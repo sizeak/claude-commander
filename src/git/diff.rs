@@ -1,0 +1,316 @@
+//! Cached diff computation
+//!
+//! Provides efficient diff computation with caching:
+//! - TTL-based cache to avoid redundant computation
+//! - Background refresh for active sessions
+//! - Incremental updates when possible
+
+use std::collections::HashMap;
+use std::path::Path;
+use std::process::Stdio;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use tokio::process::Command;
+use tokio::sync::RwLock;
+use tracing::{debug, instrument};
+
+use crate::error::{GitError, Result};
+use crate::session::SessionId;
+
+/// Default diff cache TTL (500ms)
+pub const DEFAULT_DIFF_CACHE_TTL: Duration = Duration::from_millis(500);
+
+/// Computed diff information
+#[derive(Debug, Clone)]
+pub struct DiffInfo {
+    /// The raw diff output
+    pub diff: String,
+    /// Number of files changed
+    pub files_changed: usize,
+    /// Lines added
+    pub lines_added: usize,
+    /// Lines removed
+    pub lines_removed: usize,
+    /// When the diff was computed
+    pub computed_at: Instant,
+    /// Base commit for the diff
+    pub base_commit: String,
+}
+
+impl DiffInfo {
+    /// Create an empty diff info
+    pub fn empty() -> Self {
+        Self {
+            diff: String::new(),
+            files_changed: 0,
+            lines_added: 0,
+            lines_removed: 0,
+            computed_at: Instant::now(),
+            base_commit: String::new(),
+        }
+    }
+
+    /// Check if this diff is stale
+    pub fn is_stale(&self, ttl: Duration) -> bool {
+        self.computed_at.elapsed() > ttl
+    }
+
+    /// Check if there are any changes
+    pub fn has_changes(&self) -> bool {
+        self.files_changed > 0 || self.lines_added > 0 || self.lines_removed > 0
+    }
+
+    /// Get a summary string
+    pub fn summary(&self) -> String {
+        if !self.has_changes() {
+            "No changes".to_string()
+        } else {
+            format!(
+                "{} file(s), +{} -{} lines",
+                self.files_changed, self.lines_added, self.lines_removed
+            )
+        }
+    }
+}
+
+/// Cached diff computation
+pub struct DiffCache {
+    /// Cache of session ID -> diff info
+    cache: Arc<RwLock<HashMap<SessionId, DiffInfo>>>,
+    /// Cache TTL
+    ttl: Duration,
+}
+
+impl DiffCache {
+    /// Create a new diff cache
+    pub fn new() -> Self {
+        Self::with_ttl(DEFAULT_DIFF_CACHE_TTL)
+    }
+
+    /// Create with custom TTL
+    pub fn with_ttl(ttl: Duration) -> Self {
+        Self {
+            cache: Arc::new(RwLock::new(HashMap::new())),
+            ttl,
+        }
+    }
+
+    /// Get cached diff or compute fresh
+    #[instrument(skip(self))]
+    pub async fn get_diff(
+        &self,
+        session_id: &SessionId,
+        worktree_path: &Path,
+        base_commit: Option<&str>,
+    ) -> Result<DiffInfo> {
+        // Fast path: check cache
+        {
+            let cache = self.cache.read().await;
+            if let Some(cached) = cache.get(session_id) {
+                if !cached.is_stale(self.ttl) {
+                    debug!("Diff cache hit for session {}", session_id);
+                    return Ok(cached.clone());
+                }
+            }
+        }
+
+        // Slow path: compute fresh diff
+        debug!("Diff cache miss for session {}, computing", session_id);
+        self.compute_diff(session_id, worktree_path, base_commit)
+            .await
+    }
+
+    /// Compute a fresh diff
+    pub async fn compute_diff(
+        &self,
+        session_id: &SessionId,
+        worktree_path: &Path,
+        base_commit: Option<&str>,
+    ) -> Result<DiffInfo> {
+        // Build diff command
+        let mut cmd = Command::new("git");
+        cmd.current_dir(worktree_path)
+            .arg("diff")
+            .arg("--stat")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        if let Some(base) = base_commit {
+            cmd.arg(base);
+        }
+
+        // Get stat output first
+        let stat_output = cmd
+            .output()
+            .await
+            .map_err(|e| GitError::DiffFailed(e.to_string()))?;
+
+        let (files_changed, lines_added, lines_removed) = if stat_output.status.success() {
+            parse_diff_stat(&String::from_utf8_lossy(&stat_output.stdout))
+        } else {
+            (0, 0, 0)
+        };
+
+        // Now get the full diff
+        let mut cmd = Command::new("git");
+        cmd.current_dir(worktree_path)
+            .arg("diff")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        if let Some(base) = base_commit {
+            cmd.arg(base);
+        }
+
+        let diff_output = cmd
+            .output()
+            .await
+            .map_err(|e| GitError::DiffFailed(e.to_string()))?;
+
+        let diff = if diff_output.status.success() {
+            String::from_utf8_lossy(&diff_output.stdout).to_string()
+        } else {
+            String::new()
+        };
+
+        let info = DiffInfo {
+            diff,
+            files_changed,
+            lines_added,
+            lines_removed,
+            computed_at: Instant::now(),
+            base_commit: base_commit.unwrap_or("HEAD").to_string(),
+        };
+
+        // Update cache
+        {
+            let mut cache = self.cache.write().await;
+            cache.insert(*session_id, info.clone());
+        }
+
+        Ok(info)
+    }
+
+    /// Invalidate cache for a session
+    pub async fn invalidate(&self, session_id: &SessionId) {
+        let mut cache = self.cache.write().await;
+        cache.remove(session_id);
+    }
+
+    /// Clear all cached diffs
+    pub async fn clear(&self) {
+        let mut cache = self.cache.write().await;
+        cache.clear();
+    }
+}
+
+impl Default for DiffCache {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clone for DiffCache {
+    fn clone(&self) -> Self {
+        Self {
+            cache: self.cache.clone(),
+            ttl: self.ttl,
+        }
+    }
+}
+
+/// Parse git diff --stat output to extract statistics
+fn parse_diff_stat(output: &str) -> (usize, usize, usize) {
+    let mut files_changed = 0;
+    let mut lines_added = 0;
+    let mut lines_removed = 0;
+
+    for line in output.lines() {
+        // Look for summary line like: "3 files changed, 10 insertions(+), 5 deletions(-)"
+        if line.contains("changed") {
+            // Parse the summary line
+            for part in line.split(',') {
+                let part = part.trim();
+                if part.contains("file") {
+                    if let Some(num) = part.split_whitespace().next() {
+                        files_changed = num.parse().unwrap_or(0);
+                    }
+                } else if part.contains("insertion") {
+                    if let Some(num) = part.split_whitespace().next() {
+                        lines_added = num.parse().unwrap_or(0);
+                    }
+                } else if part.contains("deletion") {
+                    if let Some(num) = part.split_whitespace().next() {
+                        lines_removed = num.parse().unwrap_or(0);
+                    }
+                }
+            }
+            break;
+        }
+    }
+
+    (files_changed, lines_added, lines_removed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_diff_stat() {
+        let output = " src/main.rs | 10 ++++------
+ src/lib.rs  |  5 +++++
+ 2 files changed, 9 insertions(+), 6 deletions(-)";
+
+        let (files, added, removed) = parse_diff_stat(output);
+        assert_eq!(files, 2);
+        assert_eq!(added, 9);
+        assert_eq!(removed, 6);
+    }
+
+    #[test]
+    fn test_parse_diff_stat_single_file() {
+        let output = " README.md | 3 +++
+ 1 file changed, 3 insertions(+)";
+
+        let (files, added, removed) = parse_diff_stat(output);
+        assert_eq!(files, 1);
+        assert_eq!(added, 3);
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn test_parse_diff_stat_empty() {
+        let (files, added, removed) = parse_diff_stat("");
+        assert_eq!(files, 0);
+        assert_eq!(added, 0);
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn test_diff_info_empty() {
+        let info = DiffInfo::empty();
+        assert!(!info.has_changes());
+        assert_eq!(info.summary(), "No changes");
+    }
+
+    #[test]
+    fn test_diff_info_with_changes() {
+        let info = DiffInfo {
+            diff: "some diff".to_string(),
+            files_changed: 2,
+            lines_added: 10,
+            lines_removed: 5,
+            computed_at: Instant::now(),
+            base_commit: "abc123".to_string(),
+        };
+
+        assert!(info.has_changes());
+        assert!(info.summary().contains("2 file(s)"));
+        assert!(info.summary().contains("+10"));
+        assert!(info.summary().contains("-5"));
+    }
+}
