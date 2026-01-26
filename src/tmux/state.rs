@@ -38,8 +38,6 @@ static PROCESSING_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
         // Progress bars
         Regex::new(r"\[=+>?\s*\]").unwrap(),
         Regex::new(r"\[#+\s*\]").unwrap(),
-        // Token streaming (partial lines without newline at end)
-        Regex::new(r"(?m)^[^$>\n]{10,}[^\n\s]$").unwrap(),
     ]
 });
 
