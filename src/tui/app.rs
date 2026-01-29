@@ -6,6 +6,7 @@
 //! - Background state updates
 
 use std::io::{self, Stdout};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,14 +23,14 @@ use ratatui::{
     Frame, Terminal,
 };
 use tokio::sync::RwLock;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 use super::event::{AppEvent, EventLoop, InputEvent, StateUpdate, UserCommand};
 use super::widgets::{DiffView, DiffViewState, Preview, PreviewState, TreeList, TreeListState};
 use crate::config::{AppState, Config};
 use crate::error::{Result, TuiError};
 use crate::git::DiffInfo;
-use crate::session::SessionListItem;
+use crate::session::{ProjectId, SessionId, SessionListItem, SessionManager, SessionStatus};
 
 /// Which pane is currently focused
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -60,20 +61,22 @@ pub enum Modal {
     },
     /// Help modal
     Help,
+    /// Error modal
+    Error { message: String },
 }
 
 /// Action to perform when input modal is submitted
 #[derive(Debug, Clone)]
 pub enum InputAction {
-    CreateSession,
+    CreateSession { project_id: ProjectId },
     AddProject,
 }
 
 /// Action to perform when confirm modal is confirmed
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
-    DeleteSession { session_id: crate::session::SessionId },
-    RemoveProject { project_id: crate::session::ProjectId },
+    DeleteSession { session_id: SessionId },
+    RemoveProject { project_id: ProjectId },
 }
 
 /// Application UI state
@@ -98,6 +101,12 @@ pub struct AppUiState {
     pub status_message: Option<String>,
     /// Should quit
     pub should_quit: bool,
+    /// Currently selected session (for preview/diff)
+    pub selected_session_id: Option<SessionId>,
+    /// Currently selected project
+    pub selected_project_id: Option<ProjectId>,
+    /// Attach command to run after exiting TUI
+    pub attach_command: Option<String>,
 }
 
 impl Default for AppUiState {
@@ -113,6 +122,9 @@ impl Default for AppUiState {
             diff_info: DiffInfo::empty(),
             status_message: None,
             should_quit: false,
+            selected_session_id: None,
+            selected_project_id: None,
+            attach_command: None,
         }
     }
 }
@@ -123,6 +135,8 @@ pub struct App {
     config: Config,
     /// Application state (shared with background tasks)
     app_state: Arc<RwLock<AppState>>,
+    /// Session manager
+    session_manager: SessionManager,
     /// UI state
     ui_state: AppUiState,
     /// Event loop
@@ -132,16 +146,26 @@ pub struct App {
 impl App {
     /// Create a new application
     pub fn new(config: Config, app_state: AppState) -> Self {
+        let app_state = Arc::new(RwLock::new(app_state));
+        let session_manager = SessionManager::new(config.clone(), app_state.clone());
+
         Self {
             config,
-            app_state: Arc::new(RwLock::new(app_state)),
+            app_state,
+            session_manager,
             ui_state: AppUiState::default(),
             event_loop: EventLoop::new(),
         }
     }
 
     /// Run the application
-    pub async fn run(&mut self) -> Result<()> {
+    pub async fn run(&mut self) -> Result<Option<String>> {
+        // Check tmux is available
+        self.session_manager.check_tmux().await?;
+
+        // Sync session states with actual tmux state
+        self.sync_session_states().await;
+
         // Initialize terminal
         let mut terminal = self.setup_terminal()?;
 
@@ -149,16 +173,96 @@ impl App {
         let tick_rate = Duration::from_millis(1000 / self.config.ui_refresh_fps as u64);
         self.event_loop.start(tick_rate);
 
+        // Start background state updater
+        self.start_background_updater();
+
         // Initial state refresh
         self.refresh_list_items().await;
 
         // Main loop
+        info!("Entering main loop");
         let result = self.main_loop(&mut terminal).await;
+        info!("Main loop exited with result: {:?}", result.is_ok());
 
         // Restore terminal
+        info!("Restoring terminal");
         self.restore_terminal(&mut terminal)?;
+        info!("Terminal restored successfully");
 
-        result
+        let attach_cmd = self.ui_state.attach_command.take();
+        info!("Attach command: {:?}", attach_cmd);
+
+        result.map(|_| attach_cmd)
+    }
+
+    /// Sync app state with actual tmux session state
+    ///
+    /// This method checks all active sessions and updates their status
+    /// if the corresponding tmux session no longer exists or the pane is dead.
+    async fn sync_session_states(&self) {
+        let session_ids: Vec<(SessionId, String)> = {
+            let state = self.app_state.read().await;
+            state
+                .sessions
+                .values()
+                .filter(|s| s.status.is_active())
+                .map(|s| (s.id, s.tmux_session_name.clone()))
+                .collect()
+        };
+
+        for (session_id, tmux_name) in session_ids {
+            let should_mark_stopped = if let Ok(exists) = self.session_manager.tmux.session_exists(&tmux_name).await {
+                if !exists {
+                    true
+                } else {
+                    // Session exists, but check if pane is dead (program exited)
+                    self.session_manager.tmux.is_pane_dead(&tmux_name).await.unwrap_or(false)
+                }
+            } else {
+                false
+            };
+
+            if should_mark_stopped {
+                // Kill the tmux session if it exists but pane is dead
+                let _ = self.session_manager.tmux.kill_session(&tmux_name).await;
+
+                let mut state = self.app_state.write().await;
+                if let Some(session) = state.get_session_mut(&session_id) {
+                    session.set_status(SessionStatus::Stopped);
+                }
+            }
+        }
+
+        // Save updated state
+        let state = self.app_state.read().await;
+        let _ = state.save();
+    }
+
+    /// Start background state updater task
+    fn start_background_updater(&self) {
+        let sender = self.event_loop.sender();
+        let app_state = self.app_state.clone();
+        let _session_manager_config = self.config.clone();
+
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(500));
+
+            loop {
+                interval.tick().await;
+
+                // Get active session IDs
+                let session_ids: Vec<SessionId> = {
+                    let state = app_state.read().await;
+                    state.get_active_sessions().iter().map(|s| s.id).collect()
+                };
+
+                // Update agent states (this is done in session manager)
+                // For now, just signal a state update
+                if !session_ids.is_empty() {
+                    let _ = sender.send(AppEvent::Tick).await;
+                }
+            }
+        });
     }
 
     /// Setup terminal for TUI
@@ -181,8 +285,10 @@ impl App {
         &self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> Result<()> {
+        info!("Disabling raw mode");
         disable_raw_mode().map_err(|e| TuiError::RestoreFailed(e.to_string()))?;
 
+        info!("Leaving alternate screen and disabling mouse capture");
         execute!(
             terminal.backend_mut(),
             LeaveAlternateScreen,
@@ -190,10 +296,12 @@ impl App {
         )
         .map_err(|e| TuiError::RestoreFailed(e.to_string()))?;
 
+        info!("Showing cursor");
         terminal
             .show_cursor()
             .map_err(|e| TuiError::RestoreFailed(e.to_string()))?;
 
+        info!("Terminal restore complete");
         Ok(())
     }
 
@@ -203,6 +311,12 @@ impl App {
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> Result<()> {
         loop {
+            // Update selection tracking
+            self.update_selection();
+
+            // Update preview for selected session
+            self.update_preview().await;
+
             // Render
             terminal
                 .draw(|f| self.render(f))
@@ -214,7 +328,8 @@ impl App {
                     AppEvent::Input(input) => self.handle_input(input).await,
                     AppEvent::StateUpdate(update) => self.handle_state_update(update).await,
                     AppEvent::Tick => {
-                        // Periodic refresh if needed
+                        // Refresh state periodically
+                        self.refresh_list_items().await;
                     }
                     AppEvent::Quit => {
                         self.ui_state.should_quit = true;
@@ -228,6 +343,52 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// Update selection tracking based on list position
+    fn update_selection(&mut self) {
+        if let Some(idx) = self.ui_state.list_state.selected() {
+            if let Some(item) = self.ui_state.list_items.get(idx) {
+                match item {
+                    SessionListItem::Project { id, .. } => {
+                        self.ui_state.selected_project_id = Some(*id);
+                        self.ui_state.selected_session_id = None;
+                    }
+                    SessionListItem::Worktree { id, project_id, .. } => {
+                        self.ui_state.selected_session_id = Some(*id);
+                        self.ui_state.selected_project_id = Some(*project_id);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Update preview pane content
+    async fn update_preview(&mut self) {
+        if let Some(session_id) = self.ui_state.selected_session_id {
+            // Get content
+            match self.session_manager.get_content(&session_id).await {
+                Ok(content) => {
+                    self.ui_state.preview_content = content.content;
+                }
+                Err(_) => {
+                    self.ui_state.preview_content = "Unable to capture content".to_string();
+                }
+            }
+
+            // Get diff
+            match self.session_manager.get_diff(&session_id).await {
+                Ok(diff) => {
+                    self.ui_state.diff_info = diff;
+                }
+                Err(_) => {
+                    self.ui_state.diff_info = DiffInfo::empty();
+                }
+            }
+        } else {
+            self.ui_state.preview_content = "Select a session to see preview".to_string();
+            self.ui_state.diff_info = DiffInfo::empty();
+        }
     }
 
     /// Render the UI
@@ -387,6 +548,23 @@ impl App {
                 frame.render_widget(paragraph, inner);
             }
 
+            Modal::Error { message } => {
+                let modal_area = centered_rect(60, 20, area);
+                frame.render_widget(Clear, modal_area);
+
+                let block = Block::default()
+                    .title(" Error ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Red));
+
+                let inner = block.inner(modal_area);
+                frame.render_widget(block, modal_area);
+
+                let text = format!("{}\n\nPress any key to close.", message);
+                let paragraph = Paragraph::new(text);
+                frame.render_widget(paragraph, inner);
+            }
+
             Modal::Help => {
                 let modal_area = centered_rect(70, 80, area);
                 frame.render_widget(Clear, modal_area);
@@ -401,24 +579,24 @@ impl App {
 
                 let help_text = r#"
 Navigation:
-  j/k, ↑/↓    Navigate session list
-  Enter       Attach to selected session
-  Tab         Switch between panes
+  j/k, Up/Down    Navigate session list
+  Enter           Attach to selected session
+  Tab             Switch between panes
 
 Session Management:
-  n           New worktree session
-  N           New project (open repo)
-  p           Pause session
-  r           Resume session
-  d           Delete/kill session
+  n               New worktree session (under selected project)
+  N               New project (add git repo)
+  p               Pause session
+  r               Resume session
+  d               Delete/kill session
 
 Scrolling:
-  Ctrl+u/d    Page up/down in preview
-  PgUp/PgDn   Page up/down
+  Ctrl+u/d        Page up/down in preview
+  PgUp/PgDn       Page up/down
 
 Other:
-  ?           Show this help
-  q           Quit
+  ?               Show this help
+  q               Quit
 
 Press any key to close this help.
 "#;
@@ -448,7 +626,7 @@ Press any key to close this help.
             let session_count = self.ui_state.list_items.iter()
                 .filter(|i| i.is_worktree())
                 .count();
-            format!("Sessions: {} | Press ? for help", session_count)
+            format!("Sessions: {} | Press ? for help | n: new session | N: add project", session_count)
         };
 
         let paragraph = Paragraph::new(status)
@@ -521,8 +699,8 @@ Press any key to close this help.
                 }
             }
 
-            Modal::Help => {
-                // Any key closes help
+            Modal::Help | Modal::Error { .. } => {
+                // Any key closes help/error
                 self.ui_state.modal = Modal::None;
             }
 
@@ -543,17 +721,12 @@ Press any key to close this help.
                 self.handle_select().await;
             }
             UserCommand::NewSession => {
-                self.ui_state.modal = Modal::Input {
-                    title: "New Session".to_string(),
-                    prompt: "Enter session name:".to_string(),
-                    value: String::new(),
-                    on_submit: InputAction::CreateSession,
-                };
+                self.handle_new_session();
             }
             UserCommand::NewProject => {
                 self.ui_state.modal = Modal::Input {
                     title: "Add Project".to_string(),
-                    prompt: "Enter project path:".to_string(),
+                    prompt: "Enter path to git repository:".to_string(),
                     value: std::env::current_dir()
                         .map(|p| p.display().to_string())
                         .unwrap_or_default(),
@@ -567,7 +740,7 @@ Press any key to close this help.
                 self.handle_resume_session().await;
             }
             UserCommand::DeleteSession => {
-                self.handle_delete_session().await;
+                self.handle_delete_session();
             }
             UserCommand::TogglePane => {
                 self.ui_state.focused_pane = match self.ui_state.focused_pane {
@@ -619,7 +792,6 @@ Press any key to close this help.
         match update {
             StateUpdate::ContentUpdated { session_id, .. } => {
                 debug!("Content updated for session {}", session_id);
-                // Refresh preview if this is the selected session
             }
             StateUpdate::StatusChanged { session_id } => {
                 debug!("Status changed for session {}", session_id);
@@ -634,7 +806,7 @@ Press any key to close this help.
                 self.refresh_list_items().await;
             }
             StateUpdate::Error { message } => {
-                self.ui_state.status_message = Some(format!("Error: {}", message));
+                self.ui_state.modal = Modal::Error { message };
             }
             _ => {}
         }
@@ -642,40 +814,128 @@ Press any key to close this help.
 
     /// Handle selection (attach to session)
     async fn handle_select(&mut self) {
-        // TODO: Implement session attachment
-        self.ui_state.status_message = Some("Attach not yet implemented".to_string());
+        info!("handle_select called, selected_session_id: {:?}", self.ui_state.selected_session_id);
+        if let Some(session_id) = self.ui_state.selected_session_id {
+            info!("Getting attach command for session: {}", session_id);
+            match self.session_manager.get_attach_command(&session_id).await {
+                Ok(cmd) => {
+                    info!("Got attach command: {}", cmd);
+                    self.ui_state.attach_command = Some(cmd);
+                    self.ui_state.should_quit = true;
+                    info!("Set should_quit = true");
+                }
+                Err(e) => {
+                    info!("Failed to get attach command: {}", e);
+                    self.ui_state.modal = Modal::Error {
+                        message: format!("Cannot attach: {}", e),
+                    };
+                }
+            }
+        } else {
+            info!("No session selected");
+        }
+    }
+
+    /// Handle new session command
+    fn handle_new_session(&mut self) {
+        if let Some(project_id) = self.ui_state.selected_project_id {
+            self.ui_state.modal = Modal::Input {
+                title: "New Session".to_string(),
+                prompt: "Enter session name:".to_string(),
+                value: String::new(),
+                on_submit: InputAction::CreateSession { project_id },
+            };
+        } else {
+            self.ui_state.status_message = Some("Select a project first (use N to add one)".to_string());
+        }
     }
 
     /// Handle pause session
     async fn handle_pause_session(&mut self) {
-        // TODO: Implement session pause
-        self.ui_state.status_message = Some("Pause not yet implemented".to_string());
+        if let Some(session_id) = self.ui_state.selected_session_id {
+            match self.session_manager.pause_session(&session_id).await {
+                Ok(_) => {
+                    self.ui_state.status_message = Some("Session paused".to_string());
+                    self.refresh_list_items().await;
+                }
+                Err(e) => {
+                    self.ui_state.modal = Modal::Error {
+                        message: format!("Failed to pause: {}", e),
+                    };
+                }
+            }
+        }
     }
 
     /// Handle resume session
     async fn handle_resume_session(&mut self) {
-        // TODO: Implement session resume
-        self.ui_state.status_message = Some("Resume not yet implemented".to_string());
+        if let Some(session_id) = self.ui_state.selected_session_id {
+            match self.session_manager.resume_session(&session_id).await {
+                Ok(_) => {
+                    self.ui_state.status_message = Some("Session resumed".to_string());
+                    self.refresh_list_items().await;
+                }
+                Err(e) => {
+                    self.ui_state.modal = Modal::Error {
+                        message: format!("Failed to resume: {}", e),
+                    };
+                }
+            }
+        }
     }
 
-    /// Handle delete session
-    async fn handle_delete_session(&mut self) {
-        // TODO: Implement session deletion with confirmation
-        self.ui_state.status_message = Some("Delete not yet implemented".to_string());
+    /// Handle delete session - show confirmation
+    fn handle_delete_session(&mut self) {
+        if let Some(session_id) = self.ui_state.selected_session_id {
+            self.ui_state.modal = Modal::Confirm {
+                title: "Delete Session".to_string(),
+                message: "Are you sure you want to delete this session?\nThis will kill the tmux session and remove the worktree.".to_string(),
+                on_confirm: ConfirmAction::DeleteSession { session_id },
+            };
+        }
     }
 
     /// Handle input modal submission
     async fn handle_input_submit(&mut self, action: InputAction, value: String) {
         match action {
-            InputAction::CreateSession => {
-                // TODO: Create session with given name
-                self.ui_state.status_message =
-                    Some(format!("Would create session: {}", value));
+            InputAction::CreateSession { project_id } => {
+                if value.trim().is_empty() {
+                    self.ui_state.status_message = Some("Session name cannot be empty".to_string());
+                    return;
+                }
+
+                match self.session_manager.create_session(&project_id, value, None).await {
+                    Ok(session_id) => {
+                        self.ui_state.status_message = Some(format!("Created session {}", session_id));
+                        self.refresh_list_items().await;
+                    }
+                    Err(e) => {
+                        self.ui_state.modal = Modal::Error {
+                            message: format!("Failed to create session: {}", e),
+                        };
+                    }
+                }
             }
             InputAction::AddProject => {
-                // TODO: Add project from path
-                self.ui_state.status_message =
-                    Some(format!("Would add project: {}", value));
+                let path = PathBuf::from(value.trim());
+                if !path.exists() {
+                    self.ui_state.modal = Modal::Error {
+                        message: format!("Path does not exist: {}", path.display()),
+                    };
+                    return;
+                }
+
+                match self.session_manager.add_project(path).await {
+                    Ok(project_id) => {
+                        self.ui_state.status_message = Some(format!("Added project {}", project_id));
+                        self.refresh_list_items().await;
+                    }
+                    Err(e) => {
+                        self.ui_state.modal = Modal::Error {
+                            message: format!("Failed to add project: {}", e),
+                        };
+                    }
+                }
             }
         }
     }
@@ -684,14 +944,32 @@ Press any key to close this help.
     async fn handle_confirm(&mut self, action: ConfirmAction) {
         match action {
             ConfirmAction::DeleteSession { session_id } => {
-                // TODO: Actually delete the session
-                self.ui_state.status_message =
-                    Some(format!("Would delete session: {}", session_id));
+                match self.session_manager.delete_session(&session_id).await {
+                    Ok(_) => {
+                        self.ui_state.status_message = Some("Session deleted".to_string());
+                        self.ui_state.selected_session_id = None;
+                        self.refresh_list_items().await;
+                    }
+                    Err(e) => {
+                        self.ui_state.modal = Modal::Error {
+                            message: format!("Failed to delete: {}", e),
+                        };
+                    }
+                }
             }
             ConfirmAction::RemoveProject { project_id } => {
-                // TODO: Actually remove the project
-                self.ui_state.status_message =
-                    Some(format!("Would remove project: {}", project_id));
+                match self.session_manager.remove_project(&project_id).await {
+                    Ok(_) => {
+                        self.ui_state.status_message = Some("Project removed".to_string());
+                        self.ui_state.selected_project_id = None;
+                        self.refresh_list_items().await;
+                    }
+                    Err(e) => {
+                        self.ui_state.modal = Modal::Error {
+                            message: format!("Failed to remove: {}", e),
+                        };
+                    }
+                }
             }
         }
     }
@@ -731,6 +1009,9 @@ Press any key to close this help.
 
         self.ui_state.list_items = items;
         self.ui_state.list_state.set_item_count(self.ui_state.list_items.len());
+
+        // Clear status message after a bit
+        // (In a real app, you'd use a timer)
     }
 }
 

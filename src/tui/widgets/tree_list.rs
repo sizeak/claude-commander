@@ -7,7 +7,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, StatefulWidget, Widget},
+    widgets::{Block, List, ListItem, ListState, StatefulWidget},
 };
 
 use crate::session::{AgentState, SessionListItem, SessionStatus};
@@ -50,6 +50,7 @@ impl<'a> TreeList<'a> {
     }
 
     /// Set the highlight symbol
+    #[allow(dead_code)]
     pub fn highlight_symbol(mut self, symbol: &'a str) -> Self {
         self.highlight_symbol = symbol;
         self

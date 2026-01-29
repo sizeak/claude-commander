@@ -56,6 +56,9 @@ pub enum SessionError {
 
     #[error("Maximum sessions reached: {0}")]
     MaxSessionsReached(usize),
+
+    #[error("Tmux session not found: {0} (session may have crashed or been killed)")]
+    TmuxSessionNotFound(String),
 }
 
 /// Tmux integration errors

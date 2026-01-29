@@ -5,9 +5,7 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Style},
-    text::{Line, Text},
-    widgets::{Block, Borders, Paragraph, ScrollbarState, StatefulWidget, Widget, Wrap},
+    widgets::{Block, Paragraph, ScrollbarState, Widget, Wrap},
 };
 
 /// Preview widget for displaying pane content

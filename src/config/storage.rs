@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{ConfigError, Error, Result};
+use crate::error::{ConfigError, Result};
 use crate::session::{Project, ProjectId, SessionId, WorktreeSession};
 
 use super::Config;

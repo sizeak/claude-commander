@@ -109,13 +109,13 @@ impl Config {
     pub fn ensure_directories(&self) -> Result<()> {
         let dirs = Self::project_dirs()?;
 
-        std::fs::create_dir_all(dirs.config_dir()).map_err(|e| {
+        std::fs::create_dir_all(dirs.config_dir()).map_err(|_e| {
             Error::Config(ConfigError::DirectoryCreationFailed(
                 dirs.config_dir().to_path_buf(),
             ))
         })?;
 
-        std::fs::create_dir_all(dirs.data_dir()).map_err(|e| {
+        std::fs::create_dir_all(dirs.data_dir()).map_err(|_e| {
             Error::Config(ConfigError::DirectoryCreationFailed(
                 dirs.data_dir().to_path_buf(),
             ))
@@ -133,7 +133,7 @@ impl Config {
         let config_path = Self::config_file_path()?;
 
         if let Some(parent) = config_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
+            std::fs::create_dir_all(parent).map_err(|_e| {
                 Error::Config(ConfigError::DirectoryCreationFailed(parent.to_path_buf()))
             })?;
         }

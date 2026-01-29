@@ -120,6 +120,7 @@ impl<'a> Widget for DiffView<'a> {
 pub type DiffViewState = super::PreviewState;
 
 /// Summary bar for diff statistics
+#[allow(dead_code)]
 pub struct DiffSummary<'a> {
     /// Diff info
     diff_info: &'a DiffInfo,
@@ -127,6 +128,7 @@ pub struct DiffSummary<'a> {
 
 impl<'a> DiffSummary<'a> {
     /// Create a new diff summary
+    #[allow(dead_code)]
     pub fn new(diff_info: &'a DiffInfo) -> Self {
         Self { diff_info }
     }

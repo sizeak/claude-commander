@@ -130,26 +130,59 @@ impl TmuxExecutor {
     }
 
     /// Create a new tmux session
+    ///
+    /// Sets `remain-on-exit on` so that if the command exits or crashes,
+    /// the pane stays open showing the exit status rather than disappearing.
     pub async fn create_session(
         &self,
         session_name: &str,
         working_dir: &std::path::Path,
         command: Option<&str>,
     ) -> Result<()> {
-        let mut args = vec![
-            "new-session",
-            "-d",
-            "-s",
-            session_name,
-            "-c",
-            working_dir.to_str().unwrap_or("."),
-        ];
+        let working_dir_str = working_dir.to_str().unwrap_or(".");
 
-        if let Some(cmd) = command {
-            args.push(cmd);
-        }
+        // Create session with remain-on-exit option so pane stays open if command exits
+        let args: Vec<&str> = if let Some(cmd) = command {
+            vec![
+                "new-session",
+                "-d",
+                "-s",
+                session_name,
+                "-c",
+                working_dir_str,
+                "-x",
+                "200",
+                "-y",
+                "50",
+                cmd,
+            ]
+        } else {
+            vec![
+                "new-session",
+                "-d",
+                "-s",
+                session_name,
+                "-c",
+                working_dir_str,
+                "-x",
+                "200",
+                "-y",
+                "50",
+            ]
+        };
 
         self.execute(&args).await?;
+
+        // Set remain-on-exit so pane stays open if the program exits/crashes
+        self.execute(&[
+            "set-option",
+            "-t",
+            session_name,
+            "remain-on-exit",
+            "on",
+        ])
+        .await?;
+
         Ok(())
     }
 
@@ -166,6 +199,16 @@ impl TmuxExecutor {
             .await?;
 
         Ok(output.lines().map(String::from).collect())
+    }
+
+    /// Check if a pane is dead (program has exited)
+    pub async fn is_pane_dead(&self, session_name: &str) -> Result<bool> {
+        let output = self
+            .execute(&["list-panes", "-t", session_name, "-F", "#{pane_dead}"])
+            .await?;
+
+        // Returns "1" if pane is dead, "0" if alive
+        Ok(output.trim() == "1")
     }
 
     /// Send keys to a tmux session
