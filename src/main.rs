@@ -2,9 +2,6 @@
 //!
 //! Run with `claude-commander` or `claude-commander --help` for usage.
 
-use std::io::Write;
-use std::process::Command;
-
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::Result;
 use tracing::info;
@@ -12,6 +9,7 @@ use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use claude_commander::{
     config::{AppState, Config},
+    tmux::{attach_to_session, AttachResult},
     tui::App,
     APP_NAME, VERSION,
 };
@@ -111,33 +109,26 @@ async fn run_tui(config: Config, app_state: AppState) -> Result<Option<String>> 
     Ok(app.run().await?)
 }
 
-/// Execute tmux attach command synchronously (outside tokio runtime)
-fn execute_attach(cmd: &str) {
-    let _ = std::io::stdout().flush();
-    let _ = std::io::stderr().flush();
-
-    // Parse the command (format: "tmux attach-session -t <name>")
-    let parts: Vec<&str> = cmd.split_whitespace().collect();
-
-    if parts.len() >= 4 && parts[0] == "tmux" {
-        let status = Command::new("tmux")
-            .args(&parts[1..])
-            .status();
-
-        match status {
-            Ok(exit_status) => {
-                if !exit_status.success() {
-                    eprintln!("tmux exited with code: {:?}", exit_status.code());
-                }
-            }
-            Err(e) => {
-                eprintln!("Failed to run tmux: {}", e);
-            }
+/// Execute async PTY-based attach to a tmux session
+async fn execute_attach(session_name: &str) {
+    match attach_to_session(session_name).await {
+        Ok(AttachResult::Detached) => {
+            info!("Detached from session");
+        }
+        Ok(AttachResult::SessionEnded) => {
+            info!("Session ended");
+        }
+        Ok(AttachResult::Error(e)) => {
+            eprintln!("Attach error: {}", e);
+        }
+        Err(e) => {
+            eprintln!("Failed to attach: {}", e);
         }
     }
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     // Install color-eyre error hooks
     color_eyre::install()?;
 
@@ -154,12 +145,6 @@ fn main() -> Result<()> {
         eprintln!("Warning: Failed to create directories: {}", e);
     }
 
-    // Load persistent state
-    let app_state = AppState::load().unwrap_or_else(|e| {
-        eprintln!("Warning: Failed to load state, starting fresh: {}", e);
-        AppState::new()
-    });
-
     match cli.command {
         None | Some(Commands::Tui) => {
             // Setup logging to file for TUI mode
@@ -168,22 +153,28 @@ fn main() -> Result<()> {
             info!("Starting Claude Commander TUI v{}", VERSION);
 
             // Main loop: TUI -> attach -> detach -> TUI
+            // Single tokio runtime, never dropped - attach uses async PTY
             loop {
                 // Reload state each iteration (may have changed)
-                let current_state = AppState::load().unwrap_or_else(|_| AppState::new());
+                let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
 
-                // Run TUI in a tokio runtime, get attach command if any
-                let runtime = tokio::runtime::Runtime::new()?;
-                let attach_cmd = runtime.block_on(run_tui(config.clone(), current_state))?;
+                // Run TUI
+                let attach_cmd = run_tui(config.clone(), app_state).await?;
 
-                // Drop the runtime before running tmux
-                drop(runtime);
-
-                // Execute attach command outside of async runtime
+                // Execute attach command (async, within same runtime)
                 if let Some(cmd) = attach_cmd {
                     info!("Executing attach command: {}", cmd);
-                    execute_attach(&cmd);
-                    // After tmux exits (user detached), loop back to TUI
+
+                    // Parse session name from command (format: "tmux attach-session -t <name>")
+                    let session_name = cmd
+                        .split_whitespace()
+                        .last()
+                        .unwrap_or("");
+
+                    if !session_name.is_empty() {
+                        execute_attach(session_name).await;
+                    }
+
                     info!("Returned from tmux, restarting TUI");
                 } else {
                     // No attach command means user quit the TUI
@@ -194,6 +185,8 @@ fn main() -> Result<()> {
 
         Some(Commands::List { all }) => {
             setup_logging(cli.debug, false)?;
+
+            let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
 
             println!("Sessions:");
             println!();
@@ -245,47 +238,46 @@ fn main() -> Result<()> {
             use std::sync::Arc;
             use tokio::sync::RwLock;
 
-            let runtime = tokio::runtime::Runtime::new()?;
-            runtime.block_on(async {
-                let app_state = Arc::new(RwLock::new(app_state));
-                let manager = SessionManager::new(config, app_state);
+            let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
+            let app_state = Arc::new(RwLock::new(app_state));
+            let manager = SessionManager::new(config, app_state);
 
-                // Check tmux
-                manager.check_tmux().await?;
+            // Check tmux
+            manager.check_tmux().await?;
 
-                // First, try to find or add the project
-                let project_id = {
-                    let state = manager.app_state.read().await;
-                    state
-                        .projects
-                        .values()
-                        .find(|p| p.repo_path == path)
-                        .map(|p| p.id)
-                };
+            // First, try to find or add the project
+            let project_id = {
+                let state = manager.app_state.read().await;
+                state
+                    .projects
+                    .values()
+                    .find(|p| p.repo_path == path)
+                    .map(|p| p.id)
+            };
 
-                let project_id = match project_id {
-                    Some(id) => id,
-                    None => {
-                        println!("Adding project from {:?}...", path);
-                        manager.add_project(path).await?
-                    }
-                };
+            let project_id = match project_id {
+                Some(id) => id,
+                None => {
+                    println!("Adding project from {:?}...", path);
+                    manager.add_project(path).await?
+                }
+            };
 
-                println!("Creating session '{}'...", name);
-                let session_id = manager.create_session(&project_id, name, program).await?;
+            println!("Creating session '{}'...", name);
+            let session_id = manager.create_session(&project_id, name, program).await?;
 
-                println!("Session created: {}", session_id);
-                println!();
-                println!("Attach with: claude-commander attach {}", session_id);
-                Ok::<_, color_eyre::eyre::Error>(())
-            })?;
+            println!("Session created: {}", session_id);
+            println!();
+            println!("Attach with: claude-commander attach {}", session_id);
         }
 
         Some(Commands::Attach { session }) => {
             setup_logging(cli.debug, false)?;
 
+            let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
+
             // Find session by name or ID prefix
-            let session_id = app_state
+            let tmux_name = app_state
                 .sessions
                 .iter()
                 .find(|(id, s)| {
@@ -294,15 +286,9 @@ fn main() -> Result<()> {
                 })
                 .map(|(_, s)| s.tmux_session_name.clone());
 
-            match session_id {
-                Some(tmux_name) => {
-                    let status = Command::new("tmux")
-                        .args(["attach-session", "-t", &tmux_name])
-                        .status()?;
-
-                    if !status.success() {
-                        eprintln!("Failed to attach to session");
-                    }
+            match tmux_name {
+                Some(name) => {
+                    execute_attach(&name).await;
                 }
                 None => {
                     eprintln!("Session not found: {}", session);

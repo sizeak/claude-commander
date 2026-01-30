@@ -87,6 +87,21 @@ pub enum TmuxError {
 
     #[error("Semaphore acquire failed")]
     SemaphoreError,
+
+    #[error("PTY error: {0}")]
+    PtyError(String),
+}
+
+impl From<pty_process::Error> for TmuxError {
+    fn from(e: pty_process::Error) -> Self {
+        TmuxError::PtyError(e.to_string())
+    }
+}
+
+impl From<pty_process::Error> for Error {
+    fn from(e: pty_process::Error) -> Self {
+        Error::Tmux(TmuxError::PtyError(e.to_string()))
+    }
 }
 
 /// Git operations errors
