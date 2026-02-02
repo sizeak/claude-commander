@@ -195,7 +195,9 @@ impl App {
                     if !session_name.is_empty() {
                         let _ = crate::tmux::attach_to_session(session_name).await;
                     }
-                    info!("Returned from attach, resuming TUI with preserved state");
+                    info!("Returned from attach, restarting input reader");
+                    // Restart the input reader to get a fresh EventStream
+                    self.event_loop.restart_input();
                     // Loop continues, TUI resumes with state preserved
                 }
                 None => break, // User quit

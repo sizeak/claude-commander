@@ -5,6 +5,8 @@
 //! - Application state updates
 //! - Render ticks
 
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use crossterm::event::{Event as CrosstermEvent, EventStream, KeyCode, KeyEvent, KeyModifiers};
@@ -175,13 +177,22 @@ pub struct EventLoop {
     tx: mpsc::Sender<AppEvent>,
     /// Receiver for events
     rx: mpsc::Receiver<AppEvent>,
+    /// Generation counter for input reader (used to stop old readers)
+    input_generation: Arc<AtomicU64>,
+    /// Current tick rate
+    tick_rate: Option<Duration>,
 }
 
 impl EventLoop {
     /// Create a new event loop
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel(256);
-        Self { tx, rx }
+        Self {
+            tx,
+            rx,
+            input_generation: Arc::new(AtomicU64::new(0)),
+            tick_rate: None,
+        }
     }
 
     /// Get a sender for posting events
@@ -194,18 +205,51 @@ impl EventLoop {
     /// This spawns background tasks for:
     /// - Terminal input
     /// - Render ticks
-    pub fn start(&self, tick_rate: Duration) {
-        let tx = self.tx.clone();
+    pub fn start(&mut self, tick_rate: Duration) {
+        self.tick_rate = Some(tick_rate);
+        self.start_input_reader();
 
-        // Terminal input task
+        // Render tick task
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tick_rate);
+
+            loop {
+                interval.tick().await;
+                if tx.send(AppEvent::Tick).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    /// Start or restart the input reader task
+    ///
+    /// This creates a fresh EventStream to read terminal input.
+    /// Any existing input reader will stop when it sees the generation has changed.
+    fn start_input_reader(&self) {
+        let tx = self.tx.clone();
+        let generation = self.input_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let generation_ref = self.input_generation.clone();
+
         tokio::spawn(async move {
             let mut reader = EventStream::new();
 
             loop {
-                let event = reader.next().fuse();
+                // Check if we've been superseded by a newer reader
+                if generation_ref.load(Ordering::SeqCst) != generation {
+                    debug!("Input reader generation {} stopping (superseded)", generation);
+                    break;
+                }
 
-                match event.await {
-                    Some(Ok(event)) => {
+                // Use timeout to periodically check generation
+                let event = tokio::time::timeout(
+                    Duration::from_millis(100),
+                    reader.next().fuse()
+                ).await;
+
+                match event {
+                    Ok(Some(Ok(event))) => {
                         let app_event = match event {
                             CrosstermEvent::Key(key) => AppEvent::Input(InputEvent::Key(key)),
                             CrosstermEvent::Mouse(mouse) => {
@@ -221,27 +265,28 @@ impl EventLoop {
                             break;
                         }
                     }
-                    Some(Err(e)) => {
+                    Ok(Some(Err(e))) => {
                         debug!("Error reading terminal event: {}", e);
-                        break;
+                        // Don't break on error - might be temporary during attach/detach
+                        continue;
                     }
-                    None => break,
+                    Ok(None) => break,
+                    Err(_) => continue, // Timeout, loop back to check generation
                 }
             }
         });
+    }
 
-        // Render tick task
-        let tx = self.tx.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(tick_rate);
+    /// Restart the input reader after returning from tmux attach
+    ///
+    /// This creates a fresh EventStream and drains any stale events.
+    pub fn restart_input(&mut self) {
+        // Drain any stale events from the channel
+        while self.rx.try_recv().is_ok() {}
 
-            loop {
-                interval.tick().await;
-                if tx.send(AppEvent::Tick).await.is_err() {
-                    break;
-                }
-            }
-        });
+        // Start a fresh input reader
+        self.start_input_reader();
+        debug!("Input reader restarted");
     }
 
     /// Receive the next event
