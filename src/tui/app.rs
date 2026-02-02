@@ -189,15 +189,19 @@ impl App {
 
             match self.ui_state.attach_command.take() {
                 Some(cmd) => {
+                    // Pause input reading during tmux attach
+                    self.event_loop.pause_input();
+
                     // Attach to session (TUI is paused)
                     info!("Executing attach command: {}", cmd);
                     let session_name = cmd.split_whitespace().last().unwrap_or("");
                     if !session_name.is_empty() {
                         let _ = crate::tmux::attach_to_session(session_name).await;
                     }
-                    info!("Returned from attach, restarting input reader");
-                    // Restart the input reader to get a fresh EventStream
-                    self.event_loop.restart_input();
+
+                    // Resume input reading
+                    info!("Returned from attach, resuming input");
+                    self.event_loop.resume_input();
                     // Loop continues, TUI resumes with state preserved
                 }
                 None => break, // User quit
