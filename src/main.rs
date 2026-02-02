@@ -127,6 +127,51 @@ async fn execute_attach(session_name: &str) {
     }
 }
 
+/// Log stdin state for debugging junk input issues
+fn log_stdin_state(context: &str) {
+    use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+    use std::io::Read;
+    use std::os::unix::io::{AsFd, AsRawFd};
+
+    let stdin = std::io::stdin();
+    let fd = stdin.as_fd();
+    let mut poll_fds = [PollFd::new(fd, PollFlags::POLLIN)];
+
+    match poll(&mut poll_fds, PollTimeout::ZERO) {
+        Ok(n) if n > 0 => {
+            // There's data - read it non-blocking
+            let raw_fd = stdin.as_raw_fd();
+            let flags = unsafe { nix::libc::fcntl(raw_fd, nix::libc::F_GETFL) };
+            unsafe { nix::libc::fcntl(raw_fd, nix::libc::F_SETFL, flags | nix::libc::O_NONBLOCK) };
+
+            let mut buf = [0u8; 256];
+            let mut stdin_lock = stdin.lock();
+            match stdin_lock.read(&mut buf) {
+                Ok(n) if n > 0 => {
+                    let bytes = &buf[..n];
+                    let as_str: String = bytes
+                        .iter()
+                        .map(|b| {
+                            if *b >= 32 && *b < 127 {
+                                format!("{}", *b as char)
+                            } else {
+                                format!("\\x{:02x}", b)
+                            }
+                        })
+                        .collect();
+                    info!("STDIN {} ({} bytes): {}", context, n, as_str);
+                }
+                _ => info!("STDIN {}: poll said data but read got none", context),
+            }
+            drop(stdin_lock);
+
+            unsafe { nix::libc::fcntl(raw_fd, nix::libc::F_SETFL, flags) };
+        }
+        Ok(_) => info!("STDIN {}: empty", context),
+        Err(e) => info!("STDIN {}: poll error: {}", context, e),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Install color-eyre error hooks
@@ -175,7 +220,10 @@ async fn main() -> Result<()> {
                         execute_attach(session_name).await;
                     }
 
-                    info!("Returned from tmux, restarting TUI");
+                    info!("Returned from attach, about to restart TUI");
+
+                    // Log stdin state before TUI restart
+                    log_stdin_state("before TUI restart");
                 } else {
                     // No attach command means user quit the TUI
                     break;
