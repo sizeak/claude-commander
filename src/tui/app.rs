@@ -159,40 +159,50 @@ impl App {
     }
 
     /// Run the application
-    pub async fn run(&mut self) -> Result<Option<String>> {
+    pub async fn run(&mut self) -> Result<()> {
         // Check tmux is available
         self.session_manager.check_tmux().await?;
 
-        // Sync session states with actual tmux state
+        // One-time setup
         self.sync_session_states().await;
-
-        // Initialize terminal
-        let mut terminal = self.setup_terminal()?;
-
-        // Start event loop
         let tick_rate = Duration::from_millis(1000 / self.config.ui_refresh_fps as u64);
         self.event_loop.start(tick_rate);
-
-        // Start background state updater
         self.start_background_updater();
 
-        // Initial state refresh
-        self.refresh_list_items().await;
+        loop {
+            // Setup terminal for TUI
+            let mut terminal = self.setup_terminal()?;
+            self.refresh_list_items().await;
 
-        // Main loop
-        info!("Entering main loop");
-        let result = self.main_loop(&mut terminal).await;
-        info!("Main loop exited with result: {:?}", result.is_ok());
+            // Run main loop until quit or attach
+            info!("Entering main loop");
+            let result = self.main_loop(&mut terminal).await;
+            info!("Main loop exited with result: {:?}", result.is_ok());
 
-        // Restore terminal
-        info!("Restoring terminal");
-        self.restore_terminal(&mut terminal)?;
-        info!("Terminal restored successfully");
+            // Restore terminal before attach or exit
+            info!("Restoring terminal");
+            self.restore_terminal(&mut terminal)?;
+            info!("Terminal restored successfully");
 
-        let attach_cmd = self.ui_state.attach_command.take();
-        info!("Attach command: {:?}", attach_cmd);
+            // Reset should_quit for next iteration
+            self.ui_state.should_quit = false;
 
-        result.map(|_| attach_cmd)
+            match self.ui_state.attach_command.take() {
+                Some(cmd) => {
+                    // Attach to session (TUI is paused)
+                    info!("Executing attach command: {}", cmd);
+                    let session_name = cmd.split_whitespace().last().unwrap_or("");
+                    if !session_name.is_empty() {
+                        let _ = crate::tmux::attach_to_session(session_name).await;
+                    }
+                    info!("Returned from attach, resuming TUI with preserved state");
+                    // Loop continues, TUI resumes with state preserved
+                }
+                None => break, // User quit
+            }
+        }
+
+        Ok(())
     }
 
     /// Sync app state with actual tmux session state

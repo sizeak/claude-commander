@@ -103,12 +103,6 @@ fn setup_logging(debug: bool, to_file: bool) -> Result<()> {
     Ok(())
 }
 
-/// Run the TUI and return an optional attach command
-async fn run_tui(config: Config, app_state: AppState) -> Result<Option<String>> {
-    let mut app = App::new(config, app_state);
-    Ok(app.run().await?)
-}
-
 /// Execute async PTY-based attach to a tmux session
 async fn execute_attach(session_name: &str) {
     match attach_to_session(session_name).await {
@@ -124,51 +118,6 @@ async fn execute_attach(session_name: &str) {
         Err(e) => {
             eprintln!("Failed to attach: {}", e);
         }
-    }
-}
-
-/// Log stdin state for debugging junk input issues
-fn log_stdin_state(context: &str) {
-    use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
-    use std::io::Read;
-    use std::os::unix::io::{AsFd, AsRawFd};
-
-    let stdin = std::io::stdin();
-    let fd = stdin.as_fd();
-    let mut poll_fds = [PollFd::new(fd, PollFlags::POLLIN)];
-
-    match poll(&mut poll_fds, PollTimeout::ZERO) {
-        Ok(n) if n > 0 => {
-            // There's data - read it non-blocking
-            let raw_fd = stdin.as_raw_fd();
-            let flags = unsafe { nix::libc::fcntl(raw_fd, nix::libc::F_GETFL) };
-            unsafe { nix::libc::fcntl(raw_fd, nix::libc::F_SETFL, flags | nix::libc::O_NONBLOCK) };
-
-            let mut buf = [0u8; 256];
-            let mut stdin_lock = stdin.lock();
-            match stdin_lock.read(&mut buf) {
-                Ok(n) if n > 0 => {
-                    let bytes = &buf[..n];
-                    let as_str: String = bytes
-                        .iter()
-                        .map(|b| {
-                            if *b >= 32 && *b < 127 {
-                                format!("{}", *b as char)
-                            } else {
-                                format!("\\x{:02x}", b)
-                            }
-                        })
-                        .collect();
-                    info!("STDIN {} ({} bytes): {}", context, n, as_str);
-                }
-                _ => info!("STDIN {}: poll said data but read got none", context),
-            }
-            drop(stdin_lock);
-
-            unsafe { nix::libc::fcntl(raw_fd, nix::libc::F_SETFL, flags) };
-        }
-        Ok(_) => info!("STDIN {}: empty", context),
-        Err(e) => info!("STDIN {}: poll error: {}", context, e),
     }
 }
 
@@ -192,43 +141,12 @@ async fn main() -> Result<()> {
 
     match cli.command {
         None | Some(Commands::Tui) => {
-            // Setup logging to file for TUI mode
             setup_logging(cli.debug, true)?;
-
             info!("Starting Claude Commander TUI v{}", VERSION);
 
-            // Main loop: TUI -> attach -> detach -> TUI
-            // Single tokio runtime, never dropped - attach uses async PTY
-            loop {
-                // Reload state each iteration (may have changed)
-                let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
-
-                // Run TUI
-                let attach_cmd = run_tui(config.clone(), app_state).await?;
-
-                // Execute attach command (async, within same runtime)
-                if let Some(cmd) = attach_cmd {
-                    info!("Executing attach command: {}", cmd);
-
-                    // Parse session name from command (format: "tmux attach-session -t <name>")
-                    let session_name = cmd
-                        .split_whitespace()
-                        .last()
-                        .unwrap_or("");
-
-                    if !session_name.is_empty() {
-                        execute_attach(session_name).await;
-                    }
-
-                    info!("Returned from attach, about to restart TUI");
-
-                    // Log stdin state before TUI restart
-                    log_stdin_state("before TUI restart");
-                } else {
-                    // No attach command means user quit the TUI
-                    break;
-                }
-            }
+            let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
+            let mut app = App::new(config.clone(), app_state);
+            app.run().await?;
         }
 
         Some(Commands::List { all }) => {
