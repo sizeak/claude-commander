@@ -38,6 +38,10 @@ pub struct AppState {
     /// Application version that last wrote this state
     #[serde(default)]
     pub version: String,
+
+    /// Path to save state to (not serialized, set at load time)
+    #[serde(skip)]
+    state_path: Option<PathBuf>,
 }
 
 impl AppState {
@@ -58,7 +62,9 @@ impl AppState {
     /// Load state from a specific path
     pub fn load_from(path: &PathBuf) -> Result<Self> {
         if !path.exists() {
-            return Ok(Self::new());
+            let mut state = Self::new();
+            state.state_path = Some(path.clone());
+            return Ok(state);
         }
 
         let content = std::fs::read_to_string(path)
@@ -67,15 +73,19 @@ impl AppState {
         let mut state: AppState = serde_json::from_str(&content)
             .map_err(|e| ConfigError::LoadFailed(format!("Failed to parse state file: {}", e)))?;
 
-        // Update version
+        // Update version and remember path
         state.version = env!("CARGO_PKG_VERSION").to_string();
+        state.state_path = Some(path.clone());
 
         Ok(state)
     }
 
-    /// Save state to the default location
+    /// Save state to the remembered location (or default if none)
     pub fn save(&self) -> Result<()> {
-        let path = Config::state_file_path()?;
+        let path = match &self.state_path {
+            Some(p) => p.clone(),
+            None => Config::state_file_path()?,
+        };
         self.save_to(&path)
     }
 

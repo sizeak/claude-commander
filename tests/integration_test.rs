@@ -1,6 +1,7 @@
 //! Integration tests for claude-commander
 //!
 //! These tests require tmux to be installed and available.
+//! All tests use isolated state files to avoid polluting user data.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -11,6 +12,12 @@ use tokio::sync::RwLock;
 use claude_commander::config::{AppState, Config};
 use claude_commander::git::GitBackend;
 use claude_commander::session::SessionManager;
+
+/// Helper to create an isolated AppState that won't pollute user data
+fn create_isolated_state(temp_dir: &TempDir) -> AppState {
+    let state_path = temp_dir.path().join("state.json");
+    AppState::load_from(&state_path).unwrap()
+}
 
 /// Helper to create a test git repository
 async fn create_test_repo() -> (TempDir, PathBuf) {
@@ -118,10 +125,11 @@ async fn test_session_manager_add_project() {
         return;
     }
 
-    let (_temp_dir, repo_path) = create_test_repo().await;
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let state_temp_dir = TempDir::new().unwrap();
 
     let config = Config::default();
-    let state = Arc::new(RwLock::new(AppState::new()));
+    let state = Arc::new(RwLock::new(create_isolated_state(&state_temp_dir)));
     let manager = SessionManager::new(config, state.clone());
 
     // Add project
@@ -133,6 +141,10 @@ async fn test_session_manager_add_project() {
     // Verify project was added
     let state = state.read().await;
     assert!(state.get_project(&project_id).is_some());
+
+    // Keep temp dirs alive until end of test
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
 }
 
 #[tokio::test]
@@ -142,14 +154,15 @@ async fn test_session_manager_create_session() {
         return;
     }
 
-    let (_temp_dir, repo_path) = create_test_repo().await;
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let state_temp_dir = TempDir::new().unwrap();
 
     // Create temp worktrees dir
     let worktrees_dir = TempDir::new().unwrap();
     let mut config = Config::default();
     config.worktrees_dir = Some(worktrees_dir.path().to_path_buf());
 
-    let state = Arc::new(RwLock::new(AppState::new()));
+    let state = Arc::new(RwLock::new(create_isolated_state(&state_temp_dir)));
     let manager = SessionManager::new(config, state.clone());
 
     // Add project
@@ -181,6 +194,11 @@ async fn test_session_manager_create_session() {
 
     // Cleanup: kill the tmux session
     let _ = manager.kill_session(&session_id, true).await;
+
+    // Keep temp dirs alive until end of test
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
+    drop(worktrees_dir);
 }
 
 #[tokio::test]
@@ -190,13 +208,14 @@ async fn test_session_manager_pause_resume() {
         return;
     }
 
-    let (_temp_dir, repo_path) = create_test_repo().await;
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let state_temp_dir = TempDir::new().unwrap();
 
     let worktrees_dir = TempDir::new().unwrap();
     let mut config = Config::default();
     config.worktrees_dir = Some(worktrees_dir.path().to_path_buf());
 
-    let state = Arc::new(RwLock::new(AppState::new()));
+    let state = Arc::new(RwLock::new(create_isolated_state(&state_temp_dir)));
     let manager = SessionManager::new(config, state.clone());
 
     // Add project and create session
@@ -230,6 +249,11 @@ async fn test_session_manager_pause_resume() {
 
     // Cleanup
     let _ = manager.kill_session(&session_id, true).await;
+
+    // Keep temp dirs alive until end of test
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
+    drop(worktrees_dir);
 }
 
 #[tokio::test]
