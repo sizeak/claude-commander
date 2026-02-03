@@ -223,33 +223,36 @@ impl EventLoop {
         });
     }
 
-    /// Start or restart the input reader task
-    ///
-    /// This creates a fresh EventStream to read terminal input.
-    /// Any existing input reader will stop when it sees the generation has changed.
+    /// Start the input reader task
     fn start_input_reader(&self) {
         let tx = self.tx.clone();
-        let generation = self.input_generation.fetch_add(1, Ordering::SeqCst) + 1;
+        let generation = self.input_generation.load(Ordering::SeqCst);
         let generation_ref = self.input_generation.clone();
 
         tokio::spawn(async move {
             let mut reader = EventStream::new();
 
             loop {
-                // Check if we've been superseded by a newer reader
+                // Check if we should stop (generation changed = stop signal)
                 if generation_ref.load(Ordering::SeqCst) != generation {
-                    debug!("Input reader generation {} stopping (superseded)", generation);
+                    debug!("Input reader stopping (generation changed)");
                     break;
                 }
 
-                // Use timeout to periodically check generation
+                // Use short timeout to check generation frequently
                 let event = tokio::time::timeout(
-                    Duration::from_millis(100),
+                    Duration::from_millis(50),
                     reader.next().fuse()
                 ).await;
 
                 match event {
                     Ok(Some(Ok(event))) => {
+                        // Re-check generation before sending (might have changed during read)
+                        if generation_ref.load(Ordering::SeqCst) != generation {
+                            debug!("Input reader stopping (generation changed during read)");
+                            break;
+                        }
+
                         let app_event = match event {
                             CrosstermEvent::Key(key) => AppEvent::Input(InputEvent::Key(key)),
                             CrosstermEvent::Mouse(mouse) => {
@@ -267,24 +270,31 @@ impl EventLoop {
                     }
                     Ok(Some(Err(e))) => {
                         debug!("Error reading terminal event: {}", e);
-                        // Don't break on error - might be temporary during attach/detach
                         continue;
                     }
                     Ok(None) => break,
                     Err(_) => continue, // Timeout, loop back to check generation
                 }
             }
+            debug!("Input reader task exited");
         });
     }
 
-    /// Restart the input reader after returning from tmux attach
+    /// Stop the input reader before tmux attach
     ///
-    /// This creates a fresh EventStream and drains any stale events.
+    /// Increments generation to signal current reader to stop, then waits briefly
+    /// for it to actually stop so it won't compete for stdin during attach.
+    pub fn stop_input(&mut self) {
+        self.input_generation.fetch_add(1, Ordering::SeqCst);
+        debug!("Input reader stop signaled");
+    }
+
+    /// Restart the input reader after returning from tmux attach
     pub fn restart_input(&mut self) {
         // Drain any stale events from the channel
         while self.rx.try_recv().is_ok() {}
 
-        // Start a fresh input reader
+        // Start a fresh input reader (generation was already incremented by stop_input)
         self.start_input_reader();
         debug!("Input reader restarted");
     }

@@ -189,14 +189,20 @@ impl App {
 
             match self.ui_state.attach_command.take() {
                 Some(cmd) => {
-                    // Attach to session (TUI is paused)
+                    // Stop the input reader BEFORE attaching so it doesn't compete for stdin
+                    self.event_loop.stop_input();
+                    // Brief delay to let the reader task actually stop
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+
+                    // Attach to session
                     info!("Executing attach command: {}", cmd);
                     let session_name = cmd.split_whitespace().last().unwrap_or("");
                     if !session_name.is_empty() {
                         let _ = crate::tmux::attach_to_session(session_name).await;
                     }
+
+                    // Restart the input reader after detach
                     info!("Returned from attach, restarting input reader");
-                    // Restart the input reader to get a fresh EventStream
                     self.event_loop.restart_input();
                     // Loop continues, TUI resumes with state preserved
                 }
