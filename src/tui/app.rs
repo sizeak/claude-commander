@@ -37,6 +37,13 @@ use crate::session::{ProjectId, SessionId, SessionListItem, SessionManager, Sess
 pub enum FocusedPane {
     #[default]
     SessionList,
+    RightPane,
+}
+
+/// Which view is shown in the right pane
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RightPaneView {
+    #[default]
     Preview,
     Diff,
 }
@@ -89,6 +96,8 @@ pub struct AppUiState {
     pub diff_state: DiffViewState,
     /// Currently focused pane
     pub focused_pane: FocusedPane,
+    /// Which view is shown in the right pane
+    pub right_pane_view: RightPaneView,
     /// Current modal
     pub modal: Modal,
     /// Session list items (flattened hierarchy)
@@ -116,6 +125,7 @@ impl Default for AppUiState {
             preview_state: PreviewState::new(),
             diff_state: DiffViewState::new(),
             focused_pane: FocusedPane::default(),
+            right_pane_view: RightPaneView::default(),
             modal: Modal::None,
             list_items: Vec::new(),
             preview_content: String::new(),
@@ -413,26 +423,20 @@ impl App {
     fn render(&mut self, frame: &mut Frame) {
         let size = frame.area();
 
-        // Main layout: session list on left, preview/diff on right
+        // Main layout: session list on left, right pane fills rest
         let main_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
             .split(size);
 
-        // Right side: preview on top, diff on bottom
-        let right_chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
-            .split(main_chunks[1]);
-
         // Render session list
         self.render_session_list(frame, main_chunks[0]);
 
-        // Render preview
-        self.render_preview(frame, right_chunks[0]);
-
-        // Render diff
-        self.render_diff(frame, right_chunks[1]);
+        // Render either preview or diff based on current view
+        match self.ui_state.right_pane_view {
+            RightPaneView::Preview => self.render_preview(frame, main_chunks[1]),
+            RightPaneView::Diff => self.render_diff(frame, main_chunks[1]),
+        }
 
         // Render modal if open
         self.render_modal(frame, size);
@@ -467,10 +471,13 @@ impl App {
 
     /// Render the preview pane
     fn render_preview(&mut self, frame: &mut Frame, area: Rect) {
-        let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::Preview);
+        let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
+
+        // Show tab indicator in title
+        let title = " [Preview] | Diff ";
 
         let block = Block::default()
-            .title(" Preview ")
+            .title(title)
             .borders(Borders::ALL)
             .border_style(if is_focused {
                 Style::default().fg(Color::Cyan)
@@ -493,10 +500,11 @@ impl App {
 
     /// Render the diff pane
     fn render_diff(&mut self, frame: &mut Frame, area: Rect) {
-        let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::Diff);
+        let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
 
+        // Show tab indicator and diff summary in title
         let title = format!(
-            " Diff ({}) ",
+            " Preview | [Diff] ({}) ",
             self.ui_state.diff_info.summary()
         );
 
@@ -599,7 +607,7 @@ impl App {
 Navigation:
   j/k, Up/Down    Navigate session list
   Enter           Attach to selected session
-  Tab             Switch between panes
+  Tab             Toggle preview/diff view
 
 Session Management:
   n               New worktree session (under selected project)
@@ -609,7 +617,7 @@ Session Management:
   d               Delete/kill session
 
 Scrolling:
-  Ctrl+u/d        Page up/down in preview
+  Ctrl+u/d        Page up/down in current view
   PgUp/PgDn       Page up/down
 
 Other:
@@ -761,10 +769,9 @@ Press any key to close this help.
                 self.handle_delete_session();
             }
             UserCommand::TogglePane => {
-                self.ui_state.focused_pane = match self.ui_state.focused_pane {
-                    FocusedPane::SessionList => FocusedPane::Preview,
-                    FocusedPane::Preview => FocusedPane::Diff,
-                    FocusedPane::Diff => FocusedPane::SessionList,
+                self.ui_state.right_pane_view = match self.ui_state.right_pane_view {
+                    RightPaneView::Preview => RightPaneView::Diff,
+                    RightPaneView::Diff => RightPaneView::Preview,
                 };
             }
             UserCommand::ShowHelp => {
@@ -774,31 +781,27 @@ Press any key to close this help.
                 self.ui_state.should_quit = true;
             }
             UserCommand::PageUp => {
-                match self.ui_state.focused_pane {
-                    FocusedPane::Preview => self.ui_state.preview_state.page_up(),
-                    FocusedPane::Diff => self.ui_state.diff_state.page_up(),
-                    _ => {}
+                match self.ui_state.right_pane_view {
+                    RightPaneView::Preview => self.ui_state.preview_state.page_up(),
+                    RightPaneView::Diff => self.ui_state.diff_state.page_up(),
                 }
             }
             UserCommand::PageDown => {
-                match self.ui_state.focused_pane {
-                    FocusedPane::Preview => self.ui_state.preview_state.page_down(),
-                    FocusedPane::Diff => self.ui_state.diff_state.page_down(),
-                    _ => {}
+                match self.ui_state.right_pane_view {
+                    RightPaneView::Preview => self.ui_state.preview_state.page_down(),
+                    RightPaneView::Diff => self.ui_state.diff_state.page_down(),
                 }
             }
             UserCommand::ScrollUp => {
-                match self.ui_state.focused_pane {
-                    FocusedPane::Preview => self.ui_state.preview_state.scroll_up(1),
-                    FocusedPane::Diff => self.ui_state.diff_state.scroll_up(1),
-                    _ => {}
+                match self.ui_state.right_pane_view {
+                    RightPaneView::Preview => self.ui_state.preview_state.scroll_up(1),
+                    RightPaneView::Diff => self.ui_state.diff_state.scroll_up(1),
                 }
             }
             UserCommand::ScrollDown => {
-                match self.ui_state.focused_pane {
-                    FocusedPane::Preview => self.ui_state.preview_state.scroll_down(1),
-                    FocusedPane::Diff => self.ui_state.diff_state.scroll_down(1),
-                    _ => {}
+                match self.ui_state.right_pane_view {
+                    RightPaneView::Preview => self.ui_state.preview_state.scroll_down(1),
+                    RightPaneView::Diff => self.ui_state.diff_state.scroll_down(1),
                 }
             }
             _ => {}
