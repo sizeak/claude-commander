@@ -423,11 +423,19 @@ impl App {
     fn render(&mut self, frame: &mut Frame) {
         let size = frame.area();
 
+        // Content area with margin on top, left, right, and space for status bar at bottom
+        let content_area = Rect {
+            x: size.x + 1,
+            y: size.y + 1,
+            width: size.width.saturating_sub(2),
+            height: size.height.saturating_sub(3), // 1 top margin + 1 bottom margin + 1 status bar
+        };
+
         // Main layout: session list on left, right pane fills rest
         let main_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
-            .split(size);
+            .split(content_area);
 
         // Render session list
         self.render_session_list(frame, main_chunks[0]);
@@ -439,9 +447,9 @@ impl App {
         }
 
         // Render modal if open
-        self.render_modal(frame, size);
+        self.render_modal(frame, content_area);
 
-        // Render status bar
+        // Render status bar at the very bottom of the screen
         self.render_status_bar(frame, size);
     }
 
@@ -451,7 +459,7 @@ impl App {
 
         let block = Block::default()
             .title(" Sessions ")
-            .borders(Borders::ALL)
+            .borders(Borders::NONE)
             .border_style(if is_focused {
                 Style::default().fg(Color::Cyan)
             } else {
