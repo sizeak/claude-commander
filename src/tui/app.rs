@@ -17,7 +17,7 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Modifier, Style},
     widgets::{Block, Borders, Clear, Paragraph},
     Frame, Terminal,
@@ -611,8 +611,13 @@ impl App {
                 let inner = block.inner(modal_area);
                 frame.render_widget(block, modal_area);
 
-                let help_text = r#"
-Navigation:
+                // Add margin inside the modal for better readability
+                let content_area = inner.inner(Margin {
+                    horizontal: 2,
+                    vertical: 1,
+                });
+
+                let help_text = r#"Navigation:
   j/k, Up/Down    Navigate session list
   Enter           Attach to selected session
   Tab             Toggle preview/diff view
@@ -636,7 +641,7 @@ Press any key to close this help.
 "#;
 
                 let paragraph = Paragraph::new(help_text);
-                frame.render_widget(paragraph, inner);
+                frame.render_widget(paragraph, content_area);
             }
         }
     }
