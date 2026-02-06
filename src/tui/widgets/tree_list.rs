@@ -23,8 +23,6 @@ pub struct TreeList<'a> {
     block: Option<Block<'a>>,
     /// Style for selected item
     highlight_style: Style,
-    /// Symbol for selected item
-    highlight_symbol: &'a str,
 }
 
 impl<'a> TreeList<'a> {
@@ -35,7 +33,6 @@ impl<'a> TreeList<'a> {
             theme,
             block: None,
             highlight_style: theme.selection().add_modifier(Modifier::BOLD),
-            highlight_symbol: "▶ ",
         }
     }
 
@@ -51,12 +48,6 @@ impl<'a> TreeList<'a> {
         self
     }
 
-    /// Set the highlight symbol
-    #[allow(dead_code)]
-    pub fn highlight_symbol(mut self, symbol: &'a str) -> Self {
-        self.highlight_symbol = symbol;
-        self
-    }
 
     /// Convert items to list items
     fn to_list_items(&self) -> Vec<ListItem<'a>> {
@@ -144,9 +135,7 @@ impl<'a> StatefulWidget for TreeList<'a> {
     fn render(self, area: Rect, buf: &mut Buffer, state: &mut Self::State) {
         let items = self.to_list_items();
 
-        let list = List::new(items)
-            .highlight_style(self.highlight_style)
-            .highlight_symbol(self.highlight_symbol);
+        let list = List::new(items).highlight_style(self.highlight_style);
 
         let list = if let Some(block) = self.block {
             list.block(block)
