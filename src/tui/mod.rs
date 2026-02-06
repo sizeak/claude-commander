@@ -8,7 +8,9 @@
 
 mod app;
 mod event;
+pub mod theme;
 mod widgets;
 
 pub use app::*;
 pub use event::*;
+pub use theme::Theme;

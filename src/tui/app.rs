@@ -18,7 +18,7 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     widgets::{Block, Borders, Clear, Paragraph},
     Frame, Terminal,
 };
@@ -26,6 +26,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 use super::event::{AppEvent, EventLoop, InputEvent, StateUpdate, UserCommand};
+use super::theme::Theme;
 use super::widgets::{DiffView, DiffViewState, Preview, PreviewState, TreeList, TreeListState};
 use crate::config::{AppState, Config};
 use crate::error::{Result, TuiError};
@@ -151,6 +152,8 @@ pub struct App {
     ui_state: AppUiState,
     /// Event loop
     event_loop: EventLoop,
+    /// Theme configuration
+    theme: Theme,
 }
 
 impl App {
@@ -165,6 +168,7 @@ impl App {
             session_manager,
             ui_state: AppUiState::default(),
             event_loop: EventLoop::new(),
+            theme: Theme::default(),
         }
     }
 
@@ -461,18 +465,14 @@ impl App {
             .title(" Sessions ")
             .borders(Borders::NONE)
             .border_style(if is_focused {
-                Style::default().fg(Color::Cyan)
+                self.theme.border_focused()
             } else {
-                Style::default()
+                self.theme.border_unfocused()
             });
 
-        let tree_list = TreeList::new(&self.ui_state.list_items)
+        let tree_list = TreeList::new(&self.ui_state.list_items, &self.theme)
             .block(block)
-            .highlight_style(
-                Style::default()
-                    .bg(Color::DarkGray)
-                    .add_modifier(Modifier::BOLD),
-            );
+            .highlight_style(self.theme.selection().add_modifier(Modifier::BOLD));
 
         frame.render_stateful_widget(tree_list, area, &mut self.ui_state.list_state.list_state);
     }
@@ -488,9 +488,9 @@ impl App {
             .title(title)
             .borders(Borders::ALL)
             .border_style(if is_focused {
-                Style::default().fg(Color::Cyan)
+                self.theme.border_focused()
             } else {
-                Style::default()
+                self.theme.border_unfocused()
             });
 
         // Update preview state with visible area
@@ -520,9 +520,9 @@ impl App {
             .title(title)
             .borders(Borders::ALL)
             .border_style(if is_focused {
-                Style::default().fg(Color::Cyan)
+                self.theme.border_focused()
             } else {
-                Style::default()
+                self.theme.border_unfocused()
             });
 
         // Update diff state with visible area
@@ -531,7 +531,7 @@ impl App {
             .diff_state
             .set_content(&self.ui_state.diff_info.diff, inner_height);
 
-        let diff_view = DiffView::new(&self.ui_state.diff_info)
+        let diff_view = DiffView::new(&self.ui_state.diff_info, &self.theme)
             .block(block)
             .scroll(self.ui_state.diff_state.scroll_offset);
 
@@ -555,7 +555,7 @@ impl App {
                 let block = Block::default()
                     .title(format!(" {} ", title))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Yellow));
+                    .border_style(Style::default().fg(self.theme.modal_warning));
 
                 let inner = block.inner(modal_area);
                 frame.render_widget(block, modal_area);
@@ -572,7 +572,7 @@ impl App {
                 let block = Block::default()
                     .title(format!(" {} ", title))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Red));
+                    .border_style(Style::default().fg(self.theme.modal_error));
 
                 let inner = block.inner(modal_area);
                 frame.render_widget(block, modal_area);
@@ -589,7 +589,7 @@ impl App {
                 let block = Block::default()
                     .title(" Error ")
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Red));
+                    .border_style(Style::default().fg(self.theme.modal_error));
 
                 let inner = block.inner(modal_area);
                 frame.render_widget(block, modal_area);
@@ -606,7 +606,7 @@ impl App {
                 let block = Block::default()
                     .title(" Help ")
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(Color::Cyan));
+                    .border_style(Style::default().fg(self.theme.modal_info));
 
                 let inner = block.inner(modal_area);
                 frame.render_widget(block, modal_area);
@@ -664,7 +664,7 @@ Press any key to close this help.
         };
 
         let paragraph = Paragraph::new(status)
-            .style(Style::default().bg(Color::DarkGray));
+            .style(self.theme.status_bar());
 
         frame.render_widget(paragraph, status_area);
     }

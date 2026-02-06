@@ -11,11 +11,14 @@ use ratatui::{
 };
 
 use crate::git::DiffInfo;
+use crate::tui::theme::Theme;
 
 /// Diff view widget
 pub struct DiffView<'a> {
     /// Diff info to display
     diff_info: &'a DiffInfo,
+    /// Theme for styling
+    theme: &'a Theme,
     /// Block for borders and title
     block: Option<Block<'a>>,
     /// Scroll offset
@@ -24,9 +27,10 @@ pub struct DiffView<'a> {
 
 impl<'a> DiffView<'a> {
     /// Create a new diff view
-    pub fn new(diff_info: &'a DiffInfo) -> Self {
+    pub fn new(diff_info: &'a DiffInfo, theme: &'a Theme) -> Self {
         Self {
             diff_info,
+            theme,
             block: None,
             scroll: 0,
         }
@@ -49,7 +53,7 @@ impl<'a> DiffView<'a> {
         if self.diff_info.diff.is_empty() {
             return vec![Line::from(Span::styled(
                 "No changes",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(self.theme.text_secondary),
             ))];
         }
 
@@ -61,33 +65,33 @@ impl<'a> DiffView<'a> {
                     // Added line
                     Line::from(Span::styled(
                         line.to_string(),
-                        Style::default().fg(Color::Green),
+                        Style::default().fg(self.theme.diff_added),
                     ))
                 } else if line.starts_with('-') && !line.starts_with("---") {
                     // Removed line
                     Line::from(Span::styled(
                         line.to_string(),
-                        Style::default().fg(Color::Red),
+                        Style::default().fg(self.theme.diff_removed),
                     ))
                 } else if line.starts_with("@@") {
                     // Hunk header
                     Line::from(Span::styled(
                         line.to_string(),
-                        Style::default().fg(Color::Cyan),
+                        Style::default().fg(self.theme.diff_hunk_header),
                     ))
                 } else if line.starts_with("diff ") || line.starts_with("index ") {
                     // File header
                     Line::from(Span::styled(
                         line.to_string(),
                         Style::default()
-                            .fg(Color::Yellow)
+                            .fg(self.theme.diff_file_header)
                             .add_modifier(Modifier::BOLD),
                     ))
                 } else if line.starts_with("---") || line.starts_with("+++") {
                     // File names
                     Line::from(Span::styled(
                         line.to_string(),
-                        Style::default().fg(Color::Yellow),
+                        Style::default().fg(self.theme.diff_file_header),
                     ))
                 } else {
                     // Context line
@@ -124,13 +128,15 @@ pub type DiffViewState = super::PreviewState;
 pub struct DiffSummary<'a> {
     /// Diff info
     diff_info: &'a DiffInfo,
+    /// Theme for styling
+    theme: &'a Theme,
 }
 
 impl<'a> DiffSummary<'a> {
     /// Create a new diff summary
     #[allow(dead_code)]
-    pub fn new(diff_info: &'a DiffInfo) -> Self {
-        Self { diff_info }
+    pub fn new(diff_info: &'a DiffInfo, theme: &'a Theme) -> Self {
+        Self { diff_info, theme }
     }
 }
 
@@ -149,18 +155,18 @@ impl<'a> Widget for DiffSummary<'a> {
                 Span::raw(" | "),
                 Span::styled(
                     format!("+{}", self.diff_info.lines_added),
-                    Style::default().fg(Color::Green),
+                    Style::default().fg(self.theme.diff_added),
                 ),
                 Span::raw(" "),
                 Span::styled(
                     format!("-{}", self.diff_info.lines_removed),
-                    Style::default().fg(Color::Red),
+                    Style::default().fg(self.theme.diff_removed),
                 ),
             ])
         } else {
             Line::from(Span::styled(
                 "No changes",
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(self.theme.text_secondary),
             ))
         };
 
@@ -198,7 +204,8 @@ index abc123..def456 100644
  more context"#;
 
         let info = make_diff_info(diff);
-        let view = DiffView::new(&info);
+        let theme = Theme::default();
+        let view = DiffView::new(&info, &theme);
         let lines = view.to_styled_lines();
 
         // Should have styled lines
@@ -208,7 +215,8 @@ index abc123..def456 100644
     #[test]
     fn test_empty_diff() {
         let info = DiffInfo::empty();
-        let view = DiffView::new(&info);
+        let theme = Theme::default();
+        let view = DiffView::new(&info, &theme);
         let lines = view.to_styled_lines();
 
         assert_eq!(lines.len(), 1);

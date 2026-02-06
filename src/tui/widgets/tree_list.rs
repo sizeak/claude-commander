@@ -5,17 +5,20 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, List, ListItem, ListState, StatefulWidget},
 };
 
 use crate::session::{AgentState, SessionListItem, SessionStatus};
+use crate::tui::theme::Theme;
 
 /// Tree list widget for displaying hierarchical sessions
 pub struct TreeList<'a> {
     /// Items to display
     items: &'a [SessionListItem],
+    /// Theme for styling
+    theme: &'a Theme,
     /// Block for borders and title
     block: Option<Block<'a>>,
     /// Style for selected item
@@ -26,13 +29,12 @@ pub struct TreeList<'a> {
 
 impl<'a> TreeList<'a> {
     /// Create a new tree list
-    pub fn new(items: &'a [SessionListItem]) -> Self {
+    pub fn new(items: &'a [SessionListItem], theme: &'a Theme) -> Self {
         Self {
             items,
+            theme,
             block: None,
-            highlight_style: Style::default()
-                .bg(Color::DarkGray)
-                .add_modifier(Modifier::BOLD),
+            highlight_style: theme.selection().add_modifier(Modifier::BOLD),
             highlight_symbol: "▶ ",
         }
     }
@@ -76,12 +78,17 @@ impl<'a> TreeList<'a> {
 
                     let line = Line::from(vec![
                         Span::raw(format!("{} ", icon)),
-                        Span::styled(name.clone(), Style::default().add_modifier(Modifier::BOLD)),
+                        Span::styled(
+                            name.clone(),
+                            Style::default()
+                                .fg(self.theme.text_project)
+                                .add_modifier(Modifier::BOLD),
+                        ),
                         Span::styled(
                             format!(" ({})", main_branch),
-                            Style::default().fg(Color::DarkGray),
+                            Style::default().fg(self.theme.text_secondary),
                         ),
-                        Span::styled(count_str, Style::default().fg(Color::Cyan)),
+                        Span::styled(count_str, Style::default().fg(self.theme.text_secondary)),
                     ]);
 
                     ListItem::new(line)
@@ -96,9 +103,9 @@ impl<'a> TreeList<'a> {
                     ..
                 } => {
                     let (status_icon, status_color) = match status {
-                        SessionStatus::Running => ("●", Color::Green),
-                        SessionStatus::Paused => ("◐", Color::Yellow),
-                        SessionStatus::Stopped => ("○", Color::DarkGray),
+                        SessionStatus::Running => ("●", self.theme.status_running),
+                        SessionStatus::Paused => ("◐", self.theme.status_paused),
+                        SessionStatus::Stopped => ("○", self.theme.status_stopped),
                     };
 
                     let agent_icon = match agent_state {
@@ -115,12 +122,12 @@ impl<'a> TreeList<'a> {
                         Span::raw(title.clone()),
                         Span::styled(
                             format!(" [{}]", branch),
-                            Style::default().fg(Color::Blue),
+                            Style::default().fg(self.theme.text_accent),
                         ),
                         Span::raw(format!(" {} ", agent_icon)),
                         Span::styled(
                             format!("({})", program),
-                            Style::default().fg(Color::DarkGray),
+                            Style::default().fg(self.theme.text_secondary),
                         ),
                     ]);
 
