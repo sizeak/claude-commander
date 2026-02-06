@@ -2,10 +2,12 @@
 //!
 //! Displays captured pane content with scrolling support.
 
+use ansi_to_tui::IntoText;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    widgets::{Block, Paragraph, ScrollbarState, Widget, Wrap},
+    text::Text,
+    widgets::{Block, Paragraph, ScrollbarState, Widget},
 };
 
 /// Preview widget for displaying pane content
@@ -43,9 +45,14 @@ impl<'a> Preview<'a> {
 
 impl<'a> Widget for Preview<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let paragraph = Paragraph::new(self.content)
-            .scroll((self.scroll, 0))
-            .wrap(Wrap { trim: false });
+        // Convert ANSI escape codes to ratatui styled text
+        let text: Text<'_> = self
+            .content
+            .into_text()
+            .unwrap_or_else(|_| Text::raw(self.content));
+
+        // No .wrap() - preserve original formatting (ASCII boxes, tables, etc.)
+        let paragraph = Paragraph::new(text).scroll((self.scroll, 0));
 
         let paragraph = if let Some(block) = self.block {
             paragraph.block(block)

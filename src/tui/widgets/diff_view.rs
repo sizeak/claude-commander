@@ -7,7 +7,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Paragraph, Widget, Wrap},
+    widgets::{Block, Paragraph, Widget},
 };
 
 use crate::git::DiffInfo;
@@ -106,9 +106,8 @@ impl<'a> Widget for DiffView<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let lines = self.to_styled_lines();
 
-        let paragraph = Paragraph::new(lines)
-            .scroll((self.scroll, 0))
-            .wrap(Wrap { trim: false });
+        // No .wrap() - preserve original line formatting
+        let paragraph = Paragraph::new(lines).scroll((self.scroll, 0));
 
         let paragraph = if let Some(block) = self.block {
             paragraph.block(block)

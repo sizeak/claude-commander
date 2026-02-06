@@ -225,7 +225,8 @@ impl TmuxExecutor {
         start_line: Option<i32>,
         end_line: Option<i32>,
     ) -> Result<String> {
-        let mut args = vec!["capture-pane", "-t", session_name, "-p"];
+        // -p: output to stdout, -e: include escape sequences (ANSI colors)
+        let mut args = vec!["capture-pane", "-t", session_name, "-p", "-e"];
 
         let start_str;
         let end_str;
