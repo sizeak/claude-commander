@@ -19,6 +19,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
     Frame, Terminal,
 };
@@ -518,11 +519,27 @@ impl App {
     fn render_diff(&mut self, frame: &mut Frame, area: Rect) {
         let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
 
-        // Show tab indicator and diff summary in title
-        let title = format!(
-            " Preview | [Diff] ({}) ",
-            self.ui_state.diff_info.summary()
-        );
+        // Show tab indicator and diff summary in title with colored +/- counts
+        let title = if self.ui_state.diff_info.has_changes() {
+            Line::from(vec![
+                Span::raw(format!(
+                    " Preview | [Diff] ({} file(s), ",
+                    self.ui_state.diff_info.files_changed
+                )),
+                Span::styled(
+                    format!("+{}", self.ui_state.diff_info.lines_added),
+                    Style::default().fg(self.theme.diff_added),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    format!("-{}", self.ui_state.diff_info.lines_removed),
+                    Style::default().fg(self.theme.diff_removed),
+                ),
+                Span::raw(" lines) "),
+            ])
+        } else {
+            Line::from(" Preview | [Diff] (No changes) ")
+        };
 
         let block = Block::default()
             .title(title)
