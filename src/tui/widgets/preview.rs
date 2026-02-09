@@ -65,7 +65,7 @@ impl<'a> Widget for Preview<'a> {
 }
 
 /// Preview state for scrolling
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct PreviewState {
     /// Current scroll offset (lines from top)
     pub scroll_offset: u16,
@@ -73,6 +73,19 @@ pub struct PreviewState {
     pub total_lines: usize,
     /// Visible height
     pub visible_height: u16,
+    /// Whether to follow new content (auto-scroll to bottom)
+    follow: bool,
+}
+
+impl Default for PreviewState {
+    fn default() -> Self {
+        Self {
+            scroll_offset: 0,
+            total_lines: 0,
+            visible_height: 0,
+            follow: true,
+        }
+    }
 }
 
 impl PreviewState {
@@ -86,19 +99,27 @@ impl PreviewState {
         self.total_lines = content.lines().count();
         self.visible_height = visible_height;
 
-        // Ensure scroll is still valid
-        self.clamp_scroll();
+        if self.follow {
+            self.scroll_to_bottom();
+        } else {
+            self.clamp_scroll();
+        }
     }
 
     /// Scroll up by n lines
     pub fn scroll_up(&mut self, n: u16) {
         self.scroll_offset = self.scroll_offset.saturating_sub(n);
+        self.follow = false;
     }
 
     /// Scroll down by n lines
     pub fn scroll_down(&mut self, n: u16) {
         self.scroll_offset = self.scroll_offset.saturating_add(n);
         self.clamp_scroll();
+        // Re-enable follow if we've scrolled to the bottom
+        if !self.can_scroll_down() {
+            self.follow = true;
+        }
     }
 
     /// Page up
@@ -116,10 +137,12 @@ impl PreviewState {
     /// Scroll to top
     pub fn scroll_to_top(&mut self) {
         self.scroll_offset = 0;
+        self.follow = false;
     }
 
     /// Scroll to bottom
     pub fn scroll_to_bottom(&mut self) {
+        self.follow = true;
         if self.total_lines > self.visible_height as usize {
             self.scroll_offset = (self.total_lines - self.visible_height as usize) as u16;
         } else {
@@ -167,34 +190,22 @@ mod tests {
     fn test_preview_state_scrolling() {
         let mut state = PreviewState::new();
 
-        // 100 lines, 20 visible
+        // 100 lines, 20 visible - starts at bottom (follow mode)
         let content = (0..100).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
         state.set_content(&content, 20);
 
         assert_eq!(state.total_lines, 100);
-        assert_eq!(state.scroll_offset, 0);
-        assert!(state.can_scroll_down());
-        assert!(!state.can_scroll_up());
-
-        // Scroll down
-        state.scroll_down(10);
-        assert_eq!(state.scroll_offset, 10);
+        assert_eq!(state.scroll_offset, 80); // 100 - 20, auto-scrolled to bottom
+        assert!(!state.can_scroll_down());
         assert!(state.can_scroll_up());
 
-        // Scroll up
+        // Scroll up disables follow
         state.scroll_up(5);
-        assert_eq!(state.scroll_offset, 5);
+        assert_eq!(state.scroll_offset, 75);
 
-        // Page down
-        state.page_down();
-        assert_eq!(state.scroll_offset, 23); // 5 + (20 - 2)
-
-        // Scroll to bottom
-        state.scroll_to_bottom();
-        assert_eq!(state.scroll_offset, 80); // 100 - 20
-
-        // Can't scroll further down
-        assert!(!state.can_scroll_down());
+        // Page up
+        state.page_up();
+        assert_eq!(state.scroll_offset, 57); // 75 - (20 - 2)
 
         // Scroll to top
         state.scroll_to_top();
