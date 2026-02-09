@@ -96,7 +96,14 @@ impl PreviewState {
 
     /// Update content info
     pub fn set_content(&mut self, content: &str, visible_height: u16) {
-        self.total_lines = content.lines().count();
+        // Exclude trailing empty lines (tmux capture-pane returns full pane height)
+        self.total_lines = content
+            .lines()
+            .collect::<Vec<_>>()
+            .iter()
+            .rposition(|l| !l.trim().is_empty())
+            .map(|i| i + 1)
+            .unwrap_or(0);
         self.visible_height = visible_height;
 
         if self.follow {
