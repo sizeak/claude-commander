@@ -183,6 +183,10 @@ impl App {
         self.event_loop.start(tick_rate);
         self.start_background_updater();
 
+        // Restore last selection from persisted state
+        self.refresh_list_items().await;
+        self.restore_selection().await;
+
         loop {
             // Setup terminal for TUI
             let mut terminal = self.setup_terminal()?;
@@ -220,7 +224,11 @@ impl App {
                     self.event_loop.restart_input();
                     // Loop continues, TUI resumes with state preserved
                 }
-                None => break, // User quit
+                None => {
+                    // Save selection before quitting
+                    self.save_selection().await;
+                    break;
+                }
             }
         }
 
@@ -1046,6 +1054,36 @@ Press any key to close this help.
 
         // Clear status message after a bit
         // (In a real app, you'd use a timer)
+    }
+
+    /// Save current selection to persisted state
+    async fn save_selection(&self) {
+        let mut state = self.app_state.write().await;
+        state.last_selected_session = self.ui_state.selected_session_id;
+        state.last_selected_project = self.ui_state.selected_project_id;
+        let _ = state.save();
+    }
+
+    /// Restore selection from persisted state
+    async fn restore_selection(&mut self) {
+        let (last_session, last_project) = {
+            let state = self.app_state.read().await;
+            (state.last_selected_session, state.last_selected_project)
+        };
+
+        // Try to find the last selected session or project in the list
+        let target_idx = self.ui_state.list_items.iter().position(|item| match item {
+            SessionListItem::Worktree { id, .. } => last_session.is_some_and(|s| s == *id),
+            SessionListItem::Project { id, .. } => {
+                last_session.is_none() && last_project.is_some_and(|p| p == *id)
+            }
+        });
+
+        if let Some(idx) = target_idx {
+            self.ui_state.list_state.select(Some(idx));
+        } else if !self.ui_state.list_items.is_empty() {
+            self.ui_state.list_state.select(Some(0));
+        }
     }
 }
 
