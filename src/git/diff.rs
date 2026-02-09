@@ -102,7 +102,6 @@ impl DiffCache {
         &self,
         session_id: &SessionId,
         worktree_path: &Path,
-        base_commit: Option<&str>,
     ) -> Result<DiffInfo> {
         // Fast path: check cache
         {
@@ -117,8 +116,7 @@ impl DiffCache {
 
         // Slow path: compute fresh diff
         debug!("Diff cache miss for session {}, computing", session_id);
-        self.compute_diff(session_id, worktree_path, base_commit)
-            .await
+        self.compute_diff(session_id, worktree_path).await
     }
 
     /// Compute a fresh diff
@@ -126,55 +124,98 @@ impl DiffCache {
         &self,
         session_id: &SessionId,
         worktree_path: &Path,
-        base_commit: Option<&str>,
     ) -> Result<DiffInfo> {
-        // Build diff command
-        let mut cmd = Command::new("git");
-        cmd.current_dir(worktree_path)
-            .arg("diff")
-            .arg("--stat")
+        // Get diff of tracked files against HEAD (staged + unstaged)
+        let diff_output = Command::new("git")
+            .current_dir(worktree_path)
+            .args(["diff", "HEAD"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        if let Some(base) = base_commit {
-            cmd.arg(base);
-        }
-
-        // Get stat output first
-        let stat_output = cmd
+            .stderr(Stdio::piped())
             .output()
             .await
             .map_err(|e| GitError::DiffFailed(e.to_string()))?;
 
-        let (files_changed, lines_added, lines_removed) = if stat_output.status.success() {
+        let mut diff = if diff_output.status.success() {
+            String::from_utf8_lossy(&diff_output.stdout).to_string()
+        } else {
+            String::new()
+        };
+
+        // Also diff untracked files so new files created by the agent show up
+        let untracked_output = Command::new("git")
+            .current_dir(worktree_path)
+            .args(["ls-files", "--others", "--exclude-standard"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| GitError::DiffFailed(e.to_string()))?;
+
+        if untracked_output.status.success() {
+            let untracked = String::from_utf8_lossy(&untracked_output.stdout);
+            for file in untracked.lines().filter(|l| !l.is_empty()) {
+                let file_diff = Command::new("git")
+                    .current_dir(worktree_path)
+                    .args([
+                        "diff",
+                        "--no-index",
+                        "--src-prefix=a/",
+                        "--dst-prefix=b/",
+                        "--",
+                        "/dev/null",
+                        file,
+                    ])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .output()
+                    .await;
+
+                if let Ok(output) = file_diff {
+                    // git diff --no-index exits with 1 when files differ (expected)
+                    let file_diff_str = String::from_utf8_lossy(&output.stdout);
+                    if !file_diff_str.is_empty() {
+                        // Ensure blank line separator between file diffs
+                        if !diff.is_empty() && !diff.ends_with("\n\n") {
+                            if diff.ends_with('\n') {
+                                diff.push('\n');
+                            } else {
+                                diff.push_str("\n\n");
+                            }
+                        }
+                        diff.push_str(&file_diff_str);
+                    }
+                }
+            }
+        }
+
+        // Get stats (tracked changes only is fine for summary)
+        let stat_output = Command::new("git")
+            .current_dir(worktree_path)
+            .args(["diff", "--stat", "HEAD"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| GitError::DiffFailed(e.to_string()))?;
+
+        let (mut files_changed, lines_added, lines_removed) = if stat_output.status.success() {
             parse_diff_stat(&String::from_utf8_lossy(&stat_output.stdout))
         } else {
             (0, 0, 0)
         };
 
-        // Now get the full diff
-        let mut cmd = Command::new("git");
-        cmd.current_dir(worktree_path)
-            .arg("diff")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        if let Some(base) = base_commit {
-            cmd.arg(base);
+        // Count untracked files in the total
+        if untracked_output.status.success() {
+            let untracked_count = String::from_utf8_lossy(&untracked_output.stdout)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .count();
+            files_changed += untracked_count;
         }
-
-        let diff_output = cmd
-            .output()
-            .await
-            .map_err(|e| GitError::DiffFailed(e.to_string()))?;
-
-        let diff = if diff_output.status.success() {
-            String::from_utf8_lossy(&diff_output.stdout).to_string()
-        } else {
-            String::new()
-        };
 
         let info = DiffInfo {
             diff,
@@ -182,7 +223,7 @@ impl DiffCache {
             lines_added,
             lines_removed,
             computed_at: Instant::now(),
-            base_commit: base_commit.unwrap_or("HEAD").to_string(),
+            base_commit: "HEAD".to_string(),
         };
 
         // Update cache

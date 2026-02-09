@@ -397,19 +397,16 @@ impl SessionManager {
 
     /// Get diff for a session
     pub async fn get_diff(&self, session_id: &SessionId) -> Result<DiffInfo> {
-        let (worktree_path, base_commit) = {
+        let worktree_path = {
             let state = self.app_state.read().await;
             let session = state
                 .get_session(session_id)
                 .ok_or(SessionError::NotFound(*session_id))?;
-            (
-                session.worktree_path.clone(),
-                session.base_commit.clone(),
-            )
+            session.worktree_path.clone()
         };
 
         self.diff_cache
-            .get_diff(session_id, &worktree_path, base_commit.as_deref())
+            .get_diff(session_id, &worktree_path)
             .await
     }
 
