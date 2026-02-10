@@ -227,6 +227,9 @@ pub struct WorktreeSession {
     /// Base commit for diff computation (branch point)
     #[serde(default)]
     pub base_commit: Option<String>,
+    /// Shell tmux session name (for secondary shell sessions)
+    #[serde(default)]
+    pub shell_tmux_session_name: Option<String>,
 }
 
 impl WorktreeSession {
@@ -258,6 +261,7 @@ impl WorktreeSession {
             last_active_at: now,
             tmux_session_name,
             base_commit: None,
+            shell_tmux_session_name: None,
         }
     }
 

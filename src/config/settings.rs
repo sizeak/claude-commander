@@ -38,6 +38,9 @@ pub struct Config {
     /// Path to worktrees directory
     pub worktrees_dir: Option<PathBuf>,
 
+    /// Shell program for shell sessions
+    pub shell_program: String,
+
     /// Enable debug logging
     pub debug: bool,
 
@@ -55,6 +58,7 @@ impl Default for Config {
             diff_cache_ttl_ms: 500,
             ui_refresh_fps: 30,
             worktrees_dir: None,
+            shell_program: std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string()),
             debug: false,
             log_file: None,
         }

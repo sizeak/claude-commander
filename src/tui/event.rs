@@ -87,6 +87,8 @@ pub enum UserCommand {
     NavigateDown,
     /// Select/attach to current item
     Select,
+    /// Open shell in worktree
+    SelectShell,
     /// Create new session
     NewSession,
     /// Create new project
@@ -137,6 +139,7 @@ impl UserCommand {
             (KeyCode::Enter, _) => Some(UserCommand::Select),
 
             // Session management
+            (KeyCode::Char('s'), KeyModifiers::NONE) => Some(UserCommand::SelectShell),
             (KeyCode::Char('n'), KeyModifiers::NONE) => Some(UserCommand::NewSession),
             (KeyCode::Char('N'), KeyModifiers::SHIFT) => Some(UserCommand::NewProject),
             (KeyCode::Char('p'), KeyModifiers::NONE) => Some(UserCommand::PauseSession),

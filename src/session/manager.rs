@@ -103,6 +103,10 @@ impl SessionManager {
                         warn!("Failed to kill tmux session: {}", e);
                     }
                 }
+                // Kill shell tmux session if it exists
+                if let Some(ref shell_name) = session.shell_tmux_session_name {
+                    let _ = self.tmux.kill_session(shell_name).await;
+                }
             }
         }
 
@@ -253,6 +257,11 @@ impl SessionManager {
             warn!("Failed to kill tmux session: {}", e);
         }
 
+        // Kill shell tmux session if it exists
+        if let Some(ref shell_name) = session.shell_tmux_session_name {
+            let _ = self.tmux.kill_session(shell_name).await;
+        }
+
         // Optionally remove worktree
         if remove_worktree {
             let repo_path = {
@@ -373,6 +382,111 @@ impl SessionManager {
         Ok(cmd)
     }
 
+    /// Ensure a shell tmux session exists for the given session (lazy creation)
+    async fn ensure_shell_session(&self, session_id: &SessionId) -> Result<String> {
+        let (existing_shell_name, tmux_name, worktree_path) = {
+            let state = self.app_state.read().await;
+            let session = state
+                .get_session(session_id)
+                .ok_or(SessionError::NotFound(*session_id))?;
+            (
+                session.shell_tmux_session_name.clone(),
+                session.tmux_session_name.clone(),
+                session.worktree_path.clone(),
+            )
+        };
+
+        // If shell session already exists in tmux, return its name
+        if let Some(ref shell_name) = existing_shell_name {
+            if self.tmux.session_exists(shell_name).await.unwrap_or(false) {
+                return Ok(shell_name.clone());
+            }
+        }
+
+        // Create new shell tmux session
+        let shell_name = format!("{}-sh", tmux_name);
+        self.tmux
+            .create_session(&shell_name, &worktree_path, Some(&self.config.shell_program))
+            .await?;
+
+        // Store in session state
+        {
+            let mut state = self.app_state.write().await;
+            if let Some(session) = state.get_session_mut(session_id) {
+                session.shell_tmux_session_name = Some(shell_name.clone());
+            }
+            state.save()?;
+        }
+
+        info!("Created shell session {} for session {}", shell_name, session_id);
+        Ok(shell_name)
+    }
+
+    /// Get attach command for the shell session (creates it if needed)
+    pub async fn get_shell_attach_command(&self, session_id: &SessionId) -> Result<String> {
+        let shell_name = self.ensure_shell_session(session_id).await?;
+
+        // Verify tmux session exists and pane is alive
+        let exists = self.tmux.session_exists(&shell_name).await?;
+        if !exists {
+            // Clear shell session name
+            let mut state = self.app_state.write().await;
+            if let Some(session) = state.get_session_mut(session_id) {
+                session.shell_tmux_session_name = None;
+            }
+            let _ = state.save();
+            return Err(SessionError::TmuxSessionNotFound(shell_name).into());
+        }
+
+        let pane_dead = self.tmux.is_pane_dead(&shell_name).await.unwrap_or(false);
+        if pane_dead {
+            let _ = self.tmux.kill_session(&shell_name).await;
+            let mut state = self.app_state.write().await;
+            if let Some(session) = state.get_session_mut(session_id) {
+                session.shell_tmux_session_name = None;
+            }
+            let _ = state.save();
+            return Err(SessionError::TmuxSessionNotFound(
+                format!("{} (shell exited)", shell_name),
+            )
+            .into());
+        }
+
+        Ok(format!("tmux attach-session -t {}", shell_name))
+    }
+
+    /// Get captured content for the shell session
+    pub async fn get_shell_content(&self, session_id: &SessionId) -> Result<Option<CapturedContent>> {
+        let shell_name = {
+            let state = self.app_state.read().await;
+            let session = state
+                .get_session(session_id)
+                .ok_or(SessionError::NotFound(*session_id))?;
+            session.shell_tmux_session_name.clone()
+        };
+
+        let shell_name = match shell_name {
+            Some(name) => name,
+            None => return Ok(None),
+        };
+
+        // Check if tmux session still exists
+        if !self.tmux.session_exists(&shell_name).await.unwrap_or(false) {
+            // Clear stale shell session name
+            let mut state = self.app_state.write().await;
+            if let Some(session) = state.get_session_mut(session_id) {
+                session.shell_tmux_session_name = None;
+            }
+            let _ = state.save();
+            return Ok(None);
+        }
+
+        match self.content_capture.get_content(&shell_name).await {
+            Ok(content) => Ok(Some(content)),
+            Err(_) => Ok(None),
+        }
+    }
+
     /// Get captured content for a session
     pub async fn get_content(&self, session_id: &SessionId) -> Result<CapturedContent> {
         let tmux_session_name = {
@@ -385,7 +499,7 @@ impl SessionManager {
         };
 
         self.content_capture
-            .get_content(session_id, &tmux_session_name)
+            .get_content(&tmux_session_name)
             .await
     }
 

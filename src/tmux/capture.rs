@@ -15,7 +15,6 @@ use xxhash_rust::xxh3::xxh3_64;
 
 use super::TmuxExecutor;
 use crate::error::Result;
-use crate::session::SessionId;
 
 /// Default cache TTL (50ms)
 pub const DEFAULT_CACHE_TTL: Duration = Duration::from_millis(50);
@@ -70,8 +69,8 @@ impl CapturedContent {
 pub struct ContentCapture {
     /// Tmux executor for actual captures
     executor: TmuxExecutor,
-    /// Cache of session ID -> captured content
-    cache: Arc<RwLock<HashMap<SessionId, CapturedContent>>>,
+    /// Cache of tmux session name -> captured content
+    cache: Arc<RwLock<HashMap<String, CapturedContent>>>,
     /// Cache TTL
     ttl: Duration,
 }
@@ -91,21 +90,20 @@ impl ContentCapture {
         }
     }
 
-    /// Get content for a session, using cache if fresh
+    /// Get content for a tmux session, using cache if fresh
     #[instrument(skip(self))]
     pub async fn get_content(
         &self,
-        session_id: &SessionId,
         tmux_session_name: &str,
     ) -> Result<CapturedContent> {
         // Fast path: check cache with read lock
         {
             let cache = self.cache.read().await;
-            if let Some(cached) = cache.get(session_id) {
+            if let Some(cached) = cache.get(tmux_session_name) {
                 if !cached.is_stale(self.ttl) {
                     debug!(
-                        "Cache hit for session {}, age: {:?}",
-                        session_id,
+                        "Cache hit for {}, age: {:?}",
+                        tmux_session_name,
                         cached.age()
                     );
                     return Ok(cached.clone());
@@ -114,14 +112,13 @@ impl ContentCapture {
         }
 
         // Slow path: capture fresh content
-        debug!("Cache miss for session {}, capturing fresh", session_id);
-        self.capture_fresh(session_id, tmux_session_name).await
+        debug!("Cache miss for {}, capturing fresh", tmux_session_name);
+        self.capture_fresh(tmux_session_name).await
     }
 
     /// Force a fresh capture, bypassing cache
     pub async fn capture_fresh(
         &self,
-        session_id: &SessionId,
         tmux_session_name: &str,
     ) -> Result<CapturedContent> {
         // Capture with scrollback (last 1000 lines)
@@ -135,28 +132,22 @@ impl ContentCapture {
         // Update cache
         {
             let mut cache = self.cache.write().await;
-            cache.insert(*session_id, captured.clone());
+            cache.insert(tmux_session_name.to_string(), captured.clone());
         }
 
         Ok(captured)
     }
 
-    /// Invalidate cache for a session
-    pub async fn invalidate(&self, session_id: &SessionId) {
+    /// Invalidate cache for a tmux session
+    pub async fn invalidate(&self, tmux_session_name: &str) {
         let mut cache = self.cache.write().await;
-        cache.remove(session_id);
+        cache.remove(tmux_session_name);
     }
 
     /// Clear all cached content
     pub async fn clear(&self) {
         let mut cache = self.cache.write().await;
         cache.clear();
-    }
-
-    /// Get all cached sessions
-    pub async fn cached_sessions(&self) -> Vec<SessionId> {
-        let cache = self.cache.read().await;
-        cache.keys().copied().collect()
     }
 }
 

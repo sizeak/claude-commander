@@ -48,6 +48,7 @@ pub enum RightPaneView {
     #[default]
     Preview,
     Diff,
+    Shell,
 }
 
 /// Modal dialog state
@@ -106,6 +107,10 @@ pub struct AppUiState {
     pub list_items: Vec<SessionListItem>,
     /// Preview content
     pub preview_content: String,
+    /// Shell pane state
+    pub shell_state: PreviewState,
+    /// Shell content
+    pub shell_content: String,
     /// Diff info
     pub diff_info: DiffInfo,
     /// Status message
@@ -118,6 +123,8 @@ pub struct AppUiState {
     pub selected_project_id: Option<ProjectId>,
     /// Attach command to run after exiting TUI
     pub attach_command: Option<String>,
+    /// Needs right pane clear (set on view switch, consumed on render)
+    pub clear_right_pane: bool,
 }
 
 impl Default for AppUiState {
@@ -126,6 +133,8 @@ impl Default for AppUiState {
             list_state: TreeListState::new(),
             preview_state: PreviewState::new(),
             diff_state: DiffViewState::new(),
+            shell_state: PreviewState::new(),
+            shell_content: String::new(),
             focused_pane: FocusedPane::default(),
             right_pane_view: RightPaneView::default(),
             modal: Modal::None,
@@ -137,6 +146,7 @@ impl Default for AppUiState {
             selected_session_id: None,
             selected_project_id: None,
             attach_command: None,
+            clear_right_pane: false,
         }
     }
 }
@@ -358,6 +368,14 @@ impl App {
             // Update preview for selected session
             self.update_preview().await;
 
+            // Force full terminal redraw on view switch to clear stale styled cells
+            if self.ui_state.clear_right_pane {
+                terminal
+                    .clear()
+                    .map_err(|e| TuiError::RenderError(e.to_string()))?;
+                self.ui_state.clear_right_pane = false;
+            }
+
             // Render
             terminal
                 .draw(|f| self.render(f))
@@ -404,6 +422,15 @@ impl App {
         }
     }
 
+    /// Get mutable reference to the active pane's scroll state
+    fn active_pane_state(&mut self) -> &mut PreviewState {
+        match self.ui_state.right_pane_view {
+            RightPaneView::Preview => &mut self.ui_state.preview_state,
+            RightPaneView::Diff => &mut self.ui_state.diff_state,
+            RightPaneView::Shell => &mut self.ui_state.shell_state,
+        }
+    }
+
     /// Update preview pane content
     async fn update_preview(&mut self) {
         if let Some(session_id) = self.ui_state.selected_session_id {
@@ -426,9 +453,25 @@ impl App {
                     self.ui_state.diff_info = DiffInfo::empty();
                 }
             }
+
+            // Get shell content
+            match self.session_manager.get_shell_content(&session_id).await {
+                Ok(Some(content)) => {
+                    self.ui_state.shell_content = content.content;
+                }
+                Ok(None) => {
+                    self.ui_state.shell_content =
+                        "No shell session. Press 's' to open one.".to_string();
+                }
+                Err(_) => {
+                    self.ui_state.shell_content =
+                        "No shell session. Press 's' to open one.".to_string();
+                }
+            }
         } else {
             self.ui_state.preview_content = "Select a session to see preview".to_string();
             self.ui_state.diff_info = DiffInfo::empty();
+            self.ui_state.shell_content = String::new();
         }
     }
 
@@ -453,10 +496,11 @@ impl App {
         // Render session list
         self.render_session_list(frame, main_chunks[0]);
 
-        // Render either preview or diff based on current view
+        // Render either preview, diff, or shell based on current view
         match self.ui_state.right_pane_view {
             RightPaneView::Preview => self.render_preview(frame, main_chunks[1]),
             RightPaneView::Diff => self.render_diff(frame, main_chunks[1]),
+            RightPaneView::Shell => self.render_shell(frame, main_chunks[1]),
         }
 
         // Render modal if open
@@ -491,7 +535,7 @@ impl App {
         let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
 
         // Show tab indicator in title
-        let title = " [Preview] | Diff ";
+        let title = " [Preview] | Diff | Shell ";
 
         let block = Block::default()
             .title(title)
@@ -524,7 +568,7 @@ impl App {
             Line::from(vec![
                 Span::raw(format!(
                     " Preview | [Diff] ({} file(s), ",
-                    self.ui_state.diff_info.files_changed
+                    self.ui_state.diff_info.files_changed,
                 )),
                 Span::styled(
                     format!("+{}", self.ui_state.diff_info.lines_added),
@@ -535,10 +579,10 @@ impl App {
                     format!("-{}", self.ui_state.diff_info.lines_removed),
                     Style::default().fg(self.theme.diff_removed),
                 ),
-                Span::raw(" lines) "),
+                Span::raw(" lines) | Shell "),
             ])
         } else {
-            Line::from(" Preview | [Diff] (No changes) ")
+            Line::from(" Preview | [Diff] (No changes) | Shell ")
         };
 
         let block = Block::default()
@@ -561,6 +605,33 @@ impl App {
             .scroll(self.ui_state.diff_state.scroll_offset);
 
         frame.render_widget(diff_view, area);
+    }
+
+    /// Render the shell pane
+    fn render_shell(&mut self, frame: &mut Frame, area: Rect) {
+        let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
+
+        let title = " Preview | Diff | [Shell] ";
+
+        let block = Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_style(if is_focused {
+                self.theme.border_focused()
+            } else {
+                self.theme.border_unfocused()
+            });
+
+        let inner_height = area.height.saturating_sub(2);
+        self.ui_state
+            .shell_state
+            .set_content(&self.ui_state.shell_content, inner_height);
+
+        let preview = Preview::new(&self.ui_state.shell_content)
+            .block(block)
+            .scroll(self.ui_state.shell_state.scroll_offset);
+
+        frame.render_widget(preview, area);
     }
 
     /// Render modal overlay
@@ -645,7 +716,8 @@ impl App {
                 let help_text = r#"Navigation:
   j/k, Up/Down    Navigate session list
   Enter           Attach to selected session
-  Tab             Toggle preview/diff view
+  s               Open shell in worktree
+  Tab             Toggle preview/diff/shell view
 
 Session Management:
   n               New worktree session (under selected project)
@@ -784,6 +856,9 @@ Press any key to close this help.
             UserCommand::Select => {
                 self.handle_select().await;
             }
+            UserCommand::SelectShell => {
+                self.handle_select_shell().await;
+            }
             UserCommand::NewSession => {
                 self.handle_new_session();
             }
@@ -809,8 +884,10 @@ Press any key to close this help.
             UserCommand::TogglePane => {
                 self.ui_state.right_pane_view = match self.ui_state.right_pane_view {
                     RightPaneView::Preview => RightPaneView::Diff,
-                    RightPaneView::Diff => RightPaneView::Preview,
+                    RightPaneView::Diff => RightPaneView::Shell,
+                    RightPaneView::Shell => RightPaneView::Preview,
                 };
+                self.ui_state.clear_right_pane = true;
             }
             UserCommand::ShowHelp => {
                 self.ui_state.modal = Modal::Help;
@@ -818,30 +895,10 @@ Press any key to close this help.
             UserCommand::Quit => {
                 self.ui_state.should_quit = true;
             }
-            UserCommand::PageUp => {
-                match self.ui_state.right_pane_view {
-                    RightPaneView::Preview => self.ui_state.preview_state.page_up(),
-                    RightPaneView::Diff => self.ui_state.diff_state.page_up(),
-                }
-            }
-            UserCommand::PageDown => {
-                match self.ui_state.right_pane_view {
-                    RightPaneView::Preview => self.ui_state.preview_state.page_down(),
-                    RightPaneView::Diff => self.ui_state.diff_state.page_down(),
-                }
-            }
-            UserCommand::ScrollUp => {
-                match self.ui_state.right_pane_view {
-                    RightPaneView::Preview => self.ui_state.preview_state.scroll_up(1),
-                    RightPaneView::Diff => self.ui_state.diff_state.scroll_up(1),
-                }
-            }
-            UserCommand::ScrollDown => {
-                match self.ui_state.right_pane_view {
-                    RightPaneView::Preview => self.ui_state.preview_state.scroll_down(1),
-                    RightPaneView::Diff => self.ui_state.diff_state.scroll_down(1),
-                }
-            }
+            UserCommand::PageUp => self.active_pane_state().page_up(),
+            UserCommand::PageDown => self.active_pane_state().page_down(),
+            UserCommand::ScrollUp => self.active_pane_state().scroll_up(1),
+            UserCommand::ScrollDown => self.active_pane_state().scroll_down(1),
             _ => {}
         }
     }
@@ -892,6 +949,23 @@ Press any key to close this help.
             }
         } else {
             info!("No session selected");
+        }
+    }
+
+    /// Handle shell selection (attach to shell session)
+    async fn handle_select_shell(&mut self) {
+        if let Some(session_id) = self.ui_state.selected_session_id {
+            match self.session_manager.get_shell_attach_command(&session_id).await {
+                Ok(cmd) => {
+                    self.ui_state.attach_command = Some(cmd);
+                    self.ui_state.should_quit = true;
+                }
+                Err(e) => {
+                    self.ui_state.modal = Modal::Error {
+                        message: format!("Cannot open shell: {}", e),
+                    };
+                }
+            }
         }
     }
 
