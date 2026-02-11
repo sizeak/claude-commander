@@ -8,10 +8,10 @@
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture},
+    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -165,6 +165,9 @@ pub struct App {
     event_loop: EventLoop,
     /// Theme configuration
     theme: Theme,
+    /// Suppress key events until this instant (filters stray bytes from
+    /// unrecognized escape sequences that crossterm splits into multiple events)
+    suppress_keys_until: Instant,
 }
 
 impl App {
@@ -180,6 +183,7 @@ impl App {
             ui_state: AppUiState::default(),
             event_loop: EventLoop::new(),
             theme: Theme::default(),
+            suppress_keys_until: Instant::now(),
         }
     }
 
@@ -321,8 +325,13 @@ impl App {
         enable_raw_mode().map_err(|e| TuiError::InitFailed(e.to_string()))?;
 
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
-            .map_err(|e| TuiError::InitFailed(e.to_string()))?;
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableMouseCapture,
+            EnableBracketedPaste
+        )
+        .map_err(|e| TuiError::InitFailed(e.to_string()))?;
 
         let backend = CrosstermBackend::new(stdout);
         let terminal =
@@ -343,7 +352,8 @@ impl App {
         execute!(
             terminal.backend_mut(),
             LeaveAlternateScreen,
-            DisableMouseCapture
+            DisableMouseCapture,
+            DisableBracketedPaste
         )
         .map_err(|e| TuiError::RestoreFailed(e.to_string()))?;
 
@@ -781,6 +791,22 @@ Press any key to close this help.
     async fn handle_input(&mut self, input: InputEvent) {
         match input {
             InputEvent::Key(key) => {
+                debug!(
+                    "Key event: code={:?} modifiers={:?} kind={:?}",
+                    key.code, key.modifiers, key.kind
+                );
+
+                // Suppress stray bytes from unrecognized escape sequences.
+                // When crossterm can't parse a multi-byte sequence (e.g. from
+                // modifier combos the terminal encodes as CSI), it emits each
+                // byte as a separate key event ~8ms apart.  We suppress all
+                // events for a short window after an unrecognized one.
+                let now = Instant::now();
+                if now < self.suppress_keys_until {
+                    debug!("Suppressing key event (escape sequence cooldown)");
+                    return;
+                }
+
                 // Check for modal-specific handling first
                 if !matches!(self.ui_state.modal, Modal::None) {
                     self.handle_modal_key(key).await;
@@ -788,8 +814,14 @@ Press any key to close this help.
                 }
 
                 // Convert to command and handle
-                if let Some(cmd) = UserCommand::from_key(key) {
-                    self.handle_command(cmd).await;
+                match UserCommand::from_key(key) {
+                    Some(cmd) => self.handle_command(cmd).await,
+                    None => {
+                        // Unrecognized key event — likely the start of a
+                        // broken escape sequence.  Suppress further events
+                        // briefly so trailing bytes don't trigger commands.
+                        self.suppress_keys_until = now + Duration::from_millis(50);
+                    }
                 }
             }
             InputEvent::Resize(_, _) => {
@@ -797,6 +829,14 @@ Press any key to close this help.
             }
             InputEvent::Mouse(_) => {
                 // Mouse handling if needed
+            }
+            InputEvent::Paste(text) => {
+                // Handle paste in modal input, ignore otherwise
+                if let Modal::Input { value, .. } = &mut self.ui_state.modal {
+                    // Strip newlines from pasted text to prevent accidental submission
+                    let clean = text.replace(['\n', '\r'], "");
+                    value.push_str(&clean);
+                }
             }
         }
     }

@@ -9,7 +9,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use crossterm::event::{Event as CrosstermEvent, EventStream, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{
+    Event as CrosstermEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+};
 use futures::{FutureExt, StreamExt};
 use tokio::sync::mpsc;
 use tracing::debug;
@@ -38,6 +40,8 @@ pub enum InputEvent {
     Mouse(crossterm::event::MouseEvent),
     /// Terminal resize
     Resize(u16, u16),
+    /// Bracketed paste
+    Paste(String),
 }
 
 /// State updates from background tasks
@@ -126,17 +130,23 @@ pub enum UserCommand {
 impl UserCommand {
     /// Convert a key event to a user command
     pub fn from_key(key: KeyEvent) -> Option<Self> {
+        // Only process key press events; ignore release/repeat from terminals
+        // that support the kitty keyboard protocol
+        if key.kind != KeyEventKind::Press {
+            return None;
+        }
+
         match (key.code, key.modifiers) {
             // Navigation
-            (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+            (KeyCode::Up, KeyModifiers::NONE) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
                 Some(UserCommand::NavigateUp)
             }
-            (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+            (KeyCode::Down, KeyModifiers::NONE) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
                 Some(UserCommand::NavigateDown)
             }
 
             // Selection
-            (KeyCode::Enter, _) => Some(UserCommand::Select),
+            (KeyCode::Enter, KeyModifiers::NONE) => Some(UserCommand::Select),
 
             // Session management
             (KeyCode::Char('s'), KeyModifiers::NONE) => Some(UserCommand::SelectShell),
@@ -147,22 +157,24 @@ impl UserCommand {
             (KeyCode::Char('d'), KeyModifiers::NONE) => Some(UserCommand::DeleteSession),
 
             // Pane control
-            (KeyCode::Tab, _) => Some(UserCommand::TogglePane),
+            (KeyCode::Tab, KeyModifiers::NONE) => Some(UserCommand::TogglePane),
 
             // Scrolling
             (KeyCode::Char('u'), KeyModifiers::CONTROL) => Some(UserCommand::PageUp),
             (KeyCode::Char('d'), KeyModifiers::CONTROL) => Some(UserCommand::PageDown),
-            (KeyCode::PageUp, _) => Some(UserCommand::PageUp),
-            (KeyCode::PageDown, _) => Some(UserCommand::PageDown),
+            (KeyCode::PageUp, KeyModifiers::NONE) => Some(UserCommand::PageUp),
+            (KeyCode::PageDown, KeyModifiers::NONE) => Some(UserCommand::PageDown),
 
             // Help and quit
-            (KeyCode::Char('?'), _) => Some(UserCommand::ShowHelp),
+            (KeyCode::Char('?'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                Some(UserCommand::ShowHelp)
+            }
             (KeyCode::Char('q'), KeyModifiers::NONE) => Some(UserCommand::Quit),
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(UserCommand::Quit),
 
             // Modal controls
-            (KeyCode::Esc, _) => Some(UserCommand::Cancel),
-            (KeyCode::Backspace, _) => Some(UserCommand::Backspace),
+            (KeyCode::Esc, KeyModifiers::NONE) => Some(UserCommand::Cancel),
+            (KeyCode::Backspace, KeyModifiers::NONE) => Some(UserCommand::Backspace),
 
             // Text input (for modals)
             (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
@@ -263,6 +275,9 @@ impl EventLoop {
                             }
                             CrosstermEvent::Resize(w, h) => {
                                 AppEvent::Input(InputEvent::Resize(w, h))
+                            }
+                            CrosstermEvent::Paste(text) => {
+                                AppEvent::Input(InputEvent::Paste(text))
                             }
                             _ => continue,
                         };
