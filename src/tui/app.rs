@@ -406,6 +406,7 @@ impl App {
 
     /// Update selection tracking based on list position
     fn update_selection(&mut self) {
+        let old_session = self.ui_state.selected_session_id;
         if let Some(idx) = self.ui_state.list_state.selected() {
             if let Some(item) = self.ui_state.list_items.get(idx) {
                 match item {
@@ -419,6 +420,11 @@ impl App {
                     }
                 }
             }
+        }
+        // Force full terminal redraw when the selected session changes to flush
+        // stale styled cells from the previous session's pane content
+        if self.ui_state.selected_session_id != old_session {
+            self.ui_state.clear_right_pane = true;
         }
     }
 
