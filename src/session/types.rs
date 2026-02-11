@@ -118,32 +118,6 @@ impl fmt::Display for SessionStatus {
     }
 }
 
-/// Detected state of the agent running in the session
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentState {
-    /// Agent is waiting for input (prompt visible)
-    #[default]
-    WaitingForInput,
-    /// Agent is actively processing
-    Processing,
-    /// Agent encountered an error
-    Error,
-    /// Agent state is unknown (e.g., just started)
-    Unknown,
-}
-
-impl fmt::Display for AgentState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::WaitingForInput => write!(f, "waiting"),
-            Self::Processing => write!(f, "processing"),
-            Self::Error => write!(f, "error"),
-            Self::Unknown => write!(f, "unknown"),
-        }
-    }
-}
-
 /// Project represents a git repository (parent session)
 ///
 /// A project is the top-level container that holds:
@@ -214,8 +188,6 @@ pub struct WorktreeSession {
     pub worktree_path: PathBuf,
     /// Current status
     pub status: SessionStatus,
-    /// Detected agent state
-    pub agent_state: AgentState,
     /// Program running in the session (e.g., "claude", "aider")
     pub program: String,
     /// When the session was created
@@ -255,7 +227,6 @@ impl WorktreeSession {
             branch: branch.into(),
             worktree_path,
             status: SessionStatus::Running,
-            agent_state: AgentState::Unknown,
             program: program.into(),
             created_at: now,
             last_active_at: now,
@@ -271,12 +242,6 @@ impl WorktreeSession {
         if status == SessionStatus::Running {
             self.last_active_at = Utc::now();
         }
-    }
-
-    /// Update the agent state
-    pub fn set_agent_state(&mut self, state: AgentState) {
-        self.agent_state = state;
-        self.last_active_at = Utc::now();
     }
 
     /// Mark the session as active (update last_active_at)
@@ -312,7 +277,6 @@ pub enum SessionListItem {
         title: String,
         branch: String,
         status: SessionStatus,
-        agent_state: AgentState,
         program: String,
     },
 }
@@ -435,7 +399,6 @@ mod tests {
             title: "test".to_string(),
             branch: "test".to_string(),
             status: SessionStatus::Running,
-            agent_state: AgentState::WaitingForInput,
             program: "claude".to_string(),
         };
 

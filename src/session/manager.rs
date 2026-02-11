@@ -12,10 +12,8 @@ use tracing::{info, instrument, warn};
 use crate::config::{AppState, Config};
 use crate::error::{Result, SessionError};
 use crate::git::{DiffCache, DiffInfo, GitBackend, WorktreeManager};
-use crate::session::{
-    AgentState, Project, ProjectId, SessionId, SessionStatus, WorktreeSession,
-};
-use crate::tmux::{CapturedContent, ContentCapture, StateDetector, TmuxExecutor};
+use crate::session::{Project, ProjectId, SessionId, SessionStatus, WorktreeSession};
+use crate::tmux::{CapturedContent, ContentCapture, TmuxExecutor};
 
 /// Session manager coordinates all session operations
 pub struct SessionManager {
@@ -27,8 +25,6 @@ pub struct SessionManager {
     pub tmux: TmuxExecutor,
     /// Content capture cache
     content_capture: ContentCapture,
-    /// State detector
-    state_detector: StateDetector,
     /// Diff cache
     diff_cache: DiffCache,
 }
@@ -43,14 +39,12 @@ impl SessionManager {
         );
         let diff_cache =
             DiffCache::with_ttl(std::time::Duration::from_millis(config.diff_cache_ttl_ms));
-        let state_detector = StateDetector::new();
 
         Self {
             config,
             app_state: state,
             tmux,
             content_capture,
-            state_detector,
             diff_cache,
         }
     }
@@ -503,12 +497,6 @@ impl SessionManager {
             .await
     }
 
-    /// Detect agent state for a session
-    pub async fn detect_agent_state(&self, session_id: &SessionId) -> Result<AgentState> {
-        let content = self.get_content(session_id).await?;
-        Ok(self.state_detector.detect(&content))
-    }
-
     /// Get diff for a session
     pub async fn get_diff(&self, session_id: &SessionId) -> Result<DiffInfo> {
         let worktree_path = {
@@ -522,29 +510,6 @@ impl SessionManager {
         self.diff_cache
             .get_diff(session_id, &worktree_path)
             .await
-    }
-
-    /// Update agent state for all active sessions
-    pub async fn update_all_states(&self) -> Result<()> {
-        let session_ids: Vec<SessionId> = {
-            let state = self.app_state.read().await;
-            state
-                .get_active_sessions()
-                .iter()
-                .map(|s| s.id)
-                .collect()
-        };
-
-        for session_id in session_ids {
-            if let Ok(agent_state) = self.detect_agent_state(&session_id).await {
-                let mut state = self.app_state.write().await;
-                if let Some(session) = state.get_session_mut(&session_id) {
-                    session.set_agent_state(agent_state);
-                }
-            }
-        }
-
-        Ok(())
     }
 
     /// Generate branch name from title

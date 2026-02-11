@@ -30,7 +30,7 @@ pub mod tui;
 pub use config::{AppState, Config};
 pub use error::{Error, Result};
 pub use session::{
-    AgentState, Project, ProjectId, SessionId, SessionListItem, SessionStatus, WorktreeSession,
+    Project, ProjectId, SessionId, SessionListItem, SessionStatus, WorktreeSession,
 };
 pub use tmux::{attach_to_session, AttachResult};
 

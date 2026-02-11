@@ -10,7 +10,7 @@ use ratatui::{
     widgets::{Block, List, ListItem, ListState, StatefulWidget},
 };
 
-use crate::session::{AgentState, SessionListItem, SessionStatus};
+use crate::session::{SessionListItem, SessionStatus};
 use crate::tui::theme::Theme;
 
 /// Tree list widget for displaying hierarchical sessions
@@ -89,7 +89,6 @@ impl<'a> TreeList<'a> {
                     title,
                     branch,
                     status,
-                    agent_state,
                     program,
                     ..
                 } => {
@@ -97,13 +96,6 @@ impl<'a> TreeList<'a> {
                         SessionStatus::Running => ("●", self.theme.status_running),
                         SessionStatus::Paused => ("◐", self.theme.status_paused),
                         SessionStatus::Stopped => ("○", self.theme.status_stopped),
-                    };
-
-                    let agent_icon = match agent_state {
-                        AgentState::WaitingForInput => "⏳",
-                        AgentState::Processing => "⚙️",
-                        AgentState::Error => "❌",
-                        AgentState::Unknown => "❓",
                     };
 
                     let line = Line::from(vec![
@@ -115,7 +107,7 @@ impl<'a> TreeList<'a> {
                             format!(" [{}]", branch),
                             Style::default().fg(self.theme.text_accent),
                         ),
-                        Span::raw(format!(" {} ", agent_icon)),
+                        Span::raw(" "),
                         Span::styled(
                             format!("({})", program),
                             Style::default().fg(self.theme.text_secondary),

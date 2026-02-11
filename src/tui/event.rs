@@ -56,10 +56,6 @@ pub enum StateUpdate {
     StatusChanged {
         session_id: SessionId,
     },
-    /// Agent state changed
-    AgentStateChanged {
-        session_id: SessionId,
-    },
     /// Diff updated
     DiffUpdated {
         session_id: SessionId,

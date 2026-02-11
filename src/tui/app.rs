@@ -196,7 +196,6 @@ impl App {
         self.sync_session_states().await;
         let tick_rate = Duration::from_millis(1000 / self.config.ui_refresh_fps as u64);
         self.event_loop.start(tick_rate);
-        self.start_background_updater();
 
         // Restore last selection from persisted state
         self.refresh_list_items().await;
@@ -291,33 +290,6 @@ impl App {
         // Save updated state
         let state = self.app_state.read().await;
         let _ = state.save();
-    }
-
-    /// Start background state updater task
-    fn start_background_updater(&self) {
-        let sender = self.event_loop.sender();
-        let app_state = self.app_state.clone();
-        let _session_manager_config = self.config.clone();
-
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(500));
-
-            loop {
-                interval.tick().await;
-
-                // Get active session IDs
-                let session_ids: Vec<SessionId> = {
-                    let state = app_state.read().await;
-                    state.get_active_sessions().iter().map(|s| s.id).collect()
-                };
-
-                // Update agent states (this is done in session manager)
-                // For now, just signal a state update
-                if !session_ids.is_empty() {
-                    let _ = sender.send(AppEvent::Tick).await;
-                }
-            }
-        });
     }
 
     /// Setup terminal for TUI
@@ -1179,7 +1151,6 @@ Press any key to close this help.
                         title: session.title.clone(),
                         branch: session.branch.clone(),
                         status: session.status,
-                        agent_state: session.agent_state,
                         program: session.program.clone(),
                     });
                 }
