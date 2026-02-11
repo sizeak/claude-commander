@@ -60,4 +60,5 @@ Integration tests in `tests/integration_test.rs` require tmux, use `tempfile` fo
 - Pull request labels include `dev-review-required`, `ready-for-test`, `trivial`, `tidy`, `merge-on-ci-green`. Do not add labels unless instructed.
 - Never skip GPG commit signing
 - Precommit hooks may autoformat files while failing the commit; these changes will need to be restaged and the commit reattempted.
+- Before committing, always ensure `cargo clippy` and `cargo build` pass with no warnings or errors. Fix any issues before creating the commit.
 
