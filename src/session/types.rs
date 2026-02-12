@@ -139,6 +139,9 @@ pub struct Project {
     /// Worktree sessions belonging to this project
     #[serde(default)]
     pub worktrees: Vec<SessionId>,
+    /// Shell tmux session name (for project-level shell)
+    #[serde(default)]
+    pub shell_tmux_session_name: Option<String>,
 }
 
 impl Project {
@@ -151,6 +154,7 @@ impl Project {
             main_branch: main_branch.into(),
             created_at: Utc::now(),
             worktrees: Vec::new(),
+            shell_tmux_session_name: None,
         }
     }
 

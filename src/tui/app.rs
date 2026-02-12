@@ -389,6 +389,8 @@ impl App {
     /// Update selection tracking based on list position
     fn update_selection(&mut self) {
         let old_session = self.ui_state.selected_session_id;
+        let was_on_project = old_session.is_none() && self.ui_state.selected_project_id.is_some();
+
         if let Some(idx) = self.ui_state.list_state.selected() {
             if let Some(item) = self.ui_state.list_items.get(idx) {
                 match item {
@@ -403,6 +405,25 @@ impl App {
                 }
             }
         }
+
+        let now_on_project = self.ui_state.selected_session_id.is_none()
+            && self.ui_state.selected_project_id.is_some();
+
+        // Auto-switch pane when transitioning between project and session
+        if now_on_project && !was_on_project {
+            // Transitioning to a project: Preview → Shell
+            if self.ui_state.right_pane_view == RightPaneView::Preview {
+                self.ui_state.right_pane_view = RightPaneView::Shell;
+                self.ui_state.clear_right_pane = true;
+            }
+        } else if !now_on_project && was_on_project {
+            // Transitioning to a session: Shell → Preview
+            if self.ui_state.right_pane_view == RightPaneView::Shell {
+                self.ui_state.right_pane_view = RightPaneView::Preview;
+                self.ui_state.clear_right_pane = true;
+            }
+        }
+
         // Force full terminal redraw when the selected session changes to flush
         // stale styled cells from the previous session's pane content
         if self.ui_state.selected_session_id != old_session {
@@ -456,6 +477,22 @@ impl App {
                         "No shell session. Press 's' to open one.".to_string();
                 }
             }
+        } else if let Some(project_id) = self.ui_state.selected_project_id {
+            // Project selected (no session) — show project-level diff and shell
+            self.ui_state.preview_content = String::new();
+
+            match self.session_manager.get_project_diff(&project_id).await {
+                Ok(diff) => self.ui_state.diff_info = diff,
+                Err(_) => self.ui_state.diff_info = DiffInfo::empty(),
+            }
+
+            match self.session_manager.get_project_shell_content(&project_id).await {
+                Ok(Some(content)) => self.ui_state.shell_content = content.content,
+                _ => {
+                    self.ui_state.shell_content =
+                        "No shell session. Press 's' to open one.".to_string();
+                }
+            }
         } else {
             self.ui_state.preview_content = "Select a session to see preview".to_string();
             self.ui_state.diff_info = DiffInfo::empty();
@@ -485,7 +522,15 @@ impl App {
         self.render_session_list(frame, main_chunks[0]);
 
         // Render either preview, diff, or shell based on current view
-        match self.ui_state.right_pane_view {
+        // Defensive: if a project is selected and view is Preview, render Shell instead
+        let view = if self.is_project_selected()
+            && self.ui_state.right_pane_view == RightPaneView::Preview
+        {
+            RightPaneView::Shell
+        } else {
+            self.ui_state.right_pane_view
+        };
+        match view {
             RightPaneView::Preview => self.render_preview(frame, main_chunks[1]),
             RightPaneView::Diff => self.render_diff(frame, main_chunks[1]),
             RightPaneView::Shell => self.render_shell(frame, main_chunks[1]),
@@ -516,6 +561,12 @@ impl App {
             .highlight_style(self.theme.selection().add_modifier(Modifier::BOLD));
 
         frame.render_stateful_widget(tree_list, area, &mut self.ui_state.list_state.list_state);
+    }
+
+    /// Check if a project (not a session) is currently selected
+    fn is_project_selected(&self) -> bool {
+        self.ui_state.selected_session_id.is_none()
+            && self.ui_state.selected_project_id.is_some()
     }
 
     /// Render the preview pane
@@ -550,13 +601,20 @@ impl App {
     /// Render the diff pane
     fn render_diff(&mut self, frame: &mut Frame, area: Rect) {
         let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
+        let on_project = self.is_project_selected();
 
         // Show tab indicator and diff summary in title with colored +/- counts
+        let (prefix, suffix) = if on_project {
+            ("Shell | ", "")
+        } else {
+            ("Preview | ", " | Shell")
+        };
+
         let title = if self.ui_state.diff_info.has_changes() {
             Line::from(vec![
                 Span::raw(format!(
-                    " Preview | [Diff] ({} file(s), ",
-                    self.ui_state.diff_info.files_changed,
+                    " {}[Diff] ({} file(s), ",
+                    prefix, self.ui_state.diff_info.files_changed,
                 )),
                 Span::styled(
                     format!("+{}", self.ui_state.diff_info.lines_added),
@@ -567,10 +625,10 @@ impl App {
                     format!("-{}", self.ui_state.diff_info.lines_removed),
                     Style::default().fg(self.theme.diff_removed),
                 ),
-                Span::raw(" lines) | Shell "),
+                Span::raw(format!(" lines){} ", suffix)),
             ])
         } else {
-            Line::from(" Preview | [Diff] (No changes) | Shell ")
+            Line::from(format!(" {}[Diff] (No changes){} ", prefix, suffix))
         };
 
         let block = Block::default()
@@ -599,7 +657,11 @@ impl App {
     fn render_shell(&mut self, frame: &mut Frame, area: Rect) {
         let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
 
-        let title = " Preview | Diff | [Shell] ";
+        let title = if self.is_project_selected() {
+            " [Shell] | Diff "
+        } else {
+            " Preview | Diff | [Shell] "
+        };
 
         let block = Block::default()
             .title(title)
@@ -900,10 +962,21 @@ Press any key to close this help.
                 self.handle_delete_session();
             }
             UserCommand::TogglePane => {
-                self.ui_state.right_pane_view = match self.ui_state.right_pane_view {
-                    RightPaneView::Preview => RightPaneView::Diff,
-                    RightPaneView::Diff => RightPaneView::Shell,
-                    RightPaneView::Shell => RightPaneView::Preview,
+                let on_project = self.ui_state.selected_session_id.is_none()
+                    && self.ui_state.selected_project_id.is_some();
+                self.ui_state.right_pane_view = if on_project {
+                    // Project: Shell → Diff → Shell (no Preview)
+                    match self.ui_state.right_pane_view {
+                        RightPaneView::Shell => RightPaneView::Diff,
+                        _ => RightPaneView::Shell,
+                    }
+                } else {
+                    // Session: Preview → Diff → Shell → Preview
+                    match self.ui_state.right_pane_view {
+                        RightPaneView::Preview => RightPaneView::Diff,
+                        RightPaneView::Diff => RightPaneView::Shell,
+                        RightPaneView::Shell => RightPaneView::Preview,
+                    }
                 };
                 self.ui_state.clear_right_pane = true;
             }
@@ -974,6 +1047,18 @@ Press any key to close this help.
     async fn handle_select_shell(&mut self) {
         if let Some(session_id) = self.ui_state.selected_session_id {
             match self.session_manager.get_shell_attach_command(&session_id).await {
+                Ok(cmd) => {
+                    self.ui_state.attach_command = Some(cmd);
+                    self.ui_state.should_quit = true;
+                }
+                Err(e) => {
+                    self.ui_state.modal = Modal::Error {
+                        message: format!("Cannot open shell: {}", e),
+                    };
+                }
+            }
+        } else if let Some(project_id) = self.ui_state.selected_project_id {
+            match self.session_manager.get_project_shell_attach_command(&project_id).await {
                 Ok(cmd) => {
                     self.ui_state.attach_command = Some(cmd);
                     self.ui_state.should_quit = true;

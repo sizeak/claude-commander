@@ -11,7 +11,7 @@ use tracing::{info, instrument, warn};
 
 use crate::config::{AppState, Config};
 use crate::error::{Result, SessionError};
-use crate::git::{DiffCache, DiffInfo, GitBackend, WorktreeManager};
+use crate::git::{compute_diff_for_path, DiffCache, DiffInfo, GitBackend, WorktreeManager};
 use crate::session::{Project, ProjectId, SessionId, SessionStatus, WorktreeSession};
 use crate::tmux::{CapturedContent, ContentCapture, TmuxExecutor};
 
@@ -87,6 +87,11 @@ impl SessionManager {
             .get_project(project_id)
             .ok_or_else(|| SessionError::ProjectNotFound(project_id.to_string()))?
             .clone();
+
+        // Kill project shell tmux session if it exists
+        if let Some(ref shell_name) = project.shell_tmux_session_name {
+            let _ = self.tmux.kill_session(shell_name).await;
+        }
 
         // Kill all sessions
         for session_id in &project.worktrees {
@@ -510,6 +515,122 @@ impl SessionManager {
         self.diff_cache
             .get_diff(session_id, &worktree_path)
             .await
+    }
+
+    /// Ensure a shell tmux session exists for the given project (lazy creation)
+    async fn ensure_project_shell(&self, project_id: &ProjectId) -> Result<String> {
+        let (existing_shell_name, repo_path, id_prefix) = {
+            let state = self.app_state.read().await;
+            let project = state
+                .get_project(project_id)
+                .ok_or_else(|| SessionError::ProjectNotFound(project_id.to_string()))?;
+            (
+                project.shell_tmux_session_name.clone(),
+                project.repo_path.clone(),
+                project_id.to_string(),
+            )
+        };
+
+        // If shell session already exists in tmux, return its name
+        if let Some(ref shell_name) = existing_shell_name {
+            if self.tmux.session_exists(shell_name).await.unwrap_or(false) {
+                return Ok(shell_name.clone());
+            }
+        }
+
+        // Create new shell tmux session
+        let shell_name = format!("cc-proj-{}-sh", id_prefix);
+        self.tmux
+            .create_session(&shell_name, &repo_path, Some(&self.config.shell_program))
+            .await?;
+
+        // Store in project state
+        {
+            let mut state = self.app_state.write().await;
+            if let Some(project) = state.get_project_mut(project_id) {
+                project.shell_tmux_session_name = Some(shell_name.clone());
+            }
+            state.save()?;
+        }
+
+        info!("Created shell session {} for project {}", shell_name, project_id);
+        Ok(shell_name)
+    }
+
+    /// Get attach command for the project shell session (creates it if needed)
+    pub async fn get_project_shell_attach_command(&self, project_id: &ProjectId) -> Result<String> {
+        let shell_name = self.ensure_project_shell(project_id).await?;
+
+        // Verify tmux session exists and pane is alive
+        let exists = self.tmux.session_exists(&shell_name).await?;
+        if !exists {
+            let mut state = self.app_state.write().await;
+            if let Some(project) = state.get_project_mut(project_id) {
+                project.shell_tmux_session_name = None;
+            }
+            let _ = state.save();
+            return Err(SessionError::TmuxSessionNotFound(shell_name).into());
+        }
+
+        let pane_dead = self.tmux.is_pane_dead(&shell_name).await.unwrap_or(false);
+        if pane_dead {
+            let _ = self.tmux.kill_session(&shell_name).await;
+            let mut state = self.app_state.write().await;
+            if let Some(project) = state.get_project_mut(project_id) {
+                project.shell_tmux_session_name = None;
+            }
+            let _ = state.save();
+            return Err(SessionError::TmuxSessionNotFound(
+                format!("{} (shell exited)", shell_name),
+            )
+            .into());
+        }
+
+        Ok(format!("tmux attach-session -t {}", shell_name))
+    }
+
+    /// Get captured content for the project shell session
+    pub async fn get_project_shell_content(&self, project_id: &ProjectId) -> Result<Option<CapturedContent>> {
+        let shell_name = {
+            let state = self.app_state.read().await;
+            let project = state
+                .get_project(project_id)
+                .ok_or_else(|| SessionError::ProjectNotFound(project_id.to_string()))?;
+            project.shell_tmux_session_name.clone()
+        };
+
+        let shell_name = match shell_name {
+            Some(name) => name,
+            None => return Ok(None),
+        };
+
+        // Check if tmux session still exists
+        if !self.tmux.session_exists(&shell_name).await.unwrap_or(false) {
+            let mut state = self.app_state.write().await;
+            if let Some(project) = state.get_project_mut(project_id) {
+                project.shell_tmux_session_name = None;
+            }
+            let _ = state.save();
+            return Ok(None);
+        }
+
+        match self.content_capture.get_content(&shell_name).await {
+            Ok(content) => Ok(Some(content)),
+            Err(_) => Ok(None),
+        }
+    }
+
+    /// Get diff for a project (uncommitted changes in repo)
+    pub async fn get_project_diff(&self, project_id: &ProjectId) -> Result<DiffInfo> {
+        let repo_path = {
+            let state = self.app_state.read().await;
+            let project = state
+                .get_project(project_id)
+                .ok_or_else(|| SessionError::ProjectNotFound(project_id.to_string()))?;
+            project.repo_path.clone()
+        };
+
+        compute_diff_for_path(&repo_path).await
     }
 
     /// Generate branch name from title
