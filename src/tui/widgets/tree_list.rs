@@ -49,8 +49,25 @@ impl<'a> TreeList<'a> {
     }
 
 
+    /// Check whether sessions use more than one distinct program
+    fn has_mixed_programs(&self) -> bool {
+        let mut first = None;
+        for item in self.items {
+            if let SessionListItem::Worktree { program, .. } = item {
+                match first {
+                    None => first = Some(program.as_str()),
+                    Some(p) if p != program => return true,
+                    _ => {}
+                }
+            }
+        }
+        false
+    }
+
     /// Convert items to list items
     fn to_list_items(&self) -> Vec<ListItem<'a>> {
+        let show_program = self.has_mixed_programs();
+
         self.items
             .iter()
             .map(|item| match item {
@@ -98,7 +115,7 @@ impl<'a> TreeList<'a> {
                         SessionStatus::Stopped => ("○", self.theme.status_stopped),
                     };
 
-                    let line = Line::from(vec![
+                    let mut spans = vec![
                         // Indentation for worktrees
                         Span::raw("   └── "),
                         Span::styled(format!("{} ", status_icon), Style::default().fg(status_color)),
@@ -107,12 +124,17 @@ impl<'a> TreeList<'a> {
                             format!(" [{}]", branch),
                             Style::default().fg(self.theme.text_accent),
                         ),
-                        Span::raw(" "),
-                        Span::styled(
+                    ];
+
+                    if show_program {
+                        spans.push(Span::raw(" "));
+                        spans.push(Span::styled(
                             format!("({})", program),
                             Style::default().fg(self.theme.text_secondary),
-                        ),
-                    ]);
+                        ));
+                    }
+
+                    let line = Line::from(spans);
 
                     ListItem::new(line)
                 }
