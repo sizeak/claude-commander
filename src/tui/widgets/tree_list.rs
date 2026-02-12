@@ -93,8 +93,8 @@ impl<'a> TreeList<'a> {
                                 .add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
-                            format!(" ({})", main_branch),
-                            Style::default().fg(self.theme.text_secondary),
+                            format!(" [{}]", main_branch),
+                            Style::default().fg(self.theme.text_accent),
                         ),
                         Span::styled(count_str, Style::default().fg(self.theme.text_secondary)),
                     ]);
