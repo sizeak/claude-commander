@@ -129,6 +129,12 @@ impl Config {
         std::fs::create_dir_all(&worktrees_dir)
             .map_err(|_| Error::Config(ConfigError::DirectoryCreationFailed(worktrees_dir)))?;
 
+        // Seed a default config file if none exists so users can discover it
+        let config_path = Self::config_file_path()?;
+        if !config_path.exists() {
+            let _ = Config::default().save();
+        }
+
         Ok(())
     }
 
