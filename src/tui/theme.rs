@@ -63,6 +63,7 @@ pub struct Theme {
     pub text_secondary: Color,
     pub text_accent: Color,
     pub text_project: Color,
+    pub text_pr: Color,
 
     // Diff colors
     pub diff_added: Color,
@@ -114,6 +115,7 @@ impl Theme {
             text_secondary: Color::DarkGray,
             text_accent: Color::Blue,
             text_project: Color::Green,
+            text_pr: Color::Cyan,
 
             diff_added: Color::Green,
             diff_removed: Color::Red,
@@ -147,6 +149,7 @@ impl Theme {
             text_secondary: Color::Indexed(250),
             text_accent: Color::Indexed(147),     // Pastel lavender
             text_project: Color::Indexed(108),    // Muted sage green
+            text_pr: Color::Indexed(117),         // Sky blue
 
             diff_added: Color::Indexed(156),      // Pastel mint
             diff_removed: Color::Indexed(210),    // Pastel coral
@@ -180,6 +183,7 @@ impl Theme {
             text_secondary: Color::Rgb(166, 173, 200),
             text_accent: Color::Rgb(180, 190, 254),      // Pastel periwinkle
             text_project: Color::Rgb(129, 178, 134),     // Muted sage green
+            text_pr: Color::Rgb(137, 180, 250),          // Pastel sky blue
 
             diff_added: Color::Rgb(166, 227, 161),       // Pastel mint
             diff_removed: Color::Rgb(243, 139, 168),     // Pastel rose

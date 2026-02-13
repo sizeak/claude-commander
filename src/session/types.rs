@@ -206,6 +206,12 @@ pub struct WorktreeSession {
     /// Shell tmux session name (for secondary shell sessions)
     #[serde(default)]
     pub shell_tmux_session_name: Option<String>,
+    /// GitHub PR number (if a PR exists for this branch)
+    #[serde(default)]
+    pub pr_number: Option<u32>,
+    /// GitHub PR URL
+    #[serde(default)]
+    pub pr_url: Option<String>,
 }
 
 impl WorktreeSession {
@@ -237,6 +243,8 @@ impl WorktreeSession {
             tmux_session_name,
             base_commit: None,
             shell_tmux_session_name: None,
+            pr_number: None,
+            pr_url: None,
         }
     }
 
@@ -282,6 +290,8 @@ pub enum SessionListItem {
         branch: String,
         status: SessionStatus,
         program: String,
+        pr_number: Option<u32>,
+        pr_url: Option<String>,
     },
 }
 
@@ -404,6 +414,8 @@ mod tests {
             branch: "test".to_string(),
             status: SessionStatus::Running,
             program: "claude".to_string(),
+            pr_number: None,
+            pr_url: None,
         };
 
         assert!(project_item.key().starts_with("project:"));

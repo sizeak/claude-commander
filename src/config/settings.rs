@@ -41,6 +41,9 @@ pub struct Config {
     /// Shell program for shell sessions
     pub shell_program: String,
 
+    /// Interval in seconds between GitHub PR checks (0 = disabled)
+    pub pr_check_interval_secs: u64,
+
     /// Enable debug logging
     pub debug: bool,
 
@@ -59,6 +62,7 @@ impl Default for Config {
             ui_refresh_fps: 30,
             worktrees_dir: None,
             shell_program: std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string()),
+            pr_check_interval_secs: 600,
             debug: false,
             log_file: None,
         }

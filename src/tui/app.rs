@@ -31,7 +31,7 @@ use super::theme::Theme;
 use super::widgets::{DiffView, DiffViewState, Preview, PreviewState, TreeList, TreeListState};
 use crate::config::{AppState, Config};
 use crate::error::{Result, TuiError};
-use crate::git::DiffInfo;
+use crate::git::{check_pr_for_branch, is_gh_available, DiffInfo};
 use crate::session::{ProjectId, SessionId, SessionListItem, SessionManager, SessionStatus};
 
 /// Which pane is currently focused
@@ -125,6 +125,10 @@ pub struct AppUiState {
     pub attach_command: Option<String>,
     /// Needs right pane clear (set on view switch, consumed on render)
     pub clear_right_pane: bool,
+    /// When the last PR status check was performed
+    pub last_pr_check: Option<Instant>,
+    /// Whether the `gh` CLI is available
+    pub gh_available: bool,
 }
 
 impl Default for AppUiState {
@@ -147,6 +151,8 @@ impl Default for AppUiState {
             selected_project_id: None,
             attach_command: None,
             clear_right_pane: false,
+            last_pr_check: None,
+            gh_available: false,
         }
     }
 }
@@ -194,6 +200,15 @@ impl App {
 
         // One-time setup
         self.sync_session_states().await;
+
+        // Check gh availability and do initial PR check
+        if self.config.pr_check_interval_secs > 0 {
+            self.ui_state.gh_available = is_gh_available().await;
+            if self.ui_state.gh_available {
+                self.check_pr_statuses().await;
+            }
+        }
+
         let tick_rate = Duration::from_millis(1000 / self.config.ui_refresh_fps as u64);
         self.event_loop.start(tick_rate);
 
@@ -371,6 +386,18 @@ impl App {
                     AppEvent::Tick => {
                         // Refresh state periodically
                         self.refresh_list_items().await;
+
+                        // Periodic PR status check
+                        if self.ui_state.gh_available && self.config.pr_check_interval_secs > 0 {
+                            let interval = Duration::from_secs(self.config.pr_check_interval_secs);
+                            let should_check = self
+                                .ui_state
+                                .last_pr_check
+                                .is_none_or(|t| t.elapsed() >= interval);
+                            if should_check {
+                                self.check_pr_statuses().await;
+                            }
+                        }
                     }
                     AppEvent::Quit => {
                         self.ui_state.should_quit = true;
@@ -1210,6 +1237,44 @@ Press any key to close this help.
         }
     }
 
+    /// Check PR status for all sessions with branches
+    async fn check_pr_statuses(&mut self) {
+        self.ui_state.last_pr_check = Some(Instant::now());
+
+        // Collect session info: (session_id, branch, repo_path)
+        let sessions_to_check: Vec<(SessionId, String, std::path::PathBuf)> = {
+            let state = self.app_state.read().await;
+            state
+                .sessions
+                .values()
+                .filter_map(|s| {
+                    let project = state.projects.get(&s.project_id)?;
+                    Some((s.id, s.branch.clone(), project.repo_path.clone()))
+                })
+                .collect()
+        };
+
+        let mut changed = false;
+        for (session_id, branch, repo_path) in sessions_to_check {
+            let pr_info = check_pr_for_branch(&repo_path, &branch).await;
+            let mut state = self.app_state.write().await;
+            if let Some(session) = state.get_session_mut(&session_id) {
+                let new_number = pr_info.as_ref().map(|p| p.number);
+                let new_url = pr_info.map(|p| p.url);
+                if session.pr_number != new_number || session.pr_url != new_url {
+                    session.pr_number = new_number;
+                    session.pr_url = new_url;
+                    changed = true;
+                }
+            }
+        }
+
+        if changed {
+            let state = self.app_state.read().await;
+            let _ = state.save();
+        }
+    }
+
     /// Refresh the list items from app state
     async fn refresh_list_items(&mut self) {
         let state = self.app_state.read().await;
@@ -1237,6 +1302,8 @@ Press any key to close this help.
                         branch: session.branch.clone(),
                         status: session.status,
                         program: session.program.clone(),
+                        pr_number: session.pr_number,
+                        pr_url: session.pr_url.clone(),
                     });
                 }
             }

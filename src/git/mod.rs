@@ -7,8 +7,10 @@
 
 mod backend;
 mod diff;
+mod pr;
 mod worktree;
 
 pub use backend::*;
 pub use diff::*;
+pub use pr::*;
 pub use worktree::*;
