@@ -99,6 +99,8 @@ pub enum UserCommand {
     ResumeSession,
     /// Delete/kill current session
     DeleteSession,
+    /// Remove an entire project
+    RemoveProject,
     /// Toggle between preview/diff panes
     TogglePane,
     /// Show help
@@ -151,6 +153,7 @@ impl UserCommand {
             (KeyCode::Char('p'), KeyModifiers::NONE) => Some(UserCommand::PauseSession),
             (KeyCode::Char('r'), KeyModifiers::NONE) => Some(UserCommand::ResumeSession),
             (KeyCode::Char('d'), KeyModifiers::NONE) => Some(UserCommand::DeleteSession),
+            (KeyCode::Char('D'), KeyModifiers::SHIFT) => Some(UserCommand::RemoveProject),
 
             // Pane control
             (KeyCode::Tab, KeyModifiers::NONE) => Some(UserCommand::TogglePane),

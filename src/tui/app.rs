@@ -802,6 +802,7 @@ Session Management:
   p               Pause session
   r               Resume session
   d               Delete/kill session
+  D               Remove project
 
 Scrolling:
   Ctrl+u/d        Page up/down in current view
@@ -988,6 +989,9 @@ Press any key to close this help.
             UserCommand::DeleteSession => {
                 self.handle_delete_session();
             }
+            UserCommand::RemoveProject => {
+                self.handle_remove_project();
+            }
             UserCommand::TogglePane => {
                 let on_project = self.ui_state.selected_session_id.is_none()
                     && self.ui_state.selected_project_id.is_some();
@@ -1143,6 +1147,19 @@ Press any key to close this help.
                         message: format!("Failed to resume: {}", e),
                     };
                 }
+            }
+        }
+    }
+
+    /// Handle remove project - show confirmation (only when a project row is selected)
+    fn handle_remove_project(&mut self) {
+        if self.ui_state.selected_session_id.is_none() {
+            if let Some(project_id) = self.ui_state.selected_project_id {
+                self.ui_state.modal = Modal::Confirm {
+                    title: "Remove Project".to_string(),
+                    message: "Are you sure you want to remove this project?\nThis will kill all sessions and remove all worktrees.".to_string(),
+                    on_confirm: ConfirmAction::RemoveProject { project_id },
+                };
             }
         }
     }
