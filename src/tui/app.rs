@@ -112,7 +112,7 @@ pub struct AppUiState {
     /// Shell content
     pub shell_content: String,
     /// Diff info
-    pub diff_info: DiffInfo,
+    pub diff_info: Arc<DiffInfo>,
     /// Status message
     pub status_message: Option<String>,
     /// Should quit
@@ -144,7 +144,7 @@ impl Default for AppUiState {
             modal: Modal::None,
             list_items: Vec::new(),
             preview_content: String::new(),
-            diff_info: DiffInfo::empty(),
+            diff_info: Arc::new(DiffInfo::empty()),
             status_message: None,
             should_quit: false,
             selected_session_id: None,
@@ -486,7 +486,7 @@ impl App {
                     self.ui_state.diff_info = diff;
                 }
                 Err(_) => {
-                    self.ui_state.diff_info = DiffInfo::empty();
+                    self.ui_state.diff_info = Arc::new(DiffInfo::empty());
                 }
             }
 
@@ -510,7 +510,7 @@ impl App {
 
             match self.session_manager.get_project_diff(&project_id).await {
                 Ok(diff) => self.ui_state.diff_info = diff,
-                Err(_) => self.ui_state.diff_info = DiffInfo::empty(),
+                Err(_) => self.ui_state.diff_info = Arc::new(DiffInfo::empty()),
             }
 
             match self.session_manager.get_project_shell_content(&project_id).await {
@@ -522,7 +522,7 @@ impl App {
             }
         } else {
             self.ui_state.preview_content = "Select a session to see preview".to_string();
-            self.ui_state.diff_info = DiffInfo::empty();
+            self.ui_state.diff_info = Arc::new(DiffInfo::empty());
             self.ui_state.shell_content = String::new();
         }
     }
@@ -667,11 +667,11 @@ impl App {
                 self.theme.border_unfocused()
             });
 
-        // Update diff state with visible area
+        // Update diff state with precomputed line count (avoids scanning the diff string)
         let inner_height = area.height.saturating_sub(2);
         self.ui_state
             .diff_state
-            .set_content(&self.ui_state.diff_info.diff, inner_height);
+            .set_metrics(self.ui_state.diff_info.line_count, inner_height);
 
         let diff_view = DiffView::new(&self.ui_state.diff_info, &self.theme)
             .block(block)

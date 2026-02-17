@@ -113,6 +113,19 @@ impl PreviewState {
         }
     }
 
+    /// Update metrics directly without scanning content.
+    /// Useful when line count is precomputed (e.g. from DiffInfo).
+    pub fn set_metrics(&mut self, total_lines: usize, visible_height: u16) {
+        self.total_lines = total_lines;
+        self.visible_height = visible_height;
+
+        if self.follow {
+            self.scroll_to_bottom();
+        } else {
+            self.clamp_scroll();
+        }
+    }
+
     /// Scroll up by n lines
     pub fn scroll_up(&mut self, n: u16) {
         self.scroll_offset = self.scroll_offset.saturating_sub(n);

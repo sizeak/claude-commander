@@ -16,7 +16,6 @@ use tokio::sync::RwLock;
 use tracing::{debug, instrument};
 
 use crate::error::{GitError, Result};
-use crate::session::SessionId;
 
 /// Default diff cache TTL (500ms)
 pub const DEFAULT_DIFF_CACHE_TTL: Duration = Duration::from_millis(500);
@@ -32,6 +31,8 @@ pub struct DiffInfo {
     pub lines_added: usize,
     /// Lines removed
     pub lines_removed: usize,
+    /// Total number of lines in the diff (precomputed)
+    pub line_count: usize,
     /// When the diff was computed
     pub computed_at: Instant,
     /// Base commit for the diff
@@ -46,6 +47,7 @@ impl DiffInfo {
             files_changed: 0,
             lines_added: 0,
             lines_removed: 0,
+            line_count: 0,
             computed_at: Instant::now(),
             base_commit: String::new(),
         }
@@ -74,15 +76,15 @@ impl DiffInfo {
     }
 }
 
-/// Cached diff computation
-pub struct DiffCache {
-    /// Cache of session ID -> diff info
-    cache: Arc<RwLock<HashMap<SessionId, DiffInfo>>>,
+/// Cached diff computation, generic over key type
+pub struct DiffCache<K> {
+    /// Cache of key -> diff info
+    cache: Arc<RwLock<HashMap<K, Arc<DiffInfo>>>>,
     /// Cache TTL
     ttl: Duration,
 }
 
-impl DiffCache {
+impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send + Sync + 'static> DiffCache<K> {
     /// Create a new diff cache
     pub fn new() -> Self {
         Self::with_ttl(DEFAULT_DIFF_CACHE_TTL)
@@ -97,49 +99,49 @@ impl DiffCache {
     }
 
     /// Get cached diff or compute fresh
-    #[instrument(skip(self))]
+    #[instrument(skip(self, worktree_path))]
     pub async fn get_diff(
         &self,
-        session_id: &SessionId,
+        key: &K,
         worktree_path: &Path,
-    ) -> Result<DiffInfo> {
+    ) -> Result<Arc<DiffInfo>> {
         // Fast path: check cache
         {
             let cache = self.cache.read().await;
-            if let Some(cached) = cache.get(session_id) {
+            if let Some(cached) = cache.get(key) {
                 if !cached.is_stale(self.ttl) {
-                    debug!("Diff cache hit for session {}", session_id);
-                    return Ok(cached.clone());
+                    debug!("Diff cache hit for {}", key);
+                    return Ok(Arc::clone(cached));
                 }
             }
         }
 
         // Slow path: compute fresh diff
-        debug!("Diff cache miss for session {}, computing", session_id);
-        self.compute_diff(session_id, worktree_path).await
+        debug!("Diff cache miss for {}, computing", key);
+        self.compute_diff(key, worktree_path).await
     }
 
     /// Compute a fresh diff
     pub async fn compute_diff(
         &self,
-        session_id: &SessionId,
+        key: &K,
         worktree_path: &Path,
-    ) -> Result<DiffInfo> {
-        let info = compute_diff_for_path(worktree_path).await?;
+    ) -> Result<Arc<DiffInfo>> {
+        let info = Arc::new(compute_diff_for_path(worktree_path).await?);
 
         // Update cache
         {
             let mut cache = self.cache.write().await;
-            cache.insert(*session_id, info.clone());
+            cache.insert(*key, Arc::clone(&info));
         }
 
         Ok(info)
     }
 
-    /// Invalidate cache for a session
-    pub async fn invalidate(&self, session_id: &SessionId) {
+    /// Invalidate cache for a key
+    pub async fn invalidate(&self, key: &K) {
         let mut cache = self.cache.write().await;
-        cache.remove(session_id);
+        cache.remove(key);
     }
 
     /// Clear all cached diffs
@@ -149,13 +151,13 @@ impl DiffCache {
     }
 }
 
-impl Default for DiffCache {
+impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send + Sync + 'static> Default for DiffCache<K> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Clone for DiffCache {
+impl<K> Clone for DiffCache<K> {
     fn clone(&self) -> Self {
         Self {
             cache: self.cache.clone(),
@@ -258,11 +260,14 @@ pub async fn compute_diff_for_path(path: &Path) -> Result<DiffInfo> {
         files_changed += untracked_count;
     }
 
+    let line_count = diff.lines().count();
+
     Ok(DiffInfo {
         diff,
         files_changed,
         lines_added,
         lines_removed,
+        line_count,
         computed_at: Instant::now(),
         base_commit: "HEAD".to_string(),
     })
@@ -350,6 +355,7 @@ mod tests {
             files_changed: 2,
             lines_added: 10,
             lines_removed: 5,
+            line_count: 1,
             computed_at: Instant::now(),
             base_commit: "abc123".to_string(),
         };

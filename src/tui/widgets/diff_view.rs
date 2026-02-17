@@ -48,66 +48,68 @@ impl<'a> DiffView<'a> {
         self
     }
 
-    /// Convert diff to styled lines
-    fn to_styled_lines(&self) -> Vec<Line<'a>> {
-        if self.diff_info.diff.is_empty() {
-            return vec![Line::from(Span::styled(
-                "No changes",
-                Style::default().fg(self.theme.text_secondary),
-            ))];
+    /// Style a single diff line
+    fn style_line(&self, line: &'a str) -> Line<'a> {
+        if line.starts_with('+') && !line.starts_with("+++") {
+            Line::from(Span::styled(
+                line,
+                Style::default().fg(self.theme.diff_added),
+            ))
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            Line::from(Span::styled(
+                line,
+                Style::default().fg(self.theme.diff_removed),
+            ))
+        } else if line.starts_with("@@") {
+            Line::from(Span::styled(
+                line,
+                Style::default().fg(self.theme.diff_hunk_header),
+            ))
+        } else if line.starts_with("diff ") || line.starts_with("index ") {
+            Line::from(Span::styled(
+                line,
+                Style::default()
+                    .fg(self.theme.diff_file_header)
+                    .add_modifier(Modifier::BOLD),
+            ))
+        } else if line.starts_with("---") || line.starts_with("+++") {
+            Line::from(Span::styled(
+                line,
+                Style::default().fg(self.theme.diff_file_header),
+            ))
+        } else {
+            Line::from(Span::raw(line))
         }
-
-        self.diff_info
-            .diff
-            .lines()
-            .map(|line| {
-                if line.starts_with('+') && !line.starts_with("+++") {
-                    // Added line
-                    Line::from(Span::styled(
-                        line.to_string(),
-                        Style::default().fg(self.theme.diff_added),
-                    ))
-                } else if line.starts_with('-') && !line.starts_with("---") {
-                    // Removed line
-                    Line::from(Span::styled(
-                        line.to_string(),
-                        Style::default().fg(self.theme.diff_removed),
-                    ))
-                } else if line.starts_with("@@") {
-                    // Hunk header
-                    Line::from(Span::styled(
-                        line.to_string(),
-                        Style::default().fg(self.theme.diff_hunk_header),
-                    ))
-                } else if line.starts_with("diff ") || line.starts_with("index ") {
-                    // File header
-                    Line::from(Span::styled(
-                        line.to_string(),
-                        Style::default()
-                            .fg(self.theme.diff_file_header)
-                            .add_modifier(Modifier::BOLD),
-                    ))
-                } else if line.starts_with("---") || line.starts_with("+++") {
-                    // File names
-                    Line::from(Span::styled(
-                        line.to_string(),
-                        Style::default().fg(self.theme.diff_file_header),
-                    ))
-                } else {
-                    // Context line
-                    Line::from(Span::raw(line.to_string()))
-                }
-            })
-            .collect()
     }
 }
 
 impl<'a> Widget for DiffView<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let lines = self.to_styled_lines();
+        // Compute inner area accounting for block borders
+        let inner_height = if self.block.is_some() {
+            area.height.saturating_sub(2) as usize
+        } else {
+            area.height as usize
+        };
 
-        // No .wrap() - preserve original line formatting
-        let paragraph = Paragraph::new(lines).scroll((self.scroll, 0));
+        let lines: Vec<Line<'a>> = if self.diff_info.diff.is_empty() {
+            vec![Line::from(Span::styled(
+                "No changes",
+                Style::default().fg(self.theme.text_secondary),
+            ))]
+        } else {
+            // Only style the visible window of lines
+            self.diff_info
+                .diff
+                .lines()
+                .skip(self.scroll as usize)
+                .take(inner_height)
+                .map(|line| self.style_line(line))
+                .collect()
+        };
+
+        // scroll is (0,0) since we already sliced to the visible window
+        let paragraph = Paragraph::new(lines);
 
         let paragraph = if let Some(block) = self.block {
             paragraph.block(block)
@@ -184,6 +186,7 @@ mod tests {
             files_changed: 1,
             lines_added: 5,
             lines_removed: 3,
+            line_count: diff.lines().count(),
             computed_at: Instant::now(),
             base_commit: "abc123".to_string(),
         }
@@ -205,19 +208,20 @@ index abc123..def456 100644
         let info = make_diff_info(diff);
         let theme = Theme::default();
         let view = DiffView::new(&info, &theme);
-        let lines = view.to_styled_lines();
-
-        // Should have styled lines
-        assert!(!lines.is_empty());
+        // Style a single line to test
+        let styled = view.style_line("+added line");
+        assert_eq!(styled.spans.len(), 1);
     }
 
     #[test]
     fn test_empty_diff() {
         let info = DiffInfo::empty();
         let theme = Theme::default();
-        let view = DiffView::new(&info, &theme);
-        let lines = view.to_styled_lines();
 
-        assert_eq!(lines.len(), 1);
+        // Render into a buffer to verify it doesn't panic
+        let area = Rect::new(0, 0, 80, 24);
+        let mut buf = Buffer::empty(area);
+        let view = DiffView::new(&info, &theme);
+        view.render(area, &mut buf);
     }
 }

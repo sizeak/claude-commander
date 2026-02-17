@@ -11,7 +11,7 @@ use tracing::{info, instrument, warn};
 
 use crate::config::{AppState, Config};
 use crate::error::{Result, SessionError};
-use crate::git::{compute_diff_for_path, DiffCache, DiffInfo, GitBackend, WorktreeManager};
+use crate::git::{DiffCache, DiffInfo, GitBackend, WorktreeManager};
 use crate::session::{Project, ProjectId, SessionId, SessionStatus, WorktreeSession};
 use crate::tmux::{CapturedContent, ContentCapture, TmuxExecutor};
 
@@ -25,8 +25,10 @@ pub struct SessionManager {
     pub tmux: TmuxExecutor,
     /// Content capture cache
     content_capture: ContentCapture,
-    /// Diff cache
-    diff_cache: DiffCache,
+    /// Diff cache for sessions
+    diff_cache: DiffCache<SessionId>,
+    /// Diff cache for projects
+    project_diff_cache: DiffCache<ProjectId>,
 }
 
 impl SessionManager {
@@ -39,6 +41,8 @@ impl SessionManager {
         );
         let diff_cache =
             DiffCache::with_ttl(std::time::Duration::from_millis(config.diff_cache_ttl_ms));
+        let project_diff_cache =
+            DiffCache::with_ttl(std::time::Duration::from_millis(config.diff_cache_ttl_ms));
 
         Self {
             config,
@@ -46,6 +50,7 @@ impl SessionManager {
             tmux,
             content_capture,
             diff_cache,
+            project_diff_cache,
         }
     }
 
@@ -503,7 +508,7 @@ impl SessionManager {
     }
 
     /// Get diff for a session
-    pub async fn get_diff(&self, session_id: &SessionId) -> Result<DiffInfo> {
+    pub async fn get_diff(&self, session_id: &SessionId) -> Result<Arc<DiffInfo>> {
         let worktree_path = {
             let state = self.app_state.read().await;
             let session = state
@@ -621,7 +626,7 @@ impl SessionManager {
     }
 
     /// Get diff for a project (uncommitted changes in repo)
-    pub async fn get_project_diff(&self, project_id: &ProjectId) -> Result<DiffInfo> {
+    pub async fn get_project_diff(&self, project_id: &ProjectId) -> Result<Arc<DiffInfo>> {
         let repo_path = {
             let state = self.app_state.read().await;
             let project = state
@@ -630,7 +635,9 @@ impl SessionManager {
             project.repo_path.clone()
         };
 
-        compute_diff_for_path(&repo_path).await
+        self.project_diff_cache
+            .get_diff(project_id, &repo_path)
+            .await
     }
 
     /// Generate branch name from title
