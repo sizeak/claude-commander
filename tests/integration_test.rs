@@ -12,6 +12,7 @@ use tokio::sync::RwLock;
 use claude_commander::config::{AppState, Config};
 use claude_commander::git::GitBackend;
 use claude_commander::session::SessionManager;
+use claude_commander::SessionStatus;
 
 /// Helper to create an isolated AppState that won't pollute user data
 fn create_isolated_state(temp_dir: &TempDir) -> AppState {
@@ -290,4 +291,73 @@ async fn test_config_defaults() {
     assert_eq!(config.capture_cache_ttl_ms, 50);
     assert_eq!(config.diff_cache_ttl_ms, 500);
     assert_eq!(config.ui_refresh_fps, 30);
+}
+
+#[tokio::test]
+async fn test_sync_worktrees_imports_external() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let state_temp_dir = TempDir::new().unwrap();
+
+    let worktrees_dir = TempDir::new().unwrap();
+    let mut config = Config::default();
+    config.worktrees_dir = Some(worktrees_dir.path().to_path_buf());
+
+    let state = Arc::new(RwLock::new(create_isolated_state(&state_temp_dir)));
+    let manager = SessionManager::new(config, state.clone());
+
+    // Add project (no worktrees yet)
+    let project_id = manager.add_project(repo_path.clone()).await.unwrap();
+
+    // Verify no sessions were imported (no external worktrees exist)
+    {
+        let st = state.read().await;
+        let project = st.get_project(&project_id).unwrap();
+        assert_eq!(project.worktrees.len(), 0, "No sessions should exist yet");
+    }
+
+    // Create an external worktree via git CLI (simulating Claude Code /worktree or manual creation)
+    let external_wt_path = worktrees_dir.path().join("external-feature");
+    let output = tokio::process::Command::new("git")
+        .current_dir(&repo_path)
+        .args([
+            "worktree",
+            "add",
+            "-b",
+            "external-feature",
+            external_wt_path.to_str().unwrap(),
+        ])
+        .output()
+        .await
+        .unwrap();
+    assert!(output.status.success(), "git worktree add should succeed");
+
+    // Run sync_worktrees - should import the external worktree
+    let imported = manager.sync_worktrees(&project_id).await.unwrap();
+    assert_eq!(imported, 1, "Should import 1 external worktree");
+
+    // Verify the imported session
+    {
+        let st = state.read().await;
+        let project = st.get_project(&project_id).unwrap();
+        assert_eq!(project.worktrees.len(), 1, "Should have 1 session");
+
+        let session = st.get_session(&project.worktrees[0]).unwrap();
+        assert_eq!(session.branch, "external-feature");
+        assert_eq!(session.status, SessionStatus::Paused);
+        assert!(session.base_commit.is_some());
+    }
+
+    // Run sync again - should be idempotent
+    let imported_again = manager.sync_worktrees(&project_id).await.unwrap();
+    assert_eq!(imported_again, 0, "Second sync should import 0 (idempotent)");
+
+    // Keep temp dirs alive
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
+    drop(worktrees_dir);
 }

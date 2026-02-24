@@ -129,6 +129,8 @@ pub struct AppUiState {
     pub last_pr_check: Option<Instant>,
     /// Whether the `gh` CLI is available
     pub gh_available: bool,
+    /// When the last background preview fetch was spawned (None = not in flight)
+    pub preview_update_spawned_at: Option<Instant>,
 }
 
 impl Default for AppUiState {
@@ -153,6 +155,7 @@ impl Default for AppUiState {
             clear_right_pane: false,
             last_pr_check: None,
             gh_available: false,
+            preview_update_spawned_at: None,
         }
     }
 }
@@ -303,8 +306,21 @@ impl App {
         }
 
         // Save updated state
-        let state = self.app_state.read().await;
-        let _ = state.save();
+        {
+            let state = self.app_state.read().await;
+            let _ = state.save();
+        }
+
+        // Sync unmanaged worktrees for all projects
+        let project_ids: Vec<ProjectId> = {
+            let state = self.app_state.read().await;
+            state.projects.keys().copied().collect()
+        };
+        for project_id in project_ids {
+            if let Err(e) = self.session_manager.sync_worktrees(&project_id).await {
+                debug!("Failed to sync worktrees for project {}: {}", project_id, e);
+            }
+        }
     }
 
     /// Setup terminal for TUI
@@ -358,13 +374,11 @@ impl App {
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     ) -> Result<()> {
+        // Kick off an initial background preview fetch
+        self.update_selection();
+        self.spawn_preview_update();
+
         loop {
-            // Update selection tracking
-            self.update_selection();
-
-            // Update preview for selected session
-            self.update_preview().await;
-
             // Force full terminal redraw on view switch to clear stale styled cells
             if self.ui_state.clear_right_pane {
                 terminal
@@ -373,34 +387,42 @@ impl App {
                 self.ui_state.clear_right_pane = false;
             }
 
-            // Render
+            // Render with whatever data we have — never blocks on I/O
             terminal
                 .draw(|f| self.render(f))
                 .map_err(|e| TuiError::RenderError(e.to_string()))?;
 
-            // Handle events
-            if let Some(event) = self.event_loop.next().await {
-                match event {
-                    AppEvent::Input(input) => self.handle_input(input).await,
-                    AppEvent::StateUpdate(update) => self.handle_state_update(update).await,
-                    AppEvent::Tick => {
-                        // Refresh state periodically
-                        self.refresh_list_items().await;
+            // Wait for at least one event
+            let Some(event) = self.event_loop.next().await else {
+                break;
+            };
 
-                        // Periodic PR status check
-                        if self.ui_state.gh_available && self.config.pr_check_interval_secs > 0 {
-                            let interval = Duration::from_secs(self.config.pr_check_interval_secs);
-                            let should_check = self
-                                .ui_state
-                                .last_pr_check
-                                .is_none_or(|t| t.elapsed() >= interval);
-                            if should_check {
-                                self.check_pr_statuses().await;
-                            }
-                        }
-                    }
-                    AppEvent::Quit => {
-                        self.ui_state.should_quit = true;
+            // Process first event, then drain all pending events.
+            // This ensures rapid keypresses are handled immediately
+            // without waiting for the next render cycle.
+            let mut needs_tick = false;
+            needs_tick |= self.process_event(event).await;
+
+            while let Some(event) = self.event_loop.try_next() {
+                needs_tick |= self.process_event(event).await;
+            }
+
+            // Periodic background work (only on Tick)
+            if needs_tick {
+                self.refresh_list_items().await;
+
+                // Spawn non-blocking preview update
+                self.spawn_preview_update();
+
+                // Periodic PR status check
+                if self.ui_state.gh_available && self.config.pr_check_interval_secs > 0 {
+                    let interval = Duration::from_secs(self.config.pr_check_interval_secs);
+                    let should_check = self
+                        .ui_state
+                        .last_pr_check
+                        .is_none_or(|t| t.elapsed() >= interval);
+                    if should_check {
+                        self.check_pr_statuses().await;
                     }
                 }
             }
@@ -411,6 +433,84 @@ impl App {
         }
 
         Ok(())
+    }
+
+    /// Process a single event, returns true if it was a Tick
+    async fn process_event(&mut self, event: AppEvent) -> bool {
+        match event {
+            AppEvent::Input(input) => {
+                let old_session = self.ui_state.selected_session_id;
+                let old_project = self.ui_state.selected_project_id;
+
+                self.handle_input(input).await;
+                // Keep selection IDs in sync after input (needed for
+                // correct behavior when draining multiple events)
+                self.update_selection();
+
+                // Immediately fetch preview when selection changes
+                if self.ui_state.selected_session_id != old_session
+                    || self.ui_state.selected_project_id != old_project
+                {
+                    // Cancel any in-flight fetch for the old selection
+                    self.ui_state.preview_update_spawned_at = None;
+                    self.spawn_preview_update();
+                }
+            }
+            AppEvent::StateUpdate(update) => self.handle_state_update(update).await,
+            AppEvent::Tick => return true,
+            AppEvent::Quit => {
+                self.ui_state.should_quit = true;
+            }
+        }
+        false
+    }
+
+    /// Spawn a background task to fetch preview/diff/shell data.
+    ///
+    /// The task runs in parallel with the main event loop so that
+    /// keyboard input is never blocked by I/O. Results arrive as
+    /// `StateUpdate::PreviewReady` events.
+    fn spawn_preview_update(&mut self) {
+        // Skip if a fetch is already in flight (with 5s safety timeout)
+        if let Some(spawned_at) = self.ui_state.preview_update_spawned_at {
+            if spawned_at.elapsed() < Duration::from_secs(5) {
+                return;
+            }
+            debug!("Preview update stale (>5s), spawning new one");
+        }
+
+        let session_id = self.ui_state.selected_session_id;
+        let project_id = self.ui_state.selected_project_id;
+        let mgr = self.session_manager.clone();
+        let tx = self.event_loop.sender();
+
+        self.ui_state.preview_update_spawned_at = Some(Instant::now());
+
+        debug!(
+            "Spawning preview update for session={:?} project={:?}",
+            session_id, project_id
+        );
+
+        tokio::spawn(async move {
+            let (preview_content, diff_info, shell_content) =
+                fetch_preview_data(&mgr, session_id, project_id).await;
+
+            debug!(
+                "Preview fetch complete, sending PreviewReady (preview_len={} diff_lines={})",
+                preview_content.len(),
+                diff_info.line_count
+            );
+
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::PreviewReady {
+                    session_id,
+                    project_id,
+                    preview_content,
+                    diff_info,
+                    shell_content,
+                }))
+                .await;
+        });
     }
 
     /// Update selection tracking based on list position
@@ -464,66 +564,6 @@ impl App {
             RightPaneView::Preview => &mut self.ui_state.preview_state,
             RightPaneView::Diff => &mut self.ui_state.diff_state,
             RightPaneView::Shell => &mut self.ui_state.shell_state,
-        }
-    }
-
-    /// Update preview pane content
-    async fn update_preview(&mut self) {
-        if let Some(session_id) = self.ui_state.selected_session_id {
-            // Get content
-            match self.session_manager.get_content(&session_id).await {
-                Ok(content) => {
-                    self.ui_state.preview_content = content.content;
-                }
-                Err(_) => {
-                    self.ui_state.preview_content = "Unable to capture content".to_string();
-                }
-            }
-
-            // Get diff
-            match self.session_manager.get_diff(&session_id).await {
-                Ok(diff) => {
-                    self.ui_state.diff_info = diff;
-                }
-                Err(_) => {
-                    self.ui_state.diff_info = Arc::new(DiffInfo::empty());
-                }
-            }
-
-            // Get shell content
-            match self.session_manager.get_shell_content(&session_id).await {
-                Ok(Some(content)) => {
-                    self.ui_state.shell_content = content.content;
-                }
-                Ok(None) => {
-                    self.ui_state.shell_content =
-                        "No shell session. Press 's' to open one.".to_string();
-                }
-                Err(_) => {
-                    self.ui_state.shell_content =
-                        "No shell session. Press 's' to open one.".to_string();
-                }
-            }
-        } else if let Some(project_id) = self.ui_state.selected_project_id {
-            // Project selected (no session) — show project-level diff and shell
-            self.ui_state.preview_content = String::new();
-
-            match self.session_manager.get_project_diff(&project_id).await {
-                Ok(diff) => self.ui_state.diff_info = diff,
-                Err(_) => self.ui_state.diff_info = Arc::new(DiffInfo::empty()),
-            }
-
-            match self.session_manager.get_project_shell_content(&project_id).await {
-                Ok(Some(content)) => self.ui_state.shell_content = content.content,
-                _ => {
-                    self.ui_state.shell_content =
-                        "No shell session. Press 's' to open one.".to_string();
-                }
-            }
-        } else {
-            self.ui_state.preview_content = "Select a session to see preview".to_string();
-            self.ui_state.diff_info = Arc::new(DiffInfo::empty());
-            self.ui_state.shell_content = String::new();
         }
     }
 
@@ -1043,6 +1083,40 @@ Press any key to close this help.
                 debug!("Session removed: {}", session_id);
                 self.refresh_list_items().await;
             }
+            StateUpdate::PreviewReady {
+                session_id,
+                project_id,
+                preview_content,
+                diff_info,
+                shell_content,
+            } => {
+                let elapsed = self
+                    .ui_state
+                    .preview_update_spawned_at
+                    .map(|t| t.elapsed())
+                    .unwrap_or_default();
+                self.ui_state.preview_update_spawned_at = None;
+
+                // Only apply if selection hasn't changed since the fetch started
+                if session_id == self.ui_state.selected_session_id
+                    && project_id == self.ui_state.selected_project_id
+                {
+                    debug!(
+                        "Applying PreviewReady (preview_len={} diff_lines={} elapsed={:?})",
+                        preview_content.len(),
+                        diff_info.line_count,
+                        elapsed
+                    );
+                    self.ui_state.preview_content = preview_content;
+                    self.ui_state.diff_info = diff_info;
+                    self.ui_state.shell_content = shell_content;
+                } else {
+                    debug!(
+                        "Discarding stale PreviewReady (selection changed, elapsed={:?})",
+                        elapsed
+                    );
+                }
+            }
             StateUpdate::Error { message } => {
                 self.ui_state.modal = Modal::Error { message };
             }
@@ -1361,6 +1435,72 @@ Press any key to close this help.
         } else if !self.ui_state.list_items.is_empty() {
             self.ui_state.list_state.select(Some(0));
         }
+    }
+}
+
+/// Fetch preview/diff/shell data for the currently selected session or project.
+///
+/// Runs outside the main event loop so it never blocks keyboard input.
+async fn fetch_preview_data(
+    mgr: &SessionManager,
+    session_id: Option<SessionId>,
+    project_id: Option<ProjectId>,
+) -> (String, Arc<DiffInfo>, String) {
+    if let Some(sid) = session_id {
+        debug!("fetch_preview_data: fetching content for session {}", sid);
+        let preview = mgr
+            .get_content(&sid)
+            .await
+            .map(|c| c.content)
+            .unwrap_or_else(|e| {
+                debug!("fetch_preview_data: get_content error: {}", e);
+                "Unable to capture content".to_string()
+            });
+
+        debug!("fetch_preview_data: fetching diff for session {}", sid);
+        let diff = mgr
+            .get_diff(&sid)
+            .await
+            .unwrap_or_else(|e| {
+                debug!("fetch_preview_data: get_diff error: {}", e);
+                Arc::new(DiffInfo::empty())
+            });
+
+        debug!("fetch_preview_data: fetching shell for session {}", sid);
+        let shell = match mgr.get_shell_content(&sid).await {
+            Ok(Some(c)) => c.content,
+            Ok(None) => "No shell session. Press 's' to open one.".to_string(),
+            Err(e) => {
+                debug!("fetch_preview_data: get_shell_content error: {}", e);
+                "No shell session. Press 's' to open one.".to_string()
+            }
+        };
+
+        (preview, diff, shell)
+    } else if let Some(pid) = project_id {
+        debug!("fetch_preview_data: fetching diff for project {}", pid);
+        let diff = mgr
+            .get_project_diff(&pid)
+            .await
+            .unwrap_or_else(|e| {
+                debug!("fetch_preview_data: get_project_diff error: {}", e);
+                Arc::new(DiffInfo::empty())
+            });
+
+        debug!("fetch_preview_data: fetching shell for project {}", pid);
+        let shell = match mgr.get_project_shell_content(&pid).await {
+            Ok(Some(c)) => c.content,
+            _ => "No shell session. Press 's' to open one.".to_string(),
+        };
+
+        (String::new(), diff, shell)
+    } else {
+        debug!("fetch_preview_data: no selection");
+        (
+            "Select a session to see preview".to_string(),
+            Arc::new(DiffInfo::empty()),
+            String::new(),
+        )
     }
 }
 

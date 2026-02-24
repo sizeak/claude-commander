@@ -9,14 +9,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::git::DiffInfo;
+use crate::session::{ProjectId, SessionId};
+
 use crossterm::event::{
     Event as CrosstermEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
 };
 use futures::{FutureExt, StreamExt};
 use tokio::sync::mpsc;
 use tracing::debug;
-
-use crate::session::{ProjectId, SessionId};
 
 /// Application events
 #[derive(Debug, Clone)]
@@ -75,6 +76,19 @@ pub enum StateUpdate {
     /// Error occurred
     Error {
         message: String,
+    },
+    /// Preview/diff/shell data ready from background fetch
+    PreviewReady {
+        /// Which session this data is for (None if project-level)
+        session_id: Option<SessionId>,
+        /// Which project this data is for
+        project_id: Option<ProjectId>,
+        /// Preview pane content (tmux capture)
+        preview_content: String,
+        /// Diff information
+        diff_info: Arc<DiffInfo>,
+        /// Shell pane content
+        shell_content: String,
     },
 }
 
@@ -319,6 +333,11 @@ impl EventLoop {
     /// Receive the next event
     pub async fn next(&mut self) -> Option<AppEvent> {
         self.rx.recv().await
+    }
+
+    /// Try to receive an event without blocking
+    pub fn try_next(&mut self) -> Option<AppEvent> {
+        self.rx.try_recv().ok()
     }
 
     /// Post a state update
