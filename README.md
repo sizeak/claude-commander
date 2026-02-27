@@ -68,6 +68,9 @@ claude-commander config --init
 | `p` | Pause session |
 | `r` | Resume session |
 | `d` | Delete session |
+| `D` | Remove project |
+| `e` | Open in editor/IDE |
+| `s` | Open shell in worktree |
 | `Tab` | Switch between panes |
 | `Ctrl+u/d` | Page up/down in preview |
 | `?` | Show help |
@@ -76,6 +79,8 @@ claude-commander config --init
 ## Configuration
 
 Configuration file: `~/.config/claude-commander/config.toml`
+
+All settings can also be set via environment variables with the `CC_` prefix (e.g. `CC_EDITOR=code`).
 
 ```toml
 # Default program to run in new sessions
@@ -95,6 +100,15 @@ diff_cache_ttl_ms = 500
 
 # UI refresh rate in FPS
 ui_refresh_fps = 30
+
+# Editor/IDE command for opening sessions (e.g. "code", "zed", "nvim")
+# Falls back to $VISUAL, then $EDITOR if not set
+# editor = "code"
+
+# Whether the editor is a GUI application (true) or terminal-based (false)
+# GUI editors are spawned in the background; terminal editors suspend the TUI
+# Auto-detected from a known list if not set (code, zed, subl, JetBrains IDEs, etc.)
+# editor_gui = true
 ```
 
 ## Architecture

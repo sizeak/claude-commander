@@ -44,6 +44,13 @@ pub struct Config {
     /// Interval in seconds between GitHub PR checks (0 = disabled)
     pub pr_check_interval_secs: u64,
 
+    /// Editor/IDE command for opening sessions (e.g. "code", "zed", "nvim")
+    pub editor: Option<String>,
+
+    /// Whether the editor is a GUI application (true) or terminal-based (false).
+    /// If unset, auto-detected from a known list of GUI editors.
+    pub editor_gui: Option<bool>,
+
     /// Enable debug logging
     pub debug: bool,
 
@@ -61,6 +68,8 @@ impl Default for Config {
             diff_cache_ttl_ms: 500,
             ui_refresh_fps: 30,
             worktrees_dir: None,
+            editor: None,
+            editor_gui: None,
             shell_program: std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string()),
             pr_check_interval_secs: 600,
             debug: false,
@@ -159,6 +168,40 @@ impl Config {
             .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
 
         Ok(())
+    }
+
+    /// Resolve the editor command: config → $VISUAL → $EDITOR → None
+    pub fn resolve_editor(&self) -> Option<String> {
+        self.editor
+            .clone()
+            .or_else(|| std::env::var("VISUAL").ok())
+            .or_else(|| std::env::var("EDITOR").ok())
+    }
+
+    /// Whether the resolved editor is a GUI application.
+    /// Uses explicit `editor_gui` config if set, otherwise checks a known list.
+    pub fn is_gui_editor(&self, editor: &str) -> bool {
+        if let Some(gui) = self.editor_gui {
+            return gui;
+        }
+        // Extract the basename for matching (handles paths like /usr/bin/code)
+        let basename = std::path::Path::new(editor)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(editor);
+        matches!(
+            basename,
+            "code" | "code-insiders" | "cursor"
+                | "zed" | "zeditor"
+                | "subl" | "sublime_text"
+                | "idea" | "goland" | "rustrover" | "clion" | "pycharm" | "webstorm" | "phpstorm"
+                | "atom"
+                | "lapce"
+                | "fleet"
+                | "gedit" | "kate" | "mousepad"
+                | "gvim"
+                | "open" | "xdg-open"
+        )
     }
 
     fn project_dirs() -> Result<ProjectDirs> {

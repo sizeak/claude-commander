@@ -115,6 +115,8 @@ pub enum UserCommand {
     DeleteSession,
     /// Remove an entire project
     RemoveProject,
+    /// Open worktree in editor/IDE
+    OpenInEditor,
     /// Toggle between preview/diff panes
     TogglePane,
     /// Show help
@@ -168,6 +170,7 @@ impl UserCommand {
             (KeyCode::Char('r'), KeyModifiers::NONE) => Some(UserCommand::ResumeSession),
             (KeyCode::Char('d'), KeyModifiers::NONE) => Some(UserCommand::DeleteSession),
             (KeyCode::Char('D'), KeyModifiers::SHIFT) => Some(UserCommand::RemoveProject),
+            (KeyCode::Char('e'), KeyModifiers::NONE) => Some(UserCommand::OpenInEditor),
 
             // Pane control
             (KeyCode::Tab, KeyModifiers::NONE) => Some(UserCommand::TogglePane),

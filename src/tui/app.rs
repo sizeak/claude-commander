@@ -123,6 +123,8 @@ pub struct AppUiState {
     pub selected_project_id: Option<ProjectId>,
     /// Attach command to run after exiting TUI
     pub attach_command: Option<String>,
+    /// Editor command + path to open after exiting TUI
+    pub editor_command: Option<(String, PathBuf)>,
     /// Needs right pane clear (set on view switch, consumed on render)
     pub clear_right_pane: bool,
     /// When the last PR status check was performed
@@ -152,6 +154,7 @@ impl Default for AppUiState {
             selected_session_id: None,
             selected_project_id: None,
             attach_command: None,
+            editor_command: None,
             clear_right_pane: false,
             last_pr_check: None,
             gh_available: false,
@@ -237,29 +240,48 @@ impl App {
             // Reset should_quit for next iteration
             self.ui_state.should_quit = false;
 
-            match self.ui_state.attach_command.take() {
-                Some(cmd) => {
-                    // Stop the input reader BEFORE attaching so it doesn't compete for stdin
-                    self.event_loop.stop_input();
-                    // Brief delay to let the reader task actually stop
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+            if let Some((editor, path)) = self.ui_state.editor_command.take() {
+                // Run editor as a foreground process, then return to TUI
+                self.event_loop.stop_input();
+                tokio::time::sleep(Duration::from_millis(100)).await;
 
-                    // Attach to session
-                    info!("Executing attach command: {}", cmd);
-                    let session_name = cmd.split_whitespace().last().unwrap_or("");
-                    if !session_name.is_empty() {
-                        let _ = crate::tmux::attach_to_session(session_name).await;
-                    }
+                info!("Launching editor: {} {}", editor, path.display());
+                let status = std::process::Command::new(&editor)
+                    .arg(&path)
+                    .status();
 
-                    // Restart the input reader after detach
-                    info!("Returned from attach, restarting input reader");
-                    self.event_loop.restart_input();
-                    // Loop continues, TUI resumes with state preserved
+                if let Err(e) = status {
+                    self.ui_state.modal = Modal::Error {
+                        message: format!("Failed to launch '{}': {}", editor, e),
+                    };
                 }
-                None => {
-                    // Save selection before quitting
-                    self.save_selection().await;
-                    break;
+
+                self.event_loop.restart_input();
+            } else {
+                match self.ui_state.attach_command.take() {
+                    Some(cmd) => {
+                        // Stop the input reader BEFORE attaching so it doesn't compete for stdin
+                        self.event_loop.stop_input();
+                        // Brief delay to let the reader task actually stop
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+
+                        // Attach to session
+                        info!("Executing attach command: {}", cmd);
+                        let session_name = cmd.split_whitespace().last().unwrap_or("");
+                        if !session_name.is_empty() {
+                            let _ = crate::tmux::attach_to_session(session_name).await;
+                        }
+
+                        // Restart the input reader after detach
+                        info!("Returned from attach, restarting input reader");
+                        self.event_loop.restart_input();
+                        // Loop continues, TUI resumes with state preserved
+                    }
+                    None => {
+                        // Save selection before quitting
+                        self.save_selection().await;
+                        break;
+                    }
                 }
             }
         }
@@ -843,6 +865,7 @@ Session Management:
   r               Resume session
   d               Delete/kill session
   D               Remove project
+  e               Open in editor/IDE
 
 Scrolling:
   Ctrl+u/d        Page up/down in current view
@@ -1032,6 +1055,9 @@ Press any key to close this help.
             UserCommand::RemoveProject => {
                 self.handle_remove_project();
             }
+            UserCommand::OpenInEditor => {
+                self.handle_open_in_editor().await;
+            }
             UserCommand::TogglePane => {
                 let on_project = self.ui_state.selected_session_id.is_none()
                     && self.ui_state.selected_project_id.is_some();
@@ -1174,6 +1200,52 @@ Press any key to close this help.
                     };
                 }
             }
+        }
+    }
+
+    /// Handle open in editor command
+    async fn handle_open_in_editor(&mut self) {
+        let path = {
+            let state = self.app_state.read().await;
+            if let Some(session_id) = self.ui_state.selected_session_id {
+                state
+                    .sessions
+                    .get(&session_id)
+                    .map(|s| s.worktree_path.clone())
+            } else if let Some(project_id) = self.ui_state.selected_project_id {
+                state
+                    .projects
+                    .get(&project_id)
+                    .map(|p| p.repo_path.clone())
+            } else {
+                None
+            }
+        };
+
+        let Some(path) = path else {
+            return;
+        };
+
+        let Some(editor) = self.config.resolve_editor() else {
+            self.ui_state.modal = Modal::Error {
+                message: "No editor configured. Set 'editor' in config.toml or \
+                          set $VISUAL / $EDITOR."
+                    .to_string(),
+            };
+            return;
+        };
+
+        if self.config.is_gui_editor(&editor) {
+            // GUI editor: spawn detached, TUI stays up
+            if let Err(e) = std::process::Command::new(&editor).arg(&path).spawn() {
+                self.ui_state.modal = Modal::Error {
+                    message: format!("Failed to launch '{}': {}", editor, e),
+                };
+            }
+        } else {
+            // Terminal editor: tear down TUI, run foreground, restore
+            self.ui_state.editor_command = Some((editor, path));
+            self.ui_state.should_quit = true;
         }
     }
 
