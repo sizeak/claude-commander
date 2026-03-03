@@ -119,6 +119,8 @@ pub enum UserCommand {
     OpenInEditor,
     /// Toggle between preview/diff panes
     TogglePane,
+    /// Toggle between preview/diff panes (reverse)
+    TogglePaneReverse,
     /// Show help
     ShowHelp,
     /// Quit application
@@ -174,6 +176,7 @@ impl UserCommand {
 
             // Pane control
             (KeyCode::Tab, KeyModifiers::NONE) => Some(UserCommand::TogglePane),
+            (KeyCode::BackTab, _) => Some(UserCommand::TogglePaneReverse),
 
             // Scrolling
             (KeyCode::Char('u'), KeyModifiers::CONTROL) => Some(UserCommand::PageUp),

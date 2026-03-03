@@ -929,7 +929,7 @@ impl App {
   j/k, Up/Down    Navigate session list
   Enter           Attach to selected session
   s               Open shell in worktree
-  Tab             Toggle preview/diff/shell view
+  Tab/Shift+Tab   Toggle preview/diff/shell view
 
 Session Management:
   n               New worktree session (under selected project)
@@ -1185,6 +1185,25 @@ Press any key to close this help.
                         RightPaneView::Preview => RightPaneView::Diff,
                         RightPaneView::Diff => RightPaneView::Shell,
                         RightPaneView::Shell => RightPaneView::Preview,
+                    }
+                };
+                self.ui_state.clear_right_pane = true;
+            }
+            UserCommand::TogglePaneReverse => {
+                let on_project = self.ui_state.selected_session_id.is_none()
+                    && self.ui_state.selected_project_id.is_some();
+                self.ui_state.right_pane_view = if on_project {
+                    // Project: Diff → Shell → Diff (no Preview)
+                    match self.ui_state.right_pane_view {
+                        RightPaneView::Diff => RightPaneView::Shell,
+                        _ => RightPaneView::Diff,
+                    }
+                } else {
+                    // Session: Shell → Diff → Preview → Shell
+                    match self.ui_state.right_pane_view {
+                        RightPaneView::Preview => RightPaneView::Shell,
+                        RightPaneView::Diff => RightPaneView::Preview,
+                        RightPaneView::Shell => RightPaneView::Diff,
                     }
                 };
                 self.ui_state.clear_right_pane = true;
