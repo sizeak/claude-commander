@@ -8,6 +8,7 @@
 
 mod app;
 mod event;
+mod path_completer;
 pub mod theme;
 mod widgets;
 

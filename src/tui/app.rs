@@ -27,6 +27,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, info};
 
 use super::event::{AppEvent, EventLoop, InputEvent, StateUpdate, UserCommand};
+use super::path_completer::PathCompleter;
 use super::theme::Theme;
 use super::widgets::{DiffView, DiffViewState, Preview, PreviewState, TreeList, TreeListState};
 use crate::config::{AppState, Config};
@@ -68,6 +69,14 @@ pub enum Modal {
         title: String,
         message: String,
         on_confirm: ConfirmAction,
+    },
+    /// Path input modal with tab completion
+    PathInput {
+        title: String,
+        prompt: String,
+        value: String,
+        on_submit: InputAction,
+        completer: PathCompleter,
     },
     /// Help modal
     Help,
@@ -800,6 +809,70 @@ impl App {
                 frame.render_widget(paragraph, inner);
             }
 
+            Modal::PathInput {
+                title,
+                prompt,
+                value,
+                completer,
+                ..
+            } => {
+                let modal_area = centered_rect(60, 40, area);
+                frame.render_widget(Clear, modal_area);
+
+                let block = Block::default()
+                    .title(format!(" {} ", title))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.theme.modal_warning));
+
+                let inner = block.inner(modal_area);
+                frame.render_widget(block, modal_area);
+
+                // Split: prompt+input at top, completions below, hint at bottom
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(3), // prompt + input
+                        Constraint::Min(1),    // completions list
+                        Constraint::Length(1), // hint line
+                    ])
+                    .split(inner);
+
+                let input_text = format!("{}\n\n> {}_", prompt, value);
+                let input_para = Paragraph::new(input_text);
+                frame.render_widget(input_para, chunks[0]);
+
+                // Render completions list
+                let (completions, highlighted) = completer.visible_completions();
+                if !completions.is_empty() {
+                    let lines: Vec<Line> = completions
+                        .iter()
+                        .enumerate()
+                        .map(|(i, c)| {
+                            // Show just the final path component for readability
+                            let display = c.rsplit('/').next().unwrap_or(c);
+                            if highlighted == Some(i) {
+                                Line::from(Span::styled(
+                                    format!("  > {}", display),
+                                    Style::default()
+                                        .fg(self.theme.modal_info)
+                                        .add_modifier(Modifier::BOLD),
+                                ))
+                            } else {
+                                Line::from(format!("    {}", display))
+                            }
+                        })
+                        .collect();
+                    let completions_para = Paragraph::new(lines);
+                    frame.render_widget(completions_para, chunks[1]);
+                }
+
+                let hint = Line::from(Span::styled(
+                    "[Tab] complete  [Enter] submit  [Esc] cancel",
+                    Style::default().add_modifier(Modifier::DIM),
+                ));
+                frame.render_widget(Paragraph::new(hint), chunks[2]);
+            }
+
             Modal::Confirm { title, message, .. } => {
                 let modal_area = centered_rect(50, 15, area);
                 frame.render_widget(Clear, modal_area);
@@ -957,10 +1030,18 @@ Press any key to close this help.
             }
             InputEvent::Paste(text) => {
                 // Handle paste in modal input, ignore otherwise
-                if let Modal::Input { value, .. } = &mut self.ui_state.modal {
-                    // Strip newlines from pasted text to prevent accidental submission
-                    let clean = text.replace(['\n', '\r'], "");
-                    value.push_str(&clean);
+                let clean = text.replace(['\n', '\r'], "");
+                match &mut self.ui_state.modal {
+                    Modal::Input { value, .. } => {
+                        value.push_str(&clean);
+                    }
+                    Modal::PathInput {
+                        value, completer, ..
+                    } => {
+                        value.push_str(&clean);
+                        completer.invalidate();
+                    }
+                    _ => {}
                 }
             }
         }
@@ -991,6 +1072,36 @@ Press any key to close this help.
                     _ => {}
                 }
             }
+
+            Modal::PathInput {
+                value,
+                on_submit,
+                completer,
+                ..
+            } => match key.code {
+                KeyCode::Enter => {
+                    let action = on_submit.clone();
+                    let value = value.clone();
+                    self.ui_state.modal = Modal::None;
+                    self.handle_input_submit(action, value).await;
+                }
+                KeyCode::Esc => {
+                    self.ui_state.modal = Modal::None;
+                }
+                KeyCode::Tab => {
+                    let completed = completer.complete(value);
+                    *value = completed;
+                }
+                KeyCode::Backspace => {
+                    value.pop();
+                    completer.invalidate();
+                }
+                KeyCode::Char(c) => {
+                    value.push(c);
+                    completer.invalidate();
+                }
+                _ => {}
+            },
 
             Modal::Confirm { on_confirm, .. } => {
                 match key.code {
@@ -1034,13 +1145,14 @@ Press any key to close this help.
                 self.handle_new_session();
             }
             UserCommand::NewProject => {
-                self.ui_state.modal = Modal::Input {
+                self.ui_state.modal = Modal::PathInput {
                     title: "Add Project".to_string(),
                     prompt: "Enter path to git repository:".to_string(),
                     value: std::env::current_dir()
                         .map(|p| p.display().to_string())
                         .unwrap_or_default(),
                     on_submit: InputAction::AddProject,
+                    completer: PathCompleter::new(),
                 };
             }
             UserCommand::PauseSession => {
@@ -1343,7 +1455,8 @@ Press any key to close this help.
                 }
             }
             InputAction::AddProject => {
-                let path = PathBuf::from(value.trim());
+                let expanded = super::path_completer::expand_tilde(value.trim());
+                let path = PathBuf::from(expanded);
                 if !path.exists() {
                     self.ui_state.modal = Modal::Error {
                         message: format!("Path does not exist: {}", path.display()),
