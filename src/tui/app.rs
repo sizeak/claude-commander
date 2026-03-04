@@ -1502,31 +1502,161 @@ Press any key to close this help.
     async fn handle_confirm(&mut self, action: ConfirmAction) {
         match action {
             ConfirmAction::DeleteSession { session_id } => {
-                match self.session_manager.delete_session(&session_id).await {
-                    Ok(_) => {
-                        self.ui_state.status_message = Some("Session deleted".to_string());
-                        self.ui_state.selected_session_id = None;
-                        self.refresh_list_items().await;
-                    }
-                    Err(e) => {
+                // 1. Capture session data before removal
+                let cleanup_data = {
+                    let state = self.app_state.read().await;
+                    state.get_session(&session_id).map(|s| {
+                        let repo_path = state
+                            .get_project(&s.project_id)
+                            .map(|p| p.repo_path.clone());
+                        (
+                            s.tmux_session_name.clone(),
+                            s.shell_tmux_session_name.clone(),
+                            s.worktree_path.clone(),
+                            repo_path,
+                        )
+                    })
+                };
+
+                // 2. Remove from state immediately so the UI updates
+                {
+                    let mut state = self.app_state.write().await;
+                    state.remove_session(&session_id);
+                    if let Err(e) = state.save() {
                         self.ui_state.modal = Modal::Error {
-                            message: format!("Failed to delete: {}", e),
+                            message: format!("Failed to save state: {}", e),
                         };
+                        return;
                     }
+                }
+                self.ui_state.selected_session_id = None;
+                self.ui_state.status_message = Some("Session deleted".to_string());
+                self.refresh_list_items().await;
+
+                // 3. Spawn background cleanup (kill tmux + remove worktree)
+                if let Some((tmux_name, shell_tmux_name, worktree_path, repo_path)) = cleanup_data
+                {
+                    let tmux = self.session_manager.tmux.clone();
+                    let tx = self.event_loop.sender();
+                    tokio::spawn(async move {
+                        if let Err(e) = tmux.kill_session(&tmux_name).await {
+                            debug!("Failed to kill tmux session: {}", e);
+                        }
+                        if let Some(ref shell_name) = shell_tmux_name {
+                            let _ = tmux.kill_session(shell_name).await;
+                        }
+                        if let Some(repo_path) = repo_path {
+                            let output = tokio::process::Command::new("git")
+                                .current_dir(&repo_path)
+                                .args(["worktree", "remove", "--force"])
+                                .arg(&worktree_path)
+                                .output()
+                                .await;
+                            if let Err(e) = output.as_ref().map_err(|e| e.to_string()).and_then(
+                                |o| {
+                                    if o.status.success() {
+                                        Ok(())
+                                    } else {
+                                        Err(String::from_utf8_lossy(&o.stderr).into_owned())
+                                    }
+                                },
+                            ) {
+                                let _ = tx
+                                    .send(AppEvent::StateUpdate(StateUpdate::Error {
+                                        message: format!(
+                                            "Background cleanup failed: {}",
+                                            e
+                                        ),
+                                    }))
+                                    .await;
+                            }
+                        }
+                    });
                 }
             }
             ConfirmAction::RemoveProject { project_id } => {
-                match self.session_manager.remove_project(&project_id).await {
-                    Ok(_) => {
-                        self.ui_state.status_message = Some("Project removed".to_string());
-                        self.ui_state.selected_project_id = None;
-                        self.refresh_list_items().await;
-                    }
-                    Err(e) => {
+                // 1. Capture project and session data before removal
+                let cleanup_data = {
+                    let state = self.app_state.read().await;
+                    state.get_project(&project_id).map(|project| {
+                        let repo_path = project.repo_path.clone();
+                        let shell_tmux = project.shell_tmux_session_name.clone();
+                        let sessions: Vec<_> = project
+                            .worktrees
+                            .iter()
+                            .filter_map(|sid| {
+                                state.get_session(sid).map(|s| {
+                                    (
+                                        s.tmux_session_name.clone(),
+                                        s.shell_tmux_session_name.clone(),
+                                        s.worktree_path.clone(),
+                                    )
+                                })
+                            })
+                            .collect();
+                        (repo_path, shell_tmux, sessions)
+                    })
+                };
+
+                // 2. Remove from state immediately so the UI updates
+                {
+                    let mut state = self.app_state.write().await;
+                    state.remove_project(&project_id);
+                    if let Err(e) = state.save() {
                         self.ui_state.modal = Modal::Error {
-                            message: format!("Failed to remove: {}", e),
+                            message: format!("Failed to save state: {}", e),
                         };
+                        return;
                     }
+                }
+                self.ui_state.selected_project_id = None;
+                self.ui_state.status_message = Some("Project removed".to_string());
+                self.refresh_list_items().await;
+
+                // 3. Spawn background cleanup (kill all tmux sessions + remove worktrees)
+                if let Some((repo_path, shell_tmux, sessions)) = cleanup_data {
+                    let tmux = self.session_manager.tmux.clone();
+                    let tx = self.event_loop.sender();
+                    tokio::spawn(async move {
+                        // Kill project shell tmux session
+                        if let Some(ref shell_name) = shell_tmux {
+                            let _ = tmux.kill_session(shell_name).await;
+                        }
+                        // Kill all session tmux sessions
+                        for (tmux_name, shell_tmux_name, _) in &sessions {
+                            let _ = tmux.kill_session(tmux_name).await;
+                            if let Some(ref shell_name) = shell_tmux_name {
+                                let _ = tmux.kill_session(shell_name).await;
+                            }
+                        }
+                        // Remove all worktrees
+                        for (_, _, worktree_path) in &sessions {
+                            let output = tokio::process::Command::new("git")
+                                .current_dir(&repo_path)
+                                .args(["worktree", "remove", "--force"])
+                                .arg(worktree_path)
+                                .output()
+                                .await;
+                            if let Err(e) =
+                                output.as_ref().map_err(|e| e.to_string()).and_then(|o| {
+                                    if o.status.success() {
+                                        Ok(())
+                                    } else {
+                                        Err(String::from_utf8_lossy(&o.stderr).into_owned())
+                                    }
+                                })
+                            {
+                                let _ = tx
+                                    .send(AppEvent::StateUpdate(StateUpdate::Error {
+                                        message: format!(
+                                            "Background cleanup failed: {}",
+                                            e
+                                        ),
+                                    }))
+                                    .await;
+                            }
+                        }
+                    });
                 }
             }
         }
