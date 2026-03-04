@@ -36,12 +36,6 @@ impl<'a> TreeList<'a> {
         }
     }
 
-    /// Set the block
-    pub fn block(mut self, block: Block<'a>) -> Self {
-        self.block = Some(block);
-        self
-    }
-
     /// Set the highlight style
     pub fn highlight_style(mut self, style: Style) -> Self {
         self.highlight_style = style;
@@ -77,7 +71,6 @@ impl<'a> TreeList<'a> {
                     worktree_count,
                     ..
                 } => {
-                    let icon = "📁";
                     let count_str = if *worktree_count > 0 {
                         format!(" ({})", worktree_count)
                     } else {
@@ -85,7 +78,7 @@ impl<'a> TreeList<'a> {
                     };
 
                     let line = Line::from(vec![
-                        Span::raw(format!("{} ", icon)),
+                        Span::raw(" "),
                         Span::styled(
                             name.clone(),
                             Style::default()

@@ -643,22 +643,22 @@ impl App {
 
     /// Render the session list
     fn render_session_list(&mut self, frame: &mut Frame, area: Rect) {
-        let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::SessionList);
+        // Split into a 1-line heading bar and the list below
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(area);
 
-        let block = Block::default()
-            .title(" Sessions ")
-            .borders(Borders::NONE)
-            .border_style(if is_focused {
-                self.theme.border_focused()
-            } else {
-                self.theme.border_unfocused()
-            });
+        // Full-width heading bar with dark grey background
+        let heading_style = self.theme.status_bar();
+        let heading = Paragraph::new(Line::styled(" Sessions:", heading_style))
+            .style(heading_style);
+        frame.render_widget(heading, chunks[0]);
 
         let tree_list = TreeList::new(&self.ui_state.list_items, &self.theme)
-            .block(block)
             .highlight_style(self.theme.selection().add_modifier(Modifier::BOLD));
 
-        frame.render_stateful_widget(tree_list, area, &mut self.ui_state.list_state.list_state);
+        frame.render_stateful_widget(tree_list, chunks[1], &mut self.ui_state.list_state.list_state);
     }
 
     /// Check if a project (not a session) is currently selected
