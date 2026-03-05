@@ -62,7 +62,7 @@ pub struct Theme {
     pub text_primary: Color,
     pub text_secondary: Color,
     pub text_accent: Color,
-    pub text_project: Color,
+    pub project_colors: Vec<(Color, Color)>, // (project_header, session_title)
     pub text_pr: Color,
 
     // Diff colors
@@ -114,7 +114,14 @@ impl Theme {
             text_primary: Color::Reset,
             text_secondary: Color::DarkGray,
             text_accent: Color::Blue,
-            text_project: Color::Green,
+            project_colors: vec![
+                (Color::Magenta, Color::LightMagenta),
+                (Color::Cyan, Color::LightCyan),
+                (Color::Blue, Color::LightBlue),
+                (Color::Yellow, Color::LightYellow),
+                (Color::Green, Color::LightGreen),
+                (Color::Red, Color::LightRed),
+            ],
             text_pr: Color::Cyan,
 
             diff_added: Color::Green,
@@ -148,7 +155,14 @@ impl Theme {
             text_primary: Color::Reset,
             text_secondary: Color::Indexed(250),
             text_accent: Color::Indexed(147),     // Pastel lavender
-            text_project: Color::Indexed(108),    // Muted sage green
+            project_colors: vec![
+                (Color::Indexed(168), Color::Indexed(218)), // Pink
+                (Color::Indexed(68), Color::Indexed(117)),  // Blue
+                (Color::Indexed(71), Color::Indexed(157)),  // Green
+                (Color::Indexed(173), Color::Indexed(222)), // Orange
+                (Color::Indexed(134), Color::Indexed(183)), // Purple
+                (Color::Indexed(73), Color::Indexed(152)),  // Teal
+            ],
             text_pr: Color::Indexed(117),         // Sky blue
 
             diff_added: Color::Indexed(156),      // Pastel mint
@@ -182,7 +196,14 @@ impl Theme {
             text_primary: Color::Rgb(245, 245, 250),
             text_secondary: Color::Rgb(166, 173, 200),
             text_accent: Color::Rgb(180, 190, 254),      // Pastel periwinkle
-            text_project: Color::Rgb(129, 178, 134),     // Muted sage green
+            project_colors: vec![
+                (Color::Rgb(199, 120, 140), Color::Rgb(243, 174, 190)), // Pink
+                (Color::Rgb(100, 140, 210), Color::Rgb(160, 190, 245)), // Blue
+                (Color::Rgb(100, 165, 110), Color::Rgb(166, 218, 170)), // Green
+                (Color::Rgb(210, 160, 100), Color::Rgb(245, 210, 165)), // Orange
+                (Color::Rgb(160, 130, 200), Color::Rgb(200, 175, 240)), // Purple
+                (Color::Rgb(90, 170, 170), Color::Rgb(155, 215, 215)),  // Teal
+            ],
             text_pr: Color::Rgb(137, 180, 250),          // Pastel sky blue
 
             diff_added: Color::Rgb(166, 227, 161),       // Pastel mint
@@ -217,6 +238,11 @@ impl Theme {
             Some(fg) => style.fg(fg),
             None => style,
         }
+    }
+
+    /// Get project colors by index (cycles through palette)
+    pub fn project_color(&self, index: usize) -> (Color, Color) {
+        self.project_colors[index % self.project_colors.len()]
     }
 
     /// Style for status bar

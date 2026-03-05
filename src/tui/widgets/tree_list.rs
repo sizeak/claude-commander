@@ -61,6 +61,8 @@ impl<'a> TreeList<'a> {
     /// Convert items to list items
     fn to_list_items(&self) -> Vec<ListItem<'a>> {
         let show_program = self.has_mixed_programs();
+        let mut project_index: usize = 0;
+        let mut current_session_color = self.theme.project_color(0).1;
 
         self.items
             .iter()
@@ -71,6 +73,10 @@ impl<'a> TreeList<'a> {
                     worktree_count,
                     ..
                 } => {
+                    let (proj_color, sess_color) = self.theme.project_color(project_index);
+                    current_session_color = sess_color;
+                    project_index += 1;
+
                     let count_str = if *worktree_count > 0 {
                         format!(" ({})", worktree_count)
                     } else {
@@ -82,7 +88,7 @@ impl<'a> TreeList<'a> {
                         Span::styled(
                             name.clone(),
                             Style::default()
-                                .fg(self.theme.text_project)
+                                .fg(proj_color)
                                 .add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
@@ -113,7 +119,10 @@ impl<'a> TreeList<'a> {
                         // Indentation for worktrees
                         Span::raw("   └── "),
                         Span::styled(format!("{} ", status_icon), Style::default().fg(status_color)),
-                        Span::raw(title.clone()),
+                        Span::styled(
+                            title.clone(),
+                            Style::default().fg(current_session_color),
+                        ),
                         Span::styled(
                             format!(" [{}]", branch),
                             Style::default().fg(self.theme.text_accent),
