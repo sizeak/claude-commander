@@ -212,6 +212,9 @@ pub struct WorktreeSession {
     /// GitHub PR URL
     #[serde(default)]
     pub pr_url: Option<String>,
+    /// Whether the PR has been merged
+    #[serde(default)]
+    pub pr_merged: bool,
 }
 
 impl WorktreeSession {
@@ -245,6 +248,7 @@ impl WorktreeSession {
             shell_tmux_session_name: None,
             pr_number: None,
             pr_url: None,
+            pr_merged: false,
         }
     }
 
@@ -292,6 +296,7 @@ pub enum SessionListItem {
         program: String,
         pr_number: Option<u32>,
         pr_url: Option<String>,
+        pr_merged: bool,
     },
 }
 
@@ -416,6 +421,7 @@ mod tests {
             program: "claude".to_string(),
             pr_number: None,
             pr_url: None,
+            pr_merged: false,
         };
 
         assert!(project_item.key().starts_with("project:"));

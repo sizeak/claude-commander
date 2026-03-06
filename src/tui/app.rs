@@ -942,7 +942,8 @@ Session Management:
 
 Status Indicators:
   ●  Running (agent active, green)
-  ●  PR open (purple)
+  ●  PR open (light purple)
+  ●  PR merged (dark purple)
   ◐  Paused
   ○  Stopped
 
@@ -1703,10 +1704,12 @@ Press any key to close this help.
             let mut state = self.app_state.write().await;
             if let Some(session) = state.get_session_mut(&session_id) {
                 let new_number = pr_info.as_ref().map(|p| p.number);
+                let new_merged = pr_info.as_ref().is_some_and(|p| p.merged);
                 let new_url = pr_info.map(|p| p.url);
-                if session.pr_number != new_number || session.pr_url != new_url {
+                if session.pr_number != new_number || session.pr_url != new_url || session.pr_merged != new_merged {
                     session.pr_number = new_number;
                     session.pr_url = new_url;
+                    session.pr_merged = new_merged;
                     changed = true;
                 }
             }
@@ -1747,6 +1750,7 @@ Press any key to close this help.
                         program: session.program.clone(),
                         pr_number: session.pr_number,
                         pr_url: session.pr_url.clone(),
+                        pr_merged: session.pr_merged,
                     });
                 }
             }

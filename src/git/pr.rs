@@ -14,6 +14,7 @@ use tracing::debug;
 pub struct PrInfo {
     pub number: u32,
     pub url: String,
+    pub merged: bool,
 }
 
 /// Returns `true` if the `gh` CLI is installed and runnable.
@@ -33,38 +34,49 @@ pub async fn is_gh_available() -> bool {
     }
 }
 
-/// Check whether `branch` has an open PR in the repo at `repo_path`.
+/// Check whether `branch` has a PR (open or merged) in the repo at `repo_path`.
 ///
 /// Returns `None` on any failure (gh missing, not authed, network error,
-/// not a GitHub repo, or no open PR).
+/// not a GitHub repo, or no PR). Prefers open PRs over merged ones.
 pub async fn check_pr_for_branch(repo_path: &Path, branch: &str) -> Option<PrInfo> {
-    let output = Command::new("gh")
-        .args([
-            "pr",
-            "list",
-            "--head",
-            branch,
-            "--json",
-            "number,url",
-            "--limit",
-            "1",
-        ])
-        .current_dir(repo_path)
-        .output()
-        .await
-        .ok()?;
+    // Check open PRs first, then merged if none found
+    for state in &["open", "merged"] {
+        let output = Command::new("gh")
+            .args([
+                "pr",
+                "list",
+                "--head",
+                branch,
+                "--state",
+                state,
+                "--json",
+                "number,url",
+                "--limit",
+                "1",
+            ])
+            .current_dir(repo_path)
+            .output()
+            .await
+            .ok()?;
 
-    if !output.status.success() {
-        debug!(
-            "gh pr list failed for branch {}: {}",
-            branch,
-            String::from_utf8_lossy(&output.stderr)
-        );
-        return None;
+        if !output.status.success() {
+            debug!(
+                "gh pr list --state {} failed for branch {}: {}",
+                state,
+                branch,
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return None;
+        }
+
+        let json = String::from_utf8(output.stdout).ok()?;
+        if let Some(mut info) = parse_pr_json(&json) {
+            info.merged = *state == "merged";
+            return Some(info);
+        }
     }
 
-    let json = String::from_utf8(output.stdout).ok()?;
-    parse_pr_json(&json)
+    None
 }
 
 /// Parse the JSON array returned by `gh pr list --json number,url --limit 1`.
@@ -108,7 +120,7 @@ fn parse_pr_json(json: &str) -> Option<PrInfo> {
         rest[..quote_end].to_string()
     };
 
-    Some(PrInfo { number, url })
+    Some(PrInfo { number, url, merged: false })
 }
 
 #[cfg(test)]
@@ -121,6 +133,7 @@ mod tests {
         let info = parse_pr_json(json).unwrap();
         assert_eq!(info.number, 42);
         assert_eq!(info.url, "https://github.com/owner/repo/pull/42");
+        assert!(!info.merged);
     }
 
     #[test]

@@ -107,12 +107,14 @@ impl<'a> TreeList<'a> {
                     status,
                     program,
                     pr_number,
+                    pr_merged,
                     ..
                 } => {
+                    let pr_color = if *pr_merged { self.theme.status_pr_merged } else { self.theme.status_pr };
                     let has_pr = pr_number.is_some();
                     let (status_icon, status_color) = match status {
-                        SessionStatus::Running => ("●", if has_pr { self.theme.status_pr } else { self.theme.status_running }),
-                        SessionStatus::Paused => ("◐", if has_pr { self.theme.status_pr } else { self.theme.status_paused }),
+                        SessionStatus::Running => ("●", if has_pr { pr_color } else { self.theme.status_running }),
+                        SessionStatus::Paused => ("◐", if has_pr { pr_color } else { self.theme.status_paused }),
                         SessionStatus::Stopped => ("○", self.theme.status_stopped),
                     };
 
