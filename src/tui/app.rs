@@ -940,6 +940,11 @@ Session Management:
   D               Remove project
   e               Open in editor/IDE
 
+Status Indicators:
+  ●  Running (agent active)
+  ◐  Paused
+  ○  Stopped
+
 Scrolling:
   Ctrl+u/d        Page up/down in current view
   PgUp/PgDn       Page up/down
