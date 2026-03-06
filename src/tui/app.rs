@@ -1471,6 +1471,12 @@ Press any key to close this help.
                     Ok(session_id) => {
                         self.ui_state.status_message = Some(format!("Created session {}", session_id));
                         self.refresh_list_items().await;
+                        // Select the newly created session
+                        if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
+                            matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
+                        }) {
+                            self.ui_state.list_state.select(Some(idx));
+                        }
                     }
                     Err(e) => {
                         self.ui_state.modal = Modal::Error {
@@ -1493,6 +1499,12 @@ Press any key to close this help.
                     Ok(project_id) => {
                         self.ui_state.status_message = Some(format!("Added project {}", project_id));
                         self.refresh_list_items().await;
+                        // Select the newly added project
+                        if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
+                            matches!(item, SessionListItem::Project { id, .. } if *id == project_id)
+                        }) {
+                            self.ui_state.list_state.select(Some(idx));
+                        }
                     }
                     Err(e) => {
                         self.ui_state.modal = Modal::Error {
