@@ -57,6 +57,7 @@ pub struct Theme {
     pub status_running: Color,
     pub status_paused: Color,
     pub status_stopped: Color,
+    pub status_pr: Color,
 
     // Text
     pub text_primary: Color,
@@ -110,6 +111,7 @@ impl Theme {
             status_running: Color::Green,
             status_paused: Color::Yellow,
             status_stopped: Color::DarkGray,
+            status_pr: Color::Magenta,
 
             text_primary: Color::Reset,
             text_secondary: Color::DarkGray,
@@ -151,6 +153,7 @@ impl Theme {
             status_running: Color::Indexed(156),  // Pastel mint green
             status_paused: Color::Indexed(222),   // Pastel peach
             status_stopped: Color::Indexed(248),
+            status_pr: Color::Indexed(141),          // Medium purple
 
             text_primary: Color::Reset,
             text_secondary: Color::Indexed(250),
@@ -192,6 +195,7 @@ impl Theme {
             status_running: Color::Rgb(166, 227, 161),   // Pastel mint
             status_paused: Color::Rgb(249, 226, 175),    // Pastel peach
             status_stopped: Color::Rgb(147, 153, 178),   // Muted lavender
+            status_pr: Color::Rgb(203, 166, 247),          // Pastel mauve
 
             text_primary: Color::Rgb(245, 245, 250),
             text_secondary: Color::Rgb(166, 173, 200),

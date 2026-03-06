@@ -109,9 +109,10 @@ impl<'a> TreeList<'a> {
                     pr_number,
                     ..
                 } => {
+                    let has_pr = pr_number.is_some();
                     let (status_icon, status_color) = match status {
-                        SessionStatus::Running => ("●", self.theme.status_running),
-                        SessionStatus::Paused => ("◐", self.theme.status_paused),
+                        SessionStatus::Running => ("●", if has_pr { self.theme.status_pr } else { self.theme.status_running }),
+                        SessionStatus::Paused => ("◐", if has_pr { self.theme.status_pr } else { self.theme.status_paused }),
                         SessionStatus::Stopped => ("○", self.theme.status_stopped),
                     };
 

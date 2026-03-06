@@ -941,7 +941,8 @@ Session Management:
   e               Open in editor/IDE
 
 Status Indicators:
-  ●  Running (agent active)
+  ●  Running (agent active, green)
+  ●  PR open (purple)
   ◐  Paused
   ○  Stopped
 
