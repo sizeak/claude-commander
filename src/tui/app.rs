@@ -1799,27 +1799,22 @@ async fn fetch_preview_data(
     project_id: Option<ProjectId>,
 ) -> (String, Arc<DiffInfo>, String) {
     if let Some(sid) = session_id {
-        debug!("fetch_preview_data: fetching content for session {}", sid);
-        let preview = mgr
-            .get_content(&sid)
-            .await
-            .map(|c| c.content)
-            .unwrap_or_else(|e| {
-                debug!("fetch_preview_data: get_content error: {}", e);
-                "Unable to capture content".to_string()
-            });
+        debug!("fetch_preview_data: fetching content/diff/shell for session {}", sid);
+        let (preview_result, diff_result, shell_result) = tokio::join!(
+            mgr.get_content(&sid),
+            mgr.get_diff(&sid),
+            mgr.get_shell_content(&sid),
+        );
 
-        debug!("fetch_preview_data: fetching diff for session {}", sid);
-        let diff = mgr
-            .get_diff(&sid)
-            .await
-            .unwrap_or_else(|e| {
-                debug!("fetch_preview_data: get_diff error: {}", e);
-                Arc::new(DiffInfo::empty())
-            });
-
-        debug!("fetch_preview_data: fetching shell for session {}", sid);
-        let shell = match mgr.get_shell_content(&sid).await {
+        let preview = preview_result.map(|c| c.content).unwrap_or_else(|e| {
+            debug!("fetch_preview_data: get_content error: {}", e);
+            "Unable to capture content".to_string()
+        });
+        let diff = diff_result.unwrap_or_else(|e| {
+            debug!("fetch_preview_data: get_diff error: {}", e);
+            Arc::new(DiffInfo::empty())
+        });
+        let shell = match shell_result {
             Ok(Some(c)) => c.content,
             Ok(None) => "No shell session. Press 's' to open one.".to_string(),
             Err(e) => {
@@ -1830,17 +1825,17 @@ async fn fetch_preview_data(
 
         (preview, diff, shell)
     } else if let Some(pid) = project_id {
-        debug!("fetch_preview_data: fetching diff for project {}", pid);
-        let diff = mgr
-            .get_project_diff(&pid)
-            .await
-            .unwrap_or_else(|e| {
-                debug!("fetch_preview_data: get_project_diff error: {}", e);
-                Arc::new(DiffInfo::empty())
-            });
+        debug!("fetch_preview_data: fetching diff/shell for project {}", pid);
+        let (diff_result, shell_result) = tokio::join!(
+            mgr.get_project_diff(&pid),
+            mgr.get_project_shell_content(&pid),
+        );
 
-        debug!("fetch_preview_data: fetching shell for project {}", pid);
-        let shell = match mgr.get_project_shell_content(&pid).await {
+        let diff = diff_result.unwrap_or_else(|e| {
+            debug!("fetch_preview_data: get_project_diff error: {}", e);
+            Arc::new(DiffInfo::empty())
+        });
+        let shell = match shell_result {
             Ok(Some(c)) => c.content,
             _ => "No shell session. Press 's' to open one.".to_string(),
         };

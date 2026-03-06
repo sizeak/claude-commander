@@ -168,16 +168,34 @@ impl<K> Clone for DiffCache<K> {
 
 /// Compute a diff for the given path (no caching)
 pub async fn compute_diff_for_path(path: &Path) -> Result<DiffInfo> {
-    // Get diff of tracked files against HEAD (staged + unstaged)
-    let diff_output = Command::new("git")
-        .current_dir(path)
-        .args(["diff", "HEAD"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .map_err(|e| GitError::DiffFailed(e.to_string()))?;
+    // Phase 1: Run the three independent git commands in parallel
+    let (diff_output, untracked_output, stat_output) = tokio::join!(
+        Command::new("git")
+            .current_dir(path)
+            .args(["diff", "HEAD"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output(),
+        Command::new("git")
+            .current_dir(path)
+            .args(["ls-files", "--others", "--exclude-standard"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output(),
+        Command::new("git")
+            .current_dir(path)
+            .args(["diff", "--stat", "HEAD"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output(),
+    );
+
+    let diff_output = diff_output.map_err(|e| GitError::DiffFailed(e.to_string()))?;
+    let untracked_output = untracked_output.map_err(|e| GitError::DiffFailed(e.to_string()))?;
+    let stat_output = stat_output.map_err(|e| GitError::DiffFailed(e.to_string()))?;
 
     let mut diff = if diff_output.status.success() {
         String::from_utf8_lossy(&diff_output.stdout).to_string()
@@ -185,21 +203,13 @@ pub async fn compute_diff_for_path(path: &Path) -> Result<DiffInfo> {
         String::new()
     };
 
-    // Also diff untracked files so new files created by the agent show up
-    let untracked_output = Command::new("git")
-        .current_dir(path)
-        .args(["ls-files", "--others", "--exclude-standard"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .map_err(|e| GitError::DiffFailed(e.to_string()))?;
-
+    // Phase 2: Run untracked file diffs in parallel
     if untracked_output.status.success() {
         let untracked = String::from_utf8_lossy(&untracked_output.stdout);
-        for file in untracked.lines().filter(|l| !l.is_empty()) {
-            let file_diff = Command::new("git")
+        let untracked_files: Vec<&str> = untracked.lines().filter(|l| !l.is_empty()).collect();
+
+        let untracked_diffs = futures::future::join_all(untracked_files.iter().map(|file| {
+            Command::new("git")
                 .current_dir(path)
                 .args([
                     "diff",
@@ -214,36 +224,25 @@ pub async fn compute_diff_for_path(path: &Path) -> Result<DiffInfo> {
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .output()
-                .await;
+        }))
+        .await;
 
-            if let Ok(output) = file_diff {
-                // git diff --no-index exits with 1 when files differ (expected)
-                let file_diff_str = String::from_utf8_lossy(&output.stdout);
-                if !file_diff_str.is_empty() {
-                    // Ensure blank line separator between file diffs
-                    if !diff.is_empty() && !diff.ends_with("\n\n") {
-                        if diff.ends_with('\n') {
-                            diff.push('\n');
-                        } else {
-                            diff.push_str("\n\n");
-                        }
+        for output in untracked_diffs.into_iter().flatten() {
+            // git diff --no-index exits with 1 when files differ (expected)
+            let file_diff_str = String::from_utf8_lossy(&output.stdout);
+            if !file_diff_str.is_empty() {
+                // Ensure blank line separator between file diffs
+                if !diff.is_empty() && !diff.ends_with("\n\n") {
+                    if diff.ends_with('\n') {
+                        diff.push('\n');
+                    } else {
+                        diff.push_str("\n\n");
                     }
-                    diff.push_str(&file_diff_str);
                 }
+                diff.push_str(&file_diff_str);
             }
         }
     }
-
-    // Get stats (tracked changes only is fine for summary)
-    let stat_output = Command::new("git")
-        .current_dir(path)
-        .args(["diff", "--stat", "HEAD"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .map_err(|e| GitError::DiffFailed(e.to_string()))?;
 
     let (mut files_changed, lines_added, lines_removed) = if stat_output.status.success() {
         parse_diff_stat(&String::from_utf8_lossy(&stat_output.stdout))
