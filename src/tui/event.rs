@@ -77,6 +77,10 @@ pub enum StateUpdate {
     Error {
         message: String,
     },
+    /// PR status results ready from background check
+    PrStatusReady {
+        results: Vec<(SessionId, Option<crate::git::PrInfo>)>,
+    },
     /// Preview/diff/shell data ready from background fetch
     PreviewReady {
         /// Which session this data is for (None if project-level)

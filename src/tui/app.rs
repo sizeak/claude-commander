@@ -220,7 +220,7 @@ impl App {
         if self.config.pr_check_interval_secs > 0 {
             self.ui_state.gh_available = is_gh_available().await;
             if self.ui_state.gh_available {
-                self.check_pr_statuses().await;
+                self.spawn_pr_status_check();
             }
         }
 
@@ -453,7 +453,7 @@ impl App {
                         .last_pr_check
                         .is_none_or(|t| t.elapsed() >= interval);
                     if should_check {
-                        self.check_pr_statuses().await;
+                        self.spawn_pr_status_check();
                     }
                 }
             }
@@ -1281,6 +1281,31 @@ Press any key to close this help.
                     );
                 }
             }
+            StateUpdate::PrStatusReady { results } => {
+                let mut changed = false;
+                let mut state = self.app_state.write().await;
+                for (session_id, pr_info) in results {
+                    if let Some(session) = state.get_session_mut(&session_id) {
+                        let new_number = pr_info.as_ref().map(|p| p.number);
+                        let new_merged = pr_info.as_ref().is_some_and(|p| p.merged);
+                        let new_url = pr_info.map(|p| p.url);
+                        if session.pr_number != new_number
+                            || session.pr_url != new_url
+                            || session.pr_merged != new_merged
+                        {
+                            session.pr_number = new_number;
+                            session.pr_url = new_url;
+                            session.pr_merged = new_merged;
+                            changed = true;
+                        }
+                    }
+                }
+                if changed {
+                    let _ = state.save();
+                }
+                drop(state);
+                self.refresh_list_items().await;
+            }
             StateUpdate::Error { message } => {
                 self.ui_state.modal = Modal::Error { message };
             }
@@ -1681,44 +1706,39 @@ Press any key to close this help.
         }
     }
 
-    /// Check PR status for all sessions with branches
-    async fn check_pr_statuses(&mut self) {
+    /// Spawn a background task to check PR status for all sessions
+    fn spawn_pr_status_check(&mut self) {
         self.ui_state.last_pr_check = Some(Instant::now());
 
-        // Collect session info: (session_id, branch, repo_path)
-        let sessions_to_check: Vec<(SessionId, String, std::path::PathBuf)> = {
-            let state = self.app_state.read().await;
-            state
-                .sessions
-                .values()
-                .filter_map(|s| {
-                    let project = state.projects.get(&s.project_id)?;
-                    Some((s.id, s.branch.clone(), project.repo_path.clone()))
-                })
-                .collect()
-        };
+        let app_state = self.app_state.clone();
+        let tx = self.event_loop.sender();
 
-        let mut changed = false;
-        for (session_id, branch, repo_path) in sessions_to_check {
-            let pr_info = check_pr_for_branch(&repo_path, &branch).await;
-            let mut state = self.app_state.write().await;
-            if let Some(session) = state.get_session_mut(&session_id) {
-                let new_number = pr_info.as_ref().map(|p| p.number);
-                let new_merged = pr_info.as_ref().is_some_and(|p| p.merged);
-                let new_url = pr_info.map(|p| p.url);
-                if session.pr_number != new_number || session.pr_url != new_url || session.pr_merged != new_merged {
-                    session.pr_number = new_number;
-                    session.pr_url = new_url;
-                    session.pr_merged = new_merged;
-                    changed = true;
-                }
+        tokio::spawn(async move {
+            // Collect session info under a brief read lock
+            let sessions_to_check: Vec<(SessionId, String, std::path::PathBuf)> = {
+                let state = app_state.read().await;
+                state
+                    .sessions
+                    .values()
+                    .filter_map(|s| {
+                        let project = state.projects.get(&s.project_id)?;
+                        Some((s.id, s.branch.clone(), project.repo_path.clone()))
+                    })
+                    .collect()
+            };
+
+            let mut results = Vec::with_capacity(sessions_to_check.len());
+            for (session_id, branch, repo_path) in sessions_to_check {
+                let pr_info = check_pr_for_branch(&repo_path, &branch).await;
+                results.push((session_id, pr_info));
             }
-        }
 
-        if changed {
-            let state = self.app_state.read().await;
-            let _ = state.save();
-        }
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::PrStatusReady {
+                    results,
+                }))
+                .await;
+        });
     }
 
     /// Refresh the list items from app state
