@@ -168,6 +168,23 @@ impl SessionManager {
             title, branch_name, project_id
         );
 
+        // Pull latest changes on the project's current branch
+        if self.config.pull_before_create {
+            info!("Pulling latest changes in {}", repo_path.display());
+            let output = tokio::process::Command::new("git")
+                .current_dir(&repo_path)
+                .args(["pull", "--ff-only"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output()
+                .await?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                warn!("git pull failed (continuing anyway): {}", stderr);
+            }
+        }
+
         // Create git backend and worktree manager
         let backend = GitBackend::open(&repo_path)?;
         let worktrees_dir = self.config.worktrees_dir()?;

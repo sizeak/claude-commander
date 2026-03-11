@@ -51,6 +51,9 @@ pub struct Config {
     /// If unset, auto-detected from a known list of GUI editors.
     pub editor_gui: Option<bool>,
 
+    /// Pull the latest changes on the project's checked-out branch before creating a new session
+    pub pull_before_create: bool,
+
     /// Enable debug logging
     pub debug: bool,
 
@@ -72,6 +75,7 @@ impl Default for Config {
             editor_gui: None,
             shell_program: std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string()),
             pr_check_interval_secs: 600,
+            pull_before_create: true,
             debug: false,
             log_file: None,
         }
