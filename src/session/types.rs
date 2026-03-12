@@ -92,9 +92,10 @@ impl SessionStatus {
         matches!(self, Self::Running | Self::Paused)
     }
 
-    /// Check if the session can be attached to
+    /// Check if the session can be attached to (Stopped sessions are allowed
+    /// because get_attach_command will recreate the tmux session automatically)
     pub fn can_attach(&self) -> bool {
-        matches!(self, Self::Running | Self::Paused)
+        matches!(self, Self::Running | Self::Paused | Self::Stopped)
     }
 
     /// Check if the session can be paused
@@ -344,7 +345,7 @@ mod tests {
         assert!(!SessionStatus::Running.can_resume());
         assert!(SessionStatus::Paused.can_resume());
         assert!(!SessionStatus::Paused.can_pause());
-        assert!(!SessionStatus::Stopped.can_attach());
+        assert!(SessionStatus::Stopped.can_attach());
     }
 
     #[test]

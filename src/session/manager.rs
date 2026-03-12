@@ -265,11 +265,11 @@ impl SessionManager {
         let exists = self.tmux.session_exists(&tmux_session_name).await?;
 
         if !exists {
-            // Recreate tmux session
+            // Recreate tmux session with --resume so the agent picks up where it left off
             let worktree_path = session.worktree_path.clone();
-            let program = session.program.clone();
+            let resume_program = format!("{} --resume", session.program);
             self.tmux
-                .create_session(&tmux_session_name, &worktree_path, Some(&program))
+                .create_session(&tmux_session_name, &worktree_path, Some(&resume_program))
                 .await?;
         }
 
@@ -367,7 +367,7 @@ impl SessionManager {
     pub async fn get_attach_command(&self, session_id: &SessionId) -> Result<String> {
         info!("get_attach_command called for session: {}", session_id);
 
-        let tmux_name = {
+        let (tmux_name, worktree_path, program) = {
             let state = self.app_state.read().await;
             let session = state
                 .get_session(session_id)
@@ -379,7 +379,11 @@ impl SessionManager {
                 return Err(SessionError::InvalidState(*session_id).into());
             }
 
-            session.tmux_session_name.clone()
+            (
+                session.tmux_session_name.clone(),
+                session.worktree_path.clone(),
+                session.program.clone(),
+            )
         };
 
         info!("Checking if tmux session '{}' exists", tmux_name);
@@ -388,33 +392,35 @@ impl SessionManager {
         let exists = self.tmux.session_exists(&tmux_name).await?;
         info!("Tmux session exists: {}", exists);
 
-        if !exists {
-            // Update state to reflect that session is stopped
-            info!("Tmux session not found, updating state to Stopped");
+        let needs_recreate = if !exists {
+            info!("Tmux session not found, will recreate");
+            true
+        } else {
+            // Check if the pane is dead (program exited)
+            let pane_dead = self.tmux.is_pane_dead(&tmux_name).await.unwrap_or(false);
+            info!("Pane dead: {}", pane_dead);
+            if pane_dead {
+                info!("Pane is dead, killing tmux session for recreation");
+                let _ = self.tmux.kill_session(&tmux_name).await;
+                true
+            } else {
+                false
+            }
+        };
+
+        if needs_recreate {
+            // Recreate the tmux session with --resume so the agent picks up where it left off
+            let resume_program = format!("{} --resume", program);
+            info!("Recreating tmux session with: {}", resume_program);
+            self.tmux
+                .create_session(&tmux_name, &worktree_path, Some(&resume_program))
+                .await?;
+
             let mut state = self.app_state.write().await;
             if let Some(session) = state.get_session_mut(session_id) {
-                session.set_status(SessionStatus::Stopped);
+                session.set_status(SessionStatus::Running);
                 let _ = state.save();
             }
-            return Err(SessionError::TmuxSessionNotFound(tmux_name).into());
-        }
-
-        // Check if the pane is dead (program exited)
-        let pane_dead = self.tmux.is_pane_dead(&tmux_name).await.unwrap_or(false);
-        info!("Pane dead: {}", pane_dead);
-
-        if pane_dead {
-            // The program inside tmux has exited - kill the session and update state
-            info!("Pane is dead, killing tmux session and updating state");
-            let _ = self.tmux.kill_session(&tmux_name).await;
-            let mut state = self.app_state.write().await;
-            if let Some(session) = state.get_session_mut(session_id) {
-                session.set_status(SessionStatus::Stopped);
-                let _ = state.save();
-            }
-            return Err(SessionError::TmuxSessionNotFound(
-                format!("{} (program exited)", tmux_name)
-            ).into());
         }
 
         let cmd = format!("tmux attach-session -t {}", tmux_name);
