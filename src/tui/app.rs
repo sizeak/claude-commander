@@ -11,7 +11,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crossterm::{
-    event::{DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture},
+    event::{
+        DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        MouseEventKind,
+    },
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -20,7 +23,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame, Terminal,
 };
 use tokio::sync::RwLock;
@@ -34,6 +37,17 @@ use crate::config::{AppState, Config};
 use crate::error::{Result, TuiError};
 use crate::git::{check_pr_for_branch, is_gh_available, DiffInfo};
 use crate::session::{ProjectId, SessionId, SessionListItem, SessionManager, SessionStatus};
+
+/// Direction for mouse scroll events
+enum ScrollDirection {
+    Up,
+    Down,
+}
+
+/// Left pane (session list) width as a percentage of the content area
+const LEFT_PANE_PCT: u16 = 30;
+/// Right pane (preview/diff/shell) width as a percentage of the content area
+const RIGHT_PANE_PCT: u16 = 70;
 
 /// Which pane is currently focused
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -126,6 +140,8 @@ pub struct AppUiState {
     pub status_message: Option<String>,
     /// Should quit
     pub should_quit: bool,
+    /// Last known terminal size (updated each render frame)
+    pub terminal_size: Rect,
     /// Currently selected session (for preview/diff)
     pub selected_session_id: Option<SessionId>,
     /// Currently selected project
@@ -168,6 +184,7 @@ impl Default for AppUiState {
             last_pr_check: None,
             gh_available: false,
             preview_update_spawned_at: None,
+            terminal_size: Rect::default(),
         }
     }
 }
@@ -359,12 +376,7 @@ impl App {
         enable_raw_mode().map_err(|e| TuiError::InitFailed(e.to_string()))?;
 
         let mut stdout = io::stdout();
-        execute!(
-            stdout,
-            EnterAlternateScreen,
-            EnableMouseCapture,
-            EnableBracketedPaste
-        )
+        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)
         .map_err(|e| TuiError::InitFailed(e.to_string()))?;
 
         let backend = CrosstermBackend::new(stdout);
@@ -382,12 +394,12 @@ impl App {
         info!("Disabling raw mode");
         disable_raw_mode().map_err(|e| TuiError::RestoreFailed(e.to_string()))?;
 
-        info!("Leaving alternate screen and disabling mouse capture");
+        info!("Leaving alternate screen");
         execute!(
             terminal.backend_mut(),
             LeaveAlternateScreen,
-            DisableMouseCapture,
-            DisableBracketedPaste
+            DisableBracketedPaste,
+            DisableMouseCapture
         )
         .map_err(|e| TuiError::RestoreFailed(e.to_string()))?;
 
@@ -598,9 +610,51 @@ impl App {
         }
     }
 
+    /// Scroll the pane under the given mouse column position
+    fn scroll_pane_at(&mut self, col: u16, direction: ScrollDirection) {
+        let size = self.ui_state.terminal_size;
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
+
+        // Recompute the same content_area as render()
+        let content_area = Rect {
+            x: size.x + 1,
+            y: size.y + 1,
+            width: size.width.saturating_sub(2),
+            height: size.height.saturating_sub(3),
+        };
+
+        let main_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(LEFT_PANE_PCT),
+                Constraint::Percentage(RIGHT_PANE_PCT),
+            ])
+            .split(content_area);
+
+        let lines_per_tick: u16 = 3;
+
+        if col < main_chunks[0].right() {
+            // Left pane: scroll the session list selection
+            match direction {
+                ScrollDirection::Up => self.ui_state.list_state.previous(),
+                ScrollDirection::Down => self.ui_state.list_state.next(),
+            }
+            self.update_selection();
+        } else {
+            // Right pane: scroll content
+            match direction {
+                ScrollDirection::Up => self.active_pane_state().scroll_up(lines_per_tick),
+                ScrollDirection::Down => self.active_pane_state().scroll_down(lines_per_tick),
+            }
+        }
+    }
+
     /// Render the UI
     fn render(&mut self, frame: &mut Frame) {
         let size = frame.area();
+        self.ui_state.terminal_size = size;
 
         // Content area with margin on top, left, right, and space for status bar at bottom
         let content_area = Rect {
@@ -613,7 +667,7 @@ impl App {
         // Main layout: session list on left, right pane fills rest
         let main_chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
+            .constraints([Constraint::Percentage(LEFT_PANE_PCT), Constraint::Percentage(RIGHT_PANE_PCT)])
             .split(content_area);
 
         // Render session list
@@ -886,7 +940,7 @@ impl App {
                 frame.render_widget(block, modal_area);
 
                 let text = format!("{}\n\n[Enter] Confirm  [Esc] Cancel", message);
-                let paragraph = Paragraph::new(text);
+                let paragraph = Paragraph::new(text).wrap(Wrap { trim: true });
                 frame.render_widget(paragraph, inner);
             }
 
@@ -903,7 +957,7 @@ impl App {
                 frame.render_widget(block, modal_area);
 
                 let text = format!("{}\n\nPress any key to close.", message);
-                let paragraph = Paragraph::new(text);
+                let paragraph = Paragraph::new(text).wrap(Wrap { trim: true });
                 frame.render_widget(paragraph, inner);
             }
 
@@ -1032,9 +1086,15 @@ Press any key to close this help.
             InputEvent::Resize(_, _) => {
                 // Terminal will re-render automatically
             }
-            InputEvent::Mouse(_) => {
-                // Mouse handling if needed
-            }
+            InputEvent::Mouse(mouse) => match mouse.kind {
+                MouseEventKind::ScrollUp => {
+                    self.scroll_pane_at(mouse.column, ScrollDirection::Up);
+                }
+                MouseEventKind::ScrollDown => {
+                    self.scroll_pane_at(mouse.column, ScrollDirection::Down);
+                }
+                _ => {}
+            },
             InputEvent::Paste(text) => {
                 // Handle paste in modal input, ignore otherwise
                 let clean = text.replace(['\n', '\r'], "");

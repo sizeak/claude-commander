@@ -451,6 +451,24 @@ impl SessionManager {
 
         // Create new shell tmux session
         let shell_name = format!("{}-sh", tmux_name);
+
+        // Check if a tmux session with this name already exists (stale state)
+        if self.tmux.session_exists(&shell_name).await.unwrap_or(false) {
+            let pane_dead = self.tmux.is_pane_dead(&shell_name).await.unwrap_or(false);
+            if pane_dead {
+                info!("Shell session {} has dead pane, killing for recreation", shell_name);
+                let _ = self.tmux.kill_session(&shell_name).await;
+            } else {
+                info!("Reusing existing shell session {}", shell_name);
+                let mut state = self.app_state.write().await;
+                if let Some(session) = state.get_session_mut(session_id) {
+                    session.shell_tmux_session_name = Some(shell_name.clone());
+                }
+                state.save()?;
+                return Ok(shell_name);
+            }
+        }
+
         self.tmux
             .create_session(&shell_name, &worktree_path, Some(&self.config.shell_program))
             .await?;
@@ -587,6 +605,24 @@ impl SessionManager {
 
         // Create new shell tmux session
         let shell_name = format!("cc-proj-{}-sh", id_prefix);
+
+        // Check if a tmux session with this name already exists (stale state)
+        if self.tmux.session_exists(&shell_name).await.unwrap_or(false) {
+            let pane_dead = self.tmux.is_pane_dead(&shell_name).await.unwrap_or(false);
+            if pane_dead {
+                info!("Project shell session {} has dead pane, killing for recreation", shell_name);
+                let _ = self.tmux.kill_session(&shell_name).await;
+            } else {
+                info!("Reusing existing project shell session {}", shell_name);
+                let mut state = self.app_state.write().await;
+                if let Some(project) = state.get_project_mut(project_id) {
+                    project.shell_tmux_session_name = Some(shell_name.clone());
+                }
+                state.save()?;
+                return Ok(shell_name);
+            }
+        }
+
         self.tmux
             .create_session(&shell_name, &repo_path, Some(&self.config.shell_program))
             .await?;
