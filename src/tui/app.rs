@@ -27,7 +27,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use tokio::sync::RwLock;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::event::{AppEvent, EventLoop, InputEvent, StateUpdate, UserCommand};
 use super::path_completer::PathCompleter;
@@ -291,12 +291,26 @@ impl App {
                         // Brief delay to let the reader task actually stop
                         tokio::time::sleep(Duration::from_millis(100)).await;
 
-                        // Attach to session
+                        // Flush any pending input (e.g. the Enter key that triggered this attach)
+                        crate::tmux::flush_stdin();
+
+                        // Attach to session via async PTY bridge (supports Ctrl+Q detach)
                         info!("Executing attach command: {}", cmd);
                         let session_name = cmd.split_whitespace().last().unwrap_or("");
                         if !session_name.is_empty() {
-                            let _ = crate::tmux::attach_to_session(session_name).await;
+                            match crate::tmux::attach_to_session(session_name).await {
+                                Ok(result) => info!("Attach ended: {:?}", result),
+                                Err(e) => {
+                                    warn!("Failed to attach to session: {}", e);
+                                    self.ui_state.modal = Modal::Error {
+                                        message: format!("Failed to attach: {}", e),
+                                    };
+                                }
+                            }
                         }
+
+                        // Flush stdin again after detach to discard any stale input
+                        crate::tmux::flush_stdin();
 
                         // Restart the input reader after detach
                         info!("Returned from attach, restarting input reader");

@@ -33,16 +33,16 @@ pub async fn attach_to_session(session_name: &str) -> Result<AttachResult> {
     let (cols, rows) = terminal::size().unwrap_or((80, 24));
 
     // Open PTY (async)
-    let pty = pty_process::Pty::new()?;
+    let (pty, pts) = pty_process::open()?;
     pty.resize(pty_process::Size::new(rows, cols))?;
 
     // Get the raw fd for resize operations (before we split the pty)
     let pty_fd = pty.as_raw_fd();
 
     // Spawn tmux attach-session
-    let mut cmd = pty_process::Command::new("tmux");
-    cmd.args(["attach-session", "-t", session_name]);
-    let mut child = cmd.spawn(&pty.pts()?)?;
+    let cmd = pty_process::Command::new("tmux")
+        .args(["attach-session", "-t", session_name]);
+    let mut child = cmd.spawn(pts)?;
 
     info!("Spawned tmux attach-session for {}", session_name);
 
@@ -124,7 +124,7 @@ fn log_pending_stdin(context: &str) {
 }
 
 /// Flush any pending input from stdin at the kernel level
-fn flush_stdin() {
+pub fn flush_stdin() {
     use nix::sys::termios::{tcflush, FlushArg};
 
     let _ = tcflush(std::io::stdin(), FlushArg::TCIFLUSH);
