@@ -12,23 +12,32 @@ A high-performance terminal UI for managing Claude coding sessions, written in R
 - **Agent state detection** - Detect if agent is waiting for input, processing, or errored
 - **Persistent state** - Sessions survive restarts
 
+## Requirements
+
+- **Rust/Cargo** - Required to build from source ([install via rustup](https://rustup.rs/))
+- **tmux** - Required for session management
+- **git** - For worktree operations
+
 ## Installation
+
+Install directly from GitHub:
+
+```bash
+cargo install --git https://github.com/sizeak/claude-commander.git
+```
+
+Or clone and install locally:
 
 ```bash
 cargo install --path .
 ```
 
-Or build from source:
+Or build from source without installing:
 
 ```bash
 cargo build --release
 ./target/release/claude-commander
 ```
-
-## Requirements
-
-- **tmux** - Required for session management
-- **git** - For worktree operations
 
 ## Usage
 
