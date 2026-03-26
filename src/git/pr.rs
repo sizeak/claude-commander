@@ -120,11 +120,7 @@ fn parse_pr_json(json: &str) -> Option<PrInfo> {
         rest[..quote_end].to_string()
     };
 
-    Some(PrInfo {
-        number,
-        url,
-        merged: false,
-    })
+    Some(PrInfo { number, url, merged: false })
 }
 
 #[cfg(test)]

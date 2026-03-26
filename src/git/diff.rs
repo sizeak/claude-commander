@@ -84,10 +84,7 @@ pub struct DiffCache<K> {
     ttl: Duration,
 }
 
-impl<
-        K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
-    > DiffCache<K>
-{
+impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send + Sync + 'static> DiffCache<K> {
     /// Create a new diff cache
     pub fn new() -> Self {
         Self::with_ttl(DEFAULT_DIFF_CACHE_TTL)
@@ -103,7 +100,11 @@ impl<
 
     /// Get cached diff or compute fresh
     #[instrument(skip(self, worktree_path))]
-    pub async fn get_diff(&self, key: &K, worktree_path: &Path) -> Result<Arc<DiffInfo>> {
+    pub async fn get_diff(
+        &self,
+        key: &K,
+        worktree_path: &Path,
+    ) -> Result<Arc<DiffInfo>> {
         // Fast path: check cache
         {
             let cache = self.cache.read().await;
@@ -121,7 +122,11 @@ impl<
     }
 
     /// Compute a fresh diff
-    pub async fn compute_diff(&self, key: &K, worktree_path: &Path) -> Result<Arc<DiffInfo>> {
+    pub async fn compute_diff(
+        &self,
+        key: &K,
+        worktree_path: &Path,
+    ) -> Result<Arc<DiffInfo>> {
         let info = Arc::new(compute_diff_for_path(worktree_path).await?);
 
         // Update cache
@@ -146,10 +151,7 @@ impl<
     }
 }
 
-impl<
-        K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
-    > Default for DiffCache<K>
-{
+impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send + Sync + 'static> Default for DiffCache<K> {
     fn default() -> Self {
         Self::new()
     }

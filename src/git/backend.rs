@@ -43,12 +43,11 @@ impl GitBackend {
     pub fn discover(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
 
-        let repo =
-            gix::discover(path).map_err(|_e| GitError::NotARepository(path.to_path_buf()))?;
+        let repo = gix::discover(path).map_err(|_e| {
+            GitError::NotARepository(path.to_path_buf())
+        })?;
 
-        let repo_path = repo
-            .path()
-            .parent()
+        let repo_path = repo.path().parent()
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| path.to_path_buf());
 
@@ -80,11 +79,7 @@ impl GitBackend {
                 match head.id() {
                     Some(id) => {
                         let id_str = id.to_string();
-                        let short = if id_str.len() > 8 {
-                            &id_str[..8]
-                        } else {
-                            &id_str
-                        };
+                        let short = if id_str.len() > 8 { &id_str[..8] } else { &id_str };
                         Ok(format!("HEAD detached at {}", short))
                     }
                     None => Ok("HEAD (no commits)".to_string()),
@@ -100,10 +95,7 @@ impl GitBackend {
 
     /// Check if a branch exists
     pub fn branch_exists(&self, branch_name: &str) -> Result<bool> {
-        let refs = self
-            .repo
-            .references()
-            .map_err(|e| GitError::Gix(e.to_string()))?;
+        let refs = self.repo.references().map_err(|e| GitError::Gix(e.to_string()))?;
 
         let branch_ref = format!("refs/heads/{}", branch_name);
 
@@ -133,10 +125,7 @@ impl GitBackend {
     /// Check if the working directory is dirty
     pub fn is_dirty(&self) -> Result<bool> {
         // Get the index
-        let _index = self
-            .repo
-            .index()
-            .map_err(|e| GitError::Gix(e.to_string()))?;
+        let _index = self.repo.index().map_err(|e| GitError::Gix(e.to_string()))?;
 
         // For now, we'll use a simple heuristic: check if there are any changes
         // A full implementation would compare index to HEAD and worktree to index

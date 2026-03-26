@@ -137,15 +137,16 @@ impl StateStore {
         let state_path = self.state_path.clone();
         let lock_path = self.lock_path.clone();
 
-        let (result, new_state, mtime) =
-            tokio::task::spawn_blocking(move || -> std::result::Result<_, crate::error::Error> {
+        let (result, new_state, mtime) = tokio::task::spawn_blocking(
+            move || -> std::result::Result<_, crate::error::Error> {
                 let lock_file = open_lock_file(&lock_path)?;
-                let _lock = Flock::lock(lock_file, FlockArg::LockExclusive).map_err(|(_, e)| {
-                    crate::error::Error::Config(ConfigError::SaveFailed(format!(
-                        "Failed to acquire file lock: {}",
-                        e
-                    )))
-                })?;
+                let _lock =
+                    Flock::lock(lock_file, FlockArg::LockExclusive).map_err(|(_, e)| {
+                        crate::error::Error::Config(ConfigError::SaveFailed(format!(
+                            "Failed to acquire file lock: {}",
+                            e
+                        )))
+                    })?;
 
                 let mut disk_state = read_state_from_disk(&state_path)?;
 
@@ -160,9 +161,10 @@ impl StateStore {
                     .ok();
 
                 Ok((result, disk_state, mtime))
-            })
-            .await
-            .map_err(|e| ConfigError::SaveFailed(format!("Blocking task panicked: {}", e)))??;
+            },
+        )
+        .await
+        .map_err(|e| ConfigError::SaveFailed(format!("Blocking task panicked: {}", e)))??;
 
         *self.state.write().await = new_state;
         *self.last_mtime.write().await = mtime;
@@ -257,14 +259,15 @@ fn atomic_write(path: &PathBuf, state: &AppState) -> Result<()> {
     let tmp_path = path.with_extension(format!("json.tmp.{}", std::process::id()));
 
     {
-        let mut tmp_file = File::create(&tmp_path)
-            .map_err(|e| ConfigError::SaveFailed(format!("Failed to create temp file: {}", e)))?;
-        tmp_file
-            .write_all(content.as_bytes())
-            .map_err(|e| ConfigError::SaveFailed(format!("Failed to write temp file: {}", e)))?;
-        tmp_file
-            .sync_all()
-            .map_err(|e| ConfigError::SaveFailed(format!("Failed to fsync temp file: {}", e)))?;
+        let mut tmp_file = File::create(&tmp_path).map_err(|e| {
+            ConfigError::SaveFailed(format!("Failed to create temp file: {}", e))
+        })?;
+        tmp_file.write_all(content.as_bytes()).map_err(|e| {
+            ConfigError::SaveFailed(format!("Failed to write temp file: {}", e))
+        })?;
+        tmp_file.sync_all().map_err(|e| {
+            ConfigError::SaveFailed(format!("Failed to fsync temp file: {}", e))
+        })?;
     }
 
     std::fs::rename(&tmp_path, path).map_err(|e| {

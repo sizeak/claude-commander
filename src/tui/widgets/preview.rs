@@ -211,10 +211,7 @@ mod tests {
         let mut state = PreviewState::new();
 
         // 100 lines, 20 visible - starts at bottom (follow mode)
-        let content = (0..100)
-            .map(|i| format!("Line {}", i))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let content = (0..100).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
         state.set_content(&content, 20);
 
         assert_eq!(state.total_lines, 100);
@@ -240,10 +237,7 @@ mod tests {
         let mut state = PreviewState::new();
 
         // 10 lines, 20 visible - no scrolling needed
-        let content = (0..10)
-            .map(|i| format!("Line {}", i))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let content = (0..10).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
         state.set_content(&content, 20);
 
         assert!(!state.can_scroll_down());

@@ -92,7 +92,10 @@ impl ContentCapture {
 
     /// Get content for a tmux session, using cache if fresh
     #[instrument(skip(self))]
-    pub async fn get_content(&self, tmux_session_name: &str) -> Result<CapturedContent> {
+    pub async fn get_content(
+        &self,
+        tmux_session_name: &str,
+    ) -> Result<CapturedContent> {
         // Fast path: check cache with read lock
         {
             let cache = self.cache.read().await;
@@ -114,7 +117,10 @@ impl ContentCapture {
     }
 
     /// Force a fresh capture, bypassing cache
-    pub async fn capture_fresh(&self, tmux_session_name: &str) -> Result<CapturedContent> {
+    pub async fn capture_fresh(
+        &self,
+        tmux_session_name: &str,
+    ) -> Result<CapturedContent> {
         // Capture with scrollback (last 1000 lines)
         let content = self
             .executor

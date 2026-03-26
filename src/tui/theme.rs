@@ -146,21 +146,21 @@ impl Theme {
     /// 256-color theme (good balance of compatibility and aesthetics)
     pub fn indexed() -> Self {
         Self {
-            border_focused: Color::Indexed(117), // Pastel sky blue
+            border_focused: Color::Indexed(117),  // Pastel sky blue
             border_unfocused: Color::Indexed(243),
 
-            selection_bg: Color::Indexed(60), // Muted purple-blue
+            selection_bg: Color::Indexed(60),     // Muted purple-blue
             selection_fg: Some(Color::Indexed(255)),
 
-            status_running: Color::Indexed(156), // Pastel mint green
-            status_paused: Color::Indexed(222),  // Pastel peach
+            status_running: Color::Indexed(156),  // Pastel mint green
+            status_paused: Color::Indexed(222),   // Pastel peach
             status_stopped: Color::Indexed(248),
-            status_pr: Color::Indexed(141),       // Medium purple
-            status_pr_merged: Color::Indexed(97), // Dark purple
+            status_pr: Color::Indexed(141),          // Medium purple
+            status_pr_merged: Color::Indexed(97),     // Dark purple
 
             text_primary: Color::Reset,
             text_secondary: Color::Indexed(250),
-            text_accent: Color::Indexed(147), // Pastel lavender
+            text_accent: Color::Indexed(147),     // Pastel lavender
             project_colors: vec![
                 (Color::Indexed(168), Color::Indexed(218)), // Pink
                 (Color::Indexed(68), Color::Indexed(117)),  // Blue
@@ -169,17 +169,17 @@ impl Theme {
                 (Color::Indexed(134), Color::Indexed(183)), // Purple
                 (Color::Indexed(73), Color::Indexed(152)),  // Teal
             ],
-            text_pr: Color::Indexed(117), // Sky blue
+            text_pr: Color::Indexed(117),         // Sky blue
 
-            diff_added: Color::Indexed(156),       // Pastel mint
-            diff_removed: Color::Indexed(210),     // Pastel coral
+            diff_added: Color::Indexed(156),      // Pastel mint
+            diff_removed: Color::Indexed(210),    // Pastel coral
             diff_hunk_header: Color::Indexed(183), // Pastel orchid
             diff_file_header: Color::Indexed(223), // Pastel cream
             diff_context: Color::Reset,
 
-            modal_info: Color::Indexed(117),    // Pastel sky
-            modal_warning: Color::Indexed(222), // Pastel peach
-            modal_error: Color::Indexed(210),   // Pastel coral
+            modal_info: Color::Indexed(117),      // Pastel sky
+            modal_warning: Color::Indexed(222),   // Pastel peach
+            modal_error: Color::Indexed(210),     // Pastel coral
 
             status_bar_bg: Color::Indexed(236),
             status_bar_fg: Color::Indexed(252),
@@ -189,21 +189,21 @@ impl Theme {
     /// True color theme (richest visual experience)
     pub fn truecolor() -> Self {
         Self {
-            border_focused: Color::Rgb(137, 180, 250), // Pastel sky blue
+            border_focused: Color::Rgb(137, 180, 250),   // Pastel sky blue
             border_unfocused: Color::Rgb(88, 91, 112),
 
             selection_bg: Color::Rgb(69, 71, 90),
             selection_fg: Some(Color::Rgb(245, 245, 250)),
 
-            status_running: Color::Rgb(166, 227, 161), // Pastel mint
-            status_paused: Color::Rgb(249, 226, 175),  // Pastel peach
-            status_stopped: Color::Rgb(147, 153, 178), // Muted lavender
-            status_pr: Color::Rgb(203, 166, 247),      // Pastel mauve
-            status_pr_merged: Color::Rgb(137, 100, 180), // Dark purple
+            status_running: Color::Rgb(166, 227, 161),   // Pastel mint
+            status_paused: Color::Rgb(249, 226, 175),    // Pastel peach
+            status_stopped: Color::Rgb(147, 153, 178),   // Muted lavender
+            status_pr: Color::Rgb(203, 166, 247),          // Pastel mauve
+            status_pr_merged: Color::Rgb(137, 100, 180),     // Dark purple
 
             text_primary: Color::Rgb(245, 245, 250),
             text_secondary: Color::Rgb(166, 173, 200),
-            text_accent: Color::Rgb(180, 190, 254), // Pastel periwinkle
+            text_accent: Color::Rgb(180, 190, 254),      // Pastel periwinkle
             project_colors: vec![
                 (Color::Rgb(199, 120, 140), Color::Rgb(243, 174, 190)), // Pink
                 (Color::Rgb(100, 140, 210), Color::Rgb(160, 190, 245)), // Blue
@@ -212,17 +212,17 @@ impl Theme {
                 (Color::Rgb(160, 130, 200), Color::Rgb(200, 175, 240)), // Purple
                 (Color::Rgb(90, 170, 170), Color::Rgb(155, 215, 215)),  // Teal
             ],
-            text_pr: Color::Rgb(137, 180, 250), // Pastel sky blue
+            text_pr: Color::Rgb(137, 180, 250),          // Pastel sky blue
 
-            diff_added: Color::Rgb(166, 227, 161), // Pastel mint
-            diff_removed: Color::Rgb(243, 139, 168), // Pastel rose
+            diff_added: Color::Rgb(166, 227, 161),       // Pastel mint
+            diff_removed: Color::Rgb(243, 139, 168),     // Pastel rose
             diff_hunk_header: Color::Rgb(203, 166, 247), // Pastel mauve
             diff_file_header: Color::Rgb(249, 226, 175), // Pastel peach
             diff_context: Color::Reset,
 
-            modal_info: Color::Rgb(137, 180, 250), // Pastel sky
-            modal_warning: Color::Rgb(249, 226, 175), // Pastel peach
-            modal_error: Color::Rgb(243, 139, 168), // Pastel rose
+            modal_info: Color::Rgb(137, 180, 250),       // Pastel sky
+            modal_warning: Color::Rgb(249, 226, 175),    // Pastel peach
+            modal_error: Color::Rgb(243, 139, 168),      // Pastel rose
 
             status_bar_bg: Color::Rgb(49, 50, 68),
             status_bar_fg: Color::Rgb(205, 214, 244),
@@ -255,9 +255,7 @@ impl Theme {
 
     /// Style for status bar
     pub fn status_bar(&self) -> Style {
-        Style::default()
-            .bg(self.status_bar_bg)
-            .fg(self.status_bar_fg)
+        Style::default().bg(self.status_bar_bg).fg(self.status_bar_fg)
     }
 }
 

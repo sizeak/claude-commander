@@ -55,15 +55,6 @@
       {
         checks = {
           inherit claude-commander;
-
-          clippy = craneLib.cargoClippy (commonArgs // {
-            inherit cargoArtifacts;
-            cargoClippyExtraArgs = "--all-targets -- --deny warnings";
-          });
-
-          fmt = craneLib.cargoFmt {
-            inherit src;
-          };
         };
 
         packages = {

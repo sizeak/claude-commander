@@ -42,6 +42,7 @@ impl<'a> TreeList<'a> {
         self
     }
 
+
     /// Check whether sessions use more than one distinct program
     fn has_mixed_programs(&self) -> bool {
         let mut first = None;
@@ -86,7 +87,9 @@ impl<'a> TreeList<'a> {
                         Span::raw(" "),
                         Span::styled(
                             name.clone(),
-                            Style::default().fg(proj_color).add_modifier(Modifier::BOLD),
+                            Style::default()
+                                .fg(proj_color)
+                                .add_modifier(Modifier::BOLD),
                         ),
                         Span::styled(
                             format!(" [{}]", main_branch),
@@ -107,40 +110,22 @@ impl<'a> TreeList<'a> {
                     pr_merged,
                     ..
                 } => {
-                    let pr_color = if *pr_merged {
-                        self.theme.status_pr_merged
-                    } else {
-                        self.theme.status_pr
-                    };
+                    let pr_color = if *pr_merged { self.theme.status_pr_merged } else { self.theme.status_pr };
                     let has_pr = pr_number.is_some();
                     let (status_icon, status_color) = match status {
-                        SessionStatus::Running => (
-                            "●",
-                            if has_pr {
-                                pr_color
-                            } else {
-                                self.theme.status_running
-                            },
-                        ),
-                        SessionStatus::Paused => (
-                            "◐",
-                            if has_pr {
-                                pr_color
-                            } else {
-                                self.theme.status_paused
-                            },
-                        ),
+                        SessionStatus::Running => ("●", if has_pr { pr_color } else { self.theme.status_running }),
+                        SessionStatus::Paused => ("◐", if has_pr { pr_color } else { self.theme.status_paused }),
                         SessionStatus::Stopped => ("○", self.theme.status_stopped),
                     };
 
                     let mut spans = vec![
                         // Indentation for worktrees
                         Span::raw("   └── "),
+                        Span::styled(format!("{} ", status_icon), Style::default().fg(status_color)),
                         Span::styled(
-                            format!("{} ", status_icon),
-                            Style::default().fg(status_color),
+                            title.clone(),
+                            Style::default().fg(current_session_color),
                         ),
-                        Span::styled(title.clone(), Style::default().fg(current_session_color)),
                         Span::styled(
                             format!(" [{}]", branch),
                             Style::default().fg(self.theme.text_accent),
@@ -190,7 +175,10 @@ impl<'a> StatefulWidget for TreeList<'a> {
             .collect();
 
         // Compute inner area before block is moved
-        let list_area = self.block.as_ref().map_or(area, |b| b.inner(area));
+        let list_area = self
+            .block
+            .as_ref()
+            .map_or(area, |b| b.inner(area));
 
         let items = self.to_list_items();
         let list = List::new(items).highlight_style(self.highlight_style);
@@ -268,9 +256,7 @@ fn inject_pr_hyperlinks(
         let y = list_area.y + row as u16;
         let needle = format!("PR #{}", pr_num);
 
-        let Some(start_x) =
-            find_text_in_row(buf, y, list_area.x, list_area.x + list_area.width, &needle)
-        else {
+        let Some(start_x) = find_text_in_row(buf, y, list_area.x, list_area.x + list_area.width, &needle) else {
             continue;
         };
 

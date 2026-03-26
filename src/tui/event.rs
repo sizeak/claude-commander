@@ -54,17 +54,29 @@ pub enum StateUpdate {
         content_hash: u64,
     },
     /// Session status changed
-    StatusChanged { session_id: SessionId },
+    StatusChanged {
+        session_id: SessionId,
+    },
     /// Diff updated
-    DiffUpdated { session_id: SessionId },
+    DiffUpdated {
+        session_id: SessionId,
+    },
     /// Project added
-    ProjectAdded { project_id: ProjectId },
+    ProjectAdded {
+        project_id: ProjectId,
+    },
     /// Session added
-    SessionAdded { session_id: SessionId },
+    SessionAdded {
+        session_id: SessionId,
+    },
     /// Session removed
-    SessionRemoved { session_id: SessionId },
+    SessionRemoved {
+        session_id: SessionId,
+    },
     /// Error occurred
-    Error { message: String },
+    Error {
+        message: String,
+    },
     /// PR status results ready from background check
     PrStatusReady {
         results: Vec<(SessionId, Option<crate::git::PrInfo>)>,
@@ -268,8 +280,10 @@ impl EventLoop {
                 }
 
                 // Use short timeout to check generation frequently
-                let event =
-                    tokio::time::timeout(Duration::from_millis(50), reader.next().fuse()).await;
+                let event = tokio::time::timeout(
+                    Duration::from_millis(50),
+                    reader.next().fuse()
+                ).await;
 
                 match event {
                     Ok(Some(Ok(event))) => {
@@ -287,7 +301,9 @@ impl EventLoop {
                             CrosstermEvent::Resize(w, h) => {
                                 AppEvent::Input(InputEvent::Resize(w, h))
                             }
-                            CrosstermEvent::Paste(text) => AppEvent::Input(InputEvent::Paste(text)),
+                            CrosstermEvent::Paste(text) => {
+                                AppEvent::Input(InputEvent::Paste(text))
+                            }
                             _ => continue,
                         };
 

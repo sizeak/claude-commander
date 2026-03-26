@@ -29,7 +29,9 @@ pub mod tui;
 
 pub use config::{AppState, Config, StateStore};
 pub use error::{Error, Result};
-pub use session::{Project, ProjectId, SessionId, SessionListItem, SessionStatus, WorktreeSession};
+pub use session::{
+    Project, ProjectId, SessionId, SessionListItem, SessionStatus, WorktreeSession,
+};
 pub use tmux::{attach_to_session, AttachResult};
 
 /// Application version

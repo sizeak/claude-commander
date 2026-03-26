@@ -169,10 +169,11 @@ impl Config {
             })?;
         }
 
-        let toml =
-            toml::to_string_pretty(self).map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
+        let toml = toml::to_string_pretty(self)
+            .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
 
-        std::fs::write(&config_path, toml).map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
+        std::fs::write(&config_path, toml)
+            .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
 
         Ok(())
     }
@@ -198,29 +199,16 @@ impl Config {
             .unwrap_or(editor);
         matches!(
             basename,
-            "code"
-                | "code-insiders"
-                | "cursor"
-                | "zed"
-                | "zeditor"
-                | "subl"
-                | "sublime_text"
-                | "idea"
-                | "goland"
-                | "rustrover"
-                | "clion"
-                | "pycharm"
-                | "webstorm"
-                | "phpstorm"
+            "code" | "code-insiders" | "cursor"
+                | "zed" | "zeditor"
+                | "subl" | "sublime_text"
+                | "idea" | "goland" | "rustrover" | "clion" | "pycharm" | "webstorm" | "phpstorm"
                 | "atom"
                 | "lapce"
                 | "fleet"
-                | "gedit"
-                | "kate"
-                | "mousepad"
+                | "gedit" | "kate" | "mousepad"
                 | "gvim"
-                | "open"
-                | "xdg-open"
+                | "open" | "xdg-open"
         )
     }
 
