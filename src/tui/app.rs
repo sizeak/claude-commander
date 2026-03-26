@@ -135,8 +135,8 @@ pub struct AppUiState {
     pub shell_content: String,
     /// Diff info
     pub diff_info: Arc<DiffInfo>,
-    /// Status message
-    pub status_message: Option<String>,
+    /// Status message (with expiry time)
+    pub status_message: Option<(String, Instant)>,
     /// Should quit
     pub should_quit: bool,
     /// Last known terminal size (updated each render frame)
@@ -173,7 +173,8 @@ impl Default for AppUiState {
             list_items: Vec::new(),
             preview_content: String::new(),
             diff_info: Arc::new(DiffInfo::empty()),
-            status_message: None,
+            status_message: None, // (message, expiry)
+
             should_quit: false,
             selected_session_id: None,
             selected_project_id: None,
@@ -1062,13 +1063,23 @@ Press any key to close this help.
             height: 1,
         };
 
-        let status = if let Some(ref msg) = self.ui_state.status_message {
-            msg.clone()
+        let status = if let Some((ref msg, expires)) = self.ui_state.status_message {
+            if Instant::now() < expires {
+                msg.clone()
+            } else {
+                String::new()
+            }
         } else {
+            String::new()
+        };
+
+        let status = if status.is_empty() {
             let session_count = self.ui_state.list_items.iter()
                 .filter(|i| i.is_worktree())
                 .count();
             format!("Sessions: {} | Press ? for help | n: new session | N: add project", session_count)
+        } else {
+            status
         };
 
         let paragraph = Paragraph::new(status)
@@ -1507,7 +1518,7 @@ Press any key to close this help.
                 on_submit: InputAction::CreateSession { project_id },
             };
         } else {
-            self.ui_state.status_message = Some("Select a project first (use N to add one)".to_string());
+            self.ui_state.status_message = Some(("Select a project first (use N to add one)".to_string(), Instant::now() + Duration::from_secs(3)));
         }
     }
 
@@ -1516,7 +1527,7 @@ Press any key to close this help.
         if let Some(session_id) = self.ui_state.selected_session_id {
             match self.session_manager.pause_session(&session_id).await {
                 Ok(_) => {
-                    self.ui_state.status_message = Some("Session paused".to_string());
+                    self.ui_state.status_message = Some(("Session paused".to_string(), Instant::now() + Duration::from_secs(3)));
                     self.refresh_list_items().await;
                 }
                 Err(e) => {
@@ -1533,7 +1544,7 @@ Press any key to close this help.
         if let Some(session_id) = self.ui_state.selected_session_id {
             match self.session_manager.resume_session(&session_id).await {
                 Ok(_) => {
-                    self.ui_state.status_message = Some("Session resumed".to_string());
+                    self.ui_state.status_message = Some(("Session resumed".to_string(), Instant::now() + Duration::from_secs(3)));
                     self.refresh_list_items().await;
                 }
                 Err(e) => {
@@ -1574,13 +1585,13 @@ Press any key to close this help.
         match action {
             InputAction::CreateSession { project_id } => {
                 if value.trim().is_empty() {
-                    self.ui_state.status_message = Some("Session name cannot be empty".to_string());
+                    self.ui_state.status_message = Some(("Session name cannot be empty".to_string(), Instant::now() + Duration::from_secs(3)));
                     return;
                 }
 
                 match self.session_manager.create_session(&project_id, value, None).await {
                     Ok(session_id) => {
-                        self.ui_state.status_message = Some(format!("Created session {}", session_id));
+                        self.ui_state.status_message = Some((format!("Created session {}", session_id), Instant::now() + Duration::from_secs(3)));
                         self.refresh_list_items().await;
                         // Select the newly created session
                         if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
@@ -1608,7 +1619,7 @@ Press any key to close this help.
 
                 match self.session_manager.add_project(path).await {
                     Ok(project_id) => {
-                        self.ui_state.status_message = Some(format!("Added project {}", project_id));
+                        self.ui_state.status_message = Some((format!("Added project {}", project_id), Instant::now() + Duration::from_secs(3)));
                         self.refresh_list_items().await;
                         // Select the newly added project
                         if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
@@ -1657,7 +1668,7 @@ Press any key to close this help.
                     return;
                 }
                 self.ui_state.selected_session_id = None;
-                self.ui_state.status_message = Some("Session deleted".to_string());
+                self.ui_state.status_message = Some(("Session deleted".to_string(), Instant::now() + Duration::from_secs(3)));
                 self.refresh_list_items().await;
 
                 // 3. Spawn background cleanup (kill tmux + remove worktree)
@@ -1735,7 +1746,7 @@ Press any key to close this help.
                     return;
                 }
                 self.ui_state.selected_project_id = None;
-                self.ui_state.status_message = Some("Project removed".to_string());
+                self.ui_state.status_message = Some(("Project removed".to_string(), Instant::now() + Duration::from_secs(3)));
                 self.refresh_list_items().await;
 
                 // 3. Spawn background cleanup (kill all tmux sessions + remove worktrees)
