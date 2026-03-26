@@ -43,10 +43,12 @@ enum ScrollDirection {
     Down,
 }
 
-/// Left pane (session list) width as a percentage of the content area
-const LEFT_PANE_PCT: u16 = 30;
-/// Right pane (preview/diff/shell) width as a percentage of the content area
-const RIGHT_PANE_PCT: u16 = 70;
+/// Minimum left pane width as a percentage of the content area
+const MIN_LEFT_PANE_PCT: u16 = 15;
+/// Maximum left pane width as a percentage of the content area
+const MAX_LEFT_PANE_PCT: u16 = 60;
+/// Default left pane width as a percentage of the content area
+const DEFAULT_LEFT_PANE_PCT: u16 = 30;
 
 /// Which pane is currently focused
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -151,6 +153,8 @@ pub struct AppUiState {
     pub editor_command: Option<(String, PathBuf)>,
     /// Needs right pane clear (set on view switch, consumed on render)
     pub clear_right_pane: bool,
+    /// Left pane width as a percentage (adjustable at runtime via < / >)
+    pub left_pane_pct: u16,
     /// When the last PR status check was performed
     pub last_pr_check: Option<Instant>,
     /// Whether the `gh` CLI is available
@@ -181,6 +185,7 @@ impl Default for AppUiState {
             attach_command: None,
             editor_command: None,
             clear_right_pane: false,
+            left_pane_pct: DEFAULT_LEFT_PANE_PCT,
             last_pr_check: None,
             gh_available: false,
             preview_update_spawned_at: None,
@@ -660,8 +665,8 @@ impl App {
         let main_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
-                Constraint::Percentage(LEFT_PANE_PCT),
-                Constraint::Percentage(RIGHT_PANE_PCT),
+                Constraint::Percentage(self.ui_state.left_pane_pct),
+                Constraint::Percentage(100 - self.ui_state.left_pane_pct),
             ])
             .split(content_area);
 
@@ -699,7 +704,7 @@ impl App {
         // Main layout: session list on left, right pane fills rest
         let main_chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(LEFT_PANE_PCT), Constraint::Percentage(RIGHT_PANE_PCT)])
+            .constraints([Constraint::Percentage(self.ui_state.left_pane_pct), Constraint::Percentage(100 - self.ui_state.left_pane_pct)])
             .split(content_area);
 
         // Render session list
@@ -1037,6 +1042,9 @@ Scrolling:
   Ctrl+u/d        Page up/down in current view
   PgUp/PgDn       Page up/down
 
+Layout:
+  </>             Resize pane split
+
 Other:
   ?               Show this help
   q               Quit
@@ -1316,6 +1324,17 @@ Press any key to close this help.
                     }
                 };
                 self.ui_state.clear_right_pane = true;
+            }
+            UserCommand::ShrinkLeftPane => {
+                self.ui_state.left_pane_pct = self
+                    .ui_state
+                    .left_pane_pct
+                    .saturating_sub(2)
+                    .max(MIN_LEFT_PANE_PCT);
+            }
+            UserCommand::GrowLeftPane => {
+                self.ui_state.left_pane_pct =
+                    (self.ui_state.left_pane_pct + 2).min(MAX_LEFT_PANE_PCT);
             }
             UserCommand::ShowHelp => {
                 self.ui_state.modal = Modal::Help;

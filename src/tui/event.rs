@@ -127,6 +127,10 @@ pub enum UserCommand {
     TogglePane,
     /// Toggle between preview/diff panes (reverse)
     TogglePaneReverse,
+    /// Shrink left pane (move divider left)
+    ShrinkLeftPane,
+    /// Grow left pane (move divider right)
+    GrowLeftPane,
     /// Show help
     ShowHelp,
     /// Quit application
@@ -183,6 +187,12 @@ impl UserCommand {
             // Pane control
             (KeyCode::Tab, KeyModifiers::NONE) => Some(UserCommand::TogglePane),
             (KeyCode::BackTab, _) => Some(UserCommand::TogglePaneReverse),
+            (KeyCode::Char('<'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                Some(UserCommand::ShrinkLeftPane)
+            }
+            (KeyCode::Char('>'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                Some(UserCommand::GrowLeftPane)
+            }
 
             // Scrolling
             (KeyCode::Char('u'), KeyModifiers::CONTROL) => Some(UserCommand::PageUp),
@@ -395,6 +405,34 @@ mod tests {
         assert!(matches!(
             UserCommand::from_key(key),
             Some(UserCommand::TextInput('a'))
+        ));
+    }
+
+    #[test]
+    fn test_pane_resize_keys() {
+        let key = KeyEvent::new(KeyCode::Char('<'), KeyModifiers::SHIFT);
+        assert!(matches!(
+            UserCommand::from_key(key),
+            Some(UserCommand::ShrinkLeftPane)
+        ));
+
+        let key = KeyEvent::new(KeyCode::Char('>'), KeyModifiers::SHIFT);
+        assert!(matches!(
+            UserCommand::from_key(key),
+            Some(UserCommand::GrowLeftPane)
+        ));
+
+        // Some terminals report without SHIFT
+        let key = KeyEvent::new(KeyCode::Char('<'), KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(key),
+            Some(UserCommand::ShrinkLeftPane)
+        ));
+
+        let key = KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(key),
+            Some(UserCommand::GrowLeftPane)
         ));
     }
 }
