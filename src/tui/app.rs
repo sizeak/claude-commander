@@ -1016,43 +1016,64 @@ impl App {
                     vertical: 1,
                 });
 
-                let help_text = r#"Navigation:
-  j/k, Up/Down    Navigate session list
-  Enter           Attach to selected session
-  s               Open shell in worktree
-  Tab/Shift+Tab   Toggle preview/diff/shell view
+                let help_lines = vec![
+                    Line::from("Navigation:"),
+                    Line::from("  j/k, Up/Down    Navigate session list"),
+                    Line::from("  Enter           Attach to selected session"),
+                    Line::from("  s               Open shell in worktree"),
+                    Line::from("  Tab/Shift+Tab   Toggle preview/diff/shell view"),
+                    Line::from(""),
+                    Line::from("Session Management:"),
+                    Line::from("  n               New worktree session (under selected project)"),
+                    Line::from("  N               New project (add git repo)"),
+                    Line::from("  p               Pause session"),
+                    Line::from("  r               Resume session"),
+                    Line::from("  d               Delete/kill session"),
+                    Line::from("  D               Remove project"),
+                    Line::from("  e               Open in editor/IDE"),
+                    Line::from(""),
+                    Line::from("Status Indicators:"),
+                    Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled("●", Style::default().fg(self.theme.status_running)),
+                        Span::raw("  Running (agent active)"),
+                    ]),
+                    Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled("●", Style::default().fg(self.theme.status_pr)),
+                        Span::raw("  PR open"),
+                    ]),
+                    Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled("●", Style::default().fg(self.theme.status_pr_merged)),
+                        Span::raw("  PR merged"),
+                    ]),
+                    Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled("◐", Style::default().fg(self.theme.status_paused)),
+                        Span::raw("  Paused"),
+                    ]),
+                    Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled("○", Style::default().fg(self.theme.status_stopped)),
+                        Span::raw("  Stopped"),
+                    ]),
+                    Line::from(""),
+                    Line::from("Scrolling:"),
+                    Line::from("  Ctrl+u/d        Page up/down in current view"),
+                    Line::from("  PgUp/PgDn       Page up/down"),
+                    Line::from(""),
+                    Line::from("Layout:"),
+                    Line::from("  </>             Resize pane split"),
+                    Line::from(""),
+                    Line::from("Other:"),
+                    Line::from("  ?               Show this help"),
+                    Line::from("  q               Quit"),
+                    Line::from(""),
+                    Line::from("Press any key to close this help."),
+                ];
 
-Session Management:
-  n               New worktree session (under selected project)
-  N               New project (add git repo)
-  p               Pause session
-  r               Resume session
-  d               Delete/kill session
-  D               Remove project
-  e               Open in editor/IDE
-
-Status Indicators:
-  ●  Running (agent active, green)
-  ●  PR open (light purple)
-  ●  PR merged (dark purple)
-  ◐  Paused
-  ○  Stopped
-
-Scrolling:
-  Ctrl+u/d        Page up/down in current view
-  PgUp/PgDn       Page up/down
-
-Layout:
-  </>             Resize pane split
-
-Other:
-  ?               Show this help
-  q               Quit
-
-Press any key to close this help.
-"#;
-
-                let paragraph = Paragraph::new(help_text);
+                let paragraph = Paragraph::new(help_lines);
                 frame.render_widget(paragraph, content_area);
             }
         }
