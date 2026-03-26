@@ -27,7 +27,7 @@ pub mod session;
 pub mod tmux;
 pub mod tui;
 
-pub use config::{AppState, Config};
+pub use config::{AppState, Config, StateStore};
 pub use error::{Error, Result};
 pub use session::{
     Project, ProjectId, SessionId, SessionListItem, SessionStatus, WorktreeSession,

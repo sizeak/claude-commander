@@ -6,7 +6,9 @@
 //! - Worktree directory management
 
 mod settings;
-mod storage;
+pub mod storage;
+mod store;
 
 pub use settings::*;
 pub use storage::*;
+pub use store::StateStore;

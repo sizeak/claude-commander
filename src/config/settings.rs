@@ -54,6 +54,9 @@ pub struct Config {
     /// Pull the latest changes on the project's checked-out branch before creating a new session
     pub pull_before_create: bool,
 
+    /// Interval in milliseconds for checking state file changes from other instances (0 = disabled)
+    pub state_sync_interval_ms: u64,
+
     /// Enable debug logging
     pub debug: bool,
 
@@ -76,6 +79,7 @@ impl Default for Config {
             shell_program: std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string()),
             pr_check_interval_secs: 600,
             pull_before_create: true,
+            state_sync_interval_ms: 2000,
             debug: false,
             log_file: None,
         }

@@ -7,17 +7,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use tempfile::TempDir;
-use tokio::sync::RwLock;
 
-use claude_commander::config::{AppState, Config};
+use claude_commander::config::{AppState, Config, StateStore};
 use claude_commander::git::GitBackend;
 use claude_commander::session::SessionManager;
 use claude_commander::SessionStatus;
 
-/// Helper to create an isolated AppState that won't pollute user data
-fn create_isolated_state(temp_dir: &TempDir) -> AppState {
+/// Helper to create an isolated StateStore that won't pollute user data
+fn create_isolated_store(temp_dir: &TempDir) -> Arc<StateStore> {
     let state_path = temp_dir.path().join("state.json");
-    AppState::load_from(&state_path).unwrap()
+    let state = AppState::load_from(&state_path).unwrap();
+    Arc::new(StateStore::with_path(state, state_path))
 }
 
 /// Helper to create a test git repository
@@ -130,8 +130,8 @@ async fn test_session_manager_add_project() {
     let state_temp_dir = TempDir::new().unwrap();
 
     let config = Config::default();
-    let state = Arc::new(RwLock::new(create_isolated_state(&state_temp_dir)));
-    let manager = SessionManager::new(config, state.clone());
+    let store = create_isolated_store(&state_temp_dir);
+    let manager = SessionManager::new(config, store.clone());
 
     // Add project
     let result = manager.add_project(repo_path.clone()).await;
@@ -140,7 +140,7 @@ async fn test_session_manager_add_project() {
     let project_id = result.unwrap();
 
     // Verify project was added
-    let state = state.read().await;
+    let state = store.read().await;
     assert!(state.get_project(&project_id).is_some());
 
     // Keep temp dirs alive until end of test
@@ -163,8 +163,8 @@ async fn test_session_manager_create_session() {
     let mut config = Config::default();
     config.worktrees_dir = Some(worktrees_dir.path().to_path_buf());
 
-    let state = Arc::new(RwLock::new(create_isolated_state(&state_temp_dir)));
-    let manager = SessionManager::new(config, state.clone());
+    let store = create_isolated_store(&state_temp_dir);
+    let manager = SessionManager::new(config, store.clone());
 
     // Add project
     let project_id = manager.add_project(repo_path).await.unwrap();
@@ -184,7 +184,7 @@ async fn test_session_manager_create_session() {
 
     // Verify session was created
     {
-        let state = state.read().await;
+        let state = store.read().await;
         let session = state.get_session(&session_id);
         assert!(session.is_some(), "Session should exist in state");
 
@@ -216,8 +216,8 @@ async fn test_session_manager_pause_resume() {
     let mut config = Config::default();
     config.worktrees_dir = Some(worktrees_dir.path().to_path_buf());
 
-    let state = Arc::new(RwLock::new(create_isolated_state(&state_temp_dir)));
-    let manager = SessionManager::new(config, state.clone());
+    let store = create_isolated_store(&state_temp_dir);
+    let manager = SessionManager::new(config, store.clone());
 
     // Add project and create session
     let project_id = manager.add_project(repo_path).await.unwrap();
@@ -228,7 +228,7 @@ async fn test_session_manager_pause_resume() {
 
     // Verify initial status
     {
-        let state = state.read().await;
+        let state = store.read().await;
         let session = state.get_session(&session_id).unwrap();
         assert!(session.status.can_pause(), "Should be able to pause");
     }
@@ -239,7 +239,7 @@ async fn test_session_manager_pause_resume() {
 
     // Verify paused status
     {
-        let state = state.read().await;
+        let state = store.read().await;
         let session = state.get_session(&session_id).unwrap();
         assert!(session.status.can_resume(), "Should be able to resume");
     }
@@ -307,15 +307,15 @@ async fn test_sync_worktrees_imports_external() {
     let mut config = Config::default();
     config.worktrees_dir = Some(worktrees_dir.path().to_path_buf());
 
-    let state = Arc::new(RwLock::new(create_isolated_state(&state_temp_dir)));
-    let manager = SessionManager::new(config, state.clone());
+    let store = create_isolated_store(&state_temp_dir);
+    let manager = SessionManager::new(config, store.clone());
 
     // Add project (no worktrees yet)
     let project_id = manager.add_project(repo_path.clone()).await.unwrap();
 
     // Verify no sessions were imported (no external worktrees exist)
     {
-        let st = state.read().await;
+        let st = store.read().await;
         let project = st.get_project(&project_id).unwrap();
         assert_eq!(project.worktrees.len(), 0, "No sessions should exist yet");
     }
@@ -342,7 +342,7 @@ async fn test_sync_worktrees_imports_external() {
 
     // Verify the imported session
     {
-        let st = state.read().await;
+        let st = store.read().await;
         let project = st.get_project(&project_id).unwrap();
         assert_eq!(project.worktrees.len(), 1, "Should have 1 session");
 

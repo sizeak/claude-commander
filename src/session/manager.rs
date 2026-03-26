@@ -6,10 +6,9 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use tokio::sync::RwLock;
 use tracing::{info, instrument, warn};
 
-use crate::config::{AppState, Config};
+use crate::config::{Config, StateStore};
 use crate::error::{Result, SessionError};
 use crate::git::{DiffCache, DiffInfo, GitBackend, WorktreeManager};
 use crate::session::{Project, ProjectId, SessionId, SessionStatus, WorktreeSession};
@@ -19,8 +18,8 @@ use crate::tmux::{CapturedContent, ContentCapture, TmuxExecutor};
 pub struct SessionManager {
     /// Application configuration
     config: Config,
-    /// Persistent state
-    pub app_state: Arc<RwLock<AppState>>,
+    /// Concurrent-safe persistent state store
+    pub store: Arc<StateStore>,
     /// Tmux executor
     pub tmux: TmuxExecutor,
     /// Content capture cache
@@ -35,7 +34,7 @@ impl Clone for SessionManager {
     fn clone(&self) -> Self {
         Self {
             config: self.config.clone(),
-            app_state: self.app_state.clone(),
+            store: self.store.clone(),
             tmux: self.tmux.clone(),
             content_capture: self.content_capture.clone(),
             diff_cache: self.diff_cache.clone(),
@@ -46,7 +45,7 @@ impl Clone for SessionManager {
 
 impl SessionManager {
     /// Create a new session manager
-    pub fn new(config: Config, state: Arc<RwLock<AppState>>) -> Self {
+    pub fn new(config: Config, store: Arc<StateStore>) -> Self {
         let tmux = TmuxExecutor::with_max_concurrent(config.max_concurrent_tmux);
         let content_capture = ContentCapture::with_ttl(
             tmux.clone(),
@@ -59,7 +58,7 @@ impl SessionManager {
 
         Self {
             config,
-            app_state: state,
+            store,
             tmux,
             content_capture,
             diff_cache,
@@ -86,12 +85,9 @@ impl SessionManager {
         let project = Project::new(name, repo_path, main_branch);
         let project_id = project.id;
 
-        // Save to state
-        {
-            let mut state = self.app_state.write().await;
+        self.store.mutate(move |state| {
             state.add_project(project);
-            state.save()?;
-        }
+        }).await?;
 
         // Import any existing worktrees as sessions
         if let Err(e) = self.sync_worktrees(&project_id).await {
@@ -104,38 +100,42 @@ impl SessionManager {
     /// Remove a project and all its sessions
     #[instrument(skip(self))]
     pub async fn remove_project(&self, project_id: &ProjectId) -> Result<()> {
-        let mut state = self.app_state.write().await;
-
-        // Get project first to find sessions
-        let project = state
-            .get_project(project_id)
-            .ok_or_else(|| SessionError::ProjectNotFound(project_id.to_string()))?
-            .clone();
+        // Read project data for tmux cleanup
+        let project = {
+            let state = self.store.read().await;
+            state
+                .get_project(project_id)
+                .ok_or_else(|| SessionError::ProjectNotFound(project_id.to_string()))?
+                .clone()
+        };
 
         // Kill project shell tmux session if it exists
         if let Some(ref shell_name) = project.shell_tmux_session_name {
             let _ = self.tmux.kill_session(shell_name).await;
         }
 
-        // Kill all sessions
-        for session_id in &project.worktrees {
-            if let Some(session) = state.get_session(session_id) {
-                // Kill tmux session if running
-                if session.status.is_active() {
-                    if let Err(e) = self.tmux.kill_session(&session.tmux_session_name).await {
-                        warn!("Failed to kill tmux session: {}", e);
+        // Kill all sessions' tmux processes
+        {
+            let state = self.store.read().await;
+            for session_id in &project.worktrees {
+                if let Some(session) = state.get_session(session_id) {
+                    if session.status.is_active() {
+                        if let Err(e) = self.tmux.kill_session(&session.tmux_session_name).await {
+                            warn!("Failed to kill tmux session: {}", e);
+                        }
                     }
-                }
-                // Kill shell tmux session if it exists
-                if let Some(ref shell_name) = session.shell_tmux_session_name {
-                    let _ = self.tmux.kill_session(shell_name).await;
+                    if let Some(ref shell_name) = session.shell_tmux_session_name {
+                        let _ = self.tmux.kill_session(shell_name).await;
+                    }
                 }
             }
         }
 
-        // Remove project (also removes sessions)
-        state.remove_project(project_id);
-        state.save()?;
+        // Remove project from state (also removes sessions)
+        let pid = *project_id;
+        self.store.mutate(move |state| {
+            state.remove_project(&pid);
+        }).await?;
 
         info!("Removed project {}", project_id);
         Ok(())
@@ -153,7 +153,7 @@ impl SessionManager {
 
         // Get project info
         let (repo_path, _main_branch) = {
-            let state = self.app_state.read().await;
+            let state = self.store.read().await;
             let project = state
                 .get_project(project_id)
                 .ok_or_else(|| SessionError::ProjectNotFound(project_id.to_string()))?;
@@ -216,11 +216,9 @@ impl SessionManager {
             .await?;
 
         // Save session to state
-        {
-            let mut state = self.app_state.write().await;
+        self.store.mutate(move |state| {
             state.add_session(session);
-            state.save()?;
-        }
+        }).await?;
 
         info!("Created session {} with tmux session {}", session_id, tmux_session_name);
         Ok(session_id)
@@ -229,19 +227,19 @@ impl SessionManager {
     /// Pause a session (detach from tmux, keep worktree)
     #[instrument(skip(self))]
     pub async fn pause_session(&self, session_id: &SessionId) -> Result<()> {
-        let mut state = self.app_state.write().await;
+        let sid = *session_id;
+        self.store.try_mutate(move |state| {
+            let session = state
+                .get_session_mut(&sid)
+                .ok_or(SessionError::NotFound(sid))?;
 
-        let session = state
-            .get_session_mut(session_id)
-            .ok_or(SessionError::NotFound(*session_id))?;
+            if !session.status.can_pause() {
+                return Err(SessionError::InvalidState(sid).into());
+            }
 
-        if !session.status.can_pause() {
-            return Err(SessionError::InvalidState(*session_id).into());
-        }
-
-        // Update status
-        session.set_status(SessionStatus::Paused);
-        state.save()?;
+            session.set_status(SessionStatus::Paused);
+            Ok(())
+        }).await?;
 
         info!("Paused session {}", session_id);
         Ok(())
@@ -250,32 +248,41 @@ impl SessionManager {
     /// Resume a paused session
     #[instrument(skip(self))]
     pub async fn resume_session(&self, session_id: &SessionId) -> Result<()> {
-        let mut state = self.app_state.write().await;
+        // Read session info first
+        let (tmux_session_name, worktree_path, program, can_resume) = {
+            let state = self.store.read().await;
+            let session = state
+                .get_session(session_id)
+                .ok_or(SessionError::NotFound(*session_id))?;
+            (
+                session.tmux_session_name.clone(),
+                session.worktree_path.clone(),
+                session.program.clone(),
+                session.status.can_resume(),
+            )
+        };
 
-        let session = state
-            .get_session_mut(session_id)
-            .ok_or(SessionError::NotFound(*session_id))?;
-
-        if !session.status.can_resume() {
+        if !can_resume {
             return Err(SessionError::InvalidState(*session_id).into());
         }
 
         // Check if tmux session still exists
-        let tmux_session_name = session.tmux_session_name.clone();
         let exists = self.tmux.session_exists(&tmux_session_name).await?;
 
         if !exists {
-            // Recreate tmux session with --resume so the agent picks up where it left off
-            let worktree_path = session.worktree_path.clone();
-            let resume_program = format!("{} --resume", session.program);
+            let resume_program = format!("{} --resume", program);
             self.tmux
                 .create_session(&tmux_session_name, &worktree_path, Some(&resume_program))
                 .await?;
         }
 
         // Update status
-        session.set_status(SessionStatus::Running);
-        state.save()?;
+        let sid = *session_id;
+        self.store.mutate(move |state| {
+            if let Some(session) = state.get_session_mut(&sid) {
+                session.set_status(SessionStatus::Running);
+            }
+        }).await?;
 
         info!("Resumed session {}", session_id);
         Ok(())
@@ -285,7 +292,7 @@ impl SessionManager {
     #[instrument(skip(self))]
     pub async fn kill_session(&self, session_id: &SessionId, remove_worktree: bool) -> Result<()> {
         let session = {
-            let state = self.app_state.read().await;
+            let state = self.store.read().await;
             state
                 .get_session(session_id)
                 .ok_or(SessionError::NotFound(*session_id))?
@@ -305,7 +312,7 @@ impl SessionManager {
         // Optionally remove worktree
         if remove_worktree {
             let repo_path = {
-                let state = self.app_state.read().await;
+                let state = self.store.read().await;
                 state
                     .get_project(&session.project_id)
                     .map(|p| p.repo_path.clone())
@@ -326,13 +333,12 @@ impl SessionManager {
         }
 
         // Update state
-        {
-            let mut state = self.app_state.write().await;
-            if let Some(session) = state.get_session_mut(session_id) {
+        let sid = *session_id;
+        self.store.mutate(move |state| {
+            if let Some(session) = state.get_session_mut(&sid) {
                 session.set_status(SessionStatus::Stopped);
             }
-            state.save()?;
-        }
+        }).await?;
 
         info!("Killed session {}", session_id);
         Ok(())
@@ -343,7 +349,7 @@ impl SessionManager {
     pub async fn delete_session(&self, session_id: &SessionId) -> Result<()> {
         // First kill if active
         {
-            let state = self.app_state.read().await;
+            let state = self.store.read().await;
             if let Some(session) = state.get_session(session_id) {
                 if session.status.is_active() {
                     drop(state);
@@ -353,11 +359,10 @@ impl SessionManager {
         }
 
         // Remove from state
-        {
-            let mut state = self.app_state.write().await;
-            state.remove_session(session_id);
-            state.save()?;
-        }
+        let sid = *session_id;
+        self.store.mutate(move |state| {
+            state.remove_session(&sid);
+        }).await?;
 
         info!("Deleted session {}", session_id);
         Ok(())
@@ -368,7 +373,7 @@ impl SessionManager {
         info!("get_attach_command called for session: {}", session_id);
 
         let (tmux_name, worktree_path, program) = {
-            let state = self.app_state.read().await;
+            let state = self.store.read().await;
             let session = state
                 .get_session(session_id)
                 .ok_or(SessionError::NotFound(*session_id))?;
@@ -416,11 +421,12 @@ impl SessionManager {
                 .create_session(&tmux_name, &worktree_path, Some(&resume_program))
                 .await?;
 
-            let mut state = self.app_state.write().await;
-            if let Some(session) = state.get_session_mut(session_id) {
-                session.set_status(SessionStatus::Running);
-                let _ = state.save();
-            }
+            let sid = *session_id;
+            let _ = self.store.mutate(move |state| {
+                if let Some(session) = state.get_session_mut(&sid) {
+                    session.set_status(SessionStatus::Running);
+                }
+            }).await;
         }
 
         let cmd = format!("tmux attach-session -t {}", tmux_name);
@@ -431,7 +437,7 @@ impl SessionManager {
     /// Ensure a shell tmux session exists for the given session (lazy creation)
     async fn ensure_shell_session(&self, session_id: &SessionId) -> Result<String> {
         let (existing_shell_name, tmux_name, worktree_path) = {
-            let state = self.app_state.read().await;
+            let state = self.store.read().await;
             let session = state
                 .get_session(session_id)
                 .ok_or(SessionError::NotFound(*session_id))?;
@@ -460,11 +466,13 @@ impl SessionManager {
                 let _ = self.tmux.kill_session(&shell_name).await;
             } else {
                 info!("Reusing existing shell session {}", shell_name);
-                let mut state = self.app_state.write().await;
-                if let Some(session) = state.get_session_mut(session_id) {
-                    session.shell_tmux_session_name = Some(shell_name.clone());
-                }
-                state.save()?;
+                let sid = *session_id;
+                let name = shell_name.clone();
+                self.store.mutate(move |state| {
+                    if let Some(session) = state.get_session_mut(&sid) {
+                        session.shell_tmux_session_name = Some(name);
+                    }
+                }).await?;
                 return Ok(shell_name);
             }
         }
@@ -474,13 +482,13 @@ impl SessionManager {
             .await?;
 
         // Store in session state
-        {
-            let mut state = self.app_state.write().await;
-            if let Some(session) = state.get_session_mut(session_id) {
-                session.shell_tmux_session_name = Some(shell_name.clone());
+        let sid = *session_id;
+        let name = shell_name.clone();
+        self.store.mutate(move |state| {
+            if let Some(session) = state.get_session_mut(&sid) {
+                session.shell_tmux_session_name = Some(name);
             }
-            state.save()?;
-        }
+        }).await?;
 
         info!("Created shell session {} for session {}", shell_name, session_id);
         Ok(shell_name)
@@ -493,23 +501,24 @@ impl SessionManager {
         // Verify tmux session exists and pane is alive
         let exists = self.tmux.session_exists(&shell_name).await?;
         if !exists {
-            // Clear shell session name
-            let mut state = self.app_state.write().await;
-            if let Some(session) = state.get_session_mut(session_id) {
-                session.shell_tmux_session_name = None;
-            }
-            let _ = state.save();
+            let sid = *session_id;
+            let _ = self.store.mutate(move |state| {
+                if let Some(session) = state.get_session_mut(&sid) {
+                    session.shell_tmux_session_name = None;
+                }
+            }).await;
             return Err(SessionError::TmuxSessionNotFound(shell_name).into());
         }
 
         let pane_dead = self.tmux.is_pane_dead(&shell_name).await.unwrap_or(false);
         if pane_dead {
             let _ = self.tmux.kill_session(&shell_name).await;
-            let mut state = self.app_state.write().await;
-            if let Some(session) = state.get_session_mut(session_id) {
-                session.shell_tmux_session_name = None;
-            }
-            let _ = state.save();
+            let sid = *session_id;
+            let _ = self.store.mutate(move |state| {
+                if let Some(session) = state.get_session_mut(&sid) {
+                    session.shell_tmux_session_name = None;
+                }
+            }).await;
             return Err(SessionError::TmuxSessionNotFound(
                 format!("{} (shell exited)", shell_name),
             )
@@ -522,7 +531,7 @@ impl SessionManager {
     /// Get captured content for the shell session
     pub async fn get_shell_content(&self, session_id: &SessionId) -> Result<Option<CapturedContent>> {
         let shell_name = {
-            let state = self.app_state.read().await;
+            let state = self.store.read().await;
             let session = state
                 .get_session(session_id)
                 .ok_or(SessionError::NotFound(*session_id))?;
@@ -536,12 +545,12 @@ impl SessionManager {
 
         // Check if tmux session still exists
         if !self.tmux.session_exists(&shell_name).await.unwrap_or(false) {
-            // Clear stale shell session name
-            let mut state = self.app_state.write().await;
-            if let Some(session) = state.get_session_mut(session_id) {
-                session.shell_tmux_session_name = None;
-            }
-            let _ = state.save();
+            let sid = *session_id;
+            let _ = self.store.mutate(move |state| {
+                if let Some(session) = state.get_session_mut(&sid) {
+                    session.shell_tmux_session_name = None;
+                }
+            }).await;
             return Ok(None);
         }
 
@@ -554,7 +563,7 @@ impl SessionManager {
     /// Get captured content for a session
     pub async fn get_content(&self, session_id: &SessionId) -> Result<CapturedContent> {
         let tmux_session_name = {
-            let state = self.app_state.read().await;
+            let state = self.store.read().await;
             state
                 .get_session(session_id)
                 .ok_or(SessionError::NotFound(*session_id))?
@@ -570,7 +579,7 @@ impl SessionManager {
     /// Get diff for a session
     pub async fn get_diff(&self, session_id: &SessionId) -> Result<Arc<DiffInfo>> {
         let worktree_path = {
-            let state = self.app_state.read().await;
+            let state = self.store.read().await;
             let session = state
                 .get_session(session_id)
                 .ok_or(SessionError::NotFound(*session_id))?;
@@ -585,7 +594,7 @@ impl SessionManager {
     /// Ensure a shell tmux session exists for the given project (lazy creation)
     async fn ensure_project_shell(&self, project_id: &ProjectId) -> Result<String> {
         let (existing_shell_name, repo_path, id_prefix) = {
-            let state = self.app_state.read().await;
+            let state = self.store.read().await;
             let project = state
                 .get_project(project_id)
                 .ok_or_else(|| SessionError::ProjectNotFound(project_id.to_string()))?;
@@ -614,11 +623,13 @@ impl SessionManager {
                 let _ = self.tmux.kill_session(&shell_name).await;
             } else {
                 info!("Reusing existing project shell session {}", shell_name);
-                let mut state = self.app_state.write().await;
-                if let Some(project) = state.get_project_mut(project_id) {
-                    project.shell_tmux_session_name = Some(shell_name.clone());
-                }
-                state.save()?;
+                let pid = *project_id;
+                let name = shell_name.clone();
+                self.store.mutate(move |state| {
+                    if let Some(project) = state.get_project_mut(&pid) {
+                        project.shell_tmux_session_name = Some(name);
+                    }
+                }).await?;
                 return Ok(shell_name);
             }
         }
@@ -628,13 +639,13 @@ impl SessionManager {
             .await?;
 
         // Store in project state
-        {
-            let mut state = self.app_state.write().await;
-            if let Some(project) = state.get_project_mut(project_id) {
-                project.shell_tmux_session_name = Some(shell_name.clone());
+        let pid = *project_id;
+        let name = shell_name.clone();
+        self.store.mutate(move |state| {
+            if let Some(project) = state.get_project_mut(&pid) {
+                project.shell_tmux_session_name = Some(name);
             }
-            state.save()?;
-        }
+        }).await?;
 
         info!("Created shell session {} for project {}", shell_name, project_id);
         Ok(shell_name)
@@ -647,22 +658,24 @@ impl SessionManager {
         // Verify tmux session exists and pane is alive
         let exists = self.tmux.session_exists(&shell_name).await?;
         if !exists {
-            let mut state = self.app_state.write().await;
-            if let Some(project) = state.get_project_mut(project_id) {
-                project.shell_tmux_session_name = None;
-            }
-            let _ = state.save();
+            let pid = *project_id;
+            let _ = self.store.mutate(move |state| {
+                if let Some(project) = state.get_project_mut(&pid) {
+                    project.shell_tmux_session_name = None;
+                }
+            }).await;
             return Err(SessionError::TmuxSessionNotFound(shell_name).into());
         }
 
         let pane_dead = self.tmux.is_pane_dead(&shell_name).await.unwrap_or(false);
         if pane_dead {
             let _ = self.tmux.kill_session(&shell_name).await;
-            let mut state = self.app_state.write().await;
-            if let Some(project) = state.get_project_mut(project_id) {
-                project.shell_tmux_session_name = None;
-            }
-            let _ = state.save();
+            let pid = *project_id;
+            let _ = self.store.mutate(move |state| {
+                if let Some(project) = state.get_project_mut(&pid) {
+                    project.shell_tmux_session_name = None;
+                }
+            }).await;
             return Err(SessionError::TmuxSessionNotFound(
                 format!("{} (shell exited)", shell_name),
             )
@@ -675,7 +688,7 @@ impl SessionManager {
     /// Get captured content for the project shell session
     pub async fn get_project_shell_content(&self, project_id: &ProjectId) -> Result<Option<CapturedContent>> {
         let shell_name = {
-            let state = self.app_state.read().await;
+            let state = self.store.read().await;
             let project = state
                 .get_project(project_id)
                 .ok_or_else(|| SessionError::ProjectNotFound(project_id.to_string()))?;
@@ -689,11 +702,12 @@ impl SessionManager {
 
         // Check if tmux session still exists
         if !self.tmux.session_exists(&shell_name).await.unwrap_or(false) {
-            let mut state = self.app_state.write().await;
-            if let Some(project) = state.get_project_mut(project_id) {
-                project.shell_tmux_session_name = None;
-            }
-            let _ = state.save();
+            let pid = *project_id;
+            let _ = self.store.mutate(move |state| {
+                if let Some(project) = state.get_project_mut(&pid) {
+                    project.shell_tmux_session_name = None;
+                }
+            }).await;
             return Ok(None);
         }
 
@@ -706,7 +720,7 @@ impl SessionManager {
     /// Get diff for a project (uncommitted changes in repo)
     pub async fn get_project_diff(&self, project_id: &ProjectId) -> Result<Arc<DiffInfo>> {
         let repo_path = {
-            let state = self.app_state.read().await;
+            let state = self.store.read().await;
             let project = state
                 .get_project(project_id)
                 .ok_or_else(|| SessionError::ProjectNotFound(project_id.to_string()))?;
@@ -726,7 +740,7 @@ impl SessionManager {
     #[instrument(skip(self))]
     pub async fn sync_worktrees(&self, project_id: &ProjectId) -> Result<usize> {
         let (repo_path, existing_paths) = {
-            let state = self.app_state.read().await;
+            let state = self.store.read().await;
             let project = match state.get_project(project_id) {
                 Some(p) => p,
                 None => return Ok(0),
@@ -755,6 +769,7 @@ impl SessionManager {
         };
 
         let worktrees_dir = self.config.worktrees_dir()?;
+        let canonical_worktrees_dir = std::fs::canonicalize(&worktrees_dir).unwrap_or_else(|_| worktrees_dir.clone());
         let worktree_manager = WorktreeManager::new(backend, worktrees_dir);
 
         let worktrees = match worktree_manager.list_worktrees().await {
@@ -786,6 +801,11 @@ impl SessionManager {
                 continue;
             }
 
+            // Only import worktrees inside the managed worktrees directory
+            if !canonical_wt.starts_with(&canonical_worktrees_dir) {
+                continue;
+            }
+
             // Skip if already tracked by an existing session
             if existing_paths.contains(&canonical_wt) {
                 continue;
@@ -811,11 +831,11 @@ impl SessionManager {
         }
 
         if !new_sessions.is_empty() {
-            let mut state = self.app_state.write().await;
-            for session in new_sessions {
-                state.add_session(session);
-            }
-            state.save()?;
+            self.store.mutate(move |state| {
+                for session in new_sessions {
+                    state.add_session(session);
+                }
+            }).await?;
         }
 
         if imported > 0 {
@@ -853,12 +873,21 @@ impl SessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{AppState, StateStore};
+    use tempfile::TempDir;
+
+    fn test_store() -> (TempDir, Arc<StateStore>) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("state.json");
+        let store = Arc::new(StateStore::with_path(AppState::new(), path));
+        (dir, store)
+    }
 
     #[test]
     fn test_sanitize_name() {
         let config = Config::default();
-        let state = Arc::new(RwLock::new(AppState::new()));
-        let manager = SessionManager::new(config, state);
+        let (_dir, store) = test_store();
+        let manager = SessionManager::new(config, store);
 
         assert_eq!(manager.sanitize_name("Hello World"), "hello-world");
         assert_eq!(manager.sanitize_name("Feature/Auth"), "feature-auth");
@@ -868,15 +897,15 @@ mod tests {
     #[test]
     fn test_generate_branch_name() {
         let mut config = Config::default();
-        let state = Arc::new(RwLock::new(AppState::new()));
+        let (_dir, store) = test_store();
 
         // Without prefix
-        let manager = SessionManager::new(config.clone(), state.clone());
+        let manager = SessionManager::new(config.clone(), store.clone());
         assert_eq!(manager.generate_branch_name("Feature Auth"), "feature-auth");
 
         // With prefix
         config.branch_prefix = "cc".to_string();
-        let manager = SessionManager::new(config, state);
+        let manager = SessionManager::new(config, store);
         assert_eq!(manager.generate_branch_name("Feature Auth"), "cc/feature-auth");
     }
 }

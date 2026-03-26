@@ -26,14 +26,13 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame, Terminal,
 };
-use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
 use super::event::{AppEvent, EventLoop, InputEvent, StateUpdate, UserCommand};
 use super::path_completer::PathCompleter;
 use super::theme::Theme;
 use super::widgets::{DiffView, DiffViewState, Preview, PreviewState, TreeList, TreeListState};
-use crate::config::{AppState, Config};
+use crate::config::{Config, StateStore};
 use crate::error::{Result, TuiError};
 use crate::git::{check_pr_for_branch, is_gh_available, DiffInfo};
 use crate::session::{ProjectId, SessionId, SessionListItem, SessionManager, SessionStatus};
@@ -193,8 +192,8 @@ impl Default for AppUiState {
 pub struct App {
     /// Configuration
     config: Config,
-    /// Application state (shared with background tasks)
-    app_state: Arc<RwLock<AppState>>,
+    /// Concurrent-safe persistent state store
+    store: Arc<StateStore>,
     /// Session manager
     session_manager: SessionManager,
     /// UI state
@@ -210,13 +209,12 @@ pub struct App {
 
 impl App {
     /// Create a new application
-    pub fn new(config: Config, app_state: AppState) -> Self {
-        let app_state = Arc::new(RwLock::new(app_state));
-        let session_manager = SessionManager::new(config.clone(), app_state.clone());
+    pub fn new(config: Config, store: Arc<StateStore>) -> Self {
+        let session_manager = SessionManager::new(config.clone(), store.clone());
 
         Self {
             config,
-            app_state,
+            store,
             session_manager,
             ui_state: AppUiState::default(),
             event_loop: EventLoop::new(),
@@ -243,6 +241,30 @@ impl App {
 
         let tick_rate = Duration::from_millis(1000 / self.config.ui_refresh_fps as u64);
         self.event_loop.start(tick_rate);
+
+        // Start background state sync for cross-instance changes
+        if self.config.state_sync_interval_ms > 0 {
+            let store = self.store.clone();
+            let tx = self.event_loop.sender();
+            let interval_ms = self.config.state_sync_interval_ms;
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+                loop {
+                    interval.tick().await;
+                    match store.reload_if_changed().await {
+                        Ok(true) => {
+                            let _ = tx
+                                .send(AppEvent::StateUpdate(StateUpdate::ExternalChange))
+                                .await;
+                        }
+                        Ok(false) => {}
+                        Err(e) => {
+                            debug!("State sync check failed: {}", e);
+                        }
+                    }
+                }
+            });
+        }
 
         // Restore last selection from persisted state
         self.refresh_list_items().await;
@@ -335,7 +357,7 @@ impl App {
     /// if the corresponding tmux session no longer exists or the pane is dead.
     async fn sync_session_states(&self) {
         let session_ids: Vec<(SessionId, String)> = {
-            let state = self.app_state.read().await;
+            let state = self.store.read().await;
             state
                 .sessions
                 .values()
@@ -360,22 +382,17 @@ impl App {
                 // Kill the tmux session if it exists but pane is dead
                 let _ = self.session_manager.tmux.kill_session(&tmux_name).await;
 
-                let mut state = self.app_state.write().await;
-                if let Some(session) = state.get_session_mut(&session_id) {
-                    session.set_status(SessionStatus::Stopped);
-                }
+                let _ = self.store.mutate(move |state| {
+                    if let Some(session) = state.get_session_mut(&session_id) {
+                        session.set_status(SessionStatus::Stopped);
+                    }
+                }).await;
             }
-        }
-
-        // Save updated state
-        {
-            let state = self.app_state.read().await;
-            let _ = state.save();
         }
 
         // Sync unmanaged worktrees for all projects
         let project_ids: Vec<ProjectId> = {
-            let state = self.app_state.read().await;
+            let state = self.store.read().await;
             state.projects.keys().copied().collect()
         };
         for project_id in project_ids {
@@ -1356,28 +1373,22 @@ Press any key to close this help.
                 }
             }
             StateUpdate::PrStatusReady { results } => {
-                let mut changed = false;
-                let mut state = self.app_state.write().await;
-                for (session_id, pr_info) in results {
-                    if let Some(session) = state.get_session_mut(&session_id) {
-                        let new_number = pr_info.as_ref().map(|p| p.number);
-                        let new_merged = pr_info.as_ref().is_some_and(|p| p.merged);
-                        let new_url = pr_info.map(|p| p.url);
-                        if session.pr_number != new_number
-                            || session.pr_url != new_url
-                            || session.pr_merged != new_merged
-                        {
+                let _ = self.store.mutate(move |state| {
+                    for (session_id, pr_info) in &results {
+                        if let Some(session) = state.get_session_mut(session_id) {
+                            let new_number = pr_info.as_ref().map(|p| p.number);
+                            let new_merged = pr_info.as_ref().is_some_and(|p| p.merged);
+                            let new_url = pr_info.as_ref().map(|p| p.url.clone());
                             session.pr_number = new_number;
                             session.pr_url = new_url;
                             session.pr_merged = new_merged;
-                            changed = true;
                         }
                     }
-                }
-                if changed {
-                    let _ = state.save();
-                }
-                drop(state);
+                }).await;
+                self.refresh_list_items().await;
+            }
+            StateUpdate::ExternalChange => {
+                debug!("External state change detected, refreshing UI");
                 self.refresh_list_items().await;
             }
             StateUpdate::Error { message } => {
@@ -1443,7 +1454,7 @@ Press any key to close this help.
     /// Handle open in editor command
     async fn handle_open_in_editor(&mut self) {
         let path = {
-            let state = self.app_state.read().await;
+            let state = self.store.read().await;
             if let Some(session_id) = self.ui_state.selected_session_id {
                 state
                     .sessions
@@ -1622,7 +1633,7 @@ Press any key to close this help.
             ConfirmAction::DeleteSession { session_id } => {
                 // 1. Capture session data before removal
                 let cleanup_data = {
-                    let state = self.app_state.read().await;
+                    let state = self.store.read().await;
                     state.get_session(&session_id).map(|s| {
                         let repo_path = state
                             .get_project(&s.project_id)
@@ -1637,15 +1648,13 @@ Press any key to close this help.
                 };
 
                 // 2. Remove from state immediately so the UI updates
-                {
-                    let mut state = self.app_state.write().await;
+                if let Err(e) = self.store.mutate(move |state| {
                     state.remove_session(&session_id);
-                    if let Err(e) = state.save() {
-                        self.ui_state.modal = Modal::Error {
-                            message: format!("Failed to save state: {}", e),
-                        };
-                        return;
-                    }
+                }).await {
+                    self.ui_state.modal = Modal::Error {
+                        message: format!("Failed to save state: {}", e),
+                    };
+                    return;
                 }
                 self.ui_state.selected_session_id = None;
                 self.ui_state.status_message = Some("Session deleted".to_string());
@@ -1695,7 +1704,7 @@ Press any key to close this help.
             ConfirmAction::RemoveProject { project_id } => {
                 // 1. Capture project and session data before removal
                 let cleanup_data = {
-                    let state = self.app_state.read().await;
+                    let state = self.store.read().await;
                     state.get_project(&project_id).map(|project| {
                         let repo_path = project.repo_path.clone();
                         let shell_tmux = project.shell_tmux_session_name.clone();
@@ -1717,15 +1726,13 @@ Press any key to close this help.
                 };
 
                 // 2. Remove from state immediately so the UI updates
-                {
-                    let mut state = self.app_state.write().await;
+                if let Err(e) = self.store.mutate(move |state| {
                     state.remove_project(&project_id);
-                    if let Err(e) = state.save() {
-                        self.ui_state.modal = Modal::Error {
-                            message: format!("Failed to save state: {}", e),
-                        };
-                        return;
-                    }
+                }).await {
+                    self.ui_state.modal = Modal::Error {
+                        message: format!("Failed to save state: {}", e),
+                    };
+                    return;
                 }
                 self.ui_state.selected_project_id = None;
                 self.ui_state.status_message = Some("Project removed".to_string());
@@ -1784,13 +1791,13 @@ Press any key to close this help.
     fn spawn_pr_status_check(&mut self) {
         self.ui_state.last_pr_check = Some(Instant::now());
 
-        let app_state = self.app_state.clone();
+        let store = self.store.clone();
         let tx = self.event_loop.sender();
 
         tokio::spawn(async move {
             // Collect session info under a brief read lock
             let sessions_to_check: Vec<(SessionId, String, std::path::PathBuf)> = {
-                let state = app_state.read().await;
+                let state = store.read().await;
                 state
                     .sessions
                     .values()
@@ -1817,12 +1824,15 @@ Press any key to close this help.
 
     /// Refresh the list items from app state
     async fn refresh_list_items(&mut self) {
-        let state = self.app_state.read().await;
+        let state = self.store.read().await;
 
         let mut items = Vec::new();
 
-        // Build hierarchical list
-        for project in state.projects.values() {
+        // Build hierarchical list with stable sort order
+        let mut projects: Vec<_> = state.projects.values().collect();
+        projects.sort_by(|a, b| a.name.cmp(&b.name));
+
+        for project in projects {
             // Add project item
             items.push(SessionListItem::Project {
                 id: project.id,
@@ -1832,21 +1842,26 @@ Press any key to close this help.
                 worktree_count: project.worktrees.len(),
             });
 
-            // Add worktree sessions for this project
-            for session_id in &project.worktrees {
-                if let Some(session) = state.sessions.get(session_id) {
-                    items.push(SessionListItem::Worktree {
-                        id: session.id,
-                        project_id: session.project_id,
-                        title: session.title.clone(),
-                        branch: session.branch.clone(),
-                        status: session.status,
-                        program: session.program.clone(),
-                        pr_number: session.pr_number,
-                        pr_url: session.pr_url.clone(),
-                        pr_merged: session.pr_merged,
-                    });
-                }
+            // Add worktree sessions sorted by creation time (newest first)
+            let mut sessions: Vec<_> = project
+                .worktrees
+                .iter()
+                .filter_map(|sid| state.sessions.get(sid))
+                .collect();
+            sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+
+            for session in sessions {
+                items.push(SessionListItem::Worktree {
+                    id: session.id,
+                    project_id: session.project_id,
+                    title: session.title.clone(),
+                    branch: session.branch.clone(),
+                    status: session.status,
+                    program: session.program.clone(),
+                    pr_number: session.pr_number,
+                    pr_url: session.pr_url.clone(),
+                    pr_merged: session.pr_merged,
+                });
             }
         }
 
@@ -1859,16 +1874,18 @@ Press any key to close this help.
 
     /// Save current selection to persisted state
     async fn save_selection(&self) {
-        let mut state = self.app_state.write().await;
-        state.last_selected_session = self.ui_state.selected_session_id;
-        state.last_selected_project = self.ui_state.selected_project_id;
-        let _ = state.save();
+        let session_id = self.ui_state.selected_session_id;
+        let project_id = self.ui_state.selected_project_id;
+        let _ = self.store.mutate(move |state| {
+            state.last_selected_session = session_id;
+            state.last_selected_project = project_id;
+        }).await;
     }
 
     /// Restore selection from persisted state
     async fn restore_selection(&mut self) {
         let (last_session, last_project) = {
-            let state = self.app_state.read().await;
+            let state = self.store.read().await;
             (state.last_selected_session, state.last_selected_project)
         };
 

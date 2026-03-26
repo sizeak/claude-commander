@@ -8,7 +8,7 @@ use tracing::info;
 use tracing_subscriber::{fmt, prelude::*, EnvFilter};
 
 use claude_commander::{
-    config::{AppState, Config},
+    config::{AppState, Config, StateStore},
     tmux::{attach_to_session, AttachResult},
     tui::App,
     APP_NAME, VERSION,
@@ -145,7 +145,8 @@ async fn main() -> Result<()> {
             info!("Starting Claude Commander TUI v{}", VERSION);
 
             let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
-            let mut app = App::new(config.clone(), app_state);
+            let store = std::sync::Arc::new(StateStore::new(app_state)?);
+            let mut app = App::new(config.clone(), store);
             app.run().await?;
         }
 
@@ -202,18 +203,17 @@ async fn main() -> Result<()> {
 
             use claude_commander::session::SessionManager;
             use std::sync::Arc;
-            use tokio::sync::RwLock;
 
             let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
-            let app_state = Arc::new(RwLock::new(app_state));
-            let manager = SessionManager::new(config, app_state);
+            let store = Arc::new(StateStore::new(app_state)?);
+            let manager = SessionManager::new(config, store.clone());
 
             // Check tmux
             manager.check_tmux().await?;
 
             // First, try to find or add the project
             let project_id = {
-                let state = manager.app_state.read().await;
+                let state = store.read().await;
                 state
                     .projects
                     .values()

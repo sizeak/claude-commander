@@ -81,6 +81,8 @@ pub enum StateUpdate {
     PrStatusReady {
         results: Vec<(SessionId, Option<crate::git::PrInfo>)>,
     },
+    /// State file was modified by another instance
+    ExternalChange,
     /// Preview/diff/shell data ready from background fetch
     PreviewReady {
         /// Which session this data is for (None if project-level)
