@@ -185,18 +185,26 @@ impl SessionManager {
             }
         }
 
-        // Create git backend and worktree manager
-        let backend = GitBackend::open(&repo_path)?;
-        let worktrees_dir = self.config.worktrees_dir()?;
-        let worktree_manager = WorktreeManager::new(backend, worktrees_dir);
-
         // Generate unique worktree name
         let worktree_name = format!("{}-{}", self.sanitize_name(&title), uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or(""));
 
-        // Create worktree
-        let worktree_info = worktree_manager
-            .create_worktree(&worktree_name, &branch_name)
-            .await?;
+        // Create worktree — sync gix work (branch check) is done in a block
+        // so non-Sync types are dropped before the first .await, keeping the
+        // overall future Send.
+        let worktrees_dir = self.config.worktrees_dir()?;
+        let branch_exists = {
+            let backend = GitBackend::open(&repo_path)?;
+            backend.branch_exists(&branch_name)?
+        };
+        let worktree_path = worktrees_dir.join(&worktree_name);
+        let worktree_info = WorktreeManager::run_create_worktree(
+            worktrees_dir,
+            repo_path.clone(),
+            worktree_path,
+            branch_name.clone(),
+            branch_exists,
+        )
+        .await?;
 
         // Create session object
         let mut session = WorktreeSession::new(

@@ -70,28 +70,54 @@ impl WorktreeManager {
         branch_name: &str,
     ) -> Result<WorktreeInfo> {
         let worktree_path = self.worktrees_dir.join(worktree_name);
+        let worktrees_dir = self.worktrees_dir.clone();
+        let repo_path = self.backend.path().to_owned();
 
+        // Check if branch exists (sync gix operation — done before any .await
+        // so that non-Sync gix types don't cross await boundaries)
+        let branch_exists = self.backend.branch_exists(branch_name)?;
+
+        // All remaining work is async CLI commands that don't need &self
+        Self::run_create_worktree(
+            worktrees_dir,
+            repo_path,
+            worktree_path,
+            branch_name.to_string(),
+            branch_exists,
+        )
+        .await
+    }
+
+    /// Run the async portion of worktree creation (CLI commands only, no gix types).
+    ///
+    /// This is a standalone async function so that non-Sync gix types from
+    /// the sync preparation phase are not held across await points, keeping
+    /// the resulting future `Send`.
+    pub async fn run_create_worktree(
+        worktrees_dir: PathBuf,
+        repo_path: PathBuf,
+        worktree_path: PathBuf,
+        branch_name: String,
+        branch_exists: bool,
+    ) -> Result<WorktreeInfo> {
         // Ensure worktrees directory exists
-        tokio::fs::create_dir_all(&self.worktrees_dir)
+        tokio::fs::create_dir_all(&worktrees_dir)
             .await
             .map_err(|e| GitError::WorktreeError(format!("Failed to create worktrees dir: {}", e)))?;
 
-        // Check if branch exists
-        let branch_exists = self.backend.branch_exists(branch_name)?;
-
         let mut cmd = Command::new("git");
-        cmd.current_dir(self.backend.path())
+        cmd.current_dir(&repo_path)
             .arg("worktree")
             .arg("add");
 
         if branch_exists {
             // Checkout existing branch
             debug!("Branch {} exists, checking out", branch_name);
-            cmd.arg(&worktree_path).arg(branch_name);
+            cmd.arg(&worktree_path).arg(&branch_name);
         } else {
             // Create new branch
             debug!("Creating new branch {}", branch_name);
-            cmd.arg("-b").arg(branch_name).arg(&worktree_path);
+            cmd.arg("-b").arg(&branch_name).arg(&worktree_path);
         }
 
         cmd.stdin(Stdio::null())
@@ -118,11 +144,11 @@ impl WorktreeManager {
         );
 
         // Get the HEAD of the new worktree
-        let head = self.get_worktree_head(&worktree_path).await?;
+        let head = Self::get_worktree_head_static(&worktree_path).await?;
 
         Ok(WorktreeInfo {
             path: worktree_path,
-            branch: branch_name.to_string(),
+            branch: branch_name,
             head,
             is_main: false,
         })
@@ -235,7 +261,7 @@ impl WorktreeManager {
     }
 
     /// Get HEAD commit of a worktree
-    async fn get_worktree_head(&self, worktree_path: &Path) -> Result<String> {
+    async fn get_worktree_head_static(worktree_path: &Path) -> Result<String> {
         let output = Command::new("git")
             .current_dir(worktree_path)
             .args(["rev-parse", "HEAD"])

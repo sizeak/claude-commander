@@ -93,6 +93,8 @@ pub enum Modal {
         on_submit: InputAction,
         completer: PathCompleter,
     },
+    /// Loading spinner modal (non-interactive)
+    Loading { title: String, message: String },
     /// Help modal
     Help,
     /// Error modal
@@ -161,6 +163,8 @@ pub struct AppUiState {
     pub gh_available: bool,
     /// When the last background preview fetch was spawned (None = not in flight)
     pub preview_update_spawned_at: Option<Instant>,
+    /// Tick counter for animations (incremented each render tick)
+    pub tick_count: u64,
 }
 
 impl Default for AppUiState {
@@ -190,6 +194,7 @@ impl Default for AppUiState {
             gh_available: false,
             preview_update_spawned_at: None,
             terminal_size: Rect::default(),
+            tick_count: 0,
         }
     }
 }
@@ -537,7 +542,10 @@ impl App {
                 }
             }
             AppEvent::StateUpdate(update) => self.handle_state_update(update).await,
-            AppEvent::Tick => return true,
+            AppEvent::Tick => {
+                self.ui_state.tick_count = self.ui_state.tick_count.wrapping_add(1);
+                return true;
+            }
             AppEvent::Quit => {
                 self.ui_state.should_quit = true;
             }
@@ -964,6 +972,25 @@ impl App {
                 frame.render_widget(Paragraph::new(hint), chunks[2]);
             }
 
+            Modal::Loading { title, message } => {
+                let modal_area = centered_rect(60, 20, area);
+                frame.render_widget(Clear, modal_area);
+
+                let block = Block::default()
+                    .title(format!(" {} ", title))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.theme.modal_info));
+
+                let inner = block.inner(modal_area);
+                frame.render_widget(block, modal_area);
+
+                const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+                let frame_char = SPINNER_FRAMES[self.ui_state.tick_count as usize % SPINNER_FRAMES.len()];
+                let text = format!("{} {}", frame_char, message);
+                let paragraph = Paragraph::new(text);
+                frame.render_widget(paragraph, inner);
+            }
+
             Modal::Confirm { title, message, .. } => {
                 let modal_area = centered_rect(50, 15, area);
                 frame.render_widget(Clear, modal_area);
@@ -1255,6 +1282,10 @@ impl App {
                 }
             }
 
+            Modal::Loading { .. } => {
+                // Non-interactive — swallow all keys while loading
+            }
+
             Modal::Help | Modal::Error { .. } => {
                 // Any key closes help/error
                 self.ui_state.modal = Modal::None;
@@ -1437,6 +1468,22 @@ impl App {
                     }
                 }).await;
                 self.refresh_list_items().await;
+            }
+            StateUpdate::SessionCreated { session_id } => {
+                debug!("Session created: {}", session_id);
+                self.ui_state.modal = Modal::None;
+                self.ui_state.status_message = Some((format!("Created session {}", session_id), Instant::now() + Duration::from_secs(3)));
+                self.refresh_list_items().await;
+                // Select the newly created session
+                if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
+                    matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
+                }) {
+                    self.ui_state.list_state.select(Some(idx));
+                }
+            }
+            StateUpdate::SessionCreateFailed { message } => {
+                debug!("Session creation failed: {}", message);
+                self.ui_state.modal = Modal::Error { message };
             }
             StateUpdate::ExternalChange => {
                 debug!("External state change detected, refreshing UI");
@@ -1629,23 +1676,25 @@ impl App {
                     return;
                 }
 
-                match self.session_manager.create_session(&project_id, value, None).await {
-                    Ok(session_id) => {
-                        self.ui_state.status_message = Some((format!("Created session {}", session_id), Instant::now() + Duration::from_secs(3)));
-                        self.refresh_list_items().await;
-                        // Select the newly created session
-                        if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
-                            matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
-                        }) {
-                            self.ui_state.list_state.select(Some(idx));
+                self.ui_state.modal = Modal::Loading {
+                    title: "New Session".to_string(),
+                    message: format!("Creating \"{}\"...", value),
+                };
+
+                let session_manager = self.session_manager.clone();
+                let tx = self.event_loop.sender();
+                tokio::spawn(async move {
+                    match session_manager.create_session(&project_id, value, None).await {
+                        Ok(session_id) => {
+                            let _ = tx.send(AppEvent::StateUpdate(StateUpdate::SessionCreated { session_id })).await;
+                        }
+                        Err(e) => {
+                            let _ = tx.send(AppEvent::StateUpdate(StateUpdate::SessionCreateFailed {
+                                message: format!("Failed to create session: {}", e),
+                            })).await;
                         }
                     }
-                    Err(e) => {
-                        self.ui_state.modal = Modal::Error {
-                            message: format!("Failed to create session: {}", e),
-                        };
-                    }
-                }
+                });
             }
             InputAction::AddProject => {
                 let expanded = super::path_completer::expand_tilde(value.trim());
