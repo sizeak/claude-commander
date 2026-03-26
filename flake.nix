@@ -3,24 +3,23 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
+    crane.url = "github:ipetkov/crane";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs = { self, nixpkgs, flake-utils }:
+  outputs = { self, nixpkgs, crane, flake-utils }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
+        craneLib = crane.mkLib pkgs;
 
-        claude-commander = pkgs.rustPlatform.buildRustPackage {
+        src = craneLib.cleanCargoSource ./.;
+
+        commonArgs = {
+          inherit src;
           pname = "claude-commander";
           version = "0.1.0";
-
-          src = pkgs.lib.cleanSource ./.;
-
-          cargoHash = "sha256-fV72COYJAgu7OUh1dQRzKK7C8RaolKdbkV9k9AIFpZg=";
-
-          # Some tests require a real git repo, which isn't available in the Nix sandbox
-          doCheck = false;
+          strictDeps = true;
 
           nativeBuildInputs = with pkgs; [
             pkg-config
@@ -28,6 +27,16 @@
           ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
             pkgs.apple-sdk_15
           ];
+        };
+
+        # Build only dependencies (cached separately for incremental rebuilds)
+        cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+
+        claude-commander = craneLib.buildPackage (commonArgs // {
+          inherit cargoArtifacts;
+
+          # Some tests require a real git repo, which isn't available in the Nix sandbox
+          doCheck = false;
 
           # tmux and git are required at runtime
           postFixup = ''
@@ -41,9 +50,22 @@
             license = licenses.mit;
             mainProgram = "claude-commander";
           };
-        };
+        });
       in
       {
+        checks = {
+          inherit claude-commander;
+
+          clippy = craneLib.cargoClippy (commonArgs // {
+            inherit cargoArtifacts;
+            cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+          });
+
+          fmt = craneLib.cargoFmt {
+            inherit src;
+          };
+        };
+
         packages = {
           claude-commander = claude-commander;
           default = claude-commander;
@@ -54,14 +76,10 @@
           program = "${claude-commander}/bin/claude-commander";
         };
 
-        devShells.default = pkgs.mkShell {
-          inputsFrom = [ claude-commander ];
+        devShells.default = craneLib.devShell {
+          checks = self.checks.${system};
           packages = with pkgs; [
-            cargo
-            rustc
             rust-analyzer
-            clippy
-            rustfmt
             tmux
             git
           ];

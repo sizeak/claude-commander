@@ -74,7 +74,9 @@ impl WorktreeManager {
         // Ensure worktrees directory exists
         tokio::fs::create_dir_all(&self.worktrees_dir)
             .await
-            .map_err(|e| GitError::WorktreeError(format!("Failed to create worktrees dir: {}", e)))?;
+            .map_err(|e| {
+                GitError::WorktreeError(format!("Failed to create worktrees dir: {}", e))
+            })?;
 
         // Check if branch exists
         let branch_exists = self.backend.branch_exists(branch_name)?;
@@ -105,11 +107,9 @@ impl WorktreeManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(GitError::WorktreeError(format!(
-                "git worktree add failed: {}",
-                stderr
-            ))
-            .into());
+            return Err(
+                GitError::WorktreeError(format!("git worktree add failed: {}", stderr)).into(),
+            );
         }
 
         info!(
@@ -152,11 +152,9 @@ impl WorktreeManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(GitError::WorktreeError(format!(
-                "git worktree remove failed: {}",
-                stderr
-            ))
-            .into());
+            return Err(
+                GitError::WorktreeError(format!("git worktree remove failed: {}", stderr)).into(),
+            );
         }
 
         info!("Removed worktree at {:?}", worktree_path);
@@ -178,11 +176,9 @@ impl WorktreeManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(GitError::WorktreeError(format!(
-                "git worktree list failed: {}",
-                stderr
-            ))
-            .into());
+            return Err(
+                GitError::WorktreeError(format!("git worktree list failed: {}", stderr)).into(),
+            );
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -267,11 +263,9 @@ impl WorktreeManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(GitError::WorktreeError(format!(
-                "git worktree prune failed: {}",
-                stderr
-            ))
-            .into());
+            return Err(
+                GitError::WorktreeError(format!("git worktree prune failed: {}", stderr)).into(),
+            );
         }
 
         Ok(())

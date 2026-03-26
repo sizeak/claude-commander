@@ -147,7 +147,11 @@ pub struct Project {
 
 impl Project {
     /// Create a new project
-    pub fn new(name: impl Into<String>, repo_path: PathBuf, main_branch: impl Into<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        repo_path: PathBuf,
+        main_branch: impl Into<String>,
+    ) -> Self {
         Self {
             id: ProjectId::new(),
             name: name.into(),

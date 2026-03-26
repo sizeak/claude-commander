@@ -40,8 +40,7 @@ pub async fn attach_to_session(session_name: &str) -> Result<AttachResult> {
     let pty_fd = pty.as_raw_fd();
 
     // Spawn tmux attach-session
-    let cmd = pty_process::Command::new("tmux")
-        .args(["attach-session", "-t", session_name]);
+    let cmd = pty_process::Command::new("tmux").args(["attach-session", "-t", session_name]);
     let mut child = cmd.spawn(pts)?;
 
     info!("Spawned tmux attach-session for {}", session_name);
@@ -83,8 +82,8 @@ pub async fn attach_to_session(session_name: &str) -> Result<AttachResult> {
 /// Log any pending bytes in stdin for debugging
 fn log_pending_stdin(context: &str) {
     use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
-    use std::os::unix::io::{AsFd, AsRawFd};
     use std::io::Read;
+    use std::os::unix::io::{AsFd, AsRawFd};
 
     let stdin = std::io::stdin();
     let fd = stdin.as_fd();
@@ -95,23 +94,35 @@ fn log_pending_stdin(context: &str) {
         Ok(n) if n > 0 => {
             // There's data - try to read it
             let flags = unsafe { nix::libc::fcntl(stdin.as_raw_fd(), nix::libc::F_GETFL) };
-            unsafe { nix::libc::fcntl(stdin.as_raw_fd(), nix::libc::F_SETFL, flags | nix::libc::O_NONBLOCK) };
+            unsafe {
+                nix::libc::fcntl(
+                    stdin.as_raw_fd(),
+                    nix::libc::F_SETFL,
+                    flags | nix::libc::O_NONBLOCK,
+                )
+            };
 
             let mut buf = [0u8; 256];
             let mut stdin_lock = stdin.lock();
             match stdin_lock.read(&mut buf) {
                 Ok(n) if n > 0 => {
                     let bytes = &buf[..n];
-                    let as_str: String = bytes.iter().map(|b| {
-                        if *b >= 32 && *b < 127 {
-                            format!("{}", *b as char)
-                        } else {
-                            format!("\\x{:02x}", b)
-                        }
-                    }).collect();
+                    let as_str: String = bytes
+                        .iter()
+                        .map(|b| {
+                            if *b >= 32 && *b < 127 {
+                                format!("{}", *b as char)
+                            } else {
+                                format!("\\x{:02x}", b)
+                            }
+                        })
+                        .collect();
                     warn!("STDIN {} - JUNK FOUND ({} bytes): {}", context, n, as_str);
                 }
-                Ok(_) => info!("STDIN {} - empty (poll said data but read got none)", context),
+                Ok(_) => info!(
+                    "STDIN {} - empty (poll said data but read got none)",
+                    context
+                ),
                 Err(e) => info!("STDIN {} - read error: {}", context, e),
             }
             drop(stdin_lock);
