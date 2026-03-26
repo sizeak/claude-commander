@@ -164,12 +164,12 @@ impl UserCommand {
 
         match (key.code, key.modifiers) {
             // Navigation
-            (KeyCode::Up, KeyModifiers::NONE) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
-                Some(UserCommand::NavigateUp)
-            }
-            (KeyCode::Down, KeyModifiers::NONE) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
-                Some(UserCommand::NavigateDown)
-            }
+            (KeyCode::Up, KeyModifiers::NONE)
+            | (KeyCode::Char('k'), KeyModifiers::NONE)
+            | (KeyCode::Char('p'), KeyModifiers::CONTROL) => Some(UserCommand::NavigateUp),
+            (KeyCode::Down, KeyModifiers::NONE)
+            | (KeyCode::Char('j'), KeyModifiers::NONE)
+            | (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(UserCommand::NavigateDown),
 
             // Selection
             (KeyCode::Enter, KeyModifiers::NONE) => Some(UserCommand::Select),

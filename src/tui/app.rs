@@ -1018,7 +1018,7 @@ impl App {
 
                 let help_lines = vec![
                     Line::from("Navigation:"),
-                    Line::from("  j/k, Up/Down    Navigate session list"),
+                    Line::from("  j/k, ↑/↓, C-p/n Navigate session list"),
                     Line::from("  Enter           Attach to selected session"),
                     Line::from("  s               Open shell in worktree"),
                     Line::from("  Tab/Shift+Tab   Toggle preview/diff/shell view"),
