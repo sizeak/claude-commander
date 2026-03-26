@@ -183,6 +183,20 @@ impl TmuxExecutor {
         ])
         .await?;
 
+        // Enable mouse support so scroll wheel enters copy mode for scrollback
+        self.execute(&["set-option", "-t", session_name, "mouse", "on"])
+            .await?;
+
+        // Increase scrollback buffer for long Claude sessions
+        self.execute(&[
+            "set-option",
+            "-t",
+            session_name,
+            "history-limit",
+            "50000",
+        ])
+        .await?;
+
         Ok(())
     }
 
