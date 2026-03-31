@@ -1480,6 +1480,8 @@ impl App {
                 }) {
                     self.ui_state.list_state.select(Some(idx));
                 }
+                self.update_selection();
+                self.spawn_preview_update();
             }
             StateUpdate::SessionCreateFailed { message } => {
                 debug!("Session creation failed: {}", message);
