@@ -916,4 +916,62 @@ mod tests {
         let manager = SessionManager::new(config, store);
         assert_eq!(manager.generate_branch_name("Feature Auth"), "cc/feature-auth");
     }
+
+    #[test]
+    fn test_sanitize_name_underscores_preserved() {
+        let config = Config::default();
+        let (_dir, store) = test_store();
+        let manager = SessionManager::new(config, store);
+
+        assert_eq!(manager.sanitize_name("hello_world"), "hello_world");
+    }
+
+    #[test]
+    fn test_sanitize_name_consecutive_specials() {
+        let config = Config::default();
+        let (_dir, store) = test_store();
+        let manager = SessionManager::new(config, store);
+
+        assert_eq!(manager.sanitize_name("a!!b"), "a--b");
+    }
+
+    #[test]
+    fn test_sanitize_name_all_special() {
+        let config = Config::default();
+        let (_dir, store) = test_store();
+        let manager = SessionManager::new(config, store);
+
+        assert_eq!(manager.sanitize_name("!!!"), "");
+    }
+
+    #[test]
+    fn test_sanitize_name_unicode() {
+        let config = Config::default();
+        let (_dir, store) = test_store();
+        let manager = SessionManager::new(config, store);
+
+        // Unicode alphanumeric chars should be preserved
+        let result = manager.sanitize_name("café");
+        assert!(result.contains("caf"));
+        assert!(result.contains('é'));
+    }
+
+    #[test]
+    fn test_generate_branch_name_empty_prefix() {
+        let config = Config::default(); // branch_prefix defaults to ""
+        let (_dir, store) = test_store();
+        let manager = SessionManager::new(config, store);
+
+        assert_eq!(manager.generate_branch_name("Foo Bar"), "foo-bar");
+    }
+
+    #[test]
+    fn test_generate_branch_name_slash_in_prefix() {
+        let mut config = Config::default();
+        config.branch_prefix = "user/cc".to_string();
+        let (_dir, store) = test_store();
+        let manager = SessionManager::new(config, store);
+
+        assert_eq!(manager.generate_branch_name("Foo"), "user/cc/foo");
+    }
 }

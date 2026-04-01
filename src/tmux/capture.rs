@@ -192,4 +192,36 @@ mod tests {
         // With zero TTL, content is immediately stale
         assert!(content.is_stale(Duration::ZERO));
     }
+
+    #[test]
+    fn test_hash_deterministic() {
+        let a = CapturedContent::new("hello world".to_string());
+        let b = CapturedContent::new("hello world".to_string());
+        assert_eq!(a.hash, b.hash);
+    }
+
+    #[test]
+    fn test_multiline_count() {
+        let content = CapturedContent::new("one\ntwo\nthree\nfour\nfive".to_string());
+        assert_eq!(content.line_count, 5);
+    }
+
+    #[test]
+    fn test_empty_content() {
+        let content = CapturedContent::new(String::new());
+        assert_eq!(content.line_count, 0);
+    }
+
+    #[test]
+    fn test_has_changed_identical_content() {
+        let a = CapturedContent::new("same".to_string());
+        let b = CapturedContent::new("same".to_string());
+        assert!(!a.has_changed(&b));
+    }
+
+    #[test]
+    fn test_not_stale_with_large_ttl() {
+        let content = CapturedContent::new("data".to_string());
+        assert!(!content.is_stale(Duration::from_secs(3600)));
+    }
 }

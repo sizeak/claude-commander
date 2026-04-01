@@ -246,4 +246,95 @@ mod tests {
         state.scroll_down(100);
         assert_eq!(state.scroll_offset, 0); // Clamped to 0
     }
+
+    #[test]
+    fn test_follow_mode_on_by_default() {
+        let mut state = PreviewState::new();
+        let content = (0..100).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        state.set_content(&content, 20);
+        // Follow mode auto-scrolls to bottom
+        assert_eq!(state.scroll_offset, 80); // 100 - 20
+    }
+
+    #[test]
+    fn test_scroll_up_disables_follow() {
+        let mut state = PreviewState::new();
+        let content = (0..100).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        state.set_content(&content, 20);
+        assert_eq!(state.scroll_offset, 80);
+
+        state.scroll_up(5);
+        assert_eq!(state.scroll_offset, 75);
+
+        // New content should NOT auto-scroll (follow disabled)
+        let content2 = (0..110).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        state.set_content(&content2, 20);
+        assert_eq!(state.scroll_offset, 75); // Stayed where we scrolled to
+    }
+
+    #[test]
+    fn test_scroll_to_bottom_re_enables_follow() {
+        let mut state = PreviewState::new();
+        let content = (0..100).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        state.set_content(&content, 20);
+
+        // Scroll up (disables follow)
+        state.scroll_up(5);
+        assert_eq!(state.scroll_offset, 75);
+
+        // Scroll back down to bottom (re-enables follow)
+        state.scroll_down(5);
+        assert_eq!(state.scroll_offset, 80);
+        assert!(!state.can_scroll_down());
+
+        // Now new content should auto-scroll
+        let content2 = (0..110).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        state.set_content(&content2, 20);
+        assert_eq!(state.scroll_offset, 90); // 110 - 20
+    }
+
+    #[test]
+    fn test_set_content_strips_trailing_empty_lines() {
+        let mut state = PreviewState::new();
+        state.set_content("line1\nline2\n\n\n", 20);
+        assert_eq!(state.total_lines, 2);
+    }
+
+    #[test]
+    fn test_set_metrics_direct() {
+        let mut state = PreviewState::new();
+        state.set_metrics(50, 10);
+        assert_eq!(state.total_lines, 50);
+        assert_eq!(state.visible_height, 10);
+        // Follow mode auto-scrolls to bottom
+        assert_eq!(state.scroll_offset, 40); // 50 - 10
+    }
+
+    #[test]
+    fn test_page_up_from_top() {
+        let mut state = PreviewState::new();
+        let content = (0..100).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        state.set_content(&content, 20);
+        state.scroll_to_top();
+        assert_eq!(state.scroll_offset, 0);
+
+        state.page_up();
+        assert_eq!(state.scroll_offset, 0); // Saturating sub stays at 0
+    }
+
+    #[test]
+    fn test_can_scroll_at_boundaries() {
+        let mut state = PreviewState::new();
+        let content = (0..100).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        state.set_content(&content, 20);
+
+        // At bottom
+        assert!(!state.can_scroll_down());
+        assert!(state.can_scroll_up());
+
+        // At top
+        state.scroll_to_top();
+        assert!(state.can_scroll_down());
+        assert!(!state.can_scroll_up());
+    }
 }

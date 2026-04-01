@@ -50,7 +50,26 @@ Terminal UI for managing Claude coding sessions via tmux and git worktrees. Each
 
 ## Testing
 
-Integration tests in `tests/integration_test.rs` require tmux, use `tempfile` for isolated temp directories, and create real git repos. Unit tests are co-located in source files (`#[cfg(test)]`). All async tests use `#[tokio::test]`.
+Unit tests are co-located in source files (`#[cfg(test)]`). Integration tests in `tests/integration_test.rs` require tmux. All async tests use `#[tokio::test]`.
+
+### Test isolation
+
+Tests must not read or modify anything on the real filesystem. Any disk access must go through `tempfile::TempDir` (already in dev-deps) for OS-portable temp paths. Never hardcode `/tmp/...` as a real path. Dummy `PathBuf` values stored in struct fields (never accessed on disk) are acceptable.
+
+### Writing new tests
+
+Use red-green TDD: write a failing test first, then implement the fix. Key areas covered by regression tests:
+
+- **State management** (`config/storage.rs`) — bidirectional session-project linking, cascade delete, active session filtering
+- **Status state machine** (`session/types.rs`) — transition guards, timestamp updates, display strings
+- **Key mappings** (`tui/event.rs`) — every documented keybinding has a test; release/repeat events ignored
+- **Config resolution** (`config/settings.rs`) — editor precedence chain, GUI editor auto-detection
+- **Widget state** (`tui/widgets/`) — TreeListState navigation/wrap/clamp, PreviewState follow mode/scroll, DiffViewState
+- **Caching** (`tmux/capture.rs`, `git/diff.rs`) — hash determinism, TTL staleness, parse_diff_stat edge cases
+- **Name sanitization** (`session/manager.rs`) — branch name generation, special char handling
+- **Error types** (`error.rs`) — all variant displays, type conversions
+
+When adding new behavior, add a corresponding unit test that would fail without the change.
 
 ## Git conventions
 

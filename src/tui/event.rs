@@ -443,4 +443,151 @@ mod tests {
             Some(UserCommand::GrowLeftPane)
         ));
     }
+
+    #[test]
+    fn test_ctrl_c_quits() {
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(matches!(UserCommand::from_key(key), Some(UserCommand::Quit)));
+    }
+
+    #[test]
+    fn test_ctrl_p_navigates_up() {
+        let key = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        assert!(matches!(UserCommand::from_key(key), Some(UserCommand::NavigateUp)));
+    }
+
+    #[test]
+    fn test_ctrl_n_navigates_down() {
+        let key = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
+        assert!(matches!(UserCommand::from_key(key), Some(UserCommand::NavigateDown)));
+    }
+
+    #[test]
+    fn test_arrow_keys() {
+        let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        assert!(matches!(UserCommand::from_key(up), Some(UserCommand::NavigateUp)));
+
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        assert!(matches!(UserCommand::from_key(down), Some(UserCommand::NavigateDown)));
+    }
+
+    #[test]
+    fn test_enter_selects() {
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(UserCommand::from_key(key), Some(UserCommand::Select)));
+    }
+
+    #[test]
+    fn test_tab_toggles_pane() {
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        assert!(matches!(UserCommand::from_key(tab), Some(UserCommand::TogglePane)));
+
+        let backtab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert!(matches!(UserCommand::from_key(backtab), Some(UserCommand::TogglePaneReverse)));
+    }
+
+    #[test]
+    fn test_session_management_keys() {
+        let cases: Vec<(KeyCode, KeyModifiers, UserCommand)> = vec![
+            (KeyCode::Char('s'), KeyModifiers::NONE, UserCommand::SelectShell),
+            (KeyCode::Char('n'), KeyModifiers::NONE, UserCommand::NewSession),
+            (KeyCode::Char('N'), KeyModifiers::SHIFT, UserCommand::NewProject),
+            (KeyCode::Char('p'), KeyModifiers::NONE, UserCommand::PauseSession),
+            (KeyCode::Char('r'), KeyModifiers::NONE, UserCommand::ResumeSession),
+            (KeyCode::Char('d'), KeyModifiers::NONE, UserCommand::DeleteSession),
+            (KeyCode::Char('D'), KeyModifiers::SHIFT, UserCommand::RemoveProject),
+            (KeyCode::Char('e'), KeyModifiers::NONE, UserCommand::OpenInEditor),
+        ];
+
+        for (code, modifiers, expected) in cases {
+            let key = KeyEvent::new(code, modifiers);
+            let result = UserCommand::from_key(key);
+            assert!(
+                result.is_some(),
+                "Expected Some for {:?}+{:?}",
+                code, modifiers
+            );
+            assert_eq!(
+                std::mem::discriminant(&result.unwrap()),
+                std::mem::discriminant(&expected),
+                "Mismatch for {:?}+{:?}",
+                code, modifiers
+            );
+        }
+    }
+
+    #[test]
+    fn test_scroll_keys() {
+        let ctrl_u = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert!(matches!(UserCommand::from_key(ctrl_u), Some(UserCommand::PageUp)));
+
+        let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert!(matches!(UserCommand::from_key(ctrl_d), Some(UserCommand::PageDown)));
+
+        let pgup = KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE);
+        assert!(matches!(UserCommand::from_key(pgup), Some(UserCommand::PageUp)));
+
+        let pgdown = KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE);
+        assert!(matches!(UserCommand::from_key(pgdown), Some(UserCommand::PageDown)));
+    }
+
+    #[test]
+    fn test_help_key() {
+        let q_none = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE);
+        assert!(matches!(UserCommand::from_key(q_none), Some(UserCommand::ShowHelp)));
+
+        let q_shift = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT);
+        assert!(matches!(UserCommand::from_key(q_shift), Some(UserCommand::ShowHelp)));
+    }
+
+    #[test]
+    fn test_escape_cancels() {
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(matches!(UserCommand::from_key(key), Some(UserCommand::Cancel)));
+    }
+
+    #[test]
+    fn test_backspace_key() {
+        let key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+        assert!(matches!(UserCommand::from_key(key), Some(UserCommand::Backspace)));
+    }
+
+    #[test]
+    fn test_key_release_ignored() {
+        use crossterm::event::{KeyEventKind, KeyEventState};
+        let key = KeyEvent {
+            code: KeyCode::Char('j'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Release,
+            state: KeyEventState::empty(),
+        };
+        assert!(UserCommand::from_key(key).is_none());
+    }
+
+    #[test]
+    fn test_key_repeat_ignored() {
+        use crossterm::event::{KeyEventKind, KeyEventState};
+        let key = KeyEvent {
+            code: KeyCode::Char('j'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Repeat,
+            state: KeyEventState::empty(),
+        };
+        assert!(UserCommand::from_key(key).is_none());
+    }
+
+    #[test]
+    fn test_unknown_key_returns_none() {
+        let key = KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE);
+        assert!(UserCommand::from_key(key).is_none());
+    }
+
+    #[test]
+    fn test_text_input_uppercase() {
+        let key = KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT);
+        assert!(matches!(
+            UserCommand::from_key(key),
+            Some(UserCommand::TextInput('A'))
+        ));
+    }
 }

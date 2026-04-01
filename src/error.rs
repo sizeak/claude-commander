@@ -207,4 +207,68 @@ mod tests {
         let tmux_err = TmuxError::NotInstalled;
         let _top_err: Error = tmux_err.into();
     }
+
+    #[test]
+    fn test_all_session_error_variants_display() {
+        let variants: Vec<SessionError> = vec![
+            SessionError::NotFound(SessionId::new()),
+            SessionError::AlreadyExists("test".to_string()),
+            SessionError::InvalidName { name: "x".to_string(), reason: "bad".to_string() },
+            SessionError::InvalidState(SessionId::new()),
+            SessionError::CreationFailed("fail".to_string()),
+            SessionError::PersistenceFailed("fail".to_string()),
+            SessionError::ProjectNotFound("proj".to_string()),
+            SessionError::MaxSessionsReached(10),
+            SessionError::TmuxSessionNotFound("sess".to_string()),
+        ];
+        for err in variants {
+            assert!(!err.to_string().is_empty(), "Empty display for {:?}", err);
+        }
+    }
+
+    #[test]
+    fn test_all_tmux_error_variants_display() {
+        let variants: Vec<TmuxError> = vec![
+            TmuxError::NotInstalled,
+            TmuxError::ServerNotRunning,
+            TmuxError::CommandFailed { command: "cmd".to_string(), stderr: "err".to_string() },
+            TmuxError::CaptureFailed("fail".to_string()),
+            TmuxError::SessionNotFound("sess".to_string()),
+            TmuxError::Timeout(std::time::Duration::from_secs(5)),
+            TmuxError::ParseError("parse".to_string()),
+            TmuxError::SemaphoreError,
+            TmuxError::PtyError("pty".to_string()),
+        ];
+        for err in variants {
+            assert!(!err.to_string().is_empty(), "Empty display for {:?}", err);
+        }
+    }
+
+    #[test]
+    fn test_git_error_conversion() {
+        let git_err = GitError::NotARepository(PathBuf::from("/tmp/foo"));
+        let top_err: Error = git_err.into();
+        assert!(matches!(top_err, Error::Git(_)));
+    }
+
+    #[test]
+    fn test_config_error_conversion() {
+        let config_err = ConfigError::LoadFailed("test".to_string());
+        let top_err: Error = config_err.into();
+        assert!(matches!(top_err, Error::Config(_)));
+    }
+
+    #[test]
+    fn test_io_error_conversion() {
+        let io_err = std::io::Error::new(std::io::ErrorKind::NotFound, "test");
+        let top_err: Error = io_err.into();
+        assert!(matches!(top_err, Error::Io(_)));
+    }
+
+    #[test]
+    fn test_tui_error_conversion() {
+        let tui_err = TuiError::InitFailed("test".to_string());
+        let top_err: Error = tui_err.into();
+        assert!(matches!(top_err, Error::Tui(_)));
+    }
 }

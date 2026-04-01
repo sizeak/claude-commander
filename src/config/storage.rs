@@ -217,6 +217,15 @@ mod tests {
         )
     }
 
+    fn create_test_session_with_status(
+        project_id: ProjectId,
+        status: crate::session::SessionStatus,
+    ) -> WorktreeSession {
+        let mut session = create_test_session(project_id);
+        session.set_status(status);
+        session
+    }
+
     #[test]
     fn test_new_state() {
         let state = AppState::new();
@@ -311,5 +320,139 @@ mod tests {
 
         let p2_sessions = state.get_project_sessions(&project2_id);
         assert_eq!(p2_sessions.len(), 1);
+    }
+
+    #[test]
+    fn test_remove_project_cascades_sessions() {
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let project_id = project.id;
+        state.add_project(project);
+
+        let s1 = create_test_session(project_id);
+        let s1_id = s1.id;
+        let s2 = create_test_session(project_id);
+        let s2_id = s2.id;
+        let s3 = create_test_session(project_id);
+        let s3_id = s3.id;
+        state.add_session(s1);
+        state.add_session(s2);
+        state.add_session(s3);
+
+        assert_eq!(state.session_count(), 3);
+        state.remove_project(&project_id);
+        assert_eq!(state.session_count(), 0);
+        assert!(state.get_session(&s1_id).is_none());
+        assert!(state.get_session(&s2_id).is_none());
+        assert!(state.get_session(&s3_id).is_none());
+    }
+
+    #[test]
+    fn test_remove_project_only_cascades_own_sessions() {
+        let mut state = AppState::new();
+
+        let project_a = create_test_project();
+        let a_id = project_a.id;
+        state.add_project(project_a);
+
+        let mut project_b = create_test_project();
+        project_b.name = "other".to_string();
+        let b_id = project_b.id;
+        state.add_project(project_b);
+
+        state.add_session(create_test_session(a_id));
+        state.add_session(create_test_session(a_id));
+        let b_session = create_test_session(b_id);
+        let b_session_id = b_session.id;
+        state.add_session(b_session);
+
+        state.remove_project(&a_id);
+        assert_eq!(state.session_count(), 1);
+        assert!(state.get_session(&b_session_id).is_some());
+    }
+
+    #[test]
+    fn test_add_session_bidirectional_link() {
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let project_id = project.id;
+        state.add_project(project);
+
+        let session = create_test_session(project_id);
+        let session_id = session.id;
+        state.add_session(session);
+
+        assert!(state.sessions.contains_key(&session_id));
+        assert!(state.get_project(&project_id).unwrap().worktrees.contains(&session_id));
+    }
+
+    #[test]
+    fn test_remove_session_bidirectional_unlink() {
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let project_id = project.id;
+        state.add_project(project);
+
+        let session = create_test_session(project_id);
+        let session_id = session.id;
+        state.add_session(session);
+
+        state.remove_session(&session_id);
+        assert!(state.sessions.is_empty());
+        assert!(state.get_project(&project_id).unwrap().worktrees.is_empty());
+    }
+
+    #[test]
+    fn test_add_session_nonexistent_project_no_panic() {
+        let mut state = AppState::new();
+        let orphan_project_id = ProjectId::new();
+        let session = create_test_session(orphan_project_id);
+        let session_id = session.id;
+
+        state.add_session(session);
+        assert_eq!(state.session_count(), 1);
+        assert!(state.get_session(&session_id).is_some());
+        assert!(state.get_project(&orphan_project_id).is_none());
+    }
+
+    #[test]
+    fn test_get_active_sessions_filters_correctly() {
+        use crate::session::SessionStatus;
+
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let project_id = project.id;
+        state.add_project(project);
+
+        state.add_session(create_test_session_with_status(project_id, SessionStatus::Running));
+        state.add_session(create_test_session_with_status(project_id, SessionStatus::Paused));
+        state.add_session(create_test_session_with_status(project_id, SessionStatus::Stopped));
+
+        let active = state.get_active_sessions();
+        assert_eq!(active.len(), 2);
+        assert!(active.iter().all(|s| s.status != SessionStatus::Stopped));
+    }
+
+    #[test]
+    fn test_get_project_sessions_empty_for_unknown_project() {
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let project_id = project.id;
+        state.add_project(project);
+
+        let sessions = state.get_project_sessions(&project_id);
+        assert!(sessions.is_empty());
+    }
+
+    #[test]
+    fn test_remove_nonexistent_session_returns_none() {
+        let mut state = AppState::new();
+        assert!(state.remove_session(&SessionId::new()).is_none());
+    }
+
+    #[test]
+    fn test_remove_nonexistent_project_returns_none() {
+        let mut state = AppState::new();
+        assert!(state.remove_project(&ProjectId::new()).is_none());
     }
 }

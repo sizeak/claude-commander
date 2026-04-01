@@ -410,4 +410,87 @@ mod tests {
         state.previous();
         assert_eq!(state.selected(), None);
     }
+
+    #[test]
+    fn test_previous_wraps_to_last() {
+        let mut state = TreeListState::new();
+        state.set_item_count(5);
+        state.select(Some(0));
+
+        state.previous();
+        assert_eq!(state.selected(), Some(4));
+    }
+
+    #[test]
+    fn test_next_wraps_to_first() {
+        let mut state = TreeListState::new();
+        state.set_item_count(5);
+        state.select(Some(4));
+
+        state.next();
+        assert_eq!(state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_set_item_count_clamps_selection() {
+        let mut state = TreeListState::new();
+        state.set_item_count(10);
+        state.select(Some(7));
+
+        state.set_item_count(5);
+        assert_eq!(state.selected(), Some(4));
+    }
+
+    #[test]
+    fn test_set_item_count_zero_clears_selection() {
+        let mut state = TreeListState::new();
+        state.set_item_count(5);
+        state.select(Some(3));
+
+        state.set_item_count(0);
+        assert_eq!(state.selected(), None);
+    }
+
+    #[test]
+    fn test_set_item_count_preserves_valid_selection() {
+        let mut state = TreeListState::new();
+        state.set_item_count(10);
+        state.select(Some(3));
+
+        state.set_item_count(8);
+        assert_eq!(state.selected(), Some(3));
+    }
+
+    #[test]
+    fn test_single_item_navigation() {
+        let mut state = TreeListState::new();
+        state.set_item_count(1);
+        state.select(Some(0));
+
+        state.next();
+        assert_eq!(state.selected(), Some(0));
+
+        state.previous();
+        assert_eq!(state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_next_from_none_selects_first() {
+        let mut state = TreeListState::new();
+        state.set_item_count(3);
+        assert_eq!(state.selected(), None);
+
+        state.next();
+        assert_eq!(state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_previous_from_none_selects_first() {
+        let mut state = TreeListState::new();
+        state.set_item_count(3);
+        assert_eq!(state.selected(), None);
+
+        state.previous();
+        assert_eq!(state.selected(), Some(0));
+    }
 }

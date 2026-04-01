@@ -364,4 +364,70 @@ mod tests {
         assert!(info.summary().contains("+10"));
         assert!(info.summary().contains("-5"));
     }
+
+    #[test]
+    fn test_diff_info_has_changes_only_added() {
+        let info = DiffInfo {
+            diff: String::new(),
+            files_changed: 0,
+            lines_added: 5,
+            lines_removed: 0,
+            line_count: 0,
+            computed_at: Instant::now(),
+            base_commit: String::new(),
+        };
+        assert!(info.has_changes());
+    }
+
+    #[test]
+    fn test_diff_info_has_changes_only_files() {
+        let info = DiffInfo {
+            diff: String::new(),
+            files_changed: 1,
+            lines_added: 0,
+            lines_removed: 0,
+            line_count: 0,
+            computed_at: Instant::now(),
+            base_commit: String::new(),
+        };
+        assert!(info.has_changes());
+    }
+
+    #[test]
+    fn test_diff_info_is_stale_zero_ttl() {
+        let info = DiffInfo::empty();
+        assert!(info.is_stale(Duration::ZERO));
+    }
+
+    #[test]
+    fn test_parse_diff_stat_deletions_only() {
+        let output = " file.rs | 3 ---\n 1 file changed, 3 deletions(-)";
+        let (files, added, removed) = parse_diff_stat(output);
+        assert_eq!(files, 1);
+        assert_eq!(added, 0);
+        assert_eq!(removed, 3);
+    }
+
+    #[test]
+    fn test_parse_diff_stat_insertions_only() {
+        let output = " file.rs | 5 +++++\n 1 file changed, 5 insertions(+)";
+        let (files, added, removed) = parse_diff_stat(output);
+        assert_eq!(files, 1);
+        assert_eq!(added, 5);
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn test_diff_info_summary_exact_format() {
+        let info = DiffInfo {
+            diff: String::new(),
+            files_changed: 3,
+            lines_added: 15,
+            lines_removed: 7,
+            line_count: 0,
+            computed_at: Instant::now(),
+            base_commit: String::new(),
+        };
+        assert_eq!(info.summary(), "3 file(s), +15 -7 lines");
+    }
 }

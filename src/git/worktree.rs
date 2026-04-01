@@ -212,50 +212,7 @@ impl WorktreeManager {
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let worktrees = self.parse_worktree_list(&stdout)?;
-
-        Ok(worktrees)
-    }
-
-    /// Parse git worktree list --porcelain output
-    fn parse_worktree_list(&self, output: &str) -> Result<Vec<WorktreeInfo>> {
-        let mut worktrees = Vec::new();
-        let mut current_path: Option<PathBuf> = None;
-        let mut current_head: Option<String> = None;
-        let mut current_branch: Option<String> = None;
-        let mut is_main = true; // First worktree is main
-
-        for line in output.lines() {
-            if line.starts_with("worktree ") {
-                // Save previous worktree if complete
-                if let (Some(path), Some(head)) = (current_path.take(), current_head.take()) {
-                    worktrees.push(WorktreeInfo {
-                        path,
-                        branch: current_branch.take().unwrap_or_else(|| "HEAD".to_string()),
-                        head,
-                        is_main,
-                    });
-                    is_main = false;
-                }
-
-                current_path = Some(PathBuf::from(line.trim_start_matches("worktree ")));
-            } else if line.starts_with("HEAD ") {
-                current_head = Some(line.trim_start_matches("HEAD ").to_string());
-            } else if line.starts_with("branch ") {
-                let branch = line.trim_start_matches("branch refs/heads/");
-                current_branch = Some(branch.to_string());
-            }
-        }
-
-        // Don't forget the last worktree
-        if let (Some(path), Some(head)) = (current_path, current_head) {
-            worktrees.push(WorktreeInfo {
-                path,
-                branch: current_branch.unwrap_or_else(|| "HEAD".to_string()),
-                head,
-                is_main,
-            });
-        }
+        let worktrees = parse_worktree_list(&stdout)?;
 
         Ok(worktrees)
     }
@@ -304,19 +261,55 @@ impl WorktreeManager {
     }
 }
 
+/// Parse git worktree list --porcelain output
+fn parse_worktree_list(output: &str) -> Result<Vec<WorktreeInfo>> {
+    let mut worktrees = Vec::new();
+    let mut current_path: Option<PathBuf> = None;
+    let mut current_head: Option<String> = None;
+    let mut current_branch: Option<String> = None;
+    let mut is_main = true; // First worktree is main
+
+    for line in output.lines() {
+        if line.starts_with("worktree ") {
+            // Save previous worktree if complete
+            if let (Some(path), Some(head)) = (current_path.take(), current_head.take()) {
+                worktrees.push(WorktreeInfo {
+                    path,
+                    branch: current_branch.take().unwrap_or_else(|| "HEAD".to_string()),
+                    head,
+                    is_main,
+                });
+                is_main = false;
+            }
+
+            current_path = Some(PathBuf::from(line.trim_start_matches("worktree ")));
+        } else if line.starts_with("HEAD ") {
+            current_head = Some(line.trim_start_matches("HEAD ").to_string());
+        } else if line.starts_with("branch ") {
+            let branch = line.trim_start_matches("branch refs/heads/");
+            current_branch = Some(branch.to_string());
+        }
+    }
+
+    // Don't forget the last worktree
+    if let (Some(path), Some(head)) = (current_path, current_head) {
+        worktrees.push(WorktreeInfo {
+            path,
+            branch: current_branch.unwrap_or_else(|| "HEAD".to_string()),
+            head,
+            is_main,
+        });
+    }
+
+    Ok(worktrees)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_parse_worktree_list() {
-        let backend = GitBackend::open(".").unwrap_or_else(|_| {
-            // Create a minimal backend for testing parse logic
-            panic!("Test requires a git repository");
-        });
-
-        let manager = WorktreeManager::new(backend, PathBuf::from("/tmp/worktrees"));
-
         let output = r#"worktree /path/to/main
 HEAD abc123def456
 branch refs/heads/main
@@ -326,7 +319,7 @@ HEAD def456abc123
 branch refs/heads/feature-branch
 "#;
 
-        let worktrees = manager.parse_worktree_list(output).unwrap();
+        let worktrees = parse_worktree_list(output).unwrap();
         assert_eq!(worktrees.len(), 2);
 
         assert_eq!(worktrees[0].path, PathBuf::from("/path/to/main"));
@@ -336,5 +329,28 @@ branch refs/heads/feature-branch
         assert_eq!(worktrees[1].path, PathBuf::from("/path/to/feature"));
         assert_eq!(worktrees[1].branch, "feature-branch");
         assert!(!worktrees[1].is_main);
+    }
+
+    #[test]
+    fn test_parse_worktree_list_single_main() {
+        let output = "worktree /path/to/main\nHEAD abc123\nbranch refs/heads/main\n";
+        let worktrees = parse_worktree_list(output).unwrap();
+        assert_eq!(worktrees.len(), 1);
+        assert!(worktrees[0].is_main);
+        assert_eq!(worktrees[0].branch, "main");
+    }
+
+    #[test]
+    fn test_parse_worktree_list_detached_head() {
+        let output = "worktree /path/to/main\nHEAD abc123\nbranch refs/heads/main\n\nworktree /path/to/detached\nHEAD def456\n";
+        let worktrees = parse_worktree_list(output).unwrap();
+        assert_eq!(worktrees.len(), 2);
+        assert_eq!(worktrees[1].branch, "HEAD");
+    }
+
+    #[test]
+    fn test_parse_worktree_list_empty() {
+        let worktrees = parse_worktree_list("").unwrap();
+        assert!(worktrees.is_empty());
     }
 }

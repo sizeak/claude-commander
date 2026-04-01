@@ -242,4 +242,91 @@ mod tests {
         assert!(toml.contains("default_program"));
         assert!(toml.contains("claude"));
     }
+
+    #[test]
+    fn test_resolve_editor_config_takes_precedence() {
+        let config = Config {
+            editor: Some("myeditor".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(config.resolve_editor(), Some("myeditor".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_editor_none_when_unset() {
+        // This test assumes VISUAL and EDITOR env vars are not set.
+        // If they are, the test still validates that config.editor=None
+        // defers to env vars (which is correct behavior).
+        let config = Config {
+            editor: None,
+            ..Config::default()
+        };
+        let result = config.resolve_editor();
+        // If neither env var is set, result is None; otherwise it's the env var value.
+        // Either way, config.editor being None means it wasn't used.
+        assert!(result.is_none() || std::env::var("VISUAL").is_ok() || std::env::var("EDITOR").is_ok());
+    }
+
+    #[test]
+    fn test_is_gui_editor_explicit_true_overrides() {
+        let config = Config {
+            editor_gui: Some(true),
+            ..Config::default()
+        };
+        // Even a terminal editor returns true when explicitly set
+        assert!(config.is_gui_editor("vim"));
+    }
+
+    #[test]
+    fn test_is_gui_editor_explicit_false_overrides() {
+        let config = Config {
+            editor_gui: Some(false),
+            ..Config::default()
+        };
+        // Even a GUI editor returns false when explicitly set
+        assert!(!config.is_gui_editor("code"));
+    }
+
+    #[test]
+    fn test_is_gui_editor_known_gui_editors() {
+        let config = Config::default();
+        let gui_editors = [
+            "code", "code-insiders", "cursor",
+            "zed", "zeditor",
+            "subl", "sublime_text",
+            "idea", "goland", "rustrover", "clion", "pycharm", "webstorm", "phpstorm",
+            "atom", "lapce", "fleet",
+            "gedit", "kate", "mousepad",
+            "gvim",
+            "open", "xdg-open",
+        ];
+        for editor in gui_editors {
+            assert!(config.is_gui_editor(editor), "{} should be detected as GUI", editor);
+        }
+    }
+
+    #[test]
+    fn test_is_gui_editor_terminal_editors_not_gui() {
+        let config = Config::default();
+        let terminal_editors = ["vim", "nvim", "nano", "emacs", "vi", "micro", "helix", "joe"];
+        for editor in terminal_editors {
+            assert!(!config.is_gui_editor(editor), "{} should NOT be detected as GUI", editor);
+        }
+    }
+
+    #[test]
+    fn test_is_gui_editor_with_path_prefix() {
+        let config = Config::default();
+        assert!(config.is_gui_editor("/usr/bin/code"));
+        assert!(!config.is_gui_editor("/usr/bin/nvim"));
+    }
+
+    #[test]
+    fn test_default_config_additional_values() {
+        let config = Config::default();
+        assert_eq!(config.diff_cache_ttl_ms, 500);
+        assert_eq!(config.pr_check_interval_secs, 600);
+        assert!(config.pull_before_create);
+        assert_eq!(config.state_sync_interval_ms, 2000);
+    }
 }

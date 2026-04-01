@@ -430,4 +430,144 @@ mod tests {
         assert!(project_item.is_project());
         assert!(worktree_item.is_worktree());
     }
+
+    #[test]
+    fn test_stopped_cannot_pause_or_resume() {
+        assert!(!SessionStatus::Stopped.can_pause());
+        assert!(!SessionStatus::Stopped.can_resume());
+    }
+
+    #[test]
+    fn test_running_can_attach() {
+        assert!(SessionStatus::Running.can_attach());
+    }
+
+    #[test]
+    fn test_paused_can_attach() {
+        assert!(SessionStatus::Paused.can_attach());
+    }
+
+    #[test]
+    fn test_is_active() {
+        assert!(SessionStatus::Running.is_active());
+        assert!(SessionStatus::Paused.is_active());
+        assert!(!SessionStatus::Stopped.is_active());
+    }
+
+    #[test]
+    fn test_session_status_display() {
+        assert_eq!(format!("{}", SessionStatus::Running), "running");
+        assert_eq!(format!("{}", SessionStatus::Paused), "paused");
+        assert_eq!(format!("{}", SessionStatus::Stopped), "stopped");
+    }
+
+    #[test]
+    fn test_set_status_running_updates_last_active() {
+        let project_id = ProjectId::new();
+        let mut session = WorktreeSession::new(
+            project_id, "Test", "branch", PathBuf::from("/tmp/wt"), "claude",
+        );
+        let before = session.last_active_at;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        session.set_status(SessionStatus::Running);
+        assert!(session.last_active_at > before);
+    }
+
+    #[test]
+    fn test_set_status_paused_does_not_update_last_active() {
+        let project_id = ProjectId::new();
+        let mut session = WorktreeSession::new(
+            project_id, "Test", "branch", PathBuf::from("/tmp/wt"), "claude",
+        );
+        let before = session.last_active_at;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        session.set_status(SessionStatus::Paused);
+        assert_eq!(session.last_active_at, before);
+    }
+
+    #[test]
+    fn test_set_status_stopped_does_not_update_last_active() {
+        let project_id = ProjectId::new();
+        let mut session = WorktreeSession::new(
+            project_id, "Test", "branch", PathBuf::from("/tmp/wt"), "claude",
+        );
+        let before = session.last_active_at;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        session.set_status(SessionStatus::Stopped);
+        assert_eq!(session.last_active_at, before);
+    }
+
+    #[test]
+    fn test_touch_updates_last_active() {
+        let project_id = ProjectId::new();
+        let mut session = WorktreeSession::new(
+            project_id, "Test", "branch", PathBuf::from("/tmp/wt"), "claude",
+        );
+        let before = session.last_active_at;
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        session.touch();
+        assert!(session.last_active_at > before);
+    }
+
+    #[test]
+    fn test_tmux_session_name_format() {
+        let session = WorktreeSession::new(
+            ProjectId::new(), "Test", "branch", PathBuf::from("/tmp/wt"), "claude",
+        );
+        assert!(session.tmux_session_name.starts_with("cc-"));
+        assert_eq!(session.tmux_session_name.len(), 11); // "cc-" (3) + 8 hex chars
+    }
+
+    #[test]
+    fn test_matches_query_empty_string() {
+        let session = WorktreeSession::new(
+            ProjectId::new(), "Anything", "any-branch", PathBuf::from("/tmp/wt"), "claude",
+        );
+        assert!(session.matches_query(""));
+    }
+
+    #[test]
+    fn test_project_add_multiple_unique_worktrees() {
+        let mut project = Project::new("test", PathBuf::from("/tmp/test"), "main");
+        let ids: Vec<SessionId> = (0..3).map(|_| SessionId::new()).collect();
+        for &id in &ids {
+            project.add_worktree(id);
+        }
+        assert_eq!(project.worktrees.len(), 3);
+    }
+
+    #[test]
+    fn test_project_remove_nonexistent_worktree() {
+        let mut project = Project::new("test", PathBuf::from("/tmp/test"), "main");
+        let existing = SessionId::new();
+        project.add_worktree(existing);
+
+        project.remove_worktree(&SessionId::new());
+        assert_eq!(project.worktrees.len(), 1);
+    }
+
+    #[test]
+    fn test_session_list_item_predicates_negative() {
+        let project_item = SessionListItem::Project {
+            id: ProjectId::new(),
+            name: "test".to_string(),
+            repo_path: PathBuf::from("/tmp"),
+            main_branch: "main".to_string(),
+            worktree_count: 0,
+        };
+        let worktree_item = SessionListItem::Worktree {
+            id: SessionId::new(),
+            project_id: ProjectId::new(),
+            title: "test".to_string(),
+            branch: "test".to_string(),
+            status: SessionStatus::Running,
+            program: "claude".to_string(),
+            pr_number: None,
+            pr_url: None,
+            pr_merged: false,
+        };
+
+        assert!(!project_item.is_worktree());
+        assert!(!worktree_item.is_project());
+    }
 }
