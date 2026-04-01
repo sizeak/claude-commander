@@ -1,0 +1,5 @@
+---
+source: src/tui/render_tests.rs
+expression: terminal.backend()
+---
+"Created session abc12345                                                                                                "

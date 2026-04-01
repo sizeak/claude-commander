@@ -1,0 +1,5 @@
+---
+source: src/tui/render_tests.rs
+expression: terminal.backend()
+---
+"Sessions: 3 | Press ? for help | n: new session | N: add project                                                        "

@@ -1,0 +1,16 @@
+---
+source: src/tui/render_tests.rs
+expression: terminal.backend()
+---
+"┌ [Preview] | Diff | Shell ────────────────────────────────┐"
+"│$ claude --resume                                         │"
+"│                                                          │"
+"│Claude is thinking...                                     │"
+"│                                                          │"
+"│> I'll help you fix the auth bug.                         │"
+"│> Let me look at the code first.                          │"
+"│                                                          │"
+"│Reading src/auth.rs...                                    │"
+"│                                                          │"
+"│                                                          │"
+"└──────────────────────────────────────────────────────────┘"
