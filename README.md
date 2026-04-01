@@ -66,6 +66,10 @@ claude-commander config
 claude-commander config --init
 ```
 
+### Session List
+
+The left pane shows projects and their worktree sessions in a tree view. Projects are sorted alphabetically. Sessions within a project are sorted newest first (by creation time).
+
 ### Keyboard Shortcuts
 
 | Key | Action |
@@ -122,37 +126,24 @@ ui_refresh_fps = 30
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                    TUI Actor (ratatui)                          │
-│  Owns: terminal, widgets, render state                          │
-│  Receives: StateSnapshot, ContentUpdate, DiffUpdate             │
-│  Sends: UserCommand (create, pause, attach, kill)               │
-└────────────────────────────┬────────────────────────────────────┘
-                             │ mpsc channels
-┌────────────────────────────▼────────────────────────────────────┐
-│                    SessionManager Actor                         │
-│  Owns: Vec<Session>, coordinates lifecycle                      │
-│  Receives: UserCommand, TmuxEvent, GitEvent                     │
-│  Sends: StateSnapshot to TUI                                    │
-└──────┬─────────────────────┬────────────────────────────────────┘
-       │                     │
-┌──────▼──────┐       ┌──────▼──────┐
-│ TmuxActor   │       │ GitActor    │
-│ per session │       │ per session │
-│ Owns: state │       │ Owns: repo  │
-└─────────────┘       └─────────────┘
-```
+The TUI event loop (`App`) owns the terminal and render state. It sends user commands to a `SessionManager` which coordinates tmux and git operations via async channels. Git read operations use gitoxide (pure Rust); worktree mutations and tmux use CLI subprocesses with semaphore-based throttling.
 
-### Key Design Decisions
-
-| Decision | Rationale |
-|----------|-----------|
-| Actor pattern | Each subsystem owns its state, communicates via typed channels |
-| gitoxide | Pure Rust git implementation - no CLI dependency for git ops |
-| tokio async | Non-blocking IO prevents UI freezes |
-| Semaphore throttling | 16 concurrent tmux commands for scalability |
-| Cache TTLs | 50ms for content, 500ms for diffs - balances freshness vs load |
+```
+┌───────────────────────────────────────────┐
+│              TUI (ratatui)                │
+│  Renders widgets, handles input           │
+└─────────────────┬─────────────────────────┘
+                  │ mpsc channels
+┌─────────────────▼─────────────────────────┐
+│           SessionManager                  │
+│  Session lifecycle, state persistence     │
+└──────┬────────────────────┬───────────────┘
+       │                    │
+┌──────▼──────┐      ┌──────▼──────┐
+│ TmuxExecutor│      │ GitBackend  │
+│ (async CLI) │      │ (gitoxide)  │
+└─────────────┘      └─────────────┘
+```
 
 ## Data Storage
 
