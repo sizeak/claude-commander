@@ -122,10 +122,7 @@ impl InputForwarder {
                     match event {
                         Some(e) => {
                             let arg = e.to_tmux_arg();
-                            if let Err(err) = executor_clone
-                                .send_keys(&session_clone, &arg)
-                                .await
-                            {
+                            if let Err(err) = executor_clone.send_keys(&session_clone, &arg).await {
                                 debug!("Failed to send keys: {}", err);
                             }
                         }
@@ -196,10 +193,7 @@ mod tests {
 
     #[test]
     fn test_input_event_conversion() {
-        assert_eq!(
-            InputEvent::Text("hello".to_string()).to_tmux_arg(),
-            "hello"
-        );
+        assert_eq!(InputEvent::Text("hello".to_string()).to_tmux_arg(), "hello");
         assert_eq!(InputEvent::Key(SpecialKey::Enter).to_tmux_arg(), "Enter");
         assert_eq!(InputEvent::Control('c').to_tmux_arg(), "C-c");
     }

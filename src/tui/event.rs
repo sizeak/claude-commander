@@ -54,41 +54,25 @@ pub enum StateUpdate {
         content_hash: u64,
     },
     /// Session status changed
-    StatusChanged {
-        session_id: SessionId,
-    },
+    StatusChanged { session_id: SessionId },
     /// Diff updated
-    DiffUpdated {
-        session_id: SessionId,
-    },
+    DiffUpdated { session_id: SessionId },
     /// Project added
-    ProjectAdded {
-        project_id: ProjectId,
-    },
+    ProjectAdded { project_id: ProjectId },
     /// Session added
-    SessionAdded {
-        session_id: SessionId,
-    },
+    SessionAdded { session_id: SessionId },
     /// Session removed
-    SessionRemoved {
-        session_id: SessionId,
-    },
+    SessionRemoved { session_id: SessionId },
     /// Error occurred
-    Error {
-        message: String,
-    },
+    Error { message: String },
     /// PR status results ready from background check
     PrStatusReady {
         results: Vec<(SessionId, Option<crate::git::PrInfo>)>,
     },
     /// Session creation completed successfully
-    SessionCreated {
-        session_id: SessionId,
-    },
+    SessionCreated { session_id: SessionId },
     /// Session creation failed
-    SessionCreateFailed {
-        message: String,
-    },
+    SessionCreateFailed { message: String },
     /// State file was modified by another instance
     ExternalChange,
     /// Preview/diff/shell data ready from background fetch
@@ -298,10 +282,8 @@ impl EventLoop {
                 }
 
                 // Use short timeout to check generation frequently
-                let event = tokio::time::timeout(
-                    Duration::from_millis(50),
-                    reader.next().fuse()
-                ).await;
+                let event =
+                    tokio::time::timeout(Duration::from_millis(50), reader.next().fuse()).await;
 
                 match event {
                     Ok(Some(Ok(event))) => {
@@ -319,9 +301,7 @@ impl EventLoop {
                             CrosstermEvent::Resize(w, h) => {
                                 AppEvent::Input(InputEvent::Resize(w, h))
                             }
-                            CrosstermEvent::Paste(text) => {
-                                AppEvent::Input(InputEvent::Paste(text))
-                            }
+                            CrosstermEvent::Paste(text) => AppEvent::Input(InputEvent::Paste(text)),
                             _ => continue,
                         };
 
@@ -447,56 +427,112 @@ mod tests {
     #[test]
     fn test_ctrl_c_quits() {
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert!(matches!(UserCommand::from_key(key), Some(UserCommand::Quit)));
+        assert!(matches!(
+            UserCommand::from_key(key),
+            Some(UserCommand::Quit)
+        ));
     }
 
     #[test]
     fn test_ctrl_p_navigates_up() {
         let key = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
-        assert!(matches!(UserCommand::from_key(key), Some(UserCommand::NavigateUp)));
+        assert!(matches!(
+            UserCommand::from_key(key),
+            Some(UserCommand::NavigateUp)
+        ));
     }
 
     #[test]
     fn test_ctrl_n_navigates_down() {
         let key = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
-        assert!(matches!(UserCommand::from_key(key), Some(UserCommand::NavigateDown)));
+        assert!(matches!(
+            UserCommand::from_key(key),
+            Some(UserCommand::NavigateDown)
+        ));
     }
 
     #[test]
     fn test_arrow_keys() {
         let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
-        assert!(matches!(UserCommand::from_key(up), Some(UserCommand::NavigateUp)));
+        assert!(matches!(
+            UserCommand::from_key(up),
+            Some(UserCommand::NavigateUp)
+        ));
 
         let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
-        assert!(matches!(UserCommand::from_key(down), Some(UserCommand::NavigateDown)));
+        assert!(matches!(
+            UserCommand::from_key(down),
+            Some(UserCommand::NavigateDown)
+        ));
     }
 
     #[test]
     fn test_enter_selects() {
         let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
-        assert!(matches!(UserCommand::from_key(key), Some(UserCommand::Select)));
+        assert!(matches!(
+            UserCommand::from_key(key),
+            Some(UserCommand::Select)
+        ));
     }
 
     #[test]
     fn test_tab_toggles_pane() {
         let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
-        assert!(matches!(UserCommand::from_key(tab), Some(UserCommand::TogglePane)));
+        assert!(matches!(
+            UserCommand::from_key(tab),
+            Some(UserCommand::TogglePane)
+        ));
 
         let backtab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
-        assert!(matches!(UserCommand::from_key(backtab), Some(UserCommand::TogglePaneReverse)));
+        assert!(matches!(
+            UserCommand::from_key(backtab),
+            Some(UserCommand::TogglePaneReverse)
+        ));
     }
 
     #[test]
     fn test_session_management_keys() {
         let cases: Vec<(KeyCode, KeyModifiers, UserCommand)> = vec![
-            (KeyCode::Char('s'), KeyModifiers::NONE, UserCommand::SelectShell),
-            (KeyCode::Char('n'), KeyModifiers::NONE, UserCommand::NewSession),
-            (KeyCode::Char('N'), KeyModifiers::SHIFT, UserCommand::NewProject),
-            (KeyCode::Char('p'), KeyModifiers::NONE, UserCommand::PauseSession),
-            (KeyCode::Char('r'), KeyModifiers::NONE, UserCommand::ResumeSession),
-            (KeyCode::Char('d'), KeyModifiers::NONE, UserCommand::DeleteSession),
-            (KeyCode::Char('D'), KeyModifiers::SHIFT, UserCommand::RemoveProject),
-            (KeyCode::Char('e'), KeyModifiers::NONE, UserCommand::OpenInEditor),
+            (
+                KeyCode::Char('s'),
+                KeyModifiers::NONE,
+                UserCommand::SelectShell,
+            ),
+            (
+                KeyCode::Char('n'),
+                KeyModifiers::NONE,
+                UserCommand::NewSession,
+            ),
+            (
+                KeyCode::Char('N'),
+                KeyModifiers::SHIFT,
+                UserCommand::NewProject,
+            ),
+            (
+                KeyCode::Char('p'),
+                KeyModifiers::NONE,
+                UserCommand::PauseSession,
+            ),
+            (
+                KeyCode::Char('r'),
+                KeyModifiers::NONE,
+                UserCommand::ResumeSession,
+            ),
+            (
+                KeyCode::Char('d'),
+                KeyModifiers::NONE,
+                UserCommand::DeleteSession,
+            ),
+            (
+                KeyCode::Char('D'),
+                KeyModifiers::SHIFT,
+                UserCommand::RemoveProject,
+            ),
+            (
+                KeyCode::Char('e'),
+                KeyModifiers::NONE,
+                UserCommand::OpenInEditor,
+            ),
         ];
 
         for (code, modifiers, expected) in cases {
@@ -505,13 +541,15 @@ mod tests {
             assert!(
                 result.is_some(),
                 "Expected Some for {:?}+{:?}",
-                code, modifiers
+                code,
+                modifiers
             );
             assert_eq!(
                 std::mem::discriminant(&result.unwrap()),
                 std::mem::discriminant(&expected),
                 "Mismatch for {:?}+{:?}",
-                code, modifiers
+                code,
+                modifiers
             );
         }
     }
@@ -519,37 +557,61 @@ mod tests {
     #[test]
     fn test_scroll_keys() {
         let ctrl_u = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
-        assert!(matches!(UserCommand::from_key(ctrl_u), Some(UserCommand::PageUp)));
+        assert!(matches!(
+            UserCommand::from_key(ctrl_u),
+            Some(UserCommand::PageUp)
+        ));
 
         let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
-        assert!(matches!(UserCommand::from_key(ctrl_d), Some(UserCommand::PageDown)));
+        assert!(matches!(
+            UserCommand::from_key(ctrl_d),
+            Some(UserCommand::PageDown)
+        ));
 
         let pgup = KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE);
-        assert!(matches!(UserCommand::from_key(pgup), Some(UserCommand::PageUp)));
+        assert!(matches!(
+            UserCommand::from_key(pgup),
+            Some(UserCommand::PageUp)
+        ));
 
         let pgdown = KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE);
-        assert!(matches!(UserCommand::from_key(pgdown), Some(UserCommand::PageDown)));
+        assert!(matches!(
+            UserCommand::from_key(pgdown),
+            Some(UserCommand::PageDown)
+        ));
     }
 
     #[test]
     fn test_help_key() {
         let q_none = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE);
-        assert!(matches!(UserCommand::from_key(q_none), Some(UserCommand::ShowHelp)));
+        assert!(matches!(
+            UserCommand::from_key(q_none),
+            Some(UserCommand::ShowHelp)
+        ));
 
         let q_shift = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT);
-        assert!(matches!(UserCommand::from_key(q_shift), Some(UserCommand::ShowHelp)));
+        assert!(matches!(
+            UserCommand::from_key(q_shift),
+            Some(UserCommand::ShowHelp)
+        ));
     }
 
     #[test]
     fn test_escape_cancels() {
         let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
-        assert!(matches!(UserCommand::from_key(key), Some(UserCommand::Cancel)));
+        assert!(matches!(
+            UserCommand::from_key(key),
+            Some(UserCommand::Cancel)
+        ));
     }
 
     #[test]
     fn test_backspace_key() {
         let key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
-        assert!(matches!(UserCommand::from_key(key), Some(UserCommand::Backspace)));
+        assert!(matches!(
+            UserCommand::from_key(key),
+            Some(UserCommand::Backspace)
+        ));
     }
 
     #[test]

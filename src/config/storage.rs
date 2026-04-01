@@ -383,7 +383,11 @@ mod tests {
         state.add_session(session);
 
         assert!(state.sessions.contains_key(&session_id));
-        assert!(state.get_project(&project_id).unwrap().worktrees.contains(&session_id));
+        assert!(state
+            .get_project(&project_id)
+            .unwrap()
+            .worktrees
+            .contains(&session_id));
     }
 
     #[test]
@@ -424,9 +428,18 @@ mod tests {
         let project_id = project.id;
         state.add_project(project);
 
-        state.add_session(create_test_session_with_status(project_id, SessionStatus::Running));
-        state.add_session(create_test_session_with_status(project_id, SessionStatus::Paused));
-        state.add_session(create_test_session_with_status(project_id, SessionStatus::Stopped));
+        state.add_session(create_test_session_with_status(
+            project_id,
+            SessionStatus::Running,
+        ));
+        state.add_session(create_test_session_with_status(
+            project_id,
+            SessionStatus::Paused,
+        ));
+        state.add_session(create_test_session_with_status(
+            project_id,
+            SessionStatus::Stopped,
+        ));
 
         let active = state.get_active_sessions();
         assert_eq!(active.len(), 2);

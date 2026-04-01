@@ -213,7 +213,10 @@ mod tests {
         let variants: Vec<SessionError> = vec![
             SessionError::NotFound(SessionId::new()),
             SessionError::AlreadyExists("test".to_string()),
-            SessionError::InvalidName { name: "x".to_string(), reason: "bad".to_string() },
+            SessionError::InvalidName {
+                name: "x".to_string(),
+                reason: "bad".to_string(),
+            },
             SessionError::InvalidState(SessionId::new()),
             SessionError::CreationFailed("fail".to_string()),
             SessionError::PersistenceFailed("fail".to_string()),
@@ -231,7 +234,10 @@ mod tests {
         let variants: Vec<TmuxError> = vec![
             TmuxError::NotInstalled,
             TmuxError::ServerNotRunning,
-            TmuxError::CommandFailed { command: "cmd".to_string(), stderr: "err".to_string() },
+            TmuxError::CommandFailed {
+                command: "cmd".to_string(),
+                stderr: "err".to_string(),
+            },
             TmuxError::CaptureFailed("fail".to_string()),
             TmuxError::SessionNotFound("sess".to_string()),
             TmuxError::Timeout(std::time::Duration::from_secs(5)),

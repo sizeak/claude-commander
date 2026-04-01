@@ -147,7 +147,11 @@ pub struct Project {
 
 impl Project {
     /// Create a new project
-    pub fn new(name: impl Into<String>, repo_path: PathBuf, main_branch: impl Into<String>) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        repo_path: PathBuf,
+        main_branch: impl Into<String>,
+    ) -> Self {
         Self {
             id: ProjectId::new(),
             name: name.into(),
@@ -465,7 +469,11 @@ mod tests {
     fn test_set_status_running_updates_last_active() {
         let project_id = ProjectId::new();
         let mut session = WorktreeSession::new(
-            project_id, "Test", "branch", PathBuf::from("/tmp/wt"), "claude",
+            project_id,
+            "Test",
+            "branch",
+            PathBuf::from("/tmp/wt"),
+            "claude",
         );
         let before = session.last_active_at;
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -477,7 +485,11 @@ mod tests {
     fn test_set_status_paused_does_not_update_last_active() {
         let project_id = ProjectId::new();
         let mut session = WorktreeSession::new(
-            project_id, "Test", "branch", PathBuf::from("/tmp/wt"), "claude",
+            project_id,
+            "Test",
+            "branch",
+            PathBuf::from("/tmp/wt"),
+            "claude",
         );
         let before = session.last_active_at;
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -489,7 +501,11 @@ mod tests {
     fn test_set_status_stopped_does_not_update_last_active() {
         let project_id = ProjectId::new();
         let mut session = WorktreeSession::new(
-            project_id, "Test", "branch", PathBuf::from("/tmp/wt"), "claude",
+            project_id,
+            "Test",
+            "branch",
+            PathBuf::from("/tmp/wt"),
+            "claude",
         );
         let before = session.last_active_at;
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -501,7 +517,11 @@ mod tests {
     fn test_touch_updates_last_active() {
         let project_id = ProjectId::new();
         let mut session = WorktreeSession::new(
-            project_id, "Test", "branch", PathBuf::from("/tmp/wt"), "claude",
+            project_id,
+            "Test",
+            "branch",
+            PathBuf::from("/tmp/wt"),
+            "claude",
         );
         let before = session.last_active_at;
         std::thread::sleep(std::time::Duration::from_millis(10));
@@ -512,7 +532,11 @@ mod tests {
     #[test]
     fn test_tmux_session_name_format() {
         let session = WorktreeSession::new(
-            ProjectId::new(), "Test", "branch", PathBuf::from("/tmp/wt"), "claude",
+            ProjectId::new(),
+            "Test",
+            "branch",
+            PathBuf::from("/tmp/wt"),
+            "claude",
         );
         assert!(session.tmux_session_name.starts_with("cc-"));
         assert_eq!(session.tmux_session_name.len(), 11); // "cc-" (3) + 8 hex chars
@@ -521,7 +545,11 @@ mod tests {
     #[test]
     fn test_matches_query_empty_string() {
         let session = WorktreeSession::new(
-            ProjectId::new(), "Anything", "any-branch", PathBuf::from("/tmp/wt"), "claude",
+            ProjectId::new(),
+            "Anything",
+            "any-branch",
+            PathBuf::from("/tmp/wt"),
+            "claude",
         );
         assert!(session.matches_query(""));
     }

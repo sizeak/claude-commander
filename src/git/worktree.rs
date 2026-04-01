@@ -103,12 +103,12 @@ impl WorktreeManager {
         // Ensure worktrees directory exists
         tokio::fs::create_dir_all(&worktrees_dir)
             .await
-            .map_err(|e| GitError::WorktreeError(format!("Failed to create worktrees dir: {}", e)))?;
+            .map_err(|e| {
+                GitError::WorktreeError(format!("Failed to create worktrees dir: {}", e))
+            })?;
 
         let mut cmd = Command::new("git");
-        cmd.current_dir(&repo_path)
-            .arg("worktree")
-            .arg("add");
+        cmd.current_dir(&repo_path).arg("worktree").arg("add");
 
         if branch_exists {
             // Checkout existing branch
@@ -131,11 +131,9 @@ impl WorktreeManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(GitError::WorktreeError(format!(
-                "git worktree add failed: {}",
-                stderr
-            ))
-            .into());
+            return Err(
+                GitError::WorktreeError(format!("git worktree add failed: {}", stderr)).into(),
+            );
         }
 
         info!(
@@ -178,11 +176,9 @@ impl WorktreeManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(GitError::WorktreeError(format!(
-                "git worktree remove failed: {}",
-                stderr
-            ))
-            .into());
+            return Err(
+                GitError::WorktreeError(format!("git worktree remove failed: {}", stderr)).into(),
+            );
         }
 
         info!("Removed worktree at {:?}", worktree_path);
@@ -204,11 +200,9 @@ impl WorktreeManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(GitError::WorktreeError(format!(
-                "git worktree list failed: {}",
-                stderr
-            ))
-            .into());
+            return Err(
+                GitError::WorktreeError(format!("git worktree list failed: {}", stderr)).into(),
+            );
         }
 
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -250,11 +244,9 @@ impl WorktreeManager {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(GitError::WorktreeError(format!(
-                "git worktree prune failed: {}",
-                stderr
-            ))
-            .into());
+            return Err(
+                GitError::WorktreeError(format!("git worktree prune failed: {}", stderr)).into(),
+            );
         }
 
         Ok(())

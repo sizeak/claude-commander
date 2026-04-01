@@ -152,9 +152,7 @@ fn list_matching_dirs(value: &str) -> Vec<String> {
             let name = e.file_name().to_string_lossy().into_owned();
             if name.starts_with(partial) {
                 // For symlinks, verify the target is a directory
-                if e.file_type().map(|ft| ft.is_symlink()).unwrap_or(false)
-                    && !e.path().is_dir()
-                {
+                if e.file_type().map(|ft| ft.is_symlink()).unwrap_or(false) && !e.path().is_dir() {
                     return None;
                 }
                 let full = if parent.is_empty() {
@@ -335,10 +333,7 @@ mod tests {
         let home = home_dir().unwrap();
 
         assert_eq!(expand_tilde("~"), home.display().to_string());
-        assert_eq!(
-            expand_tilde("~/foo"),
-            format!("{}/foo", home.display())
-        );
+        assert_eq!(expand_tilde("~/foo"), format!("{}/foo", home.display()));
         assert_eq!(expand_tilde("/absolute"), "/absolute");
         assert_eq!(expand_tilde("relative"), "relative");
     }
@@ -357,14 +352,8 @@ mod tests {
             longest_common_prefix(&["abc".into(), "abd".into(), "abx".into()]),
             "ab"
         );
-        assert_eq!(
-            longest_common_prefix(&["hello".into()]),
-            "hello"
-        );
-        assert_eq!(
-            longest_common_prefix(&["a".into(), "b".into()]),
-            ""
-        );
+        assert_eq!(longest_common_prefix(&["hello".into()]), "hello");
+        assert_eq!(longest_common_prefix(&["a".into(), "b".into()]), "");
     }
 
     #[test]

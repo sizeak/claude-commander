@@ -305,9 +305,7 @@ impl App {
                 tokio::time::sleep(Duration::from_millis(100)).await;
 
                 info!("Launching editor: {} {}", editor, path.display());
-                let status = std::process::Command::new(&editor)
-                    .arg(&path)
-                    .status();
+                let status = std::process::Command::new(&editor).arg(&path).status();
 
                 if let Err(e) = status {
                     self.ui_state.modal = Modal::Error {
@@ -378,26 +376,34 @@ impl App {
         };
 
         for (session_id, tmux_name) in session_ids {
-            let should_mark_stopped = if let Ok(exists) = self.session_manager.tmux.session_exists(&tmux_name).await {
-                if !exists {
-                    true
+            let should_mark_stopped =
+                if let Ok(exists) = self.session_manager.tmux.session_exists(&tmux_name).await {
+                    if !exists {
+                        true
+                    } else {
+                        // Session exists, but check if pane is dead (program exited)
+                        self.session_manager
+                            .tmux
+                            .is_pane_dead(&tmux_name)
+                            .await
+                            .unwrap_or(false)
+                    }
                 } else {
-                    // Session exists, but check if pane is dead (program exited)
-                    self.session_manager.tmux.is_pane_dead(&tmux_name).await.unwrap_or(false)
-                }
-            } else {
-                false
-            };
+                    false
+                };
 
             if should_mark_stopped {
                 // Kill the tmux session if it exists but pane is dead
                 let _ = self.session_manager.tmux.kill_session(&tmux_name).await;
 
-                let _ = self.store.mutate(move |state| {
-                    if let Some(session) = state.get_session_mut(&session_id) {
-                        session.set_status(SessionStatus::Stopped);
-                    }
-                }).await;
+                let _ = self
+                    .store
+                    .mutate(move |state| {
+                        if let Some(session) = state.get_session_mut(&session_id) {
+                            session.set_status(SessionStatus::Stopped);
+                        }
+                    })
+                    .await;
             }
         }
 
@@ -418,21 +424,22 @@ impl App {
         enable_raw_mode().map_err(|e| TuiError::InitFailed(e.to_string()))?;
 
         let mut stdout = io::stdout();
-        execute!(stdout, EnterAlternateScreen, EnableBracketedPaste, EnableMouseCapture)
+        execute!(
+            stdout,
+            EnterAlternateScreen,
+            EnableBracketedPaste,
+            EnableMouseCapture
+        )
         .map_err(|e| TuiError::InitFailed(e.to_string()))?;
 
         let backend = CrosstermBackend::new(stdout);
-        let terminal =
-            Terminal::new(backend).map_err(|e| TuiError::InitFailed(e.to_string()))?;
+        let terminal = Terminal::new(backend).map_err(|e| TuiError::InitFailed(e.to_string()))?;
 
         Ok(terminal)
     }
 
     /// Restore terminal to normal state
-    fn restore_terminal(
-        &self,
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) -> Result<()> {
+    fn restore_terminal(&self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
         info!("Disabling raw mode");
         disable_raw_mode().map_err(|e| TuiError::RestoreFailed(e.to_string()))?;
 
@@ -455,10 +462,7 @@ impl App {
     }
 
     /// Main event loop
-    async fn main_loop(
-        &mut self,
-        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    ) -> Result<()> {
+    async fn main_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
         // Kick off an initial background preview fetch
         self.update_selection();
         self.spawn_preview_update();
@@ -712,7 +716,10 @@ impl App {
         // Main layout: session list on left, right pane fills rest
         let main_chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(self.ui_state.left_pane_pct), Constraint::Percentage(100 - self.ui_state.left_pane_pct)])
+            .constraints([
+                Constraint::Percentage(self.ui_state.left_pane_pct),
+                Constraint::Percentage(100 - self.ui_state.left_pane_pct),
+            ])
             .split(content_area);
 
         // Render session list
@@ -750,20 +757,23 @@ impl App {
 
         // Full-width heading bar with dark grey background
         let heading_style = self.theme.status_bar();
-        let heading = Paragraph::new(Line::styled(" Sessions:", heading_style))
-            .style(heading_style);
+        let heading =
+            Paragraph::new(Line::styled(" Sessions:", heading_style)).style(heading_style);
         frame.render_widget(heading, chunks[0]);
 
         let tree_list = TreeList::new(&self.ui_state.list_items, &self.theme)
             .highlight_style(self.theme.selection().add_modifier(Modifier::BOLD));
 
-        frame.render_stateful_widget(tree_list, chunks[1], &mut self.ui_state.list_state.list_state);
+        frame.render_stateful_widget(
+            tree_list,
+            chunks[1],
+            &mut self.ui_state.list_state.list_state,
+        );
     }
 
     /// Check if a project (not a session) is currently selected
     fn is_project_selected(&self) -> bool {
-        self.ui_state.selected_session_id.is_none()
-            && self.ui_state.selected_project_id.is_some()
+        self.ui_state.selected_session_id.is_none() && self.ui_state.selected_project_id.is_some()
     }
 
     /// Render the preview pane
@@ -985,7 +995,8 @@ impl App {
                 frame.render_widget(block, modal_area);
 
                 const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-                let frame_char = SPINNER_FRAMES[self.ui_state.tick_count as usize % SPINNER_FRAMES.len()];
+                let frame_char =
+                    SPINNER_FRAMES[self.ui_state.tick_count as usize % SPINNER_FRAMES.len()];
                 let text = format!("{} {}", frame_char, message);
                 let paragraph = Paragraph::new(text);
                 frame.render_widget(paragraph, inner);
@@ -1130,16 +1141,21 @@ impl App {
         };
 
         let status = if status.is_empty() {
-            let session_count = self.ui_state.list_items.iter()
+            let session_count = self
+                .ui_state
+                .list_items
+                .iter()
                 .filter(|i| i.is_worktree())
                 .count();
-            format!("Sessions: {} | Press ? for help | n: new session | N: add project", session_count)
+            format!(
+                "Sessions: {} | Press ? for help | n: new session | N: add project",
+                session_count
+            )
         } else {
             status
         };
 
-        let paragraph = Paragraph::new(status)
-            .style(self.theme.status_bar());
+        let paragraph = Paragraph::new(status).style(self.theme.status_bar());
 
         frame.render_widget(paragraph, status_area);
     }
@@ -1217,26 +1233,26 @@ impl App {
         use crossterm::event::KeyCode;
 
         match &mut self.ui_state.modal {
-            Modal::Input { value, on_submit, .. } => {
-                match key.code {
-                    KeyCode::Enter => {
-                        let action = on_submit.clone();
-                        let value = value.clone();
-                        self.ui_state.modal = Modal::None;
-                        self.handle_input_submit(action, value).await;
-                    }
-                    KeyCode::Esc => {
-                        self.ui_state.modal = Modal::None;
-                    }
-                    KeyCode::Backspace => {
-                        value.pop();
-                    }
-                    KeyCode::Char(c) => {
-                        value.push(c);
-                    }
-                    _ => {}
+            Modal::Input {
+                value, on_submit, ..
+            } => match key.code {
+                KeyCode::Enter => {
+                    let action = on_submit.clone();
+                    let value = value.clone();
+                    self.ui_state.modal = Modal::None;
+                    self.handle_input_submit(action, value).await;
                 }
-            }
+                KeyCode::Esc => {
+                    self.ui_state.modal = Modal::None;
+                }
+                KeyCode::Backspace => {
+                    value.pop();
+                }
+                KeyCode::Char(c) => {
+                    value.push(c);
+                }
+                _ => {}
+            },
 
             Modal::PathInput {
                 value,
@@ -1268,19 +1284,17 @@ impl App {
                 _ => {}
             },
 
-            Modal::Confirm { on_confirm, .. } => {
-                match key.code {
-                    KeyCode::Enter => {
-                        let action = on_confirm.clone();
-                        self.ui_state.modal = Modal::None;
-                        self.handle_confirm(action).await;
-                    }
-                    KeyCode::Esc => {
-                        self.ui_state.modal = Modal::None;
-                    }
-                    _ => {}
+            Modal::Confirm { on_confirm, .. } => match key.code {
+                KeyCode::Enter => {
+                    let action = on_confirm.clone();
+                    self.ui_state.modal = Modal::None;
+                    self.handle_confirm(action).await;
                 }
-            }
+                KeyCode::Esc => {
+                    self.ui_state.modal = Modal::None;
+                }
+                _ => {}
+            },
 
             Modal::Loading { .. } => {
                 // Non-interactive — swallow all keys while loading
@@ -1455,24 +1469,30 @@ impl App {
                 }
             }
             StateUpdate::PrStatusReady { results } => {
-                let _ = self.store.mutate(move |state| {
-                    for (session_id, pr_info) in &results {
-                        if let Some(session) = state.get_session_mut(session_id) {
-                            let new_number = pr_info.as_ref().map(|p| p.number);
-                            let new_merged = pr_info.as_ref().is_some_and(|p| p.merged);
-                            let new_url = pr_info.as_ref().map(|p| p.url.clone());
-                            session.pr_number = new_number;
-                            session.pr_url = new_url;
-                            session.pr_merged = new_merged;
+                let _ = self
+                    .store
+                    .mutate(move |state| {
+                        for (session_id, pr_info) in &results {
+                            if let Some(session) = state.get_session_mut(session_id) {
+                                let new_number = pr_info.as_ref().map(|p| p.number);
+                                let new_merged = pr_info.as_ref().is_some_and(|p| p.merged);
+                                let new_url = pr_info.as_ref().map(|p| p.url.clone());
+                                session.pr_number = new_number;
+                                session.pr_url = new_url;
+                                session.pr_merged = new_merged;
+                            }
                         }
-                    }
-                }).await;
+                    })
+                    .await;
                 self.refresh_list_items().await;
             }
             StateUpdate::SessionCreated { session_id } => {
                 debug!("Session created: {}", session_id);
                 self.ui_state.modal = Modal::None;
-                self.ui_state.status_message = Some((format!("Created session {}", session_id), Instant::now() + Duration::from_secs(3)));
+                self.ui_state.status_message = Some((
+                    format!("Created session {}", session_id),
+                    Instant::now() + Duration::from_secs(3),
+                ));
                 self.refresh_list_items().await;
                 // Select the newly created session
                 if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
@@ -1500,7 +1520,10 @@ impl App {
 
     /// Handle selection (attach to session)
     async fn handle_select(&mut self) {
-        info!("handle_select called, selected_session_id: {:?}", self.ui_state.selected_session_id);
+        info!(
+            "handle_select called, selected_session_id: {:?}",
+            self.ui_state.selected_session_id
+        );
         if let Some(session_id) = self.ui_state.selected_session_id {
             info!("Getting attach command for session: {}", session_id);
             match self.session_manager.get_attach_command(&session_id).await {
@@ -1525,7 +1548,11 @@ impl App {
     /// Handle shell selection (attach to shell session)
     async fn handle_select_shell(&mut self) {
         if let Some(session_id) = self.ui_state.selected_session_id {
-            match self.session_manager.get_shell_attach_command(&session_id).await {
+            match self
+                .session_manager
+                .get_shell_attach_command(&session_id)
+                .await
+            {
                 Ok(cmd) => {
                     self.ui_state.attach_command = Some(cmd);
                     self.ui_state.should_quit = true;
@@ -1537,7 +1564,11 @@ impl App {
                 }
             }
         } else if let Some(project_id) = self.ui_state.selected_project_id {
-            match self.session_manager.get_project_shell_attach_command(&project_id).await {
+            match self
+                .session_manager
+                .get_project_shell_attach_command(&project_id)
+                .await
+            {
                 Ok(cmd) => {
                     self.ui_state.attach_command = Some(cmd);
                     self.ui_state.should_quit = true;
@@ -1561,10 +1592,7 @@ impl App {
                     .get(&session_id)
                     .map(|s| s.worktree_path.clone())
             } else if let Some(project_id) = self.ui_state.selected_project_id {
-                state
-                    .projects
-                    .get(&project_id)
-                    .map(|p| p.repo_path.clone())
+                state.projects.get(&project_id).map(|p| p.repo_path.clone())
             } else {
                 None
             }
@@ -1607,7 +1635,10 @@ impl App {
                 on_submit: InputAction::CreateSession { project_id },
             };
         } else {
-            self.ui_state.status_message = Some(("Select a project first (use N to add one)".to_string(), Instant::now() + Duration::from_secs(3)));
+            self.ui_state.status_message = Some((
+                "Select a project first (use N to add one)".to_string(),
+                Instant::now() + Duration::from_secs(3),
+            ));
         }
     }
 
@@ -1616,7 +1647,10 @@ impl App {
         if let Some(session_id) = self.ui_state.selected_session_id {
             match self.session_manager.pause_session(&session_id).await {
                 Ok(_) => {
-                    self.ui_state.status_message = Some(("Session paused".to_string(), Instant::now() + Duration::from_secs(3)));
+                    self.ui_state.status_message = Some((
+                        "Session paused".to_string(),
+                        Instant::now() + Duration::from_secs(3),
+                    ));
                     self.refresh_list_items().await;
                 }
                 Err(e) => {
@@ -1633,7 +1667,10 @@ impl App {
         if let Some(session_id) = self.ui_state.selected_session_id {
             match self.session_manager.resume_session(&session_id).await {
                 Ok(_) => {
-                    self.ui_state.status_message = Some(("Session resumed".to_string(), Instant::now() + Duration::from_secs(3)));
+                    self.ui_state.status_message = Some((
+                        "Session resumed".to_string(),
+                        Instant::now() + Duration::from_secs(3),
+                    ));
                     self.refresh_list_items().await;
                 }
                 Err(e) => {
@@ -1674,7 +1711,10 @@ impl App {
         match action {
             InputAction::CreateSession { project_id } => {
                 if value.trim().is_empty() {
-                    self.ui_state.status_message = Some(("Session name cannot be empty".to_string(), Instant::now() + Duration::from_secs(3)));
+                    self.ui_state.status_message = Some((
+                        "Session name cannot be empty".to_string(),
+                        Instant::now() + Duration::from_secs(3),
+                    ));
                     return;
                 }
 
@@ -1686,14 +1726,23 @@ impl App {
                 let session_manager = self.session_manager.clone();
                 let tx = self.event_loop.sender();
                 tokio::spawn(async move {
-                    match session_manager.create_session(&project_id, value, None).await {
+                    match session_manager
+                        .create_session(&project_id, value, None)
+                        .await
+                    {
                         Ok(session_id) => {
-                            let _ = tx.send(AppEvent::StateUpdate(StateUpdate::SessionCreated { session_id })).await;
+                            let _ = tx
+                                .send(AppEvent::StateUpdate(StateUpdate::SessionCreated {
+                                    session_id,
+                                }))
+                                .await;
                         }
                         Err(e) => {
-                            let _ = tx.send(AppEvent::StateUpdate(StateUpdate::SessionCreateFailed {
-                                message: format!("Failed to create session: {}", e),
-                            })).await;
+                            let _ = tx
+                                .send(AppEvent::StateUpdate(StateUpdate::SessionCreateFailed {
+                                    message: format!("Failed to create session: {}", e),
+                                }))
+                                .await;
                         }
                     }
                 });
@@ -1710,7 +1759,10 @@ impl App {
 
                 match self.session_manager.add_project(path).await {
                     Ok(project_id) => {
-                        self.ui_state.status_message = Some((format!("Added project {}", project_id), Instant::now() + Duration::from_secs(3)));
+                        self.ui_state.status_message = Some((
+                            format!("Added project {}", project_id),
+                            Instant::now() + Duration::from_secs(3),
+                        ));
                         self.refresh_list_items().await;
                         // Select the newly added project
                         if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
@@ -1750,21 +1802,27 @@ impl App {
                 };
 
                 // 2. Remove from state immediately so the UI updates
-                if let Err(e) = self.store.mutate(move |state| {
-                    state.remove_session(&session_id);
-                }).await {
+                if let Err(e) = self
+                    .store
+                    .mutate(move |state| {
+                        state.remove_session(&session_id);
+                    })
+                    .await
+                {
                     self.ui_state.modal = Modal::Error {
                         message: format!("Failed to save state: {}", e),
                     };
                     return;
                 }
                 self.ui_state.selected_session_id = None;
-                self.ui_state.status_message = Some(("Session deleted".to_string(), Instant::now() + Duration::from_secs(3)));
+                self.ui_state.status_message = Some((
+                    "Session deleted".to_string(),
+                    Instant::now() + Duration::from_secs(3),
+                ));
                 self.refresh_list_items().await;
 
                 // 3. Spawn background cleanup (kill tmux + remove worktree)
-                if let Some((tmux_name, shell_tmux_name, worktree_path, repo_path)) = cleanup_data
-                {
+                if let Some((tmux_name, shell_tmux_name, worktree_path, repo_path)) = cleanup_data {
                     let tmux = self.session_manager.tmux.clone();
                     let tx = self.event_loop.sender();
                     tokio::spawn(async move {
@@ -1781,21 +1839,18 @@ impl App {
                                 .arg(&worktree_path)
                                 .output()
                                 .await;
-                            if let Err(e) = output.as_ref().map_err(|e| e.to_string()).and_then(
-                                |o| {
+                            if let Err(e) =
+                                output.as_ref().map_err(|e| e.to_string()).and_then(|o| {
                                     if o.status.success() {
                                         Ok(())
                                     } else {
                                         Err(String::from_utf8_lossy(&o.stderr).into_owned())
                                     }
-                                },
-                            ) {
+                                })
+                            {
                                 let _ = tx
                                     .send(AppEvent::StateUpdate(StateUpdate::Error {
-                                        message: format!(
-                                            "Background cleanup failed: {}",
-                                            e
-                                        ),
+                                        message: format!("Background cleanup failed: {}", e),
                                     }))
                                     .await;
                             }
@@ -1828,16 +1883,23 @@ impl App {
                 };
 
                 // 2. Remove from state immediately so the UI updates
-                if let Err(e) = self.store.mutate(move |state| {
-                    state.remove_project(&project_id);
-                }).await {
+                if let Err(e) = self
+                    .store
+                    .mutate(move |state| {
+                        state.remove_project(&project_id);
+                    })
+                    .await
+                {
                     self.ui_state.modal = Modal::Error {
                         message: format!("Failed to save state: {}", e),
                     };
                     return;
                 }
                 self.ui_state.selected_project_id = None;
-                self.ui_state.status_message = Some(("Project removed".to_string(), Instant::now() + Duration::from_secs(3)));
+                self.ui_state.status_message = Some((
+                    "Project removed".to_string(),
+                    Instant::now() + Duration::from_secs(3),
+                ));
                 self.refresh_list_items().await;
 
                 // 3. Spawn background cleanup (kill all tmux sessions + remove worktrees)
@@ -1875,10 +1937,7 @@ impl App {
                             {
                                 let _ = tx
                                     .send(AppEvent::StateUpdate(StateUpdate::Error {
-                                        message: format!(
-                                            "Background cleanup failed: {}",
-                                            e
-                                        ),
+                                        message: format!("Background cleanup failed: {}", e),
                                     }))
                                     .await;
                             }
@@ -1968,7 +2027,9 @@ impl App {
         }
 
         self.ui_state.list_items = items;
-        self.ui_state.list_state.set_item_count(self.ui_state.list_items.len());
+        self.ui_state
+            .list_state
+            .set_item_count(self.ui_state.list_items.len());
 
         // Clear status message after a bit
         // (In a real app, you'd use a timer)
@@ -1978,10 +2039,13 @@ impl App {
     async fn save_selection(&self) {
         let session_id = self.ui_state.selected_session_id;
         let project_id = self.ui_state.selected_project_id;
-        let _ = self.store.mutate(move |state| {
-            state.last_selected_session = session_id;
-            state.last_selected_project = project_id;
-        }).await;
+        let _ = self
+            .store
+            .mutate(move |state| {
+                state.last_selected_session = session_id;
+                state.last_selected_project = project_id;
+            })
+            .await;
     }
 
     /// Restore selection from persisted state
@@ -2016,7 +2080,10 @@ async fn fetch_preview_data(
     project_id: Option<ProjectId>,
 ) -> (String, Arc<DiffInfo>, String) {
     if let Some(sid) = session_id {
-        debug!("fetch_preview_data: fetching content/diff/shell for session {}", sid);
+        debug!(
+            "fetch_preview_data: fetching content/diff/shell for session {}",
+            sid
+        );
         let (preview_result, diff_result, shell_result) = tokio::join!(
             mgr.get_content(&sid),
             mgr.get_diff(&sid),
@@ -2042,7 +2109,10 @@ async fn fetch_preview_data(
 
         (preview, diff, shell)
     } else if let Some(pid) = project_id {
-        debug!("fetch_preview_data: fetching diff/shell for project {}", pid);
+        debug!(
+            "fetch_preview_data: fetching diff/shell for project {}",
+            pid
+        );
         let (diff_result, shell_result) = tokio::join!(
             mgr.get_project_diff(&pid),
             mgr.get_project_shell_content(&pid),

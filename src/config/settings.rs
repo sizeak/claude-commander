@@ -169,11 +169,10 @@ impl Config {
             })?;
         }
 
-        let toml = toml::to_string_pretty(self)
-            .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
+        let toml =
+            toml::to_string_pretty(self).map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
 
-        std::fs::write(&config_path, toml)
-            .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
+        std::fs::write(&config_path, toml).map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
 
         Ok(())
     }
@@ -199,16 +198,29 @@ impl Config {
             .unwrap_or(editor);
         matches!(
             basename,
-            "code" | "code-insiders" | "cursor"
-                | "zed" | "zeditor"
-                | "subl" | "sublime_text"
-                | "idea" | "goland" | "rustrover" | "clion" | "pycharm" | "webstorm" | "phpstorm"
+            "code"
+                | "code-insiders"
+                | "cursor"
+                | "zed"
+                | "zeditor"
+                | "subl"
+                | "sublime_text"
+                | "idea"
+                | "goland"
+                | "rustrover"
+                | "clion"
+                | "pycharm"
+                | "webstorm"
+                | "phpstorm"
                 | "atom"
                 | "lapce"
                 | "fleet"
-                | "gedit" | "kate" | "mousepad"
+                | "gedit"
+                | "kate"
+                | "mousepad"
                 | "gvim"
-                | "open" | "xdg-open"
+                | "open"
+                | "xdg-open"
         )
     }
 
@@ -264,7 +276,9 @@ mod tests {
         let result = config.resolve_editor();
         // If neither env var is set, result is None; otherwise it's the env var value.
         // Either way, config.editor being None means it wasn't used.
-        assert!(result.is_none() || std::env::var("VISUAL").is_ok() || std::env::var("EDITOR").is_ok());
+        assert!(
+            result.is_none() || std::env::var("VISUAL").is_ok() || std::env::var("EDITOR").is_ok()
+        );
     }
 
     #[test]
@@ -291,26 +305,51 @@ mod tests {
     fn test_is_gui_editor_known_gui_editors() {
         let config = Config::default();
         let gui_editors = [
-            "code", "code-insiders", "cursor",
-            "zed", "zeditor",
-            "subl", "sublime_text",
-            "idea", "goland", "rustrover", "clion", "pycharm", "webstorm", "phpstorm",
-            "atom", "lapce", "fleet",
-            "gedit", "kate", "mousepad",
+            "code",
+            "code-insiders",
+            "cursor",
+            "zed",
+            "zeditor",
+            "subl",
+            "sublime_text",
+            "idea",
+            "goland",
+            "rustrover",
+            "clion",
+            "pycharm",
+            "webstorm",
+            "phpstorm",
+            "atom",
+            "lapce",
+            "fleet",
+            "gedit",
+            "kate",
+            "mousepad",
             "gvim",
-            "open", "xdg-open",
+            "open",
+            "xdg-open",
         ];
         for editor in gui_editors {
-            assert!(config.is_gui_editor(editor), "{} should be detected as GUI", editor);
+            assert!(
+                config.is_gui_editor(editor),
+                "{} should be detected as GUI",
+                editor
+            );
         }
     }
 
     #[test]
     fn test_is_gui_editor_terminal_editors_not_gui() {
         let config = Config::default();
-        let terminal_editors = ["vim", "nvim", "nano", "emacs", "vi", "micro", "helix", "joe"];
+        let terminal_editors = [
+            "vim", "nvim", "nano", "emacs", "vi", "micro", "helix", "joe",
+        ];
         for editor in terminal_editors {
-            assert!(!config.is_gui_editor(editor), "{} should NOT be detected as GUI", editor);
+            assert!(
+                !config.is_gui_editor(editor),
+                "{} should NOT be detected as GUI",
+                editor
+            );
         }
     }
 

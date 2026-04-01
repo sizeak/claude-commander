@@ -211,7 +211,10 @@ mod tests {
         let mut state = PreviewState::new();
 
         // 100 lines, 20 visible - starts at bottom (follow mode)
-        let content = (0..100).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        let content = (0..100)
+            .map(|i| format!("Line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         state.set_content(&content, 20);
 
         assert_eq!(state.total_lines, 100);
@@ -237,7 +240,10 @@ mod tests {
         let mut state = PreviewState::new();
 
         // 10 lines, 20 visible - no scrolling needed
-        let content = (0..10).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        let content = (0..10)
+            .map(|i| format!("Line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         state.set_content(&content, 20);
 
         assert!(!state.can_scroll_down());
@@ -250,7 +256,10 @@ mod tests {
     #[test]
     fn test_follow_mode_on_by_default() {
         let mut state = PreviewState::new();
-        let content = (0..100).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        let content = (0..100)
+            .map(|i| format!("Line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         state.set_content(&content, 20);
         // Follow mode auto-scrolls to bottom
         assert_eq!(state.scroll_offset, 80); // 100 - 20
@@ -259,7 +268,10 @@ mod tests {
     #[test]
     fn test_scroll_up_disables_follow() {
         let mut state = PreviewState::new();
-        let content = (0..100).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        let content = (0..100)
+            .map(|i| format!("Line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         state.set_content(&content, 20);
         assert_eq!(state.scroll_offset, 80);
 
@@ -267,7 +279,10 @@ mod tests {
         assert_eq!(state.scroll_offset, 75);
 
         // New content should NOT auto-scroll (follow disabled)
-        let content2 = (0..110).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        let content2 = (0..110)
+            .map(|i| format!("Line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         state.set_content(&content2, 20);
         assert_eq!(state.scroll_offset, 75); // Stayed where we scrolled to
     }
@@ -275,7 +290,10 @@ mod tests {
     #[test]
     fn test_scroll_to_bottom_re_enables_follow() {
         let mut state = PreviewState::new();
-        let content = (0..100).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        let content = (0..100)
+            .map(|i| format!("Line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         state.set_content(&content, 20);
 
         // Scroll up (disables follow)
@@ -288,7 +306,10 @@ mod tests {
         assert!(!state.can_scroll_down());
 
         // Now new content should auto-scroll
-        let content2 = (0..110).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        let content2 = (0..110)
+            .map(|i| format!("Line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         state.set_content(&content2, 20);
         assert_eq!(state.scroll_offset, 90); // 110 - 20
     }
@@ -313,7 +334,10 @@ mod tests {
     #[test]
     fn test_page_up_from_top() {
         let mut state = PreviewState::new();
-        let content = (0..100).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        let content = (0..100)
+            .map(|i| format!("Line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         state.set_content(&content, 20);
         state.scroll_to_top();
         assert_eq!(state.scroll_offset, 0);
@@ -325,7 +349,10 @@ mod tests {
     #[test]
     fn test_can_scroll_at_boundaries() {
         let mut state = PreviewState::new();
-        let content = (0..100).map(|i| format!("Line {}", i)).collect::<Vec<_>>().join("\n");
+        let content = (0..100)
+            .map(|i| format!("Line {}", i))
+            .collect::<Vec<_>>()
+            .join("\n");
         state.set_content(&content, 20);
 
         // At bottom

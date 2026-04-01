@@ -174,28 +174,16 @@ impl TmuxExecutor {
         self.execute(&args).await?;
 
         // Set remain-on-exit so pane stays open if the program exits/crashes
-        self.execute(&[
-            "set-option",
-            "-t",
-            session_name,
-            "remain-on-exit",
-            "on",
-        ])
-        .await?;
+        self.execute(&["set-option", "-t", session_name, "remain-on-exit", "on"])
+            .await?;
 
         // Enable mouse support so scroll wheel enters copy mode for scrollback
         self.execute(&["set-option", "-t", session_name, "mouse", "on"])
             .await?;
 
         // Increase scrollback buffer for long Claude sessions
-        self.execute(&[
-            "set-option",
-            "-t",
-            session_name,
-            "history-limit",
-            "50000",
-        ])
-        .await?;
+        self.execute(&["set-option", "-t", session_name, "history-limit", "50000"])
+            .await?;
 
         Ok(())
     }
@@ -279,8 +267,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_executor_with_custom_settings() {
-        let executor = TmuxExecutor::with_max_concurrent(8)
-            .with_timeout(Duration::from_secs(10));
+        let executor = TmuxExecutor::with_max_concurrent(8).with_timeout(Duration::from_secs(10));
 
         assert_eq!(executor.timeout, Duration::from_secs(10));
     }

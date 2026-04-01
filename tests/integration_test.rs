@@ -102,7 +102,10 @@ async fn test_git_backend_discover() {
 
     // Discover from subdirectory
     let backend = GitBackend::discover(&subdir);
-    assert!(backend.is_ok(), "Should discover git repository from subdirectory");
+    assert!(
+        backend.is_ok(),
+        "Should discover git repository from subdirectory"
+    );
 }
 
 #[tokio::test]
@@ -160,8 +163,10 @@ async fn test_session_manager_create_session() {
 
     // Create temp worktrees dir
     let worktrees_dir = TempDir::new().unwrap();
-    let mut config = Config::default();
-    config.worktrees_dir = Some(worktrees_dir.path().to_path_buf());
+    let config = Config {
+        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        ..Config::default()
+    };
 
     let store = create_isolated_store(&state_temp_dir);
     let manager = SessionManager::new(config, store.clone());
@@ -171,7 +176,11 @@ async fn test_session_manager_create_session() {
 
     // Create session
     let result = manager
-        .create_session(&project_id, "test-session".to_string(), Some("bash".to_string()))
+        .create_session(
+            &project_id,
+            "test-session".to_string(),
+            Some("bash".to_string()),
+        )
         .await;
 
     if let Err(e) = &result {
@@ -213,8 +222,10 @@ async fn test_session_manager_pause_resume() {
     let state_temp_dir = TempDir::new().unwrap();
 
     let worktrees_dir = TempDir::new().unwrap();
-    let mut config = Config::default();
-    config.worktrees_dir = Some(worktrees_dir.path().to_path_buf());
+    let config = Config {
+        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        ..Config::default()
+    };
 
     let store = create_isolated_store(&state_temp_dir);
     let manager = SessionManager::new(config, store.clone());
@@ -222,7 +233,11 @@ async fn test_session_manager_pause_resume() {
     // Add project and create session
     let project_id = manager.add_project(repo_path).await.unwrap();
     let session_id = manager
-        .create_session(&project_id, "pause-test".to_string(), Some("bash".to_string()))
+        .create_session(
+            &project_id,
+            "pause-test".to_string(),
+            Some("bash".to_string()),
+        )
         .await
         .unwrap();
 
@@ -265,11 +280,8 @@ async fn test_state_persistence() {
     // Create and save state
     {
         let mut state = AppState::new();
-        let project = claude_commander::Project::new(
-            "test-project",
-            PathBuf::from("/tmp/test"),
-            "main",
-        );
+        let project =
+            claude_commander::Project::new("test-project", PathBuf::from("/tmp/test"), "main");
         state.add_project(project);
         state.save_to(&state_path).unwrap();
     }
@@ -304,8 +316,10 @@ async fn test_sync_worktrees_imports_external() {
     let state_temp_dir = TempDir::new().unwrap();
 
     let worktrees_dir = TempDir::new().unwrap();
-    let mut config = Config::default();
-    config.worktrees_dir = Some(worktrees_dir.path().to_path_buf());
+    let config = Config {
+        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        ..Config::default()
+    };
 
     let store = create_isolated_store(&state_temp_dir);
     let manager = SessionManager::new(config, store.clone());
@@ -354,7 +368,10 @@ async fn test_sync_worktrees_imports_external() {
 
     // Run sync again - should be idempotent
     let imported_again = manager.sync_worktrees(&project_id).await.unwrap();
-    assert_eq!(imported_again, 0, "Second sync should import 0 (idempotent)");
+    assert_eq!(
+        imported_again, 0,
+        "Second sync should import 0 (idempotent)"
+    );
 
     // Keep temp dirs alive
     drop(repo_temp_dir);
