@@ -21,7 +21,7 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Margin, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame, Terminal,
@@ -994,10 +994,23 @@ impl App {
                 let inner = block.inner(modal_area);
                 frame.render_widget(block, modal_area);
 
-                const SPINNER_FRAMES: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-                let frame_char =
-                    SPINNER_FRAMES[self.ui_state.tick_count as usize % SPINNER_FRAMES.len()];
-                let text = format!("{} {}", frame_char, message);
+                const FRAMES: &[char] = &['│', '╱', '─', '╲'];
+                const COLORS: &[Color] = &[
+                    Color::Red,
+                    Color::Yellow,
+                    Color::Green,
+                    Color::Cyan,
+                    Color::Blue,
+                    Color::Magenta,
+                ];
+                let tick = (self.ui_state.tick_count / 5) as usize;
+                let ch = FRAMES[tick % FRAMES.len()];
+                let color = COLORS[tick % COLORS.len()];
+                let text = Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(ch.to_string(), Style::default().fg(color)),
+                    Span::raw(format!(" {}", message)),
+                ]);
                 let paragraph = Paragraph::new(text);
                 frame.render_widget(paragraph, inner);
             }
