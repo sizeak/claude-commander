@@ -71,6 +71,16 @@ Use red-green TDD: write a failing test first, then implement the fix. Key areas
 
 When adding new behavior, add a corresponding unit test that would fail without the change.
 
+## Pre-commit hooks
+
+This project uses [pre-commit](https://pre-commit.com/) to run `cargo fmt` and `cargo clippy` on every commit. After cloning, run:
+
+```
+pre-commit install
+```
+
+The `cargo fmt` hook auto-fixes formatting. If `cargo clippy` fails, fix the warnings before committing.
+
 ## Git conventions
 
 **CRITICAL: Never force push under any circumstances. This includes `--force`, `--force-with-lease`, and amending commits that have been pushed. Always create new commits instead.**
