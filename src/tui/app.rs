@@ -21,7 +21,7 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Margin, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
     Frame, Terminal,
@@ -165,6 +165,8 @@ pub struct AppUiState {
     pub preview_update_spawned_at: Option<Instant>,
     /// Tick counter for animations (incremented each render tick)
     pub tick_count: u64,
+    /// Throbber/spinner state for loading modals
+    pub throbber_state: throbber_widgets_tui::ThrobberState,
 }
 
 impl Default for AppUiState {
@@ -195,6 +197,7 @@ impl Default for AppUiState {
             preview_update_spawned_at: None,
             terminal_size: Rect::default(),
             tick_count: 0,
+            throbber_state: throbber_widgets_tui::ThrobberState::default(),
         }
     }
 }
@@ -548,6 +551,9 @@ impl App {
             AppEvent::StateUpdate(update) => self.handle_state_update(update).await,
             AppEvent::Tick => {
                 self.ui_state.tick_count = self.ui_state.tick_count.wrapping_add(1);
+                if self.ui_state.tick_count % 3 == 0 {
+                    self.ui_state.throbber_state.calc_next();
+                }
                 return true;
             }
             AppEvent::Quit => {
@@ -892,7 +898,7 @@ impl App {
     }
 
     /// Render modal overlay
-    fn render_modal(&self, frame: &mut Frame, area: Rect) {
+    fn render_modal(&mut self, frame: &mut Frame, area: Rect) {
         match &self.ui_state.modal {
             Modal::None => {}
 
@@ -994,25 +1000,20 @@ impl App {
                 let inner = block.inner(modal_area);
                 frame.render_widget(block, modal_area);
 
-                const FRAMES: &[char] = &['│', '╱', '─', '╲'];
-                const COLORS: &[Color] = &[
-                    Color::Red,
-                    Color::Yellow,
-                    Color::Green,
-                    Color::Cyan,
-                    Color::Blue,
-                    Color::Magenta,
+                const RAINBOW: &[ratatui::style::Color] = &[
+                    ratatui::style::Color::Red,
+                    ratatui::style::Color::Yellow,
+                    ratatui::style::Color::Green,
+                    ratatui::style::Color::Cyan,
+                    ratatui::style::Color::Blue,
+                    ratatui::style::Color::Magenta,
                 ];
-                let tick = (self.ui_state.tick_count / 5) as usize;
-                let ch = FRAMES[tick % FRAMES.len()];
-                let color = COLORS[tick % COLORS.len()];
-                let text = Line::from(vec![
-                    Span::raw(" "),
-                    Span::styled(ch.to_string(), Style::default().fg(color)),
-                    Span::raw(format!(" {}", message)),
-                ]);
-                let paragraph = Paragraph::new(text);
-                frame.render_widget(paragraph, inner);
+                let color = RAINBOW[self.ui_state.throbber_state.index() as usize % RAINBOW.len()];
+                let throbber = throbber_widgets_tui::Throbber::default()
+                    .throbber_set(throbber_widgets_tui::symbols::throbber::BRAILLE_EIGHT)
+                    .label(message.as_str())
+                    .throbber_style(Style::default().fg(color));
+                frame.render_stateful_widget(throbber, inner, &mut self.ui_state.throbber_state);
             }
 
             Modal::Confirm { title, message, .. } => {
