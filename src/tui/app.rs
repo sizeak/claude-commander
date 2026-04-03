@@ -1308,6 +1308,11 @@ impl App {
                         field_key: "pull_before_create".into(),
                     },
                     SettingsRow {
+                        label: "Dim Unfocused Preview".into(),
+                        value: c.dim_unfocused_preview.to_string(),
+                        field_key: "dim_unfocused_preview".into(),
+                    },
+                    SettingsRow {
                         label: "UI Refresh FPS".into(),
                         value: c.ui_refresh_fps.to_string(),
                         field_key: "ui_refresh_fps".into(),
@@ -1572,6 +1577,11 @@ impl App {
                     "pull_before_create" => {
                         if let Ok(b) = value.parse::<bool>() {
                             self.config.pull_before_create = b;
+                        }
+                    }
+                    "dim_unfocused_preview" => {
+                        if let Ok(b) = value.parse::<bool>() {
+                            self.config.dim_unfocused_preview = b;
                         }
                     }
                     "ui_refresh_fps" => {
