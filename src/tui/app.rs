@@ -156,6 +156,19 @@ pub struct SettingsRow {
     pub label: String,
     pub value: String,
     pub field_key: String,
+    pub field_type: SettingsFieldType,
+}
+
+/// How a settings field should be edited
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsFieldType {
+    /// Free-form text input
+    #[default]
+    Text,
+    /// Toggle between true/false on Enter
+    Bool,
+    /// Cycle through fixed options on Enter (e.g. true/false/auto)
+    Cycle,
 }
 
 /// Editing state within the settings modal
@@ -1270,6 +1283,7 @@ impl App {
                         label: "Default Program".into(),
                         value: c.default_program.clone(),
                         field_key: "default_program".into(),
+                        field_type: SettingsFieldType::Text,
                     },
                     SettingsRow {
                         label: "Branch Prefix".into(),
@@ -1279,11 +1293,13 @@ impl App {
                             c.branch_prefix.clone()
                         },
                         field_key: "branch_prefix".into(),
+                        field_type: SettingsFieldType::Text,
                     },
                     SettingsRow {
                         label: "Shell Program".into(),
                         value: c.shell_program.clone(),
                         field_key: "shell_program".into(),
+                        field_type: SettingsFieldType::Text,
                     },
                     SettingsRow {
                         label: "Editor".into(),
@@ -1292,6 +1308,7 @@ impl App {
                             .clone()
                             .unwrap_or_else(|| "(auto)".into()),
                         field_key: "editor".into(),
+                        field_type: SettingsFieldType::Text,
                     },
                     SettingsRow {
                         label: "Editor is GUI".into(),
@@ -1301,31 +1318,37 @@ impl App {
                             None => "(auto)".into(),
                         },
                         field_key: "editor_gui".into(),
+                        field_type: SettingsFieldType::Cycle,
                     },
                     SettingsRow {
                         label: "Pull Before Create".into(),
                         value: c.pull_before_create.to_string(),
                         field_key: "pull_before_create".into(),
+                        field_type: SettingsFieldType::Bool,
                     },
                     SettingsRow {
                         label: "Dim Unfocused Preview".into(),
                         value: c.dim_unfocused_preview.to_string(),
                         field_key: "dim_unfocused_preview".into(),
+                        field_type: SettingsFieldType::Bool,
                     },
                     SettingsRow {
                         label: "UI Refresh FPS".into(),
                         value: c.ui_refresh_fps.to_string(),
                         field_key: "ui_refresh_fps".into(),
+                        field_type: SettingsFieldType::Text,
                     },
                     SettingsRow {
                         label: "PR Check Interval (s)".into(),
                         value: c.pr_check_interval_secs.to_string(),
                         field_key: "pr_check_interval_secs".into(),
+                        field_type: SettingsFieldType::Text,
                     },
                     SettingsRow {
                         label: "Max Concurrent Tmux".into(),
                         value: c.max_concurrent_tmux.to_string(),
                         field_key: "max_concurrent_tmux".into(),
+                        field_type: SettingsFieldType::Text,
                     },
                 ]
             }
@@ -1337,6 +1360,7 @@ impl App {
                         label: action.description().to_string(),
                         value: kb.keys_display(action),
                         field_key: action.config_name().to_string(),
+                        field_type: SettingsFieldType::Text,
                     })
                     .collect()
             }
@@ -1358,6 +1382,7 @@ impl App {
                                 })
                                 .unwrap_or_else(|| format_color(t.$field)),
                             field_key: stringify!($field).into(),
+                            field_type: SettingsFieldType::Text,
                         }
                     };
                 }
@@ -1370,6 +1395,7 @@ impl App {
                             .clone()
                             .unwrap_or_else(|| "(auto)".into()),
                         field_key: "preset".into(),
+                        field_type: SettingsFieldType::Text,
                     },
                     theme_row!("Border Focused", border_focused),
                     theme_row!("Border Unfocused", border_unfocused),
@@ -1893,13 +1919,38 @@ impl App {
                 }
                 KeyCode::Enter => {
                     if !state.rows.is_empty() {
-                        let current_value = state.rows[state.selected_row].value.clone();
-                        let initial = if current_value == "(auto)" || current_value == "(none)" {
-                            String::new()
-                        } else {
-                            current_value
-                        };
-                        state.editing = Some(SettingsEditing::TextInput { value: initial });
+                        let row = &state.rows[state.selected_row];
+                        match row.field_type {
+                            SettingsFieldType::Bool => {
+                                // Toggle between true/false
+                                let new_val = if row.value == "true" { "false" } else { "true" };
+                                let field_key = row.field_key.clone();
+                                self.apply_settings_edit(state.tab, &field_key, new_val);
+                                state.rows = self.build_settings_rows(state.tab);
+                            }
+                            SettingsFieldType::Cycle => {
+                                // Cycle: true → false → (auto) → true
+                                let new_val = match row.value.as_str() {
+                                    "true" => "false",
+                                    "false" => "(auto)",
+                                    _ => "true",
+                                };
+                                let field_key = row.field_key.clone();
+                                self.apply_settings_edit(state.tab, &field_key, new_val);
+                                state.rows = self.build_settings_rows(state.tab);
+                            }
+                            SettingsFieldType::Text => {
+                                let current_value = row.value.clone();
+                                let initial =
+                                    if current_value == "(auto)" || current_value == "(none)" {
+                                        String::new()
+                                    } else {
+                                        current_value
+                                    };
+                                state.editing =
+                                    Some(SettingsEditing::TextInput { value: initial });
+                            }
+                        }
                     }
                     self.ui_state.modal = Modal::Settings(state);
                 }
