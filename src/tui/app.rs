@@ -1833,10 +1833,13 @@ impl App {
     /// Handle a keypress in the settings modal.
     async fn handle_settings_key(
         &mut self,
-        code: crossterm::event::KeyCode,
+        key: crossterm::event::KeyEvent,
         mut state: SettingsState,
     ) {
-        use crossterm::event::KeyCode;
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let code = key.code;
+        let modifiers = key.modifiers;
 
         if let Some(ref mut editing) = state.editing {
             // Currently editing a field
@@ -1904,6 +1907,22 @@ impl App {
                 KeyCode::Char('j') | KeyCode::Down => {
                     if !state.rows.is_empty() {
                         state.selected_row = (state.selected_row + 1) % state.rows.len();
+                    }
+                    self.ui_state.modal = Modal::Settings(state);
+                }
+                KeyCode::Char('n') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    if !state.rows.is_empty() {
+                        state.selected_row = (state.selected_row + 1) % state.rows.len();
+                    }
+                    self.ui_state.modal = Modal::Settings(state);
+                }
+                KeyCode::Char('p') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    if !state.rows.is_empty() {
+                        state.selected_row = if state.selected_row == 0 {
+                            state.rows.len() - 1
+                        } else {
+                            state.selected_row - 1
+                        };
                     }
                     self.ui_state.modal = Modal::Settings(state);
                 }
@@ -2164,7 +2183,7 @@ impl App {
                     Modal::Settings(s) => s,
                     _ => unreachable!(),
                 };
-                self.handle_settings_key(key.code, state).await;
+                self.handle_settings_key(key, state).await;
             }
 
             Modal::None => {}
