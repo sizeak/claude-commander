@@ -153,6 +153,9 @@ pub struct AppUiState {
     pub attach_command: Option<String>,
     /// Editor command + path to open after exiting TUI
     pub editor_command: Option<(String, PathBuf)>,
+    /// When attached via shell toggle (Ctrl+\), stores the session name to switch back to.
+    /// Contains (current_session_name, paired_session_name) so we can toggle between them.
+    pub shell_toggle_pair: Option<(String, String)>,
     /// Needs right pane clear (set on view switch, consumed on render)
     pub clear_right_pane: bool,
     /// Left pane width as a percentage (adjustable at runtime via < / >)
@@ -190,6 +193,7 @@ impl Default for AppUiState {
             selected_project_id: None,
             attach_command: None,
             editor_command: None,
+            shell_toggle_pair: None,
             clear_right_pane: false,
             left_pane_pct: DEFAULT_LEFT_PANE_PCT,
             last_pr_check: None,
@@ -328,17 +332,59 @@ impl App {
                         // Flush any pending input (e.g. the Enter key that triggered this attach)
                         crate::tmux::flush_stdin();
 
-                        // Attach to session via async PTY bridge (supports Ctrl+Q detach)
+                        // Attach to session via async PTY bridge (supports Ctrl+Q detach, Ctrl+\ shell toggle)
                         info!("Executing attach command: {}", cmd);
-                        let session_name = cmd.split_whitespace().last().unwrap_or("");
+                        let session_name = cmd.split_whitespace().last().unwrap_or("").to_string();
                         if !session_name.is_empty() {
-                            match crate::tmux::attach_to_session(session_name).await {
-                                Ok(result) => info!("Attach ended: {:?}", result),
-                                Err(e) => {
-                                    warn!("Failed to attach to session: {}", e);
-                                    self.ui_state.modal = Modal::Error {
-                                        message: format!("Failed to attach: {}", e),
-                                    };
+                            let mut current_session = session_name.clone();
+
+                            loop {
+                                match crate::tmux::attach_to_session(&current_session).await {
+                                    Ok(crate::tmux::AttachResult::SwitchToShell) => {
+                                        info!("Shell toggle requested from session: {}", current_session);
+
+                                        // Determine the paired session to switch to
+                                        let next_session = match &self.ui_state.shell_toggle_pair {
+                                            Some((_, paired)) => paired.clone(),
+                                            None => {
+                                                // First toggle — resolve the shell session
+                                                match self.resolve_shell_toggle_pair(&current_session).await {
+                                                    Ok(paired) => paired,
+                                                    Err(e) => {
+                                                        warn!("Failed to resolve shell session: {}", e);
+                                                        self.ui_state.modal = Modal::Error {
+                                                            message: format!("Cannot switch to shell: {}", e),
+                                                        };
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        };
+
+                                        // Update the toggle pair so next Ctrl+\ switches back
+                                        self.ui_state.shell_toggle_pair =
+                                            Some((next_session.clone(), current_session.clone()));
+                                        current_session = next_session;
+
+                                        // Flush between switches
+                                        crate::tmux::flush_stdin();
+                                        info!("Switching to session: {}", current_session);
+                                        continue;
+                                    }
+                                    Ok(result) => {
+                                        info!("Attach ended: {:?}", result);
+                                        // Clear toggle state on normal detach
+                                        self.ui_state.shell_toggle_pair = None;
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to attach to session: {}", e);
+                                        self.ui_state.modal = Modal::Error {
+                                            message: format!("Failed to attach: {}", e),
+                                        };
+                                        self.ui_state.shell_toggle_pair = None;
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -1079,6 +1125,7 @@ impl App {
                     Line::from("  j/k, ↑/↓, C-p/n Navigate session list"),
                     Line::from("  Enter           Attach to selected session"),
                     Line::from("  s               Open shell in worktree"),
+                    Line::from("  Ctrl+\\          Toggle between Claude/shell (while attached)"),
                     Line::from("  Tab/Shift+Tab   Toggle preview/diff/shell view"),
                     Line::from(""),
                     Line::from("Session Management:"),
@@ -1600,6 +1647,63 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Resolve the shell toggle pair for a given tmux session name.
+    ///
+    /// If the current session is a Claude session, returns the shell session name
+    /// (creating it if needed). If the current session is already a shell session
+    /// (ends with "-sh"), returns the Claude session name.
+    async fn resolve_shell_toggle_pair(&mut self, current_tmux_name: &str) -> crate::error::Result<String> {
+        if current_tmux_name.ends_with("-sh") {
+            // We're in a shell session — the Claude session is the name without "-sh"
+            let claude_name = current_tmux_name.trim_end_matches("-sh").to_string();
+            // Verify the Claude session exists
+            if self.session_manager.tmux.session_exists(&claude_name).await? {
+                return Ok(claude_name);
+            }
+            return Err(crate::error::Error::Session(
+                crate::error::SessionError::TmuxSessionNotFound(claude_name),
+            ));
+        }
+
+        // We're in a Claude session — find the matching session ID and ensure shell exists
+        let session_id = {
+            let state = self.store.read().await;
+            state
+                .sessions
+                .values()
+                .find(|s| s.tmux_session_name == current_tmux_name)
+                .map(|s| s.id)
+        };
+
+        if let Some(session_id) = session_id {
+            let shell_name = self.session_manager.ensure_shell_session(&session_id).await?;
+            return Ok(shell_name);
+        }
+
+        // Try project-level shell
+        let project_id = {
+            let state = self.store.read().await;
+            state
+                .projects
+                .values()
+                .find(|p| {
+                    p.shell_tmux_session_name.as_deref() == Some(current_tmux_name)
+                })
+                .map(|p| p.id)
+        };
+
+        if let Some(project_id) = project_id {
+            let shell_name = self.session_manager.ensure_project_shell_session(&project_id).await?;
+            return Ok(shell_name);
+        }
+
+        Err(crate::error::Error::Session(
+            crate::error::SessionError::TmuxSessionNotFound(
+                format!("No session found for tmux name: {}", current_tmux_name),
+            ),
+        ))
     }
 
     /// Handle open in editor command
