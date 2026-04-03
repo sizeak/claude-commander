@@ -32,7 +32,7 @@ use super::event::{AppEvent, EventLoop, InputEvent, StateUpdate, UserCommand};
 use super::path_completer::PathCompleter;
 use super::theme::Theme;
 use super::widgets::{DiffView, DiffViewState, Preview, PreviewState, TreeList, TreeListState};
-use crate::config::{Config, StateStore};
+use crate::config::{BindableAction, Config, StateStore};
 use crate::error::{Result, TuiError};
 use crate::git::{check_pr_for_branch, is_gh_available, DiffInfo};
 use crate::session::{ProjectId, SessionId, SessionListItem, SessionManager, SessionStatus};
@@ -99,6 +99,85 @@ pub enum Modal {
     Help,
     /// Error modal
     Error { message: String },
+    /// Settings modal
+    Settings(SettingsState),
+}
+
+/// Which tab is active in the settings modal
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsTab {
+    #[default]
+    General,
+    Keybindings,
+    Theme,
+}
+
+impl SettingsTab {
+    const ALL: [SettingsTab; 3] = [Self::General, Self::Keybindings, Self::Theme];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Keybindings => "Keybindings",
+            Self::Theme => "Theme",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::General => Self::Keybindings,
+            Self::Keybindings => Self::Theme,
+            Self::Theme => Self::General,
+        }
+    }
+
+    fn prev(self) -> Self {
+        match self {
+            Self::General => Self::Theme,
+            Self::Keybindings => Self::General,
+            Self::Theme => Self::Keybindings,
+        }
+    }
+}
+
+/// State for the settings modal
+#[derive(Debug, Clone)]
+pub struct SettingsState {
+    pub tab: SettingsTab,
+    pub selected_row: usize,
+    pub editing: Option<SettingsEditing>,
+    /// Cached row data for the current tab
+    pub rows: Vec<SettingsRow>,
+}
+
+/// A single row in the settings list
+#[derive(Debug, Clone)]
+pub struct SettingsRow {
+    pub label: String,
+    pub value: String,
+    pub field_key: String,
+    pub field_type: SettingsFieldType,
+}
+
+/// How a settings field should be edited
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsFieldType {
+    /// Free-form text input
+    #[default]
+    Text,
+    /// Toggle between true/false on Enter
+    Bool,
+    /// Cycle through fixed options on Enter (e.g. true/false/auto)
+    Cycle,
+}
+
+/// Editing state within the settings modal
+#[derive(Debug, Clone)]
+pub enum SettingsEditing {
+    /// Editing a text value
+    TextInput { value: String },
+    /// Capturing a key for keybinding
+    KeyCapture { action_name: String, keys: Vec<String> },
 }
 
 /// Action to perform when input modal is submitted
@@ -1133,6 +1212,10 @@ impl App {
                 let paragraph = Paragraph::new(help_lines);
                 frame.render_widget(paragraph, content_area);
             }
+
+            Modal::Settings(ref state) => {
+                self.render_settings_modal(frame, area, state);
+            }
         }
     }
 
@@ -1188,6 +1271,722 @@ impl App {
         lines.push(Line::from("Press any key to close this help."));
 
         lines
+    }
+
+    /// Build rows for the settings modal for the given tab.
+    fn build_settings_rows(&self, tab: SettingsTab) -> Vec<SettingsRow> {
+        match tab {
+            SettingsTab::General => {
+                let c = &self.config;
+                vec![
+                    SettingsRow {
+                        label: "Default Program".into(),
+                        value: c.default_program.clone(),
+                        field_key: "default_program".into(),
+                        field_type: SettingsFieldType::Text,
+                    },
+                    SettingsRow {
+                        label: "Branch Prefix".into(),
+                        value: if c.branch_prefix.is_empty() {
+                            "(none)".into()
+                        } else {
+                            c.branch_prefix.clone()
+                        },
+                        field_key: "branch_prefix".into(),
+                        field_type: SettingsFieldType::Text,
+                    },
+                    SettingsRow {
+                        label: "Shell Program".into(),
+                        value: c.shell_program.clone(),
+                        field_key: "shell_program".into(),
+                        field_type: SettingsFieldType::Text,
+                    },
+                    SettingsRow {
+                        label: "Editor".into(),
+                        value: c
+                            .editor
+                            .clone()
+                            .unwrap_or_else(|| "(auto)".into()),
+                        field_key: "editor".into(),
+                        field_type: SettingsFieldType::Text,
+                    },
+                    SettingsRow {
+                        label: "Editor is GUI".into(),
+                        value: match c.editor_gui {
+                            Some(true) => "true".into(),
+                            Some(false) => "false".into(),
+                            None => "(auto)".into(),
+                        },
+                        field_key: "editor_gui".into(),
+                        field_type: SettingsFieldType::Cycle,
+                    },
+                    SettingsRow {
+                        label: "Pull Before Create".into(),
+                        value: c.pull_before_create.to_string(),
+                        field_key: "pull_before_create".into(),
+                        field_type: SettingsFieldType::Bool,
+                    },
+                    SettingsRow {
+                        label: "Dim Unfocused Preview".into(),
+                        value: c.dim_unfocused_preview.to_string(),
+                        field_key: "dim_unfocused_preview".into(),
+                        field_type: SettingsFieldType::Bool,
+                    },
+                    SettingsRow {
+                        label: "UI Refresh FPS".into(),
+                        value: c.ui_refresh_fps.to_string(),
+                        field_key: "ui_refresh_fps".into(),
+                        field_type: SettingsFieldType::Text,
+                    },
+                    SettingsRow {
+                        label: "PR Check Interval (s)".into(),
+                        value: c.pr_check_interval_secs.to_string(),
+                        field_key: "pr_check_interval_secs".into(),
+                        field_type: SettingsFieldType::Text,
+                    },
+                    SettingsRow {
+                        label: "Max Concurrent Tmux".into(),
+                        value: c.max_concurrent_tmux.to_string(),
+                        field_key: "max_concurrent_tmux".into(),
+                        field_type: SettingsFieldType::Text,
+                    },
+                ]
+            }
+            SettingsTab::Keybindings => {
+                let kb = &self.config.keybindings;
+                BindableAction::ALL
+                    .iter()
+                    .map(|&action| SettingsRow {
+                        label: action.description().to_string(),
+                        value: kb.keys_display(action),
+                        field_key: action.config_name().to_string(),
+                        field_type: SettingsFieldType::Text,
+                    })
+                    .collect()
+            }
+            SettingsTab::Theme => {
+                // Show the current resolved color for each overridable field,
+                // and whether it has a user override.
+                let t = &self.theme;
+                let o = &self.config.theme;
+
+                macro_rules! theme_row {
+                    ($label:expr, $field:ident) => {
+                        SettingsRow {
+                            label: $label.into(),
+                            value: o
+                                .$field
+                                .map(|cv| {
+                                    let s = toml::to_string(&cv).unwrap_or_default();
+                                    s.trim().trim_matches('"').to_string()
+                                })
+                                .unwrap_or_else(|| format_color(t.$field)),
+                            field_key: stringify!($field).into(),
+                            field_type: SettingsFieldType::Text,
+                        }
+                    };
+                }
+
+                vec![
+                    SettingsRow {
+                        label: "Preset".into(),
+                        value: o
+                            .preset
+                            .clone()
+                            .unwrap_or_else(|| "(auto)".into()),
+                        field_key: "preset".into(),
+                        field_type: SettingsFieldType::Text,
+                    },
+                    theme_row!("Border Focused", border_focused),
+                    theme_row!("Border Unfocused", border_unfocused),
+                    theme_row!("Selection BG", selection_bg),
+                    theme_row!("Status Running", status_running),
+                    theme_row!("Status Paused", status_paused),
+                    theme_row!("Status Stopped", status_stopped),
+                    theme_row!("Status PR", status_pr),
+                    theme_row!("Status PR Merged", status_pr_merged),
+                    theme_row!("Text Primary", text_primary),
+                    theme_row!("Text Secondary", text_secondary),
+                    theme_row!("Text Accent", text_accent),
+                    theme_row!("Diff Added", diff_added),
+                    theme_row!("Diff Removed", diff_removed),
+                    theme_row!("Diff Hunk Header", diff_hunk_header),
+                    theme_row!("Diff File Header", diff_file_header),
+                    theme_row!("Modal Info", modal_info),
+                    theme_row!("Modal Warning", modal_warning),
+                    theme_row!("Modal Error", modal_error),
+                    theme_row!("Status Bar BG", status_bar_bg),
+                    theme_row!("Status Bar FG", status_bar_fg),
+                ]
+            }
+        }
+    }
+
+    /// Render the settings modal.
+    fn render_settings_modal(&self, frame: &mut Frame, area: Rect, state: &SettingsState) {
+        let modal_area = centered_rect(75, 85, area);
+        frame.render_widget(Clear, modal_area);
+
+        let block = Block::default()
+            .title(" Settings ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.theme.modal_info));
+        let inner = block.inner(modal_area);
+        frame.render_widget(block, modal_area);
+
+        let content_area = inner.inner(Margin {
+            horizontal: 1,
+            vertical: 0,
+        });
+
+        if content_area.height < 4 {
+            return;
+        }
+
+        // --- Tab bar (row 0) ---
+        let tab_area = Rect {
+            height: 1,
+            ..content_area
+        };
+        let mut tab_spans: Vec<Span> = Vec::new();
+        for (i, tab) in SettingsTab::ALL.iter().enumerate() {
+            if i > 0 {
+                tab_spans.push(Span::raw("  "));
+            }
+            let style = if *tab == state.tab {
+                Style::default()
+                    .fg(self.theme.text_primary)
+                    .add_modifier(Modifier::BOLD)
+                    .add_modifier(Modifier::UNDERLINED)
+            } else {
+                Style::default().fg(self.theme.text_secondary)
+            };
+            tab_spans.push(Span::styled(tab.label(), style));
+        }
+        frame.render_widget(Paragraph::new(Line::from(tab_spans)), tab_area);
+
+        // --- Separator ---
+        let sep_area = Rect {
+            y: content_area.y + 1,
+            height: 1,
+            ..content_area
+        };
+        let separator = "─".repeat(content_area.width as usize);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                separator,
+                Style::default().fg(self.theme.border_unfocused),
+            ))),
+            sep_area,
+        );
+
+        // --- Settings rows ---
+        let rows_area = Rect {
+            y: content_area.y + 2,
+            height: content_area.height.saturating_sub(4),
+            ..content_area
+        };
+
+        let label_width = state
+            .rows
+            .iter()
+            .map(|r| r.label.len())
+            .max()
+            .unwrap_or(20) as u16
+            + 2;
+        let value_width = rows_area.width.saturating_sub(label_width + 3);
+
+        let visible_rows = rows_area.height as usize;
+        let scroll_offset = if state.selected_row >= visible_rows {
+            state.selected_row - visible_rows + 1
+        } else {
+            0
+        };
+
+        for (i, row) in state
+            .rows
+            .iter()
+            .enumerate()
+            .skip(scroll_offset)
+            .take(visible_rows)
+        {
+            let y = rows_area.y + (i - scroll_offset) as u16;
+            let is_selected = i == state.selected_row;
+
+            let row_style = if is_selected {
+                self.theme.selection()
+            } else {
+                Style::default()
+            };
+
+            // Label
+            let label_area = Rect {
+                x: rows_area.x,
+                y,
+                width: label_width.min(rows_area.width),
+                height: 1,
+            };
+            let label = format!("{:<width$}", row.label, width = label_width as usize);
+            frame.render_widget(
+                Paragraph::new(Span::styled(label, row_style)),
+                label_area,
+            );
+
+            // Value
+            if rows_area.width > label_width + 2 {
+                let val_area = Rect {
+                    x: rows_area.x + label_width + 2,
+                    y,
+                    width: value_width,
+                    height: 1,
+                };
+
+                let display_val = if is_selected {
+                    if let Some(SettingsEditing::TextInput { value }) = &state.editing {
+                        format!("{value}▏")
+                    } else {
+                        row.value.clone()
+                    }
+                } else {
+                    row.value.clone()
+                };
+
+                let val_style = if is_selected && state.editing.is_some() {
+                    row_style.add_modifier(Modifier::UNDERLINED)
+                } else {
+                    row_style.fg(self.theme.text_accent)
+                };
+
+                // On the Theme tab, show a color swatch next to the value
+                let line = if state.tab == SettingsTab::Theme && row.field_key != "preset" {
+                    if let Some(color) = self.resolve_theme_color(&row.field_key) {
+                        Line::from(vec![
+                            Span::styled(display_val, val_style),
+                            Span::raw(" "),
+                            Span::styled("██", Style::default().fg(color)),
+                        ])
+                    } else {
+                        Line::from(Span::styled(display_val, val_style))
+                    }
+                } else {
+                    Line::from(Span::styled(display_val, val_style))
+                };
+
+                frame.render_widget(Paragraph::new(line), val_area);
+            }
+        }
+
+        // --- Footer ---
+        let footer_area = Rect {
+            y: content_area.y + content_area.height.saturating_sub(1),
+            height: 1,
+            ..content_area
+        };
+        let footer_text = if state.editing.is_some() {
+            "Enter: save  Esc: cancel"
+        } else {
+            "Tab: switch tab  j/k: navigate  Enter: edit  d: reset  Esc: close"
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                footer_text,
+                Style::default().fg(self.theme.text_secondary),
+            )),
+            footer_area,
+        );
+    }
+
+    /// Resolve the current theme color for a given field key.
+    fn resolve_theme_color(&self, field_key: &str) -> Option<ratatui::style::Color> {
+        let t = &self.theme;
+        match field_key {
+            "border_focused" => Some(t.border_focused),
+            "border_unfocused" => Some(t.border_unfocused),
+            "selection_bg" => Some(t.selection_bg),
+            "selection_fg" => t.selection_fg,
+            "status_running" => Some(t.status_running),
+            "status_paused" => Some(t.status_paused),
+            "status_stopped" => Some(t.status_stopped),
+            "status_pr" => Some(t.status_pr),
+            "status_pr_merged" => Some(t.status_pr_merged),
+            "text_primary" => Some(t.text_primary),
+            "text_secondary" => Some(t.text_secondary),
+            "text_accent" => Some(t.text_accent),
+            "text_pr" => Some(t.text_pr),
+            "diff_added" => Some(t.diff_added),
+            "diff_removed" => Some(t.diff_removed),
+            "diff_hunk_header" => Some(t.diff_hunk_header),
+            "diff_file_header" => Some(t.diff_file_header),
+            "diff_context" => Some(t.diff_context),
+            "modal_info" => Some(t.modal_info),
+            "modal_warning" => Some(t.modal_warning),
+            "modal_error" => Some(t.modal_error),
+            "status_bar_bg" => Some(t.status_bar_bg),
+            "status_bar_fg" => Some(t.status_bar_fg),
+            _ => None,
+        }
+    }
+
+    /// Get the default value for a settings field as a string.
+    fn default_value_for(&self, tab: SettingsTab, field_key: &str) -> String {
+        match tab {
+            SettingsTab::General => {
+                let d = Config::default();
+                match field_key {
+                    "default_program" => d.default_program,
+                    "branch_prefix" => d.branch_prefix,
+                    "shell_program" => d.shell_program,
+                    "editor" => String::new(),
+                    "editor_gui" => "(auto)".into(),
+                    "pull_before_create" => d.pull_before_create.to_string(),
+                    "dim_unfocused_preview" => d.dim_unfocused_preview.to_string(),
+                    "ui_refresh_fps" => d.ui_refresh_fps.to_string(),
+                    "pr_check_interval_secs" => d.pr_check_interval_secs.to_string(),
+                    "max_concurrent_tmux" => d.max_concurrent_tmux.to_string(),
+                    _ => String::new(),
+                }
+            }
+            SettingsTab::Keybindings => {
+                let defaults = crate::config::KeyBindings::default();
+                if let Ok(action) = field_key.parse::<BindableAction>() {
+                    defaults.keys_display(action)
+                } else {
+                    String::new()
+                }
+            }
+            SettingsTab::Theme => {
+                // Resetting a theme field means clearing the override (back to auto-detected)
+                // We signal this with an empty string, which apply_settings_edit interprets
+                // as "remove override" for the preset, and we handle color fields below.
+                String::new()
+            }
+        }
+    }
+
+    /// Apply an edited value from the settings modal to the config.
+    fn apply_settings_edit(&mut self, tab: SettingsTab, field_key: &str, value: &str) {
+        match tab {
+            SettingsTab::General => {
+                match field_key {
+                    "default_program" => self.config.default_program = value.to_string(),
+                    "branch_prefix" => self.config.branch_prefix = value.to_string(),
+                    "shell_program" => self.config.shell_program = value.to_string(),
+                    "editor" => {
+                        self.config.editor = if value.is_empty() || value == "(auto)" {
+                            None
+                        } else {
+                            Some(value.to_string())
+                        };
+                    }
+                    "editor_gui" => {
+                        self.config.editor_gui = match value {
+                            "true" => Some(true),
+                            "false" => Some(false),
+                            _ => None,
+                        };
+                    }
+                    "pull_before_create" => {
+                        if let Ok(b) = value.parse::<bool>() {
+                            self.config.pull_before_create = b;
+                        }
+                    }
+                    "dim_unfocused_preview" => {
+                        if let Ok(b) = value.parse::<bool>() {
+                            self.config.dim_unfocused_preview = b;
+                        }
+                    }
+                    "ui_refresh_fps" => {
+                        if let Ok(v) = value.parse::<u32>() {
+                            self.config.ui_refresh_fps = v;
+                        }
+                    }
+                    "pr_check_interval_secs" => {
+                        if let Ok(v) = value.parse::<u64>() {
+                            self.config.pr_check_interval_secs = v;
+                        }
+                    }
+                    "max_concurrent_tmux" => {
+                        if let Ok(v) = value.parse::<usize>() {
+                            self.config.max_concurrent_tmux = v;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            SettingsTab::Theme => {
+                use crate::config::theme::ColorValue;
+
+                if field_key == "preset" {
+                    self.config.theme.preset = if value.is_empty() || value == "(auto)" {
+                        None
+                    } else {
+                        Some(value.to_string())
+                    };
+                } else if value.is_empty() {
+                    // Empty value means "clear override" (reset to default)
+                    macro_rules! clear_theme_field {
+                        ($($name:ident),*) => {
+                            match field_key {
+                                $(stringify!($name) => self.config.theme.$name = None,)*
+                                _ => {}
+                            }
+                        };
+                    }
+                    clear_theme_field!(
+                        border_focused,
+                        border_unfocused,
+                        selection_bg,
+                        selection_fg,
+                        status_running,
+                        status_paused,
+                        status_stopped,
+                        status_pr,
+                        status_pr_merged,
+                        text_primary,
+                        text_secondary,
+                        text_accent,
+                        text_pr,
+                        diff_added,
+                        diff_removed,
+                        diff_hunk_header,
+                        diff_file_header,
+                        diff_context,
+                        modal_info,
+                        modal_warning,
+                        modal_error,
+                        status_bar_bg,
+                        status_bar_fg
+                    );
+                } else {
+                    // Try to parse the value as a ColorValue via TOML
+                    let toml_input = if value.starts_with('#')
+                        || value.chars().all(|c| c.is_ascii_alphabetic() || c == '_')
+                    {
+                        format!("c = \"{value}\"")
+                    } else {
+                        format!("c = {value}")
+                    };
+
+                    #[derive(serde::Deserialize)]
+                    struct Wrap {
+                        c: ColorValue,
+                    }
+
+                    if let Ok(w) = toml::from_str::<Wrap>(&toml_input) {
+                        macro_rules! set_theme_field {
+                            ($($name:ident),*) => {
+                                match field_key {
+                                    $(stringify!($name) => self.config.theme.$name = Some(w.c),)*
+                                    _ => {}
+                                }
+                            };
+                        }
+                        set_theme_field!(
+                            border_focused,
+                            border_unfocused,
+                            selection_bg,
+                            selection_fg,
+                            status_running,
+                            status_paused,
+                            status_stopped,
+                            status_pr,
+                            status_pr_merged,
+                            text_primary,
+                            text_secondary,
+                            text_accent,
+                            text_pr,
+                            diff_added,
+                            diff_removed,
+                            diff_hunk_header,
+                            diff_file_header,
+                            diff_context,
+                            modal_info,
+                            modal_warning,
+                            modal_error,
+                            status_bar_bg,
+                            status_bar_fg
+                        );
+                    }
+                }
+
+                // Rebuild theme from updated overrides
+                let base = self
+                    .config
+                    .theme
+                    .preset
+                    .as_deref()
+                    .and_then(Theme::from_preset)
+                    .unwrap_or_default();
+                self.theme = base.with_overrides(&self.config.theme);
+            }
+            SettingsTab::Keybindings => {
+                // Keybinding editing is not text-based — handled separately
+            }
+        }
+
+        // Persist config
+        if let Err(e) = self.config.save() {
+            warn!("Failed to save config: {}", e);
+        }
+    }
+
+    /// Handle a keypress in the settings modal.
+    async fn handle_settings_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        mut state: SettingsState,
+    ) {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let code = key.code;
+        let modifiers = key.modifiers;
+
+        if let Some(ref mut editing) = state.editing {
+            // Currently editing a field
+            match editing {
+                SettingsEditing::TextInput { value } => match code {
+                    KeyCode::Enter => {
+                        let val = value.clone();
+                        let field_key = state.rows[state.selected_row].field_key.clone();
+                        state.editing = None;
+                        self.apply_settings_edit(state.tab, &field_key, &val);
+                        // Refresh rows after applying
+                        state.rows = self.build_settings_rows(state.tab);
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Esc => {
+                        state.editing = None;
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Backspace => {
+                        value.pop();
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Char(c) => {
+                        value.push(c);
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    _ => {
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                },
+                SettingsEditing::KeyCapture { .. } => {
+                    // For key capture, any keypress except Esc is captured as the new binding
+                    match code {
+                        KeyCode::Esc => {
+                            state.editing = None;
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        _ => {
+                            // Key capture is a simplified version — store the key display
+                            // Full keybinding editing would require more complex UX
+                            state.editing = None;
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                    }
+                }
+            }
+        } else {
+            // Not editing — navigation mode
+            match code {
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    self.ui_state.modal = Modal::None;
+                }
+                KeyCode::Tab => {
+                    state.tab = state.tab.next();
+                    state.selected_row = 0;
+                    state.rows = self.build_settings_rows(state.tab);
+                    self.ui_state.modal = Modal::Settings(state);
+                }
+                KeyCode::BackTab => {
+                    state.tab = state.tab.prev();
+                    state.selected_row = 0;
+                    state.rows = self.build_settings_rows(state.tab);
+                    self.ui_state.modal = Modal::Settings(state);
+                }
+                KeyCode::Char('j') | KeyCode::Down => {
+                    if !state.rows.is_empty() {
+                        state.selected_row = (state.selected_row + 1) % state.rows.len();
+                    }
+                    self.ui_state.modal = Modal::Settings(state);
+                }
+                KeyCode::Char('n') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    if !state.rows.is_empty() {
+                        state.selected_row = (state.selected_row + 1) % state.rows.len();
+                    }
+                    self.ui_state.modal = Modal::Settings(state);
+                }
+                KeyCode::Char('p') if modifiers.contains(KeyModifiers::CONTROL) => {
+                    if !state.rows.is_empty() {
+                        state.selected_row = if state.selected_row == 0 {
+                            state.rows.len() - 1
+                        } else {
+                            state.selected_row - 1
+                        };
+                    }
+                    self.ui_state.modal = Modal::Settings(state);
+                }
+                KeyCode::Char('k') | KeyCode::Up => {
+                    if !state.rows.is_empty() {
+                        state.selected_row = if state.selected_row == 0 {
+                            state.rows.len() - 1
+                        } else {
+                            state.selected_row - 1
+                        };
+                    }
+                    self.ui_state.modal = Modal::Settings(state);
+                }
+                KeyCode::Enter => {
+                    if !state.rows.is_empty() {
+                        let row = &state.rows[state.selected_row];
+                        match row.field_type {
+                            SettingsFieldType::Bool => {
+                                // Toggle between true/false
+                                let new_val = if row.value == "true" { "false" } else { "true" };
+                                let field_key = row.field_key.clone();
+                                self.apply_settings_edit(state.tab, &field_key, new_val);
+                                state.rows = self.build_settings_rows(state.tab);
+                            }
+                            SettingsFieldType::Cycle => {
+                                // Cycle: true → false → (auto) → true
+                                let new_val = match row.value.as_str() {
+                                    "true" => "false",
+                                    "false" => "(auto)",
+                                    _ => "true",
+                                };
+                                let field_key = row.field_key.clone();
+                                self.apply_settings_edit(state.tab, &field_key, new_val);
+                                state.rows = self.build_settings_rows(state.tab);
+                            }
+                            SettingsFieldType::Text => {
+                                let current_value = row.value.clone();
+                                let initial =
+                                    if current_value == "(auto)" || current_value == "(none)" {
+                                        String::new()
+                                    } else {
+                                        current_value
+                                    };
+                                state.editing =
+                                    Some(SettingsEditing::TextInput { value: initial });
+                            }
+                        }
+                    }
+                    self.ui_state.modal = Modal::Settings(state);
+                }
+                KeyCode::Char('d') => {
+                    if !state.rows.is_empty() {
+                        let field_key = state.rows[state.selected_row].field_key.clone();
+                        let default_val = self.default_value_for(state.tab, &field_key);
+                        self.apply_settings_edit(state.tab, &field_key, &default_val);
+                        state.rows = self.build_settings_rows(state.tab);
+                    }
+                    self.ui_state.modal = Modal::Settings(state);
+                }
+                _ => {
+                    self.ui_state.modal = Modal::Settings(state);
+                }
+            }
+        }
     }
 
     /// Render status bar
@@ -1378,6 +2177,15 @@ impl App {
                 self.ui_state.modal = Modal::None;
             }
 
+            Modal::Settings(_) => {
+                // Extract the state to avoid borrow conflict with &mut self
+                let state = match std::mem::replace(&mut self.ui_state.modal, Modal::None) {
+                    Modal::Settings(s) => s,
+                    _ => unreachable!(),
+                };
+                self.handle_settings_key(key, state).await;
+            }
+
             Modal::None => {}
         }
     }
@@ -1477,6 +2285,15 @@ impl App {
             }
             UserCommand::ShowHelp => {
                 self.ui_state.modal = Modal::Help;
+            }
+            UserCommand::ShowSettings => {
+                let rows = self.build_settings_rows(SettingsTab::General);
+                self.ui_state.modal = Modal::Settings(SettingsState {
+                    tab: SettingsTab::General,
+                    selected_row: 0,
+                    editing: None,
+                    rows,
+                });
             }
             UserCommand::Quit => {
                 self.ui_state.should_quit = true;
@@ -2265,6 +3082,32 @@ async fn fetch_preview_data(
             Arc::new(DiffInfo::empty()),
             String::new(),
         )
+    }
+}
+
+/// Format a ratatui Color for display in the settings modal.
+fn format_color(color: ratatui::style::Color) -> String {
+    use ratatui::style::Color;
+    match color {
+        Color::Reset => "reset".into(),
+        Color::Black => "black".into(),
+        Color::Red => "red".into(),
+        Color::Green => "green".into(),
+        Color::Yellow => "yellow".into(),
+        Color::Blue => "blue".into(),
+        Color::Magenta => "magenta".into(),
+        Color::Cyan => "cyan".into(),
+        Color::Gray => "gray".into(),
+        Color::DarkGray => "dark_gray".into(),
+        Color::LightRed => "light_red".into(),
+        Color::LightGreen => "light_green".into(),
+        Color::LightYellow => "light_yellow".into(),
+        Color::LightBlue => "light_blue".into(),
+        Color::LightMagenta => "light_magenta".into(),
+        Color::LightCyan => "light_cyan".into(),
+        Color::White => "white".into(),
+        Color::Indexed(i) => format!("{i}"),
+        Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
     }
 }
 

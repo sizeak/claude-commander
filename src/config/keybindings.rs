@@ -39,6 +39,7 @@ pub enum BindableAction {
     ShrinkLeftPane,
     GrowLeftPane,
     ShowHelp,
+    ShowSettings,
     Quit,
     ScrollUp,
     ScrollDown,
@@ -69,6 +70,7 @@ impl BindableAction {
         Self::PageUp,
         Self::PageDown,
         Self::ShowHelp,
+        Self::ShowSettings,
         Self::Quit,
     ];
 
@@ -91,6 +93,7 @@ impl BindableAction {
             Self::ShrinkLeftPane => "shrink_left_pane",
             Self::GrowLeftPane => "grow_left_pane",
             Self::ShowHelp => "show_help",
+            Self::ShowSettings => "show_settings",
             Self::Quit => "quit",
             Self::ScrollUp => "scroll_up",
             Self::ScrollDown => "scroll_down",
@@ -118,6 +121,7 @@ impl BindableAction {
             Self::ShrinkLeftPane => "Shrink left pane",
             Self::GrowLeftPane => "Grow left pane",
             Self::ShowHelp => "Show help",
+            Self::ShowSettings => "Settings",
             Self::Quit => "Quit",
             Self::ScrollUp => "Scroll up",
             Self::ScrollDown => "Scroll down",
@@ -143,7 +147,7 @@ impl BindableAction {
             | Self::ShrinkLeftPane
             | Self::GrowLeftPane => "Layout",
             Self::ScrollUp | Self::ScrollDown | Self::PageUp | Self::PageDown => "Scrolling",
-            Self::ShowHelp | Self::Quit => "Other",
+            Self::ShowHelp | Self::ShowSettings | Self::Quit => "Other",
         }
     }
 }
@@ -169,6 +173,7 @@ impl FromStr for BindableAction {
             "shrink_left_pane" => Ok(Self::ShrinkLeftPane),
             "grow_left_pane" => Ok(Self::GrowLeftPane),
             "show_help" => Ok(Self::ShowHelp),
+            "show_settings" => Ok(Self::ShowSettings),
             "quit" => Ok(Self::Quit),
             "scroll_up" => Ok(Self::ScrollUp),
             "scroll_down" => Ok(Self::ScrollDown),
@@ -490,6 +495,9 @@ impl Default for KeyBindings {
         bindings.insert(BindableAction::ShowHelp, vec![
             kb(KeyCode::Char('?'), shift),
             kb(KeyCode::Char('?'), none),
+        ]);
+        bindings.insert(BindableAction::ShowSettings, vec![
+            kb(KeyCode::Char(','), none),
         ]);
         bindings.insert(BindableAction::Quit, vec![
             kb(KeyCode::Char('q'), none),
