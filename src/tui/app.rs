@@ -16,15 +16,15 @@ use crossterm::{
         MouseEventKind,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
-    Frame, Terminal,
 };
 use tracing::{debug, info, warn};
 
@@ -34,7 +34,7 @@ use super::theme::Theme;
 use super::widgets::{DiffView, DiffViewState, Preview, PreviewState, TreeList, TreeListState};
 use crate::config::{Config, StateStore};
 use crate::error::{Result, TuiError};
-use crate::git::{check_pr_for_branch, is_gh_available, DiffInfo};
+use crate::git::{DiffInfo, check_pr_for_branch, is_gh_available};
 use crate::session::{ProjectId, SessionId, SessionListItem, SessionManager, SessionStatus};
 
 /// Direction for mouse scroll events
@@ -341,19 +341,31 @@ impl App {
                             loop {
                                 match crate::tmux::attach_to_session(&current_session).await {
                                     Ok(crate::tmux::AttachResult::SwitchToShell) => {
-                                        info!("Shell toggle requested from session: {}", current_session);
+                                        info!(
+                                            "Shell toggle requested from session: {}",
+                                            current_session
+                                        );
 
                                         // Determine the paired session to switch to
                                         let next_session = match &self.ui_state.shell_toggle_pair {
                                             Some((_, paired)) => paired.clone(),
                                             None => {
                                                 // First toggle — resolve the shell session
-                                                match self.resolve_shell_toggle_pair(&current_session).await {
+                                                match self
+                                                    .resolve_shell_toggle_pair(&current_session)
+                                                    .await
+                                                {
                                                     Ok(paired) => paired,
                                                     Err(e) => {
-                                                        warn!("Failed to resolve shell session: {}", e);
+                                                        warn!(
+                                                            "Failed to resolve shell session: {}",
+                                                            e
+                                                        );
                                                         self.ui_state.modal = Modal::Error {
-                                                            message: format!("Cannot switch to shell: {}", e),
+                                                            message: format!(
+                                                                "Cannot switch to shell: {}",
+                                                                e
+                                                            ),
                                                         };
                                                         break;
                                                     }
@@ -662,17 +674,17 @@ impl App {
         let old_session = self.ui_state.selected_session_id;
         let was_on_project = old_session.is_none() && self.ui_state.selected_project_id.is_some();
 
-        if let Some(idx) = self.ui_state.list_state.selected() {
-            if let Some(item) = self.ui_state.list_items.get(idx) {
-                match item {
-                    SessionListItem::Project { id, .. } => {
-                        self.ui_state.selected_project_id = Some(*id);
-                        self.ui_state.selected_session_id = None;
-                    }
-                    SessionListItem::Worktree { id, project_id, .. } => {
-                        self.ui_state.selected_session_id = Some(*id);
-                        self.ui_state.selected_project_id = Some(*project_id);
-                    }
+        if let Some(idx) = self.ui_state.list_state.selected()
+            && let Some(item) = self.ui_state.list_items.get(idx)
+        {
+            match item {
+                SessionListItem::Project { id, .. } => {
+                    self.ui_state.selected_project_id = Some(*id);
+                    self.ui_state.selected_session_id = None;
+                }
+                SessionListItem::Worktree { id, project_id, .. } => {
+                    self.ui_state.selected_session_id = Some(*id);
+                    self.ui_state.selected_project_id = Some(*project_id);
                 }
             }
         }
@@ -1654,12 +1666,20 @@ impl App {
     /// If the current session is a Claude session, returns the shell session name
     /// (creating it if needed). If the current session is already a shell session
     /// (ends with "-sh"), returns the Claude session name.
-    async fn resolve_shell_toggle_pair(&mut self, current_tmux_name: &str) -> crate::error::Result<String> {
+    async fn resolve_shell_toggle_pair(
+        &mut self,
+        current_tmux_name: &str,
+    ) -> crate::error::Result<String> {
         if current_tmux_name.ends_with("-sh") {
             // We're in a shell session — the Claude session is the name without "-sh"
             let claude_name = current_tmux_name.trim_end_matches("-sh").to_string();
             // Verify the Claude session exists
-            if self.session_manager.tmux.session_exists(&claude_name).await? {
+            if self
+                .session_manager
+                .tmux
+                .session_exists(&claude_name)
+                .await?
+            {
                 return Ok(claude_name);
             }
             return Err(crate::error::Error::Session(
@@ -1678,7 +1698,10 @@ impl App {
         };
 
         if let Some(session_id) = session_id {
-            let shell_name = self.session_manager.ensure_shell_session(&session_id).await?;
+            let shell_name = self
+                .session_manager
+                .ensure_shell_session(&session_id)
+                .await?;
             return Ok(shell_name);
         }
 
@@ -1688,21 +1711,23 @@ impl App {
             state
                 .projects
                 .values()
-                .find(|p| {
-                    p.shell_tmux_session_name.as_deref() == Some(current_tmux_name)
-                })
+                .find(|p| p.shell_tmux_session_name.as_deref() == Some(current_tmux_name))
                 .map(|p| p.id)
         };
 
         if let Some(project_id) = project_id {
-            let shell_name = self.session_manager.ensure_project_shell_session(&project_id).await?;
+            let shell_name = self
+                .session_manager
+                .ensure_project_shell_session(&project_id)
+                .await?;
             return Ok(shell_name);
         }
 
         Err(crate::error::Error::Session(
-            crate::error::SessionError::TmuxSessionNotFound(
-                format!("No session found for tmux name: {}", current_tmux_name),
-            ),
+            crate::error::SessionError::TmuxSessionNotFound(format!(
+                "No session found for tmux name: {}",
+                current_tmux_name
+            )),
         ))
     }
 
@@ -1808,14 +1833,14 @@ impl App {
 
     /// Handle remove project - show confirmation (only when a project row is selected)
     fn handle_remove_project(&mut self) {
-        if self.ui_state.selected_session_id.is_none() {
-            if let Some(project_id) = self.ui_state.selected_project_id {
-                self.ui_state.modal = Modal::Confirm {
+        if self.ui_state.selected_session_id.is_none()
+            && let Some(project_id) = self.ui_state.selected_project_id
+        {
+            self.ui_state.modal = Modal::Confirm {
                     title: "Remove Project".to_string(),
                     message: "Are you sure you want to remove this project?\nThis will kill all sessions and remove all worktrees.".to_string(),
                     on_confirm: ConfirmAction::RemoveProject { project_id },
                 };
-            }
         }
     }
 
@@ -2038,7 +2063,7 @@ impl App {
                         // Kill all session tmux sessions
                         for (tmux_name, shell_tmux_name, _) in &sessions {
                             let _ = tmux.kill_session(tmux_name).await;
-                            if let Some(ref shell_name) = shell_tmux_name {
+                            if let Some(shell_name) = shell_tmux_name {
                                 let _ = tmux.kill_session(shell_name).await;
                             }
                         }

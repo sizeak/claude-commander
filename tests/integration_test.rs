@@ -8,10 +8,10 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 
+use claude_commander::SessionStatus;
 use claude_commander::config::{AppState, Config, StateStore};
 use claude_commander::git::GitBackend;
 use claude_commander::session::SessionManager;
-use claude_commander::SessionStatus;
 
 /// Helper to create an isolated StateStore that won't pollute user data
 fn create_isolated_store(temp_dir: &TempDir) -> Arc<StateStore> {

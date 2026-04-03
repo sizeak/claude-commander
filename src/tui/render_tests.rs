@@ -7,12 +7,12 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use ratatui::{
+    Terminal,
     backend::TestBackend,
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Modifier, Style},
     text::Line,
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
-    Terminal,
 };
 
 use crate::git::DiffInfo;

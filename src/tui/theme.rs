@@ -21,21 +21,21 @@ impl ColorMode {
     /// Detect the best color mode for the current terminal
     pub fn detect() -> Self {
         // Check COLORTERM first (most reliable for true color)
-        if let Ok(colorterm) = std::env::var("COLORTERM") {
-            if colorterm == "truecolor" || colorterm == "24bit" {
-                return Self::TrueColor;
-            }
+        if let Ok(colorterm) = std::env::var("COLORTERM")
+            && (colorterm == "truecolor" || colorterm == "24bit")
+        {
+            return Self::TrueColor;
         }
 
         // Check TERM for 256 color support
-        if let Ok(term) = std::env::var("TERM") {
-            if term.contains("256color") || term.contains("kitty") || term.contains("alacritty") {
-                // These terminals typically support true color even without COLORTERM
-                if term.contains("kitty") || term.contains("alacritty") {
-                    return Self::TrueColor;
-                }
-                return Self::Indexed;
+        if let Ok(term) = std::env::var("TERM")
+            && (term.contains("256color") || term.contains("kitty") || term.contains("alacritty"))
+        {
+            // These terminals typically support true color even without COLORTERM
+            if term.contains("kitty") || term.contains("alacritty") {
+                return Self::TrueColor;
             }
+            return Self::Indexed;
         }
 
         Self::Basic

@@ -383,11 +383,13 @@ mod tests {
         state.add_session(session);
 
         assert!(state.sessions.contains_key(&session_id));
-        assert!(state
-            .get_project(&project_id)
-            .unwrap()
-            .worktrees
-            .contains(&session_id));
+        assert!(
+            state
+                .get_project(&project_id)
+                .unwrap()
+                .worktrees
+                .contains(&session_id)
+        );
     }
 
     #[test]

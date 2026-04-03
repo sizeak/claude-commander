@@ -102,23 +102,23 @@ impl PathCompleter {
 
 /// Expand a leading `~` or `~/` to the user's home directory.
 pub(super) fn expand_tilde(path: &str) -> String {
-    if path == "~" || path.starts_with("~/") {
-        if let Some(home) = home_dir() {
-            let rest = &path[1..]; // "" or "/..."
-            return format!("{}{}", home.display(), rest);
-        }
+    if (path == "~" || path.starts_with("~/"))
+        && let Some(home) = home_dir()
+    {
+        let rest = &path[1..]; // "" or "/..."
+        return format!("{}{}", home.display(), rest);
     }
     path.to_string()
 }
 
 /// If the original input used `~`, re-collapse the home prefix.
 fn maybe_unexpand_tilde(original: &str, expanded: &str) -> String {
-    if original.starts_with('~') {
-        if let Some(home) = home_dir() {
-            let home_str = home.display().to_string();
-            if let Some(rest) = expanded.strip_prefix(&home_str) {
-                return format!("~{}", rest);
-            }
+    if original.starts_with('~')
+        && let Some(home) = home_dir()
+    {
+        let home_str = home.display().to_string();
+        if let Some(rest) = expanded.strip_prefix(&home_str) {
+            return format!("~{}", rest);
         }
     }
     expanded.to_string()

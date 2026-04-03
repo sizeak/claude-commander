@@ -122,10 +122,10 @@ impl SessionManager {
             let state = self.store.read().await;
             for session_id in &project.worktrees {
                 if let Some(session) = state.get_session(session_id) {
-                    if session.status.is_active() {
-                        if let Err(e) = self.tmux.kill_session(&session.tmux_session_name).await {
-                            warn!("Failed to kill tmux session: {}", e);
-                        }
+                    if session.status.is_active()
+                        && let Err(e) = self.tmux.kill_session(&session.tmux_session_name).await
+                    {
+                        warn!("Failed to kill tmux session: {}", e);
                     }
                     if let Some(ref shell_name) = session.shell_tmux_session_name {
                         let _ = self.tmux.kill_session(shell_name).await;
@@ -348,16 +348,15 @@ impl SessionManager {
                     .map(|p| p.repo_path.clone())
             };
 
-            if let Some(repo_path) = repo_path {
-                if let Ok(backend) = GitBackend::open(&repo_path) {
-                    let worktree_manager =
-                        WorktreeManager::new(backend, self.config.worktrees_dir()?);
-                    if let Err(e) = worktree_manager
-                        .remove_worktree(&session.worktree_path, true)
-                        .await
-                    {
-                        warn!("Failed to remove worktree: {}", e);
-                    }
+            if let Some(repo_path) = repo_path
+                && let Ok(backend) = GitBackend::open(&repo_path)
+            {
+                let worktree_manager = WorktreeManager::new(backend, self.config.worktrees_dir()?);
+                if let Err(e) = worktree_manager
+                    .remove_worktree(&session.worktree_path, true)
+                    .await
+                {
+                    warn!("Failed to remove worktree: {}", e);
                 }
             }
         }
@@ -382,11 +381,11 @@ impl SessionManager {
         // First kill if active
         {
             let state = self.store.read().await;
-            if let Some(session) = state.get_session(session_id) {
-                if session.status.is_active() {
-                    drop(state);
-                    self.kill_session(session_id, true).await?;
-                }
+            if let Some(session) = state.get_session(session_id)
+                && session.status.is_active()
+            {
+                drop(state);
+                self.kill_session(session_id, true).await?;
             }
         }
 
@@ -490,10 +489,10 @@ impl SessionManager {
         };
 
         // If shell session already exists in tmux, return its name
-        if let Some(ref shell_name) = existing_shell_name {
-            if self.tmux.session_exists(shell_name).await.unwrap_or(false) {
-                return Ok(shell_name.clone());
-            }
+        if let Some(ref shell_name) = existing_shell_name
+            && self.tmux.session_exists(shell_name).await.unwrap_or(false)
+        {
+            return Ok(shell_name.clone());
         }
 
         // Create new shell tmux session
@@ -670,10 +669,10 @@ impl SessionManager {
         };
 
         // If shell session already exists in tmux, return its name
-        if let Some(ref shell_name) = existing_shell_name {
-            if self.tmux.session_exists(shell_name).await.unwrap_or(false) {
-                return Ok(shell_name.clone());
-            }
+        if let Some(ref shell_name) = existing_shell_name
+            && self.tmux.session_exists(shell_name).await.unwrap_or(false)
+        {
+            return Ok(shell_name.clone());
         }
 
         // Create new shell tmux session

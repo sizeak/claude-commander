@@ -6,8 +6,8 @@ use std::path::PathBuf;
 
 use directories::ProjectDirs;
 use figment::{
-    providers::{Env, Format, Serialized, Toml},
     Figment,
+    providers::{Env, Format, Serialized, Toml},
 };
 use serde::{Deserialize, Serialize};
 

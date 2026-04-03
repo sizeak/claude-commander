@@ -5,13 +5,13 @@
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::Result;
 use tracing::info;
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use claude_commander::{
-    config::{AppState, Config, StateStore},
-    tmux::{attach_to_session, AttachResult},
-    tui::App,
     APP_NAME, VERSION,
+    config::{AppState, Config, StateStore},
+    tmux::{AttachResult, attach_to_session},
+    tui::App,
 };
 
 #[derive(Parser)]

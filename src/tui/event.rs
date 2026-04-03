@@ -5,8 +5,8 @@
 //! - Application state updates
 //! - Render ticks
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::git::DiffInfo;
