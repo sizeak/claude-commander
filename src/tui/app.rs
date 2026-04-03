@@ -230,13 +230,21 @@ impl App {
     pub fn new(config: Config, store: Arc<StateStore>) -> Self {
         let session_manager = SessionManager::new(config.clone(), store.clone());
 
+        let base = config
+            .theme
+            .preset
+            .as_deref()
+            .and_then(Theme::from_preset)
+            .unwrap_or_default();
+        let theme = base.with_overrides(&config.theme);
+
         Self {
             config,
             store,
             session_manager,
             ui_state: AppUiState::default(),
             event_loop: EventLoop::new(),
-            theme: Theme::default(),
+            theme,
             suppress_keys_until: Instant::now(),
         }
     }
@@ -597,7 +605,7 @@ impl App {
             AppEvent::StateUpdate(update) => self.handle_state_update(update).await,
             AppEvent::Tick => {
                 self.ui_state.tick_count = self.ui_state.tick_count.wrapping_add(1);
-                if self.ui_state.tick_count % 3 == 0 {
+                if self.ui_state.tick_count.is_multiple_of(3) {
                     self.ui_state.throbber_state.calc_next();
                 }
                 return true;
