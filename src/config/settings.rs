@@ -11,6 +11,7 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::config::keybindings::KeyBindings;
 use crate::error::{ConfigError, Error, Result};
 
 /// Application configuration
@@ -62,6 +63,9 @@ pub struct Config {
 
     /// Log file path (if set, logs to file instead of stderr)
     pub log_file: Option<PathBuf>,
+
+    /// Key bindings
+    pub keybindings: KeyBindings,
 }
 
 impl Default for Config {
@@ -82,6 +86,7 @@ impl Default for Config {
             state_sync_interval_ms: 2000,
             debug: false,
             log_file: None,
+            keybindings: KeyBindings::default(),
         }
     }
 }
