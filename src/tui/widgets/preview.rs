@@ -6,6 +6,7 @@ use ansi_to_tui::IntoText;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
+    style::Modifier,
     text::Text,
     widgets::{Block, Paragraph, ScrollbarState, Widget},
 };
@@ -18,6 +19,8 @@ pub struct Preview<'a> {
     block: Option<Block<'a>>,
     /// Scroll offset
     scroll: u16,
+    /// Whether to dim the content (unfocused state)
+    dim: bool,
 }
 
 impl<'a> Preview<'a> {
@@ -27,6 +30,7 @@ impl<'a> Preview<'a> {
             content,
             block: None,
             scroll: 0,
+            dim: false,
         }
     }
 
@@ -41,15 +45,32 @@ impl<'a> Preview<'a> {
         self.scroll = scroll;
         self
     }
+
+    /// Set whether content should be dimmed
+    pub fn dim(mut self, dim: bool) -> Self {
+        self.dim = dim;
+        self
+    }
 }
 
 impl<'a> Widget for Preview<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         // Convert ANSI escape codes to ratatui styled text
-        let text: Text<'_> = self
+        let mut text: Text<'_> = self
             .content
             .into_text()
             .unwrap_or_else(|_| Text::raw(self.content));
+
+        if self.dim {
+            for line in &mut text.lines {
+                for span in &mut line.spans {
+                    span.style = span
+                        .style
+                        .add_modifier(Modifier::DIM)
+                        .remove_modifier(Modifier::REVERSED);
+                }
+            }
+        }
 
         // No .wrap() - preserve original formatting (ASCII boxes, tables, etc.)
         let paragraph = Paragraph::new(text).scroll((self.scroll, 0));

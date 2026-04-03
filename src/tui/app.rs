@@ -785,6 +785,7 @@ impl App {
     /// Render the preview pane
     fn render_preview(&mut self, frame: &mut Frame, area: Rect) {
         let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
+        let dim = !is_focused && self.config.dim_unfocused_preview;
 
         // Show tab indicator in title
         let title = " [Preview] | Diff | Shell ";
@@ -806,7 +807,8 @@ impl App {
 
         let preview = Preview::new(&self.ui_state.preview_content)
             .block(block)
-            .scroll(self.ui_state.preview_state.scroll_offset);
+            .scroll(self.ui_state.preview_state.scroll_offset)
+            .dim(dim);
 
         frame.render_widget(preview, area);
     }
@@ -814,6 +816,7 @@ impl App {
     /// Render the diff pane
     fn render_diff(&mut self, frame: &mut Frame, area: Rect) {
         let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
+        let dim = !is_focused && self.config.dim_unfocused_preview;
         let on_project = self.is_project_selected();
 
         // Show tab indicator and diff summary in title with colored +/- counts
@@ -861,7 +864,8 @@ impl App {
 
         let diff_view = DiffView::new(&self.ui_state.diff_info, &self.theme)
             .block(block)
-            .scroll(self.ui_state.diff_state.scroll_offset);
+            .scroll(self.ui_state.diff_state.scroll_offset)
+            .dim(dim);
 
         frame.render_widget(diff_view, area);
     }
@@ -869,6 +873,7 @@ impl App {
     /// Render the shell pane
     fn render_shell(&mut self, frame: &mut Frame, area: Rect) {
         let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
+        let dim = !is_focused && self.config.dim_unfocused_preview;
 
         let title = if self.is_project_selected() {
             " [Shell] | Diff "
@@ -892,7 +897,8 @@ impl App {
 
         let preview = Preview::new(&self.ui_state.shell_content)
             .block(block)
-            .scroll(self.ui_state.shell_state.scroll_offset);
+            .scroll(self.ui_state.shell_state.scroll_offset)
+            .dim(dim);
 
         frame.render_widget(preview, area);
     }
