@@ -57,6 +57,9 @@ pub struct Config {
     /// Interval in milliseconds for checking state file changes from other instances (0 = disabled)
     pub state_sync_interval_ms: u64,
 
+    /// Dim the right pane (preview/diff/shell) when the session list is focused
+    pub dim_unfocused_preview: bool,
+
     /// Enable debug logging
     pub debug: bool,
 
@@ -80,6 +83,7 @@ impl Default for Config {
             pr_check_interval_secs: 600,
             pull_before_create: true,
             state_sync_interval_ms: 2000,
+            dim_unfocused_preview: true,
             debug: false,
             log_file: None,
         }
