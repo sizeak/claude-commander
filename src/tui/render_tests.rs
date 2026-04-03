@@ -613,3 +613,134 @@ fn test_status_bar_with_message() {
 
     insta::assert_snapshot!(terminal.backend());
 }
+
+// ── Pane content replacement (no clear needed) ─────────────────────
+
+#[test]
+fn test_preview_content_replacement_no_clear() {
+    let backend = TestBackend::new(60, 12);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    // Render content A (simulating session 1 selected)
+    terminal
+        .draw(|frame| {
+            let preview = Preview::new("Session 1 output\nLine 2\nLine 3\nLine 4\nLine 5")
+                .block(
+                    Block::default()
+                        .title(" [Preview] | Diff | Shell ")
+                        .borders(Borders::ALL),
+                )
+                .scroll(0);
+            frame.render_widget(preview, frame.area());
+        })
+        .unwrap();
+
+    // Render content B WITHOUT clearing (simulating scrolling to session 2)
+    terminal
+        .draw(|frame| {
+            let preview = Preview::new("Session 2 output\nDifferent content")
+                .block(
+                    Block::default()
+                        .title(" [Preview] | Diff | Shell ")
+                        .borders(Borders::ALL),
+                )
+                .scroll(0);
+            frame.render_widget(preview, frame.area());
+        })
+        .unwrap();
+
+    // Snapshot should show clean content B with no artifacts from A
+    insta::assert_snapshot!(terminal.backend());
+}
+
+#[test]
+fn test_preview_to_diff_view_switch_no_clear() {
+    let backend = TestBackend::new(70, 14);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = test_theme();
+
+    // Render Preview pane first
+    terminal
+        .draw(|frame| {
+            let preview = Preview::new("Preview content here\nLine 2\nLine 3")
+                .block(
+                    Block::default()
+                        .title(" [Preview] | Diff | Shell ")
+                        .borders(Borders::ALL),
+                )
+                .scroll(0);
+            frame.render_widget(preview, frame.area());
+        })
+        .unwrap();
+
+    // Switch to Diff view WITHOUT clearing
+    terminal
+        .draw(|frame| {
+            let diff = "\
+diff --git a/file.rs b/file.rs
+--- a/file.rs
++++ b/file.rs
+@@ -1,3 +1,3 @@
+ context
+-old line
++new line";
+            let info = DiffInfo {
+                diff: diff.to_string(),
+                files_changed: 1,
+                lines_added: 1,
+                lines_removed: 1,
+                line_count: diff.lines().count(),
+                computed_at: Instant::now(),
+                base_commit: "abc".to_string(),
+            };
+            let diff_view = DiffView::new(&info, &theme)
+                .block(
+                    Block::default()
+                        .title(" Preview | [Diff] | Shell ")
+                        .borders(Borders::ALL),
+                )
+                .scroll(0);
+            frame.render_widget(diff_view, frame.area());
+        })
+        .unwrap();
+
+    // Snapshot should show clean Diff view with no Preview artifacts
+    insta::assert_snapshot!(terminal.backend());
+}
+
+#[test]
+fn test_preview_to_shell_view_switch_no_clear() {
+    let backend = TestBackend::new(60, 10);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    // Render Preview pane first
+    terminal
+        .draw(|frame| {
+            let preview = Preview::new("Preview content\nWith multiple lines\nOf output")
+                .block(
+                    Block::default()
+                        .title(" [Preview] | Diff | Shell ")
+                        .borders(Borders::ALL),
+                )
+                .scroll(0);
+            frame.render_widget(preview, frame.area());
+        })
+        .unwrap();
+
+    // Switch to Shell view WITHOUT clearing
+    terminal
+        .draw(|frame| {
+            let shell = Preview::new("$ ls -la\ntotal 42\ndrwxr-xr-x 5 user user 4096")
+                .block(
+                    Block::default()
+                        .title(" Preview | Diff | [Shell] ")
+                        .borders(Borders::ALL),
+                )
+                .scroll(0);
+            frame.render_widget(shell, frame.area());
+        })
+        .unwrap();
+
+    // Snapshot should show clean Shell view with no Preview artifacts
+    insta::assert_snapshot!(terminal.backend());
+}

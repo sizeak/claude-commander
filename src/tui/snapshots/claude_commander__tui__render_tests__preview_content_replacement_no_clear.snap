@@ -1,0 +1,16 @@
+---
+source: src/tui/render_tests.rs
+expression: terminal.backend()
+---
+"┌ [Preview] | Diff | Shell ────────────────────────────────┐"
+"│Session 2 output                                          │"
+"│Different content                                         │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"└──────────────────────────────────────────────────────────┘"

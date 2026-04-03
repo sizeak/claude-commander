@@ -706,12 +706,6 @@ impl App {
                 self.ui_state.clear_right_pane = true;
             }
         }
-
-        // Force full terminal redraw when the selected session changes to flush
-        // stale styled cells from the previous session's pane content
-        if self.ui_state.selected_session_id != old_session {
-            self.ui_state.clear_right_pane = true;
-        }
     }
 
     /// Get mutable reference to the active pane's scroll state
