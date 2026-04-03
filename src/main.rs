@@ -2,6 +2,8 @@
 //!
 //! Run with `claude-commander` or `claude-commander --help` for usage.
 
+use std::os::unix::process::CommandExt;
+
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::Result;
 use tracing::info;
@@ -147,7 +149,16 @@ async fn main() -> Result<()> {
             let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
             let store = std::sync::Arc::new(StateStore::new(app_state)?);
             let mut app = App::new(config.clone(), store);
-            app.run().await?;
+            let should_restart = app.run().await?;
+
+            if should_restart {
+                info!("Restarting Claude Commander...");
+                let exe = std::env::current_exe()?;
+                let args: Vec<String> = std::env::args().skip(1).collect();
+                let err = std::process::Command::new(exe).args(&args).exec();
+                // exec() only returns on error
+                return Err(err.into());
+            }
         }
 
         Some(Commands::List { all }) => {

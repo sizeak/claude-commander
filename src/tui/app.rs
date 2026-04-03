@@ -143,6 +143,8 @@ pub struct AppUiState {
     pub status_message: Option<(String, Instant)>,
     /// Should quit
     pub should_quit: bool,
+    /// Should restart the application (re-exec the binary)
+    pub should_restart: bool,
     /// Last known terminal size (updated each render frame)
     pub terminal_size: Rect,
     /// Currently selected session (for preview/diff)
@@ -186,6 +188,7 @@ impl Default for AppUiState {
             status_message: None, // (message, expiry)
 
             should_quit: false,
+            should_restart: false,
             selected_session_id: None,
             selected_project_id: None,
             attach_command: None,
@@ -238,7 +241,9 @@ impl App {
     }
 
     /// Run the application
-    pub async fn run(&mut self) -> Result<()> {
+    ///
+    /// Returns `true` if the app should be restarted (re-exec the binary).
+    pub async fn run(&mut self) -> Result<bool> {
         // Check tmux is available
         self.session_manager.check_tmux().await?;
 
@@ -360,7 +365,7 @@ impl App {
             }
         }
 
-        Ok(())
+        Ok(self.ui_state.should_restart)
     }
 
     /// Sync app state with actual tmux session state
@@ -1120,6 +1125,7 @@ impl App {
                     Line::from(""),
                     Line::from("Other:"),
                     Line::from("  ?               Show this help"),
+                    Line::from("  Ctrl+r          Restart application"),
                     Line::from("  q               Quit"),
                     Line::from(""),
                     Line::from("Press any key to close this help."),
@@ -1420,6 +1426,10 @@ impl App {
                 self.ui_state.modal = Modal::Help;
             }
             UserCommand::Quit => {
+                self.ui_state.should_quit = true;
+            }
+            UserCommand::RestartApp => {
+                self.ui_state.should_restart = true;
                 self.ui_state.should_quit = true;
             }
             UserCommand::PageUp => self.active_pane_state().page_up(),

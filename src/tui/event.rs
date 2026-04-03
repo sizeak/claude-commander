@@ -143,6 +143,8 @@ pub enum UserCommand {
     PageUp,
     /// Page down in preview
     PageDown,
+    /// Restart the application
+    RestartApp,
 }
 
 impl UserCommand {
@@ -192,12 +194,13 @@ impl UserCommand {
             (KeyCode::PageUp, KeyModifiers::NONE) => Some(UserCommand::PageUp),
             (KeyCode::PageDown, KeyModifiers::NONE) => Some(UserCommand::PageDown),
 
-            // Help and quit
+            // Help, quit, and restart
             (KeyCode::Char('?'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
                 Some(UserCommand::ShowHelp)
             }
             (KeyCode::Char('q'), KeyModifiers::NONE) => Some(UserCommand::Quit),
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(UserCommand::Quit),
+            (KeyCode::Char('r'), KeyModifiers::CONTROL) => Some(UserCommand::RestartApp),
 
             // Modal controls
             (KeyCode::Esc, KeyModifiers::NONE) => Some(UserCommand::Cancel),
@@ -636,6 +639,15 @@ mod tests {
             state: KeyEventState::empty(),
         };
         assert!(UserCommand::from_key(key).is_none());
+    }
+
+    #[test]
+    fn test_ctrl_r_restarts_app() {
+        let key = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            UserCommand::from_key(key),
+            Some(UserCommand::RestartApp)
+        ));
     }
 
     #[test]
