@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use crate::config::keybindings::{BindableAction, KeyBindings};
 use crate::git::DiffInfo;
 use crate::session::{ProjectId, SessionId};
 
@@ -146,69 +147,59 @@ pub enum UserCommand {
 }
 
 impl UserCommand {
-    /// Convert a key event to a user command
-    pub fn from_key(key: KeyEvent) -> Option<Self> {
+    /// Convert a key event to a user command using the given keybinding table.
+    ///
+    /// Configurable actions are resolved via `bindings`. Structural keys
+    /// (Esc/Cancel, Backspace, text input) are handled as hardcoded fallbacks
+    /// since they are not user-rebindable.
+    pub fn from_key(key: KeyEvent, bindings: &KeyBindings) -> Option<Self> {
         // Only process key press events; ignore release/repeat from terminals
         // that support the kitty keyboard protocol
         if key.kind != KeyEventKind::Press {
             return None;
         }
 
+        // Try the configurable bindings first
+        if let Some(action) = bindings.resolve(&key) {
+            return Some(action.into());
+        }
+
+        // Structural keys (not rebindable)
         match (key.code, key.modifiers) {
-            // Navigation
-            (KeyCode::Up, KeyModifiers::NONE)
-            | (KeyCode::Char('k'), KeyModifiers::NONE)
-            | (KeyCode::Char('p'), KeyModifiers::CONTROL) => Some(UserCommand::NavigateUp),
-            (KeyCode::Down, KeyModifiers::NONE)
-            | (KeyCode::Char('j'), KeyModifiers::NONE)
-            | (KeyCode::Char('n'), KeyModifiers::CONTROL) => Some(UserCommand::NavigateDown),
-
-            // Selection
-            (KeyCode::Enter, KeyModifiers::NONE) => Some(UserCommand::Select),
-
-            // Session management
-            (KeyCode::Char('s'), KeyModifiers::NONE) => Some(UserCommand::SelectShell),
-            (KeyCode::Char('n'), KeyModifiers::NONE) => Some(UserCommand::NewSession),
-            (KeyCode::Char('N'), KeyModifiers::SHIFT) => Some(UserCommand::NewProject),
-            (KeyCode::Char('p'), KeyModifiers::NONE) => Some(UserCommand::PauseSession),
-            (KeyCode::Char('r'), KeyModifiers::NONE) => Some(UserCommand::ResumeSession),
-            (KeyCode::Char('d'), KeyModifiers::NONE) => Some(UserCommand::DeleteSession),
-            (KeyCode::Char('D'), KeyModifiers::SHIFT) => Some(UserCommand::RemoveProject),
-            (KeyCode::Char('e'), KeyModifiers::NONE) => Some(UserCommand::OpenInEditor),
-
-            // Pane control
-            (KeyCode::Tab, KeyModifiers::NONE) => Some(UserCommand::TogglePane),
-            (KeyCode::BackTab, _) => Some(UserCommand::TogglePaneReverse),
-            (KeyCode::Char('<'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
-                Some(UserCommand::ShrinkLeftPane)
-            }
-            (KeyCode::Char('>'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
-                Some(UserCommand::GrowLeftPane)
-            }
-
-            // Scrolling
-            (KeyCode::Char('u'), KeyModifiers::CONTROL) => Some(UserCommand::PageUp),
-            (KeyCode::Char('d'), KeyModifiers::CONTROL) => Some(UserCommand::PageDown),
-            (KeyCode::PageUp, KeyModifiers::NONE) => Some(UserCommand::PageUp),
-            (KeyCode::PageDown, KeyModifiers::NONE) => Some(UserCommand::PageDown),
-
-            // Help and quit
-            (KeyCode::Char('?'), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
-                Some(UserCommand::ShowHelp)
-            }
-            (KeyCode::Char('q'), KeyModifiers::NONE) => Some(UserCommand::Quit),
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) => Some(UserCommand::Quit),
-
-            // Modal controls
             (KeyCode::Esc, KeyModifiers::NONE) => Some(UserCommand::Cancel),
             (KeyCode::Backspace, KeyModifiers::NONE) => Some(UserCommand::Backspace),
-
-            // Text input (for modals)
             (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
                 Some(UserCommand::TextInput(c))
             }
-
             _ => None,
+        }
+    }
+}
+
+impl From<BindableAction> for UserCommand {
+    fn from(action: BindableAction) -> Self {
+        match action {
+            BindableAction::NavigateUp => Self::NavigateUp,
+            BindableAction::NavigateDown => Self::NavigateDown,
+            BindableAction::Select => Self::Select,
+            BindableAction::SelectShell => Self::SelectShell,
+            BindableAction::NewSession => Self::NewSession,
+            BindableAction::NewProject => Self::NewProject,
+            BindableAction::PauseSession => Self::PauseSession,
+            BindableAction::ResumeSession => Self::ResumeSession,
+            BindableAction::DeleteSession => Self::DeleteSession,
+            BindableAction::RemoveProject => Self::RemoveProject,
+            BindableAction::OpenInEditor => Self::OpenInEditor,
+            BindableAction::TogglePane => Self::TogglePane,
+            BindableAction::TogglePaneReverse => Self::TogglePaneReverse,
+            BindableAction::ShrinkLeftPane => Self::ShrinkLeftPane,
+            BindableAction::GrowLeftPane => Self::GrowLeftPane,
+            BindableAction::ShowHelp => Self::ShowHelp,
+            BindableAction::Quit => Self::Quit,
+            BindableAction::ScrollUp => Self::ScrollUp,
+            BindableAction::ScrollDown => Self::ScrollDown,
+            BindableAction::PageUp => Self::PageUp,
+            BindableAction::PageDown => Self::PageDown,
         }
     }
 }
@@ -366,132 +357,149 @@ impl Default for EventLoop {
 mod tests {
     use super::*;
 
+    fn kb() -> KeyBindings {
+        KeyBindings::default()
+    }
+
     #[test]
     fn test_key_to_command() {
+        let b = kb();
+
         // Navigation
         let key = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
         assert!(matches!(
-            UserCommand::from_key(key),
+            UserCommand::from_key(key, &b),
             Some(UserCommand::NavigateDown)
         ));
 
         let key = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
         assert!(matches!(
-            UserCommand::from_key(key),
+            UserCommand::from_key(key, &b),
             Some(UserCommand::NavigateUp)
         ));
 
         // Quit
         let key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
         assert!(matches!(
-            UserCommand::from_key(key),
+            UserCommand::from_key(key, &b),
             Some(UserCommand::Quit)
         ));
 
-        // Text input
+        // Text input — 'a' is not bound to any action, so falls through to TextInput
         let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
         assert!(matches!(
-            UserCommand::from_key(key),
+            UserCommand::from_key(key, &b),
             Some(UserCommand::TextInput('a'))
         ));
     }
 
     #[test]
     fn test_pane_resize_keys() {
+        let b = kb();
+
         let key = KeyEvent::new(KeyCode::Char('<'), KeyModifiers::SHIFT);
         assert!(matches!(
-            UserCommand::from_key(key),
+            UserCommand::from_key(key, &b),
             Some(UserCommand::ShrinkLeftPane)
         ));
 
         let key = KeyEvent::new(KeyCode::Char('>'), KeyModifiers::SHIFT);
         assert!(matches!(
-            UserCommand::from_key(key),
+            UserCommand::from_key(key, &b),
             Some(UserCommand::GrowLeftPane)
         ));
 
         // Some terminals report without SHIFT
         let key = KeyEvent::new(KeyCode::Char('<'), KeyModifiers::NONE);
         assert!(matches!(
-            UserCommand::from_key(key),
+            UserCommand::from_key(key, &b),
             Some(UserCommand::ShrinkLeftPane)
         ));
 
         let key = KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE);
         assert!(matches!(
-            UserCommand::from_key(key),
+            UserCommand::from_key(key, &b),
             Some(UserCommand::GrowLeftPane)
         ));
     }
 
     #[test]
     fn test_ctrl_c_quits() {
+        let b = kb();
         let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert!(matches!(
-            UserCommand::from_key(key),
+            UserCommand::from_key(key, &b),
             Some(UserCommand::Quit)
         ));
     }
 
     #[test]
     fn test_ctrl_p_navigates_up() {
+        let b = kb();
         let key = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
         assert!(matches!(
-            UserCommand::from_key(key),
+            UserCommand::from_key(key, &b),
             Some(UserCommand::NavigateUp)
         ));
     }
 
     #[test]
     fn test_ctrl_n_navigates_down() {
+        let b = kb();
         let key = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
         assert!(matches!(
-            UserCommand::from_key(key),
+            UserCommand::from_key(key, &b),
             Some(UserCommand::NavigateDown)
         ));
     }
 
     #[test]
     fn test_arrow_keys() {
+        let b = kb();
+
         let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
         assert!(matches!(
-            UserCommand::from_key(up),
+            UserCommand::from_key(up, &b),
             Some(UserCommand::NavigateUp)
         ));
 
         let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
         assert!(matches!(
-            UserCommand::from_key(down),
+            UserCommand::from_key(down, &b),
             Some(UserCommand::NavigateDown)
         ));
     }
 
     #[test]
     fn test_enter_selects() {
+        let b = kb();
         let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
         assert!(matches!(
-            UserCommand::from_key(key),
+            UserCommand::from_key(key, &b),
             Some(UserCommand::Select)
         ));
     }
 
     #[test]
     fn test_tab_toggles_pane() {
+        let b = kb();
+
         let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
         assert!(matches!(
-            UserCommand::from_key(tab),
+            UserCommand::from_key(tab, &b),
             Some(UserCommand::TogglePane)
         ));
 
         let backtab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
         assert!(matches!(
-            UserCommand::from_key(backtab),
+            UserCommand::from_key(backtab, &b),
             Some(UserCommand::TogglePaneReverse)
         ));
     }
 
     #[test]
     fn test_session_management_keys() {
+        let b = kb();
         let cases: Vec<(KeyCode, KeyModifiers, UserCommand)> = vec![
             (
                 KeyCode::Char('s'),
@@ -537,7 +545,7 @@ mod tests {
 
         for (code, modifiers, expected) in cases {
             let key = KeyEvent::new(code, modifiers);
-            let result = UserCommand::from_key(key);
+            let result = UserCommand::from_key(key, &b);
             assert!(
                 result.is_some(),
                 "Expected Some for {:?}+{:?}",
@@ -556,60 +564,66 @@ mod tests {
 
     #[test]
     fn test_scroll_keys() {
+        let b = kb();
+
         let ctrl_u = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
         assert!(matches!(
-            UserCommand::from_key(ctrl_u),
+            UserCommand::from_key(ctrl_u, &b),
             Some(UserCommand::PageUp)
         ));
 
         let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
         assert!(matches!(
-            UserCommand::from_key(ctrl_d),
+            UserCommand::from_key(ctrl_d, &b),
             Some(UserCommand::PageDown)
         ));
 
         let pgup = KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE);
         assert!(matches!(
-            UserCommand::from_key(pgup),
+            UserCommand::from_key(pgup, &b),
             Some(UserCommand::PageUp)
         ));
 
         let pgdown = KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE);
         assert!(matches!(
-            UserCommand::from_key(pgdown),
+            UserCommand::from_key(pgdown, &b),
             Some(UserCommand::PageDown)
         ));
     }
 
     #[test]
     fn test_help_key() {
+        let b = kb();
+
         let q_none = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE);
         assert!(matches!(
-            UserCommand::from_key(q_none),
+            UserCommand::from_key(q_none, &b),
             Some(UserCommand::ShowHelp)
         ));
 
         let q_shift = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT);
         assert!(matches!(
-            UserCommand::from_key(q_shift),
+            UserCommand::from_key(q_shift, &b),
             Some(UserCommand::ShowHelp)
         ));
     }
 
     #[test]
     fn test_escape_cancels() {
+        let b = kb();
         let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
         assert!(matches!(
-            UserCommand::from_key(key),
+            UserCommand::from_key(key, &b),
             Some(UserCommand::Cancel)
         ));
     }
 
     #[test]
     fn test_backspace_key() {
+        let b = kb();
         let key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
         assert!(matches!(
-            UserCommand::from_key(key),
+            UserCommand::from_key(key, &b),
             Some(UserCommand::Backspace)
         ));
     }
@@ -617,38 +631,43 @@ mod tests {
     #[test]
     fn test_key_release_ignored() {
         use crossterm::event::{KeyEventKind, KeyEventState};
+        let b = kb();
         let key = KeyEvent {
             code: KeyCode::Char('j'),
             modifiers: KeyModifiers::NONE,
             kind: KeyEventKind::Release,
             state: KeyEventState::empty(),
         };
-        assert!(UserCommand::from_key(key).is_none());
+        assert!(UserCommand::from_key(key, &b).is_none());
     }
 
     #[test]
     fn test_key_repeat_ignored() {
         use crossterm::event::{KeyEventKind, KeyEventState};
+        let b = kb();
         let key = KeyEvent {
             code: KeyCode::Char('j'),
             modifiers: KeyModifiers::NONE,
             kind: KeyEventKind::Repeat,
             state: KeyEventState::empty(),
         };
-        assert!(UserCommand::from_key(key).is_none());
+        assert!(UserCommand::from_key(key, &b).is_none());
     }
 
     #[test]
     fn test_unknown_key_returns_none() {
+        let b = kb();
         let key = KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE);
-        assert!(UserCommand::from_key(key).is_none());
+        assert!(UserCommand::from_key(key, &b).is_none());
     }
 
     #[test]
     fn test_text_input_uppercase() {
+        let b = kb();
+        // 'A' with SHIFT is not bound to any action, falls through to TextInput
         let key = KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT);
         assert!(matches!(
-            UserCommand::from_key(key),
+            UserCommand::from_key(key, &b),
             Some(UserCommand::TextInput('A'))
         ));
     }

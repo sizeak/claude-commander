@@ -1,0 +1,825 @@
+//! Configurable keybinding system
+//!
+//! Provides a data-driven keybinding table that maps key combinations to
+//! user commands. Keybindings are loaded from the `[keybindings]` section
+//! of `config.toml` and fall back to sensible defaults when omitted.
+
+use std::collections::HashMap;
+use std::fmt;
+use std::str::FromStr;
+
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use serde::de::{self, Deserializer, SeqAccess, Visitor};
+use serde::ser::Serializer;
+use serde::{Deserialize, Serialize};
+
+// ---------------------------------------------------------------------------
+// BindableAction — the subset of commands users can rebind
+// ---------------------------------------------------------------------------
+
+/// Actions that can be bound to key combinations via config.
+///
+/// This is intentionally separate from `UserCommand` — structural keys like
+/// text input and backspace are not rebindable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BindableAction {
+    NavigateUp,
+    NavigateDown,
+    Select,
+    SelectShell,
+    NewSession,
+    NewProject,
+    PauseSession,
+    ResumeSession,
+    DeleteSession,
+    RemoveProject,
+    OpenInEditor,
+    TogglePane,
+    TogglePaneReverse,
+    ShrinkLeftPane,
+    GrowLeftPane,
+    ShowHelp,
+    Quit,
+    ScrollUp,
+    ScrollDown,
+    PageUp,
+    PageDown,
+}
+
+impl BindableAction {
+    /// All actions in display order (used for help screen sections).
+    pub const ALL: &'static [BindableAction] = &[
+        Self::NavigateUp,
+        Self::NavigateDown,
+        Self::Select,
+        Self::SelectShell,
+        Self::NewSession,
+        Self::NewProject,
+        Self::PauseSession,
+        Self::ResumeSession,
+        Self::DeleteSession,
+        Self::RemoveProject,
+        Self::OpenInEditor,
+        Self::TogglePane,
+        Self::TogglePaneReverse,
+        Self::ShrinkLeftPane,
+        Self::GrowLeftPane,
+        Self::ScrollUp,
+        Self::ScrollDown,
+        Self::PageUp,
+        Self::PageDown,
+        Self::ShowHelp,
+        Self::Quit,
+    ];
+
+    /// Snake_case name used as the TOML key.
+    pub fn config_name(self) -> &'static str {
+        match self {
+            Self::NavigateUp => "navigate_up",
+            Self::NavigateDown => "navigate_down",
+            Self::Select => "select",
+            Self::SelectShell => "select_shell",
+            Self::NewSession => "new_session",
+            Self::NewProject => "new_project",
+            Self::PauseSession => "pause_session",
+            Self::ResumeSession => "resume_session",
+            Self::DeleteSession => "delete_session",
+            Self::RemoveProject => "remove_project",
+            Self::OpenInEditor => "open_in_editor",
+            Self::TogglePane => "toggle_pane",
+            Self::TogglePaneReverse => "toggle_pane_reverse",
+            Self::ShrinkLeftPane => "shrink_left_pane",
+            Self::GrowLeftPane => "grow_left_pane",
+            Self::ShowHelp => "show_help",
+            Self::Quit => "quit",
+            Self::ScrollUp => "scroll_up",
+            Self::ScrollDown => "scroll_down",
+            Self::PageUp => "page_up",
+            Self::PageDown => "page_down",
+        }
+    }
+
+    /// Human-readable label for the help screen.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::NavigateUp => "Navigate up",
+            Self::NavigateDown => "Navigate down",
+            Self::Select => "Attach to selected session",
+            Self::SelectShell => "Open shell in worktree",
+            Self::NewSession => "New worktree session",
+            Self::NewProject => "New project (add git repo)",
+            Self::PauseSession => "Pause session",
+            Self::ResumeSession => "Resume session",
+            Self::DeleteSession => "Delete/kill session",
+            Self::RemoveProject => "Remove project",
+            Self::OpenInEditor => "Open in editor/IDE",
+            Self::TogglePane => "Toggle preview/diff/shell view",
+            Self::TogglePaneReverse => "Toggle view (reverse)",
+            Self::ShrinkLeftPane => "Shrink left pane",
+            Self::GrowLeftPane => "Grow left pane",
+            Self::ShowHelp => "Show help",
+            Self::Quit => "Quit",
+            Self::ScrollUp => "Scroll up",
+            Self::ScrollDown => "Scroll down",
+            Self::PageUp => "Page up",
+            Self::PageDown => "Page down",
+        }
+    }
+
+    /// Help screen section for grouping.
+    pub fn section(self) -> &'static str {
+        match self {
+            Self::NavigateUp | Self::NavigateDown | Self::Select => "Navigation",
+            Self::SelectShell
+            | Self::NewSession
+            | Self::NewProject
+            | Self::PauseSession
+            | Self::ResumeSession
+            | Self::DeleteSession
+            | Self::RemoveProject
+            | Self::OpenInEditor => "Session Management",
+            Self::TogglePane
+            | Self::TogglePaneReverse
+            | Self::ShrinkLeftPane
+            | Self::GrowLeftPane => "Layout",
+            Self::ScrollUp | Self::ScrollDown | Self::PageUp | Self::PageDown => "Scrolling",
+            Self::ShowHelp | Self::Quit => "Other",
+        }
+    }
+}
+
+impl FromStr for BindableAction {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s {
+            "navigate_up" => Ok(Self::NavigateUp),
+            "navigate_down" => Ok(Self::NavigateDown),
+            "select" => Ok(Self::Select),
+            "select_shell" => Ok(Self::SelectShell),
+            "new_session" => Ok(Self::NewSession),
+            "new_project" => Ok(Self::NewProject),
+            "pause_session" => Ok(Self::PauseSession),
+            "resume_session" => Ok(Self::ResumeSession),
+            "delete_session" => Ok(Self::DeleteSession),
+            "remove_project" => Ok(Self::RemoveProject),
+            "open_in_editor" => Ok(Self::OpenInEditor),
+            "toggle_pane" => Ok(Self::TogglePane),
+            "toggle_pane_reverse" => Ok(Self::TogglePaneReverse),
+            "shrink_left_pane" => Ok(Self::ShrinkLeftPane),
+            "grow_left_pane" => Ok(Self::GrowLeftPane),
+            "show_help" => Ok(Self::ShowHelp),
+            "quit" => Ok(Self::Quit),
+            "scroll_up" => Ok(Self::ScrollUp),
+            "scroll_down" => Ok(Self::ScrollDown),
+            "page_up" => Ok(Self::PageUp),
+            "page_down" => Ok(Self::PageDown),
+            _ => Err(format!("unknown action: {s}")),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// KeyBinding — a single key combination
+// ---------------------------------------------------------------------------
+
+/// A key combination that can be serialized to/from human-readable strings.
+///
+/// Format: `[Ctrl-][Alt-][Shift-]<key>`
+///
+/// Examples: `"k"`, `"Ctrl-p"`, `"Shift-N"`, `"Enter"`, `"F1"`, `"Ctrl-Shift-x"`
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct KeyBinding {
+    pub code: KeyCode,
+    pub modifiers: KeyModifiers,
+}
+
+impl KeyBinding {
+    pub fn new(code: KeyCode, modifiers: KeyModifiers) -> Self {
+        Self { code, modifiers }
+    }
+
+    /// Check whether a crossterm `KeyEvent` matches this binding.
+    pub fn matches(&self, event: &KeyEvent) -> bool {
+        event.code == self.code && event.modifiers == self.modifiers
+    }
+}
+
+impl fmt::Display for KeyBinding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.modifiers.contains(KeyModifiers::CONTROL) {
+            f.write_str("Ctrl-")?;
+        }
+        if self.modifiers.contains(KeyModifiers::ALT) {
+            f.write_str("Alt-")?;
+        }
+        // We only show Shift prefix for non-character keys or lowercase chars.
+        // Uppercase letters like 'N' already imply Shift.
+        let show_shift = self.modifiers.contains(KeyModifiers::SHIFT)
+            && !matches!(self.code, KeyCode::Char(c) if c.is_ascii_uppercase());
+        if show_shift {
+            f.write_str("Shift-")?;
+        }
+
+        match self.code {
+            KeyCode::Char(' ') => f.write_str("Space"),
+            KeyCode::Char(c) => write!(f, "{c}"),
+            KeyCode::Enter => f.write_str("Enter"),
+            KeyCode::Esc => f.write_str("Esc"),
+            KeyCode::Tab => f.write_str("Tab"),
+            KeyCode::BackTab => f.write_str("BackTab"),
+            KeyCode::Backspace => f.write_str("Backspace"),
+            KeyCode::Up => f.write_str("Up"),
+            KeyCode::Down => f.write_str("Down"),
+            KeyCode::Left => f.write_str("Left"),
+            KeyCode::Right => f.write_str("Right"),
+            KeyCode::PageUp => f.write_str("PageUp"),
+            KeyCode::PageDown => f.write_str("PageDown"),
+            KeyCode::Home => f.write_str("Home"),
+            KeyCode::End => f.write_str("End"),
+            KeyCode::Delete => f.write_str("Delete"),
+            KeyCode::Insert => f.write_str("Insert"),
+            KeyCode::F(n) => write!(f, "F{n}"),
+            _ => f.write_str("???"),
+        }
+    }
+}
+
+impl FromStr for KeyBinding {
+    type Err = String;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        let s = s.trim();
+        if s.is_empty() {
+            return Err("empty key binding string".to_string());
+        }
+
+        let mut modifiers = KeyModifiers::NONE;
+        let mut rest = s;
+
+        // Parse modifier prefixes (case-insensitive)
+        loop {
+            let lower = rest.to_ascii_lowercase();
+            if let Some(after) = lower.strip_prefix("ctrl-") {
+                modifiers |= KeyModifiers::CONTROL;
+                rest = &rest[5..]; // skip "Ctrl-"
+                let _ = after; // used only for prefix check
+            } else if let Some(after) = lower.strip_prefix("alt-") {
+                modifiers |= KeyModifiers::ALT;
+                rest = &rest[4..];
+                let _ = after;
+            } else if let Some(after) = lower.strip_prefix("shift-") {
+                modifiers |= KeyModifiers::SHIFT;
+                rest = &rest[6..];
+                let _ = after;
+            } else {
+                break;
+            }
+        }
+
+        // Parse the key name
+        let code = match rest.to_ascii_lowercase().as_str() {
+            "enter" | "return" | "cr" => KeyCode::Enter,
+            "esc" | "escape" => KeyCode::Esc,
+            "tab" => KeyCode::Tab,
+            "backtab" => KeyCode::BackTab,
+            "backspace" | "bs" => KeyCode::Backspace,
+            "space" => KeyCode::Char(' '),
+            "up" => KeyCode::Up,
+            "down" => KeyCode::Down,
+            "left" => KeyCode::Left,
+            "right" => KeyCode::Right,
+            "pageup" | "pgup" => KeyCode::PageUp,
+            "pagedown" | "pgdn" | "pgdown" => KeyCode::PageDown,
+            "home" => KeyCode::Home,
+            "end" => KeyCode::End,
+            "delete" | "del" => KeyCode::Delete,
+            "insert" | "ins" => KeyCode::Insert,
+            f if f.starts_with('f') && f.len() <= 3 => {
+                let n: u8 = f[1..]
+                    .parse()
+                    .map_err(|_| format!("invalid function key: {rest}"))?;
+                if !(1..=12).contains(&n) {
+                    return Err(format!("function key out of range: F{n}"));
+                }
+                KeyCode::F(n)
+            }
+            _ => {
+                // Single character
+                let chars: Vec<char> = rest.chars().collect();
+                if chars.len() != 1 {
+                    return Err(format!("unknown key name: {rest}"));
+                }
+                let c = chars[0];
+                // Uppercase implies Shift modifier
+                if c.is_ascii_uppercase() {
+                    modifiers |= KeyModifiers::SHIFT;
+                }
+                KeyCode::Char(c)
+            }
+        };
+
+        Ok(KeyBinding { code, modifiers })
+    }
+}
+
+impl Serialize for KeyBinding {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for KeyBinding {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        KeyBinding::from_str(&s).map_err(de::Error::custom)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// KeyBindings — the full binding table
+// ---------------------------------------------------------------------------
+
+/// Complete keybinding configuration.
+///
+/// Loaded from `[keybindings]` in config.toml. Missing keys fall back to
+/// defaults. The internal lookup table is built on construction.
+#[derive(Debug, Clone)]
+pub struct KeyBindings {
+    /// Action → list of bound keys (source of truth, serialized to TOML)
+    bindings: HashMap<BindableAction, Vec<KeyBinding>>,
+    /// (KeyCode, KeyModifiers) → action (derived lookup table, not serialized)
+    lookup: HashMap<(KeyCode, KeyModifiers), BindableAction>,
+}
+
+impl KeyBindings {
+    /// Build the lookup table from the bindings map.
+    fn build_lookup(bindings: &HashMap<BindableAction, Vec<KeyBinding>>) -> HashMap<(KeyCode, KeyModifiers), BindableAction> {
+        let mut lookup = HashMap::new();
+        for (action, keys) in bindings {
+            for key in keys {
+                lookup.insert((key.code, key.modifiers), *action);
+            }
+        }
+        lookup
+    }
+
+    /// Resolve a crossterm key event to a bindable action.
+    ///
+    /// Returns `None` if the key is not bound to any action. Structural
+    /// keys (text input, backspace in modals) are handled separately.
+    pub fn resolve(&self, event: &KeyEvent) -> Option<BindableAction> {
+        if event.kind != KeyEventKind::Press {
+            return None;
+        }
+        self.lookup.get(&(event.code, event.modifiers)).copied()
+    }
+
+    /// Get the key bindings for a specific action.
+    pub fn keys_for(&self, action: BindableAction) -> &[KeyBinding] {
+        self.bindings.get(&action).map_or(&[], |v| v.as_slice())
+    }
+
+    /// Format the key bindings for an action as a comma-separated string.
+    pub fn keys_display(&self, action: BindableAction) -> String {
+        self.keys_for(action)
+            .iter()
+            .map(|k| k.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// All actions grouped by section, in display order.
+    pub fn sections(&self) -> Vec<(&'static str, Vec<(BindableAction, String)>)> {
+        let mut sections: Vec<(&str, Vec<(BindableAction, String)>)> = Vec::new();
+        let mut current_section = "";
+
+        for &action in BindableAction::ALL {
+            let section = action.section();
+            if section != current_section {
+                sections.push((section, Vec::new()));
+                current_section = section;
+            }
+            let keys = self.keys_display(action);
+            sections.last_mut().unwrap().1.push((action, keys));
+        }
+
+        sections
+    }
+}
+
+impl Default for KeyBindings {
+    fn default() -> Self {
+        let mut bindings = HashMap::new();
+
+        let kb = |code: KeyCode, modifiers: KeyModifiers| KeyBinding::new(code, modifiers);
+        let none = KeyModifiers::NONE;
+        let ctrl = KeyModifiers::CONTROL;
+        let shift = KeyModifiers::SHIFT;
+
+        // Navigation
+        bindings.insert(BindableAction::NavigateUp, vec![
+            kb(KeyCode::Char('k'), none),
+            kb(KeyCode::Up, none),
+            kb(KeyCode::Char('p'), ctrl),
+        ]);
+        bindings.insert(BindableAction::NavigateDown, vec![
+            kb(KeyCode::Char('j'), none),
+            kb(KeyCode::Down, none),
+            kb(KeyCode::Char('n'), ctrl),
+        ]);
+        bindings.insert(BindableAction::Select, vec![
+            kb(KeyCode::Enter, none),
+        ]);
+
+        // Session management
+        bindings.insert(BindableAction::SelectShell, vec![
+            kb(KeyCode::Char('s'), none),
+        ]);
+        bindings.insert(BindableAction::NewSession, vec![
+            kb(KeyCode::Char('n'), none),
+        ]);
+        bindings.insert(BindableAction::NewProject, vec![
+            kb(KeyCode::Char('N'), shift),
+        ]);
+        bindings.insert(BindableAction::PauseSession, vec![
+            kb(KeyCode::Char('p'), none),
+        ]);
+        bindings.insert(BindableAction::ResumeSession, vec![
+            kb(KeyCode::Char('r'), none),
+        ]);
+        bindings.insert(BindableAction::DeleteSession, vec![
+            kb(KeyCode::Char('d'), none),
+        ]);
+        bindings.insert(BindableAction::RemoveProject, vec![
+            kb(KeyCode::Char('D'), shift),
+        ]);
+        bindings.insert(BindableAction::OpenInEditor, vec![
+            kb(KeyCode::Char('e'), none),
+        ]);
+
+        // Pane control
+        bindings.insert(BindableAction::TogglePane, vec![
+            kb(KeyCode::Tab, none),
+        ]);
+        bindings.insert(BindableAction::TogglePaneReverse, vec![
+            kb(KeyCode::BackTab, shift),
+        ]);
+        bindings.insert(BindableAction::ShrinkLeftPane, vec![
+            kb(KeyCode::Char('<'), shift),
+            kb(KeyCode::Char('<'), none),
+        ]);
+        bindings.insert(BindableAction::GrowLeftPane, vec![
+            kb(KeyCode::Char('>'), shift),
+            kb(KeyCode::Char('>'), none),
+        ]);
+
+        // Scrolling
+        bindings.insert(BindableAction::ScrollUp, vec![]);
+        bindings.insert(BindableAction::ScrollDown, vec![]);
+        bindings.insert(BindableAction::PageUp, vec![
+            kb(KeyCode::Char('u'), ctrl),
+            kb(KeyCode::PageUp, none),
+        ]);
+        bindings.insert(BindableAction::PageDown, vec![
+            kb(KeyCode::Char('d'), ctrl),
+            kb(KeyCode::PageDown, none),
+        ]);
+
+        // Other
+        bindings.insert(BindableAction::ShowHelp, vec![
+            kb(KeyCode::Char('?'), shift),
+            kb(KeyCode::Char('?'), none),
+        ]);
+        bindings.insert(BindableAction::Quit, vec![
+            kb(KeyCode::Char('q'), none),
+            kb(KeyCode::Char('c'), ctrl),
+        ]);
+
+        let lookup = Self::build_lookup(&bindings);
+        Self { bindings, lookup }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Serde: serialize as { action_name = ["key1", "key2"] }
+// ---------------------------------------------------------------------------
+
+impl Serialize for KeyBindings {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+
+        let mut map = serializer.serialize_map(Some(self.bindings.len()))?;
+        // Serialize in a stable order
+        let mut entries: Vec<_> = self.bindings.iter().collect();
+        entries.sort_by_key(|(action, _)| action.config_name());
+        for (action, keys) in entries {
+            map.serialize_entry(action.config_name(), keys)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for KeyBindings {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        deserializer.deserialize_map(KeyBindingsVisitor)
+    }
+}
+
+struct KeyBindingsVisitor;
+
+impl<'de> Visitor<'de> for KeyBindingsVisitor {
+    type Value = KeyBindings;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a keybindings map (action_name = [\"key1\", \"key2\"])")
+    }
+
+    fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> std::result::Result<Self::Value, A::Error> {
+        // Start from defaults, then overlay user-specified bindings
+        let mut result = KeyBindings::default();
+
+        while let Some(key) = map.next_key::<String>()? {
+            let action = BindableAction::from_str(&key).map_err(de::Error::custom)?;
+            let keys: OneOrMany = map.next_value()?;
+            result.bindings.insert(action, keys.0);
+        }
+
+        // Rebuild lookup after applying overrides
+        result.lookup = KeyBindings::build_lookup(&result.bindings);
+        Ok(result)
+    }
+}
+
+/// Helper to accept either a single string or an array of strings for each action.
+struct OneOrMany(Vec<KeyBinding>);
+
+impl<'de> Deserialize<'de> for OneOrMany {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> std::result::Result<Self, D::Error> {
+        deserializer.deserialize_any(OneOrManyVisitor)
+    }
+}
+
+struct OneOrManyVisitor;
+
+impl<'de> Visitor<'de> for OneOrManyVisitor {
+    type Value = OneOrMany;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a key binding string or array of key binding strings")
+    }
+
+    fn visit_str<E: de::Error>(self, value: &str) -> std::result::Result<Self::Value, E> {
+        let kb = KeyBinding::from_str(value).map_err(E::custom)?;
+        Ok(OneOrMany(vec![kb]))
+    }
+
+    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error> {
+        let mut keys = Vec::new();
+        while let Some(s) = seq.next_element::<String>()? {
+            keys.push(KeyBinding::from_str(&s).map_err(de::Error::custom)?);
+        }
+        Ok(OneOrMany(keys))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- KeyBinding parsing --
+
+    #[test]
+    fn test_parse_simple_char() {
+        let kb: KeyBinding = "k".parse().unwrap();
+        assert_eq!(kb.code, KeyCode::Char('k'));
+        assert_eq!(kb.modifiers, KeyModifiers::NONE);
+    }
+
+    #[test]
+    fn test_parse_uppercase_implies_shift() {
+        let kb: KeyBinding = "N".parse().unwrap();
+        assert_eq!(kb.code, KeyCode::Char('N'));
+        assert_eq!(kb.modifiers, KeyModifiers::SHIFT);
+    }
+
+    #[test]
+    fn test_parse_ctrl_modifier() {
+        let kb: KeyBinding = "Ctrl-p".parse().unwrap();
+        assert_eq!(kb.code, KeyCode::Char('p'));
+        assert_eq!(kb.modifiers, KeyModifiers::CONTROL);
+    }
+
+    #[test]
+    fn test_parse_ctrl_case_insensitive() {
+        let kb: KeyBinding = "ctrl-p".parse().unwrap();
+        assert_eq!(kb.code, KeyCode::Char('p'));
+        assert_eq!(kb.modifiers, KeyModifiers::CONTROL);
+    }
+
+    #[test]
+    fn test_parse_special_keys() {
+        assert_eq!("Enter".parse::<KeyBinding>().unwrap().code, KeyCode::Enter);
+        assert_eq!("Esc".parse::<KeyBinding>().unwrap().code, KeyCode::Esc);
+        assert_eq!("Tab".parse::<KeyBinding>().unwrap().code, KeyCode::Tab);
+        assert_eq!("BackTab".parse::<KeyBinding>().unwrap().code, KeyCode::BackTab);
+        assert_eq!("Space".parse::<KeyBinding>().unwrap().code, KeyCode::Char(' '));
+        assert_eq!("Up".parse::<KeyBinding>().unwrap().code, KeyCode::Up);
+        assert_eq!("Down".parse::<KeyBinding>().unwrap().code, KeyCode::Down);
+        assert_eq!("PageUp".parse::<KeyBinding>().unwrap().code, KeyCode::PageUp);
+        assert_eq!("PageDown".parse::<KeyBinding>().unwrap().code, KeyCode::PageDown);
+    }
+
+    #[test]
+    fn test_parse_function_keys() {
+        let kb: KeyBinding = "F1".parse().unwrap();
+        assert_eq!(kb.code, KeyCode::F(1));
+        let kb: KeyBinding = "F12".parse().unwrap();
+        assert_eq!(kb.code, KeyCode::F(12));
+    }
+
+    #[test]
+    fn test_parse_function_key_out_of_range() {
+        assert!("F0".parse::<KeyBinding>().is_err());
+        assert!("F13".parse::<KeyBinding>().is_err());
+    }
+
+    #[test]
+    fn test_parse_multiple_modifiers() {
+        let kb: KeyBinding = "Ctrl-Shift-x".parse().unwrap();
+        assert_eq!(kb.code, KeyCode::Char('x'));
+        assert!(kb.modifiers.contains(KeyModifiers::CONTROL));
+        assert!(kb.modifiers.contains(KeyModifiers::SHIFT));
+    }
+
+    #[test]
+    fn test_parse_empty_errors() {
+        assert!("".parse::<KeyBinding>().is_err());
+    }
+
+    #[test]
+    fn test_parse_unknown_key_errors() {
+        assert!("FooBar".parse::<KeyBinding>().is_err());
+    }
+
+    // -- Display round-trip --
+
+    #[test]
+    fn test_display_round_trip() {
+        let cases = ["k", "Ctrl-p", "Enter", "Tab", "F1", "Up", "PageUp", "Space"];
+        for input in cases {
+            let kb: KeyBinding = input.parse().unwrap();
+            let displayed = kb.to_string();
+            let reparsed: KeyBinding = displayed.parse().unwrap();
+            assert_eq!(kb, reparsed, "round-trip failed for {input}");
+        }
+    }
+
+    #[test]
+    fn test_display_uppercase() {
+        let kb: KeyBinding = "N".parse().unwrap();
+        assert_eq!(kb.to_string(), "N");
+    }
+
+    #[test]
+    fn test_display_ctrl() {
+        let kb = KeyBinding::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(kb.to_string(), "Ctrl-c");
+    }
+
+    // -- KeyBindings defaults --
+
+    #[test]
+    fn test_defaults_match_current_bindings() {
+        let kb = KeyBindings::default();
+
+        // Navigation
+        let j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&j), Some(BindableAction::NavigateDown));
+
+        let k = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&k), Some(BindableAction::NavigateUp));
+
+        let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&up), Some(BindableAction::NavigateUp));
+
+        let ctrl_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        assert_eq!(kb.resolve(&ctrl_p), Some(BindableAction::NavigateUp));
+
+        // Session management
+        let n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&n), Some(BindableAction::NewSession));
+
+        let shift_n = KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT);
+        assert_eq!(kb.resolve(&shift_n), Some(BindableAction::NewProject));
+
+        // Quit
+        let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&q), Some(BindableAction::Quit));
+
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(kb.resolve(&ctrl_c), Some(BindableAction::Quit));
+    }
+
+    #[test]
+    fn test_release_events_ignored() {
+        let kb = KeyBindings::default();
+        let key = KeyEvent {
+            code: KeyCode::Char('j'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Release,
+            state: crossterm::event::KeyEventState::empty(),
+        };
+        assert_eq!(kb.resolve(&key), None);
+    }
+
+    #[test]
+    fn test_unbound_key_returns_none() {
+        let kb = KeyBindings::default();
+        let f1 = KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&f1), None);
+    }
+
+    // -- Serde --
+
+    #[test]
+    fn test_toml_deserialization_override() {
+        let toml = r#"
+            quit = ["Esc"]
+            navigate_up = "w"
+        "#;
+
+        let kb: KeyBindings = toml::from_str(toml).unwrap();
+
+        // Overridden: quit is now only Esc
+        let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&esc), Some(BindableAction::Quit));
+
+        // Old quit binding should be gone
+        let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert_ne!(kb.resolve(&q), Some(BindableAction::Quit));
+
+        // Overridden: navigate_up is now 'w' (single string, not array)
+        let w = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&w), Some(BindableAction::NavigateUp));
+
+        // Non-overridden defaults still work
+        let j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&j), Some(BindableAction::NavigateDown));
+    }
+
+    #[test]
+    fn test_toml_round_trip() {
+        let original = KeyBindings::default();
+        let serialized = toml::to_string_pretty(&original).unwrap();
+        let deserialized: KeyBindings = toml::from_str(&serialized).unwrap();
+
+        // All default actions should resolve identically
+        for action in BindableAction::ALL {
+            assert_eq!(
+                original.keys_for(*action),
+                deserialized.keys_for(*action),
+                "mismatch for {:?}",
+                action
+            );
+        }
+    }
+
+    #[test]
+    fn test_unknown_action_errors() {
+        let toml = r#"nonexistent_action = ["k"]"#;
+        assert!(toml::from_str::<KeyBindings>(toml).is_err());
+    }
+
+    // -- BindableAction --
+
+    #[test]
+    fn test_action_from_str_round_trip() {
+        for action in BindableAction::ALL {
+            let name = action.config_name();
+            let parsed = BindableAction::from_str(name).unwrap();
+            assert_eq!(*action, parsed);
+        }
+    }
+
+    #[test]
+    fn test_keys_display() {
+        let kb = KeyBindings::default();
+        let display = kb.keys_display(BindableAction::NavigateUp);
+        assert!(display.contains("k"));
+        assert!(display.contains("Up"));
+        assert!(display.contains("Ctrl-p"));
+    }
+
+    #[test]
+    fn test_sections_grouping() {
+        let kb = KeyBindings::default();
+        let sections = kb.sections();
+        let section_names: Vec<&str> = sections.iter().map(|(name, _)| *name).collect();
+        assert_eq!(section_names, vec!["Navigation", "Session Management", "Layout", "Scrolling", "Other"]);
+    }
+}
