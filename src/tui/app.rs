@@ -1461,7 +1461,13 @@ impl App {
             ..content_area
         };
 
-        let label_width = 24_u16;
+        let label_width = state
+            .rows
+            .iter()
+            .map(|r| r.label.len())
+            .max()
+            .unwrap_or(20) as u16
+            + 2;
         let value_width = rows_area.width.saturating_sub(label_width + 3);
 
         let visible_rows = rows_area.height as usize;
