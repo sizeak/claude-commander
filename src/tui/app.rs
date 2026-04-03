@@ -1531,10 +1531,22 @@ impl App {
                     row_style.fg(self.theme.text_accent)
                 };
 
-                frame.render_widget(
-                    Paragraph::new(Span::styled(display_val, val_style)),
-                    val_area,
-                );
+                // On the Theme tab, show a color swatch next to the value
+                let line = if state.tab == SettingsTab::Theme && row.field_key != "preset" {
+                    if let Some(color) = self.resolve_theme_color(&row.field_key) {
+                        Line::from(vec![
+                            Span::styled(display_val, val_style),
+                            Span::raw(" "),
+                            Span::styled("██", Style::default().fg(color)),
+                        ])
+                    } else {
+                        Line::from(Span::styled(display_val, val_style))
+                    }
+                } else {
+                    Line::from(Span::styled(display_val, val_style))
+                };
+
+                frame.render_widget(Paragraph::new(line), val_area);
             }
         }
 
@@ -1547,7 +1559,7 @@ impl App {
         let footer_text = if state.editing.is_some() {
             "Enter: save  Esc: cancel"
         } else {
-            "Tab: switch tab  j/k: navigate  Enter: edit  Esc: close"
+            "Tab: switch tab  j/k: navigate  Enter: edit  d: reset  Esc: close"
         };
         frame.render_widget(
             Paragraph::new(Span::styled(
@@ -1556,6 +1568,73 @@ impl App {
             )),
             footer_area,
         );
+    }
+
+    /// Resolve the current theme color for a given field key.
+    fn resolve_theme_color(&self, field_key: &str) -> Option<ratatui::style::Color> {
+        let t = &self.theme;
+        match field_key {
+            "border_focused" => Some(t.border_focused),
+            "border_unfocused" => Some(t.border_unfocused),
+            "selection_bg" => Some(t.selection_bg),
+            "selection_fg" => t.selection_fg,
+            "status_running" => Some(t.status_running),
+            "status_paused" => Some(t.status_paused),
+            "status_stopped" => Some(t.status_stopped),
+            "status_pr" => Some(t.status_pr),
+            "status_pr_merged" => Some(t.status_pr_merged),
+            "text_primary" => Some(t.text_primary),
+            "text_secondary" => Some(t.text_secondary),
+            "text_accent" => Some(t.text_accent),
+            "text_pr" => Some(t.text_pr),
+            "diff_added" => Some(t.diff_added),
+            "diff_removed" => Some(t.diff_removed),
+            "diff_hunk_header" => Some(t.diff_hunk_header),
+            "diff_file_header" => Some(t.diff_file_header),
+            "diff_context" => Some(t.diff_context),
+            "modal_info" => Some(t.modal_info),
+            "modal_warning" => Some(t.modal_warning),
+            "modal_error" => Some(t.modal_error),
+            "status_bar_bg" => Some(t.status_bar_bg),
+            "status_bar_fg" => Some(t.status_bar_fg),
+            _ => None,
+        }
+    }
+
+    /// Get the default value for a settings field as a string.
+    fn default_value_for(&self, tab: SettingsTab, field_key: &str) -> String {
+        match tab {
+            SettingsTab::General => {
+                let d = Config::default();
+                match field_key {
+                    "default_program" => d.default_program,
+                    "branch_prefix" => d.branch_prefix,
+                    "shell_program" => d.shell_program,
+                    "editor" => String::new(),
+                    "editor_gui" => "(auto)".into(),
+                    "pull_before_create" => d.pull_before_create.to_string(),
+                    "dim_unfocused_preview" => d.dim_unfocused_preview.to_string(),
+                    "ui_refresh_fps" => d.ui_refresh_fps.to_string(),
+                    "pr_check_interval_secs" => d.pr_check_interval_secs.to_string(),
+                    "max_concurrent_tmux" => d.max_concurrent_tmux.to_string(),
+                    _ => String::new(),
+                }
+            }
+            SettingsTab::Keybindings => {
+                let defaults = crate::config::KeyBindings::default();
+                if let Ok(action) = field_key.parse::<BindableAction>() {
+                    defaults.keys_display(action)
+                } else {
+                    String::new()
+                }
+            }
+            SettingsTab::Theme => {
+                // Resetting a theme field means clearing the override (back to auto-detected)
+                // We signal this with an empty string, which apply_settings_edit interprets
+                // as "remove override" for the preset, and we handle color fields below.
+                String::new()
+            }
+        }
     }
 
     /// Apply an edited value from the settings modal to the config.
@@ -1617,6 +1696,41 @@ impl App {
                     } else {
                         Some(value.to_string())
                     };
+                } else if value.is_empty() {
+                    // Empty value means "clear override" (reset to default)
+                    macro_rules! clear_theme_field {
+                        ($($name:ident),*) => {
+                            match field_key {
+                                $(stringify!($name) => self.config.theme.$name = None,)*
+                                _ => {}
+                            }
+                        };
+                    }
+                    clear_theme_field!(
+                        border_focused,
+                        border_unfocused,
+                        selection_bg,
+                        selection_fg,
+                        status_running,
+                        status_paused,
+                        status_stopped,
+                        status_pr,
+                        status_pr_merged,
+                        text_primary,
+                        text_secondary,
+                        text_accent,
+                        text_pr,
+                        diff_added,
+                        diff_removed,
+                        diff_hunk_header,
+                        diff_file_header,
+                        diff_context,
+                        modal_info,
+                        modal_warning,
+                        modal_error,
+                        status_bar_bg,
+                        status_bar_fg
+                    );
                 } else {
                     // Try to parse the value as a ColorValue via TOML
                     let toml_input = if value.starts_with('#')
@@ -1786,6 +1900,15 @@ impl App {
                             current_value
                         };
                         state.editing = Some(SettingsEditing::TextInput { value: initial });
+                    }
+                    self.ui_state.modal = Modal::Settings(state);
+                }
+                KeyCode::Char('d') => {
+                    if !state.rows.is_empty() {
+                        let field_key = state.rows[state.selected_row].field_key.clone();
+                        let default_val = self.default_value_for(state.tab, &field_key);
+                        self.apply_settings_edit(state.tab, &field_key, &default_val);
+                        state.rows = self.build_settings_rows(state.tab);
                     }
                     self.ui_state.modal = Modal::Settings(state);
                 }
