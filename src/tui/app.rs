@@ -1975,35 +1975,16 @@ impl App {
                     let tmux = self.session_manager.tmux.clone();
                     let tx = self.event_loop.sender();
                     tokio::spawn(async move {
-                        if let Err(e) = tmux.kill_session(&tmux_name).await {
-                            debug!("Failed to kill tmux session: {}", e);
-                        }
-                        if let Some(ref shell_name) = shell_tmux_name {
-                            let _ = tmux.kill_session(shell_name).await;
-                        }
-                        if let Some(repo_path) = repo_path {
-                            let output = tokio::process::Command::new("git")
-                                .current_dir(&repo_path)
-                                .args(["worktree", "remove", "--force"])
-                                .arg(&worktree_path)
-                                .output()
-                                .await;
-                            if let Err(e) =
-                                output.as_ref().map_err(|e| e.to_string()).and_then(|o| {
-                                    if o.status.success() {
-                                        Ok(())
-                                    } else {
-                                        Err(String::from_utf8_lossy(&o.stderr).into_owned())
-                                    }
-                                })
-                            {
-                                let _ = tx
-                                    .send(AppEvent::StateUpdate(StateUpdate::Error {
-                                        message: format!("Background cleanup failed: {}", e),
-                                    }))
-                                    .await;
-                            }
-                        }
+                        cleanup_session_tmux(
+                            &tmux,
+                            &tmux_name,
+                            shell_tmux_name.as_deref(),
+                            repo_path
+                                .as_ref()
+                                .map(|rp| (worktree_path.as_path(), rp.as_path())),
+                            &tx,
+                        )
+                        .await;
                     });
                 }
             }
@@ -2060,36 +2041,16 @@ impl App {
                         if let Some(ref shell_name) = shell_tmux {
                             let _ = tmux.kill_session(shell_name).await;
                         }
-                        // Kill all session tmux sessions
-                        for (tmux_name, shell_tmux_name, _) in &sessions {
-                            let _ = tmux.kill_session(tmux_name).await;
-                            if let Some(shell_name) = shell_tmux_name {
-                                let _ = tmux.kill_session(shell_name).await;
-                            }
-                        }
-                        // Remove all worktrees
-                        for (_, _, worktree_path) in &sessions {
-                            let output = tokio::process::Command::new("git")
-                                .current_dir(&repo_path)
-                                .args(["worktree", "remove", "--force"])
-                                .arg(worktree_path)
-                                .output()
-                                .await;
-                            if let Err(e) =
-                                output.as_ref().map_err(|e| e.to_string()).and_then(|o| {
-                                    if o.status.success() {
-                                        Ok(())
-                                    } else {
-                                        Err(String::from_utf8_lossy(&o.stderr).into_owned())
-                                    }
-                                })
-                            {
-                                let _ = tx
-                                    .send(AppEvent::StateUpdate(StateUpdate::Error {
-                                        message: format!("Background cleanup failed: {}", e),
-                                    }))
-                                    .await;
-                            }
+                        // Kill all session tmux sessions + remove worktrees
+                        for (tmux_name, shell_tmux_name, worktree_path) in &sessions {
+                            cleanup_session_tmux(
+                                &tmux,
+                                tmux_name,
+                                shell_tmux_name.as_deref(),
+                                Some((worktree_path.as_path(), repo_path.as_path())),
+                                &tx,
+                            )
+                            .await;
                         }
                     });
                 }
@@ -2118,11 +2079,13 @@ impl App {
                     .collect()
             };
 
-            let mut results = Vec::with_capacity(sessions_to_check.len());
-            for (session_id, branch, repo_path) in sessions_to_check {
-                let pr_info = check_pr_for_branch(&repo_path, &branch).await;
-                results.push((session_id, pr_info));
-            }
+            let results = futures::future::join_all(sessions_to_check.into_iter().map(
+                |(session_id, branch, repo_path)| async move {
+                    let pr_info = check_pr_for_branch(&repo_path, &branch).await;
+                    (session_id, pr_info)
+                },
+            ))
+            .await;
 
             let _ = tx
                 .send(AppEvent::StateUpdate(StateUpdate::PrStatusReady {
@@ -2284,6 +2247,45 @@ async fn fetch_preview_data(
             Arc::new(DiffInfo::empty()),
             String::new(),
         )
+    }
+}
+
+/// Kill tmux sessions and remove a git worktree in the background.
+///
+/// Sends an error event if worktree removal fails.
+async fn cleanup_session_tmux(
+    tmux: &crate::tmux::TmuxExecutor,
+    tmux_name: &str,
+    shell_tmux_name: Option<&str>,
+    worktree_path: Option<(&std::path::Path, &std::path::Path)>,
+    tx: &tokio::sync::mpsc::Sender<AppEvent>,
+) {
+    if let Err(e) = tmux.kill_session(tmux_name).await {
+        debug!("Failed to kill tmux session: {}", e);
+    }
+    if let Some(shell_name) = shell_tmux_name {
+        let _ = tmux.kill_session(shell_name).await;
+    }
+    if let Some((worktree_path, repo_path)) = worktree_path {
+        let output = tokio::process::Command::new("git")
+            .current_dir(repo_path)
+            .args(["worktree", "remove", "--force"])
+            .arg(worktree_path)
+            .output()
+            .await;
+        if let Err(e) = output.as_ref().map_err(|e| e.to_string()).and_then(|o| {
+            if o.status.success() {
+                Ok(())
+            } else {
+                Err(String::from_utf8_lossy(&o.stderr).into_owned())
+            }
+        }) {
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::Error {
+                    message: format!("Background cleanup failed: {}", e),
+                }))
+                .await;
+        }
     }
 }
 
