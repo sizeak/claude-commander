@@ -1120,68 +1120,66 @@ impl App {
                     vertical: 1,
                 });
 
-                let help_lines = vec![
-                    Line::from("Navigation:"),
-                    Line::from("  j/k, ↑/↓, C-p/n Navigate session list"),
-                    Line::from("  Enter           Attach to selected session"),
-                    Line::from("  s               Open shell in worktree"),
-                    Line::from("  Ctrl+\\          Toggle between Claude/shell (while attached)"),
-                    Line::from("  Tab/Shift+Tab   Toggle preview/diff/shell view"),
-                    Line::from(""),
-                    Line::from("Session Management:"),
-                    Line::from("  n               New worktree session (under selected project)"),
-                    Line::from("  N               New project (add git repo)"),
-                    Line::from("  p               Pause session"),
-                    Line::from("  r               Resume session"),
-                    Line::from("  d               Delete/kill session"),
-                    Line::from("  D               Remove project"),
-                    Line::from("  e               Open in editor/IDE"),
-                    Line::from(""),
-                    Line::from("Status Indicators:"),
-                    Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled("●", Style::default().fg(self.theme.status_running)),
-                        Span::raw("  Running (agent active)"),
-                    ]),
-                    Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled("●", Style::default().fg(self.theme.status_pr)),
-                        Span::raw("  PR open"),
-                    ]),
-                    Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled("●", Style::default().fg(self.theme.status_pr_merged)),
-                        Span::raw("  PR merged"),
-                    ]),
-                    Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled("◐", Style::default().fg(self.theme.status_paused)),
-                        Span::raw("  Paused"),
-                    ]),
-                    Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled("○", Style::default().fg(self.theme.status_stopped)),
-                        Span::raw("  Stopped"),
-                    ]),
-                    Line::from(""),
-                    Line::from("Scrolling:"),
-                    Line::from("  Ctrl+u/d        Page up/down in current view"),
-                    Line::from("  PgUp/PgDn       Page up/down"),
-                    Line::from(""),
-                    Line::from("Layout:"),
-                    Line::from("  </>             Resize pane split"),
-                    Line::from(""),
-                    Line::from("Other:"),
-                    Line::from("  ?               Show this help"),
-                    Line::from("  q               Quit"),
-                    Line::from(""),
-                    Line::from("Press any key to close this help."),
-                ];
+                let help_lines = self.build_help_lines();
 
                 let paragraph = Paragraph::new(help_lines);
                 frame.render_widget(paragraph, content_area);
             }
         }
+    }
+
+    /// Build help screen lines dynamically from the keybinding table.
+    fn build_help_lines(&self) -> Vec<Line<'static>> {
+        let kb = &self.config.keybindings;
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        let key_col_width = 18;
+
+        for (section_name, actions) in kb.sections() {
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(format!("{section_name}:")));
+
+            for (action, keys_str) in &actions {
+                let desc = action.description();
+                let padded_keys = format!("  {keys_str:<width$}{desc}", width = key_col_width);
+                lines.push(Line::from(padded_keys));
+            }
+        }
+
+        // Status indicators (not keybinding-related, stays hardcoded)
+        lines.push(Line::from(""));
+        lines.push(Line::from("Status Indicators:"));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("●", Style::default().fg(self.theme.status_running)),
+            Span::raw("  Running (agent active)"),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("●", Style::default().fg(self.theme.status_pr)),
+            Span::raw("  PR open"),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("●", Style::default().fg(self.theme.status_pr_merged)),
+            Span::raw("  PR merged"),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("◐", Style::default().fg(self.theme.status_paused)),
+            Span::raw("  Paused"),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("○", Style::default().fg(self.theme.status_stopped)),
+            Span::raw("  Stopped"),
+        ]));
+
+        lines.push(Line::from(""));
+        lines.push(Line::from("Press any key to close this help."));
+
+        lines
     }
 
     /// Render status bar
@@ -1254,7 +1252,7 @@ impl App {
                 }
 
                 // Convert to command and handle
-                match UserCommand::from_key(key) {
+                match UserCommand::from_key(key, &self.config.keybindings) {
                     Some(cmd) => self.handle_command(cmd).await,
                     None => {
                         // Unrecognized key event — likely the start of a
