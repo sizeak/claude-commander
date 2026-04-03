@@ -18,6 +18,8 @@ use crate::error::Result;
 pub enum AttachResult {
     /// User detached with Ctrl+Q or tmux detach (Ctrl+B D)
     Detached,
+    /// User pressed Ctrl+\ to toggle between Claude and shell sessions
+    SwitchToShell,
     /// The session/process ended
     SessionEnded,
     /// An error occurred during attachment
@@ -216,6 +218,13 @@ async fn run_async_loop(
                     if data.contains(&0x11) {
                         debug!("Ctrl+Q detected, detaching");
                         let _ = stdin_shutdown.send(AttachResult::Detached).await;
+                        break;
+                    }
+
+                    // Check for Ctrl+\ (0x1C) to toggle shell
+                    if data.contains(&0x1C) {
+                        debug!("Ctrl+\\ detected, switching to shell");
+                        let _ = stdin_shutdown.send(AttachResult::SwitchToShell).await;
                         break;
                     }
 

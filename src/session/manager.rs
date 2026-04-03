@@ -476,7 +476,7 @@ impl SessionManager {
     }
 
     /// Ensure a shell tmux session exists for the given session (lazy creation)
-    async fn ensure_shell_session(&self, session_id: &SessionId) -> Result<String> {
+    pub async fn ensure_shell_session(&self, session_id: &SessionId) -> Result<String> {
         let (existing_shell_name, tmux_name, worktree_path) = {
             let state = self.store.read().await;
             let session = state
@@ -656,7 +656,7 @@ impl SessionManager {
     }
 
     /// Ensure a shell tmux session exists for the given project (lazy creation)
-    async fn ensure_project_shell(&self, project_id: &ProjectId) -> Result<String> {
+    pub async fn ensure_project_shell_session(&self, project_id: &ProjectId) -> Result<String> {
         let (existing_shell_name, repo_path, id_prefix) = {
             let state = self.store.read().await;
             let project = state
@@ -727,7 +727,7 @@ impl SessionManager {
 
     /// Get attach command for the project shell session (creates it if needed)
     pub async fn get_project_shell_attach_command(&self, project_id: &ProjectId) -> Result<String> {
-        let shell_name = self.ensure_project_shell(project_id).await?;
+        let shell_name = self.ensure_project_shell_session(project_id).await?;
 
         // Verify tmux session exists and pane is alive
         let exists = self.tmux.session_exists(&shell_name).await?;
