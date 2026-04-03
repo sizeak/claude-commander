@@ -4,6 +4,7 @@
 
 use std::path::PathBuf;
 
+use crossterm::event::{KeyCode, KeyModifiers};
 use directories::ProjectDirs;
 use figment::{
     Figment,
@@ -61,6 +62,9 @@ pub struct Config {
     /// Dim the right pane (preview/diff/shell) when the session list is focused
     pub dim_unfocused_preview: bool,
 
+    /// Leader key for quick-switch modal (e.g. " " for Space, "ctrl+k", "f1")
+    pub leader_key: String,
+
     /// Enable debug logging
     pub debug: bool,
 
@@ -88,6 +92,7 @@ impl Default for Config {
             pull_before_create: true,
             state_sync_interval_ms: 2000,
             dim_unfocused_preview: true,
+            leader_key: " ".to_string(),
             debug: false,
             log_file: None,
             keybindings: KeyBindings::default(),
@@ -233,12 +238,69 @@ impl Config {
         )
     }
 
+    /// Parse the `leader_key` config string into a crossterm key code and modifiers.
+    ///
+    /// Supported formats:
+    /// - `" "` → Space
+    /// - `"ctrl+k"` → Ctrl+K
+    /// - `"f1"` → F1
+    /// - `"tab"` → Tab
+    /// - Single character like `"x"` → Char('x')
+    pub fn parse_leader_key(&self) -> (KeyCode, KeyModifiers) {
+        parse_key_string(&self.leader_key)
+    }
+
     fn project_dirs() -> Result<ProjectDirs> {
         ProjectDirs::from("com", "claude-commander", "claude-commander").ok_or_else(|| {
             Error::Config(ConfigError::LoadFailed(
                 "Could not determine home directory".to_string(),
             ))
         })
+    }
+}
+
+/// Parse a key string like `" "`, `"ctrl+k"`, `"f1"` into crossterm types.
+fn parse_key_string(s: &str) -> (KeyCode, KeyModifiers) {
+    let s = s.trim().to_lowercase();
+
+    // Check for modifier prefix (ctrl+, alt+, shift+)
+    if let Some(rest) = s.strip_prefix("ctrl+") {
+        let code = parse_key_code(rest);
+        return (code, KeyModifiers::CONTROL);
+    }
+    if let Some(rest) = s.strip_prefix("alt+") {
+        let code = parse_key_code(rest);
+        return (code, KeyModifiers::ALT);
+    }
+
+    (parse_key_code(&s), KeyModifiers::NONE)
+}
+
+fn parse_key_code(s: &str) -> KeyCode {
+    match s {
+        " " | "space" => KeyCode::Char(' '),
+        "enter" | "return" => KeyCode::Enter,
+        "tab" => KeyCode::Tab,
+        "esc" | "escape" => KeyCode::Esc,
+        "backspace" => KeyCode::Backspace,
+        "up" => KeyCode::Up,
+        "down" => KeyCode::Down,
+        "left" => KeyCode::Left,
+        "right" => KeyCode::Right,
+        "f1" => KeyCode::F(1),
+        "f2" => KeyCode::F(2),
+        "f3" => KeyCode::F(3),
+        "f4" => KeyCode::F(4),
+        "f5" => KeyCode::F(5),
+        "f6" => KeyCode::F(6),
+        "f7" => KeyCode::F(7),
+        "f8" => KeyCode::F(8),
+        "f9" => KeyCode::F(9),
+        "f10" => KeyCode::F(10),
+        "f11" => KeyCode::F(11),
+        "f12" => KeyCode::F(12),
+        s if s.len() == 1 => KeyCode::Char(s.chars().next().unwrap()),
+        _ => KeyCode::Char(' '), // fallback to space
     }
 }
 
@@ -376,5 +438,33 @@ mod tests {
         assert_eq!(config.pr_check_interval_secs, 600);
         assert!(config.pull_before_create);
         assert_eq!(config.state_sync_interval_ms, 2000);
+    }
+
+    #[test]
+    fn test_default_leader_key() {
+        let config = Config::default();
+        assert_eq!(config.leader_key, " ");
+        let (code, mods) = config.parse_leader_key();
+        assert_eq!(code, KeyCode::Char(' '));
+        assert_eq!(mods, KeyModifiers::NONE);
+    }
+
+    #[test]
+    fn test_parse_leader_key_variants() {
+        let cases = vec![
+            (" ", KeyCode::Char(' '), KeyModifiers::NONE),
+            ("space", KeyCode::Char(' '), KeyModifiers::NONE),
+            ("ctrl+k", KeyCode::Char('k'), KeyModifiers::CONTROL),
+            ("ctrl+p", KeyCode::Char('p'), KeyModifiers::CONTROL),
+            ("f1", KeyCode::F(1), KeyModifiers::NONE),
+            ("f12", KeyCode::F(12), KeyModifiers::NONE),
+            ("tab", KeyCode::Tab, KeyModifiers::NONE),
+            ("x", KeyCode::Char('x'), KeyModifiers::NONE),
+        ];
+        for (input, expected_code, expected_mods) in cases {
+            let (code, mods) = parse_key_string(input);
+            assert_eq!(code, expected_code, "Failed for input: {}", input);
+            assert_eq!(mods, expected_mods, "Failed for input: {}", input);
+        }
     }
 }

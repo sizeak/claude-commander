@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use crossterm::{
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        MouseEventKind,
+        KeyModifiers, MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -99,6 +99,22 @@ pub enum Modal {
     Help,
     /// Error modal
     Error { message: String },
+    /// Quick-switch session search modal
+    QuickSwitch {
+        query: String,
+        matches: Vec<QuickSwitchMatch>,
+        selected_idx: usize,
+    },
+}
+
+/// A session match in the quick-switch modal
+#[derive(Debug, Clone)]
+pub struct QuickSwitchMatch {
+    pub session_id: SessionId,
+    pub title: String,
+    pub branch: String,
+    pub project_name: String,
+    pub status: SessionStatus,
 }
 
 /// Action to perform when input modal is submitted
@@ -1131,6 +1147,95 @@ impl App {
                 let paragraph = Paragraph::new(help_lines);
                 frame.render_widget(paragraph, content_area);
             }
+
+            Modal::QuickSwitch {
+                query,
+                matches,
+                selected_idx,
+            } => {
+                let max_visible = 10;
+                let visible_matches = matches.len().min(max_visible);
+                // Dynamic height: border(2) + input(1) + matches
+                let modal_height = (3 + visible_matches) as u16;
+                let modal_width = (area.width * 60 / 100).max(40);
+
+                // Position in upper third
+                let modal_area = Rect {
+                    x: area.x + (area.width.saturating_sub(modal_width)) / 2,
+                    y: area.y + area.height / 5,
+                    width: modal_width,
+                    height: modal_height.min(area.height),
+                };
+
+                frame.render_widget(Clear, modal_area);
+
+                let block = Block::default()
+                    .title(" Quick Switch ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.theme.modal_info));
+
+                let inner = block.inner(modal_area);
+                frame.render_widget(block, modal_area);
+
+                if inner.height == 0 {
+                    return;
+                }
+
+                // Input line
+                let input_line = Line::from(format!("> {}_", query));
+                let input_area = Rect { height: 1, ..inner };
+                frame.render_widget(Paragraph::new(input_line), input_area);
+
+                // Match lines
+                for (i, m) in matches.iter().take(max_visible).enumerate() {
+                    let row = inner.y + 1 + i as u16;
+                    if row >= inner.y + inner.height {
+                        break;
+                    }
+
+                    let status_icon = match m.status {
+                        SessionStatus::Running => "●",
+                        SessionStatus::Paused => "◐",
+                        SessionStatus::Stopped => "○",
+                    };
+                    let status_color = match m.status {
+                        SessionStatus::Running => self.theme.status_running,
+                        SessionStatus::Paused => self.theme.status_paused,
+                        SessionStatus::Stopped => self.theme.status_stopped,
+                    };
+
+                    let is_selected = i == *selected_idx;
+                    let line = Line::from(vec![
+                        Span::styled(
+                            format!(" {} ", status_icon),
+                            Style::default().fg(status_color),
+                        ),
+                        Span::styled(
+                            m.title.clone(),
+                            if is_selected {
+                                self.theme.selection()
+                            } else {
+                                Style::default()
+                            },
+                        ),
+                        Span::styled(
+                            format!(" [{}]", m.branch),
+                            Style::default().fg(self.theme.text_accent),
+                        ),
+                        Span::styled(
+                            format!(" ({})", m.project_name),
+                            Style::default().fg(self.theme.text_secondary),
+                        ),
+                    ]);
+
+                    let line_area = Rect {
+                        y: row,
+                        height: 1,
+                        ..inner
+                    };
+                    frame.render_widget(Paragraph::new(line), line_area);
+                }
+            }
         }
     }
 
@@ -1152,6 +1257,20 @@ impl App {
                 lines.push(Line::from(padded_keys));
             }
         }
+
+        // Quick-switch (hardcoded since leader_key is in config, not keybindings)
+        lines.push(Line::from(""));
+        lines.push(Line::from("Quick Switch:"));
+        let leader_display = if self.config.leader_key.trim().is_empty() || self.config.leader_key == " " {
+            "Space".to_string()
+        } else {
+            self.config.leader_key.clone()
+        };
+        lines.push(Line::from(format!(
+            "  {:<width$}Fuzzy session search",
+            leader_display,
+            width = key_col_width,
+        )));
 
         // Status indicators (not keybinding-related, stays hardcoded)
         lines.push(Line::from(""));
@@ -1254,6 +1373,13 @@ impl App {
                 // Check for modal-specific handling first
                 if !matches!(self.ui_state.modal, Modal::None) {
                     self.handle_modal_key(key).await;
+                    return;
+                }
+
+                // Check for configurable leader key (quick-switch)
+                let (leader_code, leader_mods) = self.config.parse_leader_key();
+                if key.code == leader_code && key.modifiers == leader_mods {
+                    self.open_quick_switch().await;
                     return;
                 }
 
@@ -1375,6 +1501,63 @@ impl App {
                 // Any key closes help/error
                 self.ui_state.modal = Modal::None;
             }
+
+            Modal::QuickSwitch {
+                query,
+                matches,
+                selected_idx,
+            } => match (key.code, key.modifiers) {
+                (KeyCode::Esc, _) => {
+                    self.ui_state.modal = Modal::None;
+                }
+                (KeyCode::Enter, _) => {
+                    if let Some(m) = matches.get(*selected_idx) {
+                        let session_id = m.session_id;
+                        self.ui_state.modal = Modal::None;
+                        self.ui_state.selected_session_id = Some(session_id);
+                        // Select in the list too so we return to the right position
+                        if let Some(idx) =
+                            self.ui_state.list_items.iter().position(|item| {
+                                matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
+                            })
+                        {
+                            self.ui_state.list_state.select(Some(idx));
+                        }
+                        self.update_selection();
+                        self.handle_select().await;
+                    }
+                }
+                (KeyCode::Tab, _) => {
+                    if let Some(m) = matches.get(*selected_idx) {
+                        *query = m.title.clone();
+                        // Re-filter with the completed title
+                        self.refilter_quick_switch();
+                    }
+                }
+                (KeyCode::Backspace, _) => {
+                    query.pop();
+                    self.refilter_quick_switch();
+                }
+                (KeyCode::Up, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
+                    if !matches.is_empty() {
+                        *selected_idx = if *selected_idx == 0 {
+                            matches.len() - 1
+                        } else {
+                            *selected_idx - 1
+                        };
+                    }
+                }
+                (KeyCode::Down, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
+                    if !matches.is_empty() {
+                        *selected_idx = (*selected_idx + 1) % matches.len();
+                    }
+                }
+                (KeyCode::Char(c), _) => {
+                    query.push(c);
+                    self.refilter_quick_switch();
+                }
+                _ => {}
+            },
 
             Modal::None => {}
         }
@@ -1780,6 +1963,103 @@ impl App {
                 "Select a project first (use N to add one)".to_string(),
                 Instant::now() + Duration::from_secs(3),
             ));
+        }
+    }
+
+    /// Open the quick-switch modal with all sessions
+    async fn open_quick_switch(&mut self) {
+        let matches = self.gather_quick_switch_matches("").await;
+        self.ui_state.modal = Modal::QuickSwitch {
+            query: String::new(),
+            matches,
+            selected_idx: 0,
+        };
+    }
+
+    /// Gather session matches for a query (empty query = all sessions)
+    async fn gather_quick_switch_matches(&self, query: &str) -> Vec<QuickSwitchMatch> {
+        let state = self.store.read().await;
+        let mut matches = Vec::new();
+
+        for session in state.sessions.values() {
+            if !query.is_empty() && !session.matches_query(query) {
+                continue;
+            }
+            let project_name = state
+                .get_project(&session.project_id)
+                .map(|p| p.name.clone())
+                .unwrap_or_default();
+            matches.push(QuickSwitchMatch {
+                session_id: session.id,
+                title: session.title.clone(),
+                branch: session.branch.clone(),
+                project_name,
+                status: session.status,
+            });
+        }
+
+        // Sort by title for predictable ordering
+        matches.sort_by(|a, b| a.title.cmp(&b.title));
+        matches
+    }
+
+    /// Re-filter the quick-switch matches based on the current query.
+    /// Rebuilds from list_items so backspace can widen results.
+    fn refilter_quick_switch(&mut self) {
+        if let Modal::QuickSwitch {
+            query,
+            matches,
+            selected_idx,
+        } = &mut self.ui_state.modal
+        {
+            let query_lower = query.to_lowercase();
+            // Build project name lookup from list items
+            let mut project_names: std::collections::HashMap<SessionId, String> =
+                std::collections::HashMap::new();
+            let mut current_project_name = String::new();
+            for item in &self.ui_state.list_items {
+                match item {
+                    SessionListItem::Project { name, .. } => {
+                        current_project_name = name.clone();
+                    }
+                    SessionListItem::Worktree { id, .. } => {
+                        project_names.insert(*id, current_project_name.clone());
+                    }
+                }
+            }
+
+            *matches = self
+                .ui_state
+                .list_items
+                .iter()
+                .filter_map(|item| {
+                    if let SessionListItem::Worktree {
+                        id,
+                        title,
+                        branch,
+                        status,
+                        ..
+                    } = item
+                    {
+                        let project_name = project_names.get(id).cloned().unwrap_or_default();
+                        if query_lower.is_empty() || title.to_lowercase().contains(&query_lower) {
+                            return Some(QuickSwitchMatch {
+                                session_id: *id,
+                                title: title.clone(),
+                                branch: branch.clone(),
+                                project_name,
+                                status: *status,
+                            });
+                        }
+                    }
+                    None
+                })
+                .collect();
+
+            // Clamp selection
+            if *selected_idx >= matches.len() {
+                *selected_idx = matches.len().saturating_sub(1);
+            }
         }
     }
 

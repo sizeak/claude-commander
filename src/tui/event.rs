@@ -144,6 +144,8 @@ pub enum UserCommand {
     PageUp,
     /// Page down in preview
     PageDown,
+    /// Open quick-switch session search modal
+    QuickSwitch,
 }
 
 impl UserCommand {

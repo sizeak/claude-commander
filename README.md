@@ -75,6 +75,7 @@ The left pane shows projects and their worktree sessions in a tree view. Project
 | Key | Action |
 |-----|--------|
 | `j/k` or `↑/↓` | Navigate session list |
+| `Space` | Quick-switch (fuzzy session search) |
 | `Enter` | Attach to selected session |
 | `n` | New worktree session |
 | `N` | Add new project |
@@ -122,6 +123,10 @@ ui_refresh_fps = 30
 # GUI editors are spawned in the background; terminal editors suspend the TUI
 # Auto-detected from a known list if not set (code, zed, subl, JetBrains IDEs, etc.)
 # editor_gui = true
+
+# Leader key for quick-switch session search (default: Space)
+# Supports: " ", "space", "ctrl+k", "f1", etc.
+# leader_key = " "
 ```
 
 ## Architecture

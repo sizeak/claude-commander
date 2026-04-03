@@ -11,7 +11,7 @@ use ratatui::{
     backend::TestBackend,
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Modifier, Style},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
@@ -742,5 +742,130 @@ fn test_preview_to_shell_view_switch_no_clear() {
         .unwrap();
 
     // Snapshot should show clean Shell view with no Preview artifacts
+    insta::assert_snapshot!(terminal.backend());
+}
+
+// ── Quick-switch modal ─────────────────────────────────────────────
+
+#[test]
+fn test_quick_switch_empty_query() {
+    let backend = TestBackend::new(80, 10);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = test_theme();
+
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            let modal_width = area.width * 60 / 100;
+            let modal_area = Rect {
+                x: area.x + (area.width - modal_width) / 2,
+                y: area.y + area.height / 5,
+                width: modal_width,
+                height: 3, // border + input + border
+            };
+            frame.render_widget(Clear, modal_area);
+
+            let block = Block::default()
+                .title(" Quick Switch ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.modal_info));
+            let inner = block.inner(modal_area);
+            frame.render_widget(block, modal_area);
+
+            let input_line = Line::from("> _");
+            frame.render_widget(Paragraph::new(input_line), inner);
+        })
+        .unwrap();
+
+    insta::assert_snapshot!(terminal.backend());
+}
+
+#[test]
+fn test_quick_switch_with_matches() {
+    let backend = TestBackend::new(80, 15);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = test_theme();
+
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            let modal_width = area.width * 60 / 100;
+            let matches = vec![
+                (
+                    "●",
+                    theme.status_running,
+                    "Add auth",
+                    "feature-auth",
+                    "my-app",
+                    true,
+                ),
+                (
+                    "◐",
+                    theme.status_paused,
+                    "Fix login",
+                    "fix-login",
+                    "my-app",
+                    false,
+                ),
+                (
+                    "○",
+                    theme.status_stopped,
+                    "Old task",
+                    "old-branch",
+                    "other",
+                    false,
+                ),
+            ];
+            let modal_area = Rect {
+                x: area.x + (area.width - modal_width) / 2,
+                y: area.y + area.height / 5,
+                width: modal_width,
+                height: 3 + matches.len() as u16,
+            };
+            frame.render_widget(Clear, modal_area);
+
+            let block = Block::default()
+                .title(" Quick Switch ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.modal_info));
+            let inner = block.inner(modal_area);
+            frame.render_widget(block, modal_area);
+
+            // Input line
+            let input_area = Rect { height: 1, ..inner };
+            frame.render_widget(Paragraph::new(Line::from("> auth_")), input_area);
+
+            // Match lines
+            for (i, (icon, color, title, branch, project, selected)) in matches.iter().enumerate() {
+                let row = inner.y + 1 + i as u16;
+                let line = Line::from(vec![
+                    Span::styled(format!(" {} ", icon), Style::default().fg(*color)),
+                    Span::styled(
+                        title.to_string(),
+                        if *selected {
+                            theme.selection()
+                        } else {
+                            Style::default()
+                        },
+                    ),
+                    Span::styled(
+                        format!(" [{}]", branch),
+                        Style::default().fg(theme.text_accent),
+                    ),
+                    Span::styled(
+                        format!(" ({})", project),
+                        Style::default().fg(theme.text_secondary),
+                    ),
+                ]);
+                let line_area = Rect {
+                    y: row,
+                    height: 1,
+                    ..inner
+                };
+                frame.render_widget(Paragraph::new(line), line_area);
+            }
+        })
+        .unwrap();
+
     insta::assert_snapshot!(terminal.backend());
 }
