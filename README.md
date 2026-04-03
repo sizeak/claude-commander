@@ -8,7 +8,7 @@ A high-performance terminal UI for managing Claude coding sessions, written in R
 - **Hierarchical session model** - Projects contain worktree sessions
 - **Git worktree isolation** - Each session has its own worktree and branch
 - **Live preview** - Real-time pane content capture with caching
-- **Diff view** - See changes made by the AI agent
+- **Info pane** - Session metadata, PR details, CI status, and AI-generated change summaries
 - **Agent state detection** - Detect if agent is waiting for input, processing, or errored
 - **Persistent state** - Sessions survive restarts
 
@@ -127,7 +127,31 @@ ui_refresh_fps = 30
 # Leader key for quick-switch session search (default: Space)
 # Supports: " ", "space", "ctrl+k", "f1", etc.
 # leader_key = " "
+
+# Enable AI-generated branch summaries in the Info pane (default: true)
+# ai_summary_enabled = true
+
+# Claude model used for AI summaries (default: Haiku for cost efficiency)
+# ai_summary_model = "claude-haiku-4-5-20251001"
 ```
+
+### AI Summary
+
+The Info pane can display an AI-generated summary of branch changes, powered
+by the Claude CLI. Summaries are generated lazily — only when you view the Info
+pane — and cached until the diff changes. They won't regenerate while you're
+browsing or until new commits/file changes are detected. This keeps token
+usage minimal.
+
+Requires the `claude` CLI to be installed and authenticated. If unavailable,
+the summary section is simply omitted.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `ai_summary_enabled` | `true` | Set to `false` to disable AI summaries entirely |
+| `ai_summary_model` | `claude-haiku-4-5-20251001` | Claude model used for summaries (Haiku recommended for cost efficiency) |
+
+Environment variable overrides: `CC_AI_SUMMARY_ENABLED`, `CC_AI_SUMMARY_MODEL`.
 
 ## Architecture
 

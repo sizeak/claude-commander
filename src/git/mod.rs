@@ -8,9 +8,11 @@
 mod backend;
 mod diff;
 mod pr;
+mod summary;
 mod worktree;
 
 pub use backend::*;
 pub use diff::*;
 pub use pr::*;
+pub use summary::*;
 pub use worktree::*;

@@ -2,8 +2,8 @@
 source: src/tui/render_tests.rs
 expression: terminal.backend()
 ---
-"┌ Preview | [Diff] | Shell ────────────────────────────────┐"
-"│No changes                                                │"
+"┌ Preview | [Info] | Shell ────────────────────────────────┐"
+"│Select a session to see info                              │"
 "│                                                          │"
 "│                                                          │"
 "│                                                          │"

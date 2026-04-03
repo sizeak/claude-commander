@@ -302,6 +302,8 @@ pub enum SessionListItem {
         pr_number: Option<u32>,
         pr_url: Option<String>,
         pr_merged: bool,
+        worktree_path: PathBuf,
+        created_at: chrono::DateTime<chrono::Utc>,
     },
 }
 
@@ -427,6 +429,8 @@ mod tests {
             pr_number: None,
             pr_url: None,
             pr_merged: false,
+            worktree_path: PathBuf::from("/tmp/wt"),
+            created_at: chrono::Utc::now(),
         };
 
         assert!(project_item.key().starts_with("project:"));
@@ -593,6 +597,8 @@ mod tests {
             pr_number: None,
             pr_url: None,
             pr_merged: false,
+            worktree_path: PathBuf::from("/tmp/wt"),
+            created_at: chrono::Utc::now(),
         };
 
         assert!(!project_item.is_worktree());
