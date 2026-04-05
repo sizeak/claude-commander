@@ -12,7 +12,8 @@ use crate::config::{Config, StateStore};
 use crate::error::{Result, SessionError};
 use crate::git::{DiffCache, DiffInfo, GitBackend, WorktreeManager};
 use crate::session::{Project, ProjectId, SessionId, SessionStatus, WorktreeSession};
-use crate::tmux::{CapturedContent, ContentCapture, TmuxExecutor};
+use crate::tmux::{CapturedContent, ContentCapture, StatusBarInfo, TmuxExecutor};
+use crate::tui::theme::Theme;
 
 /// Session manager coordinates all session operations
 pub struct SessionManager {
@@ -28,6 +29,8 @@ pub struct SessionManager {
     diff_cache: DiffCache<SessionId>,
     /// Diff cache for projects
     project_diff_cache: DiffCache<ProjectId>,
+    /// Tmux status-style string derived from theme
+    tmux_status_style: String,
 }
 
 impl Clone for SessionManager {
@@ -39,6 +42,7 @@ impl Clone for SessionManager {
             content_capture: self.content_capture.clone(),
             diff_cache: self.diff_cache.clone(),
             project_diff_cache: self.project_diff_cache.clone(),
+            tmux_status_style: self.tmux_status_style.clone(),
         }
     }
 }
@@ -56,6 +60,8 @@ impl SessionManager {
         let project_diff_cache =
             DiffCache::with_ttl(std::time::Duration::from_millis(config.diff_cache_ttl_ms));
 
+        let tmux_status_style = Theme::default().tmux_status_style();
+
         Self {
             config,
             store,
@@ -63,6 +69,7 @@ impl SessionManager {
             content_capture,
             diff_cache,
             project_diff_cache,
+            tmux_status_style,
         }
     }
 
@@ -220,6 +227,7 @@ impl SessionManager {
         .await?;
 
         // Create session object
+        let status_branch = branch_name.clone();
         let mut session = WorktreeSession::new(
             *project_id,
             title,
@@ -235,6 +243,19 @@ impl SessionManager {
         self.tmux
             .create_session(&tmux_session_name, &worktree_info.path, Some(&program))
             .await?;
+
+        // Configure CC status bar (branch only, no PR yet)
+        self.tmux
+            .configure_status_bar(
+                &tmux_session_name,
+                &StatusBarInfo {
+                    branch: status_branch,
+                    pr_number: None,
+                    pr_merged: false,
+                    status_style: self.tmux_status_style.clone(),
+                },
+            )
+            .await;
 
         // Save session to state
         self.store
@@ -277,7 +298,7 @@ impl SessionManager {
     #[instrument(skip(self))]
     pub async fn resume_session(&self, session_id: &SessionId) -> Result<()> {
         // Read session info first
-        let (tmux_session_name, worktree_path, program, can_resume) = {
+        let (tmux_session_name, worktree_path, program, can_resume, branch, pr_number, pr_merged) = {
             let state = self.store.read().await;
             let session = state
                 .get_session(session_id)
@@ -287,6 +308,9 @@ impl SessionManager {
                 session.worktree_path.clone(),
                 session.program.clone(),
                 session.status.can_resume(),
+                session.branch.clone(),
+                session.pr_number,
+                session.pr_merged,
             )
         };
 
@@ -302,6 +326,19 @@ impl SessionManager {
             self.tmux
                 .create_session(&tmux_session_name, &worktree_path, Some(&resume_program))
                 .await?;
+
+            // Configure CC status bar on the recreated session
+            self.tmux
+                .configure_status_bar(
+                    &tmux_session_name,
+                    &StatusBarInfo {
+                        branch,
+                        pr_number,
+                        pr_merged,
+                        status_style: self.tmux_status_style.clone(),
+                    },
+                )
+                .await;
         }
 
         // Update status
@@ -405,7 +442,7 @@ impl SessionManager {
     pub async fn get_attach_command(&self, session_id: &SessionId) -> Result<String> {
         info!("get_attach_command called for session: {}", session_id);
 
-        let (tmux_name, worktree_path, program) = {
+        let (tmux_name, worktree_path, program, branch, pr_number, pr_merged) = {
             let state = self.store.read().await;
             let session = state
                 .get_session(session_id)
@@ -425,6 +462,9 @@ impl SessionManager {
                 session.tmux_session_name.clone(),
                 session.worktree_path.clone(),
                 session.program.clone(),
+                session.branch.clone(),
+                session.pr_number,
+                session.pr_merged,
             )
         };
 
@@ -457,6 +497,19 @@ impl SessionManager {
             self.tmux
                 .create_session(&tmux_name, &worktree_path, Some(&resume_program))
                 .await?;
+
+            // Configure CC status bar on the recreated session
+            self.tmux
+                .configure_status_bar(
+                    &tmux_name,
+                    &StatusBarInfo {
+                        branch,
+                        pr_number,
+                        pr_merged,
+                        status_style: self.tmux_status_style.clone(),
+                    },
+                )
+                .await;
 
             let sid = *session_id;
             let _ = self

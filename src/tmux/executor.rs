@@ -220,6 +220,38 @@ impl TmuxExecutor {
         Ok(())
     }
 
+    /// Configure the status bar for a CC tmux session.
+    ///
+    /// Sets a dark-grey/light-text status bar showing branch name and optional
+    /// PR badge. Errors are logged but not propagated — this is cosmetic.
+    pub async fn configure_status_bar(&self, session_name: &str, info: &StatusBarInfo) {
+        let left = info.format_left();
+        let right = info.format_right();
+
+        let options: &[(&str, &str)] = &[
+            ("status-style", &info.status_style),
+            ("status-left", &left),
+            ("status-left-length", "60"),
+            ("status-right", &right),
+            // Suppress the default window list so only our left/right content shows
+            ("window-status-format", ""),
+            ("window-status-current-format", ""),
+        ];
+
+        for (key, value) in options {
+            if let Err(e) = self
+                .execute(&["set-option", "-t", session_name, key, value])
+                .await
+            {
+                warn!(
+                    "Failed to set tmux {} for session {}: {}",
+                    key, session_name, e
+                );
+                return;
+            }
+        }
+    }
+
     /// Capture the content of a tmux pane
     pub async fn capture_pane(
         &self,
@@ -249,6 +281,42 @@ impl TmuxExecutor {
     }
 }
 
+/// Info used to render a per-session tmux status bar.
+pub struct StatusBarInfo {
+    /// Branch name for this session
+    pub branch: String,
+    /// GitHub PR number, if one exists
+    pub pr_number: Option<u32>,
+    /// Whether the PR has been merged
+    pub pr_merged: bool,
+    /// tmux status-style value (e.g. "bg=colour236,fg=colour252")
+    pub status_style: String,
+}
+
+impl StatusBarInfo {
+    /// Format the left side of the status bar.
+    ///
+    /// `branch | PR #N | Ctrl-q: detach | Ctrl-\: shell`
+    /// `#` is escaped to `##` for tmux format safety.
+    pub fn format_left(&self) -> String {
+        let safe_branch = self.branch.replace('#', "##");
+        let pr = match self.pr_number {
+            Some(n) if self.pr_merged => format!(" | PR ##{} merged", n),
+            Some(n) => format!(" | PR ##{}",n),
+            None => String::new(),
+        };
+        format!(
+            " {}{} | Ctrl-q: detach | Ctrl-\\: shell ",
+            safe_branch, pr
+        )
+    }
+
+    /// Format the right side of the status bar (currently empty).
+    pub fn format_right(&self) -> String {
+        String::new()
+    }
+}
+
 impl Default for TmuxExecutor {
     fn default() -> Self {
         Self::new()
@@ -274,4 +342,52 @@ mod tests {
 
     // Integration tests would require tmux to be installed
     // They should be marked with #[ignore] and run separately
+
+    fn test_info(branch: &str, pr_number: Option<u32>, pr_merged: bool) -> StatusBarInfo {
+        StatusBarInfo {
+            branch: branch.to_string(),
+            pr_number,
+            pr_merged,
+            status_style: "bg=colour236,fg=colour252".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_status_bar_format_left_basic() {
+        let info = test_info("feature-auth", None, false);
+        assert_eq!(
+            info.format_left(),
+            " feature-auth | Ctrl-q: detach | Ctrl-\\: shell "
+        );
+    }
+
+    #[test]
+    fn test_status_bar_format_left_escapes_hash() {
+        let info = test_info("fix-#123-bug", None, false);
+        assert!(info.format_left().contains("fix-##123-bug"));
+    }
+
+    #[test]
+    fn test_status_bar_format_left_open_pr() {
+        let info = test_info("feature", Some(42), false);
+        assert_eq!(
+            info.format_left(),
+            " feature | PR ##42 | Ctrl-q: detach | Ctrl-\\: shell "
+        );
+    }
+
+    #[test]
+    fn test_status_bar_format_left_merged_pr() {
+        let info = test_info("feature", Some(42), true);
+        assert_eq!(
+            info.format_left(),
+            " feature | PR ##42 merged | Ctrl-q: detach | Ctrl-\\: shell "
+        );
+    }
+
+    #[test]
+    fn test_status_bar_format_right_empty() {
+        let info = test_info("main", None, false);
+        assert_eq!(info.format_right(), "");
+    }
 }

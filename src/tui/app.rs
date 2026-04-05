@@ -36,6 +36,7 @@ use crate::config::{Config, StateStore};
 use crate::error::{Result, TuiError};
 use crate::git::{DiffInfo, check_pr_for_branch, is_gh_available};
 use crate::session::{ProjectId, SessionId, SessionListItem, SessionManager, SessionStatus};
+use crate::tmux::StatusBarInfo;
 
 /// Direction for mouse scroll events
 enum ScrollDirection {
@@ -1738,6 +1739,29 @@ impl App {
                         }
                     })
                     .await;
+
+                // Update tmux status bars for running sessions with PR info
+                {
+                    let style = self.theme.tmux_status_style();
+                    let state = self.store.read().await;
+                    for session in state.sessions.values() {
+                        if session.status == SessionStatus::Running {
+                            self.session_manager
+                                .tmux
+                                .configure_status_bar(
+                                    &session.tmux_session_name,
+                                    &StatusBarInfo {
+                                        branch: session.branch.clone(),
+                                        pr_number: session.pr_number,
+                                        pr_merged: session.pr_merged,
+                                        status_style: style.clone(),
+                                    },
+                                )
+                                .await;
+                        }
+                    }
+                }
+
                 self.refresh_list_items().await;
             }
             StateUpdate::SessionCreated { session_id } => {

@@ -259,6 +259,39 @@ impl Theme {
             .bg(self.status_bar_bg)
             .fg(self.status_bar_fg)
     }
+
+    /// Return a tmux-compatible `status-style` string matching this theme's status bar colors
+    pub fn tmux_status_style(&self) -> String {
+        format!(
+            "bg={},fg={}",
+            color_to_tmux(self.status_bar_bg),
+            color_to_tmux(self.status_bar_fg),
+        )
+    }
+}
+
+/// Convert a ratatui `Color` to a tmux-compatible color string
+pub fn color_to_tmux(color: Color) -> String {
+    match color {
+        Color::Rgb(r, g, b) => format!("#{:02x}{:02x}{:02x}", r, g, b),
+        Color::Indexed(n) => format!("colour{}", n),
+        Color::Black => "black".into(),
+        Color::Red => "red".into(),
+        Color::Green => "green".into(),
+        Color::Yellow => "yellow".into(),
+        Color::Blue => "blue".into(),
+        Color::Magenta => "magenta".into(),
+        Color::Cyan => "cyan".into(),
+        Color::White | Color::Gray => "white".into(),
+        Color::DarkGray => "brightblack".into(),
+        Color::LightRed => "brightred".into(),
+        Color::LightGreen => "brightgreen".into(),
+        Color::LightYellow => "brightyellow".into(),
+        Color::LightBlue => "brightblue".into(),
+        Color::LightMagenta => "brightmagenta".into(),
+        Color::LightCyan => "brightcyan".into(),
+        Color::Reset => "default".into(),
+    }
 }
 
 #[cfg(test)]
