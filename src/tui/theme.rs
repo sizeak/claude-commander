@@ -344,4 +344,38 @@ mod tests {
         assert_eq!(indexed.border_focused, Color::Indexed(117));
         assert_eq!(truecolor.border_focused, Color::Rgb(137, 180, 250));
     }
+
+    #[test]
+    fn test_color_to_tmux_rgb() {
+        assert_eq!(color_to_tmux(Color::Rgb(49, 50, 68)), "#313244");
+        assert_eq!(color_to_tmux(Color::Rgb(0, 0, 0)), "#000000");
+        assert_eq!(color_to_tmux(Color::Rgb(255, 255, 255)), "#ffffff");
+    }
+
+    #[test]
+    fn test_color_to_tmux_indexed() {
+        assert_eq!(color_to_tmux(Color::Indexed(236)), "colour236");
+        assert_eq!(color_to_tmux(Color::Indexed(0)), "colour0");
+    }
+
+    #[test]
+    fn test_color_to_tmux_named() {
+        assert_eq!(color_to_tmux(Color::Blue), "blue");
+        assert_eq!(color_to_tmux(Color::White), "white");
+        assert_eq!(color_to_tmux(Color::DarkGray), "brightblack");
+        assert_eq!(color_to_tmux(Color::Reset), "default");
+    }
+
+    #[test]
+    fn test_tmux_status_style_per_theme() {
+        assert_eq!(Theme::basic().tmux_status_style(), "bg=blue,fg=white");
+        assert_eq!(
+            Theme::indexed().tmux_status_style(),
+            "bg=colour236,fg=colour252"
+        );
+        assert_eq!(
+            Theme::truecolor().tmux_status_style(),
+            "bg=#313244,fg=#cdd6f4"
+        );
+    }
 }

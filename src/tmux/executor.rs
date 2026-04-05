@@ -222,8 +222,8 @@ impl TmuxExecutor {
 
     /// Configure the status bar for a CC tmux session.
     ///
-    /// Sets a dark-grey/light-text status bar showing branch name and optional
-    /// PR badge. Errors are logged but not propagated — this is cosmetic.
+    /// Shows branch name, optional PR badge, and key hints. Style is set by
+    /// `StatusBarInfo::status_style`. Errors are logged but not propagated.
     pub async fn configure_status_bar(&self, session_name: &str, info: &StatusBarInfo) {
         let left = info.format_left();
         let right = info.format_right();
@@ -231,7 +231,7 @@ impl TmuxExecutor {
         let options: &[(&str, &str)] = &[
             ("status-style", &info.status_style),
             ("status-left", &left),
-            ("status-left-length", "60"),
+            ("status-left-length", "80"),
             ("status-right", &right),
             // Suppress the default window list so only our left/right content shows
             ("window-status-format", ""),
@@ -247,7 +247,6 @@ impl TmuxExecutor {
                     "Failed to set tmux {} for session {}: {}",
                     key, session_name, e
                 );
-                return;
             }
         }
     }
@@ -282,6 +281,7 @@ impl TmuxExecutor {
 }
 
 /// Info used to render a per-session tmux status bar.
+#[derive(Debug, Clone)]
 pub struct StatusBarInfo {
     /// Branch name for this session
     pub branch: String,
@@ -302,13 +302,10 @@ impl StatusBarInfo {
         let safe_branch = self.branch.replace('#', "##");
         let pr = match self.pr_number {
             Some(n) if self.pr_merged => format!(" | PR ##{} merged", n),
-            Some(n) => format!(" | PR ##{}",n),
+            Some(n) => format!(" | PR ##{}", n),
             None => String::new(),
         };
-        format!(
-            " {}{} | Ctrl-q: detach | Ctrl-\\: shell ",
-            safe_branch, pr
-        )
+        format!(" {}{} | Ctrl-q: detach | Ctrl-\\: shell ", safe_branch, pr)
     }
 
     /// Format the right side of the status bar (currently empty).

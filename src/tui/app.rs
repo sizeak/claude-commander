@@ -36,7 +36,6 @@ use crate::config::{Config, StateStore};
 use crate::error::{Result, TuiError};
 use crate::git::{DiffInfo, check_pr_for_branch, is_gh_available};
 use crate::session::{ProjectId, SessionId, SessionListItem, SessionManager, SessionStatus};
-use crate::tmux::StatusBarInfo;
 
 /// Direction for mouse scroll events
 enum ScrollDirection {
@@ -245,7 +244,9 @@ pub struct App {
 impl App {
     /// Create a new application
     pub fn new(config: Config, store: Arc<StateStore>) -> Self {
-        let session_manager = SessionManager::new(config.clone(), store.clone());
+        let theme = Theme::default();
+        let session_manager =
+            SessionManager::new(config.clone(), store.clone(), theme.tmux_status_style());
 
         Self {
             config,
@@ -253,7 +254,7 @@ impl App {
             session_manager,
             ui_state: AppUiState::default(),
             event_loop: EventLoop::new(),
-            theme: Theme::default(),
+            theme,
             suppress_keys_until: Instant::now(),
         }
     }
@@ -1742,21 +1743,13 @@ impl App {
 
                 // Update tmux status bars for running sessions with PR info
                 {
-                    let style = self.theme.tmux_status_style();
                     let state = self.store.read().await;
                     for session in state.sessions.values() {
                         if session.status == SessionStatus::Running {
+                            let info = self.session_manager.status_bar_info(session);
                             self.session_manager
                                 .tmux
-                                .configure_status_bar(
-                                    &session.tmux_session_name,
-                                    &StatusBarInfo {
-                                        branch: session.branch.clone(),
-                                        pr_number: session.pr_number,
-                                        pr_merged: session.pr_merged,
-                                        status_style: style.clone(),
-                                    },
-                                )
+                                .configure_status_bar(&session.tmux_session_name, &info)
                                 .await;
                         }
                     }

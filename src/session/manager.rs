@@ -13,7 +13,6 @@ use crate::error::{Result, SessionError};
 use crate::git::{DiffCache, DiffInfo, GitBackend, WorktreeManager};
 use crate::session::{Project, ProjectId, SessionId, SessionStatus, WorktreeSession};
 use crate::tmux::{CapturedContent, ContentCapture, StatusBarInfo, TmuxExecutor};
-use crate::tui::theme::Theme;
 
 /// Session manager coordinates all session operations
 pub struct SessionManager {
@@ -49,7 +48,11 @@ impl Clone for SessionManager {
 
 impl SessionManager {
     /// Create a new session manager
-    pub fn new(config: Config, store: Arc<StateStore>) -> Self {
+    pub fn new(
+        config: Config,
+        store: Arc<StateStore>,
+        tmux_status_style: impl Into<String>,
+    ) -> Self {
         let tmux = TmuxExecutor::with_max_concurrent(config.max_concurrent_tmux);
         let content_capture = ContentCapture::with_ttl(
             tmux.clone(),
@@ -60,8 +63,6 @@ impl SessionManager {
         let project_diff_cache =
             DiffCache::with_ttl(std::time::Duration::from_millis(config.diff_cache_ttl_ms));
 
-        let tmux_status_style = Theme::default().tmux_status_style();
-
         Self {
             config,
             store,
@@ -69,13 +70,23 @@ impl SessionManager {
             content_capture,
             diff_cache,
             project_diff_cache,
-            tmux_status_style,
+            tmux_status_style: tmux_status_style.into(),
         }
     }
 
     /// Check if tmux is available
     pub async fn check_tmux(&self) -> Result<()> {
         self.tmux.check_installed().await
+    }
+
+    /// Build a `StatusBarInfo` from session metadata
+    pub fn status_bar_info(&self, session: &WorktreeSession) -> StatusBarInfo {
+        StatusBarInfo {
+            branch: session.branch.clone(),
+            pr_number: session.pr_number,
+            pr_merged: session.pr_merged,
+            status_style: self.tmux_status_style.clone(),
+        }
     }
 
     /// Add a new project (git repository)
@@ -227,7 +238,6 @@ impl SessionManager {
         .await?;
 
         // Create session object
-        let status_branch = branch_name.clone();
         let mut session = WorktreeSession::new(
             *project_id,
             title,
@@ -238,6 +248,7 @@ impl SessionManager {
         session.base_commit = Some(worktree_info.head);
         let session_id = session.id;
         let tmux_session_name = session.tmux_session_name.clone();
+        let status_bar = self.status_bar_info(&session);
 
         // Create tmux session in the worktree directory
         self.tmux
@@ -246,15 +257,7 @@ impl SessionManager {
 
         // Configure CC status bar (branch only, no PR yet)
         self.tmux
-            .configure_status_bar(
-                &tmux_session_name,
-                &StatusBarInfo {
-                    branch: status_branch,
-                    pr_number: None,
-                    pr_merged: false,
-                    status_style: self.tmux_status_style.clone(),
-                },
-            )
+            .configure_status_bar(&tmux_session_name, &status_bar)
             .await;
 
         // Save session to state
@@ -298,7 +301,7 @@ impl SessionManager {
     #[instrument(skip(self))]
     pub async fn resume_session(&self, session_id: &SessionId) -> Result<()> {
         // Read session info first
-        let (tmux_session_name, worktree_path, program, can_resume, branch, pr_number, pr_merged) = {
+        let (tmux_session_name, worktree_path, program, can_resume, status_bar) = {
             let state = self.store.read().await;
             let session = state
                 .get_session(session_id)
@@ -308,9 +311,7 @@ impl SessionManager {
                 session.worktree_path.clone(),
                 session.program.clone(),
                 session.status.can_resume(),
-                session.branch.clone(),
-                session.pr_number,
-                session.pr_merged,
+                self.status_bar_info(session),
             )
         };
 
@@ -329,15 +330,7 @@ impl SessionManager {
 
             // Configure CC status bar on the recreated session
             self.tmux
-                .configure_status_bar(
-                    &tmux_session_name,
-                    &StatusBarInfo {
-                        branch,
-                        pr_number,
-                        pr_merged,
-                        status_style: self.tmux_status_style.clone(),
-                    },
-                )
+                .configure_status_bar(&tmux_session_name, &status_bar)
                 .await;
         }
 
@@ -442,7 +435,7 @@ impl SessionManager {
     pub async fn get_attach_command(&self, session_id: &SessionId) -> Result<String> {
         info!("get_attach_command called for session: {}", session_id);
 
-        let (tmux_name, worktree_path, program, branch, pr_number, pr_merged) = {
+        let (tmux_name, worktree_path, program, status_bar) = {
             let state = self.store.read().await;
             let session = state
                 .get_session(session_id)
@@ -462,9 +455,7 @@ impl SessionManager {
                 session.tmux_session_name.clone(),
                 session.worktree_path.clone(),
                 session.program.clone(),
-                session.branch.clone(),
-                session.pr_number,
-                session.pr_merged,
+                self.status_bar_info(session),
             )
         };
 
@@ -500,15 +491,7 @@ impl SessionManager {
 
             // Configure CC status bar on the recreated session
             self.tmux
-                .configure_status_bar(
-                    &tmux_name,
-                    &StatusBarInfo {
-                        branch,
-                        pr_number,
-                        pr_merged,
-                        status_style: self.tmux_status_style.clone(),
-                    },
-                )
+                .configure_status_bar(&tmux_name, &status_bar)
                 .await;
 
             let sid = *session_id;
@@ -529,7 +512,7 @@ impl SessionManager {
 
     /// Ensure a shell tmux session exists for the given session (lazy creation)
     pub async fn ensure_shell_session(&self, session_id: &SessionId) -> Result<String> {
-        let (existing_shell_name, tmux_name, worktree_path) = {
+        let (existing_shell_name, tmux_name, worktree_path, status_bar) = {
             let state = self.store.read().await;
             let session = state
                 .get_session(session_id)
@@ -538,13 +521,17 @@ impl SessionManager {
                 session.shell_tmux_session_name.clone(),
                 session.tmux_session_name.clone(),
                 session.worktree_path.clone(),
+                self.status_bar_info(session),
             )
         };
 
-        // If shell session already exists in tmux, return its name
+        // If shell session already exists in tmux, ensure status bar and return
         if let Some(ref shell_name) = existing_shell_name
             && self.tmux.session_exists(shell_name).await.unwrap_or(false)
         {
+            self.tmux
+                .configure_status_bar(shell_name, &status_bar)
+                .await;
             return Ok(shell_name.clone());
         }
 
@@ -562,6 +549,9 @@ impl SessionManager {
                 let _ = self.tmux.kill_session(&shell_name).await;
             } else {
                 info!("Reusing existing shell session {}", shell_name);
+                self.tmux
+                    .configure_status_bar(&shell_name, &status_bar)
+                    .await;
                 let sid = *session_id;
                 let name = shell_name.clone();
                 self.store
@@ -582,6 +572,11 @@ impl SessionManager {
                 Some(&self.config.shell_program),
             )
             .await?;
+
+        // Configure CC status bar on the shell session
+        self.tmux
+            .configure_status_bar(&shell_name, &status_bar)
+            .await;
 
         // Store in session state
         let sid = *session_id;
@@ -1035,7 +1030,7 @@ mod tests {
     fn test_sanitize_name() {
         let config = Config::default();
         let (_dir, store) = test_store();
-        let manager = SessionManager::new(config, store);
+        let manager = SessionManager::new(config, store, "");
 
         assert_eq!(manager.sanitize_name("Hello World"), "hello-world");
         assert_eq!(manager.sanitize_name("Feature/Auth"), "feature-auth");
@@ -1048,12 +1043,12 @@ mod tests {
         let (_dir, store) = test_store();
 
         // Without prefix
-        let manager = SessionManager::new(config.clone(), store.clone());
+        let manager = SessionManager::new(config.clone(), store.clone(), "");
         assert_eq!(manager.generate_branch_name("Feature Auth"), "feature-auth");
 
         // With prefix
         config.branch_prefix = "cc".to_string();
-        let manager = SessionManager::new(config, store);
+        let manager = SessionManager::new(config, store, "");
         assert_eq!(
             manager.generate_branch_name("Feature Auth"),
             "cc/feature-auth"
@@ -1064,7 +1059,7 @@ mod tests {
     fn test_sanitize_name_underscores_preserved() {
         let config = Config::default();
         let (_dir, store) = test_store();
-        let manager = SessionManager::new(config, store);
+        let manager = SessionManager::new(config, store, "");
 
         assert_eq!(manager.sanitize_name("hello_world"), "hello_world");
     }
@@ -1073,7 +1068,7 @@ mod tests {
     fn test_sanitize_name_consecutive_specials() {
         let config = Config::default();
         let (_dir, store) = test_store();
-        let manager = SessionManager::new(config, store);
+        let manager = SessionManager::new(config, store, "");
 
         assert_eq!(manager.sanitize_name("a!!b"), "a--b");
     }
@@ -1082,7 +1077,7 @@ mod tests {
     fn test_sanitize_name_all_special() {
         let config = Config::default();
         let (_dir, store) = test_store();
-        let manager = SessionManager::new(config, store);
+        let manager = SessionManager::new(config, store, "");
 
         assert_eq!(manager.sanitize_name("!!!"), "");
     }
@@ -1091,7 +1086,7 @@ mod tests {
     fn test_sanitize_name_unicode() {
         let config = Config::default();
         let (_dir, store) = test_store();
-        let manager = SessionManager::new(config, store);
+        let manager = SessionManager::new(config, store, "");
 
         // Unicode alphanumeric chars should be preserved
         let result = manager.sanitize_name("café");
@@ -1103,7 +1098,7 @@ mod tests {
     fn test_generate_branch_name_empty_prefix() {
         let config = Config::default(); // branch_prefix defaults to ""
         let (_dir, store) = test_store();
-        let manager = SessionManager::new(config, store);
+        let manager = SessionManager::new(config, store, "");
 
         assert_eq!(manager.generate_branch_name("Foo Bar"), "foo-bar");
     }
@@ -1115,7 +1110,7 @@ mod tests {
             ..Config::default()
         };
         let (_dir, store) = test_store();
-        let manager = SessionManager::new(config, store);
+        let manager = SessionManager::new(config, store, "");
 
         assert_eq!(manager.generate_branch_name("Foo"), "user/cc/foo");
     }
