@@ -134,7 +134,7 @@ async fn test_session_manager_add_project() {
 
     let config = Config::default();
     let store = create_isolated_store(&state_temp_dir);
-    let manager = SessionManager::new(config, store.clone());
+    let manager = SessionManager::new(config, store.clone(), "");
 
     // Add project
     let result = manager.add_project(repo_path.clone()).await;
@@ -169,7 +169,7 @@ async fn test_session_manager_create_session() {
     };
 
     let store = create_isolated_store(&state_temp_dir);
-    let manager = SessionManager::new(config, store.clone());
+    let manager = SessionManager::new(config, store.clone(), "");
 
     // Add project
     let project_id = manager.add_project(repo_path).await.unwrap();
@@ -228,7 +228,7 @@ async fn test_session_manager_pause_resume() {
     };
 
     let store = create_isolated_store(&state_temp_dir);
-    let manager = SessionManager::new(config, store.clone());
+    let manager = SessionManager::new(config, store.clone(), "");
 
     // Add project and create session
     let project_id = manager.add_project(repo_path).await.unwrap();
@@ -322,7 +322,7 @@ async fn test_sync_worktrees_imports_external() {
     };
 
     let store = create_isolated_store(&state_temp_dir);
-    let manager = SessionManager::new(config, store.clone());
+    let manager = SessionManager::new(config, store.clone(), "");
 
     // Add project (no worktrees yet)
     let project_id = manager.add_project(repo_path.clone()).await.unwrap();

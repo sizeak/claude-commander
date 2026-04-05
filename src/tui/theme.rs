@@ -259,6 +259,39 @@ impl Theme {
             .bg(self.status_bar_bg)
             .fg(self.status_bar_fg)
     }
+
+    /// Return a tmux-compatible `status-style` string matching this theme's status bar colors
+    pub fn tmux_status_style(&self) -> String {
+        format!(
+            "bg={},fg={}",
+            color_to_tmux(self.status_bar_bg),
+            color_to_tmux(self.status_bar_fg),
+        )
+    }
+}
+
+/// Convert a ratatui `Color` to a tmux-compatible color string
+pub fn color_to_tmux(color: Color) -> String {
+    match color {
+        Color::Rgb(r, g, b) => format!("#{:02x}{:02x}{:02x}", r, g, b),
+        Color::Indexed(n) => format!("colour{}", n),
+        Color::Black => "black".into(),
+        Color::Red => "red".into(),
+        Color::Green => "green".into(),
+        Color::Yellow => "yellow".into(),
+        Color::Blue => "blue".into(),
+        Color::Magenta => "magenta".into(),
+        Color::Cyan => "cyan".into(),
+        Color::White | Color::Gray => "white".into(),
+        Color::DarkGray => "brightblack".into(),
+        Color::LightRed => "brightred".into(),
+        Color::LightGreen => "brightgreen".into(),
+        Color::LightYellow => "brightyellow".into(),
+        Color::LightBlue => "brightblue".into(),
+        Color::LightMagenta => "brightmagenta".into(),
+        Color::LightCyan => "brightcyan".into(),
+        Color::Reset => "default".into(),
+    }
 }
 
 #[cfg(test)]
@@ -310,5 +343,39 @@ mod tests {
         assert_eq!(basic.border_focused, Color::Cyan);
         assert_eq!(indexed.border_focused, Color::Indexed(117));
         assert_eq!(truecolor.border_focused, Color::Rgb(137, 180, 250));
+    }
+
+    #[test]
+    fn test_color_to_tmux_rgb() {
+        assert_eq!(color_to_tmux(Color::Rgb(49, 50, 68)), "#313244");
+        assert_eq!(color_to_tmux(Color::Rgb(0, 0, 0)), "#000000");
+        assert_eq!(color_to_tmux(Color::Rgb(255, 255, 255)), "#ffffff");
+    }
+
+    #[test]
+    fn test_color_to_tmux_indexed() {
+        assert_eq!(color_to_tmux(Color::Indexed(236)), "colour236");
+        assert_eq!(color_to_tmux(Color::Indexed(0)), "colour0");
+    }
+
+    #[test]
+    fn test_color_to_tmux_named() {
+        assert_eq!(color_to_tmux(Color::Blue), "blue");
+        assert_eq!(color_to_tmux(Color::White), "white");
+        assert_eq!(color_to_tmux(Color::DarkGray), "brightblack");
+        assert_eq!(color_to_tmux(Color::Reset), "default");
+    }
+
+    #[test]
+    fn test_tmux_status_style_per_theme() {
+        assert_eq!(Theme::basic().tmux_status_style(), "bg=blue,fg=white");
+        assert_eq!(
+            Theme::indexed().tmux_status_style(),
+            "bg=colour236,fg=colour252"
+        );
+        assert_eq!(
+            Theme::truecolor().tmux_status_style(),
+            "bg=#313244,fg=#cdd6f4"
+        );
     }
 }
