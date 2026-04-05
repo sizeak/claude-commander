@@ -269,7 +269,7 @@ impl WorktreeManager {
 /// is copied into the worktree. Symlinks are skipped for security.
 async fn copy_worktree_includes(repo_path: &Path, worktree_path: &Path) -> Result<()> {
     let include_file = repo_path.join(".worktreeinclude");
-    if !include_file.exists() {
+    if !tokio::fs::try_exists(&include_file).await.unwrap_or(false) {
         return Ok(());
     }
 
@@ -305,10 +305,11 @@ async fn copy_worktree_includes(repo_path: &Path, worktree_path: &Path) -> Resul
             .output(),
     );
 
-    let gitignored_output = gitignored_result
-        .map_err(|e| GitError::WorktreeError(format!("Failed to list gitignored files: {e}")))?;
+    let gitignored_output = gitignored_result.map_err(|e| {
+        GitError::WorktreeError(format!("Failed to list gitignored files: {}", e))
+    })?;
     let included_output = included_result.map_err(|e| {
-        GitError::WorktreeError(format!("Failed to list worktreeinclude files: {e}"))
+        GitError::WorktreeError(format!("Failed to list worktreeinclude files: {}", e))
     })?;
 
     if !gitignored_output.status.success() {
@@ -349,7 +350,7 @@ async fn copy_worktree_includes(repo_path: &Path, worktree_path: &Path) -> Resul
         let dest = worktree_path.join(rel_path);
 
         // Skip symlinks
-        match tokio::fs::symlink_metadata(&source).await {
+        let meta = match tokio::fs::symlink_metadata(&source).await {
             Ok(meta) if meta.is_symlink() => {
                 debug!("Skipping symlink: {}", rel_path);
                 continue;
@@ -361,7 +362,7 @@ async fn copy_worktree_includes(repo_path: &Path, worktree_path: &Path) -> Resul
             Ok(meta) => meta,
         };
 
-        if source.is_dir() {
+        if meta.is_dir() {
             match copy_dir_recursive(&source, &dest).await {
                 Ok(n) => copied += n,
                 Err(e) => warn!("Failed to copy directory {}: {}", rel_path, e),
@@ -389,7 +390,10 @@ async fn copy_worktree_includes(repo_path: &Path, worktree_path: &Path) -> Resul
 fn parse_nul_separated(bytes: &[u8]) -> HashSet<&str> {
     let text = match std::str::from_utf8(bytes) {
         Ok(t) => t,
-        Err(_) => return HashSet::new(),
+        Err(e) => {
+            warn!("git ls-files output contains non-UTF-8 filenames: {}", e);
+            return HashSet::new();
+        }
     };
     text.split('\0')
         .filter(|s| !s.is_empty())
@@ -402,17 +406,17 @@ fn parse_nul_separated(bytes: &[u8]) -> HashSet<&str> {
 async fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<usize> {
     tokio::fs::create_dir_all(dest)
         .await
-        .map_err(|e| GitError::WorktreeError(format!("Failed to create dir {dest:?}: {e}")))?;
+        .map_err(|e| GitError::WorktreeError(format!("Failed to create dir {:?}: {}", dest, e)))?;
 
     let mut entries = tokio::fs::read_dir(src)
         .await
-        .map_err(|e| GitError::WorktreeError(format!("Failed to read dir {src:?}: {e}")))?;
+        .map_err(|e| GitError::WorktreeError(format!("Failed to read dir {:?}: {}", src, e)))?;
 
     let mut count = 0;
     while let Some(entry) = entries
         .next_entry()
         .await
-        .map_err(|e| GitError::WorktreeError(format!("Failed to read dir entry: {e}")))?
+        .map_err(|e| GitError::WorktreeError(format!("Failed to read dir entry: {}", e)))?
     {
         let meta = match tokio::fs::symlink_metadata(entry.path()).await {
             Ok(m) => m,
@@ -429,11 +433,10 @@ async fn copy_dir_recursive(src: &Path, dest: &Path) -> Result<usize> {
         let dest_entry = dest.join(entry.file_name());
         if meta.is_dir() {
             count += Box::pin(copy_dir_recursive(&entry.path(), &dest_entry)).await?;
+        } else if let Err(e) = tokio::fs::copy(entry.path(), &dest_entry).await {
+            warn!("Failed to copy {:?}: {}", entry.path(), e);
+            continue;
         } else {
-            if let Err(e) = tokio::fs::copy(entry.path(), &dest_entry).await {
-                warn!("Failed to copy {:?}: {}", entry.path(), e);
-                continue;
-            }
             count += 1;
         }
     }
