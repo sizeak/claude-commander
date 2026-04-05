@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use tokio::process::Command;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, warn};
 
+use super::worktree_include::copy_worktree_includes;
 use super::GitBackend;
 use crate::error::{GitError, Result};
 
@@ -140,6 +141,11 @@ impl WorktreeManager {
             "Created worktree at {:?} with branch {}",
             worktree_path, branch_name
         );
+
+        // Copy .worktreeinclude files (best-effort)
+        if let Err(e) = copy_worktree_includes(&repo_path, &worktree_path).await {
+            warn!("Failed to copy worktree includes: {}", e);
+        }
 
         // Get the HEAD of the new worktree
         let head = Self::get_worktree_head_static(&worktree_path).await?;
@@ -345,4 +351,5 @@ branch refs/heads/feature-branch
         let worktrees = parse_worktree_list("").unwrap();
         assert!(worktrees.is_empty());
     }
+
 }
