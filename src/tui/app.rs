@@ -627,7 +627,7 @@ impl App {
             AppEvent::StateUpdate(update) => self.handle_state_update(update).await,
             AppEvent::Tick => {
                 self.ui_state.tick_count = self.ui_state.tick_count.wrapping_add(1);
-                if self.ui_state.tick_count % 3 == 0 {
+                if self.ui_state.tick_count.is_multiple_of(3) {
                     self.ui_state.throbber_state.calc_next();
                 }
                 return true;
