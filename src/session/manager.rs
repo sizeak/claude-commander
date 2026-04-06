@@ -94,14 +94,16 @@ impl SessionManager {
     pub async fn add_project(&self, repo_path: PathBuf) -> Result<ProjectId> {
         // Discover git repository
         let backend = GitBackend::discover(&repo_path)?;
-        let mut main_branch = backend.detect_main_branch()?;
         let name = backend.repo_name();
         let canonical_path =
             std::fs::canonicalize(backend.path()).unwrap_or_else(|_| backend.path().to_path_buf());
 
-        // If the local heuristic didn't find a remote default, try asking the
-        // remote directly (requires network but is authoritative).
-        if backend.remote_default_branch().is_none()
+        // Detect main branch: prefer the remote's declared default (via local
+        // refs/remotes/origin/HEAD), then local heuristic (main/master/current).
+        // If neither found a remote answer, try asking the remote directly.
+        let has_remote_default = backend.remote_default_branch().is_some();
+        let mut main_branch = backend.detect_main_branch()?;
+        if !has_remote_default
             && let Some(remote_branch) =
                 crate::git::ls_remote_default_branch(&canonical_path).await
         {
@@ -236,7 +238,7 @@ impl SessionManager {
             let backend = GitBackend::open(&repo_path)?;
             let exists = backend.branch_exists(&branch_name)?;
             let remote_ref = format!("refs/remotes/origin/{}", main_branch);
-            let sp = if backend.remote_ref_exists(&remote_ref)? {
+            let sp = if backend.ref_exists(&remote_ref)? {
                 Some(format!("origin/{}", main_branch))
             } else {
                 None

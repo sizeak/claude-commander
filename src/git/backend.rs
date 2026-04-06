@@ -1,6 +1,8 @@
 //! Git backend using pure gitoxide
 //!
-//! Provides git operations without any CLI dependencies.
+//! Provides git operations primarily through gitoxide (gix).  A small number of
+//! helpers (`ls_remote_default_branch`) shell out to the git CLI as a fallback
+//! when the required information is not available locally.
 
 use std::path::{Path, PathBuf};
 
@@ -160,8 +162,8 @@ impl GitBackend {
         short.strip_prefix("origin/").map(|s| s.to_string())
     }
 
-    /// Check if a reference exists (e.g. `"refs/remotes/origin/main"`).
-    pub fn remote_ref_exists(&self, ref_name: &str) -> Result<bool> {
+    /// Check if a reference exists locally (e.g. `"refs/remotes/origin/main"`).
+    pub fn ref_exists(&self, ref_name: &str) -> Result<bool> {
         let reference = self
             .repo
             .try_find_reference(ref_name)
@@ -280,9 +282,9 @@ mod tests {
     }
 
     #[test]
-    fn test_remote_ref_exists_false_without_remote() {
+    fn test_ref_exists_false_without_remote() {
         let (_temp, backend) = init_test_repo();
-        assert_eq!(backend.remote_ref_exists("refs/remotes/origin/main").unwrap(), false);
+        assert!(!backend.ref_exists("refs/remotes/origin/main").unwrap());
     }
 
     #[test]

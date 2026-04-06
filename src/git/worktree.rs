@@ -63,7 +63,7 @@ impl WorktreeManager {
     /// Create a new worktree
     ///
     /// If the branch exists, checks it out into the worktree.
-    /// If the branch doesn't exist, creates it from HEAD.
+    /// If the branch doesn't exist, creates it from HEAD (or a start point when given).
     #[instrument(skip(self))]
     pub async fn create_worktree(
         &self,
@@ -114,8 +114,11 @@ impl WorktreeManager {
         cmd.current_dir(&repo_path).arg("worktree").arg("add");
 
         if branch_exists {
-            // Checkout existing branch
+            // Checkout existing branch (start_point is not applicable here)
             debug!("Branch {} exists, checking out", branch_name);
+            if start_point.is_some() {
+                debug!("Ignoring start_point for existing branch {}", branch_name);
+            }
             cmd.arg(&worktree_path).arg(&branch_name);
         } else {
             // Create new branch, optionally from a specific start point
