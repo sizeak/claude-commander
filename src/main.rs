@@ -5,13 +5,13 @@
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::Result;
 use tracing::info;
-use tracing_subscriber::{fmt, prelude::*, EnvFilter};
+use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use claude_commander::{
-    config::{AppState, Config, StateStore},
-    tmux::{attach_to_session, AttachResult},
-    tui::App,
     APP_NAME, VERSION,
+    config::{AppState, Config, StateStore},
+    tmux::{AttachResult, attach_to_session},
+    tui::App,
 };
 
 #[derive(Parser)]
@@ -202,11 +202,13 @@ async fn main() -> Result<()> {
             let path = path.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
             use claude_commander::session::SessionManager;
+            use claude_commander::tui::theme::Theme;
             use std::sync::Arc;
 
             let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
             let store = Arc::new(StateStore::new(app_state)?);
-            let manager = SessionManager::new(config, store.clone());
+            let manager =
+                SessionManager::new(config, store.clone(), Theme::default().tmux_status_style());
 
             // Check tmux
             manager.check_tmux().await?;

@@ -96,15 +96,15 @@ impl ContentCapture {
         // Fast path: check cache with read lock
         {
             let cache = self.cache.read().await;
-            if let Some(cached) = cache.get(tmux_session_name) {
-                if !cached.is_stale(self.ttl) {
-                    debug!(
-                        "Cache hit for {}, age: {:?}",
-                        tmux_session_name,
-                        cached.age()
-                    );
-                    return Ok(cached.clone());
-                }
+            if let Some(cached) = cache.get(tmux_session_name)
+                && !cached.is_stale(self.ttl)
+            {
+                debug!(
+                    "Cache hit for {}, age: {:?}",
+                    tmux_session_name,
+                    cached.age()
+                );
+                return Ok(cached.clone());
             }
         }
 

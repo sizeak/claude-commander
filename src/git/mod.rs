@@ -9,6 +9,7 @@ mod backend;
 mod diff;
 mod pr;
 mod worktree;
+mod worktree_include;
 
 pub use backend::*;
 pub use diff::*;

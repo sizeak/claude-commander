@@ -30,7 +30,7 @@ pub mod tui;
 pub use config::{AppState, Config, StateStore};
 pub use error::{Error, Result};
 pub use session::{Project, ProjectId, SessionId, SessionListItem, SessionStatus, WorktreeSession};
-pub use tmux::{attach_to_session, AttachResult};
+pub use tmux::{AttachResult, attach_to_session};
 
 /// Application version
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

@@ -16,8 +16,8 @@ use nix::fcntl::{Flock, FlockArg};
 use tokio::sync::RwLock;
 use tracing::debug;
 
-use super::storage::AppState;
 use super::Config;
+use super::storage::AppState;
 use crate::error::{ConfigError, Result};
 
 /// Concurrent-safe state persistence backed by a JSON file with advisory locking.

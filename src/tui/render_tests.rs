@@ -7,12 +7,12 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use ratatui::{
+    Terminal,
     backend::TestBackend,
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Modifier, Style},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
-    Terminal,
 };
 
 use crate::git::DiffInfo;
@@ -608,6 +608,262 @@ fn test_status_bar_with_message() {
             let text = "Created session abc12345";
             let paragraph = Paragraph::new(text).style(theme.status_bar());
             frame.render_widget(paragraph, frame.area());
+        })
+        .unwrap();
+
+    insta::assert_snapshot!(terminal.backend());
+}
+
+// ── Pane content replacement (no clear needed) ─────────────────────
+
+#[test]
+fn test_preview_content_replacement_no_clear() {
+    let backend = TestBackend::new(60, 12);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    // Render content A (simulating session 1 selected)
+    terminal
+        .draw(|frame| {
+            let preview = Preview::new("Session 1 output\nLine 2\nLine 3\nLine 4\nLine 5")
+                .block(
+                    Block::default()
+                        .title(" [Preview] | Diff | Shell ")
+                        .borders(Borders::ALL),
+                )
+                .scroll(0);
+            frame.render_widget(preview, frame.area());
+        })
+        .unwrap();
+
+    // Render content B WITHOUT clearing (simulating scrolling to session 2)
+    terminal
+        .draw(|frame| {
+            let preview = Preview::new("Session 2 output\nDifferent content")
+                .block(
+                    Block::default()
+                        .title(" [Preview] | Diff | Shell ")
+                        .borders(Borders::ALL),
+                )
+                .scroll(0);
+            frame.render_widget(preview, frame.area());
+        })
+        .unwrap();
+
+    // Snapshot should show clean content B with no artifacts from A
+    insta::assert_snapshot!(terminal.backend());
+}
+
+#[test]
+fn test_preview_to_diff_view_switch_no_clear() {
+    let backend = TestBackend::new(70, 14);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = test_theme();
+
+    // Render Preview pane first
+    terminal
+        .draw(|frame| {
+            let preview = Preview::new("Preview content here\nLine 2\nLine 3")
+                .block(
+                    Block::default()
+                        .title(" [Preview] | Diff | Shell ")
+                        .borders(Borders::ALL),
+                )
+                .scroll(0);
+            frame.render_widget(preview, frame.area());
+        })
+        .unwrap();
+
+    // Switch to Diff view WITHOUT clearing
+    terminal
+        .draw(|frame| {
+            let diff = "\
+diff --git a/file.rs b/file.rs
+--- a/file.rs
++++ b/file.rs
+@@ -1,3 +1,3 @@
+ context
+-old line
++new line";
+            let info = DiffInfo {
+                diff: diff.to_string(),
+                files_changed: 1,
+                lines_added: 1,
+                lines_removed: 1,
+                line_count: diff.lines().count(),
+                computed_at: Instant::now(),
+                base_commit: "abc".to_string(),
+            };
+            let diff_view = DiffView::new(&info, &theme)
+                .block(
+                    Block::default()
+                        .title(" Preview | [Diff] | Shell ")
+                        .borders(Borders::ALL),
+                )
+                .scroll(0);
+            frame.render_widget(diff_view, frame.area());
+        })
+        .unwrap();
+
+    // Snapshot should show clean Diff view with no Preview artifacts
+    insta::assert_snapshot!(terminal.backend());
+}
+
+#[test]
+fn test_preview_to_shell_view_switch_no_clear() {
+    let backend = TestBackend::new(60, 10);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    // Render Preview pane first
+    terminal
+        .draw(|frame| {
+            let preview = Preview::new("Preview content\nWith multiple lines\nOf output")
+                .block(
+                    Block::default()
+                        .title(" [Preview] | Diff | Shell ")
+                        .borders(Borders::ALL),
+                )
+                .scroll(0);
+            frame.render_widget(preview, frame.area());
+        })
+        .unwrap();
+
+    // Switch to Shell view WITHOUT clearing
+    terminal
+        .draw(|frame| {
+            let shell = Preview::new("$ ls -la\ntotal 42\ndrwxr-xr-x 5 user user 4096")
+                .block(
+                    Block::default()
+                        .title(" Preview | Diff | [Shell] ")
+                        .borders(Borders::ALL),
+                )
+                .scroll(0);
+            frame.render_widget(shell, frame.area());
+        })
+        .unwrap();
+
+    // Snapshot should show clean Shell view with no Preview artifacts
+    insta::assert_snapshot!(terminal.backend());
+}
+
+// ── Quick-switch modal ─────────────────────────────────────────────
+
+#[test]
+fn test_quick_switch_empty_query() {
+    let backend = TestBackend::new(80, 10);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = test_theme();
+
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            let modal_width = area.width * 60 / 100;
+            let modal_area = Rect {
+                x: area.x + (area.width - modal_width) / 2,
+                y: area.y + area.height / 5,
+                width: modal_width,
+                height: 3, // border + input + border
+            };
+            frame.render_widget(Clear, modal_area);
+
+            let block = Block::default()
+                .title(" Quick Switch ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.modal_info));
+            let inner = block.inner(modal_area);
+            frame.render_widget(block, modal_area);
+
+            let input_line = Line::from("> _");
+            frame.render_widget(Paragraph::new(input_line), inner);
+        })
+        .unwrap();
+
+    insta::assert_snapshot!(terminal.backend());
+}
+
+#[test]
+fn test_quick_switch_with_matches() {
+    let backend = TestBackend::new(80, 15);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = test_theme();
+
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            let modal_width = area.width * 60 / 100;
+            let matches = vec![
+                (
+                    "●",
+                    theme.status_running,
+                    "Add auth",
+                    "feature-auth",
+                    "my-app",
+                    true,
+                ),
+                (
+                    "◐",
+                    theme.status_paused,
+                    "Fix login",
+                    "fix-login",
+                    "my-app",
+                    false,
+                ),
+                (
+                    "○",
+                    theme.status_stopped,
+                    "Old task",
+                    "old-branch",
+                    "other",
+                    false,
+                ),
+            ];
+            let modal_area = Rect {
+                x: area.x + (area.width - modal_width) / 2,
+                y: area.y + area.height / 5,
+                width: modal_width,
+                height: 3 + matches.len() as u16,
+            };
+            frame.render_widget(Clear, modal_area);
+
+            let block = Block::default()
+                .title(" Quick Switch ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.modal_info));
+            let inner = block.inner(modal_area);
+            frame.render_widget(block, modal_area);
+
+            // Input line
+            let input_area = Rect { height: 1, ..inner };
+            frame.render_widget(Paragraph::new(Line::from("> auth_")), input_area);
+
+            // Match lines
+            for (i, (icon, color, title, branch, project, selected)) in matches.iter().enumerate() {
+                let row = inner.y + 1 + i as u16;
+                let line = Line::from(vec![
+                    Span::styled(format!(" {} ", icon), Style::default().fg(*color)),
+                    Span::styled(
+                        title.to_string(),
+                        if *selected {
+                            theme.selection()
+                        } else {
+                            Style::default()
+                        },
+                    ),
+                    Span::styled(
+                        format!(" [{}]", branch),
+                        Style::default().fg(theme.text_accent),
+                    ),
+                    Span::styled(
+                        format!(" ({})", project),
+                        Style::default().fg(theme.text_secondary),
+                    ),
+                ]);
+                let line_area = Rect {
+                    y: row,
+                    height: 1,
+                    ..inner
+                };
+                frame.render_widget(Paragraph::new(line), line_area);
+            }
         })
         .unwrap();
 

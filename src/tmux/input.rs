@@ -8,7 +8,7 @@
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, instrument};
 
 use super::TmuxExecutor;
