@@ -85,6 +85,7 @@ impl WorktreeManager {
             worktree_path,
             branch_name.to_string(),
             branch_exists,
+            None,
         )
         .await
     }
@@ -100,6 +101,7 @@ impl WorktreeManager {
         worktree_path: PathBuf,
         branch_name: String,
         branch_exists: bool,
+        start_point: Option<String>,
     ) -> Result<WorktreeInfo> {
         // Ensure worktrees directory exists
         tokio::fs::create_dir_all(&worktrees_dir)
@@ -112,13 +114,20 @@ impl WorktreeManager {
         cmd.current_dir(&repo_path).arg("worktree").arg("add");
 
         if branch_exists {
-            // Checkout existing branch
+            // Checkout existing branch (start_point is not applicable here)
             debug!("Branch {} exists, checking out", branch_name);
+            if start_point.is_some() {
+                debug!("Ignoring start_point for existing branch {}", branch_name);
+            }
             cmd.arg(&worktree_path).arg(&branch_name);
         } else {
-            // Create new branch
+            // Create new branch, optionally from a specific start point
             debug!("Creating new branch {}", branch_name);
             cmd.arg("-b").arg(&branch_name).arg(&worktree_path);
+            if let Some(ref sp) = start_point {
+                debug!("Using start point {}", sp);
+                cmd.arg(sp);
+            }
         }
 
         cmd.stdin(Stdio::null())

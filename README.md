@@ -118,8 +118,8 @@ default_program = "claude"
 # Branch name prefix for new sessions (empty = no prefix)
 branch_prefix = ""
 
-# Pull latest changes on the project branch before creating a new session
-pull_before_create = true
+# Fetch latest changes from origin before creating a new session
+fetch_before_create = true
 
 # Maximum concurrent tmux commands
 max_concurrent_tmux = 16
