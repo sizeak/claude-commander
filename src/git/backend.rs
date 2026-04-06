@@ -146,15 +146,42 @@ impl GitBackend {
         Ok(false) // Placeholder - full implementation needed
     }
 
+    /// Get the default branch from the remote via `refs/remotes/origin/HEAD`.
+    ///
+    /// Returns `None` if the ref doesn't exist or isn't a symbolic reference.
+    pub fn remote_default_branch(&self) -> Option<String> {
+        let reference = self
+            .repo
+            .try_find_reference("refs/remotes/origin/HEAD")
+            .ok()??;
+
+        let target_name = reference.inner.target.try_name()?;
+        let short = target_name.shorten().to_string();
+        short.strip_prefix("origin/").map(|s| s.to_string())
+    }
+
+    /// Check if a reference exists (e.g. `"refs/remotes/origin/main"`).
+    pub fn remote_ref_exists(&self, ref_name: &str) -> Result<bool> {
+        let reference = self
+            .repo
+            .try_find_reference(ref_name)
+            .map_err(|e| GitError::Gix(e.to_string()))?;
+        Ok(reference.is_some())
+    }
+
     /// Get the main branch name (main or master)
     pub fn detect_main_branch(&self) -> Result<String> {
-        // Check for 'main' first, then 'master'
+        // Prefer the remote's declared default branch
+        if let Some(branch) = self.remote_default_branch() {
+            return Ok(branch);
+        }
+
+        // Fall back to local heuristic: main -> master -> current branch
         if self.branch_exists("main")? {
             Ok("main".to_string())
         } else if self.branch_exists("master")? {
             Ok("master".to_string())
         } else {
-            // Fall back to current branch
             self.current_branch()
         }
     }
@@ -172,6 +199,43 @@ impl GitBackend {
     pub fn repo(&self) -> &Repository {
         &self.repo
     }
+}
+
+/// Parse the output of `git ls-remote --symref origin HEAD` to extract
+/// the default branch name.
+///
+/// Expected format: `ref: refs/heads/<branch>\tHEAD`
+pub fn parse_ls_remote_symref(stdout: &str) -> Option<String> {
+    for line in stdout.lines() {
+        if let Some(rest) = line.strip_prefix("ref: refs/heads/")
+            && let Some(branch) = rest.strip_suffix("\tHEAD")
+        {
+            return Some(branch.to_string());
+        }
+    }
+    None
+}
+
+/// Query the remote for its default branch via `git ls-remote --symref`.
+///
+/// Returns `None` on any failure (no remote, network error, etc.).
+pub async fn ls_remote_default_branch(repo_path: &Path) -> Option<String> {
+    let output = tokio::process::Command::new("git")
+        .current_dir(repo_path)
+        .args(["ls-remote", "--symref", "origin", "HEAD"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .await
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    parse_ls_remote_symref(&stdout)
 }
 
 #[cfg(test)]
@@ -207,5 +271,37 @@ mod tests {
         let branch = backend.detect_main_branch();
         // This should not error, even for unborn branches
         assert!(branch.is_ok());
+    }
+
+    #[test]
+    fn test_remote_default_branch_none_without_remote() {
+        let (_temp, backend) = init_test_repo();
+        assert!(backend.remote_default_branch().is_none());
+    }
+
+    #[test]
+    fn test_remote_ref_exists_false_without_remote() {
+        let (_temp, backend) = init_test_repo();
+        assert_eq!(backend.remote_ref_exists("refs/remotes/origin/main").unwrap(), false);
+    }
+
+    #[test]
+    fn test_parse_ls_remote_symref() {
+        // Typical output: main branch
+        let output = "ref: refs/heads/main\tHEAD\nabc123def456\tHEAD\n";
+        assert_eq!(parse_ls_remote_symref(output), Some("main".to_string()));
+
+        // Non-default branch name
+        let output = "ref: refs/heads/develop\tHEAD\nabc123\tHEAD\n";
+        assert_eq!(parse_ls_remote_symref(output), Some("develop".to_string()));
+
+        // Empty string
+        assert_eq!(parse_ls_remote_symref(""), None);
+
+        // Garbage
+        assert_eq!(parse_ls_remote_symref("not a valid output"), None);
+
+        // Missing tab separator
+        assert_eq!(parse_ls_remote_symref("ref: refs/heads/main HEAD\n"), None);
     }
 }

@@ -53,8 +53,9 @@ pub struct Config {
     /// If unset, auto-detected from a known list of GUI editors.
     pub editor_gui: Option<bool>,
 
-    /// Pull the latest changes on the project's checked-out branch before creating a new session
-    pub pull_before_create: bool,
+    /// Fetch the latest changes from origin before creating a new session
+    #[serde(alias = "pull_before_create")]
+    pub fetch_before_create: bool,
 
     /// Interval in milliseconds for checking state file changes from other instances (0 = disabled)
     pub state_sync_interval_ms: u64,
@@ -89,7 +90,7 @@ impl Default for Config {
             editor_gui: None,
             shell_program: std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string()),
             pr_check_interval_secs: 600,
-            pull_before_create: true,
+            fetch_before_create: true,
             state_sync_interval_ms: 2000,
             dim_unfocused_preview: true,
             leader_key: " ".to_string(),
@@ -436,7 +437,7 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.diff_cache_ttl_ms, 500);
         assert_eq!(config.pr_check_interval_secs, 600);
-        assert!(config.pull_before_create);
+        assert!(config.fetch_before_create);
         assert_eq!(config.state_sync_interval_ms, 2000);
     }
 

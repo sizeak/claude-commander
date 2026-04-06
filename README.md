@@ -124,6 +124,9 @@ ui_refresh_fps = 30
 # Auto-detected from a known list if not set (code, zed, subl, JetBrains IDEs, etc.)
 # editor_gui = true
 
+# Fetch latest changes from origin before creating a new session
+fetch_before_create = true
+
 # Leader key for quick-switch session search (default: Space)
 # Supports: " ", "space", "ctrl+k", "f1", etc.
 # leader_key = " "

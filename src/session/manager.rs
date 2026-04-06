@@ -94,14 +94,23 @@ impl SessionManager {
     pub async fn add_project(&self, repo_path: PathBuf) -> Result<ProjectId> {
         // Discover git repository
         let backend = GitBackend::discover(&repo_path)?;
-        let main_branch = backend.detect_main_branch()?;
+        let mut main_branch = backend.detect_main_branch()?;
         let name = backend.repo_name();
+        let canonical_path =
+            std::fs::canonicalize(backend.path()).unwrap_or_else(|_| backend.path().to_path_buf());
+
+        // If the local heuristic didn't find a remote default, try asking the
+        // remote directly (requires network but is authoritative).
+        if backend.remote_default_branch().is_none()
+            && let Some(remote_branch) =
+                crate::git::ls_remote_default_branch(&canonical_path).await
+        {
+            main_branch = remote_branch;
+        }
 
         info!("Adding project '{}' from {:?}", name, repo_path);
 
-        let repo_path =
-            std::fs::canonicalize(backend.path()).unwrap_or_else(|_| backend.path().to_path_buf());
-        let project = Project::new(name, repo_path, main_branch);
+        let project = Project::new(name, canonical_path, main_branch);
         let project_id = project.id;
 
         self.store
@@ -175,7 +184,7 @@ impl SessionManager {
         let program = program.unwrap_or_else(|| self.config.default_program.clone());
 
         // Get project info
-        let (repo_path, _main_branch) = {
+        let (repo_path, main_branch) = {
             let state = self.store.read().await;
             let project = state
                 .get_project(project_id)
@@ -191,12 +200,12 @@ impl SessionManager {
             title, branch_name, project_id
         );
 
-        // Pull latest changes on the project's current branch
-        if self.config.pull_before_create {
-            info!("Pulling latest changes in {}", repo_path.display());
+        // Fetch latest changes from origin
+        if self.config.fetch_before_create {
+            info!("Fetching latest changes from origin in {}", repo_path.display());
             let output = tokio::process::Command::new("git")
                 .current_dir(&repo_path)
-                .args(["pull", "--ff-only"])
+                .args(["fetch", "origin"])
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -204,7 +213,7 @@ impl SessionManager {
                 .await?;
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                warn!("git pull failed (continuing anyway): {}", stderr);
+                warn!("git fetch failed (continuing anyway): {}", stderr);
             }
         }
 
@@ -219,13 +228,20 @@ impl SessionManager {
                 .unwrap_or("")
         );
 
-        // Create worktree — sync gix work (branch check) is done in a block
-        // so non-Sync types are dropped before the first .await, keeping the
-        // overall future Send.
+        // Create worktree — sync gix work (branch check + start point) is done
+        // in a block so non-Sync types are dropped before the first .await,
+        // keeping the overall future Send.
         let worktrees_dir = self.config.worktrees_dir()?;
-        let branch_exists = {
+        let (branch_exists, start_point) = {
             let backend = GitBackend::open(&repo_path)?;
-            backend.branch_exists(&branch_name)?
+            let exists = backend.branch_exists(&branch_name)?;
+            let remote_ref = format!("refs/remotes/origin/{}", main_branch);
+            let sp = if backend.remote_ref_exists(&remote_ref)? {
+                Some(format!("origin/{}", main_branch))
+            } else {
+                None
+            };
+            (exists, sp)
         };
         let worktree_path = worktrees_dir.join(&worktree_name);
         let worktree_info = WorktreeManager::run_create_worktree(
@@ -234,6 +250,7 @@ impl SessionManager {
             worktree_path,
             branch_name.clone(),
             branch_exists,
+            start_point,
         )
         .await?;
 

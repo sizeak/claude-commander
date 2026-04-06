@@ -378,3 +378,143 @@ async fn test_sync_worktrees_imports_external() {
     drop(state_temp_dir);
     drop(worktrees_dir);
 }
+
+/// Helper to create a bare repo as "origin" and a working repo with that remote configured.
+async fn create_test_repo_with_remote() -> (TempDir, PathBuf, TempDir, PathBuf) {
+    // Create bare "origin" repo
+    let bare_dir = TempDir::new().unwrap();
+    let bare_path = bare_dir.path().to_path_buf();
+
+    tokio::process::Command::new("git")
+        .current_dir(&bare_path)
+        .args(["init", "--bare"])
+        .output()
+        .await
+        .unwrap();
+
+    // Create working repo
+    let work_dir = TempDir::new().unwrap();
+    let work_path = work_dir.path().to_path_buf();
+
+    tokio::process::Command::new("git")
+        .current_dir(&work_path)
+        .args(["init"])
+        .output()
+        .await
+        .unwrap();
+
+    // Configure git user
+    for args in [
+        vec!["config", "user.email", "test@test.com"],
+        vec!["config", "user.name", "Test User"],
+    ] {
+        tokio::process::Command::new("git")
+            .current_dir(&work_path)
+            .args(&args)
+            .output()
+            .await
+            .unwrap();
+    }
+
+    // Add remote
+    tokio::process::Command::new("git")
+        .current_dir(&work_path)
+        .args(["remote", "add", "origin", bare_path.to_str().unwrap()])
+        .output()
+        .await
+        .unwrap();
+
+    // Create initial commit and push
+    tokio::fs::write(work_path.join("README.md"), "# Test\n")
+        .await
+        .unwrap();
+
+    tokio::process::Command::new("git")
+        .current_dir(&work_path)
+        .args(["add", "README.md"])
+        .output()
+        .await
+        .unwrap();
+
+    tokio::process::Command::new("git")
+        .current_dir(&work_path)
+        .args(["commit", "-m", "Initial commit"])
+        .output()
+        .await
+        .unwrap();
+
+    tokio::process::Command::new("git")
+        .current_dir(&work_path)
+        .args(["push", "-u", "origin", "HEAD"])
+        .output()
+        .await
+        .unwrap();
+
+    (bare_dir, bare_path, work_dir, work_path)
+}
+
+#[tokio::test]
+async fn test_detect_main_branch_with_remote() {
+    let (_bare_dir, _bare_path, _work_dir, work_path) =
+        create_test_repo_with_remote().await;
+
+    // Set origin/HEAD so remote_default_branch() can resolve it
+    tokio::process::Command::new("git")
+        .current_dir(&work_path)
+        .args(["remote", "set-head", "origin", "--auto"])
+        .output()
+        .await
+        .unwrap();
+
+    let backend = GitBackend::open(&work_path).unwrap();
+    let main = backend.detect_main_branch().unwrap();
+
+    // The default branch should be whatever the working repo's HEAD is
+    let current = backend.current_branch().unwrap();
+    assert_eq!(main, current);
+}
+
+#[tokio::test]
+async fn test_create_session_no_remote_falls_back() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    // Repo with no remote — fetch_before_create: true should still succeed
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let state_temp_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+
+    let config = Config {
+        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        fetch_before_create: true,
+        ..Config::default()
+    };
+
+    let store = create_isolated_store(&state_temp_dir);
+    let manager = SessionManager::new(config, store.clone(), "");
+
+    let project_id = manager.add_project(repo_path).await.unwrap();
+
+    let result = manager
+        .create_session(
+            &project_id,
+            "fallback-test".to_string(),
+            Some("bash".to_string()),
+        )
+        .await;
+
+    assert!(
+        result.is_ok(),
+        "Session creation should succeed without remote: {:?}",
+        result.err()
+    );
+
+    let session_id = result.unwrap();
+    let _ = manager.kill_session(&session_id, true).await;
+
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
+    drop(worktrees_dir);
+}
