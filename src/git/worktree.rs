@@ -63,7 +63,7 @@ impl WorktreeManager {
     /// Create a new worktree
     ///
     /// If the branch exists, checks it out into the worktree.
-    /// If the branch doesn't exist, creates it from HEAD (or a start point when given).
+    /// If the branch doesn't exist, creates it from HEAD.
     #[instrument(skip(self))]
     pub async fn create_worktree(
         &self,

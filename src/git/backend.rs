@@ -1,8 +1,6 @@
 //! Git backend using pure gitoxide
 //!
-//! Provides git operations primarily through gitoxide (gix).  A small number of
-//! helpers (`ls_remote_default_branch`) shell out to the git CLI as a fallback
-//! when the required information is not available locally.
+//! Provides git operations without any CLI dependencies.
 
 use std::path::{Path, PathBuf};
 
@@ -203,43 +201,6 @@ impl GitBackend {
     }
 }
 
-/// Parse the output of `git ls-remote --symref origin HEAD` to extract
-/// the default branch name.
-///
-/// Expected format: `ref: refs/heads/<branch>\tHEAD`
-pub fn parse_ls_remote_symref(stdout: &str) -> Option<String> {
-    for line in stdout.lines() {
-        if let Some(rest) = line.strip_prefix("ref: refs/heads/")
-            && let Some(branch) = rest.strip_suffix("\tHEAD")
-        {
-            return Some(branch.to_string());
-        }
-    }
-    None
-}
-
-/// Query the remote for its default branch via `git ls-remote --symref`.
-///
-/// Returns `None` on any failure (no remote, network error, etc.).
-pub async fn ls_remote_default_branch(repo_path: &Path) -> Option<String> {
-    let output = tokio::process::Command::new("git")
-        .current_dir(repo_path)
-        .args(["ls-remote", "--symref", "origin", "HEAD"])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .await
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_ls_remote_symref(&stdout)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,23 +248,4 @@ mod tests {
         assert!(!backend.ref_exists("refs/remotes/origin/main").unwrap());
     }
 
-    #[test]
-    fn test_parse_ls_remote_symref() {
-        // Typical output: main branch
-        let output = "ref: refs/heads/main\tHEAD\nabc123def456\tHEAD\n";
-        assert_eq!(parse_ls_remote_symref(output), Some("main".to_string()));
-
-        // Non-default branch name
-        let output = "ref: refs/heads/develop\tHEAD\nabc123\tHEAD\n";
-        assert_eq!(parse_ls_remote_symref(output), Some("develop".to_string()));
-
-        // Empty string
-        assert_eq!(parse_ls_remote_symref(""), None);
-
-        // Garbage
-        assert_eq!(parse_ls_remote_symref("not a valid output"), None);
-
-        // Missing tab separator
-        assert_eq!(parse_ls_remote_symref("ref: refs/heads/main HEAD\n"), None);
-    }
 }

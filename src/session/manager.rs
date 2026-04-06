@@ -94,25 +94,14 @@ impl SessionManager {
     pub async fn add_project(&self, repo_path: PathBuf) -> Result<ProjectId> {
         // Discover git repository
         let backend = GitBackend::discover(&repo_path)?;
+        let main_branch = backend.detect_main_branch()?;
         let name = backend.repo_name();
-        let canonical_path =
-            std::fs::canonicalize(backend.path()).unwrap_or_else(|_| backend.path().to_path_buf());
-
-        // Detect main branch: prefer the remote's declared default (via local
-        // refs/remotes/origin/HEAD), then local heuristic (main/master/current).
-        // If neither found a remote answer, try asking the remote directly.
-        let has_remote_default = backend.remote_default_branch().is_some();
-        let mut main_branch = backend.detect_main_branch()?;
-        if !has_remote_default
-            && let Some(remote_branch) =
-                crate::git::ls_remote_default_branch(&canonical_path).await
-        {
-            main_branch = remote_branch;
-        }
 
         info!("Adding project '{}' from {:?}", name, repo_path);
 
-        let project = Project::new(name, canonical_path, main_branch);
+        let repo_path =
+            std::fs::canonicalize(backend.path()).unwrap_or_else(|_| backend.path().to_path_buf());
+        let project = Project::new(name, repo_path, main_branch);
         let project_id = project.id;
 
         self.store
