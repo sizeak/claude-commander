@@ -6,6 +6,7 @@ use ansi_to_tui::IntoText;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
+    style::Modifier,
     text::Text,
     widgets::{Block, Paragraph, ScrollbarState, Widget},
 };
@@ -66,7 +67,10 @@ impl<'a> Widget for Preview<'a> {
             for line in &mut text.lines {
                 for span in &mut line.spans {
                     let fg = span.style.fg.unwrap_or(ratatui::style::Color::Reset);
-                    span.style = span.style.fg(dim_color(fg, opacity));
+                    span.style = span
+                        .style
+                        .fg(dim_color(fg, opacity))
+                        .remove_modifier(Modifier::REVERSED);
                 }
             }
         }
