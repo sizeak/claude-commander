@@ -23,6 +23,8 @@ pub struct DiffView<'a> {
     block: Option<Block<'a>>,
     /// Scroll offset
     scroll: u16,
+    /// Whether to dim the content (unfocused state)
+    dim: bool,
 }
 
 impl<'a> DiffView<'a> {
@@ -33,6 +35,7 @@ impl<'a> DiffView<'a> {
             theme,
             block: None,
             scroll: 0,
+            dim: false,
         }
     }
 
@@ -48,38 +51,35 @@ impl<'a> DiffView<'a> {
         self
     }
 
+    /// Set whether content should be dimmed
+    pub fn dim(mut self, dim: bool) -> Self {
+        self.dim = dim;
+        self
+    }
+
     /// Style a single diff line
     fn style_line(&self, line: &'a str) -> Line<'a> {
-        if line.starts_with('+') && !line.starts_with("+++") {
-            Line::from(Span::styled(
-                line,
-                Style::default().fg(self.theme.diff_added),
-            ))
+        let mut style = if line.starts_with('+') && !line.starts_with("+++") {
+            Style::default().fg(self.theme.diff_added)
         } else if line.starts_with('-') && !line.starts_with("---") {
-            Line::from(Span::styled(
-                line,
-                Style::default().fg(self.theme.diff_removed),
-            ))
+            Style::default().fg(self.theme.diff_removed)
         } else if line.starts_with("@@") {
-            Line::from(Span::styled(
-                line,
-                Style::default().fg(self.theme.diff_hunk_header),
-            ))
+            Style::default().fg(self.theme.diff_hunk_header)
         } else if line.starts_with("diff ") || line.starts_with("index ") {
-            Line::from(Span::styled(
-                line,
-                Style::default()
-                    .fg(self.theme.diff_file_header)
-                    .add_modifier(Modifier::BOLD),
-            ))
+            Style::default()
+                .fg(self.theme.diff_file_header)
+                .add_modifier(Modifier::BOLD)
         } else if line.starts_with("---") || line.starts_with("+++") {
-            Line::from(Span::styled(
-                line,
-                Style::default().fg(self.theme.diff_file_header),
-            ))
+            Style::default().fg(self.theme.diff_file_header)
         } else {
-            Line::from(Span::raw(line))
+            Style::default()
+        };
+
+        if self.dim {
+            style = style.add_modifier(Modifier::DIM);
         }
+
+        Line::from(Span::styled(line, style))
     }
 }
 

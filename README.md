@@ -50,7 +50,7 @@ claude-commander
 ### Commands
 
 ```bash
-# List all sessions
+# List active sessions (add --all to include stopped)
 claude-commander list
 
 # Create a new session
@@ -64,6 +64,9 @@ claude-commander config
 
 # Initialize config file
 claude-commander config --init
+
+# Use a custom config file
+claude-commander --config /path/to/config.toml
 ```
 
 ### Session List
@@ -72,9 +75,12 @@ The left pane shows projects and their worktree sessions in a tree view. Project
 
 ### Keyboard Shortcuts
 
+All keybindings below are defaults and can be customised via the `[keybindings]` config table (see [Configuration](#configuration)).
+
 | Key | Action |
 |-----|--------|
-| `j/k` or `↑/↓` | Navigate session list |
+| `j/k` or `↑/↓` or `Ctrl-n/p` | Navigate session list |
+| `Space` | Quick-switch (fuzzy session search) |
 | `Enter` | Attach to selected session |
 | `n` | New worktree session |
 | `N` | Add new project |
@@ -84,14 +90,27 @@ The left pane shows projects and their worktree sessions in a tree view. Project
 | `D` | Remove project |
 | `e` | Open in editor/IDE |
 | `s` | Open shell in worktree |
-| `Tab` | Switch between panes |
-| `Ctrl+u/d` | Page up/down in preview |
+| `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
+| `<` / `>` | Shrink / grow left pane |
+| `Ctrl-u/d` or `PageUp/Down` | Page up/down in preview |
 | `?` | Show help |
-| `q` | Quit |
+| `q` or `Ctrl-c` | Quit |
+
+### Attached Session Shortcuts
+
+When attached to a session (via `Enter` or `claude-commander attach`):
+
+| Key | Action |
+|-----|--------|
+| `Ctrl-q` | Detach and return to session list |
+| `Ctrl-\` | Switch between Claude and shell pane |
 
 ## Configuration
 
-Configuration file: `~/.config/claude-commander/config.toml`
+Configuration file location depends on your platform:
+
+- **macOS**: `~/Library/Application Support/com.claude-commander.claude-commander/config.toml`
+- **Linux**: `~/.config/claude-commander/config.toml`
 
 All settings can also be set via environment variables with the `CC_` prefix (e.g. `CC_EDITOR=code`).
 
@@ -101,6 +120,9 @@ default_program = "claude"
 
 # Branch name prefix for new sessions (empty = no prefix)
 branch_prefix = ""
+
+# Fetch latest changes from origin before creating a new session
+fetch_before_create = true
 
 # Maximum concurrent tmux commands
 max_concurrent_tmux = 16
@@ -114,6 +136,12 @@ diff_cache_ttl_ms = 500
 # UI refresh rate in FPS
 ui_refresh_fps = 30
 
+# Custom worktrees directory (default: platform-specific, see Data Storage below)
+# worktrees_dir = "/path/to/worktrees"
+
+# Shell program for shell sessions (default: $SHELL or "bash")
+# shell_program = "zsh"
+
 # Editor/IDE command for opening sessions (e.g. "code", "zed", "nvim")
 # Falls back to $VISUAL, then $EDITOR if not set
 # editor = "code"
@@ -122,6 +150,28 @@ ui_refresh_fps = 30
 # GUI editors are spawned in the background; terminal editors suspend the TUI
 # Auto-detected from a known list if not set (code, zed, subl, JetBrains IDEs, etc.)
 # editor_gui = true
+
+# Interval in seconds between GitHub PR checks (0 = disabled)
+pr_check_interval_secs = 600
+
+# Dim the right pane (preview/diff/shell) when the session list is focused
+dim_unfocused_preview = true
+
+# Leader key for quick-switch session search
+# Supports: " ", "space", "ctrl+k", "f1", etc.
+# leader_key = " "
+
+# Interval in milliseconds for syncing state file changes from other instances (0 = disabled)
+state_sync_interval_ms = 2000
+
+# Log file path (if set, logs to file; use with --debug)
+# log_file = "/tmp/claude-commander.log"
+
+# Custom key bindings — override any default key with one or more alternatives
+# [keybindings]
+# navigate_up = ["k", "Up"]
+# quit = ["q", "Ctrl-c"]
+# toggle_pane = ["Tab"]
 ```
 
 ## Architecture
@@ -147,9 +197,13 @@ The TUI event loop (`App`) owns the terminal and render state. It sends user com
 
 ## Data Storage
 
-- **Config**: `~/.config/claude-commander/config.toml`
-- **State**: `~/.local/share/claude-commander/state.json`
-- **Worktrees**: `~/.local/share/claude-commander/worktrees/`
+Paths are platform-specific, determined by the `directories` crate:
+
+| File | macOS | Linux |
+|------|-------|-------|
+| Config | `~/Library/Application Support/com.claude-commander.claude-commander/config.toml` | `~/.config/claude-commander/config.toml` |
+| State | `~/Library/Application Support/com.claude-commander.claude-commander/state.json` | `~/.local/share/claude-commander/state.json` |
+| Worktrees | `~/Library/Application Support/com.claude-commander.claude-commander/worktrees/` | `~/.local/share/claude-commander/worktrees/` |
 
 ## Development
 

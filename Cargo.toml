@@ -1,7 +1,7 @@
 [package]
 name = "claude-commander"
 version = "0.2.0"
-edition = "2021"
+edition = "2024"
 authors = ["Claude Commander Contributors"]
 description = "A high-performance terminal UI for managing Claude coding sessions"
 license = "MIT"

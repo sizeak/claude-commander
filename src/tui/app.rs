@@ -13,18 +13,18 @@ use std::time::{Duration, Instant};
 use crossterm::{
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        MouseEventKind,
+        KeyModifiers, MouseEventKind,
     },
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
+    Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
-    Frame, Terminal,
 };
 use tracing::{debug, info, warn};
 
@@ -34,7 +34,7 @@ use super::theme::Theme;
 use super::widgets::{DiffView, DiffViewState, Preview, PreviewState, TreeList, TreeListState};
 use crate::config::{BindableAction, Config, StateStore};
 use crate::error::{Result, TuiError};
-use crate::git::{check_pr_for_branch, is_gh_available, DiffInfo};
+use crate::git::{DiffInfo, check_pr_for_branch, is_gh_available};
 use crate::session::{ProjectId, SessionId, SessionListItem, SessionManager, SessionStatus};
 
 /// Direction for mouse scroll events
@@ -101,6 +101,22 @@ pub enum Modal {
     Error { message: String },
     /// Settings modal
     Settings(SettingsState),
+    /// Quick-switch session search modal
+    QuickSwitch {
+        query: String,
+        matches: Vec<QuickSwitchMatch>,
+        selected_idx: usize,
+    },
+}
+
+/// A session match in the quick-switch modal
+#[derive(Debug, Clone)]
+pub struct QuickSwitchMatch {
+    pub session_id: SessionId,
+    pub title: String,
+    pub branch: String,
+    pub project_name: String,
+    pub status: SessionStatus,
 }
 
 /// Which tab is active in the settings modal
@@ -164,7 +180,7 @@ pub enum SettingsEditing {
     /// Editing a text value
     TextInput { value: String },
     /// Capturing a key for keybinding
-    KeyCapture { action_name: String, keys: Vec<String> },
+    KeyCapture { action_name: String, keys: Vec<String> }
 }
 
 /// Action to perform when input modal is submitted
@@ -219,6 +235,9 @@ pub struct AppUiState {
     pub attach_command: Option<String>,
     /// Editor command + path to open after exiting TUI
     pub editor_command: Option<(String, PathBuf)>,
+    /// When attached via shell toggle (Ctrl+\), stores the session name to switch back to.
+    /// Contains (current_session_name, paired_session_name) so we can toggle between them.
+    pub shell_toggle_pair: Option<(String, String)>,
     /// Needs right pane clear (set on view switch, consumed on render)
     pub clear_right_pane: bool,
     /// Left pane width as a percentage (adjustable at runtime via < / >)
@@ -256,6 +275,7 @@ impl Default for AppUiState {
             selected_project_id: None,
             attach_command: None,
             editor_command: None,
+            shell_toggle_pair: None,
             clear_right_pane: false,
             left_pane_pct: DEFAULT_LEFT_PANE_PCT,
             last_pr_check: None,
@@ -290,7 +310,9 @@ pub struct App {
 impl App {
     /// Create a new application
     pub fn new(config: Config, store: Arc<StateStore>) -> Self {
-        let session_manager = SessionManager::new(config.clone(), store.clone());
+        let theme = Theme::default();
+        let session_manager =
+            SessionManager::new(config.clone(), store.clone(), theme.tmux_status_style());
 
         let base = config
             .theme
@@ -402,17 +424,71 @@ impl App {
                         // Flush any pending input (e.g. the Enter key that triggered this attach)
                         crate::tmux::flush_stdin();
 
-                        // Attach to session via async PTY bridge (supports Ctrl+Q detach)
+                        // Attach to session via async PTY bridge (supports Ctrl+Q detach, Ctrl+\ shell toggle)
                         info!("Executing attach command: {}", cmd);
-                        let session_name = cmd.split_whitespace().last().unwrap_or("");
+                        let session_name = cmd.split_whitespace().last().unwrap_or("").to_string();
                         if !session_name.is_empty() {
-                            match crate::tmux::attach_to_session(session_name).await {
-                                Ok(result) => info!("Attach ended: {:?}", result),
-                                Err(e) => {
-                                    warn!("Failed to attach to session: {}", e);
-                                    self.ui_state.modal = Modal::Error {
-                                        message: format!("Failed to attach: {}", e),
-                                    };
+                            let mut current_session = session_name.clone();
+
+                            loop {
+                                match crate::tmux::attach_to_session(&current_session).await {
+                                    Ok(crate::tmux::AttachResult::SwitchToShell) => {
+                                        info!(
+                                            "Shell toggle requested from session: {}",
+                                            current_session
+                                        );
+
+                                        // Determine the paired session to switch to
+                                        let next_session = match &self.ui_state.shell_toggle_pair {
+                                            Some((_, paired)) => paired.clone(),
+                                            None => {
+                                                // First toggle — resolve the shell session
+                                                match self
+                                                    .resolve_shell_toggle_pair(&current_session)
+                                                    .await
+                                                {
+                                                    Ok(paired) => paired,
+                                                    Err(e) => {
+                                                        warn!(
+                                                            "Failed to resolve shell session: {}",
+                                                            e
+                                                        );
+                                                        self.ui_state.modal = Modal::Error {
+                                                            message: format!(
+                                                                "Cannot switch to shell: {}",
+                                                                e
+                                                            ),
+                                                        };
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        };
+
+                                        // Update the toggle pair so next Ctrl+\ switches back
+                                        self.ui_state.shell_toggle_pair =
+                                            Some((next_session.clone(), current_session.clone()));
+                                        current_session = next_session;
+
+                                        // Flush between switches
+                                        crate::tmux::flush_stdin();
+                                        info!("Switching to session: {}", current_session);
+                                        continue;
+                                    }
+                                    Ok(result) => {
+                                        info!("Attach ended: {:?}", result);
+                                        // Clear toggle state on normal detach
+                                        self.ui_state.shell_toggle_pair = None;
+                                        break;
+                                    }
+                                    Err(e) => {
+                                        warn!("Failed to attach to session: {}", e);
+                                        self.ui_state.modal = Modal::Error {
+                                            message: format!("Failed to attach: {}", e),
+                                        };
+                                        self.ui_state.shell_toggle_pair = None;
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -690,17 +766,17 @@ impl App {
         let old_session = self.ui_state.selected_session_id;
         let was_on_project = old_session.is_none() && self.ui_state.selected_project_id.is_some();
 
-        if let Some(idx) = self.ui_state.list_state.selected() {
-            if let Some(item) = self.ui_state.list_items.get(idx) {
-                match item {
-                    SessionListItem::Project { id, .. } => {
-                        self.ui_state.selected_project_id = Some(*id);
-                        self.ui_state.selected_session_id = None;
-                    }
-                    SessionListItem::Worktree { id, project_id, .. } => {
-                        self.ui_state.selected_session_id = Some(*id);
-                        self.ui_state.selected_project_id = Some(*project_id);
-                    }
+        if let Some(idx) = self.ui_state.list_state.selected()
+            && let Some(item) = self.ui_state.list_items.get(idx)
+        {
+            match item {
+                SessionListItem::Project { id, .. } => {
+                    self.ui_state.selected_project_id = Some(*id);
+                    self.ui_state.selected_session_id = None;
+                }
+                SessionListItem::Worktree { id, project_id, .. } => {
+                    self.ui_state.selected_session_id = Some(*id);
+                    self.ui_state.selected_project_id = Some(*project_id);
                 }
             }
         }
@@ -721,12 +797,6 @@ impl App {
                 self.ui_state.right_pane_view = RightPaneView::Preview;
                 self.ui_state.clear_right_pane = true;
             }
-        }
-
-        // Force full terminal redraw when the selected session changes to flush
-        // stale styled cells from the previous session's pane content
-        if self.ui_state.selected_session_id != old_session {
-            self.ui_state.clear_right_pane = true;
         }
     }
 
@@ -859,6 +929,7 @@ impl App {
     /// Render the preview pane
     fn render_preview(&mut self, frame: &mut Frame, area: Rect) {
         let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
+        let dim = !is_focused && self.config.dim_unfocused_preview;
 
         // Show tab indicator in title
         let title = " [Preview] | Diff | Shell ";
@@ -880,7 +951,8 @@ impl App {
 
         let preview = Preview::new(&self.ui_state.preview_content)
             .block(block)
-            .scroll(self.ui_state.preview_state.scroll_offset);
+            .scroll(self.ui_state.preview_state.scroll_offset)
+            .dim(dim);
 
         frame.render_widget(preview, area);
     }
@@ -888,6 +960,7 @@ impl App {
     /// Render the diff pane
     fn render_diff(&mut self, frame: &mut Frame, area: Rect) {
         let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
+        let dim = !is_focused && self.config.dim_unfocused_preview;
         let on_project = self.is_project_selected();
 
         // Show tab indicator and diff summary in title with colored +/- counts
@@ -935,7 +1008,8 @@ impl App {
 
         let diff_view = DiffView::new(&self.ui_state.diff_info, &self.theme)
             .block(block)
-            .scroll(self.ui_state.diff_state.scroll_offset);
+            .scroll(self.ui_state.diff_state.scroll_offset)
+            .dim(dim);
 
         frame.render_widget(diff_view, area);
     }
@@ -943,6 +1017,7 @@ impl App {
     /// Render the shell pane
     fn render_shell(&mut self, frame: &mut Frame, area: Rect) {
         let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
+        let dim = !is_focused && self.config.dim_unfocused_preview;
 
         let title = if self.is_project_selected() {
             " [Shell] | Diff "
@@ -966,7 +1041,8 @@ impl App {
 
         let preview = Preview::new(&self.ui_state.shell_content)
             .block(block)
-            .scroll(self.ui_state.shell_state.scroll_offset);
+            .scroll(self.ui_state.shell_state.scroll_offset)
+            .dim(dim);
 
         frame.render_widget(preview, area);
     }
@@ -1148,64 +1224,99 @@ impl App {
                 frame.render_widget(paragraph, content_area);
             }
 
-            Modal::Settings(ref state) => {
+            Modal::Settings(state) => {
                 self.render_settings_modal(frame, area, state);
             }
-        }
-    }
 
-    /// Build help screen lines dynamically from the keybinding table.
-    fn build_help_lines(&self) -> Vec<Line<'static>> {
-        let kb = &self.config.keybindings;
-        let mut lines: Vec<Line<'static>> = Vec::new();
-        let key_col_width = 18;
+            Modal::QuickSwitch {
+                query,
+                matches,
+                selected_idx,
+            } => {
+                let max_visible = 10;
+                let visible_matches = matches.len().min(max_visible);
+                // Dynamic height: border(2) + input(1) + matches
+                let modal_height = (3 + visible_matches) as u16;
+                let modal_width = (area.width * 60 / 100).max(40);
 
-        for (section_name, actions) in kb.sections() {
-            if !lines.is_empty() {
-                lines.push(Line::from(""));
+                // Position in upper third
+                let modal_area = Rect {
+                    x: area.x + (area.width.saturating_sub(modal_width)) / 2,
+                    y: area.y + area.height / 5,
+                    width: modal_width,
+                    height: modal_height.min(area.height),
+                };
+
+                frame.render_widget(Clear, modal_area);
+
+                let block = Block::default()
+                    .title(" Quick Switch ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.theme.modal_info));
+
+                let inner = block.inner(modal_area);
+                frame.render_widget(block, modal_area);
+
+                if inner.height == 0 {
+                    return;
+                }
+
+                // Input line
+                let input_line = Line::from(format!("> {}_", query));
+                let input_area = Rect { height: 1, ..inner };
+                frame.render_widget(Paragraph::new(input_line), input_area);
+
+                // Match lines
+                for (i, m) in matches.iter().take(max_visible).enumerate() {
+                    let row = inner.y + 1 + i as u16;
+                    if row >= inner.y + inner.height {
+                        break;
+                    }
+
+                    let status_icon = match m.status {
+                        SessionStatus::Running => "●",
+                        SessionStatus::Paused => "◐",
+                        SessionStatus::Stopped => "○",
+                    };
+                    let status_color = match m.status {
+                        SessionStatus::Running => self.theme.status_running,
+                        SessionStatus::Paused => self.theme.status_paused,
+                        SessionStatus::Stopped => self.theme.status_stopped,
+                    };
+
+                    let is_selected = i == *selected_idx;
+                    let line = Line::from(vec![
+                        Span::styled(
+                            format!(" {} ", status_icon),
+                            Style::default().fg(status_color),
+                        ),
+                        Span::styled(
+                            m.title.clone(),
+                            if is_selected {
+                                self.theme.selection()
+                            } else {
+                                Style::default()
+                            },
+                        ),
+                        Span::styled(
+                            format!(" [{}]", m.branch),
+                            Style::default().fg(self.theme.text_accent),
+                        ),
+                        Span::styled(
+                            format!(" ({})", m.project_name),
+                            Style::default().fg(self.theme.text_secondary),
+                        ),
+                    ]);
+
+                    let line_area = Rect {
+                        y: row,
+                        height: 1,
+                        ..inner
+                    };
+                    frame.render_widget(Paragraph::new(line), line_area);
+                }
             }
-            lines.push(Line::from(format!("{section_name}:")));
-
-            for (action, keys_str) in &actions {
-                let desc = action.description();
-                let padded_keys = format!("  {keys_str:<width$}{desc}", width = key_col_width);
-                lines.push(Line::from(padded_keys));
-            }
         }
-
-        // Status indicators (not keybinding-related, stays hardcoded)
-        lines.push(Line::from(""));
-        lines.push(Line::from("Status Indicators:"));
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled("●", Style::default().fg(self.theme.status_running)),
-            Span::raw("  Running (agent active)"),
-        ]));
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled("●", Style::default().fg(self.theme.status_pr)),
-            Span::raw("  PR open"),
-        ]));
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled("●", Style::default().fg(self.theme.status_pr_merged)),
-            Span::raw("  PR merged"),
-        ]));
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled("◐", Style::default().fg(self.theme.status_paused)),
-            Span::raw("  Paused"),
-        ]));
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled("○", Style::default().fg(self.theme.status_stopped)),
-            Span::raw("  Stopped"),
-        ]));
-
-        lines.push(Line::from(""));
-        lines.push(Line::from("Press any key to close this help."));
-
-        lines
     }
 
     /// Build rows for the settings modal for the given tab.
@@ -1251,9 +1362,9 @@ impl App {
                         field_key: "editor_gui".into(),
                     },
                     SettingsRow {
-                        label: "Pull Before Create".into(),
-                        value: c.pull_before_create.to_string(),
-                        field_key: "pull_before_create".into(),
+                        label: "Fetch Before Create".into(),
+                        value: c.fetch_before_create.to_string(),
+                        field_key: "fetch_before_create".into(),
                     },
                     SettingsRow {
                         label: "UI Refresh FPS".into(),
@@ -1517,9 +1628,9 @@ impl App {
                             _ => None,
                         };
                     }
-                    "pull_before_create" => {
+                    "fetch_before_create" => {
                         if let Ok(b) = value.parse::<bool>() {
-                            self.config.pull_before_create = b;
+                            self.config.fetch_before_create = b;
                         }
                     }
                     "ui_refresh_fps" => {
@@ -1728,6 +1839,74 @@ impl App {
         }
     }
 
+    /// Build help screen lines dynamically from the keybinding table.
+    fn build_help_lines(&self) -> Vec<Line<'static>> {
+        let kb = &self.config.keybindings;
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        let key_col_width = 18;
+
+        for (section_name, actions) in kb.sections() {
+            if !lines.is_empty() {
+                lines.push(Line::from(""));
+            }
+            lines.push(Line::from(format!("{section_name}:")));
+
+            for (action, keys_str) in &actions {
+                let desc = action.description();
+                let padded_keys = format!("  {keys_str:<width$}{desc}", width = key_col_width);
+                lines.push(Line::from(padded_keys));
+            }
+        }
+
+        // Quick-switch (hardcoded since leader_key is in config, not keybindings)
+        lines.push(Line::from(""));
+        lines.push(Line::from("Quick Switch:"));
+        let leader_display = if self.config.leader_key.trim().is_empty() || self.config.leader_key == " " {
+            "Space".to_string()
+        } else {
+            self.config.leader_key.clone()
+        };
+        lines.push(Line::from(format!(
+            "  {:<width$}Fuzzy session search",
+            leader_display,
+            width = key_col_width,
+        )));
+
+        // Status indicators (not keybinding-related, stays hardcoded)
+        lines.push(Line::from(""));
+        lines.push(Line::from("Status Indicators:"));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("●", Style::default().fg(self.theme.status_running)),
+            Span::raw("  Running (agent active)"),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("●", Style::default().fg(self.theme.status_pr)),
+            Span::raw("  PR open"),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("●", Style::default().fg(self.theme.status_pr_merged)),
+            Span::raw("  PR merged"),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("◐", Style::default().fg(self.theme.status_paused)),
+            Span::raw("  Paused"),
+        ]));
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("○", Style::default().fg(self.theme.status_stopped)),
+            Span::raw("  Stopped"),
+        ]));
+
+        lines.push(Line::from(""));
+        lines.push(Line::from("Press any key to close this help."));
+
+        lines
+    }
+
     /// Render status bar
     fn render_status_bar(&self, frame: &mut Frame, area: Rect) {
         if area.height < 2 {
@@ -1794,6 +1973,13 @@ impl App {
                 // Check for modal-specific handling first
                 if !matches!(self.ui_state.modal, Modal::None) {
                     self.handle_modal_key(key).await;
+                    return;
+                }
+
+                // Check for configurable leader key (quick-switch)
+                let (leader_code, leader_mods) = self.config.parse_leader_key();
+                if key.code == leader_code && key.modifiers == leader_mods {
+                    self.open_quick_switch().await;
                     return;
                 }
 
@@ -1924,6 +2110,63 @@ impl App {
                 };
                 self.handle_settings_key(key.code, state).await;
             }
+
+            Modal::QuickSwitch {
+                query,
+                matches,
+                selected_idx,
+            } => match (key.code, key.modifiers) {
+                (KeyCode::Esc, _) => {
+                    self.ui_state.modal = Modal::None;
+                }
+                (KeyCode::Enter, _) => {
+                    if let Some(m) = matches.get(*selected_idx) {
+                        let session_id = m.session_id;
+                        self.ui_state.modal = Modal::None;
+                        self.ui_state.selected_session_id = Some(session_id);
+                        // Select in the list too so we return to the right position
+                        if let Some(idx) =
+                            self.ui_state.list_items.iter().position(|item| {
+                                matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
+                            })
+                        {
+                            self.ui_state.list_state.select(Some(idx));
+                        }
+                        self.update_selection();
+                        self.handle_select().await;
+                    }
+                }
+                (KeyCode::Tab, _) => {
+                    if let Some(m) = matches.get(*selected_idx) {
+                        *query = m.title.clone();
+                        // Re-filter with the completed title
+                        self.refilter_quick_switch();
+                    }
+                }
+                (KeyCode::Backspace, _) => {
+                    query.pop();
+                    self.refilter_quick_switch();
+                }
+                (KeyCode::Up, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
+                    if !matches.is_empty() {
+                        *selected_idx = if *selected_idx == 0 {
+                            matches.len() - 1
+                        } else {
+                            *selected_idx - 1
+                        };
+                    }
+                }
+                (KeyCode::Down, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
+                    if !matches.is_empty() {
+                        *selected_idx = (*selected_idx + 1) % matches.len();
+                    }
+                }
+                (KeyCode::Char(c), _) => {
+                    query.push(c);
+                    self.refilter_quick_switch();
+                }
+                _ => {}
+            },
 
             Modal::None => {}
         }
@@ -2113,6 +2356,21 @@ impl App {
                         }
                     })
                     .await;
+
+                // Update tmux status bars for running sessions with PR info
+                {
+                    let state = self.store.read().await;
+                    for session in state.sessions.values() {
+                        if session.status == SessionStatus::Running {
+                            let info = self.session_manager.status_bar_info(session);
+                            self.session_manager
+                                .tmux
+                                .configure_status_bar(&session.tmux_session_name, &info)
+                                .await;
+                        }
+                    }
+                }
+
                 self.refresh_list_items().await;
             }
             StateUpdate::SessionCreated { session_id } => {
@@ -2211,6 +2469,76 @@ impl App {
         }
     }
 
+    /// Resolve the shell toggle pair for a given tmux session name.
+    ///
+    /// If the current session is a Claude session, returns the shell session name
+    /// (creating it if needed). If the current session is already a shell session
+    /// (ends with "-sh"), returns the Claude session name.
+    async fn resolve_shell_toggle_pair(
+        &mut self,
+        current_tmux_name: &str,
+    ) -> crate::error::Result<String> {
+        if current_tmux_name.ends_with("-sh") {
+            // We're in a shell session — the Claude session is the name without "-sh"
+            let claude_name = current_tmux_name.trim_end_matches("-sh").to_string();
+            // Verify the Claude session exists
+            if self
+                .session_manager
+                .tmux
+                .session_exists(&claude_name)
+                .await?
+            {
+                return Ok(claude_name);
+            }
+            return Err(crate::error::Error::Session(
+                crate::error::SessionError::TmuxSessionNotFound(claude_name),
+            ));
+        }
+
+        // We're in a Claude session — find the matching session ID and ensure shell exists
+        let session_id = {
+            let state = self.store.read().await;
+            state
+                .sessions
+                .values()
+                .find(|s| s.tmux_session_name == current_tmux_name)
+                .map(|s| s.id)
+        };
+
+        if let Some(session_id) = session_id {
+            let shell_name = self
+                .session_manager
+                .ensure_shell_session(&session_id)
+                .await?;
+            return Ok(shell_name);
+        }
+
+        // Try project-level shell
+        let project_id = {
+            let state = self.store.read().await;
+            state
+                .projects
+                .values()
+                .find(|p| p.shell_tmux_session_name.as_deref() == Some(current_tmux_name))
+                .map(|p| p.id)
+        };
+
+        if let Some(project_id) = project_id {
+            let shell_name = self
+                .session_manager
+                .ensure_project_shell_session(&project_id)
+                .await?;
+            return Ok(shell_name);
+        }
+
+        Err(crate::error::Error::Session(
+            crate::error::SessionError::TmuxSessionNotFound(format!(
+                "No session found for tmux name: {}",
+                current_tmux_name
+            )),
+        ))
+    }
+
     /// Handle open in editor command
     async fn handle_open_in_editor(&mut self) {
         let path = {
@@ -2271,6 +2599,103 @@ impl App {
         }
     }
 
+    /// Open the quick-switch modal with all sessions
+    async fn open_quick_switch(&mut self) {
+        let matches = self.gather_quick_switch_matches("").await;
+        self.ui_state.modal = Modal::QuickSwitch {
+            query: String::new(),
+            matches,
+            selected_idx: 0,
+        };
+    }
+
+    /// Gather session matches for a query (empty query = all sessions)
+    async fn gather_quick_switch_matches(&self, query: &str) -> Vec<QuickSwitchMatch> {
+        let state = self.store.read().await;
+        let mut matches = Vec::new();
+
+        for session in state.sessions.values() {
+            if !query.is_empty() && !session.matches_query(query) {
+                continue;
+            }
+            let project_name = state
+                .get_project(&session.project_id)
+                .map(|p| p.name.clone())
+                .unwrap_or_default();
+            matches.push(QuickSwitchMatch {
+                session_id: session.id,
+                title: session.title.clone(),
+                branch: session.branch.clone(),
+                project_name,
+                status: session.status,
+            });
+        }
+
+        // Sort by title for predictable ordering
+        matches.sort_by(|a, b| a.title.cmp(&b.title));
+        matches
+    }
+
+    /// Re-filter the quick-switch matches based on the current query.
+    /// Rebuilds from list_items so backspace can widen results.
+    fn refilter_quick_switch(&mut self) {
+        if let Modal::QuickSwitch {
+            query,
+            matches,
+            selected_idx,
+        } = &mut self.ui_state.modal
+        {
+            let query_lower = query.to_lowercase();
+            // Build project name lookup from list items
+            let mut project_names: std::collections::HashMap<SessionId, String> =
+                std::collections::HashMap::new();
+            let mut current_project_name = String::new();
+            for item in &self.ui_state.list_items {
+                match item {
+                    SessionListItem::Project { name, .. } => {
+                        current_project_name = name.clone();
+                    }
+                    SessionListItem::Worktree { id, .. } => {
+                        project_names.insert(*id, current_project_name.clone());
+                    }
+                }
+            }
+
+            *matches = self
+                .ui_state
+                .list_items
+                .iter()
+                .filter_map(|item| {
+                    if let SessionListItem::Worktree {
+                        id,
+                        title,
+                        branch,
+                        status,
+                        ..
+                    } = item
+                    {
+                        let project_name = project_names.get(id).cloned().unwrap_or_default();
+                        if query_lower.is_empty() || title.to_lowercase().contains(&query_lower) {
+                            return Some(QuickSwitchMatch {
+                                session_id: *id,
+                                title: title.clone(),
+                                branch: branch.clone(),
+                                project_name,
+                                status: *status,
+                            });
+                        }
+                    }
+                    None
+                })
+                .collect();
+
+            // Clamp selection
+            if *selected_idx >= matches.len() {
+                *selected_idx = matches.len().saturating_sub(1);
+            }
+        }
+    }
+
     /// Handle pause session
     async fn handle_pause_session(&mut self) {
         if let Some(session_id) = self.ui_state.selected_session_id {
@@ -2313,14 +2738,14 @@ impl App {
 
     /// Handle remove project - show confirmation (only when a project row is selected)
     fn handle_remove_project(&mut self) {
-        if self.ui_state.selected_session_id.is_none() {
-            if let Some(project_id) = self.ui_state.selected_project_id {
-                self.ui_state.modal = Modal::Confirm {
+        if self.ui_state.selected_session_id.is_none()
+            && let Some(project_id) = self.ui_state.selected_project_id
+        {
+            self.ui_state.modal = Modal::Confirm {
                     title: "Remove Project".to_string(),
                     message: "Are you sure you want to remove this project?\nThis will kill all sessions and remove all worktrees.".to_string(),
                     on_confirm: ConfirmAction::RemoveProject { project_id },
                 };
-            }
         }
     }
 
@@ -2455,35 +2880,16 @@ impl App {
                     let tmux = self.session_manager.tmux.clone();
                     let tx = self.event_loop.sender();
                     tokio::spawn(async move {
-                        if let Err(e) = tmux.kill_session(&tmux_name).await {
-                            debug!("Failed to kill tmux session: {}", e);
-                        }
-                        if let Some(ref shell_name) = shell_tmux_name {
-                            let _ = tmux.kill_session(shell_name).await;
-                        }
-                        if let Some(repo_path) = repo_path {
-                            let output = tokio::process::Command::new("git")
-                                .current_dir(&repo_path)
-                                .args(["worktree", "remove", "--force"])
-                                .arg(&worktree_path)
-                                .output()
-                                .await;
-                            if let Err(e) =
-                                output.as_ref().map_err(|e| e.to_string()).and_then(|o| {
-                                    if o.status.success() {
-                                        Ok(())
-                                    } else {
-                                        Err(String::from_utf8_lossy(&o.stderr).into_owned())
-                                    }
-                                })
-                            {
-                                let _ = tx
-                                    .send(AppEvent::StateUpdate(StateUpdate::Error {
-                                        message: format!("Background cleanup failed: {}", e),
-                                    }))
-                                    .await;
-                            }
-                        }
+                        cleanup_session_tmux(
+                            &tmux,
+                            &tmux_name,
+                            shell_tmux_name.as_deref(),
+                            repo_path
+                                .as_ref()
+                                .map(|rp| (worktree_path.as_path(), rp.as_path())),
+                            &tx,
+                        )
+                        .await;
                     });
                 }
             }
@@ -2540,36 +2946,16 @@ impl App {
                         if let Some(ref shell_name) = shell_tmux {
                             let _ = tmux.kill_session(shell_name).await;
                         }
-                        // Kill all session tmux sessions
-                        for (tmux_name, shell_tmux_name, _) in &sessions {
-                            let _ = tmux.kill_session(tmux_name).await;
-                            if let Some(ref shell_name) = shell_tmux_name {
-                                let _ = tmux.kill_session(shell_name).await;
-                            }
-                        }
-                        // Remove all worktrees
-                        for (_, _, worktree_path) in &sessions {
-                            let output = tokio::process::Command::new("git")
-                                .current_dir(&repo_path)
-                                .args(["worktree", "remove", "--force"])
-                                .arg(worktree_path)
-                                .output()
-                                .await;
-                            if let Err(e) =
-                                output.as_ref().map_err(|e| e.to_string()).and_then(|o| {
-                                    if o.status.success() {
-                                        Ok(())
-                                    } else {
-                                        Err(String::from_utf8_lossy(&o.stderr).into_owned())
-                                    }
-                                })
-                            {
-                                let _ = tx
-                                    .send(AppEvent::StateUpdate(StateUpdate::Error {
-                                        message: format!("Background cleanup failed: {}", e),
-                                    }))
-                                    .await;
-                            }
+                        // Kill all session tmux sessions + remove worktrees
+                        for (tmux_name, shell_tmux_name, worktree_path) in &sessions {
+                            cleanup_session_tmux(
+                                &tmux,
+                                tmux_name,
+                                shell_tmux_name.as_deref(),
+                                Some((worktree_path.as_path(), repo_path.as_path())),
+                                &tx,
+                            )
+                            .await;
                         }
                     });
                 }
@@ -2598,11 +2984,13 @@ impl App {
                     .collect()
             };
 
-            let mut results = Vec::with_capacity(sessions_to_check.len());
-            for (session_id, branch, repo_path) in sessions_to_check {
-                let pr_info = check_pr_for_branch(&repo_path, &branch).await;
-                results.push((session_id, pr_info));
-            }
+            let results = futures::future::join_all(sessions_to_check.into_iter().map(
+                |(session_id, branch, repo_path)| async move {
+                    let pr_info = check_pr_for_branch(&repo_path, &branch).await;
+                    (session_id, pr_info)
+                },
+            ))
+            .await;
 
             let _ = tx
                 .send(AppEvent::StateUpdate(StateUpdate::PrStatusReady {
@@ -2790,6 +3178,45 @@ fn format_color(color: ratatui::style::Color) -> String {
         Color::White => "white".into(),
         Color::Indexed(i) => format!("{i}"),
         Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+    }
+}
+
+/// Kill tmux sessions and remove a git worktree in the background.
+///
+/// Sends an error event if worktree removal fails.
+async fn cleanup_session_tmux(
+    tmux: &crate::tmux::TmuxExecutor,
+    tmux_name: &str,
+    shell_tmux_name: Option<&str>,
+    worktree_path: Option<(&std::path::Path, &std::path::Path)>,
+    tx: &tokio::sync::mpsc::Sender<AppEvent>,
+) {
+    if let Err(e) = tmux.kill_session(tmux_name).await {
+        debug!("Failed to kill tmux session: {}", e);
+    }
+    if let Some(shell_name) = shell_tmux_name {
+        let _ = tmux.kill_session(shell_name).await;
+    }
+    if let Some((worktree_path, repo_path)) = worktree_path {
+        let output = tokio::process::Command::new("git")
+            .current_dir(repo_path)
+            .args(["worktree", "remove", "--force"])
+            .arg(worktree_path)
+            .output()
+            .await;
+        if let Err(e) = output.as_ref().map_err(|e| e.to_string()).and_then(|o| {
+            if o.status.success() {
+                Ok(())
+            } else {
+                Err(String::from_utf8_lossy(&o.stderr).into_owned())
+            }
+        }) {
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::Error {
+                    message: format!("Background cleanup failed: {}", e),
+                }))
+                .await;
+        }
     }
 }
 

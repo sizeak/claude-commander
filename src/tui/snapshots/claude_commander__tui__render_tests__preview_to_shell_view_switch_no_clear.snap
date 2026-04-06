@@ -1,0 +1,14 @@
+---
+source: src/tui/render_tests.rs
+expression: terminal.backend()
+---
+"┌ Preview | Diff | [Shell] ────────────────────────────────┐"
+"│$ ls -la                                                  │"
+"│total 42                                                  │"
+"│drwxr-xr-x 5 user user 4096                               │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"└──────────────────────────────────────────────────────────┘"

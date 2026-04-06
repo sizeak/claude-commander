@@ -18,6 +18,8 @@ use crate::error::Result;
 pub enum AttachResult {
     /// User detached with Ctrl+Q or tmux detach (Ctrl+B D)
     Detached,
+    /// User pressed Ctrl+\ to toggle between Claude and shell sessions
+    SwitchToShell,
     /// The session/process ended
     SessionEnded,
     /// An error occurred during attachment
@@ -81,7 +83,7 @@ pub async fn attach_to_session(session_name: &str) -> Result<AttachResult> {
 
 /// Log any pending bytes in stdin for debugging
 fn log_pending_stdin(context: &str) {
-    use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
+    use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
     use std::io::Read;
     use std::os::unix::io::{AsFd, AsRawFd};
 
@@ -136,14 +138,14 @@ fn log_pending_stdin(context: &str) {
 
 /// Flush any pending input from stdin at the kernel level
 pub fn flush_stdin() {
-    use nix::sys::termios::{tcflush, FlushArg};
+    use nix::sys::termios::{FlushArg, tcflush};
 
     let _ = tcflush(std::io::stdin(), FlushArg::TCIFLUSH);
 }
 
 /// Resize PTY using ioctl
 fn resize_pty(fd: i32, rows: u16, cols: u16) {
-    use nix::libc::{ioctl, winsize, TIOCSWINSZ};
+    use nix::libc::{TIOCSWINSZ, ioctl, winsize};
 
     let ws = winsize {
         ws_row: rows,
@@ -219,6 +221,13 @@ async fn run_async_loop(
                         break;
                     }
 
+                    // Check for Ctrl+\ (0x1C) to toggle shell
+                    if data.contains(&0x1C) {
+                        debug!("Ctrl+\\ detected, switching to shell");
+                        let _ = stdin_shutdown.send(AttachResult::SwitchToShell).await;
+                        break;
+                    }
+
                     // Forward raw bytes to PTY
                     if pty_writer.write_all(data).await.is_err() {
                         break;
@@ -236,7 +245,7 @@ async fn run_async_loop(
     // Task 3: SIGWINCH handling (Unix only, as backup for resize events)
     #[cfg(unix)]
     let resize_task = tokio::spawn(async move {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
 
         if let Ok(mut sigwinch) = signal(SignalKind::window_change()) {
             loop {

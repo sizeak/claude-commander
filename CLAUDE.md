@@ -44,9 +44,15 @@ Terminal UI for managing Claude coding sessions via tmux and git worktrees. Each
 
 ## Config and state files
 
-- Config: `~/.config/claude-commander/config.toml` (see `Config` struct in `config/settings.rs` for all fields)
-- State: `~/.local/share/claude-commander/state.json`
-- Worktrees: `~/.local/share/claude-commander/worktrees/`
+Paths are determined by the `directories` crate (`ProjectDirs::from("com", "claude-commander", "claude-commander")`) and differ by platform:
+
+| File | macOS | Linux |
+|------|-------|-------|
+| Config | `~/Library/Application Support/com.claude-commander.claude-commander/config.toml` | `~/.config/claude-commander/config.toml` |
+| State | `~/Library/Application Support/com.claude-commander.claude-commander/state.json` | `~/.local/share/claude-commander/state.json` |
+| Worktrees | `~/Library/Application Support/com.claude-commander.claude-commander/worktrees/` | `~/.local/share/claude-commander/worktrees/` |
+
+See `Config` struct in `config/settings.rs` for all config fields. The worktrees directory can be overridden via the `worktrees_dir` config option.
 
 ## Testing
 

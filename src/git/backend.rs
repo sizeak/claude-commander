@@ -146,15 +146,42 @@ impl GitBackend {
         Ok(false) // Placeholder - full implementation needed
     }
 
+    /// Get the default branch from the remote via `refs/remotes/origin/HEAD`.
+    ///
+    /// Returns `None` if the ref doesn't exist or isn't a symbolic reference.
+    pub fn remote_default_branch(&self) -> Option<String> {
+        let reference = self
+            .repo
+            .try_find_reference("refs/remotes/origin/HEAD")
+            .ok()??;
+
+        let target_name = reference.inner.target.try_name()?;
+        let short = target_name.shorten().to_string();
+        short.strip_prefix("origin/").map(|s| s.to_string())
+    }
+
+    /// Check if a reference exists locally (e.g. `"refs/remotes/origin/main"`).
+    pub fn ref_exists(&self, ref_name: &str) -> Result<bool> {
+        let reference = self
+            .repo
+            .try_find_reference(ref_name)
+            .map_err(|e| GitError::Gix(e.to_string()))?;
+        Ok(reference.is_some())
+    }
+
     /// Get the main branch name (main or master)
     pub fn detect_main_branch(&self) -> Result<String> {
-        // Check for 'main' first, then 'master'
+        // Prefer the remote's declared default branch
+        if let Some(branch) = self.remote_default_branch() {
+            return Ok(branch);
+        }
+
+        // Fall back to local heuristic: main -> master -> current branch
         if self.branch_exists("main")? {
             Ok("main".to_string())
         } else if self.branch_exists("master")? {
             Ok("master".to_string())
         } else {
-            // Fall back to current branch
             self.current_branch()
         }
     }
@@ -208,4 +235,17 @@ mod tests {
         // This should not error, even for unborn branches
         assert!(branch.is_ok());
     }
+
+    #[test]
+    fn test_remote_default_branch_none_without_remote() {
+        let (_temp, backend) = init_test_repo();
+        assert!(backend.remote_default_branch().is_none());
+    }
+
+    #[test]
+    fn test_ref_exists_false_without_remote() {
+        let (_temp, backend) = init_test_repo();
+        assert!(!backend.ref_exists("refs/remotes/origin/main").unwrap());
+    }
+
 }

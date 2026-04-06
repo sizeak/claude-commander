@@ -5,8 +5,8 @@
 //! - Application state updates
 //! - Render ticks
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::config::keybindings::{BindableAction, KeyBindings};
@@ -146,6 +146,8 @@ pub enum UserCommand {
     PageUp,
     /// Page down in preview
     PageDown,
+    /// Open quick-switch session search modal
+    QuickSwitch,
 }
 
 impl UserCommand {

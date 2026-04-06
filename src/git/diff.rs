@@ -84,9 +84,8 @@ pub struct DiffCache<K> {
     ttl: Duration,
 }
 
-impl<
-        K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
-    > DiffCache<K>
+impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send + Sync + 'static>
+    DiffCache<K>
 {
     /// Create a new diff cache
     pub fn new() -> Self {
@@ -107,11 +106,11 @@ impl<
         // Fast path: check cache
         {
             let cache = self.cache.read().await;
-            if let Some(cached) = cache.get(key) {
-                if !cached.is_stale(self.ttl) {
-                    debug!("Diff cache hit for {}", key);
-                    return Ok(Arc::clone(cached));
-                }
+            if let Some(cached) = cache.get(key)
+                && !cached.is_stale(self.ttl)
+            {
+                debug!("Diff cache hit for {}", key);
+                return Ok(Arc::clone(cached));
             }
         }
 
@@ -146,9 +145,8 @@ impl<
     }
 }
 
-impl<
-        K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send + Sync + 'static,
-    > Default for DiffCache<K>
+impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send + Sync + 'static>
+    Default for DiffCache<K>
 {
     fn default() -> Self {
         Self::new()
@@ -290,10 +288,10 @@ fn parse_diff_stat(output: &str) -> (usize, usize, usize) {
                     if let Some(num) = part.split_whitespace().next() {
                         lines_added = num.parse().unwrap_or(0);
                     }
-                } else if part.contains("deletion") {
-                    if let Some(num) = part.split_whitespace().next() {
-                        lines_removed = num.parse().unwrap_or(0);
-                    }
+                } else if part.contains("deletion")
+                    && let Some(num) = part.split_whitespace().next()
+                {
+                    lines_removed = num.parse().unwrap_or(0);
                 }
             }
             break;
