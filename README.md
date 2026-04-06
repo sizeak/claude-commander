@@ -107,7 +107,10 @@ When attached to a session (via `Enter` or `claude-commander attach`):
 
 ## Configuration
 
-Configuration file: `~/.config/claude-commander/config.toml`
+Configuration file location depends on your platform:
+
+- **macOS**: `~/Library/Application Support/com.claude-commander.claude-commander/config.toml`
+- **Linux**: `~/.config/claude-commander/config.toml`
 
 All settings can also be set via environment variables with the `CC_` prefix (e.g. `CC_EDITOR=code`).
 
@@ -133,7 +136,7 @@ diff_cache_ttl_ms = 500
 # UI refresh rate in FPS
 ui_refresh_fps = 30
 
-# Custom worktrees directory (default: ~/.local/share/claude-commander/worktrees/)
+# Custom worktrees directory (default: platform-specific, see Data Storage below)
 # worktrees_dir = "/path/to/worktrees"
 
 # Shell program for shell sessions (default: $SHELL or "bash")
@@ -194,9 +197,13 @@ The TUI event loop (`App`) owns the terminal and render state. It sends user com
 
 ## Data Storage
 
-- **Config**: `~/.config/claude-commander/config.toml`
-- **State**: `~/.local/share/claude-commander/state.json`
-- **Worktrees**: `~/.local/share/claude-commander/worktrees/`
+Paths are platform-specific, determined by the `directories` crate:
+
+| File | macOS | Linux |
+|------|-------|-------|
+| Config | `~/Library/Application Support/com.claude-commander.claude-commander/config.toml` | `~/.config/claude-commander/config.toml` |
+| State | `~/Library/Application Support/com.claude-commander.claude-commander/state.json` | `~/.local/share/claude-commander/state.json` |
+| Worktrees | `~/Library/Application Support/com.claude-commander.claude-commander/worktrees/` | `~/.local/share/claude-commander/worktrees/` |
 
 ## Development
 
