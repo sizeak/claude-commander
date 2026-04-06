@@ -11,7 +11,7 @@ use ratatui::{
 };
 
 use crate::git::DiffInfo;
-use crate::tui::theme::Theme;
+use crate::tui::theme::{dim_color, Theme};
 
 /// Diff view widget
 pub struct DiffView<'a> {
@@ -23,8 +23,8 @@ pub struct DiffView<'a> {
     block: Option<Block<'a>>,
     /// Scroll offset
     scroll: u16,
-    /// Whether to dim the content (unfocused state)
-    dim: bool,
+    /// Opacity for unfocused dimming (None = no dimming, Some(0.4) = 40% brightness)
+    dim_opacity: Option<f32>,
 }
 
 impl<'a> DiffView<'a> {
@@ -35,7 +35,7 @@ impl<'a> DiffView<'a> {
             theme,
             block: None,
             scroll: 0,
-            dim: false,
+            dim_opacity: None,
         }
     }
 
@@ -51,9 +51,9 @@ impl<'a> DiffView<'a> {
         self
     }
 
-    /// Set whether content should be dimmed
-    pub fn dim(mut self, dim: bool) -> Self {
-        self.dim = dim;
+    /// Set the opacity for unfocused dimming (0.0 = black, 1.0 = unchanged)
+    pub fn dim_opacity(mut self, opacity: Option<f32>) -> Self {
+        self.dim_opacity = opacity;
         self
     }
 
@@ -75,8 +75,9 @@ impl<'a> DiffView<'a> {
             Style::default()
         };
 
-        if self.dim {
-            style = style.add_modifier(Modifier::DIM);
+        if let Some(opacity) = self.dim_opacity {
+            let fg = style.fg.unwrap_or(Color::Reset);
+            style = style.fg(dim_color(fg, opacity));
         }
 
         Line::from(Span::styled(line, style))

@@ -6,10 +6,11 @@ use ansi_to_tui::IntoText;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::Modifier,
     text::Text,
     widgets::{Block, Paragraph, ScrollbarState, Widget},
 };
+
+use crate::tui::theme::dim_color;
 
 /// Preview widget for displaying pane content
 pub struct Preview<'a> {
@@ -19,8 +20,8 @@ pub struct Preview<'a> {
     block: Option<Block<'a>>,
     /// Scroll offset
     scroll: u16,
-    /// Whether to dim the content (unfocused state)
-    dim: bool,
+    /// Opacity for unfocused dimming (None = no dimming, Some(0.4) = 40% brightness)
+    dim_opacity: Option<f32>,
 }
 
 impl<'a> Preview<'a> {
@@ -30,7 +31,7 @@ impl<'a> Preview<'a> {
             content,
             block: None,
             scroll: 0,
-            dim: false,
+            dim_opacity: None,
         }
     }
 
@@ -46,9 +47,9 @@ impl<'a> Preview<'a> {
         self
     }
 
-    /// Set whether content should be dimmed
-    pub fn dim(mut self, dim: bool) -> Self {
-        self.dim = dim;
+    /// Set the opacity for unfocused dimming (0.0 = black, 1.0 = unchanged)
+    pub fn dim_opacity(mut self, opacity: Option<f32>) -> Self {
+        self.dim_opacity = opacity;
         self
     }
 }
@@ -61,13 +62,11 @@ impl<'a> Widget for Preview<'a> {
             .into_text()
             .unwrap_or_else(|_| Text::raw(self.content));
 
-        if self.dim {
+        if let Some(opacity) = self.dim_opacity {
             for line in &mut text.lines {
                 for span in &mut line.spans {
-                    span.style = span
-                        .style
-                        .add_modifier(Modifier::DIM)
-                        .remove_modifier(Modifier::REVERSED);
+                    let fg = span.style.fg.unwrap_or(ratatui::style::Color::Reset);
+                    span.style = span.style.fg(dim_color(fg, opacity));
                 }
             }
         }
