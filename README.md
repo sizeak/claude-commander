@@ -157,6 +157,10 @@ pr_check_interval_secs = 600
 # Dim the right pane (preview/diff/shell) when the session list is focused
 dim_unfocused_preview = true
 
+# How much to dim unfocused pane colors (0.0 = fully dimmed/black, 1.0 = no dimming)
+# Uses a foreground color override for cross-terminal compatibility (no Modifier::DIM)
+dim_unfocused_opacity = 0.4
+
 # Leader key for quick-switch session search
 # Supports: " ", "space", "ctrl+k", "f1", etc.
 # leader_key = " "

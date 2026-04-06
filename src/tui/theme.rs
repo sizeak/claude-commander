@@ -270,6 +270,97 @@ impl Theme {
     }
 }
 
+/// Scale a color's brightness toward black by the given factor (0.0 = black, 1.0 = unchanged).
+///
+/// For named and indexed colors that can't be scaled directly, falls back to the
+/// closest indexed gray from the 256-color palette.
+pub fn dim_color(color: Color, opacity: f32) -> Color {
+    let opacity = opacity.clamp(0.0, 1.0);
+    match color {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            (r as f32 * opacity) as u8,
+            (g as f32 * opacity) as u8,
+            (b as f32 * opacity) as u8,
+        ),
+        Color::Reset => {
+            // Reset means "terminal default" — dim to a gray proportional to opacity
+            // Assume default text is ~200 brightness
+            let v = (200.0 * opacity) as u8;
+            Color::Rgb(v, v, v)
+        }
+        other => {
+            // Convert named/indexed colors to approximate RGB, then dim
+            let (r, g, b) = color_to_approx_rgb(other);
+            Color::Rgb(
+                (r as f32 * opacity) as u8,
+                (g as f32 * opacity) as u8,
+                (b as f32 * opacity) as u8,
+            )
+        }
+    }
+}
+
+/// Approximate RGB values for named ANSI colors
+fn color_to_approx_rgb(color: Color) -> (u8, u8, u8) {
+    match color {
+        Color::Black => (0, 0, 0),
+        Color::Red => (205, 0, 0),
+        Color::Green => (0, 205, 0),
+        Color::Yellow => (205, 205, 0),
+        Color::Blue => (0, 0, 238),
+        Color::Magenta => (205, 0, 205),
+        Color::Cyan => (0, 205, 205),
+        Color::White | Color::Gray => (229, 229, 229),
+        Color::DarkGray => (127, 127, 127),
+        Color::LightRed => (255, 0, 0),
+        Color::LightGreen => (0, 255, 0),
+        Color::LightYellow => (255, 255, 0),
+        Color::LightBlue => (92, 92, 255),
+        Color::LightMagenta => (255, 0, 255),
+        Color::LightCyan => (0, 255, 255),
+        Color::Indexed(n) => indexed_to_rgb(n),
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Reset => (200, 200, 200),
+    }
+}
+
+/// Convert a 256-color index to approximate RGB
+fn indexed_to_rgb(n: u8) -> (u8, u8, u8) {
+    match n {
+        // Standard 16 colors — delegate to named
+        0 => (0, 0, 0),
+        1 => (205, 0, 0),
+        2 => (0, 205, 0),
+        3 => (205, 205, 0),
+        4 => (0, 0, 238),
+        5 => (205, 0, 205),
+        6 => (0, 205, 205),
+        7 => (229, 229, 229),
+        8 => (127, 127, 127),
+        9 => (255, 0, 0),
+        10 => (0, 255, 0),
+        11 => (255, 255, 0),
+        12 => (92, 92, 255),
+        13 => (255, 0, 255),
+        14 => (0, 255, 255),
+        15 => (255, 255, 255),
+        // 6x6x6 color cube (indices 16-231)
+        16..=231 => {
+            let n = n - 16;
+            let b = n % 6;
+            let g = (n / 6) % 6;
+            let r = n / 36;
+            let to_val = |c: u8| if c == 0 { 0u8 } else { 55 + 40 * c };
+            (to_val(r), to_val(g), to_val(b))
+        }
+        // Grayscale ramp (indices 232-255)
+        232..=255 => {
+            let v = 8 + 10 * (n - 232);
+            (v, v, v)
+        }
+    }
+}
+
 /// Convert a ratatui `Color` to a tmux-compatible color string
 pub fn color_to_tmux(color: Color) -> String {
     match color {
@@ -364,6 +455,65 @@ mod tests {
         assert_eq!(color_to_tmux(Color::White), "white");
         assert_eq!(color_to_tmux(Color::DarkGray), "brightblack");
         assert_eq!(color_to_tmux(Color::Reset), "default");
+    }
+
+    #[test]
+    fn test_dim_color_rgb() {
+        // 50% opacity halves each channel
+        assert_eq!(dim_color(Color::Rgb(200, 100, 50), 0.5), Color::Rgb(100, 50, 25));
+    }
+
+    #[test]
+    fn test_dim_color_full_opacity_unchanged() {
+        assert_eq!(dim_color(Color::Rgb(200, 100, 50), 1.0), Color::Rgb(200, 100, 50));
+    }
+
+    #[test]
+    fn test_dim_color_zero_opacity_is_black() {
+        assert_eq!(dim_color(Color::Rgb(200, 100, 50), 0.0), Color::Rgb(0, 0, 0));
+    }
+
+    #[test]
+    fn test_dim_color_named_converts_to_rgb() {
+        // Green at 50% should be approximately half brightness
+        let dimmed = dim_color(Color::Green, 0.5);
+        assert!(matches!(dimmed, Color::Rgb(_, _, _)));
+    }
+
+    #[test]
+    fn test_dim_color_indexed_converts_to_rgb() {
+        let dimmed = dim_color(Color::Indexed(196), 0.5);
+        assert!(matches!(dimmed, Color::Rgb(_, _, _)));
+    }
+
+    #[test]
+    fn test_dim_color_reset_produces_gray() {
+        let dimmed = dim_color(Color::Reset, 0.5);
+        assert_eq!(dimmed, Color::Rgb(100, 100, 100));
+    }
+
+    #[test]
+    fn test_dim_color_clamps_opacity() {
+        // Opacity > 1.0 should be clamped to 1.0
+        assert_eq!(dim_color(Color::Rgb(200, 100, 50), 2.0), Color::Rgb(200, 100, 50));
+        // Opacity < 0.0 should be clamped to 0.0
+        assert_eq!(dim_color(Color::Rgb(200, 100, 50), -1.0), Color::Rgb(0, 0, 0));
+    }
+
+    #[test]
+    fn test_indexed_to_rgb_grayscale_ramp() {
+        // Index 232 = darkest gray (8)
+        assert_eq!(indexed_to_rgb(232), (8, 8, 8));
+        // Index 255 = lightest gray (238)
+        assert_eq!(indexed_to_rgb(255), (238, 238, 238));
+    }
+
+    #[test]
+    fn test_indexed_to_rgb_color_cube() {
+        // Index 16 = (0,0,0) in the 6x6x6 cube
+        assert_eq!(indexed_to_rgb(16), (0, 0, 0));
+        // Index 196 = (5,0,0) = bright red
+        assert_eq!(indexed_to_rgb(196), (255, 0, 0));
     }
 
     #[test]

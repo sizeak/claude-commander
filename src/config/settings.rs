@@ -63,6 +63,11 @@ pub struct Config {
     /// Dim the right pane (preview/diff/shell) when the session list is focused
     pub dim_unfocused_preview: bool,
 
+    /// How much to dim unfocused pane colors (0.0 = fully dimmed/black, 1.0 = no dimming).
+    /// Uses a foreground color override instead of terminal DIM modifier for cross-terminal
+    /// compatibility. Only takes effect when `dim_unfocused_preview` is true.
+    pub dim_unfocused_opacity: f32,
+
     /// Leader key for quick-switch modal (e.g. " " for Space, "ctrl+k", "f1")
     pub leader_key: String,
 
@@ -93,6 +98,7 @@ impl Default for Config {
             fetch_before_create: true,
             state_sync_interval_ms: 2000,
             dim_unfocused_preview: true,
+            dim_unfocused_opacity: 0.4,
             leader_key: " ".to_string(),
             debug: false,
             log_file: None,
