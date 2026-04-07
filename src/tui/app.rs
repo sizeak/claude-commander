@@ -182,7 +182,10 @@ pub enum SettingsEditing {
     /// Editing a text value
     TextInput { value: String },
     /// Capturing a key for keybinding
-    KeyCapture { action_name: String, keys: Vec<String> }
+    KeyCapture {
+        action_name: String,
+        keys: Vec<String>,
+    },
 }
 
 /// Action to perform when input modal is submitted
@@ -1363,10 +1366,7 @@ impl App {
                     },
                     SettingsRow {
                         label: "Editor".into(),
-                        value: c
-                            .editor
-                            .clone()
-                            .unwrap_or_else(|| "(auto)".into()),
+                        value: c.editor.clone().unwrap_or_else(|| "(auto)".into()),
                         field_key: "editor".into(),
                         color_swatch: None,
                     },
@@ -1408,11 +1408,13 @@ impl App {
                         label: "Dim Unfocused Preview".into(),
                         value: c.dim_unfocused_preview.to_string(),
                         field_key: "dim_unfocused_preview".into(),
+                        color_swatch: None,
                     },
                     SettingsRow {
                         label: "Dim Opacity".into(),
                         value: format!("{:.2}", c.dim_unfocused_opacity),
                         field_key: "dim_unfocused_opacity".into(),
+                        color_swatch: None,
                     },
                 ]
             }
@@ -1454,10 +1456,7 @@ impl App {
                 vec![
                     SettingsRow {
                         label: "Preset".into(),
-                        value: o
-                            .preset
-                            .clone()
-                            .unwrap_or_else(|| "(auto)".into()),
+                        value: o.preset.clone().unwrap_or_else(|| "(auto)".into()),
                         field_key: "preset".into(),
                         color_swatch: None,
                     },
@@ -1585,10 +1584,7 @@ impl App {
                 height: 1,
             };
             let label = format!("{:<width$}", row.label, width = label_width as usize);
-            frame.render_widget(
-                Paragraph::new(Span::styled(label, row_style)),
-                label_area,
-            );
+            frame.render_widget(Paragraph::new(Span::styled(label, row_style)), label_area);
 
             // Color swatch + Value
             if rows_area.width > label_width + 2 {
@@ -1669,58 +1665,56 @@ impl App {
     /// Apply an edited value from the settings modal to the config.
     fn apply_settings_edit(&mut self, tab: SettingsTab, field_key: &str, value: &str) {
         match tab {
-            SettingsTab::General => {
-                match field_key {
-                    "default_program" => self.config.default_program = value.to_string(),
-                    "branch_prefix" => self.config.branch_prefix = value.to_string(),
-                    "shell_program" => self.config.shell_program = value.to_string(),
-                    "editor" => {
-                        self.config.editor = if value.is_empty() || value == "(auto)" {
-                            None
-                        } else {
-                            Some(value.to_string())
-                        };
-                    }
-                    "editor_gui" => {
-                        self.config.editor_gui = match value {
-                            "true" => Some(true),
-                            "false" => Some(false),
-                            _ => None,
-                        };
-                    }
-                    "fetch_before_create" => {
-                        if let Ok(b) = value.parse::<bool>() {
-                            self.config.fetch_before_create = b;
-                        }
-                    }
-                    "ui_refresh_fps" => {
-                        if let Ok(v) = value.parse::<u32>() {
-                            self.config.ui_refresh_fps = v;
-                        }
-                    }
-                    "pr_check_interval_secs" => {
-                        if let Ok(v) = value.parse::<u64>() {
-                            self.config.pr_check_interval_secs = v;
-                        }
-                    }
-                    "max_concurrent_tmux" => {
-                        if let Ok(v) = value.parse::<usize>() {
-                            self.config.max_concurrent_tmux = v;
-                        }
-                    }
-                    "dim_unfocused_preview" => {
-                        if let Ok(b) = value.parse::<bool>() {
-                            self.config.dim_unfocused_preview = b;
-                        }
-                    }
-                    "dim_unfocused_opacity" => {
-                        if let Ok(v) = value.parse::<f32>() {
-                            self.config.dim_unfocused_opacity = v.clamp(0.0, 1.0);
-                        }
-                    }
-                    _ => {}
+            SettingsTab::General => match field_key {
+                "default_program" => self.config.default_program = value.to_string(),
+                "branch_prefix" => self.config.branch_prefix = value.to_string(),
+                "shell_program" => self.config.shell_program = value.to_string(),
+                "editor" => {
+                    self.config.editor = if value.is_empty() || value == "(auto)" {
+                        None
+                    } else {
+                        Some(value.to_string())
+                    };
                 }
-            }
+                "editor_gui" => {
+                    self.config.editor_gui = match value {
+                        "true" => Some(true),
+                        "false" => Some(false),
+                        _ => None,
+                    };
+                }
+                "fetch_before_create" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        self.config.fetch_before_create = b;
+                    }
+                }
+                "ui_refresh_fps" => {
+                    if let Ok(v) = value.parse::<u32>() {
+                        self.config.ui_refresh_fps = v;
+                    }
+                }
+                "pr_check_interval_secs" => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.pr_check_interval_secs = v;
+                    }
+                }
+                "max_concurrent_tmux" => {
+                    if let Ok(v) = value.parse::<usize>() {
+                        self.config.max_concurrent_tmux = v;
+                    }
+                }
+                "dim_unfocused_preview" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        self.config.dim_unfocused_preview = b;
+                    }
+                }
+                "dim_unfocused_opacity" => {
+                    if let Ok(v) = value.parse::<f32>() {
+                        self.config.dim_unfocused_opacity = v.clamp(0.0, 1.0);
+                    }
+                }
+                _ => {}
+            },
             SettingsTab::Theme => {
                 use crate::config::theme::ColorValue;
 
@@ -1931,11 +1925,12 @@ impl App {
         // Quick-switch (hardcoded since leader_key is in config, not keybindings)
         lines.push(Line::from(""));
         lines.push(Line::from("Quick Switch:"));
-        let leader_display = if self.config.leader_key.trim().is_empty() || self.config.leader_key == " " {
-            "Space".to_string()
-        } else {
-            self.config.leader_key.clone()
-        };
+        let leader_display =
+            if self.config.leader_key.trim().is_empty() || self.config.leader_key == " " {
+                "Space".to_string()
+            } else {
+                self.config.leader_key.clone()
+            };
         lines.push(Line::from(format!(
             "  {:<width$}Fuzzy session search",
             leader_display,
