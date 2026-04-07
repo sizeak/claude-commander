@@ -22,7 +22,7 @@ use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Margin, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
@@ -172,6 +172,8 @@ pub struct SettingsRow {
     pub label: String,
     pub value: String,
     pub field_key: String,
+    /// Optional color for displaying a swatch next to the value (Theme tab only)
+    pub color_swatch: Option<Color>,
 }
 
 /// Editing state within the settings modal
@@ -1341,6 +1343,7 @@ impl App {
                         label: "Default Program".into(),
                         value: c.default_program.clone(),
                         field_key: "default_program".into(),
+                        color_swatch: None,
                     },
                     SettingsRow {
                         label: "Branch Prefix".into(),
@@ -1350,11 +1353,13 @@ impl App {
                             c.branch_prefix.clone()
                         },
                         field_key: "branch_prefix".into(),
+                        color_swatch: None,
                     },
                     SettingsRow {
                         label: "Shell Program".into(),
                         value: c.shell_program.clone(),
                         field_key: "shell_program".into(),
+                        color_swatch: None,
                     },
                     SettingsRow {
                         label: "Editor".into(),
@@ -1363,6 +1368,7 @@ impl App {
                             .clone()
                             .unwrap_or_else(|| "(auto)".into()),
                         field_key: "editor".into(),
+                        color_swatch: None,
                     },
                     SettingsRow {
                         label: "Editor is GUI".into(),
@@ -1372,26 +1378,31 @@ impl App {
                             None => "(auto)".into(),
                         },
                         field_key: "editor_gui".into(),
+                        color_swatch: None,
                     },
                     SettingsRow {
                         label: "Fetch Before Create".into(),
                         value: c.fetch_before_create.to_string(),
                         field_key: "fetch_before_create".into(),
+                        color_swatch: None,
                     },
                     SettingsRow {
                         label: "UI Refresh FPS".into(),
                         value: c.ui_refresh_fps.to_string(),
                         field_key: "ui_refresh_fps".into(),
+                        color_swatch: None,
                     },
                     SettingsRow {
                         label: "PR Check Interval (s)".into(),
                         value: c.pr_check_interval_secs.to_string(),
                         field_key: "pr_check_interval_secs".into(),
+                        color_swatch: None,
                     },
                     SettingsRow {
                         label: "Max Concurrent Tmux".into(),
                         value: c.max_concurrent_tmux.to_string(),
                         field_key: "max_concurrent_tmux".into(),
+                        color_swatch: None,
                     },
                 ]
             }
@@ -1403,6 +1414,7 @@ impl App {
                         label: action.description().to_string(),
                         value: kb.keys_display(action),
                         field_key: action.config_name().to_string(),
+                        color_swatch: None,
                     })
                     .collect()
             }
@@ -1424,6 +1436,7 @@ impl App {
                                 })
                                 .unwrap_or_else(|| format_color(t.$field)),
                             field_key: stringify!($field).into(),
+                            color_swatch: Some(t.$field),
                         }
                     };
                 }
@@ -1436,6 +1449,7 @@ impl App {
                             .clone()
                             .unwrap_or_else(|| "(auto)".into()),
                         field_key: "preset".into(),
+                        color_swatch: None,
                     },
                     theme_row!("Border Focused", border_focused),
                     theme_row!("Border Unfocused", border_unfocused),
@@ -1566,12 +1580,36 @@ impl App {
                 label_area,
             );
 
-            // Value
+            // Color swatch + Value
             if rows_area.width > label_width + 2 {
+                let swatch_width: u16 = if row.color_swatch.is_some() { 3 } else { 0 };
+                let val_x = rows_area.x + label_width + 2;
+
+                // Render color swatch if present
+                if let Some(swatch_color) = row.color_swatch {
+                    let swatch_area = Rect {
+                        x: val_x,
+                        y,
+                        width: swatch_width.min(value_width),
+                        height: 1,
+                    };
+                    let swatch_style = if is_selected {
+                        Style::default()
+                            .fg(swatch_color)
+                            .bg(self.theme.selection_bg)
+                    } else {
+                        Style::default().fg(swatch_color)
+                    };
+                    frame.render_widget(
+                        Paragraph::new(Span::styled("██ ", swatch_style)),
+                        swatch_area,
+                    );
+                }
+
                 let val_area = Rect {
-                    x: rows_area.x + label_width + 2,
+                    x: val_x + swatch_width,
                     y,
-                    width: value_width,
+                    width: value_width.saturating_sub(swatch_width),
                     height: 1,
                 };
 
