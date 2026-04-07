@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use crossterm::{
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        KeyModifiers, MouseEventKind,
+        MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -1800,7 +1800,7 @@ impl App {
     /// Handle a keypress in the settings modal.
     async fn handle_settings_key(
         &mut self,
-        code: crossterm::event::KeyCode,
+        key: crossterm::event::KeyEvent,
         mut state: SettingsState,
     ) {
         use crossterm::event::KeyCode;
@@ -1808,7 +1808,7 @@ impl App {
         if let Some(ref mut editing) = state.editing {
             // Currently editing a field
             match editing {
-                SettingsEditing::TextInput { value } => match code {
+                SettingsEditing::TextInput { value } => match key.code {
                     KeyCode::Enter => {
                         let val = value.clone();
                         let field_key = state.rows[state.selected_row].field_key.clone();
@@ -1836,7 +1836,7 @@ impl App {
                 },
                 SettingsEditing::KeyCapture { .. } => {
                     // For key capture, any keypress except Esc is captured as the new binding
-                    match code {
+                    match key.code {
                         KeyCode::Esc => {
                             state.editing = None;
                             self.ui_state.modal = Modal::Settings(state);
@@ -1851,30 +1851,17 @@ impl App {
                 }
             }
         } else {
-            // Not editing — navigation mode
-            match code {
-                KeyCode::Esc | KeyCode::Char('q') => {
-                    self.ui_state.modal = Modal::None;
-                }
-                KeyCode::Tab => {
-                    state.tab = state.tab.next();
-                    state.selected_row = 0;
-                    state.rows = self.build_settings_rows(state.tab);
-                    self.ui_state.modal = Modal::Settings(state);
-                }
-                KeyCode::BackTab => {
-                    state.tab = state.tab.prev();
-                    state.selected_row = 0;
-                    state.rows = self.build_settings_rows(state.tab);
-                    self.ui_state.modal = Modal::Settings(state);
-                }
-                KeyCode::Char('j') | KeyCode::Down => {
+            // Not editing — navigation mode: resolve via configurable keybindings
+            use crate::config::keybindings::BindableAction;
+
+            match self.config.keybindings.resolve(&key) {
+                Some(BindableAction::NavigateDown) => {
                     if !state.rows.is_empty() {
                         state.selected_row = (state.selected_row + 1) % state.rows.len();
                     }
                     self.ui_state.modal = Modal::Settings(state);
                 }
-                KeyCode::Char('k') | KeyCode::Up => {
+                Some(BindableAction::NavigateUp) => {
                     if !state.rows.is_empty() {
                         state.selected_row = if state.selected_row == 0 {
                             state.rows.len() - 1
@@ -1884,21 +1871,43 @@ impl App {
                     }
                     self.ui_state.modal = Modal::Settings(state);
                 }
-                KeyCode::Enter => {
-                    if !state.rows.is_empty() {
-                        let current_value = state.rows[state.selected_row].value.clone();
-                        let initial = if current_value == "(auto)" || current_value == "(none)" {
-                            String::new()
-                        } else {
-                            current_value
-                        };
-                        state.editing = Some(SettingsEditing::TextInput { value: initial });
+                Some(BindableAction::Quit) => {
+                    self.ui_state.modal = Modal::None;
+                }
+                _ => match key.code {
+                    KeyCode::Esc => {
+                        self.ui_state.modal = Modal::None;
                     }
-                    self.ui_state.modal = Modal::Settings(state);
-                }
-                _ => {
-                    self.ui_state.modal = Modal::Settings(state);
-                }
+                    KeyCode::Tab => {
+                        state.tab = state.tab.next();
+                        state.selected_row = 0;
+                        state.rows = self.build_settings_rows(state.tab);
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::BackTab => {
+                        state.tab = state.tab.prev();
+                        state.selected_row = 0;
+                        state.rows = self.build_settings_rows(state.tab);
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Enter => {
+                        if !state.rows.is_empty() {
+                            let current_value = state.rows[state.selected_row].value.clone();
+                            let initial =
+                                if current_value == "(auto)" || current_value == "(none)" {
+                                    String::new()
+                                } else {
+                                    current_value
+                                };
+                            state.editing =
+                                Some(SettingsEditing::TextInput { value: initial });
+                        }
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    _ => {
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                },
             }
         }
     }
@@ -2173,65 +2182,70 @@ impl App {
                     Modal::Settings(s) => s,
                     _ => unreachable!(),
                 };
-                self.handle_settings_key(key.code, state).await;
+                self.handle_settings_key(key, state).await;
             }
 
             Modal::QuickSwitch {
                 query,
                 matches,
                 selected_idx,
-            } => match (key.code, key.modifiers) {
-                (KeyCode::Esc, _) => {
-                    self.ui_state.modal = Modal::None;
-                }
-                (KeyCode::Enter, _) => {
-                    if let Some(m) = matches.get(*selected_idx) {
-                        let session_id = m.session_id;
-                        self.ui_state.modal = Modal::None;
-                        self.ui_state.selected_session_id = Some(session_id);
-                        // Select in the list too so we return to the right position
-                        if let Some(idx) =
-                            self.ui_state.list_items.iter().position(|item| {
-                                matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
-                            })
-                        {
-                            self.ui_state.list_state.select(Some(idx));
+            } => {
+                use crate::config::keybindings::BindableAction;
+
+                // Resolve configurable bindings first for navigation
+                match self.config.keybindings.resolve(&key) {
+                    Some(BindableAction::NavigateUp) => {
+                        if !matches.is_empty() {
+                            *selected_idx = if *selected_idx == 0 {
+                                matches.len() - 1
+                            } else {
+                                *selected_idx - 1
+                            };
                         }
-                        self.update_selection();
-                        self.handle_select().await;
                     }
-                }
-                (KeyCode::Tab, _) => {
-                    if let Some(m) = matches.get(*selected_idx) {
-                        *query = m.title.clone();
-                        // Re-filter with the completed title
-                        self.refilter_quick_switch();
+                    Some(BindableAction::NavigateDown) => {
+                        if !matches.is_empty() {
+                            *selected_idx = (*selected_idx + 1) % matches.len();
+                        }
                     }
+                    _ => match key.code {
+                        KeyCode::Esc => {
+                            self.ui_state.modal = Modal::None;
+                        }
+                        KeyCode::Enter => {
+                            if let Some(m) = matches.get(*selected_idx) {
+                                let session_id = m.session_id;
+                                self.ui_state.modal = Modal::None;
+                                self.ui_state.selected_session_id = Some(session_id);
+                                if let Some(idx) =
+                                    self.ui_state.list_items.iter().position(|item| {
+                                        matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
+                                    })
+                                {
+                                    self.ui_state.list_state.select(Some(idx));
+                                }
+                                self.update_selection();
+                                self.handle_select().await;
+                            }
+                        }
+                        KeyCode::Tab => {
+                            if let Some(m) = matches.get(*selected_idx) {
+                                *query = m.title.clone();
+                                self.refilter_quick_switch();
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            query.pop();
+                            self.refilter_quick_switch();
+                        }
+                        KeyCode::Char(c) => {
+                            query.push(c);
+                            self.refilter_quick_switch();
+                        }
+                        _ => {}
+                    },
                 }
-                (KeyCode::Backspace, _) => {
-                    query.pop();
-                    self.refilter_quick_switch();
-                }
-                (KeyCode::Up, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
-                    if !matches.is_empty() {
-                        *selected_idx = if *selected_idx == 0 {
-                            matches.len() - 1
-                        } else {
-                            *selected_idx - 1
-                        };
-                    }
-                }
-                (KeyCode::Down, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
-                    if !matches.is_empty() {
-                        *selected_idx = (*selected_idx + 1) % matches.len();
-                    }
-                }
-                (KeyCode::Char(c), _) => {
-                    query.push(c);
-                    self.refilter_quick_switch();
-                }
-                _ => {}
-            },
+            }
 
             Modal::None => {}
         }
