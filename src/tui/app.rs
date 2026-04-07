@@ -1404,6 +1404,16 @@ impl App {
                         field_key: "max_concurrent_tmux".into(),
                         color_swatch: None,
                     },
+                    SettingsRow {
+                        label: "Dim Unfocused Preview".into(),
+                        value: c.dim_unfocused_preview.to_string(),
+                        field_key: "dim_unfocused_preview".into(),
+                    },
+                    SettingsRow {
+                        label: "Dim Opacity".into(),
+                        value: format!("{:.2}", c.dim_unfocused_opacity),
+                        field_key: "dim_unfocused_opacity".into(),
+                    },
                 ]
             }
             SettingsTab::Keybindings => {
@@ -1696,6 +1706,16 @@ impl App {
                     "max_concurrent_tmux" => {
                         if let Ok(v) = value.parse::<usize>() {
                             self.config.max_concurrent_tmux = v;
+                        }
+                    }
+                    "dim_unfocused_preview" => {
+                        if let Ok(b) = value.parse::<bool>() {
+                            self.config.dim_unfocused_preview = b;
+                        }
+                    }
+                    "dim_unfocused_opacity" => {
+                        if let Ok(v) = value.parse::<f32>() {
+                            self.config.dim_unfocused_opacity = v.clamp(0.0, 1.0);
                         }
                     }
                     _ => {}
