@@ -13,6 +13,7 @@ use figment::{
 use serde::{Deserialize, Serialize};
 
 use crate::config::keybindings::KeyBindings;
+use crate::config::theme::ThemeOverrides;
 use crate::error::{ConfigError, Error, Result};
 
 /// Application configuration
@@ -79,6 +80,10 @@ pub struct Config {
 
     /// Key bindings
     pub keybindings: KeyBindings,
+
+    /// Theme color overrides
+    #[serde(default)]
+    pub theme: ThemeOverrides,
 }
 
 impl Default for Config {
@@ -103,6 +108,7 @@ impl Default for Config {
             debug: false,
             log_file: None,
             keybindings: KeyBindings::default(),
+            theme: ThemeOverrides::default(),
         }
     }
 }

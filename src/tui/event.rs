@@ -126,6 +126,8 @@ pub enum UserCommand {
     GrowLeftPane,
     /// Show help
     ShowHelp,
+    /// Show settings modal
+    ShowSettings,
     /// Quit application
     Quit,
     /// Cancel current operation
@@ -197,6 +199,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::ShrinkLeftPane => Self::ShrinkLeftPane,
             BindableAction::GrowLeftPane => Self::GrowLeftPane,
             BindableAction::ShowHelp => Self::ShowHelp,
+            BindableAction::ShowSettings => Self::ShowSettings,
             BindableAction::Quit => Self::Quit,
             BindableAction::ScrollUp => Self::ScrollUp,
             BindableAction::ScrollDown => Self::ScrollDown,

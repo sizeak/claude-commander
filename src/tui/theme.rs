@@ -5,6 +5,8 @@
 
 use ratatui::style::{Color, Style};
 
+use crate::config::theme::ThemeOverrides;
+
 /// Terminal color capability
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ColorMode {
@@ -229,6 +231,66 @@ impl Theme {
         }
     }
 
+    /// Look up a preset palette by name.
+    ///
+    /// Recognised names: `"basic"`, `"indexed"`, `"truecolor"`.
+    pub fn from_preset(name: &str) -> Option<Self> {
+        match name.to_lowercase().as_str() {
+            "basic" => Some(Self::basic()),
+            "indexed" => Some(Self::indexed()),
+            "truecolor" => Some(Self::truecolor()),
+            _ => None,
+        }
+    }
+
+    /// Apply user-supplied overrides on top of this theme.
+    ///
+    /// Only `Some` fields in `overrides` replace the corresponding color;
+    /// `None` fields leave the base theme value untouched.
+    pub fn with_overrides(mut self, overrides: &ThemeOverrides) -> Self {
+        macro_rules! apply {
+            ($field:ident) => {
+                if let Some(cv) = overrides.$field {
+                    self.$field = cv.0;
+                }
+            };
+        }
+
+        apply!(border_focused);
+        apply!(border_unfocused);
+        apply!(selection_bg);
+        apply!(status_running);
+        apply!(status_paused);
+        apply!(status_stopped);
+        apply!(status_pr);
+        apply!(status_pr_merged);
+        apply!(text_primary);
+        apply!(text_secondary);
+        apply!(text_accent);
+        apply!(text_pr);
+        apply!(diff_added);
+        apply!(diff_removed);
+        apply!(diff_hunk_header);
+        apply!(diff_file_header);
+        apply!(diff_context);
+        apply!(modal_info);
+        apply!(modal_warning);
+        apply!(modal_error);
+        apply!(status_bar_bg);
+        apply!(status_bar_fg);
+
+        // selection_fg is Option<Color> in Theme but Option<ColorValue> in overrides
+        if let Some(cv) = overrides.selection_fg {
+            self.selection_fg = Some(cv.0);
+        }
+
+        // project_colors is intentionally not overridable — paired-tuple
+        // arrays are ergonomically poor in TOML and the feature has minimal
+        // user demand.
+
+        self
+    }
+
     /// Style for focused pane borders
     pub fn border_focused(&self) -> Style {
         Style::default().fg(self.border_focused)
@@ -388,6 +450,7 @@ pub fn color_to_tmux(color: Color) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::theme::{ColorValue, ThemeOverrides};
 
     #[test]
     fn test_basic_theme() {
@@ -434,6 +497,63 @@ mod tests {
         assert_eq!(basic.border_focused, Color::Cyan);
         assert_eq!(indexed.border_focused, Color::Indexed(117));
         assert_eq!(truecolor.border_focused, Color::Rgb(137, 180, 250));
+    }
+
+    #[test]
+    fn test_from_preset_valid() {
+        assert_eq!(
+            Theme::from_preset("basic").unwrap().border_focused,
+            Color::Cyan
+        );
+        assert_eq!(
+            Theme::from_preset("indexed").unwrap().border_focused,
+            Color::Indexed(117)
+        );
+        assert_eq!(
+            Theme::from_preset("TrueColor").unwrap().border_focused,
+            Color::Rgb(137, 180, 250)
+        );
+    }
+
+    #[test]
+    fn test_from_preset_unknown_returns_none() {
+        assert!(Theme::from_preset("catppuccin").is_none());
+    }
+
+    #[test]
+    fn test_with_overrides_applies_some_fields() {
+        let base = Theme::basic();
+        let overrides = ThemeOverrides {
+            border_focused: Some(ColorValue(Color::Rgb(255, 0, 0))),
+            status_running: Some(ColorValue(Color::Yellow)),
+            ..Default::default()
+        };
+        let themed = base.with_overrides(&overrides);
+        assert_eq!(themed.border_focused, Color::Rgb(255, 0, 0));
+        assert_eq!(themed.status_running, Color::Yellow);
+        // Untouched fields keep the base value
+        assert_eq!(themed.border_unfocused, Color::DarkGray);
+        assert_eq!(themed.status_paused, Color::Yellow);
+    }
+
+    #[test]
+    fn test_with_overrides_empty_is_identity() {
+        let base = Theme::indexed();
+        let themed = base.clone().with_overrides(&ThemeOverrides::default());
+        assert_eq!(themed.border_focused, base.border_focused);
+        assert_eq!(themed.selection_bg, base.selection_bg);
+        assert_eq!(themed.status_bar_bg, base.status_bar_bg);
+    }
+
+    #[test]
+    fn test_with_overrides_selection_fg() {
+        let base = Theme::basic();
+        let overrides = ThemeOverrides {
+            selection_fg: Some(ColorValue(Color::Rgb(1, 2, 3))),
+            ..Default::default()
+        };
+        let themed = base.with_overrides(&overrides);
+        assert_eq!(themed.selection_fg, Some(Color::Rgb(1, 2, 3)));
     }
 
     #[test]
