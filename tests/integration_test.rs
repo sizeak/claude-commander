@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use claude_commander::SessionStatus;
-use claude_commander::config::{AppState, Config, StateStore};
+use claude_commander::config::{AppState, Config, ConfigStore, StateStore};
 use claude_commander::git::GitBackend;
 use claude_commander::session::SessionManager;
 
@@ -18,6 +18,14 @@ fn create_isolated_store(temp_dir: &TempDir) -> Arc<StateStore> {
     let state_path = temp_dir.path().join("state.json");
     let state = AppState::load_from(&state_path).unwrap();
     Arc::new(StateStore::with_path(state, state_path))
+}
+
+/// Helper to create an isolated ConfigStore for testing
+fn create_isolated_config_store(temp_dir: &TempDir, config: Config) -> Arc<ConfigStore> {
+    let config_path = temp_dir.path().join("config.toml");
+    let toml = toml::to_string_pretty(&config).unwrap();
+    std::fs::write(&config_path, toml).unwrap();
+    Arc::new(ConfigStore::with_path(config, config_path))
 }
 
 /// Helper to create a test git repository
@@ -133,8 +141,9 @@ async fn test_session_manager_add_project() {
     let state_temp_dir = TempDir::new().unwrap();
 
     let config = Config::default();
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
     let store = create_isolated_store(&state_temp_dir);
-    let manager = SessionManager::new(config, store.clone(), "");
+    let manager = SessionManager::new(config_store, store.clone(), "");
 
     // Add project
     let result = manager.add_project(repo_path.clone()).await;
@@ -168,8 +177,9 @@ async fn test_session_manager_create_session() {
         ..Config::default()
     };
 
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
     let store = create_isolated_store(&state_temp_dir);
-    let manager = SessionManager::new(config, store.clone(), "");
+    let manager = SessionManager::new(config_store, store.clone(), "");
 
     // Add project
     let project_id = manager.add_project(repo_path).await.unwrap();
@@ -227,8 +237,9 @@ async fn test_session_manager_pause_resume() {
         ..Config::default()
     };
 
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
     let store = create_isolated_store(&state_temp_dir);
-    let manager = SessionManager::new(config, store.clone(), "");
+    let manager = SessionManager::new(config_store, store.clone(), "");
 
     // Add project and create session
     let project_id = manager.add_project(repo_path).await.unwrap();
@@ -321,8 +332,9 @@ async fn test_sync_worktrees_imports_external() {
         ..Config::default()
     };
 
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
     let store = create_isolated_store(&state_temp_dir);
-    let manager = SessionManager::new(config, store.clone(), "");
+    let manager = SessionManager::new(config_store, store.clone(), "");
 
     // Add project (no worktrees yet)
     let project_id = manager.add_project(repo_path.clone()).await.unwrap();
@@ -492,8 +504,9 @@ async fn test_create_session_no_remote_falls_back() {
         ..Config::default()
     };
 
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
     let store = create_isolated_store(&state_temp_dir);
-    let manager = SessionManager::new(config, store.clone(), "");
+    let manager = SessionManager::new(config_store, store.clone(), "");
 
     let project_id = manager.add_project(repo_path).await.unwrap();
 
