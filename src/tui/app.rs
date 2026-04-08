@@ -344,6 +344,7 @@ impl App {
         self.session_manager.check_tmux().await?;
 
         // One-time setup
+        self.cleanup_stale_creating_sessions().await;
         self.sync_session_states().await;
 
         // Check gh availability and do initial PR check
@@ -518,6 +519,34 @@ impl App {
         Ok(())
     }
 
+    /// Remove any sessions stuck in `Creating` status from a previous crash.
+    async fn cleanup_stale_creating_sessions(&self) {
+        let creating_ids: Vec<SessionId> = {
+            let state = self.store.read().await;
+            state
+                .sessions
+                .values()
+                .filter(|s| s.status == SessionStatus::Creating)
+                .map(|s| s.id)
+                .collect()
+        };
+
+        if !creating_ids.is_empty() {
+            warn!(
+                "Cleaning up {} stale Creating session(s) from previous run",
+                creating_ids.len()
+            );
+            let _ = self
+                .store
+                .mutate(move |state| {
+                    for sid in &creating_ids {
+                        state.remove_session(sid);
+                    }
+                })
+                .await;
+        }
+    }
+
     /// Sync app state with actual tmux session state
     ///
     /// This method checks all active sessions and updates their status
@@ -528,7 +557,7 @@ impl App {
             state
                 .sessions
                 .values()
-                .filter(|s| s.status.is_active())
+                .filter(|s| s.status.is_active() && s.status != SessionStatus::Creating)
                 .map(|s| (s.id, s.tmux_session_name.clone()))
                 .collect()
         };
@@ -917,6 +946,7 @@ impl App {
         frame.render_widget(heading, chunks[0]);
 
         let tree_list = TreeList::new(&self.ui_state.list_items, &self.theme)
+            .tick(self.ui_state.tick_count)
             .highlight_style(self.theme.selection().add_modifier(Modifier::BOLD));
 
         frame.render_stateful_widget(
@@ -1291,11 +1321,13 @@ impl App {
                     }
 
                     let status_icon = match m.status {
+                        SessionStatus::Creating => "⠋",
                         SessionStatus::Running => "●",
                         SessionStatus::Paused => "◐",
                         SessionStatus::Stopped => "○",
                     };
                     let status_color = match m.status {
+                        SessionStatus::Creating => self.theme.status_creating,
                         SessionStatus::Running => self.theme.status_running,
                         SessionStatus::Paused => self.theme.status_paused,
                         SessionStatus::Stopped => self.theme.status_stopped,
@@ -2469,8 +2501,16 @@ impl App {
                 self.update_selection();
                 self.spawn_preview_update();
             }
-            StateUpdate::SessionCreateFailed { message } => {
+            StateUpdate::SessionCreateFailed {
+                session_id,
+                message,
+            } => {
                 debug!("Session creation failed: {}", message);
+                let _ = self
+                    .session_manager
+                    .remove_creating_session(&session_id)
+                    .await;
+                self.refresh_list_items().await;
                 self.ui_state.modal = Modal::Error { message };
             }
             StateUpdate::ExternalChange => {
@@ -2484,12 +2524,27 @@ impl App {
         }
     }
 
+    /// Check if the selected session is in Creating state
+    fn selected_session_is_creating(&self) -> bool {
+        self.ui_state.list_items.iter().any(|item| {
+            matches!(
+                item,
+                SessionListItem::Worktree { id, status, .. }
+                if self.ui_state.selected_session_id == Some(*id)
+                    && *status == SessionStatus::Creating
+            )
+        })
+    }
+
     /// Handle selection (attach to session)
     async fn handle_select(&mut self) {
         info!(
             "handle_select called, selected_session_id: {:?}",
             self.ui_state.selected_session_id
         );
+        if self.selected_session_is_creating() {
+            return;
+        }
         if let Some(session_id) = self.ui_state.selected_session_id {
             info!("Getting attach command for session: {}", session_id);
             match self.session_manager.get_attach_command(&session_id).await {
@@ -2513,6 +2568,9 @@ impl App {
 
     /// Handle shell selection (attach to shell session)
     async fn handle_select_shell(&mut self) {
+        if self.selected_session_is_creating() {
+            return;
+        }
         if let Some(session_id) = self.ui_state.selected_session_id {
             match self
                 .session_manager
@@ -2620,6 +2678,9 @@ impl App {
 
     /// Handle open in editor command
     async fn handle_open_in_editor(&mut self) {
+        if self.selected_session_is_creating() {
+            return;
+        }
         let path = {
             let state = self.store.read().await;
             if let Some(session_id) = self.ui_state.selected_session_id {
@@ -2694,6 +2755,9 @@ impl App {
         let mut matches = Vec::new();
 
         for session in state.sessions.values() {
+            if session.status == SessionStatus::Creating {
+                continue;
+            }
             if !query.is_empty() && !session.matches_query(query) {
                 continue;
             }
@@ -2777,6 +2841,9 @@ impl App {
 
     /// Handle pause session
     async fn handle_pause_session(&mut self) {
+        if self.selected_session_is_creating() {
+            return;
+        }
         if let Some(session_id) = self.ui_state.selected_session_id {
             match self.session_manager.pause_session(&session_id).await {
                 Ok(_) => {
@@ -2797,6 +2864,9 @@ impl App {
 
     /// Handle resume session
     async fn handle_resume_session(&mut self) {
+        if self.selected_session_is_creating() {
+            return;
+        }
         if let Some(session_id) = self.ui_state.selected_session_id {
             match self.session_manager.resume_session(&session_id).await {
                 Ok(_) => {
@@ -2830,6 +2900,9 @@ impl App {
 
     /// Handle delete session - show confirmation
     fn handle_delete_session(&mut self) {
+        if self.selected_session_is_creating() {
+            return;
+        }
         if let Some(session_id) = self.ui_state.selected_session_id {
             self.ui_state.modal = Modal::Confirm {
                 title: "Delete Session".to_string(),
@@ -2851,28 +2924,47 @@ impl App {
                     return;
                 }
 
-                self.ui_state.modal = Modal::Loading {
-                    title: "New Session".to_string(),
-                    message: format!("Creating \"{}\"...", value),
+                // Insert placeholder session immediately (no blocking modal)
+                self.ui_state.modal = Modal::None;
+                let session_id = match self
+                    .session_manager
+                    .prepare_session(&project_id, value, None)
+                    .await
+                {
+                    Ok(id) => id,
+                    Err(e) => {
+                        self.ui_state.modal = Modal::Error {
+                            message: format!("Failed to create session: {}", e),
+                        };
+                        return;
+                    }
                 };
 
+                // Refresh list and select the new placeholder
+                self.refresh_list_items().await;
+                if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
+                    matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
+                }) {
+                    self.ui_state.list_state.select(Some(idx));
+                }
+                self.update_selection();
+
+                // Spawn background task for heavy work
                 let session_manager = self.session_manager.clone();
                 let tx = self.event_loop.sender();
                 tokio::spawn(async move {
-                    match session_manager
-                        .create_session(&project_id, value, None)
-                        .await
-                    {
-                        Ok(session_id) => {
+                    match session_manager.finalize_session(&session_id).await {
+                        Ok(sid) => {
                             let _ = tx
                                 .send(AppEvent::StateUpdate(StateUpdate::SessionCreated {
-                                    session_id,
+                                    session_id: sid,
                                 }))
                                 .await;
                         }
                         Err(e) => {
                             let _ = tx
                                 .send(AppEvent::StateUpdate(StateUpdate::SessionCreateFailed {
+                                    session_id,
                                     message: format!("Failed to create session: {}", e),
                                 }))
                                 .await;
@@ -3056,6 +3148,7 @@ impl App {
                 state
                     .sessions
                     .values()
+                    .filter(|s| s.status != SessionStatus::Creating)
                     .filter_map(|s| {
                         let project = state.projects.get(&s.project_id)?;
                         Some((s.id, s.branch.clone(), project.repo_path.clone()))
@@ -3176,6 +3269,21 @@ async fn fetch_preview_data(
     project_id: Option<ProjectId>,
 ) -> (String, Arc<DiffInfo>, String) {
     if let Some(sid) = session_id {
+        // Check if session is still Creating (no tmux session to capture yet)
+        let is_creating = {
+            let state = mgr.store.read().await;
+            state
+                .get_session(&sid)
+                .is_some_and(|s| s.status == SessionStatus::Creating)
+        };
+        if is_creating {
+            return (
+                "Creating session...".to_string(),
+                Arc::new(DiffInfo::empty()),
+                String::new(),
+            );
+        }
+
         debug!(
             "fetch_preview_data: fetching content/diff/shell for session {}",
             sid

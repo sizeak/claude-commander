@@ -13,6 +13,9 @@ use ratatui::{
 use crate::session::{SessionListItem, SessionStatus};
 use crate::tui::theme::Theme;
 
+/// Braille spinner frames for the Creating status indicator
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 /// Tree list widget for displaying hierarchical sessions
 pub struct TreeList<'a> {
     /// Items to display
@@ -23,6 +26,8 @@ pub struct TreeList<'a> {
     block: Option<Block<'a>>,
     /// Style for selected item
     highlight_style: Style,
+    /// Tick counter for spinner animation
+    tick: u64,
 }
 
 impl<'a> TreeList<'a> {
@@ -33,7 +38,14 @@ impl<'a> TreeList<'a> {
             theme,
             block: None,
             highlight_style: theme.selection().add_modifier(Modifier::BOLD),
+            tick: 0,
         }
+    }
+
+    /// Set the tick counter for spinner animation
+    pub fn tick(mut self, tick: u64) -> Self {
+        self.tick = tick;
+        self
     }
 
     /// Set the highlight style
@@ -114,6 +126,11 @@ impl<'a> TreeList<'a> {
                     };
                     let has_pr = pr_number.is_some();
                     let (status_icon, status_color) = match status {
+                        SessionStatus::Creating => {
+                            let frame =
+                                (self.tick / 4) as usize % SPINNER_FRAMES.len();
+                            (SPINNER_FRAMES[frame], self.theme.status_creating)
+                        }
                         SessionStatus::Running => (
                             "●",
                             if has_pr {
@@ -506,5 +523,16 @@ mod tests {
 
         state.previous();
         assert_eq!(state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_spinner_frame_cycling() {
+        // tick/4 selects the frame index, modulo 10 frames
+        assert_eq!((0u64 / 4) as usize % SPINNER_FRAMES.len(), 0); // "⠋"
+        assert_eq!((4u64 / 4) as usize % SPINNER_FRAMES.len(), 1); // "⠙"
+        assert_eq!((8u64 / 4) as usize % SPINNER_FRAMES.len(), 2); // "⠹"
+        assert_eq!((36u64 / 4) as usize % SPINNER_FRAMES.len(), 9); // "⠏"
+        // Wraps around after 10 frames
+        assert_eq!((40u64 / 4) as usize % SPINNER_FRAMES.len(), 0); // back to "⠋"
     }
 }

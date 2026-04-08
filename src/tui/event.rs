@@ -73,7 +73,10 @@ pub enum StateUpdate {
     /// Session creation completed successfully
     SessionCreated { session_id: SessionId },
     /// Session creation failed
-    SessionCreateFailed { message: String },
+    SessionCreateFailed {
+        session_id: SessionId,
+        message: String,
+    },
     /// State file was modified by another instance
     ExternalChange,
     /// Preview/diff/shell data ready from background fetch

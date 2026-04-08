@@ -174,20 +174,23 @@ async fn test_session_manager_create_session() {
     // Add project
     let project_id = manager.add_project(repo_path).await.unwrap();
 
-    // Create session
-    let result = manager
-        .create_session(
+    // Create session (prepare + finalize)
+    let session_id = manager
+        .prepare_session(
             &project_id,
             "test-session".to_string(),
             Some("bash".to_string()),
         )
-        .await;
+        .await
+        .expect("prepare_session should succeed");
+
+    let result = manager.finalize_session(&session_id).await;
 
     if let Err(e) = &result {
-        eprintln!("Error creating session: {}", e);
+        eprintln!("Error finalizing session: {}", e);
     }
 
-    assert!(result.is_ok(), "Should create session");
+    assert!(result.is_ok(), "Should finalize session");
 
     let session_id = result.unwrap();
 
@@ -230,16 +233,17 @@ async fn test_session_manager_pause_resume() {
     let store = create_isolated_store(&state_temp_dir);
     let manager = SessionManager::new(config, store.clone(), "");
 
-    // Add project and create session
+    // Add project and create session (prepare + finalize)
     let project_id = manager.add_project(repo_path).await.unwrap();
     let session_id = manager
-        .create_session(
+        .prepare_session(
             &project_id,
             "pause-test".to_string(),
             Some("bash".to_string()),
         )
         .await
         .unwrap();
+    manager.finalize_session(&session_id).await.unwrap();
 
     // Verify initial status
     {
@@ -497,17 +501,20 @@ async fn test_create_session_no_remote_falls_back() {
 
     let project_id = manager.add_project(repo_path).await.unwrap();
 
-    let result = manager
-        .create_session(
+    let session_id = manager
+        .prepare_session(
             &project_id,
             "fallback-test".to_string(),
             Some("bash".to_string()),
         )
-        .await;
+        .await
+        .expect("prepare_session should succeed");
+
+    let result = manager.finalize_session(&session_id).await;
 
     assert!(
         result.is_ok(),
-        "Session creation should succeed without remote: {:?}",
+        "Session finalization should succeed without remote: {:?}",
         result.err()
     );
 
