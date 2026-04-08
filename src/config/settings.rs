@@ -72,6 +72,12 @@ pub struct Config {
     /// Leader key for quick-switch modal (e.g. " " for Space, "ctrl+k", "f1")
     pub leader_key: String,
 
+    /// Show sequential numbers next to sessions for quick-jump hotkeys
+    pub show_session_numbers: bool,
+
+    /// Debounce delay in ms when typing multi-digit session numbers
+    pub session_number_debounce_ms: u64,
+
     /// Enable debug logging
     pub debug: bool,
 
@@ -105,6 +111,8 @@ impl Default for Config {
             dim_unfocused_preview: true,
             dim_unfocused_opacity: 0.4,
             leader_key: " ".to_string(),
+            show_session_numbers: false,
+            session_number_debounce_ms: 250,
             debug: false,
             log_file: None,
             keybindings: KeyBindings::default(),
@@ -460,6 +468,13 @@ mod tests {
         let (code, mods) = config.parse_leader_key();
         assert_eq!(code, KeyCode::Char(' '));
         assert_eq!(mods, KeyModifiers::NONE);
+    }
+
+    #[test]
+    fn test_default_session_numbers_config() {
+        let config = Config::default();
+        assert!(!config.show_session_numbers);
+        assert_eq!(config.session_number_debounce_ms, 250);
     }
 
     #[test]

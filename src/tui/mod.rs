@@ -7,6 +7,7 @@
 //! - Modal overlays for input and confirmation
 
 mod app;
+mod digit_accumulator;
 mod event;
 mod path_completer;
 pub mod theme;
