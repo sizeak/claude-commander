@@ -199,6 +199,7 @@ pub enum InputAction {
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
     DeleteSession { session_id: SessionId },
+    RestartSession { session_id: SessionId },
     RemoveProject { project_id: ProjectId },
 }
 
@@ -2289,6 +2290,9 @@ impl App {
             UserCommand::DeleteSession => {
                 self.handle_delete_session();
             }
+            UserCommand::RestartSession => {
+                self.handle_restart_session();
+            }
             UserCommand::RemoveProject => {
                 self.handle_remove_project();
             }
@@ -2828,6 +2832,17 @@ impl App {
         }
     }
 
+    /// Handle restart session - show confirmation
+    fn handle_restart_session(&mut self) {
+        if let Some(session_id) = self.ui_state.selected_session_id {
+            self.ui_state.modal = Modal::Confirm {
+                title: "Restart Session".to_string(),
+                message: "This will kill the current tmux session and start a fresh one.\nClaude will pick up where it left off via /resume.".to_string(),
+                on_confirm: ConfirmAction::RestartSession { session_id },
+            };
+        }
+    }
+
     /// Handle delete session - show confirmation
     fn handle_delete_session(&mut self) {
         if let Some(session_id) = self.ui_state.selected_session_id {
@@ -2970,6 +2985,22 @@ impl App {
                         )
                         .await;
                     });
+                }
+            }
+            ConfirmAction::RestartSession { session_id } => {
+                match self.session_manager.restart_session(&session_id).await {
+                    Ok(_) => {
+                        self.ui_state.status_message = Some((
+                            "Session restarted".to_string(),
+                            Instant::now() + Duration::from_secs(3),
+                        ));
+                        self.refresh_list_items().await;
+                    }
+                    Err(e) => {
+                        self.ui_state.modal = Modal::Error {
+                            message: format!("Failed to restart: {}", e),
+                        };
+                    }
                 }
             }
             ConfirmAction::RemoveProject { project_id } => {
