@@ -87,6 +87,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `p` | Pause session |
 | `r` | Resume session |
 | `d` | Delete session |
+| `R` | Restart session (kill tmux + recreate with /resume) |
 | `D` | Remove project |
 | `e` | Open in editor/IDE |
 | `s` | Open shell in worktree |
