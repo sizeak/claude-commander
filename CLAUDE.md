@@ -77,6 +77,14 @@ Use red-green TDD: write a failing test first, then implement the fix. Key areas
 
 When adding new behavior, add a corresponding unit test that would fail without the change.
 
+## Documentation
+
+When adding or changing config options, hotkeys, or keybindings:
+
+- **README.md** — Update the Keyboard Shortcuts table and the Configuration TOML block to reflect the change
+- **Help modal** — Update the help text rendered in `app.rs` (`render_help_modal`) so the in-app `?` help stays in sync with the README
+- **CLAUDE.md** — No update needed for individual options; the Architecture section points to `Config` struct as the source of truth
+
 ## Pre-commit hooks
 
 This project uses [pre-commit](https://pre-commit.com/) to run `cargo fmt` and `cargo clippy` on every commit. After cloning, run:
