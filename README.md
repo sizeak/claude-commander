@@ -88,7 +88,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `r` | Resume session |
 | `d` | Delete session |
 | `D` | Remove project |
-| `e` | Open in editor/IDE |
+| `Ctrl-e` | Open in editor/IDE |
 | `s` | Open shell in worktree |
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
 | `<` / `>` | Shrink / grow left pane |
@@ -104,6 +104,7 @@ When attached to a session (via `Enter` or `claude-commander attach`):
 |-----|--------|
 | `Ctrl-q` | Detach and return to session list |
 | `Ctrl-\` | Switch between Claude and shell pane |
+| `Ctrl-e` | Open session worktree in editor/IDE |
 
 ## Configuration
 

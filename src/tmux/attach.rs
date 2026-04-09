@@ -20,6 +20,8 @@ pub enum AttachResult {
     Detached,
     /// User pressed Ctrl+\ to toggle between Claude and shell sessions
     SwitchToShell,
+    /// User pressed Ctrl+E to open the session in an editor
+    OpenEditor,
     /// The session/process ended
     SessionEnded,
     /// An error occurred during attachment
@@ -225,6 +227,13 @@ async fn run_async_loop(
                     if data.contains(&0x1C) {
                         debug!("Ctrl+\\ detected, switching to shell");
                         let _ = stdin_shutdown.send(AttachResult::SwitchToShell).await;
+                        break;
+                    }
+
+                    // Check for Ctrl+E (0x05) to open in editor
+                    if data.contains(&0x05) {
+                        debug!("Ctrl+E detected, opening editor");
+                        let _ = stdin_shutdown.send(AttachResult::OpenEditor).await;
                         break;
                     }
 

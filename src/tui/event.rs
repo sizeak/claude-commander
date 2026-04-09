@@ -168,6 +168,11 @@ impl UserCommand {
             return Some(action.into());
         }
 
+        // Backwards-compat: bare 'e' still opens editor (undocumented)
+        if key.code == KeyCode::Char('e') && key.modifiers == KeyModifiers::NONE {
+            return Some(UserCommand::OpenInEditor);
+        }
+
         // Structural keys (not rebindable)
         match (key.code, key.modifiers) {
             (KeyCode::Esc, KeyModifiers::NONE) => Some(UserCommand::Cancel),
@@ -543,7 +548,7 @@ mod tests {
             ),
             (
                 KeyCode::Char('e'),
-                KeyModifiers::NONE,
+                KeyModifiers::CONTROL,
                 UserCommand::OpenInEditor,
             ),
         ];
@@ -674,6 +679,16 @@ mod tests {
         assert!(matches!(
             UserCommand::from_key(key, &b),
             Some(UserCommand::TextInput('A'))
+        ));
+    }
+
+    #[test]
+    fn test_bare_e_opens_editor_backwards_compat() {
+        let b = kb();
+        let key = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::OpenInEditor)
         ));
     }
 }

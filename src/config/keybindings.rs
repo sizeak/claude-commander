@@ -460,7 +460,7 @@ impl Default for KeyBindings {
             kb(KeyCode::Char('D'), shift),
         ]);
         bindings.insert(BindableAction::OpenInEditor, vec![
-            kb(KeyCode::Char('e'), none),
+            kb(KeyCode::Char('e'), ctrl),
         ]);
 
         // Pane control

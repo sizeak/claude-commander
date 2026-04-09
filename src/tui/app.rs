@@ -480,6 +480,19 @@ impl App {
                                         info!("Switching to session: {}", current_session);
                                         continue;
                                     }
+                                    Ok(crate::tmux::AttachResult::OpenEditor) => {
+                                        info!(
+                                            "Open editor requested from session: {}",
+                                            current_session
+                                        );
+                                        self.ui_state.shell_toggle_pair = None;
+                                        // Open editor for the session we were attached to
+                                        self.handle_open_in_editor_for_session(
+                                            &current_session,
+                                        )
+                                        .await;
+                                        break;
+                                    }
                                     Ok(result) => {
                                         info!("Attach ended: {:?}", result);
                                         // Clear toggle state on normal detach
@@ -2656,6 +2669,42 @@ impl App {
             }
         } else {
             // Terminal editor: tear down TUI, run foreground, restore
+            self.ui_state.editor_command = Some((editor, path));
+            self.ui_state.should_quit = true;
+        }
+    }
+
+    /// Handle open in editor from within a tmux attach session
+    async fn handle_open_in_editor_for_session(&mut self, tmux_session_name: &str) {
+        let path = {
+            let state = self.store.read().await;
+            state
+                .sessions
+                .values()
+                .find(|s| s.tmux_session_name == tmux_session_name)
+                .map(|s| s.worktree_path.clone())
+        };
+
+        let Some(path) = path else {
+            return;
+        };
+
+        let Some(editor) = self.config.resolve_editor() else {
+            self.ui_state.modal = Modal::Error {
+                message: "No editor configured. Set 'editor' in config.toml or \
+                          set $VISUAL / $EDITOR."
+                    .to_string(),
+            };
+            return;
+        };
+
+        if self.config.is_gui_editor(&editor) {
+            if let Err(e) = std::process::Command::new(&editor).arg(&path).spawn() {
+                self.ui_state.modal = Modal::Error {
+                    message: format!("Failed to launch '{}': {}", editor, e),
+                };
+            }
+        } else {
             self.ui_state.editor_command = Some((editor, path));
             self.ui_state.should_quit = true;
         }
