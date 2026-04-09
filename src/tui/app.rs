@@ -486,7 +486,6 @@ impl App {
                                             current_session
                                         );
                                         self.ui_state.shell_toggle_pair = None;
-                                        // Open editor for the session we were attached to
                                         self.handle_open_in_editor_for_session(
                                             &current_session,
                                         )
@@ -2647,30 +2646,8 @@ impl App {
             }
         };
 
-        let Some(path) = path else {
-            return;
-        };
-
-        let Some(editor) = self.config.resolve_editor() else {
-            self.ui_state.modal = Modal::Error {
-                message: "No editor configured. Set 'editor' in config.toml or \
-                          set $VISUAL / $EDITOR."
-                    .to_string(),
-            };
-            return;
-        };
-
-        if self.config.is_gui_editor(&editor) {
-            // GUI editor: spawn detached, TUI stays up
-            if let Err(e) = std::process::Command::new(&editor).arg(&path).spawn() {
-                self.ui_state.modal = Modal::Error {
-                    message: format!("Failed to launch '{}': {}", editor, e),
-                };
-            }
-        } else {
-            // Terminal editor: tear down TUI, run foreground, restore
-            self.ui_state.editor_command = Some((editor, path));
-            self.ui_state.should_quit = true;
+        if let Some(path) = path {
+            self.open_path_in_editor(path);
         }
     }
 
@@ -2685,10 +2662,13 @@ impl App {
                 .map(|s| s.worktree_path.clone())
         };
 
-        let Some(path) = path else {
-            return;
-        };
+        if let Some(path) = path {
+            self.open_path_in_editor(path);
+        }
+    }
 
+    /// Resolve the configured editor and open the given path in it
+    fn open_path_in_editor(&mut self, path: PathBuf) {
         let Some(editor) = self.config.resolve_editor() else {
             self.ui_state.modal = Modal::Error {
                 message: "No editor configured. Set 'editor' in config.toml or \

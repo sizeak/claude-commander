@@ -231,6 +231,7 @@ async fn run_async_loop(
                     }
 
                     // Check for Ctrl+E (0x05) to open in editor
+                    // Note: this shadows readline's jump-to-end-of-line in the attached shell
                     if data.contains(&0x05) {
                         debug!("Ctrl+E detected, opening editor");
                         let _ = stdin_shutdown.send(AttachResult::OpenEditor).await;
