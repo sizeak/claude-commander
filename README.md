@@ -88,7 +88,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `r` | Resume session |
 | `d` | Delete session |
 | `D` | Remove project |
-| `Ctrl-e` | Open in editor/IDE |
+| `Ctrl-Shift-e` | Open in editor/IDE |
 | `s` | Open shell in worktree |
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
 | `<` / `>` | Shrink / grow left pane |

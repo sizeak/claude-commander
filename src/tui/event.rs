@@ -547,8 +547,8 @@ mod tests {
                 UserCommand::RemoveProject,
             ),
             (
-                KeyCode::Char('e'),
-                KeyModifiers::CONTROL,
+                KeyCode::Char('E'),
+                KeyModifiers::CONTROL.union(KeyModifiers::SHIFT),
                 UserCommand::OpenInEditor,
             ),
         ];
