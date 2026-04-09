@@ -7,10 +7,12 @@
 
 pub mod keybindings;
 pub mod theme;
+mod config_store;
 mod settings;
 pub mod storage;
 mod store;
 
+pub use config_store::ConfigStore;
 pub use keybindings::{BindableAction, KeyBinding, KeyBindings};
 pub use settings::*;
 pub use storage::*;

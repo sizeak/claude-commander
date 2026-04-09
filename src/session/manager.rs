@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use tracing::{info, instrument, warn};
 
-use crate::config::{Config, StateStore};
+use crate::config::{ConfigStore, StateStore};
 use crate::error::{Result, SessionError};
 use crate::git::{DiffCache, DiffInfo, GitBackend, WorktreeManager};
 use crate::session::{Project, ProjectId, SessionId, SessionStatus, WorktreeSession};
@@ -16,8 +16,8 @@ use crate::tmux::{CapturedContent, ContentCapture, StatusBarInfo, TmuxExecutor};
 
 /// Session manager coordinates all session operations
 pub struct SessionManager {
-    /// Application configuration
-    config: Config,
+    /// Shared configuration store (hot-reloaded)
+    config_store: Arc<ConfigStore>,
     /// Concurrent-safe persistent state store
     pub store: Arc<StateStore>,
     /// Tmux executor
@@ -35,7 +35,7 @@ pub struct SessionManager {
 impl Clone for SessionManager {
     fn clone(&self) -> Self {
         Self {
-            config: self.config.clone(),
+            config_store: self.config_store.clone(),
             store: self.store.clone(),
             tmux: self.tmux.clone(),
             content_capture: self.content_capture.clone(),
@@ -48,11 +48,15 @@ impl Clone for SessionManager {
 
 impl SessionManager {
     /// Create a new session manager
+    ///
+    /// Note: `max_concurrent_tmux`, `capture_cache_ttl_ms`, and `diff_cache_ttl_ms`
+    /// are read from the config at construction time and are **not** hot-reloaded.
     pub fn new(
-        config: Config,
+        config_store: Arc<ConfigStore>,
         store: Arc<StateStore>,
         tmux_status_style: impl Into<String>,
     ) -> Self {
+        let config = config_store.read();
         let tmux = TmuxExecutor::with_max_concurrent(config.max_concurrent_tmux);
         let content_capture = ContentCapture::with_ttl(
             tmux.clone(),
@@ -62,9 +66,10 @@ impl SessionManager {
             DiffCache::with_ttl(std::time::Duration::from_millis(config.diff_cache_ttl_ms));
         let project_diff_cache =
             DiffCache::with_ttl(std::time::Duration::from_millis(config.diff_cache_ttl_ms));
+        drop(config);
 
         Self {
-            config,
+            config_store,
             store,
             tmux,
             content_capture,
@@ -172,7 +177,7 @@ impl SessionManager {
         title: String,
         program: Option<String>,
     ) -> Result<SessionId> {
-        let program = program.unwrap_or_else(|| self.config.default_program.clone());
+        let program = program.unwrap_or_else(|| self.config_store.read().default_program.clone());
 
         // Get project info
         let (repo_path, main_branch) = {
@@ -192,7 +197,7 @@ impl SessionManager {
         );
 
         // Fetch latest changes from origin
-        if self.config.fetch_before_create {
+        if self.config_store.read().fetch_before_create {
             info!("Fetching latest changes from origin in {}", repo_path.display());
             let output = tokio::process::Command::new("git")
                 .current_dir(&repo_path)
@@ -222,7 +227,7 @@ impl SessionManager {
         // Create worktree — sync gix work (branch check + start point) is done
         // in a block so non-Sync types are dropped before the first .await,
         // keeping the overall future Send.
-        let worktrees_dir = self.config.worktrees_dir()?;
+        let worktrees_dir = self.config_store.read().worktrees_dir()?;
         let (branch_exists, start_point) = {
             let backend = GitBackend::open(&repo_path)?;
             let exists = backend.branch_exists(&branch_name)?;
@@ -389,7 +394,7 @@ impl SessionManager {
             if let Some(repo_path) = repo_path
                 && let Ok(backend) = GitBackend::open(&repo_path)
             {
-                let worktree_manager = WorktreeManager::new(backend, self.config.worktrees_dir()?);
+                let worktree_manager = WorktreeManager::new(backend, self.config_store.read().worktrees_dir()?);
                 if let Err(e) = worktree_manager
                     .remove_worktree(&session.worktree_path, true)
                     .await
@@ -573,11 +578,12 @@ impl SessionManager {
             }
         }
 
+        let shell_program = self.config_store.read().shell_program.clone();
         self.tmux
             .create_session(
                 &shell_name,
                 &worktree_path,
-                Some(&self.config.shell_program),
+                Some(&shell_program),
             )
             .await?;
 
@@ -758,8 +764,9 @@ impl SessionManager {
             }
         }
 
+        let shell_program = self.config_store.read().shell_program.clone();
         self.tmux
-            .create_session(&shell_name, &repo_path, Some(&self.config.shell_program))
+            .create_session(&shell_name, &repo_path, Some(&shell_program))
             .await?;
 
         // Store in project state
@@ -910,7 +917,7 @@ impl SessionManager {
             }
         };
 
-        let worktrees_dir = self.config.worktrees_dir()?;
+        let worktrees_dir = self.config_store.read().worktrees_dir()?;
         let canonical_worktrees_dir =
             std::fs::canonicalize(&worktrees_dir).unwrap_or_else(|_| worktrees_dir.clone());
         let worktree_manager = WorktreeManager::new(backend, worktrees_dir);
@@ -959,7 +966,7 @@ impl SessionManager {
                 wt.branch.clone(),
                 wt.branch.clone(),
                 wt.path.clone(),
-                self.config.default_program.clone(),
+                self.config_store.read().default_program.clone(),
             );
             session.set_status(SessionStatus::Paused);
             session.base_commit = Some(wt.head.clone());
@@ -997,10 +1004,11 @@ impl SessionManager {
     fn generate_branch_name(&self, title: &str) -> String {
         let sanitized = self.sanitize_name(title);
 
-        if self.config.branch_prefix.is_empty() {
+        let config = self.config_store.read();
+        if config.branch_prefix.is_empty() {
             sanitized
         } else {
-            format!("{}/{}", self.config.branch_prefix, sanitized)
+            format!("{}/{}", config.branch_prefix, sanitized)
         }
     }
 
@@ -1024,7 +1032,7 @@ impl SessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AppState, StateStore};
+    use crate::config::{AppState, Config, ConfigStore, StateStore};
     use tempfile::TempDir;
 
     fn test_store() -> (TempDir, Arc<StateStore>) {
@@ -1034,11 +1042,20 @@ mod tests {
         (dir, store)
     }
 
+    fn test_config_store(config: Config) -> (TempDir, Arc<ConfigStore>) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let toml = toml::to_string_pretty(&config).unwrap();
+        std::fs::write(&path, toml).unwrap();
+        let store = Arc::new(ConfigStore::with_path(config, path));
+        (dir, store)
+    }
+
     #[test]
     fn test_sanitize_name() {
-        let config = Config::default();
+        let (_cdir, config_store) = test_config_store(Config::default());
         let (_dir, store) = test_store();
-        let manager = SessionManager::new(config, store, "");
+        let manager = SessionManager::new(config_store, store, "");
 
         assert_eq!(manager.sanitize_name("Hello World"), "hello-world");
         assert_eq!(manager.sanitize_name("Feature/Auth"), "feature-auth");
@@ -1047,16 +1064,18 @@ mod tests {
 
     #[test]
     fn test_generate_branch_name() {
-        let mut config = Config::default();
+        let (_cdir, config_store) = test_config_store(Config::default());
         let (_dir, store) = test_store();
 
         // Without prefix
-        let manager = SessionManager::new(config.clone(), store.clone(), "");
+        let manager = SessionManager::new(config_store, store.clone(), "");
         assert_eq!(manager.generate_branch_name("Feature Auth"), "feature-auth");
 
         // With prefix
+        let mut config = Config::default();
         config.branch_prefix = "cc".to_string();
-        let manager = SessionManager::new(config, store, "");
+        let (_cdir2, config_store2) = test_config_store(config);
+        let manager = SessionManager::new(config_store2, store, "");
         assert_eq!(
             manager.generate_branch_name("Feature Auth"),
             "cc/feature-auth"
@@ -1065,36 +1084,36 @@ mod tests {
 
     #[test]
     fn test_sanitize_name_underscores_preserved() {
-        let config = Config::default();
+        let (_cdir, config_store) = test_config_store(Config::default());
         let (_dir, store) = test_store();
-        let manager = SessionManager::new(config, store, "");
+        let manager = SessionManager::new(config_store, store, "");
 
         assert_eq!(manager.sanitize_name("hello_world"), "hello_world");
     }
 
     #[test]
     fn test_sanitize_name_consecutive_specials() {
-        let config = Config::default();
+        let (_cdir, config_store) = test_config_store(Config::default());
         let (_dir, store) = test_store();
-        let manager = SessionManager::new(config, store, "");
+        let manager = SessionManager::new(config_store, store, "");
 
         assert_eq!(manager.sanitize_name("a!!b"), "a--b");
     }
 
     #[test]
     fn test_sanitize_name_all_special() {
-        let config = Config::default();
+        let (_cdir, config_store) = test_config_store(Config::default());
         let (_dir, store) = test_store();
-        let manager = SessionManager::new(config, store, "");
+        let manager = SessionManager::new(config_store, store, "");
 
         assert_eq!(manager.sanitize_name("!!!"), "");
     }
 
     #[test]
     fn test_sanitize_name_unicode() {
-        let config = Config::default();
+        let (_cdir, config_store) = test_config_store(Config::default());
         let (_dir, store) = test_store();
-        let manager = SessionManager::new(config, store, "");
+        let manager = SessionManager::new(config_store, store, "");
 
         // Unicode alphanumeric chars should be preserved
         let result = manager.sanitize_name("café");
@@ -1104,9 +1123,9 @@ mod tests {
 
     #[test]
     fn test_generate_branch_name_empty_prefix() {
-        let config = Config::default(); // branch_prefix defaults to ""
+        let (_cdir, config_store) = test_config_store(Config::default());
         let (_dir, store) = test_store();
-        let manager = SessionManager::new(config, store, "");
+        let manager = SessionManager::new(config_store, store, "");
 
         assert_eq!(manager.generate_branch_name("Foo Bar"), "foo-bar");
     }
@@ -1117,8 +1136,9 @@ mod tests {
             branch_prefix: "user/cc".to_string(),
             ..Config::default()
         };
+        let (_cdir, config_store) = test_config_store(config);
         let (_dir, store) = test_store();
-        let manager = SessionManager::new(config, store, "");
+        let manager = SessionManager::new(config_store, store, "");
 
         assert_eq!(manager.generate_branch_name("Foo"), "user/cc/foo");
     }

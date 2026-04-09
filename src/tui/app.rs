@@ -32,7 +32,7 @@ use super::event::{AppEvent, EventLoop, InputEvent, StateUpdate, UserCommand};
 use super::path_completer::PathCompleter;
 use super::theme::Theme;
 use super::widgets::{DiffView, DiffViewState, Preview, PreviewState, TreeList, TreeListState};
-use crate::config::{BindableAction, Config, StateStore};
+use crate::config::{BindableAction, Config, ConfigStore, StateStore};
 use crate::error::{Result, TuiError};
 use crate::git::{DiffInfo, check_pr_for_branch, is_gh_available};
 use crate::session::{ProjectId, SessionId, SessionListItem, SessionManager, SessionStatus};
@@ -295,8 +295,10 @@ impl Default for AppUiState {
 
 /// Main TUI application
 pub struct App {
-    /// Configuration
+    /// Local config cache — refreshed from config_store on tick when file changes
     config: Config,
+    /// Shared config store (hot-reloaded from disk)
+    config_store: Arc<ConfigStore>,
     /// Concurrent-safe persistent state store
     store: Arc<StateStore>,
     /// Session manager
@@ -314,10 +316,11 @@ pub struct App {
 
 impl App {
     /// Create a new application
-    pub fn new(config: Config, store: Arc<StateStore>) -> Self {
+    pub fn new(config_store: Arc<ConfigStore>, store: Arc<StateStore>) -> Self {
+        let config = config_store.read().clone();
         let theme = Theme::default();
         let session_manager =
-            SessionManager::new(config.clone(), store.clone(), theme.tmux_status_style());
+            SessionManager::new(config_store.clone(), store.clone(), theme.tmux_status_style());
 
         let base = config
             .theme
@@ -329,6 +332,7 @@ impl App {
 
         Self {
             config,
+            config_store,
             store,
             session_manager,
             ui_state: AppUiState::default(),
@@ -709,6 +713,11 @@ impl App {
                 if self.ui_state.tick_count.is_multiple_of(3) {
                     self.ui_state.throbber_state.calc_next();
                 }
+                // Check for config file changes roughly once per second
+                // (tick_count wraps at u64::MAX, is_multiple_of(30) at 30fps ≈ 1s)
+                if self.ui_state.tick_count.is_multiple_of(30) {
+                    self.check_config_reload();
+                }
                 return true;
             }
             AppEvent::Quit => {
@@ -716,6 +725,28 @@ impl App {
             }
         }
         false
+    }
+
+    /// Check if `config.toml` has been modified externally and refresh the local cache.
+    fn check_config_reload(&mut self) {
+        match self.config_store.reload_if_changed() {
+            Ok(true) => {
+                debug!("Config hot-reloaded from disk");
+                self.config = self.config_store.read().clone();
+                let base = self
+                    .config
+                    .theme
+                    .preset
+                    .as_deref()
+                    .and_then(Theme::from_preset)
+                    .unwrap_or_default();
+                self.theme = base.with_overrides(&self.config.theme);
+            }
+            Ok(false) => {}
+            Err(e) => {
+                debug!("Config reload check failed: {}", e);
+            }
+        }
     }
 
     /// Spawn a background task to fetch preview/diff/shell data.
@@ -1791,8 +1822,9 @@ impl App {
             }
         }
 
-        // Persist config
-        if let Err(e) = self.config.save() {
+        // Persist config via the store (updates mtime so hot-reload won't re-read our own write)
+        let updated = self.config.clone();
+        if let Err(e) = self.config_store.mutate(|c| *c = updated) {
             warn!("Failed to save config: {}", e);
         }
     }
@@ -2004,6 +2036,8 @@ impl App {
             String::new()
         };
 
+        let restart_needed = self.config_store.restart_required();
+
         let status = if status.is_empty() {
             let session_count = self
                 .ui_state
@@ -2011,10 +2045,19 @@ impl App {
                 .iter()
                 .filter(|i| i.is_worktree())
                 .count();
-            format!(
-                "Sessions: {} | Press ? for help | n: new session | N: add project",
-                session_count
-            )
+            if restart_needed {
+                format!(
+                    "Sessions: {} | Restart to apply config changes | ? help",
+                    session_count
+                )
+            } else {
+                format!(
+                    "Sessions: {} | Press ? for help | n: new session | N: add project",
+                    session_count
+                )
+            }
+        } else if restart_needed {
+            format!("{} | Restart to apply config changes", status)
         } else {
             status
         };
