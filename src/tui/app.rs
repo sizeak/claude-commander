@@ -1443,6 +1443,18 @@ impl App {
                         field_key: "dim_unfocused_opacity".into(),
                         color_swatch: None,
                     },
+                    SettingsRow {
+                        label: "Session Numbers".into(),
+                        value: c.show_session_numbers.to_string(),
+                        field_key: "show_session_numbers".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
+                        label: "Number Debounce (ms)".into(),
+                        value: c.session_number_debounce_ms.to_string(),
+                        field_key: "session_number_debounce_ms".into(),
+                        color_swatch: None,
+                    },
                 ]
             }
             SettingsTab::Keybindings => {
@@ -1738,6 +1750,16 @@ impl App {
                 "dim_unfocused_opacity" => {
                     if let Ok(v) = value.parse::<f32>() {
                         self.config.dim_unfocused_opacity = v.clamp(0.0, 1.0);
+                    }
+                }
+                "show_session_numbers" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        self.config.show_session_numbers = b;
+                    }
+                }
+                "session_number_debounce_ms" => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.session_number_debounce_ms = v;
                     }
                 }
                 _ => {}
