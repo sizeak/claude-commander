@@ -1974,6 +1974,8 @@ impl App {
             String::new()
         };
 
+        let restart_needed = self.config_store.restart_required();
+
         let status = if status.is_empty() {
             let session_count = self
                 .ui_state
@@ -1981,10 +1983,19 @@ impl App {
                 .iter()
                 .filter(|i| i.is_worktree())
                 .count();
-            format!(
-                "Sessions: {} | Press ? for help | n: new session | N: add project",
-                session_count
-            )
+            if restart_needed {
+                format!(
+                    "Sessions: {} | Restart to apply config changes | ? help",
+                    session_count
+                )
+            } else {
+                format!(
+                    "Sessions: {} | Press ? for help | n: new session | N: add project",
+                    session_count
+                )
+            }
+        } else if restart_needed {
+            format!("{} | Restart to apply config changes", status)
         } else {
             status
         };
