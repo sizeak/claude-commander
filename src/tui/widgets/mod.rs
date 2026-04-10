@@ -3,12 +3,12 @@
 //! Custom ratatui widgets for the application:
 //! - `TreeList` - Hierarchical session list
 //! - `Preview` - Pane content preview
-//! - `DiffView` - Diff display with syntax highlighting
+//! - `InfoView` - Session info, PR details, AI summary
 
-mod diff_view;
+mod info_view;
 mod preview;
 mod tree_list;
 
-pub use diff_view::*;
+pub use info_view::*;
 pub use preview::*;
 pub use tree_list::*;

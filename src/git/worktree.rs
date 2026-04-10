@@ -11,8 +11,8 @@ use std::process::Stdio;
 use tokio::process::Command;
 use tracing::{debug, info, instrument, warn};
 
-use super::worktree_include::copy_worktree_includes;
 use super::GitBackend;
+use super::worktree_include::copy_worktree_includes;
 use crate::error::{GitError, Result};
 
 /// Worktree information
@@ -360,5 +360,4 @@ branch refs/heads/feature-branch
         let worktrees = parse_worktree_list("").unwrap();
         assert!(worktrees.is_empty());
     }
-
 }

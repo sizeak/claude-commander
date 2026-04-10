@@ -8,7 +8,7 @@ A high-performance terminal UI for managing Claude coding sessions, written in R
 - **Hierarchical session model** - Projects contain worktree sessions
 - **Git worktree isolation** - Each session has its own worktree and branch
 - **Live preview** - Real-time pane content capture with caching
-- **Diff view** - See changes made by the AI agent
+- **Info pane** - Session metadata, PR details, CI status, and AI-generated change summaries
 - **Agent state detection** - Detect if agent is waiting for input, processing, or errored
 - **Persistent state** - Sessions survive restarts
 
@@ -94,6 +94,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
 | `<` / `>` | Shrink / grow left pane |
 | `Ctrl-u/d` or `PageUp/Down` | Page up/down in preview |
+| `g` | Generate AI summary (Info pane only) |
 | `?` | Show help |
 | `q` or `Ctrl-c` | Quit |
 
@@ -172,12 +173,36 @@ state_sync_interval_ms = 2000
 # Log file path (if set, logs to file; use with --debug)
 # log_file = "/tmp/claude-commander.log"
 
+# Enable AI-generated branch summaries in the Info pane (default: true)
+# ai_summary_enabled = true
+
+# Claude model used for AI summaries (default: Haiku for cost efficiency)
+# ai_summary_model = "claude-haiku-4-5-20251001"
+
 # Custom key bindings — override any default key with one or more alternatives
 # [keybindings]
 # navigate_up = ["k", "Up"]
 # quit = ["q", "Ctrl-c"]
 # toggle_pane = ["Tab"]
 ```
+
+### AI Summary
+
+The Info pane can display an AI-generated summary of branch changes, powered
+by the Claude CLI. Press `g` (configurable) while viewing the Info pane to
+generate a summary. Summaries are cached per-session — once generated, they
+display instantly when you revisit the session. Press `g` again to regenerate
+after making changes.
+
+Requires the `claude` CLI to be installed and authenticated. If unavailable,
+the summary section shows a placeholder instead.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `ai_summary_enabled` | `true` | Set to `false` to disable AI summaries entirely |
+| `ai_summary_model` | `claude-haiku-4-5-20251001` | Claude model used for summaries (Haiku recommended for cost efficiency) |
+
+Environment variable overrides: `CC_AI_SUMMARY_ENABLED`, `CC_AI_SUMMARY_MODEL`.
 
 ## Architecture
 

@@ -198,7 +198,10 @@ impl SessionManager {
 
         // Fetch latest changes from origin
         if self.config_store.read().fetch_before_create {
-            info!("Fetching latest changes from origin in {}", repo_path.display());
+            info!(
+                "Fetching latest changes from origin in {}",
+                repo_path.display()
+            );
             let output = tokio::process::Command::new("git")
                 .current_dir(&repo_path)
                 .args(["fetch", "origin"])
@@ -460,7 +463,8 @@ impl SessionManager {
             if let Some(repo_path) = repo_path
                 && let Ok(backend) = GitBackend::open(&repo_path)
             {
-                let worktree_manager = WorktreeManager::new(backend, self.config_store.read().worktrees_dir()?);
+                let worktree_manager =
+                    WorktreeManager::new(backend, self.config_store.read().worktrees_dir()?);
                 if let Err(e) = worktree_manager
                     .remove_worktree(&session.worktree_path, true)
                     .await
@@ -646,11 +650,7 @@ impl SessionManager {
 
         let shell_program = self.config_store.read().shell_program.clone();
         self.tmux
-            .create_session(
-                &shell_name,
-                &worktree_path,
-                Some(&shell_program),
-            )
+            .create_session(&shell_name, &worktree_path, Some(&shell_program))
             .await?;
 
         // Configure CC status bar on the shell session
@@ -1138,8 +1138,10 @@ mod tests {
         assert_eq!(manager.generate_branch_name("Feature Auth"), "feature-auth");
 
         // With prefix
-        let mut config = Config::default();
-        config.branch_prefix = "cc".to_string();
+        let config = Config {
+            branch_prefix: "cc".to_string(),
+            ..Config::default()
+        };
         let (_cdir2, config_store2) = test_config_store(config);
         let manager = SessionManager::new(config_store2, store, "");
         assert_eq!(

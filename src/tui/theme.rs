@@ -580,17 +580,26 @@ mod tests {
     #[test]
     fn test_dim_color_rgb() {
         // 50% opacity halves each channel
-        assert_eq!(dim_color(Color::Rgb(200, 100, 50), 0.5), Color::Rgb(100, 50, 25));
+        assert_eq!(
+            dim_color(Color::Rgb(200, 100, 50), 0.5),
+            Color::Rgb(100, 50, 25)
+        );
     }
 
     #[test]
     fn test_dim_color_full_opacity_unchanged() {
-        assert_eq!(dim_color(Color::Rgb(200, 100, 50), 1.0), Color::Rgb(200, 100, 50));
+        assert_eq!(
+            dim_color(Color::Rgb(200, 100, 50), 1.0),
+            Color::Rgb(200, 100, 50)
+        );
     }
 
     #[test]
     fn test_dim_color_zero_opacity_is_black() {
-        assert_eq!(dim_color(Color::Rgb(200, 100, 50), 0.0), Color::Rgb(0, 0, 0));
+        assert_eq!(
+            dim_color(Color::Rgb(200, 100, 50), 0.0),
+            Color::Rgb(0, 0, 0)
+        );
     }
 
     #[test]
@@ -615,9 +624,15 @@ mod tests {
     #[test]
     fn test_dim_color_clamps_opacity() {
         // Opacity > 1.0 should be clamped to 1.0
-        assert_eq!(dim_color(Color::Rgb(200, 100, 50), 2.0), Color::Rgb(200, 100, 50));
+        assert_eq!(
+            dim_color(Color::Rgb(200, 100, 50), 2.0),
+            Color::Rgb(200, 100, 50)
+        );
         // Opacity < 0.0 should be clamped to 0.0
-        assert_eq!(dim_color(Color::Rgb(200, 100, 50), -1.0), Color::Rgb(0, 0, 0));
+        assert_eq!(
+            dim_color(Color::Rgb(200, 100, 50), -1.0),
+            Color::Rgb(0, 0, 0)
+        );
     }
 
     #[test]

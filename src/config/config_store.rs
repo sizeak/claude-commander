@@ -137,8 +137,8 @@ impl ConfigStore {
             })?;
         }
 
-        let toml = toml::to_string_pretty(config)
-            .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
+        let toml =
+            toml::to_string_pretty(config).map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
         std::fs::write(&self.config_path, toml)
             .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
 
@@ -186,7 +186,10 @@ impl ConfigStore {
     /// Load config from `self.config_path` using the standard layered resolution.
     fn load_from_disk(&self) -> Result<Config> {
         use crate::error::ConfigError;
-        use figment::{Figment, providers::{Env, Format, Serialized, Toml}};
+        use figment::{
+            Figment,
+            providers::{Env, Format, Serialized, Toml},
+        };
 
         let config: Config = Figment::new()
             .merge(Serialized::defaults(Config::default()))
@@ -204,8 +207,7 @@ mod tests {
     use tempfile::TempDir;
 
     fn write_config(path: &std::path::Path, config: &Config) {
-        let toml =
-            toml::to_string_pretty(config).expect("serialize config");
+        let toml = toml::to_string_pretty(config).expect("serialize config");
         std::fs::write(path, toml).expect("write config file");
     }
 
@@ -225,8 +227,10 @@ mod tests {
         // Simulate external edit — change a field and rewrite the file
         // Sleep briefly so mtime differs (filesystem granularity)
         std::thread::sleep(std::time::Duration::from_millis(50));
-        let mut edited = Config::default();
-        edited.default_program = "external-edit".to_string();
+        let edited = Config {
+            default_program: "external-edit".to_string(),
+            ..Config::default()
+        };
         write_config(&config_path, &edited);
 
         // Should detect the change
@@ -308,11 +312,19 @@ mod tests {
         let store = ConfigStore::with_path(config, config_path);
 
         // Change it
-        store.mutate(|c| { c.ui_refresh_fps = 60; }).unwrap();
+        store
+            .mutate(|c| {
+                c.ui_refresh_fps = 60;
+            })
+            .unwrap();
         assert!(store.restart_required());
 
         // Change it back
-        store.mutate(|c| { c.ui_refresh_fps = original_fps; }).unwrap();
+        store
+            .mutate(|c| {
+                c.ui_refresh_fps = original_fps;
+            })
+            .unwrap();
         assert!(!store.restart_required());
     }
 
@@ -343,8 +355,10 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let config_path = dir.path().join("config.toml");
 
-        let mut config = Config::default();
-        config.default_program = "test-program".to_string();
+        let config = Config {
+            default_program: "test-program".to_string(),
+            ..Config::default()
+        };
         write_config(&config_path, &config);
 
         let store = ConfigStore::with_path(config, config_path);

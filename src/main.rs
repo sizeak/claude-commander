@@ -209,8 +209,11 @@ async fn main() -> Result<()> {
             let config_store = Arc::new(ConfigStore::new(config)?);
             let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
             let store = Arc::new(StateStore::new(app_state)?);
-            let manager =
-                SessionManager::new(config_store, store.clone(), Theme::default().tmux_status_style());
+            let manager = SessionManager::new(
+                config_store,
+                store.clone(),
+                Theme::default().tmux_status_style(),
+            );
 
             // Check tmux
             manager.check_tmux().await?;

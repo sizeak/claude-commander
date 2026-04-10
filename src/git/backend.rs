@@ -247,5 +247,4 @@ mod tests {
         let (_temp, backend) = init_test_repo();
         assert!(!backend.ref_exists("refs/remotes/origin/main").unwrap());
     }
-
 }

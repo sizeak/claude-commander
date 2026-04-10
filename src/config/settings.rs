@@ -72,6 +72,12 @@ pub struct Config {
     /// Leader key for quick-switch modal (e.g. " " for Space, "ctrl+k", "f1")
     pub leader_key: String,
 
+    /// Enable AI-generated branch summaries in the Info pane
+    pub ai_summary_enabled: bool,
+
+    /// Claude model to use for AI summaries (Haiku recommended for cost efficiency)
+    pub ai_summary_model: String,
+
     /// Enable debug logging
     pub debug: bool,
 
@@ -105,6 +111,8 @@ impl Default for Config {
             dim_unfocused_preview: true,
             dim_unfocused_opacity: 0.4,
             leader_key: " ".to_string(),
+            ai_summary_enabled: true,
+            ai_summary_model: "claude-haiku-4-5-20251001".to_string(),
             debug: false,
             log_file: None,
             keybindings: KeyBindings::default(),
@@ -451,6 +459,8 @@ mod tests {
         assert_eq!(config.pr_check_interval_secs, 600);
         assert!(config.fetch_before_create);
         assert_eq!(config.state_sync_interval_ms, 2000);
+        assert!(config.ai_summary_enabled);
+        assert_eq!(config.ai_summary_model, "claude-haiku-4-5-20251001");
     }
 
     #[test]

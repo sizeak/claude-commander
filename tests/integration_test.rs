@@ -300,7 +300,8 @@ async fn test_session_manager_restart() {
     };
 
     let store = create_isolated_store(&state_temp_dir);
-    let manager = SessionManager::new(config, store.clone(), "");
+    let config_store = Arc::new(ConfigStore::new(config).unwrap());
+    let manager = SessionManager::new(config_store, store.clone(), "");
 
     // Add project and create session
     let project_id = manager.add_project(repo_path).await.unwrap();
@@ -557,8 +558,7 @@ async fn create_test_repo_with_remote() -> (TempDir, PathBuf, TempDir, PathBuf) 
 
 #[tokio::test]
 async fn test_detect_main_branch_with_remote() {
-    let (_bare_dir, _bare_path, _work_dir, work_path) =
-        create_test_repo_with_remote().await;
+    let (_bare_dir, _bare_path, _work_dir, work_path) = create_test_repo_with_remote().await;
 
     // Set origin/HEAD so remote_default_branch() can resolve it
     tokio::process::Command::new("git")

@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::config::keybindings::{BindableAction, KeyBindings};
-use crate::git::DiffInfo;
+use crate::git::{DiffInfo, EnrichedPrInfo};
 use crate::session::{ProjectId, SessionId};
 
 use crossterm::event::{
@@ -76,6 +76,18 @@ pub enum StateUpdate {
     SessionCreateFailed { message: String },
     /// State file was modified by another instance
     ExternalChange,
+    /// Enriched PR info ready from background fetch
+    EnrichedPrReady {
+        session_id: SessionId,
+        info: Option<EnrichedPrInfo>,
+    },
+    /// AI-generated branch summary ready
+    AiSummaryReady {
+        session_id: SessionId,
+        result: Result<String, String>,
+        /// Hash of the diff that was summarized (for cache keying)
+        diff_hash: u64,
+    },
     /// Preview/diff/shell data ready from background fetch
     PreviewReady {
         /// Which session this data is for (None if project-level)
@@ -150,6 +162,8 @@ pub enum UserCommand {
     PageDown,
     /// Open quick-switch session search modal
     QuickSwitch,
+    /// Generate AI summary for the current session (Info pane only)
+    GenerateSummary,
 }
 
 impl UserCommand {
@@ -208,6 +222,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::ScrollDown => Self::ScrollDown,
             BindableAction::PageUp => Self::PageUp,
             BindableAction::PageDown => Self::PageDown,
+            BindableAction::GenerateSummary => Self::GenerateSummary,
         }
     }
 }
