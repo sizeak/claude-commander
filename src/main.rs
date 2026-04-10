@@ -9,7 +9,7 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use claude_commander::{
     APP_NAME, VERSION,
-    config::{AppState, Config, StateStore},
+    config::{AppState, Config, ConfigStore, StateStore},
     tmux::{AttachResult, attach_to_session},
     tui::App,
 };
@@ -144,9 +144,10 @@ async fn main() -> Result<()> {
             setup_logging(cli.debug, true)?;
             info!("Starting Claude Commander TUI v{}", VERSION);
 
+            let config_store = std::sync::Arc::new(ConfigStore::new(config.clone())?);
             let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
             let store = std::sync::Arc::new(StateStore::new(app_state)?);
-            let mut app = App::new(config.clone(), store);
+            let mut app = App::new(config_store, store);
             app.run().await?;
         }
 
@@ -202,11 +203,17 @@ async fn main() -> Result<()> {
             let path = path.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
             use claude_commander::session::SessionManager;
+            use claude_commander::tui::theme::Theme;
             use std::sync::Arc;
 
+            let config_store = Arc::new(ConfigStore::new(config)?);
             let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
             let store = Arc::new(StateStore::new(app_state)?);
-            let manager = SessionManager::new(config, store.clone());
+            let manager = SessionManager::new(
+                config_store,
+                store.clone(),
+                Theme::default().tmux_status_style(),
+            );
 
             // Check tmux
             manager.check_tmux().await?;

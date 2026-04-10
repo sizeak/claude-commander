@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use crossterm::{
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        KeyModifiers, MouseEventKind,
+        MouseEventKind,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -22,7 +22,7 @@ use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Margin, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
@@ -35,7 +35,7 @@ use super::widgets::{
     InfoContent, InfoProjectData, InfoSessionData, InfoView, InfoViewState, Preview, PreviewState,
     TreeList, TreeListState,
 };
-use crate::config::{Config, StateStore};
+use crate::config::{BindableAction, Config, ConfigStore, StateStore};
 use crate::error::{Result, TuiError};
 use crate::git::{
     AiSummary, DiffInfo, EnrichedPrInfo, check_pr_for_branch, diff_hash, fetch_branch_summary,
@@ -105,6 +105,8 @@ pub enum Modal {
     Help,
     /// Error modal
     Error { message: String },
+    /// Settings modal
+    Settings(SettingsState),
     /// Quick-switch session search modal
     QuickSwitch {
         query: String,
@@ -123,6 +125,75 @@ pub struct QuickSwitchMatch {
     pub status: SessionStatus,
 }
 
+/// Which tab is active in the settings modal
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SettingsTab {
+    #[default]
+    General,
+    Keybindings,
+    Theme,
+}
+
+impl SettingsTab {
+    const ALL: [SettingsTab; 3] = [Self::General, Self::Keybindings, Self::Theme];
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Keybindings => "Keybindings",
+            Self::Theme => "Theme",
+        }
+    }
+
+    fn next(self) -> Self {
+        match self {
+            Self::General => Self::Keybindings,
+            Self::Keybindings => Self::Theme,
+            Self::Theme => Self::General,
+        }
+    }
+
+    fn prev(self) -> Self {
+        match self {
+            Self::General => Self::Theme,
+            Self::Keybindings => Self::General,
+            Self::Theme => Self::Keybindings,
+        }
+    }
+}
+
+/// State for the settings modal
+#[derive(Debug, Clone)]
+pub struct SettingsState {
+    pub tab: SettingsTab,
+    pub selected_row: usize,
+    pub editing: Option<SettingsEditing>,
+    /// Cached row data for the current tab
+    pub rows: Vec<SettingsRow>,
+}
+
+/// A single row in the settings list
+#[derive(Debug, Clone)]
+pub struct SettingsRow {
+    pub label: String,
+    pub value: String,
+    pub field_key: String,
+    /// Optional color for displaying a swatch next to the value (Theme tab only)
+    pub color_swatch: Option<Color>,
+}
+
+/// Editing state within the settings modal
+#[derive(Debug, Clone)]
+pub enum SettingsEditing {
+    /// Editing a text value
+    TextInput { value: String },
+    /// Capturing a key for keybinding
+    KeyCapture {
+        action_name: String,
+        keys: Vec<String>,
+    },
+}
+
 /// Action to perform when input modal is submitted
 #[derive(Debug, Clone)]
 pub enum InputAction {
@@ -134,6 +205,7 @@ pub enum InputAction {
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
     DeleteSession { session_id: SessionId },
+    RestartSession { session_id: SessionId },
     RemoveProject { project_id: ProjectId },
 }
 
@@ -236,8 +308,10 @@ impl Default for AppUiState {
 
 /// Main TUI application
 pub struct App {
-    /// Configuration
+    /// Local config cache — refreshed from config_store on tick when file changes
     config: Config,
+    /// Shared config store (hot-reloaded from disk)
+    config_store: Arc<ConfigStore>,
     /// Concurrent-safe persistent state store
     store: Arc<StateStore>,
     /// Session manager
@@ -255,16 +329,31 @@ pub struct App {
 
 impl App {
     /// Create a new application
-    pub fn new(config: Config, store: Arc<StateStore>) -> Self {
-        let session_manager = SessionManager::new(config.clone(), store.clone());
+    pub fn new(config_store: Arc<ConfigStore>, store: Arc<StateStore>) -> Self {
+        let config = config_store.read().clone();
+        let theme = Theme::default();
+        let session_manager = SessionManager::new(
+            config_store.clone(),
+            store.clone(),
+            theme.tmux_status_style(),
+        );
+
+        let base = config
+            .theme
+            .preset
+            .as_deref()
+            .and_then(Theme::from_preset)
+            .unwrap_or_default();
+        let theme = base.with_overrides(&config.theme);
 
         Self {
             config,
+            config_store,
             store,
             session_manager,
             ui_state: AppUiState::default(),
             event_loop: EventLoop::new(),
-            theme: Theme::default(),
+            theme,
             suppress_keys_until: Instant::now(),
         }
     }
@@ -637,8 +726,13 @@ impl App {
             AppEvent::StateUpdate(update) => self.handle_state_update(update).await,
             AppEvent::Tick => {
                 self.ui_state.tick_count = self.ui_state.tick_count.wrapping_add(1);
-                if self.ui_state.tick_count % 3 == 0 {
+                if self.ui_state.tick_count.is_multiple_of(3) {
                     self.ui_state.throbber_state.calc_next();
+                }
+                // Check for config file changes roughly once per second
+                // (tick_count wraps at u64::MAX, is_multiple_of(30) at 30fps ≈ 1s)
+                if self.ui_state.tick_count.is_multiple_of(30) {
+                    self.check_config_reload();
                 }
                 return true;
             }
@@ -647,6 +741,28 @@ impl App {
             }
         }
         false
+    }
+
+    /// Check if `config.toml` has been modified externally and refresh the local cache.
+    fn check_config_reload(&mut self) {
+        match self.config_store.reload_if_changed() {
+            Ok(true) => {
+                debug!("Config hot-reloaded from disk");
+                self.config = self.config_store.read().clone();
+                let base = self
+                    .config
+                    .theme
+                    .preset
+                    .as_deref()
+                    .and_then(Theme::from_preset)
+                    .unwrap_or_default();
+                self.theme = base.with_overrides(&self.config.theme);
+            }
+            Ok(false) => {}
+            Err(e) => {
+                debug!("Config reload check failed: {}", e);
+            }
+        }
     }
 
     /// Spawn a background task to fetch preview/diff/shell data.
@@ -868,7 +984,11 @@ impl App {
     /// Render the preview pane
     fn render_preview(&mut self, frame: &mut Frame, area: Rect) {
         let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
-        let dim = !is_focused && self.config.dim_unfocused_preview;
+        let dim_opacity = if !is_focused && self.config.dim_unfocused_preview {
+            Some(self.config.dim_unfocused_opacity)
+        } else {
+            None
+        };
 
         // Show tab indicator in title
         let title = " [Preview] | Info | Shell ";
@@ -891,7 +1011,7 @@ impl App {
         let preview = Preview::new(&self.ui_state.preview_content)
             .block(block)
             .scroll(self.ui_state.preview_state.scroll_offset)
-            .dim(dim);
+            .dim_opacity(dim_opacity);
 
         frame.render_widget(preview, area);
     }
@@ -899,7 +1019,11 @@ impl App {
     /// Render the info pane (session metadata, PR details, AI summary)
     fn render_info(&mut self, frame: &mut Frame, area: Rect) {
         let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
-        let dim = !is_focused && self.config.dim_unfocused_preview;
+        let dim_opacity = if !is_focused && self.config.dim_unfocused_preview {
+            Some(self.config.dim_unfocused_opacity)
+        } else {
+            None
+        };
         let on_project = self.is_project_selected();
 
         let title = if on_project {
@@ -1113,7 +1237,7 @@ impl App {
         let info_view = InfoView::new(content, &self.theme)
             .block(block)
             .scroll(self.ui_state.info_state.scroll_offset)
-            .dim(dim);
+            .dim_opacity(dim_opacity);
 
         frame.render_widget(info_view, area);
     }
@@ -1121,7 +1245,11 @@ impl App {
     /// Render the shell pane
     fn render_shell(&mut self, frame: &mut Frame, area: Rect) {
         let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
-        let dim = !is_focused && self.config.dim_unfocused_preview;
+        let dim_opacity = if !is_focused && self.config.dim_unfocused_preview {
+            Some(self.config.dim_unfocused_opacity)
+        } else {
+            None
+        };
 
         let title = if self.is_project_selected() {
             " [Shell] | Info "
@@ -1146,7 +1274,7 @@ impl App {
         let preview = Preview::new(&self.ui_state.shell_content)
             .block(block)
             .scroll(self.ui_state.shell_state.scroll_offset)
-            .dim(dim);
+            .dim_opacity(dim_opacity);
 
         frame.render_widget(preview, area);
     }
@@ -1328,6 +1456,10 @@ impl App {
                 frame.render_widget(paragraph, content_area);
             }
 
+            Modal::Settings(state) => {
+                self.render_settings_modal(frame, area, state);
+            }
+
             Modal::QuickSwitch {
                 query,
                 matches,
@@ -1415,6 +1547,582 @@ impl App {
                     };
                     frame.render_widget(Paragraph::new(line), line_area);
                 }
+            }
+        }
+    }
+
+    /// Build rows for the settings modal for the given tab.
+    fn build_settings_rows(&self, tab: SettingsTab) -> Vec<SettingsRow> {
+        match tab {
+            SettingsTab::General => {
+                let c = &self.config;
+                vec![
+                    SettingsRow {
+                        label: "Default Program".into(),
+                        value: c.default_program.clone(),
+                        field_key: "default_program".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
+                        label: "Branch Prefix".into(),
+                        value: if c.branch_prefix.is_empty() {
+                            "(none)".into()
+                        } else {
+                            c.branch_prefix.clone()
+                        },
+                        field_key: "branch_prefix".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
+                        label: "Shell Program".into(),
+                        value: c.shell_program.clone(),
+                        field_key: "shell_program".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
+                        label: "Editor".into(),
+                        value: c.editor.clone().unwrap_or_else(|| "(auto)".into()),
+                        field_key: "editor".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
+                        label: "Editor is GUI".into(),
+                        value: match c.editor_gui {
+                            Some(true) => "true".into(),
+                            Some(false) => "false".into(),
+                            None => "(auto)".into(),
+                        },
+                        field_key: "editor_gui".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
+                        label: "Fetch Before Create".into(),
+                        value: c.fetch_before_create.to_string(),
+                        field_key: "fetch_before_create".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
+                        label: "UI Refresh FPS".into(),
+                        value: c.ui_refresh_fps.to_string(),
+                        field_key: "ui_refresh_fps".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
+                        label: "PR Check Interval (s)".into(),
+                        value: c.pr_check_interval_secs.to_string(),
+                        field_key: "pr_check_interval_secs".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
+                        label: "Max Concurrent Tmux".into(),
+                        value: c.max_concurrent_tmux.to_string(),
+                        field_key: "max_concurrent_tmux".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
+                        label: "Dim Unfocused Preview".into(),
+                        value: c.dim_unfocused_preview.to_string(),
+                        field_key: "dim_unfocused_preview".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
+                        label: "Dim Opacity".into(),
+                        value: format!("{:.2}", c.dim_unfocused_opacity),
+                        field_key: "dim_unfocused_opacity".into(),
+                        color_swatch: None,
+                    },
+                ]
+            }
+            SettingsTab::Keybindings => {
+                let kb = &self.config.keybindings;
+                BindableAction::ALL
+                    .iter()
+                    .map(|&action| SettingsRow {
+                        label: action.description().to_string(),
+                        value: kb.keys_display(action),
+                        field_key: action.config_name().to_string(),
+                        color_swatch: None,
+                    })
+                    .collect()
+            }
+            SettingsTab::Theme => {
+                // Show the current resolved color for each overridable field,
+                // and whether it has a user override.
+                let t = &self.theme;
+                let o = &self.config.theme;
+
+                macro_rules! theme_row {
+                    ($label:expr, $field:ident) => {
+                        SettingsRow {
+                            label: $label.into(),
+                            value: o
+                                .$field
+                                .map(|cv| {
+                                    let s = toml::to_string(&cv).unwrap_or_default();
+                                    s.trim().trim_matches('"').to_string()
+                                })
+                                .unwrap_or_else(|| format_color(t.$field)),
+                            field_key: stringify!($field).into(),
+                            color_swatch: Some(t.$field),
+                        }
+                    };
+                }
+
+                vec![
+                    SettingsRow {
+                        label: "Preset".into(),
+                        value: o.preset.clone().unwrap_or_else(|| "(auto)".into()),
+                        field_key: "preset".into(),
+                        color_swatch: None,
+                    },
+                    theme_row!("Border Focused", border_focused),
+                    theme_row!("Border Unfocused", border_unfocused),
+                    theme_row!("Selection BG", selection_bg),
+                    theme_row!("Status Running", status_running),
+                    theme_row!("Status Paused", status_paused),
+                    theme_row!("Status Stopped", status_stopped),
+                    theme_row!("Status PR", status_pr),
+                    theme_row!("Status PR Merged", status_pr_merged),
+                    theme_row!("Text Primary", text_primary),
+                    theme_row!("Text Secondary", text_secondary),
+                    theme_row!("Text Accent", text_accent),
+                    theme_row!("Diff Added", diff_added),
+                    theme_row!("Diff Removed", diff_removed),
+                    theme_row!("Diff Hunk Header", diff_hunk_header),
+                    theme_row!("Diff File Header", diff_file_header),
+                    theme_row!("Modal Info", modal_info),
+                    theme_row!("Modal Warning", modal_warning),
+                    theme_row!("Modal Error", modal_error),
+                    theme_row!("Status Bar BG", status_bar_bg),
+                    theme_row!("Status Bar FG", status_bar_fg),
+                ]
+            }
+        }
+    }
+
+    /// Render the settings modal.
+    fn render_settings_modal(&self, frame: &mut Frame, area: Rect, state: &SettingsState) {
+        let modal_area = centered_rect(75, 85, area);
+        frame.render_widget(Clear, modal_area);
+
+        let block = Block::default()
+            .title(" Settings ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.theme.modal_info));
+        let inner = block.inner(modal_area);
+        frame.render_widget(block, modal_area);
+
+        let content_area = inner.inner(Margin {
+            horizontal: 1,
+            vertical: 0,
+        });
+
+        if content_area.height < 4 {
+            return;
+        }
+
+        // --- Tab bar (row 0) ---
+        let tab_area = Rect {
+            height: 1,
+            ..content_area
+        };
+        let mut tab_spans: Vec<Span> = Vec::new();
+        for (i, tab) in SettingsTab::ALL.iter().enumerate() {
+            if i > 0 {
+                tab_spans.push(Span::raw("  "));
+            }
+            let style = if *tab == state.tab {
+                Style::default()
+                    .fg(self.theme.text_primary)
+                    .add_modifier(Modifier::BOLD)
+                    .add_modifier(Modifier::UNDERLINED)
+            } else {
+                Style::default().fg(self.theme.text_secondary)
+            };
+            tab_spans.push(Span::styled(tab.label(), style));
+        }
+        frame.render_widget(Paragraph::new(Line::from(tab_spans)), tab_area);
+
+        // --- Separator ---
+        let sep_area = Rect {
+            y: content_area.y + 1,
+            height: 1,
+            ..content_area
+        };
+        let separator = "─".repeat(content_area.width as usize);
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                separator,
+                Style::default().fg(self.theme.border_unfocused),
+            ))),
+            sep_area,
+        );
+
+        // --- Settings rows ---
+        let rows_area = Rect {
+            y: content_area.y + 2,
+            height: content_area.height.saturating_sub(4),
+            ..content_area
+        };
+
+        let label_width = 24_u16;
+        let value_width = rows_area.width.saturating_sub(label_width + 3);
+
+        let visible_rows = rows_area.height as usize;
+        let scroll_offset = if state.selected_row >= visible_rows {
+            state.selected_row - visible_rows + 1
+        } else {
+            0
+        };
+
+        for (i, row) in state
+            .rows
+            .iter()
+            .enumerate()
+            .skip(scroll_offset)
+            .take(visible_rows)
+        {
+            let y = rows_area.y + (i - scroll_offset) as u16;
+            let is_selected = i == state.selected_row;
+
+            let row_style = if is_selected {
+                self.theme.selection()
+            } else {
+                Style::default()
+            };
+
+            // Label
+            let label_area = Rect {
+                x: rows_area.x,
+                y,
+                width: label_width.min(rows_area.width),
+                height: 1,
+            };
+            let label = format!("{:<width$}", row.label, width = label_width as usize);
+            frame.render_widget(Paragraph::new(Span::styled(label, row_style)), label_area);
+
+            // Color swatch + Value
+            if rows_area.width > label_width + 2 {
+                let swatch_width: u16 = if row.color_swatch.is_some() { 3 } else { 0 };
+                let val_x = rows_area.x + label_width + 2;
+
+                // Render color swatch if present
+                if let Some(swatch_color) = row.color_swatch {
+                    let swatch_area = Rect {
+                        x: val_x,
+                        y,
+                        width: swatch_width.min(value_width),
+                        height: 1,
+                    };
+                    let swatch_style = if is_selected {
+                        Style::default()
+                            .fg(swatch_color)
+                            .bg(self.theme.selection_bg)
+                    } else {
+                        Style::default().fg(swatch_color)
+                    };
+                    frame.render_widget(
+                        Paragraph::new(Span::styled("██ ", swatch_style)),
+                        swatch_area,
+                    );
+                }
+
+                let val_area = Rect {
+                    x: val_x + swatch_width,
+                    y,
+                    width: value_width.saturating_sub(swatch_width),
+                    height: 1,
+                };
+
+                let display_val = if is_selected {
+                    if let Some(SettingsEditing::TextInput { value }) = &state.editing {
+                        format!("{value}▏")
+                    } else {
+                        row.value.clone()
+                    }
+                } else {
+                    row.value.clone()
+                };
+
+                let val_style = if is_selected && state.editing.is_some() {
+                    row_style.add_modifier(Modifier::UNDERLINED)
+                } else {
+                    row_style.fg(self.theme.text_accent)
+                };
+
+                frame.render_widget(
+                    Paragraph::new(Span::styled(display_val, val_style)),
+                    val_area,
+                );
+            }
+        }
+
+        // --- Footer ---
+        let footer_area = Rect {
+            y: content_area.y + content_area.height.saturating_sub(1),
+            height: 1,
+            ..content_area
+        };
+        let footer_text = if state.editing.is_some() {
+            "Enter: save  Esc: cancel"
+        } else {
+            "Tab: switch tab  j/k: navigate  Enter: edit  Esc: close"
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                footer_text,
+                Style::default().fg(self.theme.text_secondary),
+            )),
+            footer_area,
+        );
+    }
+
+    /// Apply an edited value from the settings modal to the config.
+    fn apply_settings_edit(&mut self, tab: SettingsTab, field_key: &str, value: &str) {
+        match tab {
+            SettingsTab::General => match field_key {
+                "default_program" => self.config.default_program = value.to_string(),
+                "branch_prefix" => self.config.branch_prefix = value.to_string(),
+                "shell_program" => self.config.shell_program = value.to_string(),
+                "editor" => {
+                    self.config.editor = if value.is_empty() || value == "(auto)" {
+                        None
+                    } else {
+                        Some(value.to_string())
+                    };
+                }
+                "editor_gui" => {
+                    self.config.editor_gui = match value {
+                        "true" => Some(true),
+                        "false" => Some(false),
+                        _ => None,
+                    };
+                }
+                "fetch_before_create" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        self.config.fetch_before_create = b;
+                    }
+                }
+                "ui_refresh_fps" => {
+                    if let Ok(v) = value.parse::<u32>() {
+                        self.config.ui_refresh_fps = v;
+                    }
+                }
+                "pr_check_interval_secs" => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.pr_check_interval_secs = v;
+                    }
+                }
+                "max_concurrent_tmux" => {
+                    if let Ok(v) = value.parse::<usize>() {
+                        self.config.max_concurrent_tmux = v;
+                    }
+                }
+                "dim_unfocused_preview" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        self.config.dim_unfocused_preview = b;
+                    }
+                }
+                "dim_unfocused_opacity" => {
+                    if let Ok(v) = value.parse::<f32>() {
+                        self.config.dim_unfocused_opacity = v.clamp(0.0, 1.0);
+                    }
+                }
+                _ => {}
+            },
+            SettingsTab::Theme => {
+                use crate::config::theme::ColorValue;
+
+                if field_key == "preset" {
+                    self.config.theme.preset = if value.is_empty() || value == "(auto)" {
+                        None
+                    } else {
+                        Some(value.to_string())
+                    };
+                } else {
+                    // Try to parse the value as a ColorValue via TOML
+                    let toml_input = if value.starts_with('#')
+                        || value.chars().all(|c| c.is_ascii_alphabetic() || c == '_')
+                    {
+                        format!("c = \"{value}\"")
+                    } else {
+                        format!("c = {value}")
+                    };
+
+                    #[derive(serde::Deserialize)]
+                    struct Wrap {
+                        c: ColorValue,
+                    }
+
+                    if let Ok(w) = toml::from_str::<Wrap>(&toml_input) {
+                        macro_rules! set_theme_field {
+                            ($($name:ident),*) => {
+                                match field_key {
+                                    $(stringify!($name) => self.config.theme.$name = Some(w.c),)*
+                                    _ => {}
+                                }
+                            };
+                        }
+                        set_theme_field!(
+                            border_focused,
+                            border_unfocused,
+                            selection_bg,
+                            selection_fg,
+                            status_running,
+                            status_paused,
+                            status_stopped,
+                            status_pr,
+                            status_pr_merged,
+                            text_primary,
+                            text_secondary,
+                            text_accent,
+                            text_pr,
+                            diff_added,
+                            diff_removed,
+                            diff_hunk_header,
+                            diff_file_header,
+                            diff_context,
+                            modal_info,
+                            modal_warning,
+                            modal_error,
+                            status_bar_bg,
+                            status_bar_fg
+                        );
+                    }
+                }
+
+                // Rebuild theme from updated overrides
+                let base = self
+                    .config
+                    .theme
+                    .preset
+                    .as_deref()
+                    .and_then(Theme::from_preset)
+                    .unwrap_or_default();
+                self.theme = base.with_overrides(&self.config.theme);
+            }
+            SettingsTab::Keybindings => {
+                // Keybinding editing is not text-based — handled separately
+            }
+        }
+
+        // Persist config via the store (updates mtime so hot-reload won't re-read our own write)
+        let updated = self.config.clone();
+        if let Err(e) = self.config_store.mutate(|c| *c = updated) {
+            warn!("Failed to save config: {}", e);
+        }
+    }
+
+    /// Handle a keypress in the settings modal.
+    async fn handle_settings_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        mut state: SettingsState,
+    ) {
+        use crossterm::event::KeyCode;
+
+        if let Some(ref mut editing) = state.editing {
+            // Currently editing a field
+            match editing {
+                SettingsEditing::TextInput { value } => match key.code {
+                    KeyCode::Enter => {
+                        let val = value.clone();
+                        let field_key = state.rows[state.selected_row].field_key.clone();
+                        state.editing = None;
+                        self.apply_settings_edit(state.tab, &field_key, &val);
+                        // Refresh rows after applying
+                        state.rows = self.build_settings_rows(state.tab);
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Esc => {
+                        state.editing = None;
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Backspace => {
+                        value.pop();
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Char(c) => {
+                        value.push(c);
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    _ => {
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                },
+                SettingsEditing::KeyCapture { .. } => {
+                    // For key capture, any keypress except Esc is captured as the new binding
+                    match key.code {
+                        KeyCode::Esc => {
+                            state.editing = None;
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        _ => {
+                            // Key capture is a simplified version — store the key display
+                            // Full keybinding editing would require more complex UX
+                            state.editing = None;
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                    }
+                }
+            }
+        } else {
+            // Not editing — navigation mode: resolve via configurable keybindings
+            use crate::config::keybindings::BindableAction;
+
+            match self.config.keybindings.resolve(&key) {
+                Some(BindableAction::NavigateDown) => {
+                    if !state.rows.is_empty() {
+                        state.selected_row = (state.selected_row + 1) % state.rows.len();
+                    }
+                    self.ui_state.modal = Modal::Settings(state);
+                }
+                Some(BindableAction::NavigateUp) => {
+                    if !state.rows.is_empty() {
+                        state.selected_row = if state.selected_row == 0 {
+                            state.rows.len() - 1
+                        } else {
+                            state.selected_row - 1
+                        };
+                    }
+                    self.ui_state.modal = Modal::Settings(state);
+                }
+                Some(BindableAction::Quit) => {
+                    self.ui_state.modal = Modal::None;
+                }
+                _ => match key.code {
+                    KeyCode::Esc => {
+                        self.ui_state.modal = Modal::None;
+                    }
+                    KeyCode::Tab => {
+                        state.tab = state.tab.next();
+                        state.selected_row = 0;
+                        state.rows = self.build_settings_rows(state.tab);
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::BackTab => {
+                        state.tab = state.tab.prev();
+                        state.selected_row = 0;
+                        state.rows = self.build_settings_rows(state.tab);
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Enter => {
+                        if !state.rows.is_empty() {
+                            let current_value = state.rows[state.selected_row].value.clone();
+                            let initial = if current_value == "(auto)" || current_value == "(none)"
+                            {
+                                String::new()
+                            } else {
+                                current_value
+                            };
+                            state.editing = Some(SettingsEditing::TextInput { value: initial });
+                        }
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    _ => {
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                },
             }
         }
     }
@@ -1511,6 +2219,8 @@ impl App {
             String::new()
         };
 
+        let restart_needed = self.config_store.restart_required();
+
         let status = if status.is_empty() {
             let session_count = self
                 .ui_state
@@ -1518,10 +2228,19 @@ impl App {
                 .iter()
                 .filter(|i| i.is_worktree())
                 .count();
-            format!(
-                "Sessions: {} | Press ? for help | n: new session | N: add project",
-                session_count
-            )
+            if restart_needed {
+                format!(
+                    "Sessions: {} | Restart to apply config changes | ? help",
+                    session_count
+                )
+            } else {
+                format!(
+                    "Sessions: {} | Press ? for help | n: new session | N: add project",
+                    session_count
+                )
+            }
+        } else if restart_needed {
+            format!("{} | Restart to apply config changes", status)
         } else {
             status
         };
@@ -1683,62 +2402,76 @@ impl App {
                 self.ui_state.modal = Modal::None;
             }
 
+            Modal::Settings(_) => {
+                // Extract the state to avoid borrow conflict with &mut self
+                let state = match std::mem::replace(&mut self.ui_state.modal, Modal::None) {
+                    Modal::Settings(s) => s,
+                    _ => unreachable!(),
+                };
+                self.handle_settings_key(key, state).await;
+            }
+
             Modal::QuickSwitch {
                 query,
                 matches,
                 selected_idx,
-            } => match (key.code, key.modifiers) {
-                (KeyCode::Esc, _) => {
-                    self.ui_state.modal = Modal::None;
-                }
-                (KeyCode::Enter, _) => {
-                    if let Some(m) = matches.get(*selected_idx) {
-                        let session_id = m.session_id;
-                        self.ui_state.modal = Modal::None;
-                        self.ui_state.selected_session_id = Some(session_id);
-                        // Select in the list too so we return to the right position
-                        if let Some(idx) =
-                            self.ui_state.list_items.iter().position(|item| {
-                                matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
-                            })
-                        {
-                            self.ui_state.list_state.select(Some(idx));
+            } => {
+                use crate::config::keybindings::BindableAction;
+
+                // Resolve configurable bindings first for navigation
+                match self.config.keybindings.resolve(&key) {
+                    Some(BindableAction::NavigateUp) => {
+                        if !matches.is_empty() {
+                            *selected_idx = if *selected_idx == 0 {
+                                matches.len() - 1
+                            } else {
+                                *selected_idx - 1
+                            };
                         }
-                        self.update_selection();
-                        self.handle_select().await;
                     }
-                }
-                (KeyCode::Tab, _) => {
-                    if let Some(m) = matches.get(*selected_idx) {
-                        *query = m.title.clone();
-                        // Re-filter with the completed title
-                        self.refilter_quick_switch();
+                    Some(BindableAction::NavigateDown) => {
+                        if !matches.is_empty() {
+                            *selected_idx = (*selected_idx + 1) % matches.len();
+                        }
                     }
+                    _ => match key.code {
+                        KeyCode::Esc => {
+                            self.ui_state.modal = Modal::None;
+                        }
+                        KeyCode::Enter => {
+                            if let Some(m) = matches.get(*selected_idx) {
+                                let session_id = m.session_id;
+                                self.ui_state.modal = Modal::None;
+                                self.ui_state.selected_session_id = Some(session_id);
+                                if let Some(idx) =
+                                    self.ui_state.list_items.iter().position(|item| {
+                                        matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
+                                    })
+                                {
+                                    self.ui_state.list_state.select(Some(idx));
+                                }
+                                self.update_selection();
+                                self.handle_select().await;
+                            }
+                        }
+                        KeyCode::Tab => {
+                            if let Some(m) = matches.get(*selected_idx) {
+                                *query = m.title.clone();
+                                self.refilter_quick_switch();
+                            }
+                        }
+                        KeyCode::Backspace => {
+                            query.pop();
+                            self.refilter_quick_switch();
+                        }
+                        KeyCode::Char(c) => {
+                            query.push(c);
+                            self.refilter_quick_switch();
+                        }
+                        _ => {}
+                    },
                 }
-                (KeyCode::Backspace, _) => {
-                    query.pop();
-                    self.refilter_quick_switch();
-                }
-                (KeyCode::Up, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
-                    if !matches.is_empty() {
-                        *selected_idx = if *selected_idx == 0 {
-                            matches.len() - 1
-                        } else {
-                            *selected_idx - 1
-                        };
-                    }
-                }
-                (KeyCode::Down, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
-                    if !matches.is_empty() {
-                        *selected_idx = (*selected_idx + 1) % matches.len();
-                    }
-                }
-                (KeyCode::Char(c), _) => {
-                    query.push(c);
-                    self.refilter_quick_switch();
-                }
-                _ => {}
-            },
+            }
 
             Modal::None => {}
         }
@@ -1781,6 +2514,9 @@ impl App {
             }
             UserCommand::DeleteSession => {
                 self.handle_delete_session();
+            }
+            UserCommand::RestartSession => {
+                self.handle_restart_session();
             }
             UserCommand::RemoveProject => {
                 self.handle_remove_project();
@@ -1841,6 +2577,15 @@ impl App {
             }
             UserCommand::ShowHelp => {
                 self.ui_state.modal = Modal::Help;
+            }
+            UserCommand::ShowSettings => {
+                let rows = self.build_settings_rows(SettingsTab::General);
+                self.ui_state.modal = Modal::Settings(SettingsState {
+                    tab: SettingsTab::General,
+                    selected_row: 0,
+                    editing: None,
+                    rows,
+                });
             }
             UserCommand::Quit => {
                 self.ui_state.should_quit = true;
@@ -1921,6 +2666,21 @@ impl App {
                         }
                     })
                     .await;
+
+                // Update tmux status bars for running sessions with PR info
+                {
+                    let state = self.store.read().await;
+                    for session in state.sessions.values() {
+                        if session.status == SessionStatus::Running {
+                            let info = self.session_manager.status_bar_info(session);
+                            self.session_manager
+                                .tmux
+                                .configure_status_bar(&session.tmux_session_name, &info)
+                                .await;
+                        }
+                    }
+                }
+
                 self.refresh_list_items().await;
             }
             StateUpdate::EnrichedPrReady { session_id, info } => {
@@ -2327,6 +3087,17 @@ impl App {
         }
     }
 
+    /// Handle restart session - show confirmation
+    fn handle_restart_session(&mut self) {
+        if let Some(session_id) = self.ui_state.selected_session_id {
+            self.ui_state.modal = Modal::Confirm {
+                title: "Restart Session".to_string(),
+                message: "This will kill the current tmux session and start a fresh one.\nClaude will pick up where it left off via /resume.".to_string(),
+                on_confirm: ConfirmAction::RestartSession { session_id },
+            };
+        }
+    }
+
     /// Handle delete session - show confirmation
     fn handle_delete_session(&mut self) {
         if let Some(session_id) = self.ui_state.selected_session_id {
@@ -2469,6 +3240,22 @@ impl App {
                         )
                         .await;
                     });
+                }
+            }
+            ConfirmAction::RestartSession { session_id } => {
+                match self.session_manager.restart_session(&session_id).await {
+                    Ok(_) => {
+                        self.ui_state.status_message = Some((
+                            "Session restarted".to_string(),
+                            Instant::now() + Duration::from_secs(3),
+                        ));
+                        self.refresh_list_items().await;
+                    }
+                    Err(e) => {
+                        self.ui_state.modal = Modal::Error {
+                            message: format!("Failed to restart: {}", e),
+                        };
+                    }
                 }
             }
             ConfirmAction::RemoveProject { project_id } => {
@@ -2872,6 +3659,32 @@ async fn fetch_preview_data(
             Arc::new(DiffInfo::empty()),
             String::new(),
         )
+    }
+}
+
+/// Format a ratatui Color for display in the settings modal.
+fn format_color(color: ratatui::style::Color) -> String {
+    use ratatui::style::Color;
+    match color {
+        Color::Reset => "reset".into(),
+        Color::Black => "black".into(),
+        Color::Red => "red".into(),
+        Color::Green => "green".into(),
+        Color::Yellow => "yellow".into(),
+        Color::Blue => "blue".into(),
+        Color::Magenta => "magenta".into(),
+        Color::Cyan => "cyan".into(),
+        Color::Gray => "gray".into(),
+        Color::DarkGray => "dark_gray".into(),
+        Color::LightRed => "light_red".into(),
+        Color::LightGreen => "light_green".into(),
+        Color::LightYellow => "light_yellow".into(),
+        Color::LightBlue => "light_blue".into(),
+        Color::LightMagenta => "light_magenta".into(),
+        Color::LightCyan => "light_cyan".into(),
+        Color::White => "white".into(),
+        Color::Indexed(i) => format!("{i}"),
+        Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
     }
 }
 

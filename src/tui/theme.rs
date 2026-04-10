@@ -5,6 +5,8 @@
 
 use ratatui::style::{Color, Style};
 
+use crate::config::theme::ThemeOverrides;
+
 /// Terminal color capability
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ColorMode {
@@ -229,6 +231,66 @@ impl Theme {
         }
     }
 
+    /// Look up a preset palette by name.
+    ///
+    /// Recognised names: `"basic"`, `"indexed"`, `"truecolor"`.
+    pub fn from_preset(name: &str) -> Option<Self> {
+        match name.to_lowercase().as_str() {
+            "basic" => Some(Self::basic()),
+            "indexed" => Some(Self::indexed()),
+            "truecolor" => Some(Self::truecolor()),
+            _ => None,
+        }
+    }
+
+    /// Apply user-supplied overrides on top of this theme.
+    ///
+    /// Only `Some` fields in `overrides` replace the corresponding color;
+    /// `None` fields leave the base theme value untouched.
+    pub fn with_overrides(mut self, overrides: &ThemeOverrides) -> Self {
+        macro_rules! apply {
+            ($field:ident) => {
+                if let Some(cv) = overrides.$field {
+                    self.$field = cv.0;
+                }
+            };
+        }
+
+        apply!(border_focused);
+        apply!(border_unfocused);
+        apply!(selection_bg);
+        apply!(status_running);
+        apply!(status_paused);
+        apply!(status_stopped);
+        apply!(status_pr);
+        apply!(status_pr_merged);
+        apply!(text_primary);
+        apply!(text_secondary);
+        apply!(text_accent);
+        apply!(text_pr);
+        apply!(diff_added);
+        apply!(diff_removed);
+        apply!(diff_hunk_header);
+        apply!(diff_file_header);
+        apply!(diff_context);
+        apply!(modal_info);
+        apply!(modal_warning);
+        apply!(modal_error);
+        apply!(status_bar_bg);
+        apply!(status_bar_fg);
+
+        // selection_fg is Option<Color> in Theme but Option<ColorValue> in overrides
+        if let Some(cv) = overrides.selection_fg {
+            self.selection_fg = Some(cv.0);
+        }
+
+        // project_colors is intentionally not overridable — paired-tuple
+        // arrays are ergonomically poor in TOML and the feature has minimal
+        // user demand.
+
+        self
+    }
+
     /// Style for focused pane borders
     pub fn border_focused(&self) -> Style {
         Style::default().fg(self.border_focused)
@@ -259,11 +321,136 @@ impl Theme {
             .bg(self.status_bar_bg)
             .fg(self.status_bar_fg)
     }
+
+    /// Return a tmux-compatible `status-style` string matching this theme's status bar colors
+    pub fn tmux_status_style(&self) -> String {
+        format!(
+            "bg={},fg={}",
+            color_to_tmux(self.status_bar_bg),
+            color_to_tmux(self.status_bar_fg),
+        )
+    }
+}
+
+/// Scale a color's brightness toward black by the given factor (0.0 = black, 1.0 = unchanged).
+///
+/// For named and indexed colors that can't be scaled directly, falls back to the
+/// closest indexed gray from the 256-color palette.
+pub fn dim_color(color: Color, opacity: f32) -> Color {
+    let opacity = opacity.clamp(0.0, 1.0);
+    match color {
+        Color::Rgb(r, g, b) => Color::Rgb(
+            (r as f32 * opacity) as u8,
+            (g as f32 * opacity) as u8,
+            (b as f32 * opacity) as u8,
+        ),
+        Color::Reset => {
+            // Reset means "terminal default" — dim to a gray proportional to opacity
+            // Assume default text is ~200 brightness
+            let v = (200.0 * opacity) as u8;
+            Color::Rgb(v, v, v)
+        }
+        other => {
+            // Convert named/indexed colors to approximate RGB, then dim
+            let (r, g, b) = color_to_approx_rgb(other);
+            Color::Rgb(
+                (r as f32 * opacity) as u8,
+                (g as f32 * opacity) as u8,
+                (b as f32 * opacity) as u8,
+            )
+        }
+    }
+}
+
+/// Approximate RGB values for named ANSI colors
+fn color_to_approx_rgb(color: Color) -> (u8, u8, u8) {
+    match color {
+        Color::Black => (0, 0, 0),
+        Color::Red => (205, 0, 0),
+        Color::Green => (0, 205, 0),
+        Color::Yellow => (205, 205, 0),
+        Color::Blue => (0, 0, 238),
+        Color::Magenta => (205, 0, 205),
+        Color::Cyan => (0, 205, 205),
+        Color::White | Color::Gray => (229, 229, 229),
+        Color::DarkGray => (127, 127, 127),
+        Color::LightRed => (255, 0, 0),
+        Color::LightGreen => (0, 255, 0),
+        Color::LightYellow => (255, 255, 0),
+        Color::LightBlue => (92, 92, 255),
+        Color::LightMagenta => (255, 0, 255),
+        Color::LightCyan => (0, 255, 255),
+        Color::Indexed(n) => indexed_to_rgb(n),
+        Color::Rgb(r, g, b) => (r, g, b),
+        Color::Reset => (200, 200, 200),
+    }
+}
+
+/// Convert a 256-color index to approximate RGB
+fn indexed_to_rgb(n: u8) -> (u8, u8, u8) {
+    match n {
+        // Standard 16 colors — delegate to named
+        0 => (0, 0, 0),
+        1 => (205, 0, 0),
+        2 => (0, 205, 0),
+        3 => (205, 205, 0),
+        4 => (0, 0, 238),
+        5 => (205, 0, 205),
+        6 => (0, 205, 205),
+        7 => (229, 229, 229),
+        8 => (127, 127, 127),
+        9 => (255, 0, 0),
+        10 => (0, 255, 0),
+        11 => (255, 255, 0),
+        12 => (92, 92, 255),
+        13 => (255, 0, 255),
+        14 => (0, 255, 255),
+        15 => (255, 255, 255),
+        // 6x6x6 color cube (indices 16-231)
+        16..=231 => {
+            let n = n - 16;
+            let b = n % 6;
+            let g = (n / 6) % 6;
+            let r = n / 36;
+            let to_val = |c: u8| if c == 0 { 0u8 } else { 55 + 40 * c };
+            (to_val(r), to_val(g), to_val(b))
+        }
+        // Grayscale ramp (indices 232-255)
+        232..=255 => {
+            let v = 8 + 10 * (n - 232);
+            (v, v, v)
+        }
+    }
+}
+
+/// Convert a ratatui `Color` to a tmux-compatible color string
+pub fn color_to_tmux(color: Color) -> String {
+    match color {
+        Color::Rgb(r, g, b) => format!("#{:02x}{:02x}{:02x}", r, g, b),
+        Color::Indexed(n) => format!("colour{}", n),
+        Color::Black => "black".into(),
+        Color::Red => "red".into(),
+        Color::Green => "green".into(),
+        Color::Yellow => "yellow".into(),
+        Color::Blue => "blue".into(),
+        Color::Magenta => "magenta".into(),
+        Color::Cyan => "cyan".into(),
+        Color::White | Color::Gray => "white".into(),
+        Color::DarkGray => "brightblack".into(),
+        Color::LightRed => "brightred".into(),
+        Color::LightGreen => "brightgreen".into(),
+        Color::LightYellow => "brightyellow".into(),
+        Color::LightBlue => "brightblue".into(),
+        Color::LightMagenta => "brightmagenta".into(),
+        Color::LightCyan => "brightcyan".into(),
+        Color::Reset => "default".into(),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::theme::{ColorValue, ThemeOverrides};
 
     #[test]
     fn test_basic_theme() {
@@ -310,5 +497,170 @@ mod tests {
         assert_eq!(basic.border_focused, Color::Cyan);
         assert_eq!(indexed.border_focused, Color::Indexed(117));
         assert_eq!(truecolor.border_focused, Color::Rgb(137, 180, 250));
+    }
+
+    #[test]
+    fn test_from_preset_valid() {
+        assert_eq!(
+            Theme::from_preset("basic").unwrap().border_focused,
+            Color::Cyan
+        );
+        assert_eq!(
+            Theme::from_preset("indexed").unwrap().border_focused,
+            Color::Indexed(117)
+        );
+        assert_eq!(
+            Theme::from_preset("TrueColor").unwrap().border_focused,
+            Color::Rgb(137, 180, 250)
+        );
+    }
+
+    #[test]
+    fn test_from_preset_unknown_returns_none() {
+        assert!(Theme::from_preset("catppuccin").is_none());
+    }
+
+    #[test]
+    fn test_with_overrides_applies_some_fields() {
+        let base = Theme::basic();
+        let overrides = ThemeOverrides {
+            border_focused: Some(ColorValue(Color::Rgb(255, 0, 0))),
+            status_running: Some(ColorValue(Color::Yellow)),
+            ..Default::default()
+        };
+        let themed = base.with_overrides(&overrides);
+        assert_eq!(themed.border_focused, Color::Rgb(255, 0, 0));
+        assert_eq!(themed.status_running, Color::Yellow);
+        // Untouched fields keep the base value
+        assert_eq!(themed.border_unfocused, Color::DarkGray);
+        assert_eq!(themed.status_paused, Color::Yellow);
+    }
+
+    #[test]
+    fn test_with_overrides_empty_is_identity() {
+        let base = Theme::indexed();
+        let themed = base.clone().with_overrides(&ThemeOverrides::default());
+        assert_eq!(themed.border_focused, base.border_focused);
+        assert_eq!(themed.selection_bg, base.selection_bg);
+        assert_eq!(themed.status_bar_bg, base.status_bar_bg);
+    }
+
+    #[test]
+    fn test_with_overrides_selection_fg() {
+        let base = Theme::basic();
+        let overrides = ThemeOverrides {
+            selection_fg: Some(ColorValue(Color::Rgb(1, 2, 3))),
+            ..Default::default()
+        };
+        let themed = base.with_overrides(&overrides);
+        assert_eq!(themed.selection_fg, Some(Color::Rgb(1, 2, 3)));
+    }
+
+    #[test]
+    fn test_color_to_tmux_rgb() {
+        assert_eq!(color_to_tmux(Color::Rgb(49, 50, 68)), "#313244");
+        assert_eq!(color_to_tmux(Color::Rgb(0, 0, 0)), "#000000");
+        assert_eq!(color_to_tmux(Color::Rgb(255, 255, 255)), "#ffffff");
+    }
+
+    #[test]
+    fn test_color_to_tmux_indexed() {
+        assert_eq!(color_to_tmux(Color::Indexed(236)), "colour236");
+        assert_eq!(color_to_tmux(Color::Indexed(0)), "colour0");
+    }
+
+    #[test]
+    fn test_color_to_tmux_named() {
+        assert_eq!(color_to_tmux(Color::Blue), "blue");
+        assert_eq!(color_to_tmux(Color::White), "white");
+        assert_eq!(color_to_tmux(Color::DarkGray), "brightblack");
+        assert_eq!(color_to_tmux(Color::Reset), "default");
+    }
+
+    #[test]
+    fn test_dim_color_rgb() {
+        // 50% opacity halves each channel
+        assert_eq!(
+            dim_color(Color::Rgb(200, 100, 50), 0.5),
+            Color::Rgb(100, 50, 25)
+        );
+    }
+
+    #[test]
+    fn test_dim_color_full_opacity_unchanged() {
+        assert_eq!(
+            dim_color(Color::Rgb(200, 100, 50), 1.0),
+            Color::Rgb(200, 100, 50)
+        );
+    }
+
+    #[test]
+    fn test_dim_color_zero_opacity_is_black() {
+        assert_eq!(
+            dim_color(Color::Rgb(200, 100, 50), 0.0),
+            Color::Rgb(0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn test_dim_color_named_converts_to_rgb() {
+        // Green at 50% should be approximately half brightness
+        let dimmed = dim_color(Color::Green, 0.5);
+        assert!(matches!(dimmed, Color::Rgb(_, _, _)));
+    }
+
+    #[test]
+    fn test_dim_color_indexed_converts_to_rgb() {
+        let dimmed = dim_color(Color::Indexed(196), 0.5);
+        assert!(matches!(dimmed, Color::Rgb(_, _, _)));
+    }
+
+    #[test]
+    fn test_dim_color_reset_produces_gray() {
+        let dimmed = dim_color(Color::Reset, 0.5);
+        assert_eq!(dimmed, Color::Rgb(100, 100, 100));
+    }
+
+    #[test]
+    fn test_dim_color_clamps_opacity() {
+        // Opacity > 1.0 should be clamped to 1.0
+        assert_eq!(
+            dim_color(Color::Rgb(200, 100, 50), 2.0),
+            Color::Rgb(200, 100, 50)
+        );
+        // Opacity < 0.0 should be clamped to 0.0
+        assert_eq!(
+            dim_color(Color::Rgb(200, 100, 50), -1.0),
+            Color::Rgb(0, 0, 0)
+        );
+    }
+
+    #[test]
+    fn test_indexed_to_rgb_grayscale_ramp() {
+        // Index 232 = darkest gray (8)
+        assert_eq!(indexed_to_rgb(232), (8, 8, 8));
+        // Index 255 = lightest gray (238)
+        assert_eq!(indexed_to_rgb(255), (238, 238, 238));
+    }
+
+    #[test]
+    fn test_indexed_to_rgb_color_cube() {
+        // Index 16 = (0,0,0) in the 6x6x6 cube
+        assert_eq!(indexed_to_rgb(16), (0, 0, 0));
+        // Index 196 = (5,0,0) = bright red
+        assert_eq!(indexed_to_rgb(196), (255, 0, 0));
+    }
+
+    #[test]
+    fn test_tmux_status_style_per_theme() {
+        assert_eq!(Theme::basic().tmux_status_style(), "bg=blue,fg=white");
+        assert_eq!(
+            Theme::indexed().tmux_status_style(),
+            "bg=colour236,fg=colour252"
+        );
+        assert_eq!(
+            Theme::truecolor().tmux_status_style(),
+            "bg=#313244,fg=#cdd6f4"
+        );
     }
 }

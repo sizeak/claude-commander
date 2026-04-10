@@ -32,6 +32,7 @@ pub enum BindableAction {
     PauseSession,
     ResumeSession,
     DeleteSession,
+    RestartSession,
     RemoveProject,
     OpenInEditor,
     TogglePane,
@@ -39,6 +40,7 @@ pub enum BindableAction {
     ShrinkLeftPane,
     GrowLeftPane,
     ShowHelp,
+    ShowSettings,
     Quit,
     ScrollUp,
     ScrollDown,
@@ -58,6 +60,7 @@ impl BindableAction {
         Self::PauseSession,
         Self::ResumeSession,
         Self::DeleteSession,
+        Self::RestartSession,
         Self::RemoveProject,
         Self::OpenInEditor,
         Self::TogglePane,
@@ -69,6 +72,7 @@ impl BindableAction {
         Self::PageUp,
         Self::PageDown,
         Self::ShowHelp,
+        Self::ShowSettings,
         Self::Quit,
     ];
 
@@ -84,6 +88,7 @@ impl BindableAction {
             Self::PauseSession => "pause_session",
             Self::ResumeSession => "resume_session",
             Self::DeleteSession => "delete_session",
+            Self::RestartSession => "restart_session",
             Self::RemoveProject => "remove_project",
             Self::OpenInEditor => "open_in_editor",
             Self::TogglePane => "toggle_pane",
@@ -91,6 +96,7 @@ impl BindableAction {
             Self::ShrinkLeftPane => "shrink_left_pane",
             Self::GrowLeftPane => "grow_left_pane",
             Self::ShowHelp => "show_help",
+            Self::ShowSettings => "show_settings",
             Self::Quit => "quit",
             Self::ScrollUp => "scroll_up",
             Self::ScrollDown => "scroll_down",
@@ -111,6 +117,7 @@ impl BindableAction {
             Self::PauseSession => "Pause session",
             Self::ResumeSession => "Resume session",
             Self::DeleteSession => "Delete/kill session",
+            Self::RestartSession => "Restart session",
             Self::RemoveProject => "Remove project",
             Self::OpenInEditor => "Open in editor/IDE",
             Self::TogglePane => "Toggle preview/diff/shell view",
@@ -118,6 +125,7 @@ impl BindableAction {
             Self::ShrinkLeftPane => "Shrink left pane",
             Self::GrowLeftPane => "Grow left pane",
             Self::ShowHelp => "Show help",
+            Self::ShowSettings => "Settings",
             Self::Quit => "Quit",
             Self::ScrollUp => "Scroll up",
             Self::ScrollDown => "Scroll down",
@@ -136,6 +144,7 @@ impl BindableAction {
             | Self::PauseSession
             | Self::ResumeSession
             | Self::DeleteSession
+            | Self::RestartSession
             | Self::RemoveProject
             | Self::OpenInEditor => "Session Management",
             Self::TogglePane
@@ -143,7 +152,7 @@ impl BindableAction {
             | Self::ShrinkLeftPane
             | Self::GrowLeftPane => "Layout",
             Self::ScrollUp | Self::ScrollDown | Self::PageUp | Self::PageDown => "Scrolling",
-            Self::ShowHelp | Self::Quit => "Other",
+            Self::ShowHelp | Self::ShowSettings | Self::Quit => "Other",
         }
     }
 }
@@ -162,6 +171,7 @@ impl FromStr for BindableAction {
             "pause_session" => Ok(Self::PauseSession),
             "resume_session" => Ok(Self::ResumeSession),
             "delete_session" => Ok(Self::DeleteSession),
+            "restart_session" => Ok(Self::RestartSession),
             "remove_project" => Ok(Self::RemoveProject),
             "open_in_editor" => Ok(Self::OpenInEditor),
             "toggle_pane" => Ok(Self::TogglePane),
@@ -169,6 +179,7 @@ impl FromStr for BindableAction {
             "shrink_left_pane" => Ok(Self::ShrinkLeftPane),
             "grow_left_pane" => Ok(Self::GrowLeftPane),
             "show_help" => Ok(Self::ShowHelp),
+            "show_settings" => Ok(Self::ShowSettings),
             "quit" => Ok(Self::Quit),
             "scroll_up" => Ok(Self::ScrollUp),
             "scroll_down" => Ok(Self::ScrollDown),
@@ -464,6 +475,10 @@ impl Default for KeyBindings {
             vec![kb(KeyCode::Char('d'), none)],
         );
         bindings.insert(
+            BindableAction::RestartSession,
+            vec![kb(KeyCode::Char('R'), shift)],
+        );
+        bindings.insert(
             BindableAction::RemoveProject,
             vec![kb(KeyCode::Char('D'), shift)],
         );
@@ -503,6 +518,10 @@ impl Default for KeyBindings {
         bindings.insert(
             BindableAction::ShowHelp,
             vec![kb(KeyCode::Char('?'), shift), kb(KeyCode::Char('?'), none)],
+        );
+        bindings.insert(
+            BindableAction::ShowSettings,
+            vec![kb(KeyCode::Char(','), none)],
         );
         bindings.insert(
             BindableAction::Quit,
@@ -747,6 +766,9 @@ mod tests {
 
         let shift_n = KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT);
         assert_eq!(kb.resolve(&shift_n), Some(BindableAction::NewProject));
+
+        let shift_r = KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT);
+        assert_eq!(kb.resolve(&shift_r), Some(BindableAction::RestartSession));
 
         // Quit
         let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);

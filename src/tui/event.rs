@@ -124,6 +124,8 @@ pub enum UserCommand {
     ResumeSession,
     /// Delete/kill current session
     DeleteSession,
+    /// Restart current session (kill tmux and recreate)
+    RestartSession,
     /// Remove an entire project
     RemoveProject,
     /// Open worktree in editor/IDE
@@ -138,6 +140,8 @@ pub enum UserCommand {
     GrowLeftPane,
     /// Show help
     ShowHelp,
+    /// Show settings modal
+    ShowSettings,
     /// Quit application
     Quit,
     /// Cancel current operation
@@ -202,6 +206,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::PauseSession => Self::PauseSession,
             BindableAction::ResumeSession => Self::ResumeSession,
             BindableAction::DeleteSession => Self::DeleteSession,
+            BindableAction::RestartSession => Self::RestartSession,
             BindableAction::RemoveProject => Self::RemoveProject,
             BindableAction::OpenInEditor => Self::OpenInEditor,
             BindableAction::TogglePane => Self::TogglePane,
@@ -209,6 +214,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::ShrinkLeftPane => Self::ShrinkLeftPane,
             BindableAction::GrowLeftPane => Self::GrowLeftPane,
             BindableAction::ShowHelp => Self::ShowHelp,
+            BindableAction::ShowSettings => Self::ShowSettings,
             BindableAction::Quit => Self::Quit,
             BindableAction::ScrollUp => Self::ScrollUp,
             BindableAction::ScrollDown => Self::ScrollDown,
@@ -544,6 +550,11 @@ mod tests {
                 KeyCode::Char('d'),
                 KeyModifiers::NONE,
                 UserCommand::DeleteSession,
+            ),
+            (
+                KeyCode::Char('R'),
+                KeyModifiers::SHIFT,
+                UserCommand::RestartSession,
             ),
             (
                 KeyCode::Char('D'),

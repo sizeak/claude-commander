@@ -574,6 +574,35 @@ fn test_modal_confirm() {
 }
 
 #[test]
+fn test_modal_confirm_restart() {
+    let backend = TestBackend::new(120, 24);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = test_theme();
+
+    terminal
+        .draw(|frame| {
+            let area = frame.area();
+            let modal_area = centered_rect(50, 15, area);
+            frame.render_widget(Clear, modal_area);
+
+            let block = Block::default()
+                .title(" Restart Session ")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme.modal_error));
+
+            let inner = block.inner(modal_area);
+            frame.render_widget(block, modal_area);
+
+            let text = "This will kill the current tmux session and start a fresh one.\nClaude will pick up where it left off via /resume.\n\n[Enter] Confirm  [Esc] Cancel";
+            let paragraph = Paragraph::new(text).wrap(Wrap { trim: true });
+            frame.render_widget(paragraph, inner);
+        })
+        .unwrap();
+
+    insta::assert_snapshot!(terminal.backend());
+}
+
+#[test]
 fn test_modal_error() {
     let backend = TestBackend::new(120, 24);
     let mut terminal = Terminal::new(backend).unwrap();

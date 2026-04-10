@@ -9,9 +9,10 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 
 use tokio::process::Command;
-use tracing::{debug, info, instrument};
+use tracing::{debug, info, instrument, warn};
 
 use super::GitBackend;
+use super::worktree_include::copy_worktree_includes;
 use crate::error::{GitError, Result};
 
 /// Worktree information
@@ -84,6 +85,7 @@ impl WorktreeManager {
             worktree_path,
             branch_name.to_string(),
             branch_exists,
+            None,
         )
         .await
     }
@@ -99,6 +101,7 @@ impl WorktreeManager {
         worktree_path: PathBuf,
         branch_name: String,
         branch_exists: bool,
+        start_point: Option<String>,
     ) -> Result<WorktreeInfo> {
         // Ensure worktrees directory exists
         tokio::fs::create_dir_all(&worktrees_dir)
@@ -111,13 +114,20 @@ impl WorktreeManager {
         cmd.current_dir(&repo_path).arg("worktree").arg("add");
 
         if branch_exists {
-            // Checkout existing branch
+            // Checkout existing branch (start_point is not applicable here)
             debug!("Branch {} exists, checking out", branch_name);
+            if start_point.is_some() {
+                debug!("Ignoring start_point for existing branch {}", branch_name);
+            }
             cmd.arg(&worktree_path).arg(&branch_name);
         } else {
-            // Create new branch
+            // Create new branch, optionally from a specific start point
             debug!("Creating new branch {}", branch_name);
             cmd.arg("-b").arg(&branch_name).arg(&worktree_path);
+            if let Some(ref sp) = start_point {
+                debug!("Using start point {}", sp);
+                cmd.arg(sp);
+            }
         }
 
         cmd.stdin(Stdio::null())
@@ -140,6 +150,11 @@ impl WorktreeManager {
             "Created worktree at {:?} with branch {}",
             worktree_path, branch_name
         );
+
+        // Copy .worktreeinclude files (best-effort)
+        if let Err(e) = copy_worktree_includes(&repo_path, &worktree_path).await {
+            warn!("Failed to copy worktree includes: {}", e);
+        }
 
         // Get the HEAD of the new worktree
         let head = Self::get_worktree_head_static(&worktree_path).await?;

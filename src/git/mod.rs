@@ -10,6 +10,7 @@ mod diff;
 mod pr;
 mod summary;
 mod worktree;
+mod worktree_include;
 
 pub use backend::*;
 pub use diff::*;

@@ -13,6 +13,7 @@ use figment::{
 use serde::{Deserialize, Serialize};
 
 use crate::config::keybindings::KeyBindings;
+use crate::config::theme::ThemeOverrides;
 use crate::error::{ConfigError, Error, Result};
 
 /// Application configuration
@@ -53,14 +54,20 @@ pub struct Config {
     /// If unset, auto-detected from a known list of GUI editors.
     pub editor_gui: Option<bool>,
 
-    /// Pull the latest changes on the project's checked-out branch before creating a new session
-    pub pull_before_create: bool,
+    /// Fetch the latest changes from origin before creating a new session
+    #[serde(alias = "pull_before_create")]
+    pub fetch_before_create: bool,
 
     /// Interval in milliseconds for checking state file changes from other instances (0 = disabled)
     pub state_sync_interval_ms: u64,
 
     /// Dim the right pane (preview/diff/shell) when the session list is focused
     pub dim_unfocused_preview: bool,
+
+    /// How much to dim unfocused pane colors (0.0 = fully dimmed/black, 1.0 = no dimming).
+    /// Uses a foreground color override instead of terminal DIM modifier for cross-terminal
+    /// compatibility. Only takes effect when `dim_unfocused_preview` is true.
+    pub dim_unfocused_opacity: f32,
 
     /// Leader key for quick-switch modal (e.g. " " for Space, "ctrl+k", "f1")
     pub leader_key: String,
@@ -79,6 +86,10 @@ pub struct Config {
 
     /// Key bindings
     pub keybindings: KeyBindings,
+
+    /// Theme color overrides
+    #[serde(default)]
+    pub theme: ThemeOverrides,
 }
 
 impl Default for Config {
@@ -95,15 +106,17 @@ impl Default for Config {
             editor_gui: None,
             shell_program: std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string()),
             pr_check_interval_secs: 600,
-            pull_before_create: true,
+            fetch_before_create: true,
             state_sync_interval_ms: 2000,
             dim_unfocused_preview: true,
+            dim_unfocused_opacity: 0.4,
             leader_key: " ".to_string(),
             ai_summary_enabled: true,
             ai_summary_model: "claude-haiku-4-5-20251001".to_string(),
             debug: false,
             log_file: None,
             keybindings: KeyBindings::default(),
+            theme: ThemeOverrides::default(),
         }
     }
 }
@@ -444,7 +457,7 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.diff_cache_ttl_ms, 500);
         assert_eq!(config.pr_check_interval_secs, 600);
-        assert!(config.pull_before_create);
+        assert!(config.fetch_before_create);
         assert_eq!(config.state_sync_interval_ms, 2000);
         assert!(config.ai_summary_enabled);
         assert_eq!(config.ai_summary_model, "claude-haiku-4-5-20251001");
