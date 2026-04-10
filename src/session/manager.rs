@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use tracing::{info, instrument, warn};
 
-use crate::config::{ConfigStore, StateStore};
+use crate::config::{AppState, ConfigStore, StateStore};
 use crate::error::{Result, SessionError};
 use crate::git::{DiffCache, DiffInfo, GitBackend, WorktreeManager};
 use crate::session::{Project, ProjectId, SessionId, SessionStatus, WorktreeSession};
@@ -85,12 +85,18 @@ impl SessionManager {
     }
 
     /// Build a `StatusBarInfo` from session metadata
-    pub fn status_bar_info(&self, session: &WorktreeSession) -> StatusBarInfo {
+    pub fn status_bar_info(&self, session: &WorktreeSession, state: &AppState) -> StatusBarInfo {
+        let project_name = state
+            .get_project(&session.project_id)
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
         StatusBarInfo {
             branch: session.branch.clone(),
             pr_number: session.pr_number,
             pr_merged: session.pr_merged,
             status_style: self.tmux_status_style.clone(),
+            is_shell: false,
+            project_name,
         }
     }
 
@@ -180,12 +186,16 @@ impl SessionManager {
         let program = program.unwrap_or_else(|| self.config_store.read().default_program.clone());
 
         // Get project info
-        let (repo_path, main_branch) = {
+        let (repo_path, main_branch, project_name) = {
             let state = self.store.read().await;
             let project = state
                 .get_project(project_id)
                 .ok_or_else(|| SessionError::ProjectNotFound(project_id.to_string()))?;
-            (project.repo_path.clone(), project.main_branch.clone())
+            (
+                project.repo_path.clone(),
+                project.main_branch.clone(),
+                project.name.clone(),
+            )
         };
 
         // Generate branch name from title
@@ -261,7 +271,14 @@ impl SessionManager {
         session.base_commit = Some(worktree_info.head);
         let session_id = session.id;
         let tmux_session_name = session.tmux_session_name.clone();
-        let status_bar = self.status_bar_info(&session);
+        let status_bar = StatusBarInfo {
+            branch: session.branch.clone(),
+            pr_number: session.pr_number,
+            pr_merged: session.pr_merged,
+            status_style: self.tmux_status_style.clone(),
+            is_shell: false,
+            project_name,
+        };
 
         // Create tmux session in the worktree directory
         self.tmux
@@ -324,7 +341,7 @@ impl SessionManager {
                 session.worktree_path.clone(),
                 session.program.clone(),
                 session.status.can_resume(),
-                self.status_bar_info(session),
+                self.status_bar_info(session, &state),
             )
         };
 
@@ -384,7 +401,7 @@ impl SessionManager {
                 session.shell_tmux_session_name.clone(),
                 session.worktree_path.clone(),
                 session.program.clone(),
-                self.status_bar_info(session),
+                self.status_bar_info(session, &state),
             )
         };
 
@@ -534,7 +551,7 @@ impl SessionManager {
                 session.tmux_session_name.clone(),
                 session.worktree_path.clone(),
                 session.program.clone(),
-                self.status_bar_info(session),
+                self.status_bar_info(session, &state),
             )
         };
 
@@ -600,9 +617,12 @@ impl SessionManager {
                 session.shell_tmux_session_name.clone(),
                 session.tmux_session_name.clone(),
                 session.worktree_path.clone(),
-                self.status_bar_info(session),
+                self.status_bar_info(session, &state),
             )
         };
+
+        let mut status_bar = status_bar;
+        status_bar.is_shell = true;
 
         // If shell session already exists in tmux, ensure status bar and return
         if let Some(ref shell_name) = existing_shell_name
