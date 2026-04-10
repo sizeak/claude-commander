@@ -162,6 +162,8 @@ pub enum UserCommand {
     PageDown,
     /// Open quick-switch session search modal
     QuickSwitch,
+    /// Generate AI summary for the current session (Info pane only)
+    GenerateSummary,
 }
 
 impl UserCommand {
@@ -220,6 +222,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::ScrollDown => Self::ScrollDown,
             BindableAction::PageUp => Self::PageUp,
             BindableAction::PageDown => Self::PageDown,
+            BindableAction::GenerateSummary => Self::GenerateSummary,
         }
     }
 }

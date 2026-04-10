@@ -46,6 +46,7 @@ pub enum BindableAction {
     ScrollDown,
     PageUp,
     PageDown,
+    GenerateSummary,
 }
 
 impl BindableAction {
@@ -71,6 +72,7 @@ impl BindableAction {
         Self::ScrollDown,
         Self::PageUp,
         Self::PageDown,
+        Self::GenerateSummary,
         Self::ShowHelp,
         Self::ShowSettings,
         Self::Quit,
@@ -102,6 +104,7 @@ impl BindableAction {
             Self::ScrollDown => "scroll_down",
             Self::PageUp => "page_up",
             Self::PageDown => "page_down",
+            Self::GenerateSummary => "generate_summary",
         }
     }
 
@@ -131,6 +134,7 @@ impl BindableAction {
             Self::ScrollDown => "Scroll down",
             Self::PageUp => "Page up",
             Self::PageDown => "Page down",
+            Self::GenerateSummary => "Generate AI summary",
         }
     }
 
@@ -152,6 +156,7 @@ impl BindableAction {
             | Self::ShrinkLeftPane
             | Self::GrowLeftPane => "Layout",
             Self::ScrollUp | Self::ScrollDown | Self::PageUp | Self::PageDown => "Scrolling",
+            Self::GenerateSummary => "Info Pane",
             Self::ShowHelp | Self::ShowSettings | Self::Quit => "Other",
         }
     }
@@ -185,6 +190,7 @@ impl FromStr for BindableAction {
             "scroll_down" => Ok(Self::ScrollDown),
             "page_up" => Ok(Self::PageUp),
             "page_down" => Ok(Self::PageDown),
+            "generate_summary" => Ok(Self::GenerateSummary),
             _ => Err(format!("unknown action: {s}")),
         }
     }
@@ -512,6 +518,12 @@ impl Default for KeyBindings {
         bindings.insert(
             BindableAction::PageDown,
             vec![kb(KeyCode::Char('d'), ctrl), kb(KeyCode::PageDown, none)],
+        );
+
+        // Info Pane
+        bindings.insert(
+            BindableAction::GenerateSummary,
+            vec![kb(KeyCode::Char('g'), none)],
         );
 
         // Other
@@ -880,6 +892,7 @@ mod tests {
                 "Session Management",
                 "Layout",
                 "Scrolling",
+                "Info Pane",
                 "Other"
             ]
         );

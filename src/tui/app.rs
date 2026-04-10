@@ -1026,6 +1026,17 @@ impl App {
         };
         let on_project = self.is_project_selected();
 
+        // Compute display string for the generate-summary hotkey (None = AI disabled)
+        let summary_key_hint = if self.config.ai_summary_enabled {
+            self.config
+                .keybindings
+                .keys_for(BindableAction::GenerateSummary)
+                .first()
+                .map(|k| k.to_string())
+        } else {
+            None
+        };
+
         let title = if on_project {
             " Shell | [Info] "
         } else {
@@ -1116,6 +1127,7 @@ impl App {
                     pr_merged,
                     enriched_pr,
                     ai_summary,
+                    summary_key_hint: summary_key_hint.clone(),
                 };
 
                 // Count lines for scroll state
@@ -1187,6 +1199,7 @@ impl App {
                         pr_merged: pm,
                         enriched_pr,
                         ai_summary,
+                        summary_key_hint,
                     })
                 } else {
                     InfoContent::Empty
@@ -2594,6 +2607,14 @@ impl App {
             UserCommand::PageDown => self.active_pane_state().page_down(),
             UserCommand::ScrollUp => self.active_pane_state().scroll_up(1),
             UserCommand::ScrollDown => self.active_pane_state().scroll_down(1),
+            UserCommand::GenerateSummary => {
+                // Context-specific: only works when Info pane is showing
+                if self.ui_state.right_pane_view == RightPaneView::Info
+                    && let Some(session_id) = self.ui_state.selected_session_id
+                {
+                    self.spawn_ai_summary_if_needed(session_id);
+                }
+            }
             _ => {}
         }
     }
@@ -3393,8 +3414,7 @@ impl App {
         });
 
         let Some(pr_number) = session_info.flatten() else {
-            // No PR for this session — skip enriched PR fetch but still try AI summary
-            self.spawn_ai_summary_if_needed(session_id);
+            // No PR for this session — skip enriched PR fetch
             return;
         };
 
@@ -3434,43 +3454,35 @@ impl App {
                     .await;
             });
         }
-
-        self.spawn_ai_summary_if_needed(session_id);
     }
 
-    /// Spawn AI summary generation if needed for the given session.
+    /// Spawn AI summary generation for the given session.
     ///
-    /// Computes a full branch diff (committed vs main + uncommitted), checks
-    /// the hash against any cached summary, and only calls Claude if the diff
-    /// has actually changed. The hash comparison happens in the background task
-    /// (not here) because `self.ui_state.diff_info` may still hold the
-    /// *previous* session's diff when scrolling through the list.
+    /// Called from the `GenerateSummary` hotkey handler. Always generates
+    /// (unless already in flight or AI is disabled). Computes a full branch
+    /// diff (committed vs main + uncommitted) and pipes it into Claude.
     fn spawn_ai_summary_if_needed(&mut self, session_id: SessionId) {
         if !self.config.ai_summary_enabled {
             return;
         }
 
-        let Some(cached_hash) =
-            crate::git::should_fetch_summary(self.ui_state.ai_summaries.get(&session_id))
-        else {
-            return; // Already loading, errored, or otherwise not needed
-        };
-
-        // Only show "Loading" if there's no existing cached summary to display.
-        // If there IS a cached summary, we keep it visible while the background
-        // task checks whether the diff has changed.
-        if cached_hash.is_none() {
-            self.ui_state
-                .ai_summaries
-                .insert(session_id, AiSummary::Loading);
+        // Don't spawn if already in flight
+        if matches!(
+            self.ui_state.ai_summaries.get(&session_id),
+            Some(AiSummary::Loading)
+        ) {
+            return;
         }
+
+        self.ui_state
+            .ai_summaries
+            .insert(session_id, AiSummary::Loading);
 
         let store = self.store.clone();
         let model = self.config.ai_summary_model.clone();
         let tx = self.event_loop.sender();
 
         tokio::spawn(async move {
-            // Look up worktree path and main branch from the store
             let session_info = {
                 let state = store.read().await;
                 state.sessions.get(&session_id).and_then(|s| {
@@ -3480,15 +3492,8 @@ impl App {
             };
 
             let result = if let Some((worktree_path, main_branch)) = session_info {
-                // Compute full branch diff (committed + uncommitted)
                 let diff_text = crate::git::compute_branch_diff(&worktree_path, &main_branch).await;
                 let new_hash = diff_hash(&diff_text);
-
-                // If the diff hasn't changed since last summary, skip Claude
-                if !crate::git::should_call_claude(cached_hash, new_hash) {
-                    return; // Don't send any event — keep existing cached summary
-                }
-
                 let summary_result = fetch_branch_summary(&diff_text, &model).await;
                 (summary_result, new_hash)
             } else {

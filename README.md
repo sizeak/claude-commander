@@ -94,6 +94,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
 | `<` / `>` | Shrink / grow left pane |
 | `Ctrl-u/d` or `PageUp/Down` | Page up/down in preview |
+| `g` | Generate AI summary (Info pane only) |
 | `?` | Show help |
 | `q` or `Ctrl-c` | Quit |
 
@@ -188,13 +189,13 @@ state_sync_interval_ms = 2000
 ### AI Summary
 
 The Info pane can display an AI-generated summary of branch changes, powered
-by the Claude CLI. Summaries are generated lazily — only when you view the Info
-pane — and cached until the diff changes. They won't regenerate while you're
-browsing or until new commits/file changes are detected. This keeps token
-usage minimal.
+by the Claude CLI. Press `g` (configurable) while viewing the Info pane to
+generate a summary. Summaries are cached per-session — once generated, they
+display instantly when you revisit the session. Press `g` again to regenerate
+after making changes.
 
 Requires the `claude` CLI to be installed and authenticated. If unavailable,
-the summary section is simply omitted.
+the summary section shows a placeholder instead.
 
 | Setting | Default | Description |
 |---------|---------|-------------|

@@ -28,6 +28,8 @@ pub struct InfoSessionData<'a> {
     pub pr_merged: bool,
     pub enriched_pr: Option<&'a EnrichedPrInfo>,
     pub ai_summary: Option<&'a AiSummary>,
+    /// Display string for the generate-summary hotkey (e.g. "g"). None = AI disabled.
+    pub summary_key_hint: Option<String>,
 }
 
 /// Data required to render the Info pane for a project.
@@ -161,14 +163,26 @@ impl<'a> InfoView<'a> {
         // PR section
         self.build_pr_lines(data, &mut lines);
 
-        // AI summary section
-        if let Some(summary) = data.ai_summary {
+        // AI summary section (only when AI is enabled, i.e. key hint is present)
+        if let Some(ref key_hint) = data.summary_key_hint {
             lines.push(Line::from(""));
             lines.push(Line::from(Span::styled(
                 " ─────────────────────────────────",
                 self.secondary_style(),
             )));
-            self.build_summary_lines(summary, &mut lines);
+            if let Some(summary) = data.ai_summary {
+                self.build_summary_lines(summary, &mut lines);
+            } else {
+                // No summary generated yet — show placeholder with hotkey hint
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled(" Summary: ", label),
+                    Span::styled(
+                        format!("Press {key_hint} to generate"),
+                        self.apply_dim(Style::default().fg(self.theme.text_accent)),
+                    ),
+                ]));
+            }
         }
 
         lines
@@ -459,6 +473,7 @@ mod tests {
             pr_merged: false,
             enriched_pr: None,
             ai_summary: None,
+            summary_key_hint: Some("g".into()),
         };
         let view = InfoView::new(InfoContent::Session(data), &theme);
         let lines = view.build_lines();
@@ -498,6 +513,7 @@ mod tests {
                 text: "This adds authentication.".to_string(),
                 diff_hash: 123,
             }),
+            summary_key_hint: Some("g".into()),
         };
         let view = InfoView::new(InfoContent::Session(data), &theme);
         let lines = view.build_lines();
@@ -534,6 +550,7 @@ mod tests {
             pr_merged: false,
             enriched_pr: None,
             ai_summary: Some(&AiSummary::Loading),
+            summary_key_hint: Some("g".into()),
         };
         let view = InfoView::new(InfoContent::Session(data), &theme);
         let lines = view.build_lines();
@@ -563,6 +580,7 @@ mod tests {
             pr_merged: false,
             enriched_pr: None,
             ai_summary: Some(&summary),
+            summary_key_hint: Some("g".into()),
         };
         let view = InfoView::new(InfoContent::Session(data), &theme);
         let lines = view.build_lines();
@@ -622,6 +640,7 @@ mod tests {
             pr_merged: true,
             enriched_pr: None,
             ai_summary: None,
+            summary_key_hint: Some("g".into()),
         };
         let view = InfoView::new(InfoContent::Session(data), &theme);
         let lines = view.build_lines();

@@ -146,28 +146,6 @@ pub fn diff_hash(diff_text: &str) -> u64 {
     xxhash_rust::xxh3::xxh3_64(diff_text.as_bytes())
 }
 
-/// Determine whether an AI summary fetch should be spawned, and if so, whether
-/// the UI should show "Loading" or keep displaying the existing cached summary.
-///
-/// Returns `None` if no fetch is needed (already loading, error, etc.).
-/// Returns `Some(cached_hash)` if a fetch should be spawned, where `cached_hash`
-/// is `Some(hash)` if there's an existing summary to keep showing, or `None` if
-/// the UI should show "Loading".
-pub fn should_fetch_summary(current: Option<&AiSummary>) -> Option<Option<u64>> {
-    match current {
-        None => Some(None),                // No cache → show Loading
-        Some(AiSummary::Loading) => None,  // Already in flight
-        Some(AiSummary::Error(_)) => None, // Don't retry errors
-        Some(AiSummary::Ready { diff_hash, .. }) => Some(Some(*diff_hash)), // Keep visible, check hash in bg
-    }
-}
-
-/// Check whether the background task should call Claude or skip because the
-/// diff hasn't changed since the cached summary was generated.
-pub fn should_call_claude(cached_hash: Option<u64>, new_diff_hash: u64) -> bool {
-    cached_hash != Some(new_diff_hash)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -204,57 +182,5 @@ mod tests {
             diff_hash: 42,
         };
         let _error = AiSummary::Error("failed".to_string());
-    }
-
-    // ── Cache logic tests ─────────────────────────────────────────
-
-    #[test]
-    fn test_should_fetch_when_no_cache() {
-        // No existing summary → should fetch, show Loading
-        let result = should_fetch_summary(None);
-        assert_eq!(result, Some(None));
-    }
-
-    #[test]
-    fn test_should_not_fetch_when_loading() {
-        // Already loading → don't spawn another
-        let result = should_fetch_summary(Some(&AiSummary::Loading));
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_should_not_fetch_when_errored() {
-        // Error state → don't retry automatically
-        let result = should_fetch_summary(Some(&AiSummary::Error("fail".into())));
-        assert_eq!(result, None);
-    }
-
-    #[test]
-    fn test_should_fetch_when_cached_returns_hash() {
-        // Has cached summary → should fetch (to check hash), return cached hash
-        let cached = AiSummary::Ready {
-            text: "old summary".into(),
-            diff_hash: 12345,
-        };
-        let result = should_fetch_summary(Some(&cached));
-        assert_eq!(result, Some(Some(12345)));
-    }
-
-    #[test]
-    fn test_should_call_claude_when_no_cached_hash() {
-        // No previous hash → always call Claude
-        assert!(should_call_claude(None, 999));
-    }
-
-    #[test]
-    fn test_should_call_claude_when_hash_changed() {
-        // Hash changed → call Claude
-        assert!(should_call_claude(Some(111), 222));
-    }
-
-    #[test]
-    fn test_should_not_call_claude_when_hash_matches() {
-        // Hash unchanged → skip Claude (cache hit)
-        assert!(!should_call_claude(Some(42), 42));
     }
 }

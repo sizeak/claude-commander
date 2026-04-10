@@ -436,6 +436,7 @@ fn test_info_view_session_with_pr() {
                     text: "Adds OAuth2 authentication.".into(),
                     diff_hash: 123,
                 }),
+                summary_key_hint: Some("g".into()),
             };
             let info_view = InfoView::new(InfoContent::Session(data), &theme)
                 .block(
@@ -498,6 +499,47 @@ fn test_info_view_long_text_wraps() {
                     text: "This summary is intentionally long to verify that the info pane correctly wraps text at the pane boundary instead of clipping it.".into(),
                     diff_hash: 1,
                 }),
+                summary_key_hint: Some("g".into()),
+            };
+            let info_view = InfoView::new(InfoContent::Session(data), &theme)
+                .block(
+                    Block::default()
+                        .title(" Preview | [Info] | Shell ")
+                        .borders(Borders::ALL),
+                )
+                .scroll(0);
+            frame.render_widget(info_view, frame.area());
+        })
+        .unwrap();
+
+    insta::assert_snapshot!(terminal.backend());
+}
+
+#[test]
+fn test_info_view_summary_placeholder() {
+    use crate::tui::widgets::{InfoContent, InfoSessionData, InfoView};
+
+    let backend = TestBackend::new(60, 18);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = test_theme();
+
+    let diff = DiffInfo::empty();
+    terminal
+        .draw(|frame| {
+            let data = InfoSessionData {
+                title: "my-session".into(),
+                branch: "feature-x".into(),
+                created_at: "2026-04-10 09:00 UTC".into(),
+                status: SessionStatus::Running,
+                program: "claude".into(),
+                worktree_path: "/tmp/wt".into(),
+                diff_info: &diff,
+                pr_number: None,
+                pr_url: None,
+                pr_merged: false,
+                enriched_pr: None,
+                ai_summary: None,
+                summary_key_hint: Some("g".into()),
             };
             let info_view = InfoView::new(InfoContent::Session(data), &theme)
                 .block(
@@ -824,6 +866,7 @@ fn test_preview_to_info_view_switch_no_clear() {
                 pr_merged: false,
                 enriched_pr: None,
                 ai_summary: None,
+                summary_key_hint: Some("g".into()),
             };
             let info_view = InfoView::new(InfoContent::Session(data), &theme)
                 .block(
