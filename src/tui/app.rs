@@ -1644,6 +1644,18 @@ impl App {
                         field_key: "dim_unfocused_opacity".into(),
                         color_swatch: None,
                     },
+                    SettingsRow {
+                        label: "AI Summary Enabled".into(),
+                        value: c.ai_summary_enabled.to_string(),
+                        field_key: "ai_summary_enabled".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
+                        label: "AI Summary Model".into(),
+                        value: c.ai_summary_model.clone(),
+                        field_key: "ai_summary_model".into(),
+                        color_swatch: None,
+                    },
                 ]
             }
             SettingsTab::Keybindings => {
@@ -1940,6 +1952,14 @@ impl App {
                     if let Ok(v) = value.parse::<f32>() {
                         self.config.dim_unfocused_opacity = v.clamp(0.0, 1.0);
                     }
+                }
+                "ai_summary_enabled" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        self.config.ai_summary_enabled = b;
+                    }
+                }
+                "ai_summary_model" => {
+                    self.config.ai_summary_model = value.to_string();
                 }
                 _ => {}
             },
