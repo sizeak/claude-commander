@@ -4,10 +4,17 @@
 //! by inspecting the tmux pane title and visible pane content.
 
 use std::collections::HashMap;
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use regex::Regex;
 use tracing::debug;
+
+/// Pre-compiled regex for stripping ANSI escape sequences.
+static ANSI_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\x1B\[[0-9;]*[a-zA-Z]|\x1B\][^\x07]*\x07|\x1B\][^\x1B]*\x1B\\")
+        .expect("valid regex")
+});
 
 use super::TmuxExecutor;
 use crate::error::Result;
@@ -68,10 +75,7 @@ pub fn parse_pane_content(content: &str) -> AgentState {
 
 /// Strip ANSI escape sequences from a string.
 pub fn strip_ansi(s: &str) -> String {
-    // Matches CSI sequences (\x1B[...letter) and OSC sequences (\x1B]...BEL/ST)
-    let re = Regex::new(r"\x1B\[[0-9;]*[a-zA-Z]|\x1B\][^\x07]*\x07|\x1B\][^\x1B]*\x1B\\")
-        .expect("valid regex");
-    re.replace_all(s, "").into_owned()
+    ANSI_RE.replace_all(s, "").into_owned()
 }
 
 /// Agent state detector that polls tmux sessions and caches results.

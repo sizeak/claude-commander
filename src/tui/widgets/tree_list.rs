@@ -172,7 +172,7 @@ impl<'a> TreeList<'a> {
                         match state {
                             AgentState::Working => {
                                 let frame = SPINNER_FRAMES
-                                    [self.tick as usize % SPINNER_FRAMES.len()];
+                                    [(self.tick as usize / 3) % SPINNER_FRAMES.len()];
                                 spans.push(Span::styled(
                                     format!("{} ", frame),
                                     Style::default().fg(self.theme.agent_working),

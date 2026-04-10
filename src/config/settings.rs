@@ -468,6 +468,7 @@ mod tests {
         assert!(config.fetch_before_create);
         assert_eq!(config.state_sync_interval_ms, 2000);
         assert_eq!(config.agent_state_poll_interval_ms, 3000);
+        assert!(config.show_status_indicator);
         assert!(config.ai_summary_enabled);
         assert_eq!(config.ai_summary_model, "claude-haiku-4-5-20251001");
     }

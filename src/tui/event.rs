@@ -5,6 +5,7 @@
 //! - Application state updates
 //! - Render ticks
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -90,7 +91,7 @@ pub enum StateUpdate {
     },
     /// Agent states updated from background polling
     AgentStatesUpdated {
-        states: std::collections::HashMap<SessionId, AgentState>,
+        states: HashMap<SessionId, AgentState>,
     },
     /// Preview/diff/shell data ready from background fetch
     PreviewReady {

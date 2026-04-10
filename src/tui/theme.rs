@@ -123,8 +123,8 @@ impl Theme {
             status_pr_merged: Color::DarkGray,
 
             agent_working: Color::Green,
-            unread_indicator: Color::Blue,
             agent_waiting: Color::Yellow,
+            unread_indicator: Color::Blue,
 
             text_primary: Color::Reset,
             text_secondary: Color::DarkGray,
@@ -170,8 +170,8 @@ impl Theme {
             status_pr_merged: Color::Indexed(97), // Dark purple
 
             agent_working: Color::Indexed(156), // Pastel mint
-            unread_indicator: Color::Indexed(117),    // Sky blue
             agent_waiting: Color::Indexed(208), // Orange
+            unread_indicator: Color::Indexed(117), // Sky blue
 
             text_primary: Color::Reset,
             text_secondary: Color::Indexed(250),
@@ -217,8 +217,8 @@ impl Theme {
             status_pr_merged: Color::Rgb(137, 100, 180), // Dark purple
 
             agent_working: Color::Rgb(166, 227, 161), // Pastel mint
-            unread_indicator: Color::Rgb(137, 180, 250),    // Sky blue
             agent_waiting: Color::Rgb(250, 179, 135), // Peach/orange
+            unread_indicator: Color::Rgb(137, 180, 250), // Sky blue
 
             text_primary: Color::Rgb(245, 245, 250),
             text_secondary: Color::Rgb(166, 173, 200),
@@ -282,8 +282,8 @@ impl Theme {
         apply!(status_pr);
         apply!(status_pr_merged);
         apply!(agent_working);
-        apply!(unread_indicator);
         apply!(agent_waiting);
+        apply!(unread_indicator);
         apply!(text_primary);
         apply!(text_secondary);
         apply!(text_accent);

@@ -5,6 +5,7 @@
 //! - User input handling
 //! - Background state updates
 
+use std::collections::HashMap;
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -272,7 +273,7 @@ pub struct AppUiState {
     /// Throbber/spinner state for loading modals
     pub throbber_state: throbber_widgets_tui::ThrobberState,
     /// Current agent states for Running Claude sessions (ephemeral, from background poller)
-    pub agent_states: std::collections::HashMap<SessionId, AgentState>,
+    pub agent_states: HashMap<SessionId, AgentState>,
 }
 
 impl Default for AppUiState {
@@ -307,7 +308,7 @@ impl Default for AppUiState {
             terminal_size: Rect::default(),
             tick_count: 0,
             throbber_state: throbber_widgets_tui::ThrobberState::default(),
-            agent_states: std::collections::HashMap::new(),
+            agent_states: HashMap::new(),
         }
     }
 }
@@ -434,7 +435,7 @@ impl App {
                     if sessions.is_empty() {
                         continue;
                     }
-                    let states: std::collections::HashMap<SessionId, AgentState> =
+                    let states: HashMap<SessionId, AgentState> =
                         detector.detect_all(&sessions).await;
                     if !states.is_empty() {
                         let _ = tx
