@@ -112,6 +112,8 @@ pub enum UserCommand {
     ResumeSession,
     /// Delete/kill current session
     DeleteSession,
+    /// Restart current session (kill tmux and recreate)
+    RestartSession,
     /// Remove an entire project
     RemoveProject,
     /// Open worktree in editor/IDE
@@ -192,6 +194,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::PauseSession => Self::PauseSession,
             BindableAction::ResumeSession => Self::ResumeSession,
             BindableAction::DeleteSession => Self::DeleteSession,
+            BindableAction::RestartSession => Self::RestartSession,
             BindableAction::RemoveProject => Self::RemoveProject,
             BindableAction::OpenInEditor => Self::OpenInEditor,
             BindableAction::TogglePane => Self::TogglePane,
@@ -535,6 +538,11 @@ mod tests {
                 KeyCode::Char('d'),
                 KeyModifiers::NONE,
                 UserCommand::DeleteSession,
+            ),
+            (
+                KeyCode::Char('R'),
+                KeyModifiers::SHIFT,
+                UserCommand::RestartSession,
             ),
             (
                 KeyCode::Char('D'),

@@ -361,6 +361,76 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Kill tmux sessions (main + shell) for a worktree session.
+    async fn kill_tmux_sessions(&self, tmux_name: &str, shell_tmux_name: Option<&str>) {
+        if let Err(e) = self.tmux.kill_session(tmux_name).await {
+            warn!("Failed to kill tmux session: {}", e);
+        }
+        if let Some(shell_name) = shell_tmux_name {
+            let _ = self.tmux.kill_session(shell_name).await;
+        }
+    }
+
+    /// Restart a session (kill tmux and recreate with --resume)
+    #[instrument(skip(self))]
+    pub async fn restart_session(&self, session_id: &SessionId) -> Result<()> {
+        let (tmux_session_name, shell_tmux_name, worktree_path, program, status_bar) = {
+            let state = self.store.read().await;
+            let session = state
+                .get_session(session_id)
+                .ok_or(SessionError::NotFound(*session_id))?;
+            (
+                session.tmux_session_name.clone(),
+                session.shell_tmux_session_name.clone(),
+                session.worktree_path.clone(),
+                session.program.clone(),
+                self.status_bar_info(session),
+            )
+        };
+
+        self.kill_tmux_sessions(&tmux_session_name, shell_tmux_name.as_deref())
+            .await;
+
+        // Create a fresh tmux session with --resume
+        let resume_program = format!("{} --resume", program);
+        let create_result = self
+            .tmux
+            .create_session(&tmux_session_name, &worktree_path, Some(&resume_program))
+            .await;
+
+        if let Err(e) = create_result {
+            // Tmux is dead but recreation failed — mark as Stopped so state is consistent
+            let sid = *session_id;
+            let _ = self
+                .store
+                .mutate(move |state| {
+                    if let Some(session) = state.get_session_mut(&sid) {
+                        session.set_status(SessionStatus::Stopped);
+                    }
+                })
+                .await;
+            return Err(e);
+        }
+
+        // Configure status bar on the new session
+        self.tmux
+            .configure_status_bar(&tmux_session_name, &status_bar)
+            .await;
+
+        // Set status to Running
+        let sid = *session_id;
+        self.store
+            .mutate(move |state| {
+                if let Some(session) = state.get_session_mut(&sid) {
+                    session.set_status(SessionStatus::Running);
+                }
+            })
+            .await?;
+
+        info!("Restarted session {}", session_id);
+        Ok(())
+    }
+
     /// Kill a session (stop tmux, optionally remove worktree)
     #[instrument(skip(self))]
     pub async fn kill_session(&self, session_id: &SessionId, remove_worktree: bool) -> Result<()> {
@@ -372,15 +442,11 @@ impl SessionManager {
                 .clone()
         };
 
-        // Kill tmux session
-        if let Err(e) = self.tmux.kill_session(&session.tmux_session_name).await {
-            warn!("Failed to kill tmux session: {}", e);
-        }
-
-        // Kill shell tmux session if it exists
-        if let Some(ref shell_name) = session.shell_tmux_session_name {
-            let _ = self.tmux.kill_session(shell_name).await;
-        }
+        self.kill_tmux_sessions(
+            &session.tmux_session_name,
+            session.shell_tmux_session_name.as_deref(),
+        )
+        .await;
 
         // Optionally remove worktree
         if remove_worktree {
