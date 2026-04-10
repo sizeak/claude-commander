@@ -172,6 +172,11 @@ pub struct ThemeOverrides {
     pub status_pr: Option<ColorValue>,
     pub status_pr_merged: Option<ColorValue>,
 
+    // Agent state and notification indicators
+    pub agent_working: Option<ColorValue>,
+    pub agent_waiting: Option<ColorValue>,
+    pub unread_indicator: Option<ColorValue>,
+
     // Text
     pub text_primary: Option<ColorValue>,
     pub text_secondary: Option<ColorValue>,

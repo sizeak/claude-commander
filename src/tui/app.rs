@@ -41,7 +41,10 @@ use crate::git::{
     AiSummary, DiffInfo, EnrichedPrInfo, check_pr_for_branch, diff_hash, fetch_branch_summary,
     fetch_enriched_pr, is_gh_available,
 };
-use crate::session::{ProjectId, SessionId, SessionListItem, SessionManager, SessionStatus};
+use crate::session::{
+    AgentState, ProjectId, SessionId, SessionListItem, SessionManager, SessionStatus,
+};
+use crate::tmux::AgentStateDetector;
 
 /// Direction for mouse scroll events
 enum ScrollDirection {
@@ -268,6 +271,8 @@ pub struct AppUiState {
     pub tick_count: u64,
     /// Throbber/spinner state for loading modals
     pub throbber_state: throbber_widgets_tui::ThrobberState,
+    /// Current agent states for Running Claude sessions (ephemeral, from background poller)
+    pub agent_states: std::collections::HashMap<SessionId, AgentState>,
 }
 
 impl Default for AppUiState {
@@ -302,6 +307,7 @@ impl Default for AppUiState {
             terminal_size: Rect::default(),
             tick_count: 0,
             throbber_state: throbber_widgets_tui::ThrobberState::default(),
+            agent_states: std::collections::HashMap::new(),
         }
     }
 }
@@ -396,6 +402,46 @@ impl App {
                         Err(e) => {
                             debug!("State sync check failed: {}", e);
                         }
+                    }
+                }
+            });
+        }
+
+        // Start background agent state polling
+        if self.config.agent_state_poll_interval_ms > 0 {
+            let store = self.store.clone();
+            let tx = self.event_loop.sender();
+            let interval_ms = self.config.agent_state_poll_interval_ms;
+            let tmux = self.session_manager.tmux.clone();
+            tokio::spawn(async move {
+                let cache_ttl =
+                    Duration::from_millis(interval_ms.saturating_sub(500).max(500));
+                let mut detector = AgentStateDetector::new(tmux, cache_ttl);
+                let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+                loop {
+                    interval.tick().await;
+                    let sessions: Vec<(SessionId, String, String)> = {
+                        let state = store.read().await;
+                        state
+                            .sessions
+                            .values()
+                            .filter(|s| s.status == SessionStatus::Running)
+                            .map(|s| {
+                                (s.id, s.tmux_session_name.clone(), s.program.clone())
+                            })
+                            .collect()
+                    };
+                    if sessions.is_empty() {
+                        continue;
+                    }
+                    let states: std::collections::HashMap<SessionId, AgentState> =
+                        detector.detect_all(&sessions).await;
+                    if !states.is_empty() {
+                        let _ = tx
+                            .send(AppEvent::StateUpdate(
+                                StateUpdate::AgentStatesUpdated { states },
+                            ))
+                            .await;
                     }
                 }
             });
@@ -967,7 +1013,9 @@ impl App {
         frame.render_widget(heading, chunks[0]);
 
         let tree_list = TreeList::new(&self.ui_state.list_items, &self.theme)
-            .highlight_style(self.theme.selection().add_modifier(Modifier::BOLD));
+            .highlight_style(self.theme.selection().add_modifier(Modifier::BOLD))
+            .tick(self.ui_state.tick_count)
+            .show_status_indicator(self.config.show_status_indicator);
 
         frame.render_stateful_widget(
             tree_list,
@@ -2773,6 +2821,32 @@ impl App {
                 debug!("Session creation failed: {}", message);
                 self.ui_state.modal = Modal::Error { message };
             }
+            StateUpdate::AgentStatesUpdated { states } => {
+                // Detect Working → Idle transitions and mark sessions as unread
+                let mut unread_ids = Vec::new();
+                for (session_id, new_state) in &states {
+                    if *new_state == AgentState::Idle
+                        && self.ui_state.agent_states.get(session_id)
+                            == Some(&AgentState::Working)
+                    {
+                        unread_ids.push(*session_id);
+                    }
+                }
+                if !unread_ids.is_empty() {
+                    let _ = self
+                        .store
+                        .mutate(move |state| {
+                            for sid in &unread_ids {
+                                if let Some(session) = state.get_session_mut(sid) {
+                                    session.unread = true;
+                                }
+                            }
+                        })
+                        .await;
+                }
+                self.ui_state.agent_states = states;
+                self.refresh_list_items().await;
+            }
             StateUpdate::ExternalChange => {
                 debug!("External state change detected, refreshing UI");
                 self.refresh_list_items().await;
@@ -2795,6 +2869,16 @@ impl App {
             match self.session_manager.get_attach_command(&session_id).await {
                 Ok(cmd) => {
                     info!("Got attach command: {}", cmd);
+                    // Clear unread flag when attaching
+                    let sid = session_id;
+                    let _ = self
+                        .store
+                        .mutate(move |state| {
+                            if let Some(session) = state.get_session_mut(&sid) {
+                                session.unread = false;
+                            }
+                        })
+                        .await;
                     self.ui_state.attach_command = Some(cmd);
                     self.ui_state.should_quit = true;
                     info!("Set should_quit = true");
@@ -3571,6 +3655,8 @@ impl App {
                     pr_merged: session.pr_merged,
                     worktree_path: session.worktree_path.clone(),
                     created_at: session.created_at,
+                    agent_state: self.ui_state.agent_states.get(&session.id).copied(),
+                    unread: session.unread,
                 });
             }
         }

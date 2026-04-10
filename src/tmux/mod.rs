@@ -10,8 +10,10 @@ mod attach;
 mod capture;
 mod executor;
 mod input;
+mod state;
 
 pub use attach::*;
 pub use capture::*;
 pub use executor::*;
 pub use input::*;
+pub use state::*;
