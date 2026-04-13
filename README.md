@@ -87,7 +87,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `n` | New worktree session |
 | `N` | Add new project |
 | `d` | Delete session |
-| `R` | Restart session (kill tmux + recreate with /resume) |
+| `R` | Restart session (kill tmux + recreate; adds `--resume` when `resume_session = true`) |
 | `D` | Remove project |
 | `e` | Open in editor/IDE |
 | `o` | Open PR in browser (when the session has a PR) |
@@ -127,6 +127,10 @@ branch_prefix = ""
 
 # Fetch latest changes from origin before creating a new session
 fetch_before_create = true
+
+# Pass `--resume` when restarting/recreating a session so the agent picks up
+# where it left off. Set to false to start the program fresh each time.
+resume_session = true
 
 # Maximum concurrent tmux commands
 max_concurrent_tmux = 16

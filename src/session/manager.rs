@@ -372,7 +372,7 @@ impl SessionManager {
         }
     }
 
-    /// Restart a session (kill tmux and recreate with --resume)
+    /// Restart a session (kill tmux and recreate, optionally with --resume)
     #[instrument(skip(self))]
     pub async fn restart_session(&self, session_id: &SessionId) -> Result<()> {
         let (tmux_session_name, shell_tmux_name, worktree_path, program, status_bar) = {
@@ -392,8 +392,12 @@ impl SessionManager {
         self.kill_tmux_sessions(&tmux_session_name, shell_tmux_name.as_deref())
             .await;
 
-        // Create a fresh tmux session with --resume
-        let resume_program = format!("{} --resume", program);
+        // Create a fresh tmux session, adding --resume if configured
+        let resume_program = if self.config_store.read().resume_session {
+            format!("{} --resume", program)
+        } else {
+            program.clone()
+        };
         let create_result = self
             .tmux
             .create_session(&tmux_session_name, &worktree_path, Some(&resume_program))
@@ -563,8 +567,13 @@ impl SessionManager {
         };
 
         if needs_recreate {
-            // Recreate the tmux session with --resume so the agent picks up where it left off
-            let resume_program = format!("{} --resume", program);
+            // Recreate the tmux session, adding --resume if configured so the
+            // agent picks up where it left off
+            let resume_program = if self.config_store.read().resume_session {
+                format!("{} --resume", program)
+            } else {
+                program.clone()
+            };
             info!("Recreating tmux session with: {}", resume_program);
             self.tmux
                 .create_session(&tmux_name, &worktree_path, Some(&resume_program))
