@@ -224,6 +224,10 @@ pub struct WorktreeSession {
     pub status: SessionStatus,
     /// Program running in the session (e.g., "claude", "aider")
     pub program: String,
+    /// Arguments appended to `program` when the session is spawned or
+    /// re-spawned (e.g. `["--resume"]`). Captured from config at creation.
+    #[serde(default)]
+    pub program_args: Vec<String>,
     /// When the session was created
     pub created_at: DateTime<Utc>,
     /// When the session was last active
@@ -274,6 +278,7 @@ impl WorktreeSession {
             worktree_path,
             status: SessionStatus::Running,
             program: program.into(),
+            program_args: Vec::new(),
             created_at: now,
             last_active_at: now,
             tmux_session_name,
@@ -297,6 +302,17 @@ impl WorktreeSession {
     /// Mark the session as active (update last_active_at)
     pub fn touch(&mut self) {
         self.last_active_at = Utc::now();
+    }
+
+    /// Full command string to launch this session's program, combining
+    /// `program` with any `program_args` separated by spaces. Passed as a
+    /// single argument to `tmux new-session`, which runs it via the shell.
+    pub fn command_string(&self) -> String {
+        if self.program_args.is_empty() {
+            self.program.clone()
+        } else {
+            format!("{} {}", self.program, self.program_args.join(" "))
+        }
     }
 
     /// Check if this session matches a search query
@@ -577,6 +593,53 @@ mod tests {
         );
         assert!(session.tmux_session_name.starts_with("cc-"));
         assert_eq!(session.tmux_session_name.len(), 11); // "cc-" (3) + 8 hex chars
+    }
+
+    #[test]
+    fn test_command_string_no_args() {
+        let session = WorktreeSession::new(
+            ProjectId::new(),
+            "Test",
+            "branch",
+            PathBuf::from("/tmp/wt"),
+            "claude",
+        );
+        assert_eq!(session.command_string(), "claude");
+    }
+
+    #[test]
+    fn test_command_string_with_args() {
+        let mut session = WorktreeSession::new(
+            ProjectId::new(),
+            "Test",
+            "branch",
+            PathBuf::from("/tmp/wt"),
+            "claude",
+        );
+        session.program_args = vec!["--resume".to_string(), "--model=opus".to_string()];
+        assert_eq!(session.command_string(), "claude --resume --model=opus");
+    }
+
+    #[test]
+    fn test_program_args_defaults_when_missing_in_json() {
+        // Old state.json files won't contain program_args — deserialization
+        // must fall back to an empty Vec rather than erroring. Simulate by
+        // serializing a session and stripping the field before re-deserializing.
+        let session = WorktreeSession::new(
+            ProjectId::new(),
+            "Test",
+            "test-branch",
+            PathBuf::from("/tmp/wt"),
+            "claude",
+        );
+        let mut value = serde_json::to_value(&session).expect("serializes");
+        value
+            .as_object_mut()
+            .expect("object")
+            .remove("program_args");
+        let restored: WorktreeSession =
+            serde_json::from_value(value).expect("must deserialize without program_args");
+        assert!(restored.program_args.is_empty());
     }
 
     #[test]

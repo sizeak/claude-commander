@@ -23,6 +23,12 @@ pub struct Config {
     /// Default program to run in new sessions
     pub default_program: String,
 
+    /// Default arguments passed to `default_program` when a session is
+    /// spawned or re-spawned (e.g. `["--resume"]` to resume the previous
+    /// Claude conversation on reattach). Stored per-session at creation
+    /// time, so changing this config only affects newly created sessions.
+    pub default_program_args: Vec<String>,
+
     /// Branch name prefix for new sessions (empty string means no prefix)
     pub branch_prefix: String,
 
@@ -102,6 +108,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             default_program: "claude".to_string(),
+            default_program_args: vec!["--resume".to_string()],
             branch_prefix: String::new(),
             max_concurrent_tmux: 16,
             capture_cache_ttl_ms: 50,
@@ -341,10 +348,24 @@ mod tests {
     fn test_default_config() {
         let config = Config::default();
         assert_eq!(config.default_program, "claude");
+        assert_eq!(config.default_program_args, vec!["--resume".to_string()]);
         assert_eq!(config.branch_prefix, "");
         assert_eq!(config.max_concurrent_tmux, 16);
         assert_eq!(config.capture_cache_ttl_ms, 50);
         assert_eq!(config.ui_refresh_fps, 30);
+    }
+
+    #[test]
+    fn test_default_program_args_parses_from_toml() {
+        let toml_src = r#"
+default_program = "claude"
+default_program_args = ["--resume", "--model=opus"]
+"#;
+        let config: Config = toml::from_str(toml_src).expect("parses");
+        assert_eq!(
+            config.default_program_args,
+            vec!["--resume".to_string(), "--model=opus".to_string()]
+        );
     }
 
     #[test]

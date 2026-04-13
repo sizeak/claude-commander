@@ -183,7 +183,11 @@ impl SessionManager {
         title: String,
         program: Option<String>,
     ) -> Result<SessionId> {
-        let program = program.unwrap_or_else(|| self.config_store.read().default_program.clone());
+        let (program, program_args) = {
+            let config = self.config_store.read();
+            let program = program.unwrap_or_else(|| config.default_program.clone());
+            (program, config.default_program_args.clone())
+        };
 
         // Get project info
         let (repo_path, main_branch, project_name) = {
@@ -269,11 +273,13 @@ impl SessionManager {
             title,
             branch_name,
             worktree_info.path.clone(),
-            program.clone(),
+            program,
         );
+        session.program_args = program_args;
         session.base_commit = Some(worktree_info.head);
         let session_id = session.id;
         let tmux_session_name = session.tmux_session_name.clone();
+        let launch_command = session.command_string();
         let status_bar = StatusBarInfo {
             branch: session.branch.clone(),
             pr_number: session.pr_number,
@@ -285,7 +291,11 @@ impl SessionManager {
 
         // Create tmux session in the worktree directory
         self.tmux
-            .create_session(&tmux_session_name, &worktree_info.path, Some(&program))
+            .create_session(
+                &tmux_session_name,
+                &worktree_info.path,
+                Some(&launch_command),
+            )
             .await?;
 
         // Configure CC status bar (branch only, no PR yet)
@@ -334,7 +344,7 @@ impl SessionManager {
     #[instrument(skip(self))]
     pub async fn resume_session(&self, session_id: &SessionId) -> Result<()> {
         // Read session info first
-        let (tmux_session_name, worktree_path, program, can_resume, status_bar) = {
+        let (tmux_session_name, worktree_path, launch_command, can_resume, status_bar) = {
             let state = self.store.read().await;
             let session = state
                 .get_session(session_id)
@@ -342,7 +352,7 @@ impl SessionManager {
             (
                 session.tmux_session_name.clone(),
                 session.worktree_path.clone(),
-                session.program.clone(),
+                session.command_string(),
                 session.status.can_resume(),
                 self.status_bar_info(session, &state),
             )
@@ -356,9 +366,8 @@ impl SessionManager {
         let exists = self.tmux.session_exists(&tmux_session_name).await?;
 
         if !exists {
-            let resume_program = format!("{} --resume", program);
             self.tmux
-                .create_session(&tmux_session_name, &worktree_path, Some(&resume_program))
+                .create_session(&tmux_session_name, &worktree_path, Some(&launch_command))
                 .await?;
 
             // Configure CC status bar on the recreated session
@@ -391,10 +400,10 @@ impl SessionManager {
         }
     }
 
-    /// Restart a session (kill tmux and recreate with --resume)
+    /// Restart a session (kill tmux and recreate)
     #[instrument(skip(self))]
     pub async fn restart_session(&self, session_id: &SessionId) -> Result<()> {
-        let (tmux_session_name, shell_tmux_name, worktree_path, program, status_bar) = {
+        let (tmux_session_name, shell_tmux_name, worktree_path, launch_command, status_bar) = {
             let state = self.store.read().await;
             let session = state
                 .get_session(session_id)
@@ -403,7 +412,7 @@ impl SessionManager {
                 session.tmux_session_name.clone(),
                 session.shell_tmux_session_name.clone(),
                 session.worktree_path.clone(),
-                session.program.clone(),
+                session.command_string(),
                 self.status_bar_info(session, &state),
             )
         };
@@ -411,11 +420,10 @@ impl SessionManager {
         self.kill_tmux_sessions(&tmux_session_name, shell_tmux_name.as_deref())
             .await;
 
-        // Create a fresh tmux session with --resume
-        let resume_program = format!("{} --resume", program);
+        // Create a fresh tmux session
         let create_result = self
             .tmux
-            .create_session(&tmux_session_name, &worktree_path, Some(&resume_program))
+            .create_session(&tmux_session_name, &worktree_path, Some(&launch_command))
             .await;
 
         if let Err(e) = create_result {
@@ -535,7 +543,7 @@ impl SessionManager {
     pub async fn get_attach_command(&self, session_id: &SessionId) -> Result<String> {
         info!("get_attach_command called for session: {}", session_id);
 
-        let (tmux_name, worktree_path, program, status_bar) = {
+        let (tmux_name, worktree_path, launch_command, status_bar) = {
             let state = self.store.read().await;
             let session = state
                 .get_session(session_id)
@@ -554,7 +562,7 @@ impl SessionManager {
             (
                 session.tmux_session_name.clone(),
                 session.worktree_path.clone(),
-                session.program.clone(),
+                session.command_string(),
                 self.status_bar_info(session, &state),
             )
         };
@@ -582,11 +590,10 @@ impl SessionManager {
         };
 
         if needs_recreate {
-            // Recreate the tmux session with --resume so the agent picks up where it left off
-            let resume_program = format!("{} --resume", program);
-            info!("Recreating tmux session with: {}", resume_program);
+            // Recreate the tmux session with a fresh program invocation
+            info!("Recreating tmux session with: {}", launch_command);
             self.tmux
-                .create_session(&tmux_name, &worktree_path, Some(&resume_program))
+                .create_session(&tmux_name, &worktree_path, Some(&launch_command))
                 .await?;
 
             // Configure CC status bar on the recreated session
@@ -1047,13 +1054,21 @@ impl SessionManager {
                 continue;
             }
 
+            let (default_program, default_program_args) = {
+                let config = self.config_store.read();
+                (
+                    config.default_program.clone(),
+                    config.default_program_args.clone(),
+                )
+            };
             let mut session = WorktreeSession::new(
                 *project_id,
                 wt.branch.clone(),
                 wt.branch.clone(),
                 wt.path.clone(),
-                self.config_store.read().default_program.clone(),
+                default_program,
             );
+            session.program_args = default_program_args;
             session.set_status(SessionStatus::Paused);
             session.base_commit = Some(wt.head.clone());
 
