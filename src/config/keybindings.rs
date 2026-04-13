@@ -399,6 +399,15 @@ impl KeyBindings {
         self.bindings.get(&action).map_or(&[], |v| v.as_slice())
     }
 
+    /// Replace the key bindings for a specific action, rebuilding the lookup
+    /// table. Intended for tests; production rebinding happens via TOML
+    /// deserialisation (see `KeyBindingsVisitor`).
+    #[cfg(test)]
+    pub fn set_for_test(&mut self, action: BindableAction, keys: Vec<KeyBinding>) {
+        self.bindings.insert(action, keys);
+        self.lookup = Self::build_lookup(&self.bindings);
+    }
+
     /// Format the key bindings for an action as a comma-separated string.
     pub fn keys_display(&self, action: BindableAction) -> String {
         self.keys_for(action)

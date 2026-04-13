@@ -107,7 +107,7 @@ When attached to a session (via `Enter` or `claude-commander attach`):
 |-----|--------|
 | `Ctrl-q` | Detach and return to session list |
 | `Ctrl-\` | Switch between Claude and shell pane |
-| `Ctrl-<letter>` | Open worktree in editor/IDE — opt-in; letter is configured via `editor_ctrl_hotkey_in_tmux_session` |
+| `Ctrl-<letter>` | Open worktree in editor/IDE — opt-in via `editor_ctrl_hotkey_in_tmux_session`; uses the letter from your `open_in_editor` binding |
 
 ## Configuration
 
@@ -155,9 +155,9 @@ ui_refresh_fps = 30
 # Auto-detected from a known list if not set (code, zed, subl, JetBrains IDEs, etc.)
 # editor_gui = true
 
-# Letter paired with Ctrl to open the worktree in the editor while attached to a
-# tmux session. Empty/unset disables it. Must be a single ASCII letter.
-# editor_ctrl_hotkey_in_tmux_session = "e"
+# When true, pressing Ctrl+<your `open_in_editor` letter> inside an attached
+# tmux session opens the worktree in the configured editor.
+# editor_ctrl_hotkey_in_tmux_session = false
 
 # Interval in seconds between GitHub PR checks (0 = disabled)
 pr_check_interval_secs = 600

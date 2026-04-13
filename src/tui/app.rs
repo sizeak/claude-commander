@@ -1736,11 +1736,7 @@ impl App {
                     },
                     SettingsRow {
                         label: "Editor Ctrl Hotkey in Tmux Session".into(),
-                        value: c
-                            .editor_ctrl_hotkey_in_tmux_session
-                            .clone()
-                            .filter(|s| !s.is_empty())
-                            .unwrap_or_else(|| "(disabled)".into()),
+                        value: c.editor_ctrl_hotkey_in_tmux_session.to_string(),
                         field_key: "editor_ctrl_hotkey_in_tmux_session".into(),
                         color_swatch: None,
                     },
@@ -2072,12 +2068,9 @@ impl App {
                     };
                 }
                 "editor_ctrl_hotkey_in_tmux_session" => {
-                    self.config.editor_ctrl_hotkey_in_tmux_session =
-                        if value.is_empty() || value == "(disabled)" {
-                            None
-                        } else {
-                            Some(value.to_string())
-                        };
+                    if let Ok(b) = value.parse::<bool>() {
+                        self.config.editor_ctrl_hotkey_in_tmux_session = b;
+                    }
                 }
                 "fetch_before_create" => {
                     if let Ok(b) = value.parse::<bool>() {

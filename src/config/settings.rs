@@ -54,11 +54,11 @@ pub struct Config {
     /// If unset, auto-detected from a known list of GUI editors.
     pub editor_gui: Option<bool>,
 
-    /// Letter paired with Ctrl to open the worktree in the editor from inside a
-    /// tmux attach session. Empty/unset disables the hotkey. Must be a single
-    /// ASCII letter; other values are ignored. Ctrl is implied by the field.
+    /// When true, pressing Ctrl + the `open_in_editor` letter while attached to
+    /// a tmux session opens the worktree in the editor. Has no effect unless
+    /// that keybinding's first entry is an ASCII letter.
     #[serde(default)]
-    pub editor_ctrl_hotkey_in_tmux_session: Option<String>,
+    pub editor_ctrl_hotkey_in_tmux_session: bool,
 
     /// Fetch the latest changes from origin before creating a new session
     #[serde(alias = "pull_before_create")]
@@ -122,7 +122,7 @@ impl Default for Config {
             worktrees_dir: None,
             editor: None,
             editor_gui: None,
-            editor_ctrl_hotkey_in_tmux_session: None,
+            editor_ctrl_hotkey_in_tmux_session: false,
             shell_program: std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string()),
             pr_check_interval_secs: 600,
             fetch_before_create: true,
@@ -238,17 +238,24 @@ impl Config {
     /// Raw control byte that the tmux attach loop should intercept for the
     /// editor hotkey, if any.
     ///
-    /// Reads `editor_ctrl_hotkey_in_tmux_session`, which must be a single ASCII
-    /// letter. The letter is combined implicitly with Ctrl. Empty, absent, or
-    /// malformed values resolve to `None` so no byte is intercepted.
+    /// Returns `None` when `editor_ctrl_hotkey_in_tmux_session` is `false`.
+    /// Otherwise scans the `open_in_editor` bindings for the first ASCII-letter
+    /// `Char` binding and returns the Ctrl+<letter> control byte. Non-letter
+    /// bindings (function keys, symbols) yield `None`.
     pub fn attach_editor_hotkey_byte(&self) -> Option<u8> {
-        let s = self.editor_ctrl_hotkey_in_tmux_session.as_deref()?;
-        let mut chars = s.chars();
-        let c = chars.next()?;
-        if chars.next().is_some() || !c.is_ascii_alphabetic() {
+        use crossterm::event::KeyCode;
+        if !self.editor_ctrl_hotkey_in_tmux_session {
             return None;
         }
-        Some(c.to_ascii_lowercase() as u8 & 0x1F)
+        self.keybindings
+            .keys_for(crate::config::keybindings::BindableAction::OpenInEditor)
+            .iter()
+            .find_map(|kb| match kb.code {
+                KeyCode::Char(c) if c.is_ascii_alphabetic() => {
+                    Some(c.to_ascii_lowercase() as u8 & 0x1F)
+                }
+                _ => None,
+            })
     }
 
     /// Resolve the editor command: config → $VISUAL → $EDITOR → None
@@ -419,50 +426,65 @@ mod tests {
     }
 
     #[test]
-    fn test_attach_editor_hotkey_byte_empty_string_is_disabled() {
+    fn test_attach_editor_hotkey_byte_uses_default_letter_binding_when_enabled() {
+        // Default `open_in_editor` binding is bare `e` — toggling the flag yields Ctrl+E (0x05).
         let config = Config {
-            editor_ctrl_hotkey_in_tmux_session: Some(String::new()),
+            editor_ctrl_hotkey_in_tmux_session: true,
+            ..Config::default()
+        };
+        assert_eq!(config.attach_editor_hotkey_byte(), Some(0x05));
+    }
+
+    #[test]
+    fn test_attach_editor_hotkey_byte_follows_rebound_letter() {
+        use crate::config::keybindings::{BindableAction, KeyBinding};
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut bindings = KeyBindings::default();
+        bindings.set_for_test(BindableAction::OpenInEditor, vec![KeyBinding::new(
+            KeyCode::Char('o'),
+            KeyModifiers::NONE,
+        )]);
+        let config = Config {
+            editor_ctrl_hotkey_in_tmux_session: true,
+            keybindings: bindings,
+            ..Config::default()
+        };
+        assert_eq!(config.attach_editor_hotkey_byte(), Some(0x0f));
+    }
+
+    #[test]
+    fn test_attach_editor_hotkey_byte_strips_existing_ctrl_modifier() {
+        // If user has bound `Ctrl-e` directly, we still just take the letter and add Ctrl.
+        use crate::config::keybindings::{BindableAction, KeyBinding};
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut bindings = KeyBindings::default();
+        bindings.set_for_test(BindableAction::OpenInEditor, vec![KeyBinding::new(
+            KeyCode::Char('e'),
+            KeyModifiers::CONTROL,
+        )]);
+        let config = Config {
+            editor_ctrl_hotkey_in_tmux_session: true,
+            keybindings: bindings,
+            ..Config::default()
+        };
+        assert_eq!(config.attach_editor_hotkey_byte(), Some(0x05));
+    }
+
+    #[test]
+    fn test_attach_editor_hotkey_byte_none_when_binding_has_no_letter() {
+        use crate::config::keybindings::{BindableAction, KeyBinding};
+        use crossterm::event::{KeyCode, KeyModifiers};
+        let mut bindings = KeyBindings::default();
+        bindings.set_for_test(BindableAction::OpenInEditor, vec![KeyBinding::new(
+            KeyCode::F(2),
+            KeyModifiers::NONE,
+        )]);
+        let config = Config {
+            editor_ctrl_hotkey_in_tmux_session: true,
+            keybindings: bindings,
             ..Config::default()
         };
         assert_eq!(config.attach_editor_hotkey_byte(), None);
-    }
-
-    #[test]
-    fn test_attach_editor_hotkey_byte_single_letter_resolves_to_ctrl_byte() {
-        let config = Config {
-            editor_ctrl_hotkey_in_tmux_session: Some("e".to_string()),
-            ..Config::default()
-        };
-        assert_eq!(config.attach_editor_hotkey_byte(), Some(0x05));
-        let config = Config {
-            editor_ctrl_hotkey_in_tmux_session: Some("a".to_string()),
-            ..Config::default()
-        };
-        assert_eq!(config.attach_editor_hotkey_byte(), Some(0x01));
-    }
-
-    #[test]
-    fn test_attach_editor_hotkey_byte_uppercase_letter_accepted() {
-        let config = Config {
-            editor_ctrl_hotkey_in_tmux_session: Some("E".to_string()),
-            ..Config::default()
-        };
-        assert_eq!(config.attach_editor_hotkey_byte(), Some(0x05));
-    }
-
-    #[test]
-    fn test_attach_editor_hotkey_byte_rejects_multi_char_or_non_letter() {
-        for bad in ["Ctrl-e", "ee", "1", " ", "-"] {
-            let config = Config {
-                editor_ctrl_hotkey_in_tmux_session: Some(bad.to_string()),
-                ..Config::default()
-            };
-            assert_eq!(
-                config.attach_editor_hotkey_byte(),
-                None,
-                "expected None for {bad:?}"
-            );
-        }
     }
 
     #[test]
