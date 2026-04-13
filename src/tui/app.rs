@@ -2762,7 +2762,7 @@ impl App {
                     let state = self.store.read().await;
                     for session in state.sessions.values() {
                         if session.status == SessionStatus::Running {
-                            let info = self.session_manager.status_bar_info(session);
+                            let info = self.session_manager.status_bar_info(session, &state);
                             self.session_manager
                                 .tmux
                                 .configure_status_bar(&session.tmux_session_name, &info)
