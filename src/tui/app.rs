@@ -1938,7 +1938,7 @@ impl App {
             ..content_area
         };
 
-        let label_width = 24_u16;
+        let label_width = 36_u16;
         let value_width = rows_area.width.saturating_sub(label_width + 3);
 
         let visible_rows = rows_area.height as usize;
