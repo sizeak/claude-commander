@@ -119,6 +119,31 @@ impl fmt::Display for SessionStatus {
     }
 }
 
+/// Sub-state of a Running Claude Code session, detected via pane content parsing.
+/// This is ephemeral (not persisted) and only meaningful when SessionStatus == Running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AgentState {
+    /// Claude is actively generating output
+    Working,
+    /// Claude has finished and is at the input prompt
+    Idle,
+    /// Claude is waiting for user permission or input
+    WaitingForInput,
+    /// State could not be determined (non-Claude program, detection failure, etc.)
+    Unknown,
+}
+
+impl fmt::Display for AgentState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Working => write!(f, "working"),
+            Self::Idle => write!(f, "idle"),
+            Self::WaitingForInput => write!(f, "waiting"),
+            Self::Unknown => write!(f, "unknown"),
+        }
+    }
+}
+
 /// Project represents a git repository (parent session)
 ///
 /// A project is the top-level container that holds:
@@ -220,6 +245,9 @@ pub struct WorktreeSession {
     /// Whether the PR has been merged
     #[serde(default)]
     pub pr_merged: bool,
+    /// Whether the session has unread output (agent finished but user hasn't attached)
+    #[serde(default)]
+    pub unread: bool,
 }
 
 impl WorktreeSession {
@@ -254,6 +282,7 @@ impl WorktreeSession {
             pr_number: None,
             pr_url: None,
             pr_merged: false,
+            unread: false,
         }
     }
 
@@ -302,6 +331,10 @@ pub enum SessionListItem {
         pr_number: Option<u32>,
         pr_url: Option<String>,
         pr_merged: bool,
+        worktree_path: PathBuf,
+        created_at: chrono::DateTime<chrono::Utc>,
+        agent_state: Option<AgentState>,
+        unread: bool,
     },
 }
 
@@ -427,6 +460,10 @@ mod tests {
             pr_number: None,
             pr_url: None,
             pr_merged: false,
+            worktree_path: PathBuf::from("/tmp/wt"),
+            created_at: chrono::Utc::now(),
+            agent_state: None,
+            unread: false,
         };
 
         assert!(project_item.key().starts_with("project:"));
@@ -593,9 +630,21 @@ mod tests {
             pr_number: None,
             pr_url: None,
             pr_merged: false,
+            worktree_path: PathBuf::from("/tmp/wt"),
+            created_at: chrono::Utc::now(),
+            agent_state: None,
+            unread: false,
         };
 
         assert!(!project_item.is_worktree());
         assert!(!worktree_item.is_project());
+    }
+
+    #[test]
+    fn test_agent_state_display() {
+        assert_eq!(format!("{}", AgentState::Working), "working");
+        assert_eq!(format!("{}", AgentState::Idle), "idle");
+        assert_eq!(format!("{}", AgentState::WaitingForInput), "waiting");
+        assert_eq!(format!("{}", AgentState::Unknown), "unknown");
     }
 }

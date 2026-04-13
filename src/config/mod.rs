@@ -5,12 +5,14 @@
 //! - Persistent state (`~/.claude-commander/state.json`)
 //! - Worktree directory management
 
+mod config_store;
 pub mod keybindings;
-pub mod theme;
 mod settings;
 pub mod storage;
 mod store;
+pub mod theme;
 
+pub use config_store::ConfigStore;
 pub use keybindings::{BindableAction, KeyBinding, KeyBindings};
 pub use settings::*;
 pub use storage::*;

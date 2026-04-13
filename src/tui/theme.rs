@@ -62,6 +62,11 @@ pub struct Theme {
     pub status_pr: Color,
     pub status_pr_merged: Color,
 
+    // Agent state and notification indicators
+    pub agent_working: Color,
+    pub agent_waiting: Color,
+    pub unread_indicator: Color,
+
     // Text
     pub text_primary: Color,
     pub text_secondary: Color,
@@ -117,6 +122,10 @@ impl Theme {
             status_pr: Color::Magenta,
             status_pr_merged: Color::DarkGray,
 
+            agent_working: Color::Green,
+            agent_waiting: Color::Yellow,
+            unread_indicator: Color::Blue,
+
             text_primary: Color::Reset,
             text_secondary: Color::DarkGray,
             text_accent: Color::Blue,
@@ -160,6 +169,10 @@ impl Theme {
             status_pr: Color::Indexed(141),       // Medium purple
             status_pr_merged: Color::Indexed(97), // Dark purple
 
+            agent_working: Color::Indexed(156), // Pastel mint
+            agent_waiting: Color::Indexed(208), // Orange
+            unread_indicator: Color::Indexed(117), // Sky blue
+
             text_primary: Color::Reset,
             text_secondary: Color::Indexed(250),
             text_accent: Color::Indexed(147), // Pastel lavender
@@ -202,6 +215,10 @@ impl Theme {
             status_stopped: Color::Rgb(147, 153, 178), // Muted lavender
             status_pr: Color::Rgb(203, 166, 247),      // Pastel mauve
             status_pr_merged: Color::Rgb(137, 100, 180), // Dark purple
+
+            agent_working: Color::Rgb(166, 227, 161), // Pastel mint
+            agent_waiting: Color::Rgb(250, 179, 135), // Peach/orange
+            unread_indicator: Color::Rgb(137, 180, 250), // Sky blue
 
             text_primary: Color::Rgb(245, 245, 250),
             text_secondary: Color::Rgb(166, 173, 200),
@@ -264,6 +281,9 @@ impl Theme {
         apply!(status_stopped);
         apply!(status_pr);
         apply!(status_pr_merged);
+        apply!(agent_working);
+        apply!(agent_waiting);
+        apply!(unread_indicator);
         apply!(text_primary);
         apply!(text_secondary);
         apply!(text_accent);
@@ -580,17 +600,26 @@ mod tests {
     #[test]
     fn test_dim_color_rgb() {
         // 50% opacity halves each channel
-        assert_eq!(dim_color(Color::Rgb(200, 100, 50), 0.5), Color::Rgb(100, 50, 25));
+        assert_eq!(
+            dim_color(Color::Rgb(200, 100, 50), 0.5),
+            Color::Rgb(100, 50, 25)
+        );
     }
 
     #[test]
     fn test_dim_color_full_opacity_unchanged() {
-        assert_eq!(dim_color(Color::Rgb(200, 100, 50), 1.0), Color::Rgb(200, 100, 50));
+        assert_eq!(
+            dim_color(Color::Rgb(200, 100, 50), 1.0),
+            Color::Rgb(200, 100, 50)
+        );
     }
 
     #[test]
     fn test_dim_color_zero_opacity_is_black() {
-        assert_eq!(dim_color(Color::Rgb(200, 100, 50), 0.0), Color::Rgb(0, 0, 0));
+        assert_eq!(
+            dim_color(Color::Rgb(200, 100, 50), 0.0),
+            Color::Rgb(0, 0, 0)
+        );
     }
 
     #[test]
@@ -615,9 +644,15 @@ mod tests {
     #[test]
     fn test_dim_color_clamps_opacity() {
         // Opacity > 1.0 should be clamped to 1.0
-        assert_eq!(dim_color(Color::Rgb(200, 100, 50), 2.0), Color::Rgb(200, 100, 50));
+        assert_eq!(
+            dim_color(Color::Rgb(200, 100, 50), 2.0),
+            Color::Rgb(200, 100, 50)
+        );
         // Opacity < 0.0 should be clamped to 0.0
-        assert_eq!(dim_color(Color::Rgb(200, 100, 50), -1.0), Color::Rgb(0, 0, 0));
+        assert_eq!(
+            dim_color(Color::Rgb(200, 100, 50), -1.0),
+            Color::Rgb(0, 0, 0)
+        );
     }
 
     #[test]

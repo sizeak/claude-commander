@@ -5,6 +5,7 @@
 //! - User input handling
 //! - Background state updates
 
+use std::collections::HashMap;
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -31,11 +32,20 @@ use tracing::{debug, info, warn};
 use super::event::{AppEvent, EventLoop, InputEvent, StateUpdate, UserCommand};
 use super::path_completer::PathCompleter;
 use super::theme::Theme;
-use super::widgets::{DiffView, DiffViewState, Preview, PreviewState, TreeList, TreeListState};
-use crate::config::{BindableAction, Config, StateStore};
+use super::widgets::{
+    InfoContent, InfoProjectData, InfoSessionData, InfoView, InfoViewState, Preview, PreviewState,
+    TreeList, TreeListState,
+};
+use crate::config::{BindableAction, Config, ConfigStore, StateStore};
 use crate::error::{Result, TuiError};
-use crate::git::{DiffInfo, check_pr_for_branch, is_gh_available};
-use crate::session::{ProjectId, SessionId, SessionListItem, SessionManager, SessionStatus};
+use crate::git::{
+    AiSummary, DiffInfo, EnrichedPrInfo, check_pr_for_branch, diff_hash, fetch_branch_summary,
+    fetch_enriched_pr, is_gh_available,
+};
+use crate::session::{
+    AgentState, ProjectId, SessionId, SessionListItem, SessionManager, SessionStatus,
+};
+use crate::tmux::AgentStateDetector;
 
 /// Direction for mouse scroll events
 enum ScrollDirection {
@@ -63,7 +73,7 @@ pub enum FocusedPane {
 pub enum RightPaneView {
     #[default]
     Preview,
-    Diff,
+    Info,
     Shell,
 }
 
@@ -199,6 +209,7 @@ pub enum InputAction {
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
     DeleteSession { session_id: SessionId },
+    RestartSession { session_id: SessionId },
     RemoveProject { project_id: ProjectId },
 }
 
@@ -208,8 +219,12 @@ pub struct AppUiState {
     pub list_state: TreeListState,
     /// Preview pane state
     pub preview_state: PreviewState,
-    /// Diff pane state
-    pub diff_state: DiffViewState,
+    /// Info pane state
+    pub info_state: InfoViewState,
+    /// Enriched PR info for the currently selected session
+    pub enriched_pr: Option<(SessionId, EnrichedPrInfo)>,
+    /// Cached AI summaries keyed by session ID
+    pub ai_summaries: std::collections::HashMap<SessionId, AiSummary>,
     /// Currently focused pane
     pub focused_pane: FocusedPane,
     /// Which view is shown in the right pane
@@ -257,6 +272,8 @@ pub struct AppUiState {
     pub tick_count: u64,
     /// Throbber/spinner state for loading modals
     pub throbber_state: throbber_widgets_tui::ThrobberState,
+    /// Current agent states for Running Claude sessions (ephemeral, from background poller)
+    pub agent_states: HashMap<SessionId, AgentState>,
 }
 
 impl Default for AppUiState {
@@ -264,7 +281,9 @@ impl Default for AppUiState {
         Self {
             list_state: TreeListState::new(),
             preview_state: PreviewState::new(),
-            diff_state: DiffViewState::new(),
+            info_state: InfoViewState::new(),
+            enriched_pr: None,
+            ai_summaries: std::collections::HashMap::new(),
             shell_state: PreviewState::new(),
             shell_content: String::new(),
             focused_pane: FocusedPane::default(),
@@ -289,14 +308,17 @@ impl Default for AppUiState {
             terminal_size: Rect::default(),
             tick_count: 0,
             throbber_state: throbber_widgets_tui::ThrobberState::default(),
+            agent_states: HashMap::new(),
         }
     }
 }
 
 /// Main TUI application
 pub struct App {
-    /// Configuration
+    /// Local config cache — refreshed from config_store on tick when file changes
     config: Config,
+    /// Shared config store (hot-reloaded from disk)
+    config_store: Arc<ConfigStore>,
     /// Concurrent-safe persistent state store
     store: Arc<StateStore>,
     /// Session manager
@@ -316,10 +338,14 @@ pub struct App {
 
 impl App {
     /// Create a new application
-    pub fn new(config: Config, store: Arc<StateStore>) -> Self {
+    pub fn new(config_store: Arc<ConfigStore>, store: Arc<StateStore>) -> Self {
+        let config = config_store.read().clone();
         let theme = Theme::default();
-        let session_manager =
-            SessionManager::new(config.clone(), store.clone(), theme.tmux_status_style());
+        let session_manager = SessionManager::new(
+            config_store.clone(),
+            store.clone(),
+            theme.tmux_status_style(),
+        );
 
         let base = config
             .theme
@@ -332,6 +358,7 @@ impl App {
 
         Self {
             config,
+            config_store,
             store,
             session_manager,
             ui_state: AppUiState::default(),
@@ -380,6 +407,46 @@ impl App {
                         Err(e) => {
                             debug!("State sync check failed: {}", e);
                         }
+                    }
+                }
+            });
+        }
+
+        // Start background agent state polling
+        if self.config.agent_state_poll_interval_ms > 0 {
+            let store = self.store.clone();
+            let tx = self.event_loop.sender();
+            let interval_ms = self.config.agent_state_poll_interval_ms;
+            let tmux = self.session_manager.tmux.clone();
+            tokio::spawn(async move {
+                let cache_ttl =
+                    Duration::from_millis(interval_ms.saturating_sub(500).max(500));
+                let mut detector = AgentStateDetector::new(tmux, cache_ttl);
+                let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+                loop {
+                    interval.tick().await;
+                    let sessions: Vec<(SessionId, String, String)> = {
+                        let state = store.read().await;
+                        state
+                            .sessions
+                            .values()
+                            .filter(|s| s.status == SessionStatus::Running)
+                            .map(|s| {
+                                (s.id, s.tmux_session_name.clone(), s.program.clone())
+                            })
+                            .collect()
+                    };
+                    if sessions.is_empty() {
+                        continue;
+                    }
+                    let states: HashMap<SessionId, AgentState> =
+                        detector.detect_all(&sessions).await;
+                    if !states.is_empty() {
+                        let _ = tx
+                            .send(AppEvent::StateUpdate(
+                                StateUpdate::AgentStatesUpdated { states },
+                            ))
+                            .await;
                     }
                 }
             });
@@ -722,6 +789,11 @@ impl App {
                     self.jump_to_session_number(n);
                 }
 
+                // Check for config file changes roughly once per second
+                // (tick_count wraps at u64::MAX, is_multiple_of(30) at 30fps ≈ 1s)
+                if self.ui_state.tick_count.is_multiple_of(30) {
+                    self.check_config_reload();
+                }
                 return true;
             }
             AppEvent::Quit => {
@@ -729,6 +801,28 @@ impl App {
             }
         }
         false
+    }
+
+    /// Check if `config.toml` has been modified externally and refresh the local cache.
+    fn check_config_reload(&mut self) {
+        match self.config_store.reload_if_changed() {
+            Ok(true) => {
+                debug!("Config hot-reloaded from disk");
+                self.config = self.config_store.read().clone();
+                let base = self
+                    .config
+                    .theme
+                    .preset
+                    .as_deref()
+                    .and_then(Theme::from_preset)
+                    .unwrap_or_default();
+                self.theme = base.with_overrides(&self.config.theme);
+            }
+            Ok(false) => {}
+            Err(e) => {
+                debug!("Config reload check failed: {}", e);
+            }
+        }
     }
 
     /// Spawn a background task to fetch preview/diff/shell data.
@@ -816,13 +910,16 @@ impl App {
                 self.ui_state.clear_right_pane = true;
             }
         }
+
+        // Fetch info pane data if applicable
+        self.spawn_info_fetch();
     }
 
     /// Get mutable reference to the active pane's scroll state
     fn active_pane_state(&mut self) -> &mut PreviewState {
         match self.ui_state.right_pane_view {
             RightPaneView::Preview => &mut self.ui_state.preview_state,
-            RightPaneView::Diff => &mut self.ui_state.diff_state,
+            RightPaneView::Info => &mut self.ui_state.info_state,
             RightPaneView::Shell => &mut self.ui_state.shell_state,
         }
     }
@@ -904,7 +1001,7 @@ impl App {
         };
         match view {
             RightPaneView::Preview => self.render_preview(frame, main_chunks[1]),
-            RightPaneView::Diff => self.render_diff(frame, main_chunks[1]),
+            RightPaneView::Info => self.render_info(frame, main_chunks[1]),
             RightPaneView::Shell => self.render_shell(frame, main_chunks[1]),
         }
 
@@ -931,7 +1028,9 @@ impl App {
 
         let tree_list = TreeList::new(&self.ui_state.list_items, &self.theme)
             .highlight_style(self.theme.selection().add_modifier(Modifier::BOLD))
-            .show_numbers(self.config.show_session_numbers);
+            .show_numbers(self.config.show_session_numbers)
+            .tick(self.ui_state.tick_count)
+            .show_status_indicator(self.config.show_status_indicator);
 
         frame.render_stateful_widget(
             tree_list,
@@ -968,7 +1067,7 @@ impl App {
         };
 
         // Show tab indicator in title
-        let title = " [Preview] | Diff | Shell ";
+        let title = " [Preview] | Info | Shell ";
 
         let block = Block::default()
             .title(title)
@@ -993,8 +1092,8 @@ impl App {
         frame.render_widget(preview, area);
     }
 
-    /// Render the diff pane
-    fn render_diff(&mut self, frame: &mut Frame, area: Rect) {
+    /// Render the info pane (session metadata, PR details, AI summary)
+    fn render_info(&mut self, frame: &mut Frame, area: Rect) {
         let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
         let dim_opacity = if !is_focused && self.config.dim_unfocused_preview {
             Some(self.config.dim_unfocused_opacity)
@@ -1003,32 +1102,21 @@ impl App {
         };
         let on_project = self.is_project_selected();
 
-        // Show tab indicator and diff summary in title with colored +/- counts
-        let (prefix, suffix) = if on_project {
-            ("Shell | ", "")
+        // Compute display string for the generate-summary hotkey (None = AI disabled)
+        let summary_key_hint = if self.config.ai_summary_enabled {
+            self.config
+                .keybindings
+                .keys_for(BindableAction::GenerateSummary)
+                .first()
+                .map(|k| k.to_string())
         } else {
-            ("Preview | ", " | Shell")
+            None
         };
 
-        let title = if self.ui_state.diff_info.has_changes() {
-            Line::from(vec![
-                Span::raw(format!(
-                    " {}[Diff] ({} file(s), ",
-                    prefix, self.ui_state.diff_info.files_changed,
-                )),
-                Span::styled(
-                    format!("+{}", self.ui_state.diff_info.lines_added),
-                    Style::default().fg(self.theme.diff_added),
-                ),
-                Span::raw(" "),
-                Span::styled(
-                    format!("-{}", self.ui_state.diff_info.lines_removed),
-                    Style::default().fg(self.theme.diff_removed),
-                ),
-                Span::raw(format!(" lines){} ", suffix)),
-            ])
+        let title = if on_project {
+            " Shell | [Info] "
         } else {
-            Line::from(format!(" {}[Diff] (No changes){} ", prefix, suffix))
+            " Preview | [Info] | Shell "
         };
 
         let block = Block::default()
@@ -1040,18 +1128,207 @@ impl App {
                 self.theme.border_unfocused()
             });
 
-        // Update diff state with precomputed line count (avoids scanning the diff string)
-        let inner_height = area.height.saturating_sub(2);
-        self.ui_state
-            .diff_state
-            .set_metrics(self.ui_state.diff_info.line_count, inner_height);
+        // Build the info content based on current selection
+        let content = if let Some(session_id) = self.ui_state.selected_session_id {
+            // Find the session data from list_items (includes all needed fields)
+            let session_data = self.ui_state.list_items.iter().find_map(|item| {
+                if let SessionListItem::Worktree {
+                    id,
+                    title,
+                    branch,
+                    status,
+                    program,
+                    pr_number,
+                    pr_url,
+                    pr_merged,
+                    worktree_path,
+                    created_at,
+                    ..
+                } = item
+                {
+                    if *id == session_id {
+                        Some((
+                            title.clone(),
+                            branch.clone(),
+                            *status,
+                            program.clone(),
+                            *pr_number,
+                            pr_url.clone(),
+                            *pr_merged,
+                            worktree_path.display().to_string(),
+                            created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+                        ))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            });
 
-        let diff_view = DiffView::new(&self.ui_state.diff_info, &self.theme)
+            if let Some((
+                title,
+                branch,
+                status,
+                program,
+                pr_number,
+                pr_url,
+                pr_merged,
+                worktree_path,
+                created_at,
+            )) = session_data
+            {
+                let enriched_pr = self
+                    .ui_state
+                    .enriched_pr
+                    .as_ref()
+                    .and_then(|(sid, pr)| if *sid == session_id { Some(pr) } else { None });
+
+                let ai_summary = if self.config.ai_summary_enabled {
+                    self.ui_state.ai_summaries.get(&session_id)
+                } else {
+                    None
+                };
+
+                let data = InfoSessionData {
+                    title,
+                    branch,
+                    created_at,
+                    status,
+                    program,
+                    worktree_path,
+                    diff_info: &self.ui_state.diff_info,
+                    pr_number,
+                    pr_url,
+                    pr_merged,
+                    enriched_pr,
+                    ai_summary,
+                    summary_key_hint: summary_key_hint.clone(),
+                };
+
+                // Count lines for scroll state
+                let line_count = InfoView::new(InfoContent::Session(data), &self.theme)
+                    .build_lines()
+                    .len();
+                let inner_height = area.height.saturating_sub(2);
+                self.ui_state
+                    .info_state
+                    .set_metrics(line_count, inner_height);
+
+                // Rebuild data (it was consumed by the line count call)
+                let enriched_pr = self
+                    .ui_state
+                    .enriched_pr
+                    .as_ref()
+                    .and_then(|(sid, pr)| if *sid == session_id { Some(pr) } else { None });
+                let ai_summary = if self.config.ai_summary_enabled {
+                    self.ui_state.ai_summaries.get(&session_id)
+                } else {
+                    None
+                };
+                // Re-find session data (original was consumed)
+                let session_data2 = self.ui_state.list_items.iter().find_map(|item| {
+                    if let SessionListItem::Worktree {
+                        id,
+                        title,
+                        branch,
+                        status,
+                        program,
+                        pr_number,
+                        pr_url,
+                        pr_merged,
+                        worktree_path,
+                        created_at,
+                        ..
+                    } = item
+                    {
+                        if *id == session_id {
+                            Some((
+                                title.clone(),
+                                branch.clone(),
+                                *status,
+                                program.clone(),
+                                *pr_number,
+                                pr_url.clone(),
+                                *pr_merged,
+                                worktree_path.display().to_string(),
+                                created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+                            ))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                });
+                if let Some((t, b, s, p, pn, pu, pm, wp, ca)) = session_data2 {
+                    InfoContent::Session(InfoSessionData {
+                        title: t,
+                        branch: b,
+                        created_at: ca,
+                        status: s,
+                        program: p,
+                        worktree_path: wp,
+                        diff_info: &self.ui_state.diff_info,
+                        pr_number: pn,
+                        pr_url: pu,
+                        pr_merged: pm,
+                        enriched_pr,
+                        ai_summary,
+                        summary_key_hint,
+                    })
+                } else {
+                    InfoContent::Empty
+                }
+            } else {
+                InfoContent::Empty
+            }
+        } else if let Some(project_id) = self.ui_state.selected_project_id {
+            let project_data = self.ui_state.list_items.iter().find_map(|item| {
+                if let SessionListItem::Project {
+                    id,
+                    name,
+                    repo_path,
+                    main_branch,
+                    ..
+                } = item
+                {
+                    if *id == project_id {
+                        Some((
+                            name.clone(),
+                            repo_path.display().to_string(),
+                            main_branch.clone(),
+                        ))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            });
+
+            if let Some((name, repo_path, main_branch)) = project_data {
+                let inner_height = area.height.saturating_sub(2);
+                self.ui_state.info_state.set_metrics(3, inner_height);
+
+                InfoContent::Project(InfoProjectData {
+                    name,
+                    repo_path,
+                    main_branch,
+                })
+            } else {
+                InfoContent::Empty
+            }
+        } else {
+            InfoContent::Empty
+        };
+
+        let info_view = InfoView::new(content, &self.theme)
             .block(block)
-            .scroll(self.ui_state.diff_state.scroll_offset)
+            .scroll(self.ui_state.info_state.scroll_offset)
             .dim_opacity(dim_opacity);
 
-        frame.render_widget(diff_view, area);
+        frame.render_widget(info_view, area);
     }
 
     /// Render the shell pane
@@ -1064,9 +1341,9 @@ impl App {
         };
 
         let title = if self.is_project_selected() {
-            " [Shell] | Diff "
+            " [Shell] | Info "
         } else {
-            " Preview | Diff | [Shell] "
+            " Preview | Info | [Shell] "
         };
 
         let block = Block::default()
@@ -1455,6 +1732,18 @@ impl App {
                         field_key: "session_number_debounce_ms".into(),
                         color_swatch: None,
                     },
+                    SettingsRow {
+                        label: "AI Summary Enabled".into(),
+                        value: c.ai_summary_enabled.to_string(),
+                        field_key: "ai_summary_enabled".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
+                        label: "AI Summary Model".into(),
+                        value: c.ai_summary_model.clone(),
+                        field_key: "ai_summary_model".into(),
+                        color_swatch: None,
+                    },
                 ]
             }
             SettingsTab::Keybindings => {
@@ -1762,6 +2051,14 @@ impl App {
                         self.config.session_number_debounce_ms = v;
                     }
                 }
+                "ai_summary_enabled" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        self.config.ai_summary_enabled = b;
+                    }
+                }
+                "ai_summary_model" => {
+                    self.config.ai_summary_model = value.to_string();
+                }
                 _ => {}
             },
             SettingsTab::Theme => {
@@ -1840,8 +2137,9 @@ impl App {
             }
         }
 
-        // Persist config
-        if let Err(e) = self.config.save() {
+        // Persist config via the store (updates mtime so hot-reload won't re-read our own write)
+        let updated = self.config.clone();
+        if let Err(e) = self.config_store.mutate(|c| *c = updated) {
             warn!("Failed to save config: {}", e);
         }
     }
@@ -1942,14 +2240,13 @@ impl App {
                     KeyCode::Enter => {
                         if !state.rows.is_empty() {
                             let current_value = state.rows[state.selected_row].value.clone();
-                            let initial =
-                                if current_value == "(auto)" || current_value == "(none)" {
-                                    String::new()
-                                } else {
-                                    current_value
-                                };
-                            state.editing =
-                                Some(SettingsEditing::TextInput { value: initial });
+                            let initial = if current_value == "(auto)" || current_value == "(none)"
+                            {
+                                String::new()
+                            } else {
+                                current_value
+                            };
+                            state.editing = Some(SettingsEditing::TextInput { value: initial });
                         }
                         self.ui_state.modal = Modal::Settings(state);
                     }
@@ -2053,6 +2350,8 @@ impl App {
             String::new()
         };
 
+        let restart_needed = self.config_store.restart_required();
+
         let status = if status.is_empty() {
             let session_count = self
                 .ui_state
@@ -2060,10 +2359,19 @@ impl App {
                 .iter()
                 .filter(|i| i.is_worktree())
                 .count();
-            format!(
-                "Sessions: {} | Press ? for help | n: new session | N: add project",
-                session_count
-            )
+            if restart_needed {
+                format!(
+                    "Sessions: {} | Restart to apply config changes | ? help",
+                    session_count
+                )
+            } else {
+                format!(
+                    "Sessions: {} | Press ? for help | n: new session | N: add project",
+                    session_count
+                )
+            }
+        } else if restart_needed {
+            format!("{} | Restart to apply config changes", status)
         } else {
             status
         };
@@ -2352,6 +2660,9 @@ impl App {
             UserCommand::DeleteSession => {
                 self.handle_delete_session();
             }
+            UserCommand::RestartSession => {
+                self.handle_restart_session();
+            }
             UserCommand::RemoveProject => {
                 self.handle_remove_project();
             }
@@ -2362,39 +2673,41 @@ impl App {
                 let on_project = self.ui_state.selected_session_id.is_none()
                     && self.ui_state.selected_project_id.is_some();
                 self.ui_state.right_pane_view = if on_project {
-                    // Project: Shell → Diff → Shell (no Preview)
+                    // Project: Shell → Info → Shell (no Preview)
                     match self.ui_state.right_pane_view {
-                        RightPaneView::Shell => RightPaneView::Diff,
+                        RightPaneView::Shell => RightPaneView::Info,
                         _ => RightPaneView::Shell,
                     }
                 } else {
-                    // Session: Preview → Diff → Shell → Preview
+                    // Session: Preview → Info → Shell → Preview
                     match self.ui_state.right_pane_view {
-                        RightPaneView::Preview => RightPaneView::Diff,
-                        RightPaneView::Diff => RightPaneView::Shell,
+                        RightPaneView::Preview => RightPaneView::Info,
+                        RightPaneView::Info => RightPaneView::Shell,
                         RightPaneView::Shell => RightPaneView::Preview,
                     }
                 };
                 self.ui_state.clear_right_pane = true;
+                self.spawn_info_fetch();
             }
             UserCommand::TogglePaneReverse => {
                 let on_project = self.ui_state.selected_session_id.is_none()
                     && self.ui_state.selected_project_id.is_some();
                 self.ui_state.right_pane_view = if on_project {
-                    // Project: Diff → Shell → Diff (no Preview)
+                    // Project: Info → Shell → Info (no Preview)
                     match self.ui_state.right_pane_view {
-                        RightPaneView::Diff => RightPaneView::Shell,
-                        _ => RightPaneView::Diff,
+                        RightPaneView::Info => RightPaneView::Shell,
+                        _ => RightPaneView::Info,
                     }
                 } else {
-                    // Session: Shell → Diff → Preview → Shell
+                    // Session: Shell → Info → Preview → Shell
                     match self.ui_state.right_pane_view {
                         RightPaneView::Preview => RightPaneView::Shell,
-                        RightPaneView::Diff => RightPaneView::Preview,
-                        RightPaneView::Shell => RightPaneView::Diff,
+                        RightPaneView::Info => RightPaneView::Preview,
+                        RightPaneView::Shell => RightPaneView::Info,
                     }
                 };
                 self.ui_state.clear_right_pane = true;
+                self.spawn_info_fetch();
             }
             UserCommand::ShrinkLeftPane => {
                 self.ui_state.left_pane_pct = self
@@ -2402,10 +2715,12 @@ impl App {
                     .left_pane_pct
                     .saturating_sub(2)
                     .max(MIN_LEFT_PANE_PCT);
+                self.save_left_pane_pct().await;
             }
             UserCommand::GrowLeftPane => {
                 self.ui_state.left_pane_pct =
                     (self.ui_state.left_pane_pct + 2).min(MAX_LEFT_PANE_PCT);
+                self.save_left_pane_pct().await;
             }
             UserCommand::ShowHelp => {
                 self.ui_state.modal = Modal::Help;
@@ -2426,6 +2741,14 @@ impl App {
             UserCommand::PageDown => self.active_pane_state().page_down(),
             UserCommand::ScrollUp => self.active_pane_state().scroll_up(1),
             UserCommand::ScrollDown => self.active_pane_state().scroll_down(1),
+            UserCommand::GenerateSummary => {
+                // Context-specific: only works when Info pane is showing
+                if self.ui_state.right_pane_view == RightPaneView::Info
+                    && let Some(session_id) = self.ui_state.selected_session_id
+                {
+                    self.spawn_ai_summary_if_needed(session_id);
+                }
+            }
             _ => {}
         }
     }
@@ -2504,7 +2827,7 @@ impl App {
                     let state = self.store.read().await;
                     for session in state.sessions.values() {
                         if session.status == SessionStatus::Running {
-                            let info = self.session_manager.status_bar_info(session);
+                            let info = self.session_manager.status_bar_info(session, &state);
                             self.session_manager
                                 .tmux
                                 .configure_status_bar(&session.tmux_session_name, &info)
@@ -2515,6 +2838,34 @@ impl App {
 
                 self.refresh_list_items().await;
             }
+            StateUpdate::EnrichedPrReady { session_id, info } => {
+                // Only apply if the session is still selected
+                if self.ui_state.selected_session_id == Some(session_id) {
+                    self.ui_state.enriched_pr = info.map(|pr| (session_id, pr));
+                } else {
+                    debug!("Discarding stale EnrichedPrReady for {}", session_id);
+                }
+            }
+            StateUpdate::AiSummaryReady {
+                session_id,
+                result,
+                diff_hash: hash,
+            } => match result {
+                Ok(text) => {
+                    self.ui_state.ai_summaries.insert(
+                        session_id,
+                        AiSummary::Ready {
+                            text,
+                            diff_hash: hash,
+                        },
+                    );
+                }
+                Err(msg) => {
+                    self.ui_state
+                        .ai_summaries
+                        .insert(session_id, AiSummary::Error(msg));
+                }
+            },
             StateUpdate::SessionCreated { session_id } => {
                 debug!("Session created: {}", session_id);
                 self.ui_state.modal = Modal::None;
@@ -2535,6 +2886,32 @@ impl App {
             StateUpdate::SessionCreateFailed { message } => {
                 debug!("Session creation failed: {}", message);
                 self.ui_state.modal = Modal::Error { message };
+            }
+            StateUpdate::AgentStatesUpdated { states } => {
+                // Detect Working → Idle transitions and mark sessions as unread
+                let mut unread_ids = Vec::new();
+                for (session_id, new_state) in &states {
+                    if *new_state == AgentState::Idle
+                        && self.ui_state.agent_states.get(session_id)
+                            == Some(&AgentState::Working)
+                    {
+                        unread_ids.push(*session_id);
+                    }
+                }
+                if !unread_ids.is_empty() {
+                    let _ = self
+                        .store
+                        .mutate(move |state| {
+                            for sid in &unread_ids {
+                                if let Some(session) = state.get_session_mut(sid) {
+                                    session.unread = true;
+                                }
+                            }
+                        })
+                        .await;
+                }
+                self.ui_state.agent_states = states;
+                self.refresh_list_items().await;
             }
             StateUpdate::ExternalChange => {
                 debug!("External state change detected, refreshing UI");
@@ -2558,6 +2935,16 @@ impl App {
             match self.session_manager.get_attach_command(&session_id).await {
                 Ok(cmd) => {
                     info!("Got attach command: {}", cmd);
+                    // Clear unread flag when attaching
+                    let sid = session_id;
+                    let _ = self
+                        .store
+                        .mutate(move |state| {
+                            if let Some(session) = state.get_session_mut(&sid) {
+                                session.unread = false;
+                            }
+                        })
+                        .await;
                     self.ui_state.attach_command = Some(cmd);
                     self.ui_state.should_quit = true;
                     info!("Set should_quit = true");
@@ -2891,6 +3278,17 @@ impl App {
         }
     }
 
+    /// Handle restart session - show confirmation
+    fn handle_restart_session(&mut self) {
+        if let Some(session_id) = self.ui_state.selected_session_id {
+            self.ui_state.modal = Modal::Confirm {
+                title: "Restart Session".to_string(),
+                message: "This will kill the current tmux session and start a fresh one.\nClaude will pick up where it left off via /resume.".to_string(),
+                on_confirm: ConfirmAction::RestartSession { session_id },
+            };
+        }
+    }
+
     /// Handle delete session - show confirmation
     fn handle_delete_session(&mut self) {
         if let Some(session_id) = self.ui_state.selected_session_id {
@@ -3035,6 +3433,22 @@ impl App {
                     });
                 }
             }
+            ConfirmAction::RestartSession { session_id } => {
+                match self.session_manager.restart_session(&session_id).await {
+                    Ok(_) => {
+                        self.ui_state.status_message = Some((
+                            "Session restarted".to_string(),
+                            Instant::now() + Duration::from_secs(3),
+                        ));
+                        self.refresh_list_items().await;
+                    }
+                    Err(e) => {
+                        self.ui_state.modal = Modal::Error {
+                            message: format!("Failed to restart: {}", e),
+                        };
+                    }
+                }
+            }
             ConfirmAction::RemoveProject { project_id } => {
                 // 1. Capture project and session data before removal
                 let cleanup_data = {
@@ -3142,6 +3556,130 @@ impl App {
         });
     }
 
+    /// Spawn background fetches for info pane data (enriched PR + AI summary).
+    ///
+    /// Only called from user-initiated actions (pane switch, selection change).
+    /// Not called from background ticks to avoid unnecessary regeneration.
+    fn spawn_info_fetch(&mut self) {
+        // Only relevant when the Info pane is active
+        if self.ui_state.right_pane_view != RightPaneView::Info {
+            return;
+        }
+
+        let Some(session_id) = self.ui_state.selected_session_id else {
+            return;
+        };
+
+        // Find the session's PR number and project repo path
+        let session_info = self.ui_state.list_items.iter().find_map(|item| {
+            if let SessionListItem::Worktree { id, pr_number, .. } = item {
+                if *id == session_id {
+                    Some(*pr_number)
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        });
+
+        let Some(pr_number) = session_info.flatten() else {
+            // No PR for this session — skip enriched PR fetch
+            return;
+        };
+
+        // Spawn enriched PR fetch if not already cached for this session
+        let needs_enriched = !self
+            .ui_state
+            .enriched_pr
+            .as_ref()
+            .is_some_and(|(sid, _)| *sid == session_id);
+
+        if needs_enriched && self.ui_state.gh_available {
+            let store = self.store.clone();
+            let tx = self.event_loop.sender();
+
+            tokio::spawn(async move {
+                // Look up the project repo path
+                let repo_path = {
+                    let state = store.read().await;
+                    state
+                        .sessions
+                        .get(&session_id)
+                        .and_then(|s| state.projects.get(&s.project_id))
+                        .map(|p| p.repo_path.clone())
+                };
+
+                let info = if let Some(repo_path) = repo_path {
+                    fetch_enriched_pr(&repo_path, pr_number).await
+                } else {
+                    None
+                };
+
+                let _ = tx
+                    .send(AppEvent::StateUpdate(StateUpdate::EnrichedPrReady {
+                        session_id,
+                        info,
+                    }))
+                    .await;
+            });
+        }
+    }
+
+    /// Spawn AI summary generation for the given session.
+    ///
+    /// Called from the `GenerateSummary` hotkey handler. Always generates
+    /// (unless already in flight or AI is disabled). Computes a full branch
+    /// diff (committed vs main + uncommitted) and pipes it into Claude.
+    fn spawn_ai_summary_if_needed(&mut self, session_id: SessionId) {
+        if !self.config.ai_summary_enabled {
+            return;
+        }
+
+        // Don't spawn if already in flight
+        if matches!(
+            self.ui_state.ai_summaries.get(&session_id),
+            Some(AiSummary::Loading)
+        ) {
+            return;
+        }
+
+        self.ui_state
+            .ai_summaries
+            .insert(session_id, AiSummary::Loading);
+
+        let store = self.store.clone();
+        let model = self.config.ai_summary_model.clone();
+        let tx = self.event_loop.sender();
+
+        tokio::spawn(async move {
+            let session_info = {
+                let state = store.read().await;
+                state.sessions.get(&session_id).and_then(|s| {
+                    let project = state.projects.get(&s.project_id)?;
+                    Some((s.worktree_path.clone(), project.main_branch.clone()))
+                })
+            };
+
+            let result = if let Some((worktree_path, main_branch)) = session_info {
+                let diff_text = crate::git::compute_branch_diff(&worktree_path, &main_branch).await;
+                let new_hash = diff_hash(&diff_text);
+                let summary_result = fetch_branch_summary(&diff_text, &model).await;
+                (summary_result, new_hash)
+            } else {
+                (Err("Session not found".to_string()), 0)
+            };
+
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::AiSummaryReady {
+                    session_id,
+                    result: result.0,
+                    diff_hash: result.1,
+                }))
+                .await;
+        });
+    }
+
     /// Refresh the list items from app state
     async fn refresh_list_items(&mut self) {
         let state = self.store.read().await;
@@ -3181,6 +3719,10 @@ impl App {
                     pr_number: session.pr_number,
                     pr_url: session.pr_url.clone(),
                     pr_merged: session.pr_merged,
+                    worktree_path: session.worktree_path.clone(),
+                    created_at: session.created_at,
+                    agent_state: self.ui_state.agent_states.get(&session.id).copied(),
+                    unread: session.unread,
                 });
             }
         }
@@ -3207,12 +3749,31 @@ impl App {
             .await;
     }
 
-    /// Restore selection from persisted state
+    /// Save left pane width to persisted state
+    async fn save_left_pane_pct(&self) {
+        let pct = self.ui_state.left_pane_pct;
+        let _ = self
+            .store
+            .mutate(move |state| {
+                state.left_pane_pct = Some(pct);
+            })
+            .await;
+    }
+
+    /// Restore selection and UI preferences from persisted state
     async fn restore_selection(&mut self) {
-        let (last_session, last_project) = {
+        let (last_session, last_project, left_pane_pct) = {
             let state = self.store.read().await;
-            (state.last_selected_session, state.last_selected_project)
+            (
+                state.last_selected_session,
+                state.last_selected_project,
+                state.left_pane_pct,
+            )
         };
+
+        if let Some(pct) = left_pane_pct {
+            self.ui_state.left_pane_pct = pct.clamp(MIN_LEFT_PANE_PCT, MAX_LEFT_PANE_PCT);
+        }
 
         // Try to find the last selected session or project in the list
         let target_idx = self.ui_state.list_items.iter().position(|item| match item {
@@ -3444,6 +4005,10 @@ mod tests {
             pr_number: None,
             pr_url: None,
             pr_merged: false,
+            worktree_path: std::path::PathBuf::from("/tmp/test"),
+            created_at: chrono::Utc::now(),
+            agent_state: None,
+            unread: false,
         }
     }
 
