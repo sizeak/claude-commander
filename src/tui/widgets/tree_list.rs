@@ -236,10 +236,12 @@ impl<'a> TreeList<'a> {
                         Style::default().fg(current_session_color)
                     };
                     spans.push(Span::styled(title.clone(), title_style));
-                    spans.push(Span::styled(
-                        format!(" [{}]", branch),
-                        Style::default().fg(self.theme.text_accent),
-                    ));
+                    if let Some(shown_branch) = crate::session::display_branch(title, branch) {
+                        spans.push(Span::styled(
+                            format!(" [{}]", shown_branch),
+                            Style::default().fg(self.theme.text_accent),
+                        ));
+                    }
 
                     if let Some(pr_num) = pr_number {
                         let badge_color = pr_badge_color(

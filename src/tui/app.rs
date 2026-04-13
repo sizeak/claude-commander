@@ -1633,7 +1633,7 @@ impl App {
                     };
 
                     let is_selected = i == *selected_idx;
-                    let line = Line::from(vec![
+                    let mut spans = vec![
                         Span::styled(
                             format!(" {} ", status_icon),
                             Style::default().fg(status_color),
@@ -1646,15 +1646,19 @@ impl App {
                                 Style::default()
                             },
                         ),
-                        Span::styled(
-                            format!(" [{}]", m.branch),
+                    ];
+                    if let Some(shown_branch) = crate::session::display_branch(&m.title, &m.branch)
+                    {
+                        spans.push(Span::styled(
+                            format!(" [{}]", shown_branch),
                             Style::default().fg(self.theme.text_accent),
-                        ),
-                        Span::styled(
-                            format!(" ({})", m.project_name),
-                            Style::default().fg(self.theme.text_secondary),
-                        ),
-                    ]);
+                        ));
+                    }
+                    spans.push(Span::styled(
+                        format!(" ({})", m.project_name),
+                        Style::default().fg(self.theme.text_secondary),
+                    ));
+                    let line = Line::from(spans);
 
                     let line_area = Rect {
                         y: row,

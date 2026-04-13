@@ -73,6 +73,8 @@ claude-commander --config /path/to/config.toml
 
 The left pane shows projects and their worktree sessions in a tree view. Projects are sorted alphabetically. Sessions within a project are sorted newest first (by creation time).
 
+Each session row shows the title and, in `[brackets]`, the branch name — but only when the branch differs from what the title would sanitize to. A session titled "Feature Auth" with branch `feature-auth` (or `prefix/feature-auth` when `branch_prefix` is set) renders as just `Feature Auth`; the bracket reappears only when the branch carries new information, e.g. you renamed it to `feature-auth-v2` outside the app.
+
 ### Keyboard Shortcuts
 
 All keybindings below are defaults and can be customised via the `[keybindings]` config table (see [Configuration](#configuration)).

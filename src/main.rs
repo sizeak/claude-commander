@@ -183,10 +183,19 @@ async fn main() -> Result<()> {
                             claude_commander::SessionStatus::Running => "●",
                             claude_commander::SessionStatus::Stopped => "○",
                         };
-                        println!(
-                            "    {} {} [{}] ({})",
-                            status_icon, session.title, session.branch, session.program
-                        );
+                        match claude_commander::session::display_branch(
+                            &session.title,
+                            &session.branch,
+                        ) {
+                            Some(shown_branch) => println!(
+                                "    {} {} [{}] ({})",
+                                status_icon, session.title, shown_branch, session.program
+                            ),
+                            None => println!(
+                                "    {} {} ({})",
+                                status_icon, session.title, session.program
+                            ),
+                        }
                     }
                 }
                 println!();

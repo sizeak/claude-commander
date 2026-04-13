@@ -1082,19 +1082,47 @@ impl SessionManager {
 
     /// Sanitize a name for use as branch/directory name
     fn sanitize_name(&self, name: &str) -> String {
-        name.to_lowercase()
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '-'
-                }
-            })
-            .collect::<String>()
-            .trim_matches('-')
-            .to_string()
+        sanitize_name(name)
     }
+}
+
+/// Sanitize a name for use as a branch/directory name.
+///
+/// Lowercases, replaces non-alphanumeric characters (except `-` and `_`) with
+/// `-`, and trims leading/trailing `-`.
+pub fn sanitize_name(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
+}
+
+/// Decide whether the `[branch]` annotation should be shown next to a session
+/// title.
+///
+/// Returns `Some(branch)` when the branch carries information beyond what
+/// sanitizing the title would produce. Returns `None` when the branch matches
+/// `sanitize_name(title)` either exactly or as the last `/`-segment (i.e. a
+/// configured `branch_prefix` like `"user/"` is treated as noise).
+pub fn display_branch<'a>(title: &str, branch: &'a str) -> Option<&'a str> {
+    let sanitized = sanitize_name(title);
+    if sanitized.is_empty() {
+        return Some(branch);
+    }
+    let matches = branch == sanitized
+        || branch
+            .rsplit_once('/')
+            .map(|(_, tail)| tail == sanitized)
+            .unwrap_or(false);
+    if matches { None } else { Some(branch) }
 }
 
 #[cfg(test)]
@@ -1189,6 +1217,55 @@ mod tests {
         let result = manager.sanitize_name("café");
         assert!(result.contains("caf"));
         assert!(result.contains('é'));
+    }
+
+    #[test]
+    fn test_display_branch_hides_exact_sanitized_match() {
+        assert_eq!(display_branch("Feature Auth", "feature-auth"), None);
+    }
+
+    #[test]
+    fn test_display_branch_hides_when_sanitization_changes_specials() {
+        // dot replaced by hyphen — still considered the deterministic sanitization
+        assert_eq!(display_branch("Fix bug v2.0", "fix-bug-v2-0"), None);
+    }
+
+    #[test]
+    fn test_display_branch_hides_when_prefixed() {
+        assert_eq!(display_branch("Feature Auth", "user/feature-auth"), None);
+        assert_eq!(display_branch("Feature Auth", "cc/feature-auth"), None);
+    }
+
+    #[test]
+    fn test_display_branch_shows_when_branch_renamed() {
+        assert_eq!(
+            display_branch("Feature Auth", "something-else"),
+            Some("something-else")
+        );
+    }
+
+    #[test]
+    fn test_display_branch_shows_when_suffix_differs() {
+        assert_eq!(
+            display_branch("Feature Auth", "feature-auth-v2"),
+            Some("feature-auth-v2")
+        );
+    }
+
+    #[test]
+    fn test_display_branch_shows_when_title_sanitizes_to_empty() {
+        // All-special title sanitizes to "" — we can't meaningfully compare,
+        // so always show the branch.
+        assert_eq!(display_branch("!!!", "fallback"), Some("fallback"));
+    }
+
+    #[test]
+    fn test_display_branch_shows_when_prefix_segment_doesnt_match() {
+        // Branch has a slash but the tail doesn't match the sanitized title
+        assert_eq!(
+            display_branch("Feature Auth", "user/something-else"),
+            Some("user/something-else")
+        );
     }
 
     #[test]

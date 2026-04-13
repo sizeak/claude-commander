@@ -1132,7 +1132,7 @@ fn test_quick_switch_with_matches() {
             // Match lines
             for (i, (icon, color, title, branch, project, selected)) in matches.iter().enumerate() {
                 let row = inner.y + 1 + i as u16;
-                let line = Line::from(vec![
+                let mut spans = vec![
                     Span::styled(format!(" {} ", icon), Style::default().fg(*color)),
                     Span::styled(
                         title.to_string(),
@@ -1142,15 +1142,18 @@ fn test_quick_switch_with_matches() {
                             Style::default()
                         },
                     ),
-                    Span::styled(
-                        format!(" [{}]", branch),
+                ];
+                if let Some(shown_branch) = crate::session::display_branch(title, branch) {
+                    spans.push(Span::styled(
+                        format!(" [{}]", shown_branch),
                         Style::default().fg(theme.text_accent),
-                    ),
-                    Span::styled(
-                        format!(" ({})", project),
-                        Style::default().fg(theme.text_secondary),
-                    ),
-                ]);
+                    ));
+                }
+                spans.push(Span::styled(
+                    format!(" ({})", project),
+                    Style::default().fg(theme.text_secondary),
+                ));
+                let line = Line::from(spans);
                 let line_area = Rect {
                     y: row,
                     height: 1,
