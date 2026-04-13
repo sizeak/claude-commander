@@ -1057,7 +1057,8 @@ impl App {
             .tick(self.ui_state.tick_count)
             .highlight_style(self.theme.selection().add_modifier(Modifier::BOLD))
             .show_status_indicator(self.config.show_status_indicator)
-            .review_labels(&self.config.pr_review_labels);
+            .review_labels(&self.config.pr_review_labels)
+            .invert_pr_label_color(self.config.invert_pr_label_color);
 
         frame.render_stateful_widget(
             tree_list,
@@ -1758,6 +1759,12 @@ impl App {
                         color_swatch: None,
                     },
                     SettingsRow {
+                        label: "Invert PR Label Color".into(),
+                        value: c.invert_pr_label_color.to_string(),
+                        field_key: "invert_pr_label_color".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
                         label: "Number Debounce (ms)".into(),
                         value: c.session_number_debounce_ms.to_string(),
                         field_key: "session_number_debounce_ms".into(),
@@ -2077,6 +2084,11 @@ impl App {
                 "show_session_numbers" => {
                     if let Ok(b) = value.parse::<bool>() {
                         self.config.show_session_numbers = b;
+                    }
+                }
+                "invert_pr_label_color" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        self.config.invert_pr_label_color = b;
                     }
                 }
                 "session_number_debounce_ms" => {

@@ -171,6 +171,11 @@ dim_unfocused_opacity = 0.4
 # Show sequential numbers next to sessions and enable digit-key jumping (1–99)
 # show_session_numbers = true
 
+# Render PR labels as colored text on the default background (the pre-pill
+# style). Default false renders them as colored "pill" blocks that stand out
+# more in the session list.
+# invert_pr_label_color = false
+
 # Debounce delay in ms when typing multi-digit session numbers
 # session_number_debounce_ms = 250
 

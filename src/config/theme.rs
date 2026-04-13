@@ -269,6 +269,15 @@ pub struct ThemeOverrides {
     pub pr_draft: Option<ColorValue>,
     pub pr_closed: Option<ColorValue>,
 
+    // PR label pill backgrounds (used when invert_pr_label_color = false)
+    pub pr_pill_open_bg: Option<ColorValue>,
+    pub pr_pill_draft_bg: Option<ColorValue>,
+    pub pr_pill_closed_bg: Option<ColorValue>,
+    pub pr_pill_review_bg: Option<ColorValue>,
+    pub pr_pill_merged_bg: Option<ColorValue>,
+    /// Foreground text colour for PR label pills.
+    pub pr_pill_text: Option<ColorValue>,
+
     // Agent state and notification indicators
     pub agent_working: Option<AgentWorkingStyle>,
     pub agent_waiting: Option<ColorValue>,

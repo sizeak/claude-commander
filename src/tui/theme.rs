@@ -68,6 +68,16 @@ pub struct Theme {
     pub pr_draft: Color,
     pub pr_closed: Color,
 
+    // PR label pill backgrounds (darker variants of the text colours above)
+    // used when `invert_pr_label_color = false`.
+    pub pr_pill_open_bg: Color,
+    pub pr_pill_draft_bg: Color,
+    pub pr_pill_closed_bg: Color,
+    pub pr_pill_review_bg: Color,
+    pub pr_pill_merged_bg: Color,
+    /// Text colour used on top of PR pill backgrounds.
+    pub pr_pill_text: Color,
+
     // Agent state and notification indicators
     pub agent_working: AgentWorkingStyle,
     pub agent_waiting: Color,
@@ -131,6 +141,15 @@ impl Theme {
             pr_draft: Color::DarkGray,
             pr_closed: Color::Red,
 
+            // Basic 16-colour palette: the non-"Light" ANSI colours are
+            // already dark enough to read white bold text on top.
+            pr_pill_open_bg: Color::Green,
+            pr_pill_draft_bg: Color::DarkGray,
+            pr_pill_closed_bg: Color::Red,
+            pr_pill_review_bg: Color::Magenta,
+            pr_pill_merged_bg: Color::Magenta,
+            pr_pill_text: Color::White,
+
             agent_working: AgentWorkingStyle::Rainbow,
             agent_waiting: Color::Yellow,
             unread_indicator: Color::Blue,
@@ -181,6 +200,14 @@ impl Theme {
             pr_draft: Color::Indexed(245),  // Mid-grey
             pr_closed: Color::Indexed(167), // Soft red
 
+            // Darker variants readable with bold near-white text
+            pr_pill_open_bg: Color::Indexed(22),    // Dark green
+            pr_pill_draft_bg: Color::Indexed(240),  // Dark grey
+            pr_pill_closed_bg: Color::Indexed(124), // Dark red
+            pr_pill_review_bg: Color::Indexed(97),  // Dark purple
+            pr_pill_merged_bg: Color::Indexed(54),  // Very dark purple
+            pr_pill_text: Color::Indexed(231),      // Near-white
+
             agent_working: AgentWorkingStyle::Rainbow,
             agent_waiting: Color::Indexed(208),    // Orange
             unread_indicator: Color::Indexed(117), // Sky blue
@@ -230,6 +257,14 @@ impl Theme {
             pr_open: Color::Rgb(126, 198, 153), // Soft GitHub-ish green
             pr_draft: Color::Rgb(147, 153, 178), // Muted grey-lavender
             pr_closed: Color::Rgb(243, 139, 168), // Pastel rose / soft red
+
+            // Darker variants for pill backgrounds, readable with bold near-white text
+            pr_pill_open_bg: Color::Rgb(46, 125, 80), // Dark green
+            pr_pill_draft_bg: Color::Rgb(80, 86, 110), // Dark slate
+            pr_pill_closed_bg: Color::Rgb(160, 60, 85), // Dark rose
+            pr_pill_review_bg: Color::Rgb(110, 75, 160), // Dark mauve
+            pr_pill_merged_bg: Color::Rgb(75, 55, 110), // Very dark purple
+            pr_pill_text: Color::Rgb(245, 245, 250),  // Near-white
 
             agent_working: AgentWorkingStyle::Rainbow,
             agent_waiting: Color::Rgb(250, 179, 135), // Peach/orange
@@ -298,6 +333,12 @@ impl Theme {
         apply!(pr_open);
         apply!(pr_draft);
         apply!(pr_closed);
+        apply!(pr_pill_open_bg);
+        apply!(pr_pill_draft_bg);
+        apply!(pr_pill_closed_bg);
+        apply!(pr_pill_review_bg);
+        apply!(pr_pill_merged_bg);
+        apply!(pr_pill_text);
         apply!(agent_waiting);
         apply!(unread_indicator);
         apply!(text_primary);

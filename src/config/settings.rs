@@ -73,6 +73,12 @@ pub struct Config {
     /// Show status indicator circles (●/◐/○) in the session list
     pub show_status_indicator: bool,
 
+    /// When true, render PR labels as colored text on the default background
+    /// (the pre-pill behavior). When false (default), PR labels render as a
+    /// pill — colored background block with contrasting text — so they stand
+    /// out more in the session list.
+    pub invert_pr_label_color: bool,
+
     /// Dim the right pane (preview/diff/shell) when the session list is focused
     pub dim_unfocused_preview: bool,
 
@@ -129,6 +135,7 @@ impl Default for Config {
             state_sync_interval_ms: 2000,
             agent_state_poll_interval_ms: 3000,
             show_status_indicator: true,
+            invert_pr_label_color: false,
             dim_unfocused_preview: true,
             dim_unfocused_opacity: 0.4,
             leader_key: " ".to_string(),

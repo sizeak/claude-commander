@@ -43,6 +43,9 @@ pub struct TreeList<'a> {
     show_status_indicator: bool,
     /// Label names that mark an open PR as awaiting reviewer action.
     review_labels: &'a [String],
+    /// When true, render PR labels as colored text on default bg (pre-pill
+    /// behavior). When false (default), render as a colored pill block.
+    invert_pr_label_color: bool,
 }
 
 impl<'a> TreeList<'a> {
@@ -57,7 +60,15 @@ impl<'a> TreeList<'a> {
             tick: 0,
             show_status_indicator: true,
             review_labels: &[],
+            invert_pr_label_color: false,
         }
+    }
+
+    /// When true, render PR labels as colored text on default bg
+    /// (pre-pill behavior). Default false renders them as a colored pill.
+    pub fn invert_pr_label_color(mut self, b: bool) -> Self {
+        self.invert_pr_label_color = b;
+        self
     }
 
     /// Configure the labels that flag an open PR as awaiting reviewer action.
@@ -244,18 +255,41 @@ impl<'a> TreeList<'a> {
                     }
 
                     if let Some(pr_num) = pr_number {
-                        let badge_color = pr_badge_color(
-                            self.theme,
-                            *pr_state,
-                            *pr_merged,
-                            *pr_draft,
-                            pr_labels,
-                            self.review_labels,
-                        );
-                        spans.push(Span::styled(
-                            format!(" PR #{}", pr_num),
-                            Style::default().fg(badge_color),
-                        ));
+                        if self.invert_pr_label_color {
+                            // Pre-pill behavior: colored text on default bg.
+                            let badge_color = pr_badge_color(
+                                self.theme,
+                                *pr_state,
+                                *pr_merged,
+                                *pr_draft,
+                                pr_labels,
+                                self.review_labels,
+                            );
+                            spans.push(Span::styled(
+                                format!(" PR #{}", pr_num),
+                                Style::default().fg(badge_color),
+                            ));
+                        } else {
+                            // Pill: non-colored separator space, then a pill
+                            // with internal padding, colored bg, and bold
+                            // contrast text so it stands out from the row.
+                            let pill_bg = pr_pill_bg_color(
+                                self.theme,
+                                *pr_state,
+                                *pr_merged,
+                                *pr_draft,
+                                pr_labels,
+                                self.review_labels,
+                            );
+                            spans.push(Span::raw(" "));
+                            spans.push(Span::styled(
+                                format!(" PR #{} ", pr_num),
+                                Style::default()
+                                    .bg(pill_bg)
+                                    .fg(self.theme.pr_pill_text)
+                                    .add_modifier(Modifier::BOLD),
+                            ));
+                        }
                     }
 
                     if show_program {
@@ -272,6 +306,46 @@ impl<'a> TreeList<'a> {
                 }
             })
             .collect()
+    }
+}
+
+/// Does the PR have any label matching the "review needed" list?
+fn needs_review(labels: &[String], review_labels: &[String]) -> bool {
+    !labels.is_empty()
+        && labels
+            .iter()
+            .any(|l| review_labels.iter().any(|r| r.eq_ignore_ascii_case(l)))
+}
+
+/// Pick the pill background colour for a PR badge from the same state
+/// logic as [`pr_badge_color`], but reading the darker `pr_pill_*_bg`
+/// theme fields so bold near-white text remains legible.
+pub(crate) fn pr_pill_bg_color(
+    theme: &Theme,
+    state: Option<PrState>,
+    pr_merged: bool,
+    is_draft: bool,
+    labels: &[String],
+    review_labels: &[String],
+) -> Color {
+    let effective_state = state.unwrap_or(if pr_merged {
+        PrState::Merged
+    } else {
+        PrState::Open
+    });
+
+    match effective_state {
+        PrState::Merged => theme.pr_pill_merged_bg,
+        PrState::Closed => theme.pr_pill_closed_bg,
+        PrState::Open => {
+            if is_draft {
+                theme.pr_pill_draft_bg
+            } else if needs_review(labels, review_labels) {
+                theme.pr_pill_review_bg
+            } else {
+                theme.pr_pill_open_bg
+            }
+        }
     }
 }
 
@@ -302,11 +376,7 @@ pub(crate) fn pr_badge_color(
         PrState::Open => {
             if is_draft {
                 theme.pr_draft
-            } else if !labels.is_empty()
-                && labels
-                    .iter()
-                    .any(|l| review_labels.iter().any(|r| r.eq_ignore_ascii_case(l)))
-            {
+            } else if needs_review(labels, review_labels) {
                 theme.status_pr
             } else {
                 theme.pr_open
