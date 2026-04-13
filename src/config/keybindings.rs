@@ -399,6 +399,12 @@ impl KeyBindings {
         self.bindings.get(&action).map_or(&[], |v| v.as_slice())
     }
 
+    /// Replace the bindings for `action` and rebuild the lookup table.
+    pub fn set_keys_for(&mut self, action: BindableAction, keys: Vec<KeyBinding>) {
+        self.bindings.insert(action, keys);
+        self.lookup = Self::build_lookup(&self.bindings);
+    }
+
     /// Format the key bindings for an action as a comma-separated string.
     pub fn keys_display(&self, action: BindableAction) -> String {
         self.keys_for(action)
@@ -490,7 +496,10 @@ impl Default for KeyBindings {
         );
         bindings.insert(
             BindableAction::OpenInEditor,
-            vec![kb(KeyCode::Char('e'), none)],
+            vec![
+                kb(KeyCode::Char('.'), none),
+                kb(KeyCode::Char('.'), ctrl),
+            ],
         );
 
         // Pane control
@@ -631,6 +640,51 @@ impl<'de> Visitor<'de> for OneOrManyVisitor {
         }
         Ok(OneOrMany(keys))
     }
+}
+
+// ---------------------------------------------------------------------------
+// Raw-byte encoding for detecting bindings inside a raw tmux attach session
+// ---------------------------------------------------------------------------
+
+/// Compute the raw byte sequences that should trigger [`OpenInEditor`] while
+/// forwarding stdin to a tmux PTY.
+///
+/// Inside a tmux attach we read raw bytes rather than decoded key events, so
+/// only bindings with a well-defined encoding are detectable:
+///
+/// * `Ctrl-<letter>` → a single control byte (e.g. `Ctrl-e` → 0x05).
+/// * `Ctrl-<non-letter>` → the standard CSI-u ("fixterms") encoding
+///   `ESC [ N ; 5 u` and the xterm modifyOtherKeys encoding
+///   `ESC [ 27 ; 5 ; N ~`, where `N` is the ASCII code. These only arrive on
+///   stdin if the outer terminal has the matching protocol enabled, so
+///   non-letter Ctrl bindings rely on the user's terminal configuration.
+///
+/// Bare bindings (no modifiers) are intentionally skipped — they are
+/// indistinguishable from ordinary keystrokes being typed into the attached
+/// program, so intercepting them would prevent the user from typing that key.
+///
+/// [`OpenInEditor`]: BindableAction::OpenInEditor
+pub fn editor_trigger_bytes(bindings: &KeyBindings) -> Vec<Vec<u8>> {
+    let mut triggers = Vec::new();
+    for kb in bindings.keys_for(BindableAction::OpenInEditor) {
+        if kb.modifiers != KeyModifiers::CONTROL {
+            continue;
+        }
+        let KeyCode::Char(c) = kb.code else {
+            continue;
+        };
+        if c.is_ascii_alphabetic() {
+            // Ctrl-<letter> → control byte
+            let byte = (c.to_ascii_lowercase() as u8) - 0x60;
+            triggers.push(vec![byte]);
+        } else if c.is_ascii() {
+            // Ctrl-<non-letter> → CSI-u or modifyOtherKeys sequence
+            let n = c as u32;
+            triggers.push(format!("\x1b[{n};5u").into_bytes());
+            triggers.push(format!("\x1b[27;5;{n}~").into_bytes());
+        }
+    }
+    triggers
 }
 
 // ---------------------------------------------------------------------------
@@ -878,6 +932,48 @@ mod tests {
         assert!(display.contains("k"));
         assert!(display.contains("Up"));
         assert!(display.contains("Ctrl-p"));
+    }
+
+    #[test]
+    fn test_editor_trigger_bytes_ctrl_letter() {
+        let mut kb = KeyBindings::default();
+        kb.set_keys_for(
+            BindableAction::OpenInEditor,
+            vec![
+                KeyBinding::new(KeyCode::Char('e'), KeyModifiers::NONE),
+                KeyBinding::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+            ],
+        );
+        let triggers = editor_trigger_bytes(&kb);
+        // Plain 'e' has no encoding, Ctrl-e → 0x05
+        assert_eq!(triggers, vec![vec![0x05]]);
+    }
+
+    #[test]
+    fn test_editor_trigger_bytes_ctrl_non_letter() {
+        let mut kb = KeyBindings::default();
+        kb.set_keys_for(
+            BindableAction::OpenInEditor,
+            vec![
+                KeyBinding::new(KeyCode::Char('.'), KeyModifiers::NONE),
+                KeyBinding::new(KeyCode::Char('.'), KeyModifiers::CONTROL),
+            ],
+        );
+        let triggers = editor_trigger_bytes(&kb);
+        // Plain '.' skipped. Ctrl-. yields both CSI-u and modifyOtherKeys encodings.
+        assert_eq!(triggers.len(), 2);
+        assert!(triggers.contains(&b"\x1b[46;5u".to_vec()));
+        assert!(triggers.contains(&b"\x1b[27;5;46~".to_vec()));
+    }
+
+    #[test]
+    fn test_editor_trigger_bytes_plain_letter_skipped() {
+        let mut kb = KeyBindings::default();
+        kb.set_keys_for(
+            BindableAction::OpenInEditor,
+            vec![KeyBinding::new(KeyCode::Char('e'), KeyModifiers::NONE)],
+        );
+        assert!(editor_trigger_bytes(&kb).is_empty());
     }
 
     #[test]
