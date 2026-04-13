@@ -552,12 +552,8 @@ mod tests {
     #[test]
     fn test_new_creating_session() {
         let project_id = ProjectId::new();
-        let session = WorktreeSession::new_creating(
-            project_id,
-            "Feature Auth",
-            "feature-auth",
-            "claude",
-        );
+        let session =
+            WorktreeSession::new_creating(project_id, "Feature Auth", "feature-auth", "claude");
 
         assert_eq!(session.project_id, project_id);
         assert_eq!(session.title, "Feature Auth");

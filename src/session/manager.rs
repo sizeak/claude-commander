@@ -199,8 +199,7 @@ impl SessionManager {
 
         let branch_name = self.generate_branch_name(&title);
 
-        let session =
-            WorktreeSession::new_creating(*project_id, title, branch_name, program);
+        let session = WorktreeSession::new_creating(*project_id, title, branch_name, program);
         let session_id = session.id;
 
         self.store

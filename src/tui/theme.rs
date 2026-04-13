@@ -172,8 +172,8 @@ impl Theme {
             status_pr: Color::Indexed(141),       // Medium purple
             status_pr_merged: Color::Indexed(97), // Dark purple
 
-            agent_working: Color::Indexed(156), // Pastel mint
-            agent_waiting: Color::Indexed(208), // Orange
+            agent_working: Color::Indexed(156),    // Pastel mint
+            agent_waiting: Color::Indexed(208),    // Orange
             unread_indicator: Color::Indexed(117), // Sky blue
 
             text_primary: Color::Reset,

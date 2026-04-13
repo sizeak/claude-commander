@@ -156,8 +156,7 @@ impl<'a> TreeList<'a> {
                     let has_pr = pr_number.is_some();
                     let (status_icon, status_color) = match status {
                         SessionStatus::Creating => {
-                            let frame =
-                                (self.tick / 4) as usize % SPINNER_FRAMES.len();
+                            let frame = (self.tick / 4) as usize % SPINNER_FRAMES.len();
                             (SPINNER_FRAMES[frame], self.theme.status_creating)
                         }
                         SessionStatus::Running => (
@@ -206,8 +205,8 @@ impl<'a> TreeList<'a> {
                     {
                         match state {
                             AgentState::Working => {
-                                let frame = SPINNER_FRAMES
-                                    [(self.tick as usize / 3) % SPINNER_FRAMES.len()];
+                                let frame =
+                                    SPINNER_FRAMES[(self.tick as usize / 3) % SPINNER_FRAMES.len()];
                                 spans.push(Span::styled(
                                     format!("{} ", frame),
                                     Style::default().fg(self.theme.agent_working),
@@ -517,18 +516,19 @@ mod tests {
     }
 
     /// Render a TreeList to a buffer and return lines as strings
-    fn render_tree(items: &[SessionListItem], show_numbers: bool, width: u16, height: u16) -> Vec<String> {
+    fn render_tree(
+        items: &[SessionListItem],
+        show_numbers: bool,
+        width: u16,
+        height: u16,
+    ) -> Vec<String> {
         let theme = Theme::basic();
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
                 let tree = TreeList::new(items, &theme).show_numbers(show_numbers);
-                frame.render_stateful_widget(
-                    tree,
-                    frame.area(),
-                    &mut ListState::default(),
-                );
+                frame.render_stateful_widget(tree, frame.area(), &mut ListState::default());
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -546,7 +546,11 @@ mod tests {
         let items = vec![make_project("proj", 1), make_worktree("session-a")];
         let lines = render_tree(&items, false, 40, 3);
         // Worktree line should contain tree branch
-        assert!(lines[1].contains("└──"), "Expected tree branch in: {}", lines[1]);
+        assert!(
+            lines[1].contains("└──"),
+            "Expected tree branch in: {}",
+            lines[1]
+        );
     }
 
     #[test]
@@ -558,11 +562,22 @@ mod tests {
         ];
         let lines = render_tree(&items, true, 40, 4);
         // First worktree starts with right-aligned "1"
-        assert!(lines[1].trim_start().starts_with("1 "), "Expected number prefix in: '{}'", lines[1]);
+        assert!(
+            lines[1].trim_start().starts_with("1 "),
+            "Expected number prefix in: '{}'",
+            lines[1]
+        );
         // Second worktree starts with "2"
-        assert!(lines[2].trim_start().starts_with("2 "), "Expected number prefix in: '{}'", lines[2]);
+        assert!(
+            lines[2].trim_start().starts_with("2 "),
+            "Expected number prefix in: '{}'",
+            lines[2]
+        );
         // No tree branches
-        assert!(!lines[1].contains("└──"), "Should not have tree branch with numbers");
+        assert!(
+            !lines[1].contains("└──"),
+            "Should not have tree branch with numbers"
+        );
     }
 
     #[test]
@@ -575,9 +590,17 @@ mod tests {
         ];
         let lines = render_tree(&items, true, 40, 5);
         // Session under proj-a is #1
-        assert!(lines[1].trim_start().starts_with("1 "), "Expected 1 in: '{}'", lines[1]);
+        assert!(
+            lines[1].trim_start().starts_with("1 "),
+            "Expected 1 in: '{}'",
+            lines[1]
+        );
         // Session under proj-b is #2 (not restarting)
-        assert!(lines[3].trim_start().starts_with("2 "), "Expected 2 in: '{}'", lines[3]);
+        assert!(
+            lines[3].trim_start().starts_with("2 "),
+            "Expected 2 in: '{}'",
+            lines[3]
+        );
     }
 
     #[test]
@@ -588,10 +611,22 @@ mod tests {
         }
         let lines = render_tree(&items, true, 40, 14);
         // Single digit right-aligned
-        assert!(lines[1].trim_start().starts_with("1 "), "line 1: '{}'", lines[1]);
+        assert!(
+            lines[1].trim_start().starts_with("1 "),
+            "line 1: '{}'",
+            lines[1]
+        );
         // Double digit
-        assert!(lines[10].trim_start().starts_with("10 "), "line 10: '{}'", lines[10]);
-        assert!(lines[12].trim_start().starts_with("12 "), "line 12: '{}'", lines[12]);
+        assert!(
+            lines[10].trim_start().starts_with("10 "),
+            "line 10: '{}'",
+            lines[10]
+        );
+        assert!(
+            lines[12].trim_start().starts_with("12 "),
+            "line 12: '{}'",
+            lines[12]
+        );
     }
 
     #[test]
