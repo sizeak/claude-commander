@@ -10,7 +10,7 @@ use ratatui::{
     widgets::{Block, List, ListItem, ListState, StatefulWidget},
 };
 
-use crate::session::{SessionListItem, SessionStatus};
+use crate::session::{AgentState, SessionListItem, SessionStatus};
 use crate::tui::theme::Theme;
 
 /// Braille spinner frames for the Creating status indicator
@@ -28,6 +28,8 @@ pub struct TreeList<'a> {
     highlight_style: Style,
     /// Tick counter for spinner animation
     tick: u64,
+    /// Whether to show status indicator circles (●/◐/○)
+    show_status_indicator: bool,
 }
 
 impl<'a> TreeList<'a> {
@@ -39,12 +41,19 @@ impl<'a> TreeList<'a> {
             block: None,
             highlight_style: theme.selection().add_modifier(Modifier::BOLD),
             tick: 0,
+            show_status_indicator: true,
         }
     }
 
     /// Set the tick counter for spinner animation
     pub fn tick(mut self, tick: u64) -> Self {
         self.tick = tick;
+        self
+    }
+
+    /// Set whether to show status indicator circles
+    pub fn show_status_indicator(mut self, show: bool) -> Self {
+        self.show_status_indicator = show;
         self
     }
 
@@ -117,6 +126,8 @@ impl<'a> TreeList<'a> {
                     program,
                     pr_number,
                     pr_merged,
+                    agent_state,
+                    unread,
                     ..
                 } => {
                     let pr_color = if *pr_merged {
@@ -150,19 +161,58 @@ impl<'a> TreeList<'a> {
                         SessionStatus::Stopped => ("○", self.theme.status_stopped),
                     };
 
-                    let mut spans = vec![
-                        // Indentation for worktrees
-                        Span::raw("   └── "),
-                        Span::styled(
+                    let mut spans = vec![Span::raw("   └── ")];
+
+                    if self.show_status_indicator {
+                        spans.push(Span::styled(
                             format!("{} ", status_icon),
                             Style::default().fg(status_color),
-                        ),
-                        Span::styled(title.clone(), Style::default().fg(current_session_color)),
-                        Span::styled(
-                            format!(" [{}]", branch),
-                            Style::default().fg(self.theme.text_accent),
-                        ),
-                    ];
+                        ));
+                    }
+
+                    // Agent state indicator for Running sessions
+                    if *status == SessionStatus::Running
+                        && let Some(state) = agent_state
+                    {
+                        match state {
+                            AgentState::Working => {
+                                let frame = SPINNER_FRAMES
+                                    [(self.tick as usize / 3) % SPINNER_FRAMES.len()];
+                                spans.push(Span::styled(
+                                    format!("{} ", frame),
+                                    Style::default().fg(self.theme.agent_working),
+                                ));
+                            }
+                            AgentState::WaitingForInput => {
+                                spans.push(Span::styled(
+                                    "waiting ",
+                                    Style::default().fg(self.theme.agent_waiting),
+                                ));
+                            }
+                            // Idle uses the unread diamond + bold title instead of a label
+                            AgentState::Idle | AgentState::Unknown => {}
+                        }
+                    }
+
+                    if *unread {
+                        spans.push(Span::styled(
+                            "◆ ",
+                            Style::default().fg(self.theme.unread_indicator),
+                        ));
+                    }
+
+                    let title_style = if *unread {
+                        Style::default()
+                            .fg(current_session_color)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(current_session_color)
+                    };
+                    spans.push(Span::styled(title.clone(), title_style));
+                    spans.push(Span::styled(
+                        format!(" [{}]", branch),
+                        Style::default().fg(self.theme.text_accent),
+                    ));
 
                     if let Some(pr_num) = pr_number {
                         spans.push(Span::styled(
