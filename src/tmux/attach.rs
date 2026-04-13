@@ -58,6 +58,13 @@ pub async fn attach_to_session(
     let mut child = cmd.spawn(pts)?;
 
     info!("Spawned tmux attach-session for {}", session_name);
+    match editor_hotkey_byte {
+        Some(byte) => info!(
+            "Editor hotkey capture enabled in attach mode: byte 0x{:02x}",
+            byte
+        ),
+        None => info!("Editor hotkey capture disabled in attach mode"),
+    }
 
     // Enter raw mode
     info!("Enabling raw mode for PTY session");
