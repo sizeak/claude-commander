@@ -10,8 +10,19 @@ use ratatui::{
     widgets::{Block, List, ListItem, ListState, StatefulWidget},
 };
 
-use crate::session::{SessionListItem, SessionStatus};
+use crate::session::{AgentState, SessionListItem, SessionStatus};
 use crate::tui::theme::Theme;
+
+/// Tree branch prefix for worktree items (7 display columns)
+const TREE_INDENT: &str = "   └── ";
+/// Display width of `TREE_INDENT` in columns
+const TREE_INDENT_WIDTH: usize = 7;
+/// Width of the number field when `show_numbers` is enabled.
+/// Number + trailing space = TREE_INDENT_WIDTH, keeping alignment consistent.
+const NUMBER_WIDTH: usize = TREE_INDENT_WIDTH - 1;
+
+/// Braille spinner frames for the Creating status indicator
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Tree list widget for displaying hierarchical sessions
 pub struct TreeList<'a> {
@@ -23,6 +34,12 @@ pub struct TreeList<'a> {
     block: Option<Block<'a>>,
     /// Style for selected item
     highlight_style: Style,
+    /// Show sequential numbers instead of tree branch prefixes
+    show_numbers: bool,
+    /// Tick counter for spinner animation
+    tick: u64,
+    /// Whether to show status indicator circles (●/◐/○)
+    show_status_indicator: bool,
 }
 
 impl<'a> TreeList<'a> {
@@ -33,12 +50,33 @@ impl<'a> TreeList<'a> {
             theme,
             block: None,
             highlight_style: theme.selection().add_modifier(Modifier::BOLD),
+            show_numbers: false,
+            tick: 0,
+            show_status_indicator: true,
         }
+    }
+
+    /// Set the tick counter for spinner animation
+    pub fn tick(mut self, tick: u64) -> Self {
+        self.tick = tick;
+        self
+    }
+
+    /// Set whether to show status indicator circles
+    pub fn show_status_indicator(mut self, show: bool) -> Self {
+        self.show_status_indicator = show;
+        self
     }
 
     /// Set the highlight style
     pub fn highlight_style(mut self, style: Style) -> Self {
         self.highlight_style = style;
+        self
+    }
+
+    /// Show sequential numbers instead of tree branch prefixes
+    pub fn show_numbers(mut self, show: bool) -> Self {
+        self.show_numbers = show;
         self
     }
 
@@ -61,6 +99,7 @@ impl<'a> TreeList<'a> {
     fn to_list_items(&self) -> Vec<ListItem<'a>> {
         let show_program = self.has_mixed_programs();
         let mut project_index: usize = 0;
+        let mut worktree_number: usize = 0;
         let mut current_session_color = self.theme.project_color(0).1;
 
         self.items
@@ -105,6 +144,8 @@ impl<'a> TreeList<'a> {
                     program,
                     pr_number,
                     pr_merged,
+                    agent_state,
+                    unread,
                     ..
                 } => {
                     let pr_color = if *pr_merged {
@@ -114,6 +155,11 @@ impl<'a> TreeList<'a> {
                     };
                     let has_pr = pr_number.is_some();
                     let (status_icon, status_color) = match status {
+                        SessionStatus::Creating => {
+                            let frame =
+                                (self.tick / 4) as usize % SPINNER_FRAMES.len();
+                            (SPINNER_FRAMES[frame], self.theme.status_creating)
+                        }
                         SessionStatus::Running => (
                             "●",
                             if has_pr {
@@ -133,19 +179,70 @@ impl<'a> TreeList<'a> {
                         SessionStatus::Stopped => ("○", self.theme.status_stopped),
                     };
 
+                    worktree_number += 1;
+
                     let mut spans = vec![
-                        // Indentation for worktrees
-                        Span::raw("   └── "),
-                        Span::styled(
+                        // Indentation or number prefix for worktrees
+                        if self.show_numbers {
+                            Span::styled(
+                                format!("{:>width$} ", worktree_number, width = NUMBER_WIDTH),
+                                Style::default().fg(self.theme.text_secondary),
+                            )
+                        } else {
+                            Span::raw(TREE_INDENT)
+                        },
+                    ];
+
+                    if self.show_status_indicator {
+                        spans.push(Span::styled(
                             format!("{} ", status_icon),
                             Style::default().fg(status_color),
-                        ),
-                        Span::styled(title.clone(), Style::default().fg(current_session_color)),
-                        Span::styled(
-                            format!(" [{}]", branch),
-                            Style::default().fg(self.theme.text_accent),
-                        ),
-                    ];
+                        ));
+                    }
+
+                    // Agent state indicator for Running sessions
+                    if *status == SessionStatus::Running
+                        && let Some(state) = agent_state
+                    {
+                        match state {
+                            AgentState::Working => {
+                                let frame = SPINNER_FRAMES
+                                    [(self.tick as usize / 3) % SPINNER_FRAMES.len()];
+                                spans.push(Span::styled(
+                                    format!("{} ", frame),
+                                    Style::default().fg(self.theme.agent_working),
+                                ));
+                            }
+                            AgentState::WaitingForInput => {
+                                spans.push(Span::styled(
+                                    "waiting ",
+                                    Style::default().fg(self.theme.agent_waiting),
+                                ));
+                            }
+                            // Idle uses the unread diamond + bold title instead of a label
+                            AgentState::Idle | AgentState::Unknown => {}
+                        }
+                    }
+
+                    if *unread {
+                        spans.push(Span::styled(
+                            "◆ ",
+                            Style::default().fg(self.theme.unread_indicator),
+                        ));
+                    }
+
+                    let title_style = if *unread {
+                        Style::default()
+                            .fg(current_session_color)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(current_session_color)
+                    };
+                    spans.push(Span::styled(title.clone(), title_style));
+                    spans.push(Span::styled(
+                        format!(" [{}]", branch),
+                        Style::default().fg(self.theme.text_accent),
+                    ));
 
                     if let Some(pr_num) = pr_number {
                         spans.push(Span::styled(
@@ -387,6 +484,115 @@ impl TreeListState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::session::{ProjectId, SessionId};
+    use ratatui::{Terminal, backend::TestBackend};
+    use std::path::PathBuf;
+
+    fn make_project(name: &str, count: usize) -> SessionListItem {
+        SessionListItem::Project {
+            id: ProjectId::new(),
+            name: name.to_string(),
+            repo_path: PathBuf::from("/tmp/test"),
+            main_branch: "main".to_string(),
+            worktree_count: count,
+        }
+    }
+
+    fn make_worktree(title: &str) -> SessionListItem {
+        SessionListItem::Worktree {
+            id: SessionId::new(),
+            project_id: ProjectId::new(),
+            title: title.to_string(),
+            branch: "feat".to_string(),
+            status: SessionStatus::Running,
+            program: "claude".to_string(),
+            pr_number: None,
+            pr_url: None,
+            pr_merged: false,
+            worktree_path: PathBuf::from("/tmp/test"),
+            created_at: chrono::Utc::now(),
+            agent_state: None,
+            unread: false,
+        }
+    }
+
+    /// Render a TreeList to a buffer and return lines as strings
+    fn render_tree(items: &[SessionListItem], show_numbers: bool, width: u16, height: u16) -> Vec<String> {
+        let theme = Theme::basic();
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                let tree = TreeList::new(items, &theme).show_numbers(show_numbers);
+                frame.render_stateful_widget(
+                    tree,
+                    frame.area(),
+                    &mut ListState::default(),
+                );
+            })
+            .unwrap();
+        let buf = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buf[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_to_list_items_without_numbers_uses_tree_branch() {
+        let items = vec![make_project("proj", 1), make_worktree("session-a")];
+        let lines = render_tree(&items, false, 40, 3);
+        // Worktree line should contain tree branch
+        assert!(lines[1].contains("└──"), "Expected tree branch in: {}", lines[1]);
+    }
+
+    #[test]
+    fn test_to_list_items_with_numbers_uses_number_prefix() {
+        let items = vec![
+            make_project("proj", 2),
+            make_worktree("session-a"),
+            make_worktree("session-b"),
+        ];
+        let lines = render_tree(&items, true, 40, 4);
+        // First worktree starts with right-aligned "1"
+        assert!(lines[1].trim_start().starts_with("1 "), "Expected number prefix in: '{}'", lines[1]);
+        // Second worktree starts with "2"
+        assert!(lines[2].trim_start().starts_with("2 "), "Expected number prefix in: '{}'", lines[2]);
+        // No tree branches
+        assert!(!lines[1].contains("└──"), "Should not have tree branch with numbers");
+    }
+
+    #[test]
+    fn test_numbers_are_sequential_across_projects() {
+        let items = vec![
+            make_project("proj-a", 1),
+            make_worktree("session-1"),
+            make_project("proj-b", 1),
+            make_worktree("session-2"),
+        ];
+        let lines = render_tree(&items, true, 40, 5);
+        // Session under proj-a is #1
+        assert!(lines[1].trim_start().starts_with("1 "), "Expected 1 in: '{}'", lines[1]);
+        // Session under proj-b is #2 (not restarting)
+        assert!(lines[3].trim_start().starts_with("2 "), "Expected 2 in: '{}'", lines[3]);
+    }
+
+    #[test]
+    fn test_double_digit_number_formatting() {
+        let mut items = vec![make_project("proj", 12)];
+        for i in 1..=12 {
+            items.push(make_worktree(&format!("s-{}", i)));
+        }
+        let lines = render_tree(&items, true, 40, 14);
+        // Single digit right-aligned
+        assert!(lines[1].trim_start().starts_with("1 "), "line 1: '{}'", lines[1]);
+        // Double digit
+        assert!(lines[10].trim_start().starts_with("10 "), "line 10: '{}'", lines[10]);
+        assert!(lines[12].trim_start().starts_with("12 "), "line 12: '{}'", lines[12]);
+    }
 
     #[test]
     fn test_tree_list_state_navigation() {
@@ -506,5 +712,17 @@ mod tests {
 
         state.previous();
         assert_eq!(state.selected(), Some(0));
+    }
+
+    #[test]
+    #[allow(clippy::erasing_op, clippy::identity_op)]
+    fn test_spinner_frame_cycling() {
+        // tick/4 selects the frame index, modulo 10 frames
+        assert_eq!((0u64 / 4) as usize % SPINNER_FRAMES.len(), 0); // "⠋"
+        assert_eq!((4u64 / 4) as usize % SPINNER_FRAMES.len(), 1); // "⠙"
+        assert_eq!((8u64 / 4) as usize % SPINNER_FRAMES.len(), 2); // "⠹"
+        assert_eq!((36u64 / 4) as usize % SPINNER_FRAMES.len(), 9); // "⠏"
+        // Wraps around after 10 frames
+        assert_eq!((40u64 / 4) as usize % SPINNER_FRAMES.len(), 0); // back to "⠋"
     }
 }

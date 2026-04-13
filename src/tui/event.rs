@@ -5,13 +5,14 @@
 //! - Application state updates
 //! - Render ticks
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::config::keybindings::{BindableAction, KeyBindings};
-use crate::git::DiffInfo;
-use crate::session::{ProjectId, SessionId};
+use crate::git::{DiffInfo, EnrichedPrInfo};
+use crate::session::{AgentState, ProjectId, SessionId};
 
 use crossterm::event::{
     Event as CrosstermEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
@@ -73,9 +74,28 @@ pub enum StateUpdate {
     /// Session creation completed successfully
     SessionCreated { session_id: SessionId },
     /// Session creation failed
-    SessionCreateFailed { message: String },
+    SessionCreateFailed {
+        session_id: SessionId,
+        message: String,
+    },
     /// State file was modified by another instance
     ExternalChange,
+    /// Enriched PR info ready from background fetch
+    EnrichedPrReady {
+        session_id: SessionId,
+        info: Option<EnrichedPrInfo>,
+    },
+    /// AI-generated branch summary ready
+    AiSummaryReady {
+        session_id: SessionId,
+        result: Result<String, String>,
+        /// Hash of the diff that was summarized (for cache keying)
+        diff_hash: u64,
+    },
+    /// Agent states updated from background polling
+    AgentStatesUpdated {
+        states: HashMap<SessionId, AgentState>,
+    },
     /// Preview/diff/shell data ready from background fetch
     PreviewReady {
         /// Which session this data is for (None if project-level)
@@ -112,6 +132,8 @@ pub enum UserCommand {
     ResumeSession,
     /// Delete/kill current session
     DeleteSession,
+    /// Restart current session (kill tmux and recreate)
+    RestartSession,
     /// Remove an entire project
     RemoveProject,
     /// Open worktree in editor/IDE
@@ -148,6 +170,8 @@ pub enum UserCommand {
     PageDown,
     /// Open quick-switch session search modal
     QuickSwitch,
+    /// Generate AI summary for the current session (Info pane only)
+    GenerateSummary,
 }
 
 impl UserCommand {
@@ -192,6 +216,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::PauseSession => Self::PauseSession,
             BindableAction::ResumeSession => Self::ResumeSession,
             BindableAction::DeleteSession => Self::DeleteSession,
+            BindableAction::RestartSession => Self::RestartSession,
             BindableAction::RemoveProject => Self::RemoveProject,
             BindableAction::OpenInEditor => Self::OpenInEditor,
             BindableAction::TogglePane => Self::TogglePane,
@@ -205,6 +230,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::ScrollDown => Self::ScrollDown,
             BindableAction::PageUp => Self::PageUp,
             BindableAction::PageDown => Self::PageDown,
+            BindableAction::GenerateSummary => Self::GenerateSummary,
         }
     }
 }
@@ -535,6 +561,11 @@ mod tests {
                 KeyCode::Char('d'),
                 KeyModifiers::NONE,
                 UserCommand::DeleteSession,
+            ),
+            (
+                KeyCode::Char('R'),
+                KeyModifiers::SHIFT,
+                UserCommand::RestartSession,
             ),
             (
                 KeyCode::Char('D'),

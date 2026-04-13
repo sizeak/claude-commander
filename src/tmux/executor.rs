@@ -291,12 +291,17 @@ pub struct StatusBarInfo {
     pub pr_merged: bool,
     /// tmux status-style value (e.g. "bg=colour236,fg=colour252")
     pub status_style: String,
+    /// Whether this status bar is for a shell session (changes Ctrl-\ hint)
+    pub is_shell: bool,
+    /// Project name (shown as a prefix)
+    pub project_name: String,
 }
 
 impl StatusBarInfo {
     /// Format the left side of the status bar.
     ///
-    /// `branch | PR #N | Ctrl-q: detach | Ctrl-\: shell`
+    /// Agent session: `project | branch | PR #N | Ctrl-q: detach | Ctrl-\: shell`
+    /// Shell session: `project | branch | PR #N | Ctrl-q: detach | Ctrl-\: agent`
     /// `#` is escaped to `##` for tmux format safety.
     pub fn format_left(&self) -> String {
         let safe_branch = self.branch.replace('#', "##");
@@ -305,7 +310,11 @@ impl StatusBarInfo {
             Some(n) => format!(" | PR ##{}", n),
             None => String::new(),
         };
-        format!(" {}{} | Ctrl-q: detach | Ctrl-\\: shell ", safe_branch, pr)
+        let toggle_hint = if self.is_shell { "agent" } else { "shell" };
+        format!(
+            " {} | {}{} | Ctrl-q: detach | Ctrl-\\: {} ",
+            self.project_name, safe_branch, pr, toggle_hint
+        )
     }
 
     /// Format the right side of the status bar (currently empty).
@@ -346,6 +355,8 @@ mod tests {
             pr_number,
             pr_merged,
             status_style: "bg=colour236,fg=colour252".to_string(),
+            is_shell: false,
+            project_name: "my-project".to_string(),
         }
     }
 
@@ -354,7 +365,7 @@ mod tests {
         let info = test_info("feature-auth", None, false);
         assert_eq!(
             info.format_left(),
-            " feature-auth | Ctrl-q: detach | Ctrl-\\: shell "
+            " my-project | feature-auth | Ctrl-q: detach | Ctrl-\\: shell "
         );
     }
 
@@ -369,7 +380,7 @@ mod tests {
         let info = test_info("feature", Some(42), false);
         assert_eq!(
             info.format_left(),
-            " feature | PR ##42 | Ctrl-q: detach | Ctrl-\\: shell "
+            " my-project | feature | PR ##42 | Ctrl-q: detach | Ctrl-\\: shell "
         );
     }
 
@@ -378,7 +389,17 @@ mod tests {
         let info = test_info("feature", Some(42), true);
         assert_eq!(
             info.format_left(),
-            " feature | PR ##42 merged | Ctrl-q: detach | Ctrl-\\: shell "
+            " my-project | feature | PR ##42 merged | Ctrl-q: detach | Ctrl-\\: shell "
+        );
+    }
+
+    #[test]
+    fn test_status_bar_format_left_shell_session() {
+        let mut info = test_info("feature-auth", None, false);
+        info.is_shell = true;
+        assert_eq!(
+            info.format_left(),
+            " my-project | feature-auth | Ctrl-q: detach | Ctrl-\\: agent "
         );
     }
 

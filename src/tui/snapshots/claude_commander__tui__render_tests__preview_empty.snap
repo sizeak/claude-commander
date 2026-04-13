@@ -2,7 +2,7 @@
 source: src/tui/render_tests.rs
 expression: terminal.backend()
 ---
-"┌ [Preview] | Diff | Shell ────────────────────────────────┐"
+"┌ [Preview] | Info | Shell ────────────────────────────────┐"
 "│                                                          │"
 "│                                                          │"
 "│                                                          │"

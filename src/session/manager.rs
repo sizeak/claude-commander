@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use tracing::{info, instrument, warn};
 
-use crate::config::{Config, StateStore};
+use crate::config::{AppState, ConfigStore, StateStore};
 use crate::error::{Result, SessionError};
 use crate::git::{DiffCache, DiffInfo, GitBackend, WorktreeManager};
 use crate::session::{Project, ProjectId, SessionId, SessionStatus, WorktreeSession};
@@ -16,8 +16,8 @@ use crate::tmux::{CapturedContent, ContentCapture, StatusBarInfo, TmuxExecutor};
 
 /// Session manager coordinates all session operations
 pub struct SessionManager {
-    /// Application configuration
-    config: Config,
+    /// Shared configuration store (hot-reloaded)
+    config_store: Arc<ConfigStore>,
     /// Concurrent-safe persistent state store
     pub store: Arc<StateStore>,
     /// Tmux executor
@@ -35,7 +35,7 @@ pub struct SessionManager {
 impl Clone for SessionManager {
     fn clone(&self) -> Self {
         Self {
-            config: self.config.clone(),
+            config_store: self.config_store.clone(),
             store: self.store.clone(),
             tmux: self.tmux.clone(),
             content_capture: self.content_capture.clone(),
@@ -48,11 +48,15 @@ impl Clone for SessionManager {
 
 impl SessionManager {
     /// Create a new session manager
+    ///
+    /// Note: `max_concurrent_tmux`, `capture_cache_ttl_ms`, and `diff_cache_ttl_ms`
+    /// are read from the config at construction time and are **not** hot-reloaded.
     pub fn new(
-        config: Config,
+        config_store: Arc<ConfigStore>,
         store: Arc<StateStore>,
         tmux_status_style: impl Into<String>,
     ) -> Self {
+        let config = config_store.read();
         let tmux = TmuxExecutor::with_max_concurrent(config.max_concurrent_tmux);
         let content_capture = ContentCapture::with_ttl(
             tmux.clone(),
@@ -62,9 +66,10 @@ impl SessionManager {
             DiffCache::with_ttl(std::time::Duration::from_millis(config.diff_cache_ttl_ms));
         let project_diff_cache =
             DiffCache::with_ttl(std::time::Duration::from_millis(config.diff_cache_ttl_ms));
+        drop(config);
 
         Self {
-            config,
+            config_store,
             store,
             tmux,
             content_capture,
@@ -80,12 +85,18 @@ impl SessionManager {
     }
 
     /// Build a `StatusBarInfo` from session metadata
-    pub fn status_bar_info(&self, session: &WorktreeSession) -> StatusBarInfo {
+    pub fn status_bar_info(&self, session: &WorktreeSession, state: &AppState) -> StatusBarInfo {
+        let project_name = state
+            .get_project(&session.project_id)
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
         StatusBarInfo {
             branch: session.branch.clone(),
             pr_number: session.pr_number,
             pr_merged: session.pr_merged,
             status_style: self.tmux_status_style.clone(),
+            is_shell: false,
+            project_name,
         }
     }
 
@@ -164,36 +175,83 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Create a new worktree session
+    /// Prepare a placeholder session in `Creating` state.
+    ///
+    /// This inserts the session into state immediately so the UI can show a
+    /// spinner. Call `finalize_session` in a background task to do the heavy
+    /// git/tmux work.
     #[instrument(skip(self))]
-    pub async fn create_session(
+    pub async fn prepare_session(
         &self,
         project_id: &ProjectId,
         title: String,
         program: Option<String>,
     ) -> Result<SessionId> {
-        let program = program.unwrap_or_else(|| self.config.default_program.clone());
+        let program = program.unwrap_or_else(|| self.config_store.read().default_program.clone());
 
-        // Get project info
+        // Validate project exists
+        {
+            let state = self.store.read().await;
+            state
+                .get_project(project_id)
+                .ok_or_else(|| SessionError::ProjectNotFound(project_id.to_string()))?;
+        }
+
+        let branch_name = self.generate_branch_name(&title);
+
+        let session =
+            WorktreeSession::new_creating(*project_id, title, branch_name, program);
+        let session_id = session.id;
+
+        self.store
+            .mutate(move |state| {
+                state.add_session(session);
+            })
+            .await?;
+
+        info!("Prepared creating session {}", session_id);
+        Ok(session_id)
+    }
+
+    /// Finalize a session that was created with `prepare_session`.
+    ///
+    /// Performs the heavy work: git fetch, worktree creation, tmux session
+    /// setup. On success, transitions the session from `Creating` to `Running`.
+    #[instrument(skip(self))]
+    pub async fn finalize_session(&self, session_id: &SessionId) -> Result<SessionId> {
+        // Read session and project info
+        let (project_id, title, branch_name, program) = {
+            let state = self.store.read().await;
+            let session = state
+                .get_session(session_id)
+                .ok_or(SessionError::NotFound(*session_id))?;
+            (
+                session.project_id,
+                session.title.clone(),
+                session.branch.clone(),
+                session.program.clone(),
+            )
+        };
+
         let (repo_path, main_branch) = {
             let state = self.store.read().await;
             let project = state
-                .get_project(project_id)
+                .get_project(&project_id)
                 .ok_or_else(|| SessionError::ProjectNotFound(project_id.to_string()))?;
             (project.repo_path.clone(), project.main_branch.clone())
         };
 
-        // Generate branch name from title
-        let branch_name = self.generate_branch_name(&title);
-
         info!(
-            "Creating session '{}' with branch '{}' in project {}",
+            "Finalizing session '{}' with branch '{}' in project {}",
             title, branch_name, project_id
         );
 
         // Fetch latest changes from origin
-        if self.config.fetch_before_create {
-            info!("Fetching latest changes from origin in {}", repo_path.display());
+        if self.config_store.read().fetch_before_create {
+            info!(
+                "Fetching latest changes from origin in {}",
+                repo_path.display()
+            );
             let output = tokio::process::Command::new("git")
                 .current_dir(&repo_path)
                 .args(["fetch", "origin"])
@@ -222,7 +280,7 @@ impl SessionManager {
         // Create worktree — sync gix work (branch check + start point) is done
         // in a block so non-Sync types are dropped before the first .await,
         // keeping the overall future Send.
-        let worktrees_dir = self.config.worktrees_dir()?;
+        let worktrees_dir = self.config_store.read().worktrees_dir()?;
         let (branch_exists, start_point) = {
             let backend = GitBackend::open(&repo_path)?;
             let exists = backend.branch_exists(&branch_name)?;
@@ -245,41 +303,64 @@ impl SessionManager {
         )
         .await?;
 
-        // Create session object
-        let mut session = WorktreeSession::new(
-            *project_id,
-            title,
-            branch_name,
-            worktree_info.path.clone(),
-            program.clone(),
-        );
-        session.base_commit = Some(worktree_info.head);
-        let session_id = session.id;
-        let tmux_session_name = session.tmux_session_name.clone();
-        let status_bar = self.status_bar_info(&session);
+        // Read tmux_session_name from the placeholder session
+        let tmux_session_name = {
+            let state = self.store.read().await;
+            let session = state
+                .get_session(session_id)
+                .ok_or(SessionError::NotFound(*session_id))?;
+            session.tmux_session_name.clone()
+        };
 
         // Create tmux session in the worktree directory
         self.tmux
             .create_session(&tmux_session_name, &worktree_info.path, Some(&program))
             .await?;
 
+        // Update session to Running with the real worktree info
+        let sid = *session_id;
+        let wt_path = worktree_info.path.clone();
+        let head = worktree_info.head.clone();
+        self.store
+            .mutate(move |state| {
+                if let Some(session) = state.get_session_mut(&sid) {
+                    session.worktree_path = wt_path;
+                    session.base_commit = Some(head);
+                    session.set_status(SessionStatus::Running);
+                }
+            })
+            .await?;
+
         // Configure CC status bar (branch only, no PR yet)
+        let status_bar = {
+            let state = self.store.read().await;
+            let session = state
+                .get_session(session_id)
+                .ok_or(SessionError::NotFound(*session_id))?;
+            self.status_bar_info(session, &state)
+        };
         self.tmux
             .configure_status_bar(&tmux_session_name, &status_bar)
             .await;
 
-        // Save session to state
-        self.store
-            .mutate(move |state| {
-                state.add_session(session);
-            })
-            .await?;
-
         info!(
-            "Created session {} with tmux session {}",
+            "Finalized session {} with tmux session {}",
             session_id, tmux_session_name
         );
-        Ok(session_id)
+        Ok(*session_id)
+    }
+
+    /// Remove a session that is still in `Creating` state (e.g., on failure or startup cleanup).
+    #[instrument(skip(self))]
+    pub async fn remove_creating_session(&self, session_id: &SessionId) -> Result<()> {
+        let sid = *session_id;
+        self.store
+            .mutate(move |state| {
+                state.remove_session(&sid);
+            })
+            .await?;
+        info!("Removed creating session {}", session_id);
+        Ok(())
     }
 
     /// Pause a session (detach from tmux, keep worktree)
@@ -319,7 +400,7 @@ impl SessionManager {
                 session.worktree_path.clone(),
                 session.program.clone(),
                 session.status.can_resume(),
-                self.status_bar_info(session),
+                self.status_bar_info(session, &state),
             )
         };
 
@@ -356,6 +437,76 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Kill tmux sessions (main + shell) for a worktree session.
+    async fn kill_tmux_sessions(&self, tmux_name: &str, shell_tmux_name: Option<&str>) {
+        if let Err(e) = self.tmux.kill_session(tmux_name).await {
+            warn!("Failed to kill tmux session: {}", e);
+        }
+        if let Some(shell_name) = shell_tmux_name {
+            let _ = self.tmux.kill_session(shell_name).await;
+        }
+    }
+
+    /// Restart a session (kill tmux and recreate with --resume)
+    #[instrument(skip(self))]
+    pub async fn restart_session(&self, session_id: &SessionId) -> Result<()> {
+        let (tmux_session_name, shell_tmux_name, worktree_path, program, status_bar) = {
+            let state = self.store.read().await;
+            let session = state
+                .get_session(session_id)
+                .ok_or(SessionError::NotFound(*session_id))?;
+            (
+                session.tmux_session_name.clone(),
+                session.shell_tmux_session_name.clone(),
+                session.worktree_path.clone(),
+                session.program.clone(),
+                self.status_bar_info(session, &state),
+            )
+        };
+
+        self.kill_tmux_sessions(&tmux_session_name, shell_tmux_name.as_deref())
+            .await;
+
+        // Create a fresh tmux session with --resume
+        let resume_program = format!("{} --resume", program);
+        let create_result = self
+            .tmux
+            .create_session(&tmux_session_name, &worktree_path, Some(&resume_program))
+            .await;
+
+        if let Err(e) = create_result {
+            // Tmux is dead but recreation failed — mark as Stopped so state is consistent
+            let sid = *session_id;
+            let _ = self
+                .store
+                .mutate(move |state| {
+                    if let Some(session) = state.get_session_mut(&sid) {
+                        session.set_status(SessionStatus::Stopped);
+                    }
+                })
+                .await;
+            return Err(e);
+        }
+
+        // Configure status bar on the new session
+        self.tmux
+            .configure_status_bar(&tmux_session_name, &status_bar)
+            .await;
+
+        // Set status to Running
+        let sid = *session_id;
+        self.store
+            .mutate(move |state| {
+                if let Some(session) = state.get_session_mut(&sid) {
+                    session.set_status(SessionStatus::Running);
+                }
+            })
+            .await?;
+
+        info!("Restarted session {}", session_id);
+        Ok(())
+    }
+
     /// Kill a session (stop tmux, optionally remove worktree)
     #[instrument(skip(self))]
     pub async fn kill_session(&self, session_id: &SessionId, remove_worktree: bool) -> Result<()> {
@@ -367,15 +518,11 @@ impl SessionManager {
                 .clone()
         };
 
-        // Kill tmux session
-        if let Err(e) = self.tmux.kill_session(&session.tmux_session_name).await {
-            warn!("Failed to kill tmux session: {}", e);
-        }
-
-        // Kill shell tmux session if it exists
-        if let Some(ref shell_name) = session.shell_tmux_session_name {
-            let _ = self.tmux.kill_session(shell_name).await;
-        }
+        self.kill_tmux_sessions(
+            &session.tmux_session_name,
+            session.shell_tmux_session_name.as_deref(),
+        )
+        .await;
 
         // Optionally remove worktree
         if remove_worktree {
@@ -389,7 +536,8 @@ impl SessionManager {
             if let Some(repo_path) = repo_path
                 && let Ok(backend) = GitBackend::open(&repo_path)
             {
-                let worktree_manager = WorktreeManager::new(backend, self.config.worktrees_dir()?);
+                let worktree_manager =
+                    WorktreeManager::new(backend, self.config_store.read().worktrees_dir()?);
                 if let Err(e) = worktree_manager
                     .remove_worktree(&session.worktree_path, true)
                     .await
@@ -463,7 +611,7 @@ impl SessionManager {
                 session.tmux_session_name.clone(),
                 session.worktree_path.clone(),
                 session.program.clone(),
-                self.status_bar_info(session),
+                self.status_bar_info(session, &state),
             )
         };
 
@@ -529,9 +677,12 @@ impl SessionManager {
                 session.shell_tmux_session_name.clone(),
                 session.tmux_session_name.clone(),
                 session.worktree_path.clone(),
-                self.status_bar_info(session),
+                self.status_bar_info(session, &state),
             )
         };
+
+        let mut status_bar = status_bar;
+        status_bar.is_shell = true;
 
         // If shell session already exists in tmux, ensure status bar and return
         if let Some(ref shell_name) = existing_shell_name
@@ -573,12 +724,9 @@ impl SessionManager {
             }
         }
 
+        let shell_program = self.config_store.read().shell_program.clone();
         self.tmux
-            .create_session(
-                &shell_name,
-                &worktree_path,
-                Some(&self.config.shell_program),
-            )
+            .create_session(&shell_name, &worktree_path, Some(&shell_program))
             .await?;
 
         // Configure CC status bar on the shell session
@@ -758,8 +906,9 @@ impl SessionManager {
             }
         }
 
+        let shell_program = self.config_store.read().shell_program.clone();
         self.tmux
-            .create_session(&shell_name, &repo_path, Some(&self.config.shell_program))
+            .create_session(&shell_name, &repo_path, Some(&shell_program))
             .await?;
 
         // Store in project state
@@ -910,7 +1059,7 @@ impl SessionManager {
             }
         };
 
-        let worktrees_dir = self.config.worktrees_dir()?;
+        let worktrees_dir = self.config_store.read().worktrees_dir()?;
         let canonical_worktrees_dir =
             std::fs::canonicalize(&worktrees_dir).unwrap_or_else(|_| worktrees_dir.clone());
         let worktree_manager = WorktreeManager::new(backend, worktrees_dir);
@@ -959,7 +1108,7 @@ impl SessionManager {
                 wt.branch.clone(),
                 wt.branch.clone(),
                 wt.path.clone(),
-                self.config.default_program.clone(),
+                self.config_store.read().default_program.clone(),
             );
             session.set_status(SessionStatus::Paused);
             session.base_commit = Some(wt.head.clone());
@@ -997,10 +1146,11 @@ impl SessionManager {
     fn generate_branch_name(&self, title: &str) -> String {
         let sanitized = self.sanitize_name(title);
 
-        if self.config.branch_prefix.is_empty() {
+        let config = self.config_store.read();
+        if config.branch_prefix.is_empty() {
             sanitized
         } else {
-            format!("{}/{}", self.config.branch_prefix, sanitized)
+            format!("{}/{}", config.branch_prefix, sanitized)
         }
     }
 
@@ -1024,7 +1174,7 @@ impl SessionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{AppState, StateStore};
+    use crate::config::{AppState, Config, ConfigStore, StateStore};
     use tempfile::TempDir;
 
     fn test_store() -> (TempDir, Arc<StateStore>) {
@@ -1034,11 +1184,20 @@ mod tests {
         (dir, store)
     }
 
+    fn test_config_store(config: Config) -> (TempDir, Arc<ConfigStore>) {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let toml = toml::to_string_pretty(&config).unwrap();
+        std::fs::write(&path, toml).unwrap();
+        let store = Arc::new(ConfigStore::with_path(config, path));
+        (dir, store)
+    }
+
     #[test]
     fn test_sanitize_name() {
-        let config = Config::default();
+        let (_cdir, config_store) = test_config_store(Config::default());
         let (_dir, store) = test_store();
-        let manager = SessionManager::new(config, store, "");
+        let manager = SessionManager::new(config_store, store, "");
 
         assert_eq!(manager.sanitize_name("Hello World"), "hello-world");
         assert_eq!(manager.sanitize_name("Feature/Auth"), "feature-auth");
@@ -1047,16 +1206,20 @@ mod tests {
 
     #[test]
     fn test_generate_branch_name() {
-        let mut config = Config::default();
+        let (_cdir, config_store) = test_config_store(Config::default());
         let (_dir, store) = test_store();
 
         // Without prefix
-        let manager = SessionManager::new(config.clone(), store.clone(), "");
+        let manager = SessionManager::new(config_store, store.clone(), "");
         assert_eq!(manager.generate_branch_name("Feature Auth"), "feature-auth");
 
         // With prefix
-        config.branch_prefix = "cc".to_string();
-        let manager = SessionManager::new(config, store, "");
+        let config = Config {
+            branch_prefix: "cc".to_string(),
+            ..Config::default()
+        };
+        let (_cdir2, config_store2) = test_config_store(config);
+        let manager = SessionManager::new(config_store2, store, "");
         assert_eq!(
             manager.generate_branch_name("Feature Auth"),
             "cc/feature-auth"
@@ -1065,36 +1228,36 @@ mod tests {
 
     #[test]
     fn test_sanitize_name_underscores_preserved() {
-        let config = Config::default();
+        let (_cdir, config_store) = test_config_store(Config::default());
         let (_dir, store) = test_store();
-        let manager = SessionManager::new(config, store, "");
+        let manager = SessionManager::new(config_store, store, "");
 
         assert_eq!(manager.sanitize_name("hello_world"), "hello_world");
     }
 
     #[test]
     fn test_sanitize_name_consecutive_specials() {
-        let config = Config::default();
+        let (_cdir, config_store) = test_config_store(Config::default());
         let (_dir, store) = test_store();
-        let manager = SessionManager::new(config, store, "");
+        let manager = SessionManager::new(config_store, store, "");
 
         assert_eq!(manager.sanitize_name("a!!b"), "a--b");
     }
 
     #[test]
     fn test_sanitize_name_all_special() {
-        let config = Config::default();
+        let (_cdir, config_store) = test_config_store(Config::default());
         let (_dir, store) = test_store();
-        let manager = SessionManager::new(config, store, "");
+        let manager = SessionManager::new(config_store, store, "");
 
         assert_eq!(manager.sanitize_name("!!!"), "");
     }
 
     #[test]
     fn test_sanitize_name_unicode() {
-        let config = Config::default();
+        let (_cdir, config_store) = test_config_store(Config::default());
         let (_dir, store) = test_store();
-        let manager = SessionManager::new(config, store, "");
+        let manager = SessionManager::new(config_store, store, "");
 
         // Unicode alphanumeric chars should be preserved
         let result = manager.sanitize_name("café");
@@ -1104,9 +1267,9 @@ mod tests {
 
     #[test]
     fn test_generate_branch_name_empty_prefix() {
-        let config = Config::default(); // branch_prefix defaults to ""
+        let (_cdir, config_store) = test_config_store(Config::default());
         let (_dir, store) = test_store();
-        let manager = SessionManager::new(config, store, "");
+        let manager = SessionManager::new(config_store, store, "");
 
         assert_eq!(manager.generate_branch_name("Foo Bar"), "foo-bar");
     }
@@ -1117,8 +1280,9 @@ mod tests {
             branch_prefix: "user/cc".to_string(),
             ..Config::default()
         };
+        let (_cdir, config_store) = test_config_store(config);
         let (_dir, store) = test_store();
-        let manager = SessionManager::new(config, store, "");
+        let manager = SessionManager::new(config_store, store, "");
 
         assert_eq!(manager.generate_branch_name("Foo"), "user/cc/foo");
     }

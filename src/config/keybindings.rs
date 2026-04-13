@@ -32,6 +32,7 @@ pub enum BindableAction {
     PauseSession,
     ResumeSession,
     DeleteSession,
+    RestartSession,
     RemoveProject,
     OpenInEditor,
     TogglePane,
@@ -45,6 +46,7 @@ pub enum BindableAction {
     ScrollDown,
     PageUp,
     PageDown,
+    GenerateSummary,
 }
 
 impl BindableAction {
@@ -59,6 +61,7 @@ impl BindableAction {
         Self::PauseSession,
         Self::ResumeSession,
         Self::DeleteSession,
+        Self::RestartSession,
         Self::RemoveProject,
         Self::OpenInEditor,
         Self::TogglePane,
@@ -69,6 +72,7 @@ impl BindableAction {
         Self::ScrollDown,
         Self::PageUp,
         Self::PageDown,
+        Self::GenerateSummary,
         Self::ShowHelp,
         Self::ShowSettings,
         Self::Quit,
@@ -86,6 +90,7 @@ impl BindableAction {
             Self::PauseSession => "pause_session",
             Self::ResumeSession => "resume_session",
             Self::DeleteSession => "delete_session",
+            Self::RestartSession => "restart_session",
             Self::RemoveProject => "remove_project",
             Self::OpenInEditor => "open_in_editor",
             Self::TogglePane => "toggle_pane",
@@ -99,6 +104,7 @@ impl BindableAction {
             Self::ScrollDown => "scroll_down",
             Self::PageUp => "page_up",
             Self::PageDown => "page_down",
+            Self::GenerateSummary => "generate_summary",
         }
     }
 
@@ -114,6 +120,7 @@ impl BindableAction {
             Self::PauseSession => "Pause session",
             Self::ResumeSession => "Resume session",
             Self::DeleteSession => "Delete/kill session",
+            Self::RestartSession => "Restart session",
             Self::RemoveProject => "Remove project",
             Self::OpenInEditor => "Open in editor/IDE",
             Self::TogglePane => "Toggle preview/diff/shell view",
@@ -127,6 +134,7 @@ impl BindableAction {
             Self::ScrollDown => "Scroll down",
             Self::PageUp => "Page up",
             Self::PageDown => "Page down",
+            Self::GenerateSummary => "Generate AI summary",
         }
     }
 
@@ -140,6 +148,7 @@ impl BindableAction {
             | Self::PauseSession
             | Self::ResumeSession
             | Self::DeleteSession
+            | Self::RestartSession
             | Self::RemoveProject
             | Self::OpenInEditor => "Session Management",
             Self::TogglePane
@@ -147,6 +156,7 @@ impl BindableAction {
             | Self::ShrinkLeftPane
             | Self::GrowLeftPane => "Layout",
             Self::ScrollUp | Self::ScrollDown | Self::PageUp | Self::PageDown => "Scrolling",
+            Self::GenerateSummary => "Info Pane",
             Self::ShowHelp | Self::ShowSettings | Self::Quit => "Other",
         }
     }
@@ -166,6 +176,7 @@ impl FromStr for BindableAction {
             "pause_session" => Ok(Self::PauseSession),
             "resume_session" => Ok(Self::ResumeSession),
             "delete_session" => Ok(Self::DeleteSession),
+            "restart_session" => Ok(Self::RestartSession),
             "remove_project" => Ok(Self::RemoveProject),
             "open_in_editor" => Ok(Self::OpenInEditor),
             "toggle_pane" => Ok(Self::TogglePane),
@@ -179,6 +190,7 @@ impl FromStr for BindableAction {
             "scroll_down" => Ok(Self::ScrollDown),
             "page_up" => Ok(Self::PageUp),
             "page_down" => Ok(Self::PageDown),
+            "generate_summary" => Ok(Self::GenerateSummary),
             _ => Err(format!("unknown action: {s}")),
         }
     }
@@ -359,7 +371,9 @@ pub struct KeyBindings {
 
 impl KeyBindings {
     /// Build the lookup table from the bindings map.
-    fn build_lookup(bindings: &HashMap<BindableAction, Vec<KeyBinding>>) -> HashMap<(KeyCode, KeyModifiers), BindableAction> {
+    fn build_lookup(
+        bindings: &HashMap<BindableAction, Vec<KeyBinding>>,
+    ) -> HashMap<(KeyCode, KeyModifiers), BindableAction> {
         let mut lookup = HashMap::new();
         for (action, keys) in bindings {
             for key in keys {
@@ -423,86 +437,108 @@ impl Default for KeyBindings {
         let shift = KeyModifiers::SHIFT;
 
         // Navigation
-        bindings.insert(BindableAction::NavigateUp, vec![
-            kb(KeyCode::Char('k'), none),
-            kb(KeyCode::Up, none),
-            kb(KeyCode::Char('p'), ctrl),
-        ]);
-        bindings.insert(BindableAction::NavigateDown, vec![
-            kb(KeyCode::Char('j'), none),
-            kb(KeyCode::Down, none),
-            kb(KeyCode::Char('n'), ctrl),
-        ]);
-        bindings.insert(BindableAction::Select, vec![
-            kb(KeyCode::Enter, none),
-        ]);
+        bindings.insert(
+            BindableAction::NavigateUp,
+            vec![
+                kb(KeyCode::Char('k'), none),
+                kb(KeyCode::Up, none),
+                kb(KeyCode::Char('p'), ctrl),
+            ],
+        );
+        bindings.insert(
+            BindableAction::NavigateDown,
+            vec![
+                kb(KeyCode::Char('j'), none),
+                kb(KeyCode::Down, none),
+                kb(KeyCode::Char('n'), ctrl),
+            ],
+        );
+        bindings.insert(BindableAction::Select, vec![kb(KeyCode::Enter, none)]);
 
         // Session management
-        bindings.insert(BindableAction::SelectShell, vec![
-            kb(KeyCode::Char('s'), none),
-        ]);
-        bindings.insert(BindableAction::NewSession, vec![
-            kb(KeyCode::Char('n'), none),
-        ]);
-        bindings.insert(BindableAction::NewProject, vec![
-            kb(KeyCode::Char('N'), shift),
-        ]);
-        bindings.insert(BindableAction::PauseSession, vec![
-            kb(KeyCode::Char('p'), none),
-        ]);
-        bindings.insert(BindableAction::ResumeSession, vec![
-            kb(KeyCode::Char('r'), none),
-        ]);
-        bindings.insert(BindableAction::DeleteSession, vec![
-            kb(KeyCode::Char('d'), none),
-        ]);
-        bindings.insert(BindableAction::RemoveProject, vec![
-            kb(KeyCode::Char('D'), shift),
-        ]);
-        bindings.insert(BindableAction::OpenInEditor, vec![
-            kb(KeyCode::Char('e'), none),
-        ]);
+        bindings.insert(
+            BindableAction::SelectShell,
+            vec![kb(KeyCode::Char('s'), none)],
+        );
+        bindings.insert(
+            BindableAction::NewSession,
+            vec![kb(KeyCode::Char('n'), none)],
+        );
+        bindings.insert(
+            BindableAction::NewProject,
+            vec![kb(KeyCode::Char('N'), shift)],
+        );
+        bindings.insert(
+            BindableAction::PauseSession,
+            vec![kb(KeyCode::Char('p'), none)],
+        );
+        bindings.insert(
+            BindableAction::ResumeSession,
+            vec![kb(KeyCode::Char('r'), none)],
+        );
+        bindings.insert(
+            BindableAction::DeleteSession,
+            vec![kb(KeyCode::Char('d'), none)],
+        );
+        bindings.insert(
+            BindableAction::RestartSession,
+            vec![kb(KeyCode::Char('R'), shift)],
+        );
+        bindings.insert(
+            BindableAction::RemoveProject,
+            vec![kb(KeyCode::Char('D'), shift)],
+        );
+        bindings.insert(
+            BindableAction::OpenInEditor,
+            vec![kb(KeyCode::Char('e'), none)],
+        );
 
         // Pane control
-        bindings.insert(BindableAction::TogglePane, vec![
-            kb(KeyCode::Tab, none),
-        ]);
-        bindings.insert(BindableAction::TogglePaneReverse, vec![
-            kb(KeyCode::BackTab, shift),
-        ]);
-        bindings.insert(BindableAction::ShrinkLeftPane, vec![
-            kb(KeyCode::Char('<'), shift),
-            kb(KeyCode::Char('<'), none),
-        ]);
-        bindings.insert(BindableAction::GrowLeftPane, vec![
-            kb(KeyCode::Char('>'), shift),
-            kb(KeyCode::Char('>'), none),
-        ]);
+        bindings.insert(BindableAction::TogglePane, vec![kb(KeyCode::Tab, none)]);
+        bindings.insert(
+            BindableAction::TogglePaneReverse,
+            vec![kb(KeyCode::BackTab, shift)],
+        );
+        bindings.insert(
+            BindableAction::ShrinkLeftPane,
+            vec![kb(KeyCode::Char('<'), shift), kb(KeyCode::Char('<'), none)],
+        );
+        bindings.insert(
+            BindableAction::GrowLeftPane,
+            vec![kb(KeyCode::Char('>'), shift), kb(KeyCode::Char('>'), none)],
+        );
 
         // Scrolling
         bindings.insert(BindableAction::ScrollUp, vec![]);
         bindings.insert(BindableAction::ScrollDown, vec![]);
-        bindings.insert(BindableAction::PageUp, vec![
-            kb(KeyCode::Char('u'), ctrl),
-            kb(KeyCode::PageUp, none),
-        ]);
-        bindings.insert(BindableAction::PageDown, vec![
-            kb(KeyCode::Char('d'), ctrl),
-            kb(KeyCode::PageDown, none),
-        ]);
+        bindings.insert(
+            BindableAction::PageUp,
+            vec![kb(KeyCode::Char('u'), ctrl), kb(KeyCode::PageUp, none)],
+        );
+        bindings.insert(
+            BindableAction::PageDown,
+            vec![kb(KeyCode::Char('d'), ctrl), kb(KeyCode::PageDown, none)],
+        );
+
+        // Info Pane
+        bindings.insert(
+            BindableAction::GenerateSummary,
+            vec![kb(KeyCode::Char('g'), none)],
+        );
 
         // Other
-        bindings.insert(BindableAction::ShowHelp, vec![
-            kb(KeyCode::Char('?'), shift),
-            kb(KeyCode::Char('?'), none),
-        ]);
-        bindings.insert(BindableAction::ShowSettings, vec![
-            kb(KeyCode::Char(','), none),
-        ]);
-        bindings.insert(BindableAction::Quit, vec![
-            kb(KeyCode::Char('q'), none),
-            kb(KeyCode::Char('c'), ctrl),
-        ]);
+        bindings.insert(
+            BindableAction::ShowHelp,
+            vec![kb(KeyCode::Char('?'), shift), kb(KeyCode::Char('?'), none)],
+        );
+        bindings.insert(
+            BindableAction::ShowSettings,
+            vec![kb(KeyCode::Char(','), none)],
+        );
+        bindings.insert(
+            BindableAction::Quit,
+            vec![kb(KeyCode::Char('q'), none), kb(KeyCode::Char('c'), ctrl)],
+        );
 
         let lookup = Self::build_lookup(&bindings);
         Self { bindings, lookup }
@@ -543,7 +579,10 @@ impl<'de> Visitor<'de> for KeyBindingsVisitor {
         formatter.write_str("a keybindings map (action_name = [\"key1\", \"key2\"])")
     }
 
-    fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> std::result::Result<Self::Value, A::Error> {
+    fn visit_map<A: de::MapAccess<'de>>(
+        self,
+        mut map: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
         // Start from defaults, then overlay user-specified bindings
         let mut result = KeyBindings::default();
 
@@ -582,7 +621,10 @@ impl<'de> Visitor<'de> for OneOrManyVisitor {
         Ok(OneOrMany(vec![kb]))
     }
 
-    fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error> {
+    fn visit_seq<A: SeqAccess<'de>>(
+        self,
+        mut seq: A,
+    ) -> std::result::Result<Self::Value, A::Error> {
         let mut keys = Vec::new();
         while let Some(s) = seq.next_element::<String>()? {
             keys.push(KeyBinding::from_str(&s).map_err(de::Error::custom)?);
@@ -634,12 +676,24 @@ mod tests {
         assert_eq!("Enter".parse::<KeyBinding>().unwrap().code, KeyCode::Enter);
         assert_eq!("Esc".parse::<KeyBinding>().unwrap().code, KeyCode::Esc);
         assert_eq!("Tab".parse::<KeyBinding>().unwrap().code, KeyCode::Tab);
-        assert_eq!("BackTab".parse::<KeyBinding>().unwrap().code, KeyCode::BackTab);
-        assert_eq!("Space".parse::<KeyBinding>().unwrap().code, KeyCode::Char(' '));
+        assert_eq!(
+            "BackTab".parse::<KeyBinding>().unwrap().code,
+            KeyCode::BackTab
+        );
+        assert_eq!(
+            "Space".parse::<KeyBinding>().unwrap().code,
+            KeyCode::Char(' ')
+        );
         assert_eq!("Up".parse::<KeyBinding>().unwrap().code, KeyCode::Up);
         assert_eq!("Down".parse::<KeyBinding>().unwrap().code, KeyCode::Down);
-        assert_eq!("PageUp".parse::<KeyBinding>().unwrap().code, KeyCode::PageUp);
-        assert_eq!("PageDown".parse::<KeyBinding>().unwrap().code, KeyCode::PageDown);
+        assert_eq!(
+            "PageUp".parse::<KeyBinding>().unwrap().code,
+            KeyCode::PageUp
+        );
+        assert_eq!(
+            "PageDown".parse::<KeyBinding>().unwrap().code,
+            KeyCode::PageDown
+        );
     }
 
     #[test]
@@ -724,6 +778,9 @@ mod tests {
 
         let shift_n = KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT);
         assert_eq!(kb.resolve(&shift_n), Some(BindableAction::NewProject));
+
+        let shift_r = KeyEvent::new(KeyCode::Char('R'), KeyModifiers::SHIFT);
+        assert_eq!(kb.resolve(&shift_r), Some(BindableAction::RestartSession));
 
         // Quit
         let q = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
@@ -828,6 +885,16 @@ mod tests {
         let kb = KeyBindings::default();
         let sections = kb.sections();
         let section_names: Vec<&str> = sections.iter().map(|(name, _)| *name).collect();
-        assert_eq!(section_names, vec!["Navigation", "Session Management", "Layout", "Scrolling", "Other"]);
+        assert_eq!(
+            section_names,
+            vec![
+                "Navigation",
+                "Session Management",
+                "Layout",
+                "Scrolling",
+                "Info Pane",
+                "Other"
+            ]
+        );
     }
 }

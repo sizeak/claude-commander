@@ -67,6 +67,12 @@ pub struct Config {
     /// Interval in milliseconds for checking state file changes from other instances (0 = disabled)
     pub state_sync_interval_ms: u64,
 
+    /// Interval in milliseconds for polling agent state (Working/Idle/Waiting) (0 = disabled)
+    pub agent_state_poll_interval_ms: u64,
+
+    /// Show status indicator circles (●/◐/○) in the session list
+    pub show_status_indicator: bool,
+
     /// Dim the right pane (preview/diff/shell) when the session list is focused
     pub dim_unfocused_preview: bool,
 
@@ -77,6 +83,18 @@ pub struct Config {
 
     /// Leader key for quick-switch modal (e.g. " " for Space, "ctrl+k", "f1")
     pub leader_key: String,
+
+    /// Show sequential numbers next to sessions for quick-jump hotkeys
+    pub show_session_numbers: bool,
+
+    /// Debounce delay in ms when typing multi-digit session numbers
+    pub session_number_debounce_ms: u64,
+
+    /// Enable AI-generated branch summaries in the Info pane
+    pub ai_summary_enabled: bool,
+
+    /// Claude model to use for AI summaries (Haiku recommended for cost efficiency)
+    pub ai_summary_model: String,
 
     /// Enable debug logging
     pub debug: bool,
@@ -109,9 +127,15 @@ impl Default for Config {
             pr_check_interval_secs: 600,
             fetch_before_create: true,
             state_sync_interval_ms: 2000,
+            agent_state_poll_interval_ms: 3000,
+            show_status_indicator: true,
             dim_unfocused_preview: true,
             dim_unfocused_opacity: 0.4,
             leader_key: " ".to_string(),
+            show_session_numbers: false,
+            session_number_debounce_ms: 250,
+            ai_summary_enabled: true,
+            ai_summary_model: "claude-haiku-4-5-20251001".to_string(),
             debug: false,
             log_file: None,
             keybindings: KeyBindings::default(),
@@ -527,6 +551,10 @@ mod tests {
         assert_eq!(config.pr_check_interval_secs, 600);
         assert!(config.fetch_before_create);
         assert_eq!(config.state_sync_interval_ms, 2000);
+        assert_eq!(config.agent_state_poll_interval_ms, 3000);
+        assert!(config.show_status_indicator);
+        assert!(config.ai_summary_enabled);
+        assert_eq!(config.ai_summary_model, "claude-haiku-4-5-20251001");
     }
 
     #[test]
@@ -536,6 +564,13 @@ mod tests {
         let (code, mods) = config.parse_leader_key();
         assert_eq!(code, KeyCode::Char(' '));
         assert_eq!(mods, KeyModifiers::NONE);
+    }
+
+    #[test]
+    fn test_default_session_numbers_config() {
+        let config = Config::default();
+        assert!(!config.show_session_numbers);
+        assert_eq!(config.session_number_debounce_ms, 250);
     }
 
     #[test]

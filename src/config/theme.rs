@@ -74,9 +74,8 @@ impl<'de> Visitor<'de> for ColorValueVisitor {
     type Value = ColorValue;
 
     fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
-        formatter.write_str(
-            "a color name (\"red\"), an index (117), or an RGB hex string (\"#89b4fa\")",
-        )
+        formatter
+            .write_str("a color name (\"red\"), an index (117), or an RGB hex string (\"#89b4fa\")")
     }
 
     fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
@@ -167,11 +166,17 @@ pub struct ThemeOverrides {
     pub selection_fg: Option<ColorValue>,
 
     // Session status indicators
+    pub status_creating: Option<ColorValue>,
     pub status_running: Option<ColorValue>,
     pub status_paused: Option<ColorValue>,
     pub status_stopped: Option<ColorValue>,
     pub status_pr: Option<ColorValue>,
     pub status_pr_merged: Option<ColorValue>,
+
+    // Agent state and notification indicators
+    pub agent_working: Option<ColorValue>,
+    pub agent_waiting: Option<ColorValue>,
+    pub unread_indicator: Option<ColorValue>,
 
     // Text
     pub text_primary: Option<ColorValue>,
@@ -258,10 +263,7 @@ mod tests {
         "##;
         let overrides: ThemeOverrides = toml::from_str(toml_str).unwrap();
         assert_eq!(overrides.preset.as_deref(), Some("truecolor"));
-        assert_eq!(
-            overrides.border_focused.unwrap().0,
-            Color::Rgb(255, 102, 0)
-        );
+        assert_eq!(overrides.border_focused.unwrap().0, Color::Rgb(255, 102, 0));
         assert_eq!(overrides.status_running.unwrap().0, Color::Green);
         assert_eq!(overrides.selection_bg.unwrap().0, Color::Indexed(60));
         // Unset fields remain None

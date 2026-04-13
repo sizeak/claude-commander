@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use claude_commander::SessionStatus;
-use claude_commander::config::{AppState, Config, StateStore};
+use claude_commander::config::{AppState, Config, ConfigStore, StateStore};
 use claude_commander::git::GitBackend;
 use claude_commander::session::SessionManager;
 
@@ -18,6 +18,14 @@ fn create_isolated_store(temp_dir: &TempDir) -> Arc<StateStore> {
     let state_path = temp_dir.path().join("state.json");
     let state = AppState::load_from(&state_path).unwrap();
     Arc::new(StateStore::with_path(state, state_path))
+}
+
+/// Helper to create an isolated ConfigStore for testing
+fn create_isolated_config_store(temp_dir: &TempDir, config: Config) -> Arc<ConfigStore> {
+    let config_path = temp_dir.path().join("config.toml");
+    let toml = toml::to_string_pretty(&config).unwrap();
+    std::fs::write(&config_path, toml).unwrap();
+    Arc::new(ConfigStore::with_path(config, config_path))
 }
 
 /// Helper to create a test git repository
@@ -133,8 +141,9 @@ async fn test_session_manager_add_project() {
     let state_temp_dir = TempDir::new().unwrap();
 
     let config = Config::default();
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
     let store = create_isolated_store(&state_temp_dir);
-    let manager = SessionManager::new(config, store.clone(), "");
+    let manager = SessionManager::new(config_store, store.clone(), "");
 
     // Add project
     let result = manager.add_project(repo_path.clone()).await;
@@ -168,26 +177,30 @@ async fn test_session_manager_create_session() {
         ..Config::default()
     };
 
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
     let store = create_isolated_store(&state_temp_dir);
-    let manager = SessionManager::new(config, store.clone(), "");
+    let manager = SessionManager::new(config_store, store.clone(), "");
 
     // Add project
     let project_id = manager.add_project(repo_path).await.unwrap();
 
-    // Create session
-    let result = manager
-        .create_session(
+    // Create session (prepare + finalize)
+    let session_id = manager
+        .prepare_session(
             &project_id,
             "test-session".to_string(),
             Some("bash".to_string()),
         )
-        .await;
+        .await
+        .expect("prepare_session should succeed");
+
+    let result = manager.finalize_session(&session_id).await;
 
     if let Err(e) = &result {
-        eprintln!("Error creating session: {}", e);
+        eprintln!("Error finalizing session: {}", e);
     }
 
-    assert!(result.is_ok(), "Should create session");
+    assert!(result.is_ok(), "Should finalize session");
 
     let session_id = result.unwrap();
 
@@ -227,19 +240,21 @@ async fn test_session_manager_pause_resume() {
         ..Config::default()
     };
 
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
     let store = create_isolated_store(&state_temp_dir);
-    let manager = SessionManager::new(config, store.clone(), "");
+    let manager = SessionManager::new(config_store, store.clone(), "");
 
-    // Add project and create session
+    // Add project and create session (prepare + finalize)
     let project_id = manager.add_project(repo_path).await.unwrap();
     let session_id = manager
-        .create_session(
+        .prepare_session(
             &project_id,
             "pause-test".to_string(),
             Some("bash".to_string()),
         )
         .await
         .unwrap();
+    manager.finalize_session(&session_id).await.unwrap();
 
     // Verify initial status
     {
@@ -267,6 +282,98 @@ async fn test_session_manager_pause_resume() {
     let _ = manager.kill_session(&session_id, true).await;
 
     // Keep temp dirs alive until end of test
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
+    drop(worktrees_dir);
+}
+
+#[tokio::test]
+async fn test_session_manager_restart() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let state_temp_dir = TempDir::new().unwrap();
+
+    let worktrees_dir = TempDir::new().unwrap();
+    let config = Config {
+        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        ..Config::default()
+    };
+
+    let store = create_isolated_store(&state_temp_dir);
+    let config_store = Arc::new(ConfigStore::new(config).unwrap());
+    let manager = SessionManager::new(config_store, store.clone(), "");
+
+    // Add project and create session (prepare + finalize)
+    let project_id = manager.add_project(repo_path).await.unwrap();
+    let session_id = manager
+        .prepare_session(
+            &project_id,
+            "restart-test".to_string(),
+            Some("bash".to_string()),
+        )
+        .await
+        .unwrap();
+    manager.finalize_session(&session_id).await.unwrap();
+
+    // Verify initial status is Running
+    {
+        let state = store.read().await;
+        let session = state.get_session(&session_id).unwrap();
+        assert_eq!(session.status, SessionStatus::Running);
+    }
+
+    // Restart from Running state
+    let result = manager.restart_session(&session_id).await;
+    assert!(result.is_ok(), "Should restart running session");
+
+    // Verify still Running after restart
+    {
+        let state = store.read().await;
+        let session = state.get_session(&session_id).unwrap();
+        assert_eq!(session.status, SessionStatus::Running);
+    }
+
+    // Pause, then restart from Paused state
+    manager.pause_session(&session_id).await.unwrap();
+    {
+        let state = store.read().await;
+        let session = state.get_session(&session_id).unwrap();
+        assert_eq!(session.status, SessionStatus::Paused);
+    }
+
+    let result = manager.restart_session(&session_id).await;
+    assert!(result.is_ok(), "Should restart paused session");
+
+    {
+        let state = store.read().await;
+        let session = state.get_session(&session_id).unwrap();
+        assert_eq!(session.status, SessionStatus::Running);
+    }
+
+    // Kill (-> Stopped), then restart from Stopped state
+    manager.kill_session(&session_id, false).await.unwrap();
+    {
+        let state = store.read().await;
+        let session = state.get_session(&session_id).unwrap();
+        assert_eq!(session.status, SessionStatus::Stopped);
+    }
+
+    let result = manager.restart_session(&session_id).await;
+    assert!(result.is_ok(), "Should restart stopped session");
+
+    {
+        let state = store.read().await;
+        let session = state.get_session(&session_id).unwrap();
+        assert_eq!(session.status, SessionStatus::Running);
+    }
+
+    // Cleanup
+    let _ = manager.kill_session(&session_id, true).await;
+
     drop(repo_temp_dir);
     drop(state_temp_dir);
     drop(worktrees_dir);
@@ -321,8 +428,9 @@ async fn test_sync_worktrees_imports_external() {
         ..Config::default()
     };
 
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
     let store = create_isolated_store(&state_temp_dir);
-    let manager = SessionManager::new(config, store.clone(), "");
+    let manager = SessionManager::new(config_store, store.clone(), "");
 
     // Add project (no worktrees yet)
     let project_id = manager.add_project(repo_path.clone()).await.unwrap();
@@ -455,8 +563,7 @@ async fn create_test_repo_with_remote() -> (TempDir, PathBuf, TempDir, PathBuf) 
 
 #[tokio::test]
 async fn test_detect_main_branch_with_remote() {
-    let (_bare_dir, _bare_path, _work_dir, work_path) =
-        create_test_repo_with_remote().await;
+    let (_bare_dir, _bare_path, _work_dir, work_path) = create_test_repo_with_remote().await;
 
     // Set origin/HEAD so remote_default_branch() can resolve it
     tokio::process::Command::new("git")
@@ -492,22 +599,26 @@ async fn test_create_session_no_remote_falls_back() {
         ..Config::default()
     };
 
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
     let store = create_isolated_store(&state_temp_dir);
-    let manager = SessionManager::new(config, store.clone(), "");
+    let manager = SessionManager::new(config_store, store.clone(), "");
 
     let project_id = manager.add_project(repo_path).await.unwrap();
 
-    let result = manager
-        .create_session(
+    let session_id = manager
+        .prepare_session(
             &project_id,
             "fallback-test".to_string(),
             Some("bash".to_string()),
         )
-        .await;
+        .await
+        .expect("prepare_session should succeed");
+
+    let result = manager.finalize_session(&session_id).await;
 
     assert!(
         result.is_ok(),
-        "Session creation should succeed without remote: {:?}",
+        "Session finalization should succeed without remote: {:?}",
         result.err()
     );
 

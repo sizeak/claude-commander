@@ -21,10 +21,7 @@ use crate::error::{GitError, Result};
 ///
 /// The intersection (files that are both gitignored AND match `.worktreeinclude`)
 /// is copied into the worktree. Symlinks are skipped for security.
-pub(super) async fn copy_worktree_includes(
-    repo_path: &Path,
-    worktree_path: &Path,
-) -> Result<()> {
+pub(super) async fn copy_worktree_includes(repo_path: &Path, worktree_path: &Path) -> Result<()> {
     let include_file = repo_path.join(".worktreeinclude");
     if !tokio::fs::try_exists(&include_file).await.unwrap_or(false) {
         return Ok(());
@@ -62,9 +59,8 @@ pub(super) async fn copy_worktree_includes(
             .output(),
     );
 
-    let gitignored_output = gitignored_result.map_err(|e| {
-        GitError::WorktreeError(format!("Failed to list gitignored files: {}", e))
-    })?;
+    let gitignored_output = gitignored_result
+        .map_err(|e| GitError::WorktreeError(format!("Failed to list gitignored files: {}", e)))?;
     let included_output = included_result.map_err(|e| {
         GitError::WorktreeError(format!("Failed to list worktreeinclude files: {}", e))
     })?;
@@ -215,10 +211,7 @@ mod tests {
     fn test_parse_nul_separated() {
         let input = b"foo\0bar/baz\0node_modules/\0";
         let result = parse_nul_separated(input);
-        assert_eq!(
-            result,
-            HashSet::from(["foo", "bar/baz", "node_modules"])
-        );
+        assert_eq!(result, HashSet::from(["foo", "bar/baz", "node_modules"]));
     }
 
     #[test]
@@ -281,11 +274,17 @@ mod tests {
         init_repo(&repo).await;
 
         // Create empty .worktreeinclude
-        tokio::fs::write(repo.join(".worktreeinclude"), "").await.unwrap();
+        tokio::fs::write(repo.join(".worktreeinclude"), "")
+            .await
+            .unwrap();
 
         // Create a gitignored file
-        tokio::fs::write(repo.join(".gitignore"), "*.log\n").await.unwrap();
-        tokio::fs::write(repo.join("app.log"), "log content").await.unwrap();
+        tokio::fs::write(repo.join(".gitignore"), "*.log\n")
+            .await
+            .unwrap();
+        tokio::fs::write(repo.join("app.log"), "log content")
+            .await
+            .unwrap();
 
         let worktree = tmp.path().join("wt");
         tokio::fs::create_dir(&worktree).await.unwrap();
@@ -304,19 +303,37 @@ mod tests {
         init_repo(&repo).await;
 
         // .gitignore ignores *.log and .env
-        tokio::fs::write(repo.join(".gitignore"), "*.log\n.env\n").await.unwrap();
+        tokio::fs::write(repo.join(".gitignore"), "*.log\n.env\n")
+            .await
+            .unwrap();
         // .worktreeinclude only wants *.log
-        tokio::fs::write(repo.join(".worktreeinclude"), "*.log\n").await.unwrap();
+        tokio::fs::write(repo.join(".worktreeinclude"), "*.log\n")
+            .await
+            .unwrap();
 
         // Create files
-        tokio::fs::write(repo.join("app.log"), "log data").await.unwrap();
-        tokio::fs::write(repo.join(".env"), "SECRET=x").await.unwrap();
+        tokio::fs::write(repo.join("app.log"), "log data")
+            .await
+            .unwrap();
+        tokio::fs::write(repo.join(".env"), "SECRET=x")
+            .await
+            .unwrap();
         tokio::fs::create_dir(repo.join("src")).await.unwrap();
-        tokio::fs::write(repo.join("src/main.rs"), "fn main(){}").await.unwrap();
+        tokio::fs::write(repo.join("src/main.rs"), "fn main(){}")
+            .await
+            .unwrap();
 
         // Commit tracked files so git knows about them
-        git(&repo, &["add", ".gitignore", ".worktreeinclude", "src/main.rs"]).await;
-        git(&repo, &["-c", "commit.gpgsign=false", "commit", "-m", "add files"]).await;
+        git(
+            &repo,
+            &["add", ".gitignore", ".worktreeinclude", "src/main.rs"],
+        )
+        .await;
+        git(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "add files"],
+        )
+        .await;
 
         let worktree = tmp.path().join("wt");
         tokio::fs::create_dir(&worktree).await.unwrap();
@@ -326,7 +343,9 @@ mod tests {
 
         // app.log is gitignored AND in .worktreeinclude → copied
         assert!(worktree.join("app.log").exists());
-        let content = tokio::fs::read_to_string(worktree.join("app.log")).await.unwrap();
+        let content = tokio::fs::read_to_string(worktree.join("app.log"))
+            .await
+            .unwrap();
         assert_eq!(content, "log data");
 
         // .env is gitignored but NOT in .worktreeinclude → not copied
@@ -344,18 +363,30 @@ mod tests {
         init_repo(&repo).await;
 
         // .gitignore ignores node_modules/
-        tokio::fs::write(repo.join(".gitignore"), "node_modules/\n").await.unwrap();
+        tokio::fs::write(repo.join(".gitignore"), "node_modules/\n")
+            .await
+            .unwrap();
         // .worktreeinclude includes node_modules/
-        tokio::fs::write(repo.join(".worktreeinclude"), "node_modules/\n").await.unwrap();
+        tokio::fs::write(repo.join(".worktreeinclude"), "node_modules/\n")
+            .await
+            .unwrap();
 
         // Create node_modules with nested structure
         let nm = repo.join("node_modules");
         tokio::fs::create_dir_all(nm.join("pkg/lib")).await.unwrap();
-        tokio::fs::write(nm.join("pkg/package.json"), r#"{"name":"pkg"}"#).await.unwrap();
-        tokio::fs::write(nm.join("pkg/lib/index.js"), "module.exports = {}").await.unwrap();
+        tokio::fs::write(nm.join("pkg/package.json"), r#"{"name":"pkg"}"#)
+            .await
+            .unwrap();
+        tokio::fs::write(nm.join("pkg/lib/index.js"), "module.exports = {}")
+            .await
+            .unwrap();
 
         git(&repo, &["add", ".gitignore", ".worktreeinclude"]).await;
-        git(&repo, &["-c", "commit.gpgsign=false", "commit", "-m", "add files"]).await;
+        git(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "add files"],
+        )
+        .await;
 
         let worktree = tmp.path().join("wt");
         tokio::fs::create_dir(&worktree).await.unwrap();
@@ -378,17 +409,27 @@ mod tests {
         tokio::fs::create_dir(&repo).await.unwrap();
         init_repo(&repo).await;
 
-        tokio::fs::write(repo.join(".gitignore"), "build/\n").await.unwrap();
-        tokio::fs::write(repo.join(".worktreeinclude"), "build/\n").await.unwrap();
+        tokio::fs::write(repo.join(".gitignore"), "build/\n")
+            .await
+            .unwrap();
+        tokio::fs::write(repo.join(".worktreeinclude"), "build/\n")
+            .await
+            .unwrap();
 
         // Create build dir with a real file and a symlink
         let build = repo.join("build");
         tokio::fs::create_dir(&build).await.unwrap();
-        tokio::fs::write(build.join("output.bin"), "binary").await.unwrap();
+        tokio::fs::write(build.join("output.bin"), "binary")
+            .await
+            .unwrap();
         symlink("/etc/passwd", build.join("sneaky_link")).unwrap();
 
         git(&repo, &["add", ".gitignore", ".worktreeinclude"]).await;
-        git(&repo, &["-c", "commit.gpgsign=false", "commit", "-m", "add files"]).await;
+        git(
+            &repo,
+            &["-c", "commit.gpgsign=false", "commit", "-m", "add files"],
+        )
+        .await;
 
         let worktree = tmp.path().join("wt");
         tokio::fs::create_dir(&worktree).await.unwrap();
