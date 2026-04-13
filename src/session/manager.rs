@@ -1,6 +1,6 @@
 //! Session manager - coordinates session lifecycle
 //!
-//! Handles the creation, pause, resume, and termination of sessions,
+//! Handles the creation, restart, and termination of sessions,
 //! coordinating between tmux and git operations.
 
 use std::path::PathBuf;
@@ -199,8 +199,7 @@ impl SessionManager {
 
         let branch_name = self.generate_branch_name(&title);
 
-        let session =
-            WorktreeSession::new_creating(*project_id, title, branch_name, program);
+        let session = WorktreeSession::new_creating(*project_id, title, branch_name, program);
         let session_id = session.id;
 
         self.store
@@ -363,80 +362,6 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Pause a session (detach from tmux, keep worktree)
-    #[instrument(skip(self))]
-    pub async fn pause_session(&self, session_id: &SessionId) -> Result<()> {
-        let sid = *session_id;
-        self.store
-            .try_mutate(move |state| {
-                let session = state
-                    .get_session_mut(&sid)
-                    .ok_or(SessionError::NotFound(sid))?;
-
-                if !session.status.can_pause() {
-                    return Err(SessionError::InvalidState(sid).into());
-                }
-
-                session.set_status(SessionStatus::Paused);
-                Ok(())
-            })
-            .await?;
-
-        info!("Paused session {}", session_id);
-        Ok(())
-    }
-
-    /// Resume a paused session
-    #[instrument(skip(self))]
-    pub async fn resume_session(&self, session_id: &SessionId) -> Result<()> {
-        // Read session info first
-        let (tmux_session_name, worktree_path, program, can_resume, status_bar) = {
-            let state = self.store.read().await;
-            let session = state
-                .get_session(session_id)
-                .ok_or(SessionError::NotFound(*session_id))?;
-            (
-                session.tmux_session_name.clone(),
-                session.worktree_path.clone(),
-                session.program.clone(),
-                session.status.can_resume(),
-                self.status_bar_info(session, &state),
-            )
-        };
-
-        if !can_resume {
-            return Err(SessionError::InvalidState(*session_id).into());
-        }
-
-        // Check if tmux session still exists
-        let exists = self.tmux.session_exists(&tmux_session_name).await?;
-
-        if !exists {
-            let resume_program = format!("{} --resume", program);
-            self.tmux
-                .create_session(&tmux_session_name, &worktree_path, Some(&resume_program))
-                .await?;
-
-            // Configure CC status bar on the recreated session
-            self.tmux
-                .configure_status_bar(&tmux_session_name, &status_bar)
-                .await;
-        }
-
-        // Update status
-        let sid = *session_id;
-        self.store
-            .mutate(move |state| {
-                if let Some(session) = state.get_session_mut(&sid) {
-                    session.set_status(SessionStatus::Running);
-                }
-            })
-            .await?;
-
-        info!("Resumed session {}", session_id);
-        Ok(())
-    }
-
     /// Kill tmux sessions (main + shell) for a worktree session.
     async fn kill_tmux_sessions(&self, tmux_name: &str, shell_tmux_name: Option<&str>) {
         if let Err(e) = self.tmux.kill_session(tmux_name).await {
@@ -447,7 +372,7 @@ impl SessionManager {
         }
     }
 
-    /// Restart a session (kill tmux and recreate with --resume)
+    /// Restart a session (kill tmux and recreate, optionally with --resume)
     #[instrument(skip(self))]
     pub async fn restart_session(&self, session_id: &SessionId) -> Result<()> {
         let (tmux_session_name, shell_tmux_name, worktree_path, program, status_bar) = {
@@ -467,8 +392,12 @@ impl SessionManager {
         self.kill_tmux_sessions(&tmux_session_name, shell_tmux_name.as_deref())
             .await;
 
-        // Create a fresh tmux session with --resume
-        let resume_program = format!("{} --resume", program);
+        // Create a fresh tmux session, adding --resume if configured
+        let resume_program = if self.config_store.read().resume_session {
+            format!("{} --resume", program)
+        } else {
+            program.clone()
+        };
         let create_result = self
             .tmux
             .create_session(&tmux_session_name, &worktree_path, Some(&resume_program))
@@ -638,8 +567,13 @@ impl SessionManager {
         };
 
         if needs_recreate {
-            // Recreate the tmux session with --resume so the agent picks up where it left off
-            let resume_program = format!("{} --resume", program);
+            // Recreate the tmux session, adding --resume if configured so the
+            // agent picks up where it left off
+            let resume_program = if self.config_store.read().resume_session {
+                format!("{} --resume", program)
+            } else {
+                program.clone()
+            };
             info!("Recreating tmux session with: {}", resume_program);
             self.tmux
                 .create_session(&tmux_name, &worktree_path, Some(&resume_program))
@@ -1023,11 +957,12 @@ impl SessionManager {
             .await
     }
 
-    /// Sync unmanaged git worktrees as paused sessions
+    /// Sync unmanaged git worktrees as stopped sessions
     ///
     /// Lists actual git worktrees for the project and imports any that aren't
-    /// already tracked as sessions. Imported worktrees get `Paused` status so
-    /// they can be resumed/attached via the normal flow.
+    /// already tracked as sessions. Imported worktrees get `Stopped` status —
+    /// they have no running tmux session but can be attached to (which will
+    /// recreate the tmux session on demand).
     #[instrument(skip(self))]
     pub async fn sync_worktrees(&self, project_id: &ProjectId) -> Result<usize> {
         let (repo_path, existing_paths) = {
@@ -1110,7 +1045,7 @@ impl SessionManager {
                 wt.path.clone(),
                 self.config_store.read().default_program.clone(),
             );
-            session.set_status(SessionStatus::Paused);
+            session.set_status(SessionStatus::Stopped);
             session.base_commit = Some(wt.head.clone());
 
             info!(
@@ -1156,19 +1091,47 @@ impl SessionManager {
 
     /// Sanitize a name for use as branch/directory name
     fn sanitize_name(&self, name: &str) -> String {
-        name.to_lowercase()
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '-' || c == '_' {
-                    c
-                } else {
-                    '-'
-                }
-            })
-            .collect::<String>()
-            .trim_matches('-')
-            .to_string()
+        sanitize_name(name)
     }
+}
+
+/// Sanitize a name for use as a branch/directory name.
+///
+/// Lowercases, replaces non-alphanumeric characters (except `-` and `_`) with
+/// `-`, and trims leading/trailing `-`.
+pub fn sanitize_name(name: &str) -> String {
+    name.to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string()
+}
+
+/// Decide whether the `[branch]` annotation should be shown next to a session
+/// title.
+///
+/// Returns `Some(branch)` when the branch carries information beyond what
+/// sanitizing the title would produce. Returns `None` when the branch matches
+/// `sanitize_name(title)` either exactly or as the last `/`-segment (i.e. a
+/// configured `branch_prefix` like `"user/"` is treated as noise).
+pub fn display_branch<'a>(title: &str, branch: &'a str) -> Option<&'a str> {
+    let sanitized = sanitize_name(title);
+    if sanitized.is_empty() {
+        return Some(branch);
+    }
+    let matches = branch == sanitized
+        || branch
+            .rsplit_once('/')
+            .map(|(_, tail)| tail == sanitized)
+            .unwrap_or(false);
+    if matches { None } else { Some(branch) }
 }
 
 #[cfg(test)]
@@ -1263,6 +1226,55 @@ mod tests {
         let result = manager.sanitize_name("café");
         assert!(result.contains("caf"));
         assert!(result.contains('é'));
+    }
+
+    #[test]
+    fn test_display_branch_hides_exact_sanitized_match() {
+        assert_eq!(display_branch("Feature Auth", "feature-auth"), None);
+    }
+
+    #[test]
+    fn test_display_branch_hides_when_sanitization_changes_specials() {
+        // dot replaced by hyphen — still considered the deterministic sanitization
+        assert_eq!(display_branch("Fix bug v2.0", "fix-bug-v2-0"), None);
+    }
+
+    #[test]
+    fn test_display_branch_hides_when_prefixed() {
+        assert_eq!(display_branch("Feature Auth", "user/feature-auth"), None);
+        assert_eq!(display_branch("Feature Auth", "cc/feature-auth"), None);
+    }
+
+    #[test]
+    fn test_display_branch_shows_when_branch_renamed() {
+        assert_eq!(
+            display_branch("Feature Auth", "something-else"),
+            Some("something-else")
+        );
+    }
+
+    #[test]
+    fn test_display_branch_shows_when_suffix_differs() {
+        assert_eq!(
+            display_branch("Feature Auth", "feature-auth-v2"),
+            Some("feature-auth-v2")
+        );
+    }
+
+    #[test]
+    fn test_display_branch_shows_when_title_sanitizes_to_empty() {
+        // All-special title sanitizes to "" — we can't meaningfully compare,
+        // so always show the branch.
+        assert_eq!(display_branch("!!!", "fallback"), Some("fallback"));
+    }
+
+    #[test]
+    fn test_display_branch_shows_when_prefix_segment_doesnt_match() {
+        // Branch has a slash but the tail doesn't match the sanitized title
+        assert_eq!(
+            display_branch("Feature Auth", "user/something-else"),
+            Some("user/something-else")
+        );
     }
 
     #[test]

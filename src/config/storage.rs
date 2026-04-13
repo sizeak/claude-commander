@@ -440,15 +440,11 @@ mod tests {
         ));
         state.add_session(create_test_session_with_status(
             project_id,
-            SessionStatus::Paused,
-        ));
-        state.add_session(create_test_session_with_status(
-            project_id,
             SessionStatus::Stopped,
         ));
 
         let active = state.get_active_sessions();
-        assert_eq!(active.len(), 2);
+        assert_eq!(active.len(), 1);
         assert!(active.iter().all(|s| s.status != SessionStatus::Stopped));
     }
 

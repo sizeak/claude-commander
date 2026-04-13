@@ -73,6 +73,8 @@ claude-commander --config /path/to/config.toml
 
 The left pane shows projects and their worktree sessions in a tree view. Projects are sorted alphabetically. Sessions within a project are sorted newest first (by creation time).
 
+Each session row shows the title and, in `[brackets]`, the branch name — but only when the branch differs from what the title would sanitize to. A session titled "Feature Auth" with branch `feature-auth` (or `prefix/feature-auth` when `branch_prefix` is set) renders as just `Feature Auth`; the bracket reappears only when the branch carries new information, e.g. you renamed it to `feature-auth-v2` outside the app.
+
 ### Keyboard Shortcuts
 
 All keybindings below are defaults and can be customised via the `[keybindings]` config table (see [Configuration](#configuration)).
@@ -84,12 +86,11 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `Enter` | Attach to selected session |
 | `n` | New worktree session |
 | `N` | Add new project |
-| `p` | Pause session |
-| `r` | Resume session |
 | `d` | Delete session |
-| `R` | Restart session (kill tmux + recreate with /resume) |
+| `R` | Restart session (kill tmux + recreate; adds `--resume` when `resume_session = true`) |
 | `D` | Remove project |
 | `.` or `Ctrl-.` | Open in editor/IDE |
+| `o` | Open PR in browser (when the session has a PR) |
 | `s` | Open shell in worktree |
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
 | `<` / `>` | Shrink / grow left pane |
@@ -127,6 +128,10 @@ branch_prefix = ""
 
 # Fetch latest changes from origin before creating a new session
 fetch_before_create = true
+
+# Pass `--resume` when restarting/recreating a session so the agent picks up
+# where it left off. Set to false to start the program fresh each time.
+resume_session = true
 
 # Maximum concurrent tmux commands
 max_concurrent_tmux = 16
@@ -171,6 +176,11 @@ dim_unfocused_opacity = 0.4
 
 # Show sequential numbers next to sessions and enable digit-key jumping (1–99)
 # show_session_numbers = true
+
+# Render PR labels as colored text on the default background (the pre-pill
+# style). Default false renders them as colored "pill" blocks that stand out
+# more in the session list.
+# invert_pr_label_color = false
 
 # Debounce delay in ms when typing multi-digit session numbers
 # session_number_debounce_ms = 250

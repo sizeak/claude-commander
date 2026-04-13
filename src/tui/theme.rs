@@ -5,7 +5,7 @@
 
 use ratatui::style::{Color, Style};
 
-use crate::config::theme::ThemeOverrides;
+use crate::config::theme::{AgentWorkingStyle, ThemeOverrides};
 
 /// Terminal color capability
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -58,13 +58,28 @@ pub struct Theme {
     // Session status indicators
     pub status_creating: Color,
     pub status_running: Color,
-    pub status_paused: Color,
     pub status_stopped: Color,
     pub status_pr: Color,
     pub status_pr_merged: Color,
 
+    // PR badge text colours (per state). `status_pr` is reused for the
+    // "open + awaiting review" colour (light purple).
+    pub pr_open: Color,
+    pub pr_draft: Color,
+    pub pr_closed: Color,
+
+    // PR label pill backgrounds (darker variants of the text colours above)
+    // used when `invert_pr_label_color = false`.
+    pub pr_pill_open_bg: Color,
+    pub pr_pill_draft_bg: Color,
+    pub pr_pill_closed_bg: Color,
+    pub pr_pill_review_bg: Color,
+    pub pr_pill_merged_bg: Color,
+    /// Text colour used on top of PR pill backgrounds.
+    pub pr_pill_text: Color,
+
     // Agent state and notification indicators
-    pub agent_working: Color,
+    pub agent_working: AgentWorkingStyle,
     pub agent_waiting: Color,
     pub unread_indicator: Color,
 
@@ -73,7 +88,6 @@ pub struct Theme {
     pub text_secondary: Color,
     pub text_accent: Color,
     pub project_colors: Vec<(Color, Color)>, // (project_header, session_title)
-    pub text_pr: Color,
 
     // Diff colors
     pub diff_added: Color,
@@ -119,12 +133,24 @@ impl Theme {
 
             status_creating: Color::Yellow,
             status_running: Color::Green,
-            status_paused: Color::Yellow,
             status_stopped: Color::DarkGray,
             status_pr: Color::Magenta,
             status_pr_merged: Color::DarkGray,
 
-            agent_working: Color::Green,
+            pr_open: Color::Green,
+            pr_draft: Color::DarkGray,
+            pr_closed: Color::Red,
+
+            // Basic 16-colour palette: the non-"Light" ANSI colours are
+            // already dark enough to read white bold text on top.
+            pr_pill_open_bg: Color::Green,
+            pr_pill_draft_bg: Color::DarkGray,
+            pr_pill_closed_bg: Color::Red,
+            pr_pill_review_bg: Color::Magenta,
+            pr_pill_merged_bg: Color::Magenta,
+            pr_pill_text: Color::White,
+
+            agent_working: AgentWorkingStyle::Rainbow,
             agent_waiting: Color::Yellow,
             unread_indicator: Color::Blue,
 
@@ -139,7 +165,6 @@ impl Theme {
                 (Color::Green, Color::LightGreen),
                 (Color::Red, Color::LightRed),
             ],
-            text_pr: Color::Cyan,
 
             diff_added: Color::Green,
             diff_removed: Color::Red,
@@ -167,13 +192,24 @@ impl Theme {
 
             status_creating: Color::Indexed(228), // Pastel yellow
             status_running: Color::Indexed(156),  // Pastel mint green
-            status_paused: Color::Indexed(222),   // Pastel peach
             status_stopped: Color::Indexed(248),
             status_pr: Color::Indexed(141),       // Medium purple
             status_pr_merged: Color::Indexed(97), // Dark purple
 
-            agent_working: Color::Indexed(156), // Pastel mint
-            agent_waiting: Color::Indexed(208), // Orange
+            pr_open: Color::Indexed(114),   // Pastel green
+            pr_draft: Color::Indexed(245),  // Mid-grey
+            pr_closed: Color::Indexed(167), // Soft red
+
+            // Darker variants readable with bold near-white text
+            pr_pill_open_bg: Color::Indexed(22),    // Dark green
+            pr_pill_draft_bg: Color::Indexed(240),  // Dark grey
+            pr_pill_closed_bg: Color::Indexed(124), // Dark red
+            pr_pill_review_bg: Color::Indexed(97),  // Dark purple
+            pr_pill_merged_bg: Color::Indexed(54),  // Very dark purple
+            pr_pill_text: Color::Indexed(231),      // Near-white
+
+            agent_working: AgentWorkingStyle::Rainbow,
+            agent_waiting: Color::Indexed(208),    // Orange
             unread_indicator: Color::Indexed(117), // Sky blue
 
             text_primary: Color::Reset,
@@ -187,7 +223,6 @@ impl Theme {
                 (Color::Indexed(134), Color::Indexed(183)), // Purple
                 (Color::Indexed(73), Color::Indexed(152)),  // Teal
             ],
-            text_pr: Color::Indexed(117), // Sky blue
 
             diff_added: Color::Indexed(156),       // Pastel mint
             diff_removed: Color::Indexed(210),     // Pastel coral
@@ -215,12 +250,23 @@ impl Theme {
 
             status_creating: Color::Rgb(249, 240, 107), // Pastel yellow
             status_running: Color::Rgb(166, 227, 161),  // Pastel mint
-            status_paused: Color::Rgb(249, 226, 175),   // Pastel peach
             status_stopped: Color::Rgb(147, 153, 178),  // Muted lavender
             status_pr: Color::Rgb(203, 166, 247),       // Pastel mauve
             status_pr_merged: Color::Rgb(137, 100, 180), // Dark purple
 
-            agent_working: Color::Rgb(166, 227, 161), // Pastel mint
+            pr_open: Color::Rgb(126, 198, 153), // Soft GitHub-ish green
+            pr_draft: Color::Rgb(147, 153, 178), // Muted grey-lavender
+            pr_closed: Color::Rgb(243, 139, 168), // Pastel rose / soft red
+
+            // Darker variants for pill backgrounds, readable with bold near-white text
+            pr_pill_open_bg: Color::Rgb(46, 125, 80), // Dark green
+            pr_pill_draft_bg: Color::Rgb(80, 86, 110), // Dark slate
+            pr_pill_closed_bg: Color::Rgb(160, 60, 85), // Dark rose
+            pr_pill_review_bg: Color::Rgb(110, 75, 160), // Dark mauve
+            pr_pill_merged_bg: Color::Rgb(75, 55, 110), // Very dark purple
+            pr_pill_text: Color::Rgb(245, 245, 250),  // Near-white
+
+            agent_working: AgentWorkingStyle::Rainbow,
             agent_waiting: Color::Rgb(250, 179, 135), // Peach/orange
             unread_indicator: Color::Rgb(137, 180, 250), // Sky blue
 
@@ -235,7 +281,6 @@ impl Theme {
                 (Color::Rgb(160, 130, 200), Color::Rgb(200, 175, 240)), // Purple
                 (Color::Rgb(90, 170, 170), Color::Rgb(155, 215, 215)),  // Teal
             ],
-            text_pr: Color::Rgb(137, 180, 250), // Pastel sky blue
 
             diff_added: Color::Rgb(166, 227, 161), // Pastel mint
             diff_removed: Color::Rgb(243, 139, 168), // Pastel rose
@@ -282,17 +327,23 @@ impl Theme {
         apply!(selection_bg);
         apply!(status_creating);
         apply!(status_running);
-        apply!(status_paused);
         apply!(status_stopped);
         apply!(status_pr);
         apply!(status_pr_merged);
-        apply!(agent_working);
+        apply!(pr_open);
+        apply!(pr_draft);
+        apply!(pr_closed);
+        apply!(pr_pill_open_bg);
+        apply!(pr_pill_draft_bg);
+        apply!(pr_pill_closed_bg);
+        apply!(pr_pill_review_bg);
+        apply!(pr_pill_merged_bg);
+        apply!(pr_pill_text);
         apply!(agent_waiting);
         apply!(unread_indicator);
         apply!(text_primary);
         apply!(text_secondary);
         apply!(text_accent);
-        apply!(text_pr);
         apply!(diff_added);
         apply!(diff_removed);
         apply!(diff_hunk_header);
@@ -307,6 +358,12 @@ impl Theme {
         // selection_fg is Option<Color> in Theme but Option<ColorValue> in overrides
         if let Some(cv) = overrides.selection_fg {
             self.selection_fg = Some(cv.0);
+        }
+
+        // agent_working uses AgentWorkingStyle, not ColorValue, so it's applied
+        // directly without unwrapping a `.0`.
+        if let Some(style) = overrides.agent_working {
+            self.agent_working = style;
         }
 
         // project_colors is intentionally not overridable — paired-tuple
@@ -558,7 +615,7 @@ mod tests {
         assert_eq!(themed.status_running, Color::Yellow);
         // Untouched fields keep the base value
         assert_eq!(themed.border_unfocused, Color::DarkGray);
-        assert_eq!(themed.status_paused, Color::Yellow);
+        assert_eq!(themed.status_stopped, Color::DarkGray);
     }
 
     #[test]

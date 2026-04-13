@@ -29,12 +29,11 @@ pub enum BindableAction {
     SelectShell,
     NewSession,
     NewProject,
-    PauseSession,
-    ResumeSession,
     DeleteSession,
     RestartSession,
     RemoveProject,
     OpenInEditor,
+    OpenPullRequest,
     TogglePane,
     TogglePaneReverse,
     ShrinkLeftPane,
@@ -58,12 +57,11 @@ impl BindableAction {
         Self::SelectShell,
         Self::NewSession,
         Self::NewProject,
-        Self::PauseSession,
-        Self::ResumeSession,
         Self::DeleteSession,
         Self::RestartSession,
         Self::RemoveProject,
         Self::OpenInEditor,
+        Self::OpenPullRequest,
         Self::TogglePane,
         Self::TogglePaneReverse,
         Self::ShrinkLeftPane,
@@ -87,12 +85,11 @@ impl BindableAction {
             Self::SelectShell => "select_shell",
             Self::NewSession => "new_session",
             Self::NewProject => "new_project",
-            Self::PauseSession => "pause_session",
-            Self::ResumeSession => "resume_session",
             Self::DeleteSession => "delete_session",
             Self::RestartSession => "restart_session",
             Self::RemoveProject => "remove_project",
             Self::OpenInEditor => "open_in_editor",
+            Self::OpenPullRequest => "open_pull_request",
             Self::TogglePane => "toggle_pane",
             Self::TogglePaneReverse => "toggle_pane_reverse",
             Self::ShrinkLeftPane => "shrink_left_pane",
@@ -117,12 +114,11 @@ impl BindableAction {
             Self::SelectShell => "Open shell in worktree",
             Self::NewSession => "New worktree session",
             Self::NewProject => "New project (add git repo)",
-            Self::PauseSession => "Pause session",
-            Self::ResumeSession => "Resume session",
             Self::DeleteSession => "Delete/kill session",
             Self::RestartSession => "Restart session",
             Self::RemoveProject => "Remove project",
             Self::OpenInEditor => "Open in editor/IDE",
+            Self::OpenPullRequest => "Open PR in browser",
             Self::TogglePane => "Toggle preview/diff/shell view",
             Self::TogglePaneReverse => "Toggle view (reverse)",
             Self::ShrinkLeftPane => "Shrink left pane",
@@ -145,12 +141,11 @@ impl BindableAction {
             Self::SelectShell
             | Self::NewSession
             | Self::NewProject
-            | Self::PauseSession
-            | Self::ResumeSession
             | Self::DeleteSession
             | Self::RestartSession
             | Self::RemoveProject
-            | Self::OpenInEditor => "Session Management",
+            | Self::OpenInEditor
+            | Self::OpenPullRequest => "Session Management",
             Self::TogglePane
             | Self::TogglePaneReverse
             | Self::ShrinkLeftPane
@@ -173,12 +168,11 @@ impl FromStr for BindableAction {
             "select_shell" => Ok(Self::SelectShell),
             "new_session" => Ok(Self::NewSession),
             "new_project" => Ok(Self::NewProject),
-            "pause_session" => Ok(Self::PauseSession),
-            "resume_session" => Ok(Self::ResumeSession),
             "delete_session" => Ok(Self::DeleteSession),
             "restart_session" => Ok(Self::RestartSession),
             "remove_project" => Ok(Self::RemoveProject),
             "open_in_editor" => Ok(Self::OpenInEditor),
+            "open_pull_request" => Ok(Self::OpenPullRequest),
             "toggle_pane" => Ok(Self::TogglePane),
             "toggle_pane_reverse" => Ok(Self::TogglePaneReverse),
             "shrink_left_pane" => Ok(Self::ShrinkLeftPane),
@@ -475,14 +469,6 @@ impl Default for KeyBindings {
             vec![kb(KeyCode::Char('N'), shift)],
         );
         bindings.insert(
-            BindableAction::PauseSession,
-            vec![kb(KeyCode::Char('p'), none)],
-        );
-        bindings.insert(
-            BindableAction::ResumeSession,
-            vec![kb(KeyCode::Char('r'), none)],
-        );
-        bindings.insert(
             BindableAction::DeleteSession,
             vec![kb(KeyCode::Char('d'), none)],
         );
@@ -500,6 +486,10 @@ impl Default for KeyBindings {
                 kb(KeyCode::Char('.'), none),
                 kb(KeyCode::Char('.'), ctrl),
             ],
+        );
+        bindings.insert(
+            BindableAction::OpenPullRequest,
+            vec![kb(KeyCode::Char('o'), none)],
         );
 
         // Pane control
@@ -596,9 +586,17 @@ impl<'de> Visitor<'de> for KeyBindingsVisitor {
         let mut result = KeyBindings::default();
 
         while let Some(key) = map.next_key::<String>()? {
-            let action = BindableAction::from_str(&key).map_err(de::Error::custom)?;
-            let keys: OneOrMany = map.next_value()?;
-            result.bindings.insert(action, keys.0);
+            match BindableAction::from_str(&key) {
+                Ok(action) => {
+                    let keys: OneOrMany = map.next_value()?;
+                    result.bindings.insert(action, keys.0);
+                }
+                Err(_) => {
+                    // Skip unknown actions (e.g. `pause_session` / `resume_session`
+                    // from configs written before the feature was removed).
+                    let _: de::IgnoredAny = map.next_value()?;
+                }
+            }
         }
 
         // Rebuild lookup after applying overrides
@@ -909,9 +907,17 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_action_errors() {
-        let toml = r#"nonexistent_action = ["k"]"#;
-        assert!(toml::from_str::<KeyBindings>(toml).is_err());
+    fn test_unknown_action_skipped() {
+        // Unknown action names (e.g. removed features like `pause_session`) are
+        // silently ignored so old configs don't break.
+        let toml = r#"
+            nonexistent_action = ["k"]
+            navigate_up = "w"
+        "#;
+        let kb: KeyBindings = toml::from_str(toml).unwrap();
+        // Recognised override still applied
+        let w = KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&w), Some(BindableAction::NavigateUp));
     }
 
     // -- BindableAction --

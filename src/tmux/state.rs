@@ -78,6 +78,19 @@ pub fn strip_ansi(s: &str) -> String {
     ANSI_RE.replace_all(s, "").into_owned()
 }
 
+/// Whether a program string launches Claude Code.
+///
+/// Handles path prefixes and trailing arguments, e.g. both `claude`,
+/// `claude --dangerously-skip-permissions`, and `/usr/local/bin/claude -c`
+/// are recognised.
+pub fn is_claude_program(program: &str) -> bool {
+    program
+        .split_whitespace()
+        .next()
+        .and_then(|tok| tok.rsplit('/').next())
+        .is_some_and(|name| name.eq_ignore_ascii_case("claude"))
+}
+
 /// Agent state detector that polls tmux sessions and caches results.
 pub struct AgentStateDetector {
     executor: TmuxExecutor,
@@ -127,10 +140,7 @@ impl AgentStateDetector {
                 // Title says "not working", check content
             }
             Err(e) => {
-                debug!(
-                    "Failed to get pane title for {}: {}",
-                    tmux_session_name, e
-                );
+                debug!("Failed to get pane title for {}: {}", tmux_session_name, e);
                 return AgentState::Unknown;
             }
         }
@@ -146,10 +156,7 @@ impl AgentStateDetector {
                 state
             }
             Err(e) => {
-                debug!(
-                    "Failed to capture pane for {}: {}",
-                    tmux_session_name, e
-                );
+                debug!("Failed to capture pane for {}: {}", tmux_session_name, e);
                 AgentState::Unknown
             }
         }
@@ -185,7 +192,7 @@ impl AgentStateDetector {
         let mut results = HashMap::new();
 
         for (session_id, tmux_name, program) in sessions {
-            let state = if program.eq_ignore_ascii_case("claude") {
+            let state = if is_claude_program(program) {
                 self.detect(tmux_name).await
             } else {
                 AgentState::Unknown
@@ -322,6 +329,41 @@ mod tests {
             Instant::now() - Duration::from_secs(10),
         );
         assert!(entry.1.elapsed() > Duration::from_secs(5));
+    }
+
+    // -- is_claude_program tests --
+
+    #[test]
+    fn test_is_claude_program_bare() {
+        assert!(is_claude_program("claude"));
+    }
+
+    #[test]
+    fn test_is_claude_program_case_insensitive() {
+        assert!(is_claude_program("Claude"));
+        assert!(is_claude_program("CLAUDE"));
+    }
+
+    #[test]
+    fn test_is_claude_program_with_args() {
+        assert!(is_claude_program(
+            "claude --allow-dangerously-skip-permissions"
+        ));
+        assert!(is_claude_program("claude -c"));
+    }
+
+    #[test]
+    fn test_is_claude_program_with_absolute_path() {
+        assert!(is_claude_program("/usr/local/bin/claude"));
+        assert!(is_claude_program("/usr/local/bin/claude --debug"));
+    }
+
+    #[test]
+    fn test_is_claude_program_rejects_others() {
+        assert!(!is_claude_program("aider"));
+        assert!(!is_claude_program("bash"));
+        assert!(!is_claude_program(""));
+        assert!(!is_claude_program("claude-code")); // different binary name
     }
 
     // -- detect_all filtering --

@@ -1,12 +1,12 @@
 ---
 source: src/tui/render_tests.rs
-assertion_line: 333
+assertion_line: 403
 expression: terminal.backend()
 ---
 " claude-commander [main] (3)                                          "
 "     1 ● Add auth feature [feature-auth]                              "
-"     2 ◐ Fix login bug [fix-login]                                    "
-"     3 ○ Refactor DB [refactor-db]                                    "
+"     2 ○ Fix login bug [fix-login]                                    "
+"     3 ○ Refactor DB                                                  "
 "                                                                      "
 "                                                                      "
 "                                                                      "

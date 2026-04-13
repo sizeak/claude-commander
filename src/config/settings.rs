@@ -47,6 +47,12 @@ pub struct Config {
     /// Interval in seconds between GitHub PR checks (0 = disabled)
     pub pr_check_interval_secs: u64,
 
+    /// Label names that mark an open PR as awaiting reviewer action (case-insensitive).
+    /// When any of these labels are present on an open PR, the PR badge is coloured
+    /// with the "review" colour (light purple) instead of the regular open colour.
+    #[serde(default = "default_pr_review_labels")]
+    pub pr_review_labels: Vec<String>,
+
     /// Editor/IDE command for opening sessions (e.g. "code", "zed", "nvim")
     pub editor: Option<String>,
 
@@ -58,6 +64,11 @@ pub struct Config {
     #[serde(alias = "pull_before_create")]
     pub fetch_before_create: bool,
 
+    /// Pass `--resume` to the program when restarting or recreating a session,
+    /// so the agent picks up where it left off. When false, the program is
+    /// started fresh.
+    pub resume_session: bool,
+
     /// Interval in milliseconds for checking state file changes from other instances (0 = disabled)
     pub state_sync_interval_ms: u64,
 
@@ -66,6 +77,12 @@ pub struct Config {
 
     /// Show status indicator circles (●/◐/○) in the session list
     pub show_status_indicator: bool,
+
+    /// When true, render PR labels as colored text on the default background
+    /// (the pre-pill behavior). When false (default), PR labels render as a
+    /// pill — colored background block with contrasting text — so they stand
+    /// out more in the session list.
+    pub invert_pr_label_color: bool,
 
     /// Dim the right pane (preview/diff/shell) when the session list is focused
     pub dim_unfocused_preview: bool,
@@ -118,10 +135,13 @@ impl Default for Config {
             editor_gui: None,
             shell_program: std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string()),
             pr_check_interval_secs: 600,
+            pr_review_labels: default_pr_review_labels(),
             fetch_before_create: true,
+            resume_session: true,
             state_sync_interval_ms: 2000,
             agent_state_poll_interval_ms: 3000,
             show_status_indicator: true,
+            invert_pr_label_color: false,
             dim_unfocused_preview: true,
             dim_unfocused_opacity: 0.4,
             leader_key: " ".to_string(),
@@ -135,6 +155,14 @@ impl Default for Config {
             theme: ThemeOverrides::default(),
         }
     }
+}
+
+fn default_pr_review_labels() -> Vec<String> {
+    vec![
+        "dev-review-required".to_string(),
+        "ready-for-test".to_string(),
+        "trivial".to_string(),
+    ]
 }
 
 impl Config {
@@ -474,6 +502,7 @@ mod tests {
         assert_eq!(config.diff_cache_ttl_ms, 500);
         assert_eq!(config.pr_check_interval_secs, 600);
         assert!(config.fetch_before_create);
+        assert!(config.resume_session);
         assert_eq!(config.state_sync_interval_ms, 2000);
         assert_eq!(config.agent_state_poll_interval_ms, 3000);
         assert!(config.show_status_indicator);

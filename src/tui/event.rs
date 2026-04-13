@@ -126,10 +126,6 @@ pub enum UserCommand {
     NewSession,
     /// Create new project
     NewProject,
-    /// Pause current session
-    PauseSession,
-    /// Resume current session
-    ResumeSession,
     /// Delete/kill current session
     DeleteSession,
     /// Restart current session (kill tmux and recreate)
@@ -138,6 +134,8 @@ pub enum UserCommand {
     RemoveProject,
     /// Open worktree in editor/IDE
     OpenInEditor,
+    /// Open the selected session's PR URL in a web browser
+    OpenPullRequest,
     /// Toggle between preview/diff panes
     TogglePane,
     /// Toggle between preview/diff panes (reverse)
@@ -213,12 +211,11 @@ impl From<BindableAction> for UserCommand {
             BindableAction::SelectShell => Self::SelectShell,
             BindableAction::NewSession => Self::NewSession,
             BindableAction::NewProject => Self::NewProject,
-            BindableAction::PauseSession => Self::PauseSession,
-            BindableAction::ResumeSession => Self::ResumeSession,
             BindableAction::DeleteSession => Self::DeleteSession,
             BindableAction::RestartSession => Self::RestartSession,
             BindableAction::RemoveProject => Self::RemoveProject,
             BindableAction::OpenInEditor => Self::OpenInEditor,
+            BindableAction::OpenPullRequest => Self::OpenPullRequest,
             BindableAction::TogglePane => Self::TogglePane,
             BindableAction::TogglePaneReverse => Self::TogglePaneReverse,
             BindableAction::ShrinkLeftPane => Self::ShrinkLeftPane,
@@ -548,16 +545,6 @@ mod tests {
                 UserCommand::NewProject,
             ),
             (
-                KeyCode::Char('p'),
-                KeyModifiers::NONE,
-                UserCommand::PauseSession,
-            ),
-            (
-                KeyCode::Char('r'),
-                KeyModifiers::NONE,
-                UserCommand::ResumeSession,
-            ),
-            (
                 KeyCode::Char('d'),
                 KeyModifiers::NONE,
                 UserCommand::DeleteSession,
@@ -581,6 +568,11 @@ mod tests {
                 KeyCode::Char('.'),
                 KeyModifiers::CONTROL,
                 UserCommand::OpenInEditor,
+            ),
+            (
+                KeyCode::Char('o'),
+                KeyModifiers::NONE,
+                UserCommand::OpenPullRequest,
             ),
         ];
 

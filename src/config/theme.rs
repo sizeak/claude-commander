@@ -141,6 +141,98 @@ fn parse_color_str(s: &str) -> Result<ColorValue, String> {
 }
 
 // ---------------------------------------------------------------------------
+// AgentWorkingStyle — a special colour value that can be "rainbow" or a solid
+// colour. Used only for the Working spinner.
+// ---------------------------------------------------------------------------
+
+/// Rainbow palette cycled by the Working spinner.
+pub const RAINBOW_PALETTE: &[Color] = &[
+    Color::Rgb(255, 138, 128), // coral
+    Color::Rgb(255, 189, 128), // peach
+    Color::Rgb(249, 226, 138), // light yellow
+    Color::Rgb(166, 227, 161), // mint
+    Color::Rgb(138, 200, 255), // sky
+    Color::Rgb(203, 166, 247), // lavender
+];
+
+/// Style used to colour the Working spinner.
+///
+/// Config strings: `"rainbow"` for the cycling palette, or any regular
+/// [`ColorValue`] string for a solid colour (e.g. `"green"`, `"#a6e3a1"`, `156`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentWorkingStyle {
+    /// Cycle through [`RAINBOW_PALETTE`] so each spinner tick is a new hue.
+    Rainbow,
+    /// A single static colour.
+    Solid(Color),
+}
+
+impl AgentWorkingStyle {
+    /// Colour to render at the given tick. For `Rainbow`, cycles through
+    /// [`RAINBOW_PALETTE`].
+    pub fn color_for_tick(&self, tick: u64) -> Color {
+        match self {
+            Self::Rainbow => RAINBOW_PALETTE[tick as usize % RAINBOW_PALETTE.len()],
+            Self::Solid(c) => *c,
+        }
+    }
+}
+
+impl Serialize for AgentWorkingStyle {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Rainbow => serializer.serialize_str("rainbow"),
+            Self::Solid(c) => ColorValue(*c).serialize(serializer),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for AgentWorkingStyle {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(AgentWorkingStyleVisitor)
+    }
+}
+
+struct AgentWorkingStyleVisitor;
+
+impl<'de> Visitor<'de> for AgentWorkingStyleVisitor {
+    type Value = AgentWorkingStyle;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter) -> fmt::Result {
+        formatter.write_str(
+            "\"rainbow\", a color name (\"red\"), an index (117), or an RGB hex string (\"#89b4fa\")",
+        )
+    }
+
+    fn visit_str<E: de::Error>(self, s: &str) -> Result<Self::Value, E> {
+        if s.eq_ignore_ascii_case("rainbow") {
+            return Ok(AgentWorkingStyle::Rainbow);
+        }
+        parse_color_str(s)
+            .map(|cv| AgentWorkingStyle::Solid(cv.0))
+            .map_err(de::Error::custom)
+    }
+
+    fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+        if v > 255 {
+            return Err(de::Error::custom(format!(
+                "color index {v} out of range 0..255"
+            )));
+        }
+        Ok(AgentWorkingStyle::Solid(Color::Indexed(v as u8)))
+    }
+
+    fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+        if !(0..=255).contains(&v) {
+            return Err(de::Error::custom(format!(
+                "color index {v} out of range 0..255"
+            )));
+        }
+        Ok(AgentWorkingStyle::Solid(Color::Indexed(v as u8)))
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ThemeOverrides — optional per-field overrides loaded from [theme]
 // ---------------------------------------------------------------------------
 
@@ -168,13 +260,26 @@ pub struct ThemeOverrides {
     // Session status indicators
     pub status_creating: Option<ColorValue>,
     pub status_running: Option<ColorValue>,
-    pub status_paused: Option<ColorValue>,
     pub status_stopped: Option<ColorValue>,
     pub status_pr: Option<ColorValue>,
     pub status_pr_merged: Option<ColorValue>,
 
+    // PR badge text colours
+    pub pr_open: Option<ColorValue>,
+    pub pr_draft: Option<ColorValue>,
+    pub pr_closed: Option<ColorValue>,
+
+    // PR label pill backgrounds (used when invert_pr_label_color = false)
+    pub pr_pill_open_bg: Option<ColorValue>,
+    pub pr_pill_draft_bg: Option<ColorValue>,
+    pub pr_pill_closed_bg: Option<ColorValue>,
+    pub pr_pill_review_bg: Option<ColorValue>,
+    pub pr_pill_merged_bg: Option<ColorValue>,
+    /// Foreground text colour for PR label pills.
+    pub pr_pill_text: Option<ColorValue>,
+
     // Agent state and notification indicators
-    pub agent_working: Option<ColorValue>,
+    pub agent_working: Option<AgentWorkingStyle>,
     pub agent_waiting: Option<ColorValue>,
     pub unread_indicator: Option<ColorValue>,
 
@@ -182,7 +287,6 @@ pub struct ThemeOverrides {
     pub text_primary: Option<ColorValue>,
     pub text_secondary: Option<ColorValue>,
     pub text_accent: Option<ColorValue>,
-    pub text_pr: Option<ColorValue>,
 
     // Diff colors
     pub diff_added: Option<ColorValue>,
@@ -241,6 +345,81 @@ mod tests {
     #[test]
     fn test_color_value_reset() {
         assert_eq!(parse_color("\"reset\"").0, Color::Reset);
+    }
+
+    // ---- AgentWorkingStyle deserialization ----------------------------------
+
+    #[derive(Deserialize)]
+    struct AwWrap {
+        c: AgentWorkingStyle,
+    }
+
+    fn parse_aw(toml_val: &str) -> AgentWorkingStyle {
+        let input = format!("c = {toml_val}");
+        toml::from_str::<AwWrap>(&input).unwrap().c
+    }
+
+    #[test]
+    fn test_agent_working_rainbow() {
+        assert_eq!(parse_aw("\"rainbow\""), AgentWorkingStyle::Rainbow);
+    }
+
+    #[test]
+    fn test_agent_working_rainbow_case_insensitive() {
+        assert_eq!(parse_aw("\"Rainbow\""), AgentWorkingStyle::Rainbow);
+        assert_eq!(parse_aw("\"RAINBOW\""), AgentWorkingStyle::Rainbow);
+    }
+
+    #[test]
+    fn test_agent_working_solid_named() {
+        assert_eq!(parse_aw("\"red\""), AgentWorkingStyle::Solid(Color::Red));
+    }
+
+    #[test]
+    fn test_agent_working_solid_hex() {
+        assert_eq!(
+            parse_aw("\"#89b4fa\""),
+            AgentWorkingStyle::Solid(Color::Rgb(137, 180, 250))
+        );
+    }
+
+    #[test]
+    fn test_agent_working_solid_indexed() {
+        assert_eq!(
+            parse_aw("156"),
+            AgentWorkingStyle::Solid(Color::Indexed(156))
+        );
+    }
+
+    #[test]
+    fn test_agent_working_roundtrip_rainbow() {
+        #[derive(Serialize)]
+        struct W {
+            c: AgentWorkingStyle,
+        }
+        let w = W {
+            c: AgentWorkingStyle::Rainbow,
+        };
+        let s = toml::to_string(&w).unwrap();
+        assert!(s.contains("rainbow"));
+    }
+
+    #[test]
+    fn test_agent_working_color_for_tick_rainbow_cycles() {
+        let r = AgentWorkingStyle::Rainbow;
+        assert_eq!(r.color_for_tick(0), RAINBOW_PALETTE[0]);
+        assert_eq!(
+            r.color_for_tick(RAINBOW_PALETTE.len() as u64),
+            RAINBOW_PALETTE[0]
+        );
+        assert_eq!(r.color_for_tick(1), RAINBOW_PALETTE[1]);
+    }
+
+    #[test]
+    fn test_agent_working_color_for_tick_solid_constant() {
+        let s = AgentWorkingStyle::Solid(Color::Red);
+        assert_eq!(s.color_for_tick(0), Color::Red);
+        assert_eq!(s.color_for_tick(42), Color::Red);
     }
 
     // ---- ThemeOverrides deserialization --------------------------------------

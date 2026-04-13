@@ -5,11 +5,12 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, List, ListItem, ListState, StatefulWidget},
 };
 
+use crate::git::PrState;
 use crate::session::{AgentState, SessionListItem, SessionStatus};
 use crate::tui::theme::Theme;
 
@@ -40,6 +41,11 @@ pub struct TreeList<'a> {
     tick: u64,
     /// Whether to show status indicator circles (●/◐/○)
     show_status_indicator: bool,
+    /// Label names that mark an open PR as awaiting reviewer action.
+    review_labels: &'a [String],
+    /// When true, render PR labels as colored text on default bg (pre-pill
+    /// behavior). When false (default), render as a colored pill block.
+    invert_pr_label_color: bool,
 }
 
 impl<'a> TreeList<'a> {
@@ -53,7 +59,22 @@ impl<'a> TreeList<'a> {
             show_numbers: false,
             tick: 0,
             show_status_indicator: true,
+            review_labels: &[],
+            invert_pr_label_color: false,
         }
+    }
+
+    /// When true, render PR labels as colored text on default bg
+    /// (pre-pill behavior). Default false renders them as a colored pill.
+    pub fn invert_pr_label_color(mut self, b: bool) -> Self {
+        self.invert_pr_label_color = b;
+        self
+    }
+
+    /// Configure the labels that flag an open PR as awaiting reviewer action.
+    pub fn review_labels(mut self, labels: &'a [String]) -> Self {
+        self.review_labels = labels;
+        self
     }
 
     /// Set the tick counter for spinner animation
@@ -78,6 +99,48 @@ impl<'a> TreeList<'a> {
     pub fn show_numbers(mut self, show: bool) -> Self {
         self.show_numbers = show;
         self
+    }
+
+    /// Pick the single status glyph and colour for a worktree row.
+    ///
+    /// Priority (first wins):
+    /// 1. Creating             → animated spinner
+    /// 2. Agent `Working`      → animated spinner
+    /// 3. Agent `WaitingForInput` → `?` glyph
+    /// 4. `unread`             → `◆` diamond
+    /// 5. Running (idle/unknown, no unread) → `●` filled circle
+    /// 6. Stopped              → `○` open circle
+    fn session_status_glyph(
+        &self,
+        status: SessionStatus,
+        agent_state: Option<AgentState>,
+        unread: bool,
+    ) -> Option<(String, Color)> {
+        if status == SessionStatus::Creating {
+            let step = self.tick as usize / 3;
+            let frame = SPINNER_FRAMES[step % SPINNER_FRAMES.len()];
+            return Some((frame.to_string(), self.theme.status_creating));
+        }
+        if status == SessionStatus::Running {
+            match agent_state {
+                Some(AgentState::Working) => {
+                    let step = self.tick as usize / 3;
+                    let frame = SPINNER_FRAMES[step % SPINNER_FRAMES.len()];
+                    let color = self.theme.agent_working.color_for_tick(step as u64);
+                    return Some((frame.to_string(), color));
+                }
+                Some(AgentState::WaitingForInput) => {
+                    return Some(("?".to_string(), self.theme.agent_waiting));
+                }
+                _ => {}
+            }
+            if unread {
+                return Some(("◆".to_string(), self.theme.unread_indicator));
+            }
+            return Some(("●".to_string(), self.theme.status_running));
+        }
+        // Stopped
+        Some(("○".to_string(), self.theme.status_stopped))
     }
 
     /// Check whether sessions use more than one distinct program
@@ -144,41 +207,13 @@ impl<'a> TreeList<'a> {
                     program,
                     pr_number,
                     pr_merged,
+                    pr_state,
+                    pr_draft,
+                    pr_labels,
                     agent_state,
                     unread,
                     ..
                 } => {
-                    let pr_color = if *pr_merged {
-                        self.theme.status_pr_merged
-                    } else {
-                        self.theme.status_pr
-                    };
-                    let has_pr = pr_number.is_some();
-                    let (status_icon, status_color) = match status {
-                        SessionStatus::Creating => {
-                            let frame =
-                                (self.tick / 4) as usize % SPINNER_FRAMES.len();
-                            (SPINNER_FRAMES[frame], self.theme.status_creating)
-                        }
-                        SessionStatus::Running => (
-                            "●",
-                            if has_pr {
-                                pr_color
-                            } else {
-                                self.theme.status_running
-                            },
-                        ),
-                        SessionStatus::Paused => (
-                            "◐",
-                            if has_pr {
-                                pr_color
-                            } else {
-                                self.theme.status_paused
-                            },
-                        ),
-                        SessionStatus::Stopped => ("○", self.theme.status_stopped),
-                    };
-
                     worktree_number += 1;
 
                     let mut spans = vec![
@@ -193,41 +228,14 @@ impl<'a> TreeList<'a> {
                         },
                     ];
 
-                    if self.show_status_indicator {
-                        spans.push(Span::styled(
-                            format!("{} ", status_icon),
-                            Style::default().fg(status_color),
-                        ));
-                    }
-
-                    // Agent state indicator for Running sessions
-                    if *status == SessionStatus::Running
-                        && let Some(state) = agent_state
+                    // Single status glyph: spinner > waiting > unread > running > stopped
+                    if self.show_status_indicator
+                        && let Some((glyph, color)) =
+                            self.session_status_glyph(*status, *agent_state, *unread)
                     {
-                        match state {
-                            AgentState::Working => {
-                                let frame = SPINNER_FRAMES
-                                    [(self.tick as usize / 3) % SPINNER_FRAMES.len()];
-                                spans.push(Span::styled(
-                                    format!("{} ", frame),
-                                    Style::default().fg(self.theme.agent_working),
-                                ));
-                            }
-                            AgentState::WaitingForInput => {
-                                spans.push(Span::styled(
-                                    "waiting ",
-                                    Style::default().fg(self.theme.agent_waiting),
-                                ));
-                            }
-                            // Idle uses the unread diamond + bold title instead of a label
-                            AgentState::Idle | AgentState::Unknown => {}
-                        }
-                    }
-
-                    if *unread {
                         spans.push(Span::styled(
-                            "◆ ",
-                            Style::default().fg(self.theme.unread_indicator),
+                            format!("{glyph} "),
+                            Style::default().fg(color),
                         ));
                     }
 
@@ -239,16 +247,49 @@ impl<'a> TreeList<'a> {
                         Style::default().fg(current_session_color)
                     };
                     spans.push(Span::styled(title.clone(), title_style));
-                    spans.push(Span::styled(
-                        format!(" [{}]", branch),
-                        Style::default().fg(self.theme.text_accent),
-                    ));
+                    if let Some(shown_branch) = crate::session::display_branch(title, branch) {
+                        spans.push(Span::styled(
+                            format!(" [{}]", shown_branch),
+                            Style::default().fg(self.theme.text_accent),
+                        ));
+                    }
 
                     if let Some(pr_num) = pr_number {
-                        spans.push(Span::styled(
-                            format!(" PR #{}", pr_num),
-                            Style::default().fg(self.theme.text_pr),
-                        ));
+                        if self.invert_pr_label_color {
+                            // Pre-pill behavior: colored text on default bg.
+                            let badge_color = pr_badge_color(
+                                self.theme,
+                                *pr_state,
+                                *pr_merged,
+                                *pr_draft,
+                                pr_labels,
+                                self.review_labels,
+                            );
+                            spans.push(Span::styled(
+                                format!(" PR #{}", pr_num),
+                                Style::default().fg(badge_color),
+                            ));
+                        } else {
+                            // Pill: non-colored separator space, then a pill
+                            // with internal padding, colored bg, and bold
+                            // contrast text so it stands out from the row.
+                            let pill_bg = pr_pill_bg_color(
+                                self.theme,
+                                *pr_state,
+                                *pr_merged,
+                                *pr_draft,
+                                pr_labels,
+                                self.review_labels,
+                            );
+                            spans.push(Span::raw(" "));
+                            spans.push(Span::styled(
+                                format!(" PR #{} ", pr_num),
+                                Style::default()
+                                    .bg(pill_bg)
+                                    .fg(self.theme.pr_pill_text)
+                                    .add_modifier(Modifier::BOLD),
+                            ));
+                        }
                     }
 
                     if show_program {
@@ -265,6 +306,82 @@ impl<'a> TreeList<'a> {
                 }
             })
             .collect()
+    }
+}
+
+/// Does the PR have any label matching the "review needed" list?
+fn needs_review(labels: &[String], review_labels: &[String]) -> bool {
+    !labels.is_empty()
+        && labels
+            .iter()
+            .any(|l| review_labels.iter().any(|r| r.eq_ignore_ascii_case(l)))
+}
+
+/// Pick the pill background colour for a PR badge from the same state
+/// logic as [`pr_badge_color`], but reading the darker `pr_pill_*_bg`
+/// theme fields so bold near-white text remains legible.
+pub(crate) fn pr_pill_bg_color(
+    theme: &Theme,
+    state: Option<PrState>,
+    pr_merged: bool,
+    is_draft: bool,
+    labels: &[String],
+    review_labels: &[String],
+) -> Color {
+    let effective_state = state.unwrap_or(if pr_merged {
+        PrState::Merged
+    } else {
+        PrState::Open
+    });
+
+    match effective_state {
+        PrState::Merged => theme.pr_pill_merged_bg,
+        PrState::Closed => theme.pr_pill_closed_bg,
+        PrState::Open => {
+            if is_draft {
+                theme.pr_pill_draft_bg
+            } else if needs_review(labels, review_labels) {
+                theme.pr_pill_review_bg
+            } else {
+                theme.pr_pill_open_bg
+            }
+        }
+    }
+}
+
+/// Pick the PR badge text colour from PR state, draft flag, and label-based
+/// review-needed signalling.
+///
+/// Priority: merged > closed > draft (within open) > review-needed > open.
+/// Falls back to `pr_open` when state is unknown but `pr_merged` is false,
+/// and `status_pr_merged` when state is unknown but `pr_merged` is true
+/// (handles state.json files written before pr_state was added).
+pub(crate) fn pr_badge_color(
+    theme: &Theme,
+    state: Option<PrState>,
+    pr_merged: bool,
+    is_draft: bool,
+    labels: &[String],
+    review_labels: &[String],
+) -> Color {
+    let effective_state = state.unwrap_or(if pr_merged {
+        PrState::Merged
+    } else {
+        PrState::Open
+    });
+
+    match effective_state {
+        PrState::Merged => theme.status_pr_merged,
+        PrState::Closed => theme.pr_closed,
+        PrState::Open => {
+            if is_draft {
+                theme.pr_draft
+            } else if needs_review(labels, review_labels) {
+                theme.status_pr
+            } else {
+                theme.pr_open
+            }
+        }
     }
 }
 
@@ -385,15 +502,29 @@ fn inject_pr_hyperlinks(
             }
 
             // Collect up to 2 characters for this chunk
-            let chunk_end = (char_idx + 2).min(needle_chars.len());
-            let chunk: String = needle_chars[char_idx..chunk_end].iter().collect();
-            let chunk_len = chunk_end - char_idx;
+            let mut chunk_end = (char_idx + 2).min(needle_chars.len());
+            let mut chunk: String = needle_chars[char_idx..chunk_end].iter().collect();
+            let mut chunk_len = chunk_end - char_idx;
+
+            // If this would be a trailing 1-char chunk, extend it with the
+            // following cell's first character so the chunk is always 2-char.
+            // Reason: the OSC 8 escapes balloon the cell's reported symbol
+            // width far beyond 1, which sets ratatui's `to_skip` and blocks
+            // the very next cell from emitting — leaving a stale 1-col gap
+            // in the highlight when the row is selected.
+            if chunk_len == 1 && x + 1 < list_area.x + list_area.width {
+                let next_char = buf[(x + 1, y)].symbol().chars().next().unwrap_or(' ');
+                chunk.push(next_char);
+                chunk_end += 1; // consume the borrowed cell from the loop's POV
+                chunk_len = 2;
+            }
 
             buf[(x, y)].set_symbol(&format!("{}{}{}", osc_open, chunk, osc_close));
 
-            // If we packed 2 chars into one cell, blank the next cell
+            // If we packed 2 chars into one cell, mark the next cell as a
+            // wide-char continuation so the renderer skips it entirely.
             if chunk_len == 2 && x + 1 < list_area.x + list_area.width {
-                buf[(x + 1, y)].set_symbol("");
+                buf[(x + 1, y)].set_skip(true);
             }
 
             char_idx = chunk_end;
@@ -509,6 +640,9 @@ mod tests {
             pr_number: None,
             pr_url: None,
             pr_merged: false,
+            pr_state: None,
+            pr_draft: false,
+            pr_labels: Vec::new(),
             worktree_path: PathBuf::from("/tmp/test"),
             created_at: chrono::Utc::now(),
             agent_state: None,
@@ -517,18 +651,19 @@ mod tests {
     }
 
     /// Render a TreeList to a buffer and return lines as strings
-    fn render_tree(items: &[SessionListItem], show_numbers: bool, width: u16, height: u16) -> Vec<String> {
+    fn render_tree(
+        items: &[SessionListItem],
+        show_numbers: bool,
+        width: u16,
+        height: u16,
+    ) -> Vec<String> {
         let theme = Theme::basic();
         let backend = TestBackend::new(width, height);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
             .draw(|frame| {
                 let tree = TreeList::new(items, &theme).show_numbers(show_numbers);
-                frame.render_stateful_widget(
-                    tree,
-                    frame.area(),
-                    &mut ListState::default(),
-                );
+                frame.render_stateful_widget(tree, frame.area(), &mut ListState::default());
             })
             .unwrap();
         let buf = terminal.backend().buffer();
@@ -546,7 +681,11 @@ mod tests {
         let items = vec![make_project("proj", 1), make_worktree("session-a")];
         let lines = render_tree(&items, false, 40, 3);
         // Worktree line should contain tree branch
-        assert!(lines[1].contains("└──"), "Expected tree branch in: {}", lines[1]);
+        assert!(
+            lines[1].contains("└──"),
+            "Expected tree branch in: {}",
+            lines[1]
+        );
     }
 
     #[test]
@@ -558,11 +697,22 @@ mod tests {
         ];
         let lines = render_tree(&items, true, 40, 4);
         // First worktree starts with right-aligned "1"
-        assert!(lines[1].trim_start().starts_with("1 "), "Expected number prefix in: '{}'", lines[1]);
+        assert!(
+            lines[1].trim_start().starts_with("1 "),
+            "Expected number prefix in: '{}'",
+            lines[1]
+        );
         // Second worktree starts with "2"
-        assert!(lines[2].trim_start().starts_with("2 "), "Expected number prefix in: '{}'", lines[2]);
+        assert!(
+            lines[2].trim_start().starts_with("2 "),
+            "Expected number prefix in: '{}'",
+            lines[2]
+        );
         // No tree branches
-        assert!(!lines[1].contains("└──"), "Should not have tree branch with numbers");
+        assert!(
+            !lines[1].contains("└──"),
+            "Should not have tree branch with numbers"
+        );
     }
 
     #[test]
@@ -575,9 +725,17 @@ mod tests {
         ];
         let lines = render_tree(&items, true, 40, 5);
         // Session under proj-a is #1
-        assert!(lines[1].trim_start().starts_with("1 "), "Expected 1 in: '{}'", lines[1]);
+        assert!(
+            lines[1].trim_start().starts_with("1 "),
+            "Expected 1 in: '{}'",
+            lines[1]
+        );
         // Session under proj-b is #2 (not restarting)
-        assert!(lines[3].trim_start().starts_with("2 "), "Expected 2 in: '{}'", lines[3]);
+        assert!(
+            lines[3].trim_start().starts_with("2 "),
+            "Expected 2 in: '{}'",
+            lines[3]
+        );
     }
 
     #[test]
@@ -588,10 +746,22 @@ mod tests {
         }
         let lines = render_tree(&items, true, 40, 14);
         // Single digit right-aligned
-        assert!(lines[1].trim_start().starts_with("1 "), "line 1: '{}'", lines[1]);
+        assert!(
+            lines[1].trim_start().starts_with("1 "),
+            "line 1: '{}'",
+            lines[1]
+        );
         // Double digit
-        assert!(lines[10].trim_start().starts_with("10 "), "line 10: '{}'", lines[10]);
-        assert!(lines[12].trim_start().starts_with("12 "), "line 12: '{}'", lines[12]);
+        assert!(
+            lines[10].trim_start().starts_with("10 "),
+            "line 10: '{}'",
+            lines[10]
+        );
+        assert!(
+            lines[12].trim_start().starts_with("12 "),
+            "line 12: '{}'",
+            lines[12]
+        );
     }
 
     #[test]
@@ -714,15 +884,281 @@ mod tests {
         assert_eq!(state.selected(), Some(0));
     }
 
+    // -- pr_badge_color --
+
+    fn review_labels() -> Vec<String> {
+        vec![
+            "dev-review-required".into(),
+            "ready-for-test".into(),
+            "trivial".into(),
+        ]
+    }
+
     #[test]
-    #[allow(clippy::erasing_op, clippy::identity_op)]
-    fn test_spinner_frame_cycling() {
-        // tick/4 selects the frame index, modulo 10 frames
-        assert_eq!((0u64 / 4) as usize % SPINNER_FRAMES.len(), 0); // "⠋"
-        assert_eq!((4u64 / 4) as usize % SPINNER_FRAMES.len(), 1); // "⠙"
-        assert_eq!((8u64 / 4) as usize % SPINNER_FRAMES.len(), 2); // "⠹"
-        assert_eq!((36u64 / 4) as usize % SPINNER_FRAMES.len(), 9); // "⠏"
-        // Wraps around after 10 frames
-        assert_eq!((40u64 / 4) as usize % SPINNER_FRAMES.len(), 0); // back to "⠋"
+    fn test_pr_badge_color_open() {
+        let theme = Theme::basic();
+        let c = pr_badge_color(
+            &theme,
+            Some(PrState::Open),
+            false,
+            false,
+            &[],
+            &review_labels(),
+        );
+        assert_eq!(c, theme.pr_open);
+    }
+
+    #[test]
+    fn test_pr_badge_color_merged() {
+        let theme = Theme::basic();
+        let c = pr_badge_color(
+            &theme,
+            Some(PrState::Merged),
+            true,
+            false,
+            &[],
+            &review_labels(),
+        );
+        assert_eq!(c, theme.status_pr_merged);
+    }
+
+    #[test]
+    fn test_pr_badge_color_closed() {
+        let theme = Theme::basic();
+        let c = pr_badge_color(
+            &theme,
+            Some(PrState::Closed),
+            false,
+            false,
+            &[],
+            &review_labels(),
+        );
+        assert_eq!(c, theme.pr_closed);
+    }
+
+    #[test]
+    fn test_pr_badge_color_draft_takes_precedence_over_label() {
+        let theme = Theme::basic();
+        let labels = vec!["dev-review-required".into()];
+        let c = pr_badge_color(
+            &theme,
+            Some(PrState::Open),
+            false,
+            true,
+            &labels,
+            &review_labels(),
+        );
+        assert_eq!(c, theme.pr_draft);
+    }
+
+    #[test]
+    fn test_pr_badge_color_review_label_match() {
+        let theme = Theme::basic();
+        let labels = vec!["unrelated".into(), "ready-for-test".into()];
+        let c = pr_badge_color(
+            &theme,
+            Some(PrState::Open),
+            false,
+            false,
+            &labels,
+            &review_labels(),
+        );
+        assert_eq!(c, theme.status_pr);
+    }
+
+    #[test]
+    fn test_pr_badge_color_review_label_case_insensitive() {
+        let theme = Theme::basic();
+        let labels = vec!["Dev-Review-Required".into()];
+        let c = pr_badge_color(
+            &theme,
+            Some(PrState::Open),
+            false,
+            false,
+            &labels,
+            &review_labels(),
+        );
+        assert_eq!(c, theme.status_pr);
+    }
+
+    #[test]
+    fn test_pr_badge_color_non_matching_labels_fall_through_to_open() {
+        let theme = Theme::basic();
+        let labels = vec!["bug".into(), "documentation".into()];
+        let c = pr_badge_color(
+            &theme,
+            Some(PrState::Open),
+            false,
+            false,
+            &labels,
+            &review_labels(),
+        );
+        assert_eq!(c, theme.pr_open);
+    }
+
+    #[test]
+    fn test_pr_badge_color_unknown_state_uses_pr_merged_flag_for_merged() {
+        // Backward compat: pre-pr_state state.json with pr_merged=true
+        let theme = Theme::basic();
+        let c = pr_badge_color(&theme, None, true, false, &[], &review_labels());
+        assert_eq!(c, theme.status_pr_merged);
+    }
+
+    #[test]
+    fn test_pr_badge_color_unknown_state_falls_back_to_open() {
+        // Backward compat: pre-pr_state state.json with pr_merged=false
+        let theme = Theme::basic();
+        let c = pr_badge_color(&theme, None, false, false, &[], &review_labels());
+        assert_eq!(c, theme.pr_open);
+    }
+
+    // -- session_status_glyph (single unified icon column) --
+
+    fn empty_items() -> [SessionListItem; 0] {
+        []
+    }
+
+    fn make_tree<'a>(theme: &'a Theme, items: &'a [SessionListItem]) -> TreeList<'a> {
+        TreeList::new(items, theme)
+    }
+
+    #[test]
+    fn test_glyph_working_shows_spinner() {
+        let theme = Theme::basic();
+        let items = empty_items();
+        let tree = make_tree(&theme, &items);
+        let (g, c) = tree
+            .session_status_glyph(SessionStatus::Running, Some(AgentState::Working), false)
+            .unwrap();
+        assert!(SPINNER_FRAMES.contains(&g.as_str()));
+        // Default theme uses Rainbow → colour comes from the rainbow palette
+        assert!(crate::config::theme::RAINBOW_PALETTE.contains(&c));
+    }
+
+    #[test]
+    fn test_glyph_working_beats_unread() {
+        let theme = Theme::basic();
+        let items = empty_items();
+        let tree = make_tree(&theme, &items);
+        let (g, _) = tree
+            .session_status_glyph(SessionStatus::Running, Some(AgentState::Working), true)
+            .unwrap();
+        assert!(SPINNER_FRAMES.contains(&g.as_str()));
+    }
+
+    #[test]
+    fn test_glyph_waiting_for_input() {
+        let theme = Theme::basic();
+        let items = empty_items();
+        let tree = make_tree(&theme, &items);
+        let (g, c) = tree
+            .session_status_glyph(
+                SessionStatus::Running,
+                Some(AgentState::WaitingForInput),
+                false,
+            )
+            .unwrap();
+        assert_eq!(g, "?");
+        assert_eq!(c, theme.agent_waiting);
+    }
+
+    #[test]
+    fn test_glyph_waiting_beats_unread() {
+        let theme = Theme::basic();
+        let items = empty_items();
+        let tree = make_tree(&theme, &items);
+        let (g, _) = tree
+            .session_status_glyph(
+                SessionStatus::Running,
+                Some(AgentState::WaitingForInput),
+                true,
+            )
+            .unwrap();
+        assert_eq!(g, "?");
+    }
+
+    #[test]
+    fn test_glyph_unread_when_idle() {
+        let theme = Theme::basic();
+        let items = empty_items();
+        let tree = make_tree(&theme, &items);
+        let (g, c) = tree
+            .session_status_glyph(SessionStatus::Running, Some(AgentState::Idle), true)
+            .unwrap();
+        assert_eq!(g, "◆");
+        assert_eq!(c, theme.unread_indicator);
+    }
+
+    #[test]
+    fn test_glyph_running_idle_no_unread() {
+        let theme = Theme::basic();
+        let items = empty_items();
+        let tree = make_tree(&theme, &items);
+        let (g, c) = tree
+            .session_status_glyph(SessionStatus::Running, Some(AgentState::Idle), false)
+            .unwrap();
+        assert_eq!(g, "●");
+        assert_eq!(c, theme.status_running);
+    }
+
+    #[test]
+    fn test_glyph_running_unknown_no_unread() {
+        let theme = Theme::basic();
+        let items = empty_items();
+        let tree = make_tree(&theme, &items);
+        let (g, c) = tree
+            .session_status_glyph(SessionStatus::Running, Some(AgentState::Unknown), false)
+            .unwrap();
+        assert_eq!(g, "●");
+        assert_eq!(c, theme.status_running);
+    }
+
+    #[test]
+    fn test_glyph_running_no_agent_state_no_unread() {
+        let theme = Theme::basic();
+        let items = empty_items();
+        let tree = make_tree(&theme, &items);
+        let (g, c) = tree
+            .session_status_glyph(SessionStatus::Running, None, false)
+            .unwrap();
+        assert_eq!(g, "●");
+        assert_eq!(c, theme.status_running);
+    }
+
+    #[test]
+    fn test_glyph_stopped() {
+        let theme = Theme::basic();
+        let items = empty_items();
+        let tree = make_tree(&theme, &items);
+        let (g, c) = tree
+            .session_status_glyph(SessionStatus::Stopped, None, false)
+            .unwrap();
+        assert_eq!(g, "○");
+        assert_eq!(c, theme.status_stopped);
+    }
+
+    #[test]
+    fn test_glyph_stopped_ignores_unread_and_agent_state() {
+        let theme = Theme::basic();
+        let items = empty_items();
+        let tree = make_tree(&theme, &items);
+        // Stopped sessions can't have a meaningful agent state, but ensure
+        // the glyph is consistent regardless.
+        let (g, _) = tree
+            .session_status_glyph(SessionStatus::Stopped, Some(AgentState::Working), true)
+            .unwrap();
+        assert_eq!(g, "○");
+    }
+
+    #[test]
+    fn test_glyph_creating_shows_spinner() {
+        let theme = Theme::basic();
+        let items = empty_items();
+        let tree = make_tree(&theme, &items);
+        let (g, c) = tree
+            .session_status_glyph(SessionStatus::Creating, None, false)
+            .unwrap();
+        assert!(SPINNER_FRAMES.contains(&g.as_str()));
+        assert_eq!(c, theme.status_creating);
     }
 }

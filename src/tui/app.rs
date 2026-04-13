@@ -420,8 +420,7 @@ impl App {
             let interval_ms = self.config.agent_state_poll_interval_ms;
             let tmux = self.session_manager.tmux.clone();
             tokio::spawn(async move {
-                let cache_ttl =
-                    Duration::from_millis(interval_ms.saturating_sub(500).max(500));
+                let cache_ttl = Duration::from_millis(interval_ms.saturating_sub(500).max(500));
                 let mut detector = AgentStateDetector::new(tmux, cache_ttl);
                 let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
                 loop {
@@ -432,9 +431,7 @@ impl App {
                             .sessions
                             .values()
                             .filter(|s| s.status == SessionStatus::Running)
-                            .map(|s| {
-                                (s.id, s.tmux_session_name.clone(), s.program.clone())
-                            })
+                            .map(|s| (s.id, s.tmux_session_name.clone(), s.program.clone()))
                             .collect()
                     };
                     if sessions.is_empty() {
@@ -444,9 +441,9 @@ impl App {
                         detector.detect_all(&sessions).await;
                     if !states.is_empty() {
                         let _ = tx
-                            .send(AppEvent::StateUpdate(
-                                StateUpdate::AgentStatesUpdated { states },
-                            ))
+                            .send(AppEvent::StateUpdate(StateUpdate::AgentStatesUpdated {
+                                states,
+                            }))
                             .await;
                     }
                 }
@@ -1080,7 +1077,9 @@ impl App {
             .show_numbers(self.config.show_session_numbers)
             .tick(self.ui_state.tick_count)
             .highlight_style(self.theme.selection().add_modifier(Modifier::BOLD))
-            .show_status_indicator(self.config.show_status_indicator);
+            .show_status_indicator(self.config.show_status_indicator)
+            .review_labels(&self.config.pr_review_labels)
+            .invert_pr_label_color(self.config.invert_pr_label_color);
 
         frame.render_stateful_widget(
             tree_list,
@@ -1647,18 +1646,16 @@ impl App {
                     let status_icon = match m.status {
                         SessionStatus::Creating => "⠋",
                         SessionStatus::Running => "●",
-                        SessionStatus::Paused => "◐",
                         SessionStatus::Stopped => "○",
                     };
                     let status_color = match m.status {
                         SessionStatus::Creating => self.theme.status_creating,
                         SessionStatus::Running => self.theme.status_running,
-                        SessionStatus::Paused => self.theme.status_paused,
                         SessionStatus::Stopped => self.theme.status_stopped,
                     };
 
                     let is_selected = i == *selected_idx;
-                    let line = Line::from(vec![
+                    let mut spans = vec![
                         Span::styled(
                             format!(" {} ", status_icon),
                             Style::default().fg(status_color),
@@ -1671,15 +1668,19 @@ impl App {
                                 Style::default()
                             },
                         ),
-                        Span::styled(
-                            format!(" [{}]", m.branch),
+                    ];
+                    if let Some(shown_branch) = crate::session::display_branch(&m.title, &m.branch)
+                    {
+                        spans.push(Span::styled(
+                            format!(" [{}]", shown_branch),
                             Style::default().fg(self.theme.text_accent),
-                        ),
-                        Span::styled(
-                            format!(" ({})", m.project_name),
-                            Style::default().fg(self.theme.text_secondary),
-                        ),
-                    ]);
+                        ));
+                    }
+                    spans.push(Span::styled(
+                        format!(" ({})", m.project_name),
+                        Style::default().fg(self.theme.text_secondary),
+                    ));
+                    let line = Line::from(spans);
 
                     let line_area = Rect {
                         y: row,
@@ -1743,6 +1744,12 @@ impl App {
                         color_swatch: None,
                     },
                     SettingsRow {
+                        label: "Resume Session".into(),
+                        value: c.resume_session.to_string(),
+                        field_key: "resume_session".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
                         label: "UI Refresh FPS".into(),
                         value: c.ui_refresh_fps.to_string(),
                         field_key: "ui_refresh_fps".into(),
@@ -1776,6 +1783,12 @@ impl App {
                         label: "Session Numbers".into(),
                         value: c.show_session_numbers.to_string(),
                         field_key: "show_session_numbers".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
+                        label: "Invert PR Label Color".into(),
+                        value: c.invert_pr_label_color.to_string(),
+                        field_key: "invert_pr_label_color".into(),
                         color_swatch: None,
                     },
                     SettingsRow {
@@ -1844,10 +1857,12 @@ impl App {
                     theme_row!("Border Unfocused", border_unfocused),
                     theme_row!("Selection BG", selection_bg),
                     theme_row!("Status Running", status_running),
-                    theme_row!("Status Paused", status_paused),
                     theme_row!("Status Stopped", status_stopped),
                     theme_row!("Status PR", status_pr),
                     theme_row!("Status PR Merged", status_pr_merged),
+                    theme_row!("PR Open", pr_open),
+                    theme_row!("PR Draft", pr_draft),
+                    theme_row!("PR Closed", pr_closed),
                     theme_row!("Text Primary", text_primary),
                     theme_row!("Text Secondary", text_secondary),
                     theme_row!("Text Accent", text_accent),
@@ -2068,6 +2083,11 @@ impl App {
                         self.config.fetch_before_create = b;
                     }
                 }
+                "resume_session" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        self.config.resume_session = b;
+                    }
+                }
                 "ui_refresh_fps" => {
                     if let Ok(v) = value.parse::<u32>() {
                         self.config.ui_refresh_fps = v;
@@ -2096,6 +2116,11 @@ impl App {
                 "show_session_numbers" => {
                     if let Ok(b) = value.parse::<bool>() {
                         self.config.show_session_numbers = b;
+                    }
+                }
+                "invert_pr_label_color" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        self.config.invert_pr_label_color = b;
                     }
                 }
                 "session_number_debounce_ms" => {
@@ -2152,14 +2177,15 @@ impl App {
                             selection_bg,
                             selection_fg,
                             status_running,
-                            status_paused,
                             status_stopped,
                             status_pr,
                             status_pr_merged,
+                            pr_open,
+                            pr_draft,
+                            pr_closed,
                             text_primary,
                             text_secondary,
                             text_accent,
-                            text_pr,
                             diff_added,
                             diff_removed,
                             diff_hunk_header,
@@ -2405,11 +2431,6 @@ impl App {
             Span::raw("  "),
             Span::styled("●", Style::default().fg(self.theme.status_pr_merged)),
             Span::raw("  PR merged"),
-        ]));
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled("◐", Style::default().fg(self.theme.status_paused)),
-            Span::raw("  Paused"),
         ]));
         lines.push(Line::from(vec![
             Span::raw("  "),
@@ -2747,12 +2768,6 @@ impl App {
                     completer: PathCompleter::new(),
                 };
             }
-            UserCommand::PauseSession => {
-                self.handle_pause_session().await;
-            }
-            UserCommand::ResumeSession => {
-                self.handle_resume_session().await;
-            }
             UserCommand::DeleteSession => {
                 self.handle_delete_session();
             }
@@ -2764,6 +2779,9 @@ impl App {
             }
             UserCommand::OpenInEditor => {
                 self.handle_open_in_editor().await;
+            }
+            UserCommand::OpenPullRequest => {
+                self.handle_open_pull_request().await;
             }
             UserCommand::TogglePane => {
                 let on_project = self.ui_state.selected_session_id.is_none()
@@ -2907,12 +2925,15 @@ impl App {
                     .mutate(move |state| {
                         for (session_id, pr_info) in &results {
                             if let Some(session) = state.get_session_mut(session_id) {
-                                let new_number = pr_info.as_ref().map(|p| p.number);
-                                let new_merged = pr_info.as_ref().is_some_and(|p| p.merged);
-                                let new_url = pr_info.as_ref().map(|p| p.url.clone());
-                                session.pr_number = new_number;
-                                session.pr_url = new_url;
-                                session.pr_merged = new_merged;
+                                session.pr_number = pr_info.as_ref().map(|p| p.number);
+                                session.pr_url = pr_info.as_ref().map(|p| p.url.clone());
+                                session.pr_state = pr_info.as_ref().map(|p| p.state);
+                                session.pr_draft = pr_info.as_ref().is_some_and(|p| p.is_draft);
+                                session.pr_labels = pr_info
+                                    .as_ref()
+                                    .map(|p| p.labels.clone())
+                                    .unwrap_or_default();
+                                session.pr_merged = pr_info.as_ref().is_some_and(|p| p.merged());
                             }
                         }
                     })
@@ -2996,8 +3017,7 @@ impl App {
                 let mut unread_ids = Vec::new();
                 for (session_id, new_state) in &states {
                     if *new_state == AgentState::Idle
-                        && self.ui_state.agent_states.get(session_id)
-                            == Some(&AgentState::Working)
+                        && self.ui_state.agent_states.get(session_id) == Some(&AgentState::Working)
                     {
                         unread_ids.push(*session_id);
                     }
@@ -3295,6 +3315,45 @@ impl App {
         }
     }
 
+    /// Handle "open PR in browser" — looks up the selected session's
+    /// `pr_url` and launches the OS default handler (`open` on macOS,
+    /// `xdg-open` on Linux, `cmd /c start` on Windows).
+    async fn handle_open_pull_request(&mut self) {
+        let Some(session_id) = self.ui_state.selected_session_id else {
+            return;
+        };
+        let pr_url = {
+            let state = self.store.read().await;
+            state
+                .sessions
+                .get(&session_id)
+                .and_then(|s| s.pr_url.clone())
+        };
+        let Some(url) = pr_url else {
+            self.ui_state.status_message = Some((
+                "No PR associated with this session".to_string(),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            return;
+        };
+
+        let result = if cfg!(target_os = "macos") {
+            std::process::Command::new("open").arg(&url).spawn()
+        } else if cfg!(target_os = "windows") {
+            std::process::Command::new("cmd")
+                .args(["/c", "start", "", &url])
+                .spawn()
+        } else {
+            std::process::Command::new("xdg-open").arg(&url).spawn()
+        };
+
+        if let Err(e) = result {
+            self.ui_state.modal = Modal::Error {
+                message: format!("Failed to open PR in browser: {}", e),
+            };
+        }
+    }
+
     /// Handle new session command
     fn handle_new_session(&mut self) {
         if let Some(project_id) = self.ui_state.selected_project_id {
@@ -3412,52 +3471,6 @@ impl App {
         }
     }
 
-    /// Handle pause session
-    async fn handle_pause_session(&mut self) {
-        if self.selected_session_is_creating() {
-            return;
-        }
-        if let Some(session_id) = self.ui_state.selected_session_id {
-            match self.session_manager.pause_session(&session_id).await {
-                Ok(_) => {
-                    self.ui_state.status_message = Some((
-                        "Session paused".to_string(),
-                        Instant::now() + Duration::from_secs(3),
-                    ));
-                    self.refresh_list_items().await;
-                }
-                Err(e) => {
-                    self.ui_state.modal = Modal::Error {
-                        message: format!("Failed to pause: {}", e),
-                    };
-                }
-            }
-        }
-    }
-
-    /// Handle resume session
-    async fn handle_resume_session(&mut self) {
-        if self.selected_session_is_creating() {
-            return;
-        }
-        if let Some(session_id) = self.ui_state.selected_session_id {
-            match self.session_manager.resume_session(&session_id).await {
-                Ok(_) => {
-                    self.ui_state.status_message = Some((
-                        "Session resumed".to_string(),
-                        Instant::now() + Duration::from_secs(3),
-                    ));
-                    self.refresh_list_items().await;
-                }
-                Err(e) => {
-                    self.ui_state.modal = Modal::Error {
-                        message: format!("Failed to resume: {}", e),
-                    };
-                }
-            }
-        }
-    }
-
     /// Handle remove project - show confirmation (only when a project row is selected)
     fn handle_remove_project(&mut self) {
         if self.ui_state.selected_session_id.is_none()
@@ -3474,9 +3487,14 @@ impl App {
     /// Handle restart session - show confirmation
     fn handle_restart_session(&mut self) {
         if let Some(session_id) = self.ui_state.selected_session_id {
+            let message = if self.config.resume_session {
+                "This will kill the current tmux session and start a fresh one.\nClaude will pick up where it left off via /resume.".to_string()
+            } else {
+                "This will kill the current tmux session and start a fresh one.\nIf you want to pick up where you left off, you can use /resume.".to_string()
+            };
             self.ui_state.modal = Modal::Confirm {
                 title: "Restart Session".to_string(),
-                message: "This will kill the current tmux session and start a fresh one.\nClaude will pick up where it left off via /resume.".to_string(),
+                message,
                 on_confirm: ConfirmAction::RestartSession { session_id },
             };
         }
@@ -3935,6 +3953,9 @@ impl App {
                     pr_number: session.pr_number,
                     pr_url: session.pr_url.clone(),
                     pr_merged: session.pr_merged,
+                    pr_state: session.pr_state,
+                    pr_draft: session.pr_draft,
+                    pr_labels: session.pr_labels.clone(),
                     worktree_path: session.worktree_path.clone(),
                     created_at: session.created_at,
                     agent_state: self.ui_state.agent_states.get(&session.id).copied(),
@@ -4236,6 +4257,9 @@ mod tests {
             pr_number: None,
             pr_url: None,
             pr_merged: false,
+            pr_state: None,
+            pr_draft: false,
+            pr_labels: Vec::new(),
             worktree_path: std::path::PathBuf::from("/tmp/test"),
             created_at: chrono::Utc::now(),
             agent_state: None,

@@ -225,69 +225,6 @@ async fn test_session_manager_create_session() {
 }
 
 #[tokio::test]
-async fn test_session_manager_pause_resume() {
-    if !tmux_available().await {
-        eprintln!("Skipping test: tmux not available");
-        return;
-    }
-
-    let (repo_temp_dir, repo_path) = create_test_repo().await;
-    let state_temp_dir = TempDir::new().unwrap();
-
-    let worktrees_dir = TempDir::new().unwrap();
-    let config = Config {
-        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
-        ..Config::default()
-    };
-
-    let config_store = create_isolated_config_store(&state_temp_dir, config);
-    let store = create_isolated_store(&state_temp_dir);
-    let manager = SessionManager::new(config_store, store.clone(), "");
-
-    // Add project and create session (prepare + finalize)
-    let project_id = manager.add_project(repo_path).await.unwrap();
-    let session_id = manager
-        .prepare_session(
-            &project_id,
-            "pause-test".to_string(),
-            Some("bash".to_string()),
-        )
-        .await
-        .unwrap();
-    manager.finalize_session(&session_id).await.unwrap();
-
-    // Verify initial status
-    {
-        let state = store.read().await;
-        let session = state.get_session(&session_id).unwrap();
-        assert!(session.status.can_pause(), "Should be able to pause");
-    }
-
-    // Pause
-    let result = manager.pause_session(&session_id).await;
-    assert!(result.is_ok(), "Should pause session");
-
-    // Verify paused status
-    {
-        let state = store.read().await;
-        let session = state.get_session(&session_id).unwrap();
-        assert!(session.status.can_resume(), "Should be able to resume");
-    }
-
-    // Resume
-    let result = manager.resume_session(&session_id).await;
-    assert!(result.is_ok(), "Should resume session");
-
-    // Cleanup
-    let _ = manager.kill_session(&session_id, true).await;
-
-    // Keep temp dirs alive until end of test
-    drop(repo_temp_dir);
-    drop(state_temp_dir);
-    drop(worktrees_dir);
-}
-
-#[tokio::test]
 async fn test_session_manager_restart() {
     if !tmux_available().await {
         eprintln!("Skipping test: tmux not available");
@@ -331,23 +268,6 @@ async fn test_session_manager_restart() {
     assert!(result.is_ok(), "Should restart running session");
 
     // Verify still Running after restart
-    {
-        let state = store.read().await;
-        let session = state.get_session(&session_id).unwrap();
-        assert_eq!(session.status, SessionStatus::Running);
-    }
-
-    // Pause, then restart from Paused state
-    manager.pause_session(&session_id).await.unwrap();
-    {
-        let state = store.read().await;
-        let session = state.get_session(&session_id).unwrap();
-        assert_eq!(session.status, SessionStatus::Paused);
-    }
-
-    let result = manager.restart_session(&session_id).await;
-    assert!(result.is_ok(), "Should restart paused session");
-
     {
         let state = store.read().await;
         let session = state.get_session(&session_id).unwrap();
@@ -470,7 +390,7 @@ async fn test_sync_worktrees_imports_external() {
 
         let session = st.get_session(&project.worktrees[0]).unwrap();
         assert_eq!(session.branch, "external-feature");
-        assert_eq!(session.status, SessionStatus::Paused);
+        assert_eq!(session.status, SessionStatus::Stopped);
         assert!(session.base_commit.is_some());
     }
 
