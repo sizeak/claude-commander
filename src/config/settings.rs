@@ -47,6 +47,12 @@ pub struct Config {
     /// Interval in seconds between GitHub PR checks (0 = disabled)
     pub pr_check_interval_secs: u64,
 
+    /// Label names that mark an open PR as awaiting reviewer action (case-insensitive).
+    /// When any of these labels are present on an open PR, the PR badge is coloured
+    /// with the "review" colour (light purple) instead of the regular open colour.
+    #[serde(default = "default_pr_review_labels")]
+    pub pr_review_labels: Vec<String>,
+
     /// Editor/IDE command for opening sessions (e.g. "code", "zed", "nvim")
     pub editor: Option<String>,
 
@@ -112,6 +118,7 @@ impl Default for Config {
             editor_gui: None,
             shell_program: std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string()),
             pr_check_interval_secs: 600,
+            pr_review_labels: default_pr_review_labels(),
             fetch_before_create: true,
             state_sync_interval_ms: 2000,
             agent_state_poll_interval_ms: 3000,
@@ -127,6 +134,14 @@ impl Default for Config {
             theme: ThemeOverrides::default(),
         }
     }
+}
+
+fn default_pr_review_labels() -> Vec<String> {
+    vec![
+        "dev-review-required".to_string(),
+        "ready-for-test".to_string(),
+        "trivial".to_string(),
+    ]
 }
 
 impl Config {

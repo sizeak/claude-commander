@@ -415,8 +415,7 @@ impl App {
             let interval_ms = self.config.agent_state_poll_interval_ms;
             let tmux = self.session_manager.tmux.clone();
             tokio::spawn(async move {
-                let cache_ttl =
-                    Duration::from_millis(interval_ms.saturating_sub(500).max(500));
+                let cache_ttl = Duration::from_millis(interval_ms.saturating_sub(500).max(500));
                 let mut detector = AgentStateDetector::new(tmux, cache_ttl);
                 let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
                 loop {
@@ -427,9 +426,7 @@ impl App {
                             .sessions
                             .values()
                             .filter(|s| s.status == SessionStatus::Running)
-                            .map(|s| {
-                                (s.id, s.tmux_session_name.clone(), s.program.clone())
-                            })
+                            .map(|s| (s.id, s.tmux_session_name.clone(), s.program.clone()))
                             .collect()
                     };
                     if sessions.is_empty() {
@@ -439,9 +436,9 @@ impl App {
                         detector.detect_all(&sessions).await;
                     if !states.is_empty() {
                         let _ = tx
-                            .send(AppEvent::StateUpdate(
-                                StateUpdate::AgentStatesUpdated { states },
-                            ))
+                            .send(AppEvent::StateUpdate(StateUpdate::AgentStatesUpdated {
+                                states,
+                            }))
                             .await;
                     }
                 }
@@ -1016,7 +1013,8 @@ impl App {
         let tree_list = TreeList::new(&self.ui_state.list_items, &self.theme)
             .highlight_style(self.theme.selection().add_modifier(Modifier::BOLD))
             .tick(self.ui_state.tick_count)
-            .show_status_indicator(self.config.show_status_indicator);
+            .show_status_indicator(self.config.show_status_indicator)
+            .review_labels(&self.config.pr_review_labels);
 
         frame.render_stateful_widget(
             tree_list,
@@ -1569,12 +1567,10 @@ impl App {
 
                     let status_icon = match m.status {
                         SessionStatus::Running => "●",
-                        SessionStatus::Paused => "◐",
                         SessionStatus::Stopped => "○",
                     };
                     let status_color = match m.status {
                         SessionStatus::Running => self.theme.status_running,
-                        SessionStatus::Paused => self.theme.status_paused,
                         SessionStatus::Stopped => self.theme.status_stopped,
                     };
 
@@ -1753,10 +1749,12 @@ impl App {
                     theme_row!("Border Unfocused", border_unfocused),
                     theme_row!("Selection BG", selection_bg),
                     theme_row!("Status Running", status_running),
-                    theme_row!("Status Paused", status_paused),
                     theme_row!("Status Stopped", status_stopped),
                     theme_row!("Status PR", status_pr),
                     theme_row!("Status PR Merged", status_pr_merged),
+                    theme_row!("PR Open", pr_open),
+                    theme_row!("PR Draft", pr_draft),
+                    theme_row!("PR Closed", pr_closed),
                     theme_row!("Text Primary", text_primary),
                     theme_row!("Text Secondary", text_secondary),
                     theme_row!("Text Accent", text_accent),
@@ -2051,14 +2049,15 @@ impl App {
                             selection_bg,
                             selection_fg,
                             status_running,
-                            status_paused,
                             status_stopped,
                             status_pr,
                             status_pr_merged,
+                            pr_open,
+                            pr_draft,
+                            pr_closed,
                             text_primary,
                             text_secondary,
                             text_accent,
-                            text_pr,
                             diff_added,
                             diff_removed,
                             diff_hunk_header,
@@ -2260,11 +2259,6 @@ impl App {
             Span::raw("  "),
             Span::styled("●", Style::default().fg(self.theme.status_pr_merged)),
             Span::raw("  PR merged"),
-        ]));
-        lines.push(Line::from(vec![
-            Span::raw("  "),
-            Span::styled("◐", Style::default().fg(self.theme.status_paused)),
-            Span::raw("  Paused"),
         ]));
         lines.push(Line::from(vec![
             Span::raw("  "),
@@ -2588,12 +2582,6 @@ impl App {
                     completer: PathCompleter::new(),
                 };
             }
-            UserCommand::PauseSession => {
-                self.handle_pause_session().await;
-            }
-            UserCommand::ResumeSession => {
-                self.handle_resume_session().await;
-            }
             UserCommand::DeleteSession => {
                 self.handle_delete_session();
             }
@@ -2748,12 +2736,15 @@ impl App {
                     .mutate(move |state| {
                         for (session_id, pr_info) in &results {
                             if let Some(session) = state.get_session_mut(session_id) {
-                                let new_number = pr_info.as_ref().map(|p| p.number);
-                                let new_merged = pr_info.as_ref().is_some_and(|p| p.merged);
-                                let new_url = pr_info.as_ref().map(|p| p.url.clone());
-                                session.pr_number = new_number;
-                                session.pr_url = new_url;
-                                session.pr_merged = new_merged;
+                                session.pr_number = pr_info.as_ref().map(|p| p.number);
+                                session.pr_url = pr_info.as_ref().map(|p| p.url.clone());
+                                session.pr_state = pr_info.as_ref().map(|p| p.state);
+                                session.pr_draft = pr_info.as_ref().is_some_and(|p| p.is_draft);
+                                session.pr_labels = pr_info
+                                    .as_ref()
+                                    .map(|p| p.labels.clone())
+                                    .unwrap_or_default();
+                                session.pr_merged = pr_info.as_ref().is_some_and(|p| p.merged());
                             }
                         }
                     })
@@ -2829,8 +2820,7 @@ impl App {
                 let mut unread_ids = Vec::new();
                 for (session_id, new_state) in &states {
                     if *new_state == AgentState::Idle
-                        && self.ui_state.agent_states.get(session_id)
-                            == Some(&AgentState::Working)
+                        && self.ui_state.agent_states.get(session_id) == Some(&AgentState::Working)
                     {
                         unread_ids.push(*session_id);
                     }
@@ -3158,46 +3148,6 @@ impl App {
             // Clamp selection
             if *selected_idx >= matches.len() {
                 *selected_idx = matches.len().saturating_sub(1);
-            }
-        }
-    }
-
-    /// Handle pause session
-    async fn handle_pause_session(&mut self) {
-        if let Some(session_id) = self.ui_state.selected_session_id {
-            match self.session_manager.pause_session(&session_id).await {
-                Ok(_) => {
-                    self.ui_state.status_message = Some((
-                        "Session paused".to_string(),
-                        Instant::now() + Duration::from_secs(3),
-                    ));
-                    self.refresh_list_items().await;
-                }
-                Err(e) => {
-                    self.ui_state.modal = Modal::Error {
-                        message: format!("Failed to pause: {}", e),
-                    };
-                }
-            }
-        }
-    }
-
-    /// Handle resume session
-    async fn handle_resume_session(&mut self) {
-        if let Some(session_id) = self.ui_state.selected_session_id {
-            match self.session_manager.resume_session(&session_id).await {
-                Ok(_) => {
-                    self.ui_state.status_message = Some((
-                        "Session resumed".to_string(),
-                        Instant::now() + Duration::from_secs(3),
-                    ));
-                    self.refresh_list_items().await;
-                }
-                Err(e) => {
-                    self.ui_state.modal = Modal::Error {
-                        message: format!("Failed to resume: {}", e),
-                    };
-                }
             }
         }
     }
@@ -3656,6 +3606,9 @@ impl App {
                     pr_number: session.pr_number,
                     pr_url: session.pr_url.clone(),
                     pr_merged: session.pr_merged,
+                    pr_state: session.pr_state,
+                    pr_draft: session.pr_draft,
+                    pr_labels: session.pr_labels.clone(),
                     worktree_path: session.worktree_path.clone(),
                     created_at: session.created_at,
                     agent_state: self.ui_state.agent_states.get(&session.id).copied(),

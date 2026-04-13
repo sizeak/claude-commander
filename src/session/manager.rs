@@ -1,6 +1,6 @@
 //! Session manager - coordinates session lifecycle
 //!
-//! Handles the creation, pause, resume, and termination of sessions,
+//! Handles the creation, restart, and termination of sessions,
 //! coordinating between tmux and git operations.
 
 use std::path::PathBuf;
@@ -305,80 +305,6 @@ impl SessionManager {
             session_id, tmux_session_name
         );
         Ok(session_id)
-    }
-
-    /// Pause a session (detach from tmux, keep worktree)
-    #[instrument(skip(self))]
-    pub async fn pause_session(&self, session_id: &SessionId) -> Result<()> {
-        let sid = *session_id;
-        self.store
-            .try_mutate(move |state| {
-                let session = state
-                    .get_session_mut(&sid)
-                    .ok_or(SessionError::NotFound(sid))?;
-
-                if !session.status.can_pause() {
-                    return Err(SessionError::InvalidState(sid).into());
-                }
-
-                session.set_status(SessionStatus::Paused);
-                Ok(())
-            })
-            .await?;
-
-        info!("Paused session {}", session_id);
-        Ok(())
-    }
-
-    /// Resume a paused session
-    #[instrument(skip(self))]
-    pub async fn resume_session(&self, session_id: &SessionId) -> Result<()> {
-        // Read session info first
-        let (tmux_session_name, worktree_path, program, can_resume, status_bar) = {
-            let state = self.store.read().await;
-            let session = state
-                .get_session(session_id)
-                .ok_or(SessionError::NotFound(*session_id))?;
-            (
-                session.tmux_session_name.clone(),
-                session.worktree_path.clone(),
-                session.program.clone(),
-                session.status.can_resume(),
-                self.status_bar_info(session, &state),
-            )
-        };
-
-        if !can_resume {
-            return Err(SessionError::InvalidState(*session_id).into());
-        }
-
-        // Check if tmux session still exists
-        let exists = self.tmux.session_exists(&tmux_session_name).await?;
-
-        if !exists {
-            let resume_program = format!("{} --resume", program);
-            self.tmux
-                .create_session(&tmux_session_name, &worktree_path, Some(&resume_program))
-                .await?;
-
-            // Configure CC status bar on the recreated session
-            self.tmux
-                .configure_status_bar(&tmux_session_name, &status_bar)
-                .await;
-        }
-
-        // Update status
-        let sid = *session_id;
-        self.store
-            .mutate(move |state| {
-                if let Some(session) = state.get_session_mut(&sid) {
-                    session.set_status(SessionStatus::Running);
-                }
-            })
-            .await?;
-
-        info!("Resumed session {}", session_id);
-        Ok(())
     }
 
     /// Kill tmux sessions (main + shell) for a worktree session.
@@ -967,11 +893,12 @@ impl SessionManager {
             .await
     }
 
-    /// Sync unmanaged git worktrees as paused sessions
+    /// Sync unmanaged git worktrees as stopped sessions
     ///
     /// Lists actual git worktrees for the project and imports any that aren't
-    /// already tracked as sessions. Imported worktrees get `Paused` status so
-    /// they can be resumed/attached via the normal flow.
+    /// already tracked as sessions. Imported worktrees get `Stopped` status —
+    /// they have no running tmux session but can be attached to (which will
+    /// recreate the tmux session on demand).
     #[instrument(skip(self))]
     pub async fn sync_worktrees(&self, project_id: &ProjectId) -> Result<usize> {
         let (repo_path, existing_paths) = {
@@ -1054,7 +981,7 @@ impl SessionManager {
                 wt.path.clone(),
                 self.config_store.read().default_program.clone(),
             );
-            session.set_status(SessionStatus::Paused);
+            session.set_status(SessionStatus::Stopped);
             session.base_commit = Some(wt.head.clone());
 
             info!(
