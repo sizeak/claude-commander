@@ -5,13 +5,14 @@
 //! - Application state updates
 //! - Render ticks
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::config::keybindings::{BindableAction, KeyBindings};
 use crate::git::{DiffInfo, EnrichedPrInfo};
-use crate::session::{ProjectId, SessionId};
+use crate::session::{AgentState, ProjectId, SessionId};
 
 use crossterm::event::{
     Event as CrosstermEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
@@ -87,6 +88,10 @@ pub enum StateUpdate {
         result: Result<String, String>,
         /// Hash of the diff that was summarized (for cache keying)
         diff_hash: u64,
+    },
+    /// Agent states updated from background polling
+    AgentStatesUpdated {
+        states: HashMap<SessionId, AgentState>,
     },
     /// Preview/diff/shell data ready from background fetch
     PreviewReady {

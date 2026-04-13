@@ -127,6 +127,8 @@ fn test_session_list_with_sessions() {
                     pr_merged: false,
                     worktree_path: PathBuf::from("/tmp/wt"),
                     created_at: chrono::Utc::now(),
+                    agent_state: None,
+                    unread: false,
                 },
                 SessionListItem::Worktree {
                     id: SessionId::new(),
@@ -140,6 +142,8 @@ fn test_session_list_with_sessions() {
                     pr_merged: false,
                     worktree_path: PathBuf::from("/tmp/wt"),
                     created_at: chrono::Utc::now(),
+                    agent_state: None,
+                    unread: false,
                 },
                 SessionListItem::Worktree {
                     id: SessionId::new(),
@@ -153,6 +157,8 @@ fn test_session_list_with_sessions() {
                     pr_merged: false,
                     worktree_path: PathBuf::from("/tmp/wt"),
                     created_at: chrono::Utc::now(),
+                    agent_state: None,
+                    unread: false,
                 },
             ];
             let tree_list = TreeList::new(&items, &theme)
@@ -197,6 +203,8 @@ fn test_session_list_with_pr_badges() {
                     pr_merged: false,
                     worktree_path: PathBuf::from("/tmp/wt"),
                     created_at: chrono::Utc::now(),
+                    agent_state: None,
+                    unread: false,
                 },
                 SessionListItem::Worktree {
                     id: SessionId::new(),
@@ -210,6 +218,8 @@ fn test_session_list_with_pr_badges() {
                     pr_merged: true,
                     worktree_path: PathBuf::from("/tmp/wt"),
                     created_at: chrono::Utc::now(),
+                    agent_state: None,
+                    unread: false,
                 },
             ];
             let tree_list = TreeList::new(&items, &theme)
@@ -254,6 +264,8 @@ fn test_session_list_mixed_programs() {
                     pr_merged: false,
                     worktree_path: PathBuf::from("/tmp/wt"),
                     created_at: chrono::Utc::now(),
+                    agent_state: None,
+                    unread: false,
                 },
                 SessionListItem::Worktree {
                     id: SessionId::new(),
@@ -267,6 +279,8 @@ fn test_session_list_mixed_programs() {
                     pr_merged: false,
                     worktree_path: PathBuf::from("/tmp/wt"),
                     created_at: chrono::Utc::now(),
+                    agent_state: None,
+                    unread: false,
                 },
             ];
             let tree_list = TreeList::new(&items, &theme)
