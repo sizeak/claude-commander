@@ -1735,6 +1735,16 @@ impl App {
                         color_swatch: None,
                     },
                     SettingsRow {
+                        label: "Editor Ctrl Hotkey in Tmux Session".into(),
+                        value: c
+                            .editor_ctrl_hotkey_in_tmux_session
+                            .clone()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| "(disabled)".into()),
+                        field_key: "editor_ctrl_hotkey_in_tmux_session".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
                         label: "Fetch Before Create".into(),
                         value: c.fetch_before_create.to_string(),
                         field_key: "fetch_before_create".into(),
@@ -2060,6 +2070,14 @@ impl App {
                         "false" => Some(false),
                         _ => None,
                     };
+                }
+                "editor_ctrl_hotkey_in_tmux_session" => {
+                    self.config.editor_ctrl_hotkey_in_tmux_session =
+                        if value.is_empty() || value == "(disabled)" {
+                            None
+                        } else {
+                            Some(value.to_string())
+                        };
                 }
                 "fetch_before_create" => {
                     if let Ok(b) = value.parse::<bool>() {
