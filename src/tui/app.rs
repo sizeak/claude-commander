@@ -1013,7 +1013,8 @@ impl App {
         let tree_list = TreeList::new(&self.ui_state.list_items, &self.theme)
             .highlight_style(self.theme.selection().add_modifier(Modifier::BOLD))
             .tick(self.ui_state.tick_count)
-            .show_status_indicator(self.config.show_status_indicator);
+            .show_status_indicator(self.config.show_status_indicator)
+            .review_labels(&self.config.pr_review_labels);
 
         frame.render_stateful_widget(
             tree_list,
@@ -1751,6 +1752,9 @@ impl App {
                     theme_row!("Status Stopped", status_stopped),
                     theme_row!("Status PR", status_pr),
                     theme_row!("Status PR Merged", status_pr_merged),
+                    theme_row!("PR Open", pr_open),
+                    theme_row!("PR Draft", pr_draft),
+                    theme_row!("PR Closed", pr_closed),
                     theme_row!("Text Primary", text_primary),
                     theme_row!("Text Secondary", text_secondary),
                     theme_row!("Text Accent", text_accent),
@@ -2048,10 +2052,12 @@ impl App {
                             status_stopped,
                             status_pr,
                             status_pr_merged,
+                            pr_open,
+                            pr_draft,
+                            pr_closed,
                             text_primary,
                             text_secondary,
                             text_accent,
-                            text_pr,
                             diff_added,
                             diff_removed,
                             diff_hunk_header,
@@ -2728,12 +2734,15 @@ impl App {
                     .mutate(move |state| {
                         for (session_id, pr_info) in &results {
                             if let Some(session) = state.get_session_mut(session_id) {
-                                let new_number = pr_info.as_ref().map(|p| p.number);
-                                let new_merged = pr_info.as_ref().is_some_and(|p| p.merged);
-                                let new_url = pr_info.as_ref().map(|p| p.url.clone());
-                                session.pr_number = new_number;
-                                session.pr_url = new_url;
-                                session.pr_merged = new_merged;
+                                session.pr_number = pr_info.as_ref().map(|p| p.number);
+                                session.pr_url = pr_info.as_ref().map(|p| p.url.clone());
+                                session.pr_state = pr_info.as_ref().map(|p| p.state);
+                                session.pr_draft = pr_info.as_ref().is_some_and(|p| p.is_draft);
+                                session.pr_labels = pr_info
+                                    .as_ref()
+                                    .map(|p| p.labels.clone())
+                                    .unwrap_or_default();
+                                session.pr_merged = pr_info.as_ref().is_some_and(|p| p.merged());
                             }
                         }
                     })
@@ -3595,6 +3604,9 @@ impl App {
                     pr_number: session.pr_number,
                     pr_url: session.pr_url.clone(),
                     pr_merged: session.pr_merged,
+                    pr_state: session.pr_state,
+                    pr_draft: session.pr_draft,
+                    pr_labels: session.pr_labels.clone(),
                     worktree_path: session.worktree_path.clone(),
                     created_at: session.created_at,
                     agent_state: self.ui_state.agent_states.get(&session.id).copied(),

@@ -171,6 +171,11 @@ pub struct ThemeOverrides {
     pub status_pr: Option<ColorValue>,
     pub status_pr_merged: Option<ColorValue>,
 
+    // PR badge text colours
+    pub pr_open: Option<ColorValue>,
+    pub pr_draft: Option<ColorValue>,
+    pub pr_closed: Option<ColorValue>,
+
     // Agent state and notification indicators
     pub agent_working: Option<ColorValue>,
     pub agent_waiting: Option<ColorValue>,
@@ -180,7 +185,6 @@ pub struct ThemeOverrides {
     pub text_primary: Option<ColorValue>,
     pub text_secondary: Option<ColorValue>,
     pub text_accent: Option<ColorValue>,
-    pub text_pr: Option<ColorValue>,
 
     // Diff colors
     pub diff_added: Option<ColorValue>,

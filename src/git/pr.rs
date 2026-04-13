@@ -6,15 +6,25 @@
 
 use std::path::Path;
 
+use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 use tracing::debug;
 
-/// Minimal PR metadata returned by `gh pr list`.
+/// PR metadata returned by `gh pr list` for the session list view.
 #[derive(Debug, Clone)]
 pub struct PrInfo {
     pub number: u32,
     pub url: String,
-    pub merged: bool,
+    pub state: PrState,
+    pub is_draft: bool,
+    pub labels: Vec<String>,
+}
+
+impl PrInfo {
+    /// Convenience: true when the PR is merged.
+    pub fn merged(&self) -> bool {
+        self.state == PrState::Merged
+    }
 }
 
 /// Rich PR metadata returned by `gh pr view`.
@@ -31,7 +41,8 @@ pub struct EnrichedPrInfo {
 }
 
 /// PR state as reported by the GitHub API.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PrState {
     Open,
     Closed,
@@ -92,96 +103,88 @@ pub async fn is_gh_available() -> bool {
     }
 }
 
-/// Check whether `branch` has a PR (open or merged) in the repo at `repo_path`.
+/// Check whether `branch` has a PR (any state) in the repo at `repo_path`.
 ///
 /// Returns `None` on any failure (gh missing, not authed, network error,
-/// not a GitHub repo, or no PR). Prefers open PRs over merged ones.
+/// not a GitHub repo, or no PR). Prefers open PRs over closed/merged when a
+/// branch has multiple PRs (rare, but possible after a reopen).
 pub async fn check_pr_for_branch(repo_path: &Path, branch: &str) -> Option<PrInfo> {
-    // Check open PRs first, then merged if none found
-    for state in &["open", "merged"] {
-        let output = Command::new("gh")
-            .args([
-                "pr",
-                "list",
-                "--head",
-                branch,
-                "--state",
-                state,
-                "--json",
-                "number,url",
-                "--limit",
-                "1",
-            ])
-            .current_dir(repo_path)
-            .output()
-            .await
-            .ok()?;
+    let output = Command::new("gh")
+        .args([
+            "pr",
+            "list",
+            "--head",
+            branch,
+            "--state",
+            "all",
+            "--json",
+            "number,url,state,isDraft,labels",
+            "--limit",
+            "5",
+        ])
+        .current_dir(repo_path)
+        .output()
+        .await
+        .ok()?;
 
-        if !output.status.success() {
-            debug!(
-                "gh pr list --state {} failed for branch {}: {}",
-                state,
-                branch,
-                String::from_utf8_lossy(&output.stderr)
-            );
-            return None;
-        }
-
-        let json = String::from_utf8(output.stdout).ok()?;
-        if let Some(mut info) = parse_pr_json(&json) {
-            info.merged = *state == "merged";
-            return Some(info);
-        }
+    if !output.status.success() {
+        debug!(
+            "gh pr list failed for branch {}: {}",
+            branch,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return None;
     }
 
-    None
+    let json = String::from_utf8(output.stdout).ok()?;
+    parse_pr_list_json(&json)
 }
 
-/// Parse the JSON array returned by `gh pr list --json number,url --limit 1`.
+/// Parse the JSON array returned by `gh pr list --json number,url,state,isDraft,labels`.
 ///
-/// Expected format: `[{"number":123,"url":"https://..."}]` or `[]`.
-fn parse_pr_json(json: &str) -> Option<PrInfo> {
-    let trimmed = json.trim();
-    if trimmed.is_empty() || trimmed == "[]" {
+/// Picks the first open PR if any exist, otherwise the first PR in the array
+/// (which gh returns in reverse-creation order).
+fn parse_pr_list_json(json: &str) -> Option<PrInfo> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let arr = v.as_array()?;
+    if arr.is_empty() {
         return None;
     }
 
-    // Minimal JSON parsing without pulling in serde_json for this one call.
-    // The output is a single-element array of `{"number":N,"url":"..."}`.
-    let inner = trimmed.strip_prefix('[')?.strip_suffix(']')?.trim();
-    if inner.is_empty() {
-        return None;
-    }
+    // Prefer open PRs over closed/merged when a branch has multiple
+    let chosen = arr
+        .iter()
+        .find(|p| p["state"].as_str() == Some("OPEN"))
+        .unwrap_or(&arr[0]);
 
-    // Extract "number": <digits>
-    let number = {
-        let idx = inner.find("\"number\"")?;
-        let after_key = &inner[idx + "\"number\"".len()..];
-        let colon = after_key.find(':')?;
-        let after_colon = after_key[colon + 1..].trim_start();
-        // Read digits until a non-digit character
-        let end = after_colon
-            .find(|c: char| !c.is_ascii_digit())
-            .unwrap_or(after_colon.len());
-        after_colon[..end].parse::<u32>().ok()?
-    };
+    parse_pr_entry(chosen)
+}
 
-    // Extract "url": "..."
-    let url = {
-        let idx = inner.find("\"url\"")?;
-        let after_key = &inner[idx + "\"url\"".len()..];
-        let colon = after_key.find(':')?;
-        let after_colon = after_key[colon + 1..].trim_start();
-        let quote_start = after_colon.find('"')?;
-        let rest = &after_colon[quote_start + 1..];
-        let quote_end = rest.find('"')?;
-        rest[..quote_end].to_string()
+fn parse_pr_entry(v: &serde_json::Value) -> Option<PrInfo> {
+    let number = v["number"].as_u64()? as u32;
+    let url = v["url"].as_str()?.to_string();
+    let state = match v["state"].as_str()? {
+        "OPEN" => PrState::Open,
+        "CLOSED" => PrState::Closed,
+        "MERGED" => PrState::Merged,
+        _ => return None,
     };
+    let is_draft = v["isDraft"].as_bool().unwrap_or(false);
+    let labels = v["labels"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|l| l["name"].as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
 
     Some(PrInfo {
         number,
         url,
-        merged: false,
+        state,
+        is_draft,
+        labels,
     })
 }
 
@@ -295,55 +298,65 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_pr_json_valid() {
-        let json = r#"[{"number":42,"url":"https://github.com/owner/repo/pull/42"}]"#;
-        let info = parse_pr_json(json).unwrap();
+    fn test_parse_pr_list_open() {
+        let json = r#"[{"number":42,"url":"https://github.com/owner/repo/pull/42","state":"OPEN","isDraft":false,"labels":[]}]"#;
+        let info = parse_pr_list_json(json).unwrap();
         assert_eq!(info.number, 42);
         assert_eq!(info.url, "https://github.com/owner/repo/pull/42");
-        assert!(!info.merged);
+        assert_eq!(info.state, PrState::Open);
+        assert!(!info.is_draft);
+        assert!(info.labels.is_empty());
+        assert!(!info.merged());
     }
 
     #[test]
-    fn test_parse_pr_json_empty_array() {
-        assert!(parse_pr_json("[]").is_none());
+    fn test_parse_pr_list_merged() {
+        let json = r#"[{"number":7,"url":"https://x/pull/7","state":"MERGED","isDraft":false,"labels":[]}]"#;
+        let info = parse_pr_list_json(json).unwrap();
+        assert_eq!(info.state, PrState::Merged);
+        assert!(info.merged());
     }
 
     #[test]
-    fn test_parse_pr_json_empty_string() {
-        assert!(parse_pr_json("").is_none());
+    fn test_parse_pr_list_draft_with_labels() {
+        let json = r#"[{
+            "number":3,
+            "url":"https://x/pull/3",
+            "state":"OPEN",
+            "isDraft":true,
+            "labels":[{"name":"dev-review-required","color":"abc"},{"name":"trivial","color":"def"}]
+        }]"#;
+        let info = parse_pr_list_json(json).unwrap();
+        assert!(info.is_draft);
+        assert_eq!(info.labels, vec!["dev-review-required", "trivial"]);
     }
 
     #[test]
-    fn test_parse_pr_json_whitespace() {
-        assert!(parse_pr_json("  \n  ").is_none());
+    fn test_parse_pr_list_prefers_open_over_merged() {
+        let json = r#"[
+            {"number":1,"url":"u1","state":"MERGED","isDraft":false,"labels":[]},
+            {"number":2,"url":"u2","state":"OPEN","isDraft":false,"labels":[]}
+        ]"#;
+        let info = parse_pr_list_json(json).unwrap();
+        assert_eq!(info.number, 2);
+        assert_eq!(info.state, PrState::Open);
     }
 
     #[test]
-    fn test_parse_pr_json_with_whitespace() {
-        let json = r#"
-        [
-          {
-            "number": 1234,
-            "url": "https://github.com/org/project/pull/1234"
-          }
-        ]
-        "#;
-        let info = parse_pr_json(json).unwrap();
-        assert_eq!(info.number, 1234);
-        assert_eq!(info.url, "https://github.com/org/project/pull/1234");
+    fn test_parse_pr_list_closed_when_no_open() {
+        let json = r#"[{"number":9,"url":"u","state":"CLOSED","isDraft":false,"labels":[]}]"#;
+        let info = parse_pr_list_json(json).unwrap();
+        assert_eq!(info.state, PrState::Closed);
     }
 
     #[test]
-    fn test_parse_pr_json_url_before_number() {
-        let json = r#"[{"url":"https://github.com/a/b/pull/7","number":7}]"#;
-        let info = parse_pr_json(json).unwrap();
-        assert_eq!(info.number, 7);
-        assert_eq!(info.url, "https://github.com/a/b/pull/7");
+    fn test_parse_pr_list_empty_array() {
+        assert!(parse_pr_list_json("[]").is_none());
     }
 
     #[test]
-    fn test_parse_pr_json_garbage() {
-        assert!(parse_pr_json("not json at all").is_none());
+    fn test_parse_pr_list_garbage() {
+        assert!(parse_pr_list_json("not json").is_none());
     }
 
     #[test]

@@ -230,9 +230,18 @@ pub struct WorktreeSession {
     /// GitHub PR URL
     #[serde(default)]
     pub pr_url: Option<String>,
-    /// Whether the PR has been merged
+    /// Whether the PR has been merged (kept for backward compat — derived from pr_state)
     #[serde(default)]
     pub pr_merged: bool,
+    /// PR lifecycle state (open / closed / merged). None = unknown / no PR.
+    #[serde(default)]
+    pub pr_state: Option<crate::git::PrState>,
+    /// Whether the PR is a draft
+    #[serde(default)]
+    pub pr_draft: bool,
+    /// Label names attached to the PR (used for review-needed colouring)
+    #[serde(default)]
+    pub pr_labels: Vec<String>,
     /// Whether the session has unread output (agent finished but user hasn't attached)
     #[serde(default)]
     pub unread: bool,
@@ -270,6 +279,9 @@ impl WorktreeSession {
             pr_number: None,
             pr_url: None,
             pr_merged: false,
+            pr_state: None,
+            pr_draft: false,
+            pr_labels: Vec::new(),
             unread: false,
         }
     }
@@ -319,6 +331,9 @@ pub enum SessionListItem {
         pr_number: Option<u32>,
         pr_url: Option<String>,
         pr_merged: bool,
+        pr_state: Option<crate::git::PrState>,
+        pr_draft: bool,
+        pr_labels: Vec<String>,
         worktree_path: PathBuf,
         created_at: chrono::DateTime<chrono::Utc>,
         agent_state: Option<AgentState>,
@@ -445,6 +460,9 @@ mod tests {
             pr_number: None,
             pr_url: None,
             pr_merged: false,
+            pr_state: None,
+            pr_draft: false,
+            pr_labels: Vec::new(),
             worktree_path: PathBuf::from("/tmp/wt"),
             created_at: chrono::Utc::now(),
             agent_state: None,
@@ -589,6 +607,9 @@ mod tests {
             pr_number: None,
             pr_url: None,
             pr_merged: false,
+            pr_state: None,
+            pr_draft: false,
+            pr_labels: Vec::new(),
             worktree_path: PathBuf::from("/tmp/wt"),
             created_at: chrono::Utc::now(),
             agent_state: None,

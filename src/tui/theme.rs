@@ -61,6 +61,12 @@ pub struct Theme {
     pub status_pr: Color,
     pub status_pr_merged: Color,
 
+    // PR badge text colours (per state). `status_pr` is reused for the
+    // "open + awaiting review" colour (light purple).
+    pub pr_open: Color,
+    pub pr_draft: Color,
+    pub pr_closed: Color,
+
     // Agent state and notification indicators
     pub agent_working: Color,
     pub agent_waiting: Color,
@@ -71,7 +77,6 @@ pub struct Theme {
     pub text_secondary: Color,
     pub text_accent: Color,
     pub project_colors: Vec<(Color, Color)>, // (project_header, session_title)
-    pub text_pr: Color,
 
     // Diff colors
     pub diff_added: Color,
@@ -120,6 +125,10 @@ impl Theme {
             status_pr: Color::Magenta,
             status_pr_merged: Color::DarkGray,
 
+            pr_open: Color::Green,
+            pr_draft: Color::DarkGray,
+            pr_closed: Color::Red,
+
             agent_working: Color::Green,
             agent_waiting: Color::Yellow,
             unread_indicator: Color::Blue,
@@ -135,7 +144,6 @@ impl Theme {
                 (Color::Green, Color::LightGreen),
                 (Color::Red, Color::LightRed),
             ],
-            text_pr: Color::Cyan,
 
             diff_added: Color::Green,
             diff_removed: Color::Red,
@@ -166,6 +174,10 @@ impl Theme {
             status_pr: Color::Indexed(141),       // Medium purple
             status_pr_merged: Color::Indexed(97), // Dark purple
 
+            pr_open: Color::Indexed(114),   // Pastel green
+            pr_draft: Color::Indexed(245),  // Mid-grey
+            pr_closed: Color::Indexed(167), // Soft red
+
             agent_working: Color::Indexed(156),    // Pastel mint
             agent_waiting: Color::Indexed(208),    // Orange
             unread_indicator: Color::Indexed(117), // Sky blue
@@ -181,7 +193,6 @@ impl Theme {
                 (Color::Indexed(134), Color::Indexed(183)), // Purple
                 (Color::Indexed(73), Color::Indexed(152)),  // Teal
             ],
-            text_pr: Color::Indexed(117), // Sky blue
 
             diff_added: Color::Indexed(156),       // Pastel mint
             diff_removed: Color::Indexed(210),     // Pastel coral
@@ -212,6 +223,10 @@ impl Theme {
             status_pr: Color::Rgb(203, 166, 247),      // Pastel mauve
             status_pr_merged: Color::Rgb(137, 100, 180), // Dark purple
 
+            pr_open: Color::Rgb(126, 198, 153), // Soft GitHub-ish green
+            pr_draft: Color::Rgb(147, 153, 178), // Muted grey-lavender
+            pr_closed: Color::Rgb(243, 139, 168), // Pastel rose / soft red
+
             agent_working: Color::Rgb(166, 227, 161), // Pastel mint
             agent_waiting: Color::Rgb(250, 179, 135), // Peach/orange
             unread_indicator: Color::Rgb(137, 180, 250), // Sky blue
@@ -227,7 +242,6 @@ impl Theme {
                 (Color::Rgb(160, 130, 200), Color::Rgb(200, 175, 240)), // Purple
                 (Color::Rgb(90, 170, 170), Color::Rgb(155, 215, 215)),  // Teal
             ],
-            text_pr: Color::Rgb(137, 180, 250), // Pastel sky blue
 
             diff_added: Color::Rgb(166, 227, 161), // Pastel mint
             diff_removed: Color::Rgb(243, 139, 168), // Pastel rose
@@ -276,13 +290,15 @@ impl Theme {
         apply!(status_stopped);
         apply!(status_pr);
         apply!(status_pr_merged);
+        apply!(pr_open);
+        apply!(pr_draft);
+        apply!(pr_closed);
         apply!(agent_working);
         apply!(agent_waiting);
         apply!(unread_indicator);
         apply!(text_primary);
         apply!(text_secondary);
         apply!(text_accent);
-        apply!(text_pr);
         apply!(diff_added);
         apply!(diff_removed);
         apply!(diff_hunk_header);
