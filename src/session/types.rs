@@ -80,32 +80,21 @@ impl fmt::Display for SessionId {
 pub enum SessionStatus {
     /// Session is running and active
     Running,
-    /// Session is paused (tmux detached, worktree preserved)
-    Paused,
     /// Session has completed or been killed
+    #[serde(alias = "paused")]
     Stopped,
 }
 
 impl SessionStatus {
-    /// Check if the session is active (running or paused)
+    /// Check if the session is active
     pub fn is_active(&self) -> bool {
-        matches!(self, Self::Running | Self::Paused)
+        matches!(self, Self::Running)
     }
 
     /// Check if the session can be attached to (Stopped sessions are allowed
     /// because get_attach_command will recreate the tmux session automatically)
     pub fn can_attach(&self) -> bool {
-        matches!(self, Self::Running | Self::Paused | Self::Stopped)
-    }
-
-    /// Check if the session can be paused
-    pub fn can_pause(&self) -> bool {
-        matches!(self, Self::Running)
-    }
-
-    /// Check if the session can be resumed
-    pub fn can_resume(&self) -> bool {
-        matches!(self, Self::Paused)
+        matches!(self, Self::Running | Self::Stopped)
     }
 }
 
@@ -113,7 +102,6 @@ impl fmt::Display for SessionStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Running => write!(f, "running"),
-            Self::Paused => write!(f, "paused"),
             Self::Stopped => write!(f, "stopped"),
         }
     }
@@ -377,11 +365,8 @@ mod tests {
     }
 
     #[test]
-    fn test_session_status_transitions() {
-        assert!(SessionStatus::Running.can_pause());
-        assert!(!SessionStatus::Running.can_resume());
-        assert!(SessionStatus::Paused.can_resume());
-        assert!(!SessionStatus::Paused.can_pause());
+    fn test_session_status_can_attach() {
+        assert!(SessionStatus::Running.can_attach());
         assert!(SessionStatus::Stopped.can_attach());
     }
 
@@ -473,33 +458,23 @@ mod tests {
     }
 
     #[test]
-    fn test_stopped_cannot_pause_or_resume() {
-        assert!(!SessionStatus::Stopped.can_pause());
-        assert!(!SessionStatus::Stopped.can_resume());
-    }
-
-    #[test]
-    fn test_running_can_attach() {
-        assert!(SessionStatus::Running.can_attach());
-    }
-
-    #[test]
-    fn test_paused_can_attach() {
-        assert!(SessionStatus::Paused.can_attach());
-    }
-
-    #[test]
     fn test_is_active() {
         assert!(SessionStatus::Running.is_active());
-        assert!(SessionStatus::Paused.is_active());
         assert!(!SessionStatus::Stopped.is_active());
     }
 
     #[test]
     fn test_session_status_display() {
         assert_eq!(format!("{}", SessionStatus::Running), "running");
-        assert_eq!(format!("{}", SessionStatus::Paused), "paused");
         assert_eq!(format!("{}", SessionStatus::Stopped), "stopped");
+    }
+
+    #[test]
+    fn test_session_status_paused_alias_deserializes_to_stopped() {
+        // Backward compat: state.json files written before pause/resume removal
+        // contain `"paused"` which should deserialize as Stopped.
+        let status: SessionStatus = serde_json::from_str("\"paused\"").unwrap();
+        assert_eq!(status, SessionStatus::Stopped);
     }
 
     #[test]
@@ -516,22 +491,6 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(10));
         session.set_status(SessionStatus::Running);
         assert!(session.last_active_at > before);
-    }
-
-    #[test]
-    fn test_set_status_paused_does_not_update_last_active() {
-        let project_id = ProjectId::new();
-        let mut session = WorktreeSession::new(
-            project_id,
-            "Test",
-            "branch",
-            PathBuf::from("/tmp/wt"),
-            "claude",
-        );
-        let before = session.last_active_at;
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        session.set_status(SessionStatus::Paused);
-        assert_eq!(session.last_active_at, before);
     }
 
     #[test]

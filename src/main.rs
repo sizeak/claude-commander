@@ -180,7 +180,6 @@ async fn main() -> Result<()> {
                     for session in sessions {
                         let status_icon = match session.status {
                             claude_commander::SessionStatus::Running => "●",
-                            claude_commander::SessionStatus::Paused => "◐",
                             claude_commander::SessionStatus::Stopped => "○",
                         };
                         println!(

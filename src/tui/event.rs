@@ -123,10 +123,6 @@ pub enum UserCommand {
     NewSession,
     /// Create new project
     NewProject,
-    /// Pause current session
-    PauseSession,
-    /// Resume current session
-    ResumeSession,
     /// Delete/kill current session
     DeleteSession,
     /// Restart current session (kill tmux and recreate)
@@ -210,8 +206,6 @@ impl From<BindableAction> for UserCommand {
             BindableAction::SelectShell => Self::SelectShell,
             BindableAction::NewSession => Self::NewSession,
             BindableAction::NewProject => Self::NewProject,
-            BindableAction::PauseSession => Self::PauseSession,
-            BindableAction::ResumeSession => Self::ResumeSession,
             BindableAction::DeleteSession => Self::DeleteSession,
             BindableAction::RestartSession => Self::RestartSession,
             BindableAction::RemoveProject => Self::RemoveProject,
@@ -543,16 +537,6 @@ mod tests {
                 KeyCode::Char('N'),
                 KeyModifiers::SHIFT,
                 UserCommand::NewProject,
-            ),
-            (
-                KeyCode::Char('p'),
-                KeyModifiers::NONE,
-                UserCommand::PauseSession,
-            ),
-            (
-                KeyCode::Char('r'),
-                KeyModifiers::NONE,
-                UserCommand::ResumeSession,
             ),
             (
                 KeyCode::Char('d'),

@@ -145,14 +145,6 @@ impl<'a> TreeList<'a> {
                                 self.theme.status_running
                             },
                         ),
-                        SessionStatus::Paused => (
-                            "◐",
-                            if has_pr {
-                                pr_color
-                            } else {
-                                self.theme.status_paused
-                            },
-                        ),
                         SessionStatus::Stopped => ("○", self.theme.status_stopped),
                     };
 
@@ -171,8 +163,8 @@ impl<'a> TreeList<'a> {
                     {
                         match state {
                             AgentState::Working => {
-                                let frame = SPINNER_FRAMES
-                                    [(self.tick as usize / 3) % SPINNER_FRAMES.len()];
+                                let frame =
+                                    SPINNER_FRAMES[(self.tick as usize / 3) % SPINNER_FRAMES.len()];
                                 spans.push(Span::styled(
                                     format!("{} ", frame),
                                     Style::default().fg(self.theme.agent_working),

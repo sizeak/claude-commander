@@ -57,7 +57,6 @@ pub struct Theme {
 
     // Session status indicators
     pub status_running: Color,
-    pub status_paused: Color,
     pub status_stopped: Color,
     pub status_pr: Color,
     pub status_pr_merged: Color,
@@ -117,7 +116,6 @@ impl Theme {
             selection_fg: Some(Color::White),
 
             status_running: Color::Green,
-            status_paused: Color::Yellow,
             status_stopped: Color::DarkGray,
             status_pr: Color::Magenta,
             status_pr_merged: Color::DarkGray,
@@ -164,13 +162,12 @@ impl Theme {
             selection_fg: Some(Color::Indexed(255)),
 
             status_running: Color::Indexed(156), // Pastel mint green
-            status_paused: Color::Indexed(222),  // Pastel peach
             status_stopped: Color::Indexed(248),
             status_pr: Color::Indexed(141),       // Medium purple
             status_pr_merged: Color::Indexed(97), // Dark purple
 
-            agent_working: Color::Indexed(156), // Pastel mint
-            agent_waiting: Color::Indexed(208), // Orange
+            agent_working: Color::Indexed(156),    // Pastel mint
+            agent_waiting: Color::Indexed(208),    // Orange
             unread_indicator: Color::Indexed(117), // Sky blue
 
             text_primary: Color::Reset,
@@ -211,7 +208,6 @@ impl Theme {
             selection_fg: Some(Color::Rgb(245, 245, 250)),
 
             status_running: Color::Rgb(166, 227, 161), // Pastel mint
-            status_paused: Color::Rgb(249, 226, 175),  // Pastel peach
             status_stopped: Color::Rgb(147, 153, 178), // Muted lavender
             status_pr: Color::Rgb(203, 166, 247),      // Pastel mauve
             status_pr_merged: Color::Rgb(137, 100, 180), // Dark purple
@@ -277,7 +273,6 @@ impl Theme {
         apply!(border_unfocused);
         apply!(selection_bg);
         apply!(status_running);
-        apply!(status_paused);
         apply!(status_stopped);
         apply!(status_pr);
         apply!(status_pr_merged);
@@ -553,7 +548,7 @@ mod tests {
         assert_eq!(themed.status_running, Color::Yellow);
         // Untouched fields keep the base value
         assert_eq!(themed.border_unfocused, Color::DarkGray);
-        assert_eq!(themed.status_paused, Color::Yellow);
+        assert_eq!(themed.status_stopped, Color::DarkGray);
     }
 
     #[test]

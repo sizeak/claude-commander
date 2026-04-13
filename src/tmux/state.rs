@@ -127,10 +127,7 @@ impl AgentStateDetector {
                 // Title says "not working", check content
             }
             Err(e) => {
-                debug!(
-                    "Failed to get pane title for {}: {}",
-                    tmux_session_name, e
-                );
+                debug!("Failed to get pane title for {}: {}", tmux_session_name, e);
                 return AgentState::Unknown;
             }
         }
@@ -146,10 +143,7 @@ impl AgentStateDetector {
                 state
             }
             Err(e) => {
-                debug!(
-                    "Failed to capture pane for {}: {}",
-                    tmux_session_name, e
-                );
+                debug!("Failed to capture pane for {}: {}", tmux_session_name, e);
                 AgentState::Unknown
             }
         }

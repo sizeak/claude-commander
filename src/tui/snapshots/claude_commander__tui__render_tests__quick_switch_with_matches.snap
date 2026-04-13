@@ -8,7 +8,7 @@ expression: terminal.backend()
 "                ┌ Quick Switch ────────────────────────────────┐                "
 "                │> auth_                                       │                "
 "                │ ● Add auth [feature-auth] (my-app)           │                "
-"                │ ◐ Fix login [fix-login] (my-app)             │                "
+"                │ ○ Fix login [fix-login] (my-app)             │                "
 "                │ ○ Old task [old-branch] (other)              │                "
 "                └──────────────────────────────────────────────┘                "
 "                                                                                "

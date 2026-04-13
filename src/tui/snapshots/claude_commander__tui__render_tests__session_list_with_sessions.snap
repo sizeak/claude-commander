@@ -4,7 +4,7 @@ expression: terminal.backend()
 ---
 " claude-commander [main] (3)                                          "
 "   └── ● Add auth feature [feature-auth]                              "
-"   └── ◐ Fix login bug [fix-login]                                    "
+"   └── ○ Fix login bug [fix-login]                                    "
 "   └── ○ Refactor DB [refactor-db]                                    "
 "                                                                      "
 "                                                                      "

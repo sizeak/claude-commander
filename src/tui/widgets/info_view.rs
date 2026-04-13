@@ -113,7 +113,6 @@ impl<'a> InfoView<'a> {
 
         let (icon, color) = match data.status {
             SessionStatus::Running => ("●", self.theme.status_running),
-            SessionStatus::Paused => ("◐", self.theme.status_paused),
             SessionStatus::Stopped => ("○", self.theme.status_stopped),
         };
         lines.push(Line::from(vec![
@@ -250,7 +249,7 @@ impl<'a> InfoView<'a> {
             let (ci_icon, ci_color, ci_text) = match pr.checks_status {
                 ChecksStatus::Passing => ("✓", self.theme.diff_added, "Passing"),
                 ChecksStatus::Failing => ("✗", self.theme.diff_removed, "Failing"),
-                ChecksStatus::Pending => ("◌", self.theme.status_paused, "Pending"),
+                ChecksStatus::Pending => ("◌", self.theme.modal_warning, "Pending"),
                 ChecksStatus::None => ("—", self.theme.text_secondary, "No checks"),
             };
             lines.push(Line::from(vec![
@@ -631,7 +630,7 @@ mod tests {
             title: "test".into(),
             branch: "test".into(),
             created_at: "now".into(),
-            status: SessionStatus::Paused,
+            status: SessionStatus::Stopped,
             program: "claude".into(),
             worktree_path: "/tmp".into(),
             diff_info: &diff,

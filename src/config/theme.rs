@@ -167,7 +167,6 @@ pub struct ThemeOverrides {
 
     // Session status indicators
     pub status_running: Option<ColorValue>,
-    pub status_paused: Option<ColorValue>,
     pub status_stopped: Option<ColorValue>,
     pub status_pr: Option<ColorValue>,
     pub status_pr_merged: Option<ColorValue>,

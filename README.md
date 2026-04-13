@@ -84,8 +84,6 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `Enter` | Attach to selected session |
 | `n` | New worktree session |
 | `N` | Add new project |
-| `p` | Pause session |
-| `r` | Resume session |
 | `d` | Delete session |
 | `R` | Restart session (kill tmux + recreate with /resume) |
 | `D` | Remove project |
