@@ -2652,10 +2652,12 @@ impl App {
                     .left_pane_pct
                     .saturating_sub(2)
                     .max(MIN_LEFT_PANE_PCT);
+                self.save_left_pane_pct().await;
             }
             UserCommand::GrowLeftPane => {
                 self.ui_state.left_pane_pct =
                     (self.ui_state.left_pane_pct + 2).min(MAX_LEFT_PANE_PCT);
+                self.save_left_pane_pct().await;
             }
             UserCommand::ShowHelp => {
                 self.ui_state.modal = Modal::Help;
@@ -3684,12 +3686,31 @@ impl App {
             .await;
     }
 
-    /// Restore selection from persisted state
+    /// Save left pane width to persisted state
+    async fn save_left_pane_pct(&self) {
+        let pct = self.ui_state.left_pane_pct;
+        let _ = self
+            .store
+            .mutate(move |state| {
+                state.left_pane_pct = Some(pct);
+            })
+            .await;
+    }
+
+    /// Restore selection and UI preferences from persisted state
     async fn restore_selection(&mut self) {
-        let (last_session, last_project) = {
+        let (last_session, last_project, left_pane_pct) = {
             let state = self.store.read().await;
-            (state.last_selected_session, state.last_selected_project)
+            (
+                state.last_selected_session,
+                state.last_selected_project,
+                state.left_pane_pct,
+            )
         };
+
+        if let Some(pct) = left_pane_pct {
+            self.ui_state.left_pane_pct = pct.clamp(MIN_LEFT_PANE_PCT, MAX_LEFT_PANE_PCT);
+        }
 
         // Try to find the last selected session or project in the list
         let target_idx = self.ui_state.list_items.iter().position(|item| match item {

@@ -35,6 +35,10 @@ pub struct AppState {
     #[serde(default)]
     pub last_selected_session: Option<SessionId>,
 
+    /// Persisted left pane width (percentage of terminal width)
+    #[serde(default)]
+    pub left_pane_pct: Option<u16>,
+
     /// Application version that last wrote this state
     #[serde(default)]
     pub version: String,
@@ -469,5 +473,37 @@ mod tests {
     fn test_remove_nonexistent_project_returns_none() {
         let mut state = AppState::new();
         assert!(state.remove_project(&ProjectId::new()).is_none());
+    }
+
+    #[test]
+    fn test_left_pane_pct_roundtrip() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+
+        let mut state = AppState::new();
+        state.left_pane_pct = Some(42);
+        state.save_to(&state_path).unwrap();
+
+        let loaded = AppState::load_from(&state_path).unwrap();
+        assert_eq!(loaded.left_pane_pct, Some(42));
+    }
+
+    #[test]
+    fn test_left_pane_pct_defaults_to_none() {
+        let state = AppState::new();
+        assert_eq!(state.left_pane_pct, None);
+    }
+
+    #[test]
+    fn test_left_pane_pct_missing_from_json_defaults_to_none() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+
+        // Write JSON without left_pane_pct field
+        std::fs::write(&state_path, r#"{"seen_help": true, "version": "0.1.0"}"#).unwrap();
+
+        let loaded = AppState::load_from(&state_path).unwrap();
+        assert_eq!(loaded.left_pane_pct, None);
+        assert!(loaded.seen_help);
     }
 }
