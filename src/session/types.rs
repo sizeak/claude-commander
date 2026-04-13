@@ -228,9 +228,11 @@ pub struct WorktreeSession {
     /// Program running in the session (e.g., "claude", "aider")
     pub program: String,
     /// Arguments appended to `program` when the session is spawned or
-    /// re-spawned (e.g. `["--resume"]`). Captured from config at creation.
+    /// re-spawned (e.g. `["--resume"]`). `None` means inherit from the
+    /// current config's `default_program_args` at spawn time; `Some(...)`
+    /// is an explicit per-session override.
     #[serde(default)]
-    pub program_args: Vec<String>,
+    pub program_args: Option<Vec<String>>,
     /// When the session was created
     pub created_at: DateTime<Utc>,
     /// When the session was last active
@@ -281,7 +283,7 @@ impl WorktreeSession {
             worktree_path,
             status: SessionStatus::Running,
             program: program.into(),
-            program_args: Vec::new(),
+            program_args: None,
             created_at: now,
             last_active_at: now,
             tmux_session_name,
@@ -317,7 +319,7 @@ impl WorktreeSession {
             worktree_path: PathBuf::new(),
             status: SessionStatus::Creating,
             program: program.into(),
-            program_args: Vec::new(),
+            program_args: None,
             created_at: now,
             last_active_at: now,
             tmux_session_name,
@@ -344,13 +346,16 @@ impl WorktreeSession {
     }
 
     /// Full command string to launch this session's program, combining
-    /// `program` with any `program_args` separated by spaces. Passed as a
-    /// single argument to `tmux new-session`, which runs it via the shell.
-    pub fn command_string(&self) -> String {
-        if self.program_args.is_empty() {
+    /// `program` with the session's `program_args` when set, otherwise
+    /// falling back to `config_default_args`. Joined with spaces and
+    /// passed as a single argument to `tmux new-session`, which runs it
+    /// via the shell.
+    pub fn command_string(&self, config_default_args: &[String]) -> String {
+        let args: &[String] = self.program_args.as_deref().unwrap_or(config_default_args);
+        if args.is_empty() {
             self.program.clone()
         } else {
-            format!("{} {}", self.program, self.program_args.join(" "))
+            format!("{} {}", self.program, args.join(" "))
         }
     }
 
@@ -663,7 +668,7 @@ mod tests {
     }
 
     #[test]
-    fn test_command_string_no_args() {
+    fn test_command_string_inherits_config_default_when_session_has_none() {
         let session = WorktreeSession::new(
             ProjectId::new(),
             "Test",
@@ -671,11 +676,15 @@ mod tests {
             PathBuf::from("/tmp/wt"),
             "claude",
         );
-        assert_eq!(session.command_string(), "claude");
+        // Session's program_args is None → falls back to config default.
+        let config_default = vec!["--resume".to_string()];
+        assert_eq!(session.command_string(&config_default), "claude --resume");
+        // Empty config default → bare program.
+        assert_eq!(session.command_string(&[]), "claude");
     }
 
     #[test]
-    fn test_command_string_with_args() {
+    fn test_command_string_session_override_wins_over_config() {
         let mut session = WorktreeSession::new(
             ProjectId::new(),
             "Test",
@@ -683,15 +692,33 @@ mod tests {
             PathBuf::from("/tmp/wt"),
             "claude",
         );
-        session.program_args = vec!["--resume".to_string(), "--model=opus".to_string()];
-        assert_eq!(session.command_string(), "claude --resume --model=opus");
+        session.program_args = Some(vec!["--model=opus".to_string()]);
+        // Session override takes precedence — config default is ignored.
+        let config_default = vec!["--resume".to_string()];
+        assert_eq!(session.command_string(&config_default), "claude --model=opus");
     }
 
     #[test]
-    fn test_program_args_defaults_when_missing_in_json() {
+    fn test_command_string_explicit_empty_args_override() {
+        let mut session = WorktreeSession::new(
+            ProjectId::new(),
+            "Test",
+            "branch",
+            PathBuf::from("/tmp/wt"),
+            "claude",
+        );
+        // Some(vec![]) is an explicit "no args" override — distinct from None.
+        session.program_args = Some(Vec::new());
+        let config_default = vec!["--resume".to_string()];
+        assert_eq!(session.command_string(&config_default), "claude");
+    }
+
+    #[test]
+    fn test_program_args_defaults_to_none_when_missing_in_json() {
         // Old state.json files won't contain program_args — deserialization
-        // must fall back to an empty Vec rather than erroring. Simulate by
-        // serializing a session and stripping the field before re-deserializing.
+        // must fall back to None (meaning inherit from config) rather than
+        // erroring. Simulate by serializing a session and stripping the
+        // field before re-deserializing.
         let session = WorktreeSession::new(
             ProjectId::new(),
             "Test",
@@ -706,7 +733,7 @@ mod tests {
             .remove("program_args");
         let restored: WorktreeSession =
             serde_json::from_value(value).expect("must deserialize without program_args");
-        assert!(restored.program_args.is_empty());
+        assert!(restored.program_args.is_none());
     }
 
     #[test]

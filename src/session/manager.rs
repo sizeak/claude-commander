@@ -187,11 +187,8 @@ impl SessionManager {
         title: String,
         program: Option<String>,
     ) -> Result<SessionId> {
-        let (program, program_args) = {
-            let config = self.config_store.read();
-            let program = program.unwrap_or_else(|| config.default_program.clone());
-            (program, config.default_program_args.clone())
-        };
+        let program =
+            program.unwrap_or_else(|| self.config_store.read().default_program.clone());
 
         // Validate project exists
         {
@@ -203,9 +200,11 @@ impl SessionManager {
 
         let branch_name = self.generate_branch_name(&title);
 
-        let mut session =
+        // program_args is left as None — sessions inherit from the current
+        // config's default_program_args at spawn time, so a later config
+        // change is reflected on the next restart/reattach.
+        let session =
             WorktreeSession::new_creating(*project_id, title, branch_name, program);
-        session.program_args = program_args;
         let session_id = session.id;
 
         self.store
@@ -308,13 +307,19 @@ impl SessionManager {
         .await?;
 
         // Read tmux_session_name and the full launch command (program +
-        // program_args) from the placeholder session.
+        // program_args) from the placeholder session. When the session has
+        // no explicit program_args override, fall back to the current
+        // config's default_program_args.
+        let config_default_args = self.config_store.read().default_program_args.clone();
         let (tmux_session_name, launch_command) = {
             let state = self.store.read().await;
             let session = state
                 .get_session(session_id)
                 .ok_or(SessionError::NotFound(*session_id))?;
-            (session.tmux_session_name.clone(), session.command_string())
+            (
+                session.tmux_session_name.clone(),
+                session.command_string(&config_default_args),
+            )
         };
 
         // Create tmux session in the worktree directory
@@ -398,6 +403,7 @@ impl SessionManager {
     /// Resume a paused session
     #[instrument(skip(self))]
     pub async fn resume_session(&self, session_id: &SessionId) -> Result<()> {
+        let config_default_args = self.config_store.read().default_program_args.clone();
         // Read session info first
         let (tmux_session_name, worktree_path, launch_command, can_resume, status_bar) = {
             let state = self.store.read().await;
@@ -407,7 +413,7 @@ impl SessionManager {
             (
                 session.tmux_session_name.clone(),
                 session.worktree_path.clone(),
-                session.command_string(),
+                session.command_string(&config_default_args),
                 session.status.can_resume(),
                 self.status_bar_info(session, &state),
             )
@@ -458,6 +464,7 @@ impl SessionManager {
     /// Restart a session (kill tmux and recreate)
     #[instrument(skip(self))]
     pub async fn restart_session(&self, session_id: &SessionId) -> Result<()> {
+        let config_default_args = self.config_store.read().default_program_args.clone();
         let (tmux_session_name, shell_tmux_name, worktree_path, launch_command, status_bar) = {
             let state = self.store.read().await;
             let session = state
@@ -467,7 +474,7 @@ impl SessionManager {
                 session.tmux_session_name.clone(),
                 session.shell_tmux_session_name.clone(),
                 session.worktree_path.clone(),
-                session.command_string(),
+                session.command_string(&config_default_args),
                 self.status_bar_info(session, &state),
             )
         };
@@ -598,6 +605,7 @@ impl SessionManager {
     pub async fn get_attach_command(&self, session_id: &SessionId) -> Result<String> {
         info!("get_attach_command called for session: {}", session_id);
 
+        let config_default_args = self.config_store.read().default_program_args.clone();
         let (tmux_name, worktree_path, launch_command, status_bar) = {
             let state = self.store.read().await;
             let session = state
@@ -617,7 +625,7 @@ impl SessionManager {
             (
                 session.tmux_session_name.clone(),
                 session.worktree_path.clone(),
-                session.command_string(),
+                session.command_string(&config_default_args),
                 self.status_bar_info(session, &state),
             )
         };
@@ -1109,13 +1117,9 @@ impl SessionManager {
                 continue;
             }
 
-            let (default_program, default_program_args) = {
-                let config = self.config_store.read();
-                (
-                    config.default_program.clone(),
-                    config.default_program_args.clone(),
-                )
-            };
+            let default_program = self.config_store.read().default_program.clone();
+            // program_args intentionally left as None so imported sessions
+            // inherit from the current config's default_program_args.
             let mut session = WorktreeSession::new(
                 *project_id,
                 wt.branch.clone(),
@@ -1123,7 +1127,6 @@ impl SessionManager {
                 wt.path.clone(),
                 default_program,
             );
-            session.program_args = default_program_args;
             session.set_status(SessionStatus::Paused);
             session.base_commit = Some(wt.head.clone());
 
