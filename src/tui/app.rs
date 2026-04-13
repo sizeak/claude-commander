@@ -1722,6 +1722,12 @@ impl App {
                         color_swatch: None,
                     },
                     SettingsRow {
+                        label: "Resume Session".into(),
+                        value: c.resume_session.to_string(),
+                        field_key: "resume_session".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
                         label: "UI Refresh FPS".into(),
                         value: c.ui_refresh_fps.to_string(),
                         field_key: "ui_refresh_fps".into(),
@@ -2047,6 +2053,11 @@ impl App {
                 "fetch_before_create" => {
                     if let Ok(b) = value.parse::<bool>() {
                         self.config.fetch_before_create = b;
+                    }
+                }
+                "resume_session" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        self.config.resume_session = b;
                     }
                 }
                 "ui_refresh_fps" => {
@@ -3298,9 +3309,14 @@ impl App {
     /// Handle restart session - show confirmation
     fn handle_restart_session(&mut self) {
         if let Some(session_id) = self.ui_state.selected_session_id {
+            let message = if self.config.resume_session {
+                "This will kill the current tmux session and start a fresh one.\nClaude will pick up where it left off via /resume.".to_string()
+            } else {
+                "This will kill the current tmux session and start a fresh one.\nIf you want to pick up where you left off, you can use /resume.".to_string()
+            };
             self.ui_state.modal = Modal::Confirm {
                 title: "Restart Session".to_string(),
-                message: "This will kill the current tmux session and start a fresh one.\nClaude will pick up where it left off via /resume.".to_string(),
+                message,
                 on_confirm: ConfirmAction::RestartSession { session_id },
             };
         }

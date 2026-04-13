@@ -64,6 +64,11 @@ pub struct Config {
     #[serde(alias = "pull_before_create")]
     pub fetch_before_create: bool,
 
+    /// Pass `--resume` to the program when restarting or recreating a session,
+    /// so the agent picks up where it left off. When false, the program is
+    /// started fresh.
+    pub resume_session: bool,
+
     /// Interval in milliseconds for checking state file changes from other instances (0 = disabled)
     pub state_sync_interval_ms: u64,
 
@@ -126,6 +131,7 @@ impl Default for Config {
             pr_check_interval_secs: 600,
             pr_review_labels: default_pr_review_labels(),
             fetch_before_create: true,
+            resume_session: true,
             state_sync_interval_ms: 2000,
             agent_state_poll_interval_ms: 3000,
             show_status_indicator: true,
@@ -489,6 +495,7 @@ mod tests {
         assert_eq!(config.diff_cache_ttl_ms, 500);
         assert_eq!(config.pr_check_interval_secs, 600);
         assert!(config.fetch_before_create);
+        assert!(config.resume_session);
         assert_eq!(config.state_sync_interval_ms, 2000);
         assert_eq!(config.agent_state_poll_interval_ms, 3000);
         assert!(config.show_status_indicator);
