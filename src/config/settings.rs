@@ -70,9 +70,6 @@ pub struct Config {
     /// Interval in milliseconds for polling agent state (Working/Idle/Waiting) (0 = disabled)
     pub agent_state_poll_interval_ms: u64,
 
-    /// Show status indicator circles (●/◐/○) in the session list
-    pub show_status_indicator: bool,
-
     /// When true, render PR labels as colored text on the default background
     /// (the pre-pill behavior). When false (default), PR labels render as a
     /// pill — colored background block with contrasting text — so they stand
@@ -134,7 +131,6 @@ impl Default for Config {
             fetch_before_create: true,
             state_sync_interval_ms: 2000,
             agent_state_poll_interval_ms: 3000,
-            show_status_indicator: true,
             invert_pr_label_color: false,
             dim_unfocused_preview: true,
             dim_unfocused_opacity: 0.4,
@@ -498,7 +494,6 @@ mod tests {
         assert!(config.fetch_before_create);
         assert_eq!(config.state_sync_interval_ms, 2000);
         assert_eq!(config.agent_state_poll_interval_ms, 3000);
-        assert!(config.show_status_indicator);
         assert!(config.ai_summary_enabled);
         assert_eq!(config.ai_summary_model, "claude-haiku-4-5-20251001");
     }

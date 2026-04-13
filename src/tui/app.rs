@@ -1056,7 +1056,6 @@ impl App {
             .show_numbers(self.config.show_session_numbers)
             .tick(self.ui_state.tick_count)
             .highlight_style(self.theme.selection().add_modifier(Modifier::BOLD))
-            .show_status_indicator(self.config.show_status_indicator)
             .review_labels(&self.config.pr_review_labels)
             .invert_pr_label_color(self.config.invert_pr_label_color);
 

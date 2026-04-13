@@ -39,8 +39,6 @@ pub struct TreeList<'a> {
     show_numbers: bool,
     /// Tick counter for spinner animation
     tick: u64,
-    /// Whether to show status indicator circles (●/◐/○)
-    show_status_indicator: bool,
     /// Label names that mark an open PR as awaiting reviewer action.
     review_labels: &'a [String],
     /// When true, render PR labels as colored text on default bg (pre-pill
@@ -58,7 +56,6 @@ impl<'a> TreeList<'a> {
             highlight_style: theme.selection().add_modifier(Modifier::BOLD),
             show_numbers: false,
             tick: 0,
-            show_status_indicator: true,
             review_labels: &[],
             invert_pr_label_color: false,
         }
@@ -80,12 +77,6 @@ impl<'a> TreeList<'a> {
     /// Set the tick counter for spinner animation
     pub fn tick(mut self, tick: u64) -> Self {
         self.tick = tick;
-        self
-    }
-
-    /// Set whether to show status indicator circles
-    pub fn show_status_indicator(mut self, show: bool) -> Self {
-        self.show_status_indicator = show;
         self
     }
 
@@ -229,9 +220,8 @@ impl<'a> TreeList<'a> {
                     ];
 
                     // Single status glyph: spinner > waiting > unread > running > stopped
-                    if self.show_status_indicator
-                        && let Some((glyph, color)) =
-                            self.session_status_glyph(*status, *agent_state, *unread)
+                    if let Some((glyph, color)) =
+                        self.session_status_glyph(*status, *agent_state, *unread)
                     {
                         spans.push(Span::styled(
                             format!("{glyph} "),
