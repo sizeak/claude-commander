@@ -436,7 +436,12 @@ impl App {
                             let mut current_session = session_name.clone();
 
                             loop {
-                                match crate::tmux::attach_to_session(&current_session).await {
+                                match crate::tmux::attach_to_session(
+                                    &current_session,
+                                    self.config.capture_editor_hotkey_in_tmux_session,
+                                )
+                                .await
+                                {
                                     Ok(crate::tmux::AttachResult::SwitchToShell) => {
                                         info!(
                                             "Shell toggle requested from session: {}",

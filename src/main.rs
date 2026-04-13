@@ -104,8 +104,8 @@ fn setup_logging(debug: bool, to_file: bool) -> Result<()> {
 }
 
 /// Execute async PTY-based attach to a tmux session
-async fn execute_attach(session_name: &str) {
-    match attach_to_session(session_name).await {
+async fn execute_attach(session_name: &str, capture_editor_hotkey: bool) {
+    match attach_to_session(session_name, capture_editor_hotkey).await {
         Ok(AttachResult::Detached | AttachResult::SwitchToShell | AttachResult::OpenEditor) => {
             info!("Detached from session");
         }
@@ -256,7 +256,7 @@ async fn main() -> Result<()> {
 
             match tmux_name {
                 Some(name) => {
-                    execute_attach(&name).await;
+                    execute_attach(&name, config.capture_editor_hotkey_in_tmux_session).await;
                 }
                 None => {
                     eprintln!("Session not found: {}", session);

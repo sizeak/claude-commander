@@ -21,6 +21,7 @@ pub enum AttachResult {
     /// User pressed Ctrl+\ to toggle between Claude and shell sessions
     SwitchToShell,
     /// User pressed Ctrl+E to open the session in an editor
+    /// (only produced when the caller opts in via `capture_editor_hotkey`)
     OpenEditor,
     /// The session/process ended
     SessionEnded,
@@ -32,7 +33,14 @@ pub enum AttachResult {
 ///
 /// Spawns `tmux attach-session` in a PTY and bridges stdin/stdout asynchronously.
 /// Returns when the user detaches (Ctrl+Q or Ctrl+B D) or the session ends.
-pub async fn attach_to_session(session_name: &str) -> Result<AttachResult> {
+///
+/// When `capture_editor_hotkey` is true, the input loop intercepts Ctrl+E (0x05)
+/// and returns `AttachResult::OpenEditor` instead of forwarding the byte to the
+/// shell. This shadows readline's end-of-line shortcut, so it is opt-in.
+pub async fn attach_to_session(
+    session_name: &str,
+    capture_editor_hotkey: bool,
+) -> Result<AttachResult> {
     // Get terminal size
     let (cols, rows) = terminal::size().unwrap_or((80, 24));
 
@@ -55,7 +63,7 @@ pub async fn attach_to_session(session_name: &str) -> Result<AttachResult> {
 
     // Run the async I/O loop
     info!("Starting async I/O loop");
-    let result = run_async_loop(pty, pty_fd, &mut child).await;
+    let result = run_async_loop(pty, pty_fd, &mut child, capture_editor_hotkey).await;
     info!("Async I/O loop ended with result: {:?}", result);
 
     // Restore terminal
@@ -166,6 +174,7 @@ async fn run_async_loop(
     pty: pty_process::Pty,
     pty_fd: i32,
     child: &mut tokio::process::Child,
+    capture_editor_hotkey: bool,
 ) -> AttachResult {
     // Channel for shutdown signal
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<AttachResult>(1);
@@ -231,8 +240,10 @@ async fn run_async_loop(
                     }
 
                     // Check for Ctrl+E (0x05) to open in editor
-                    // Note: this shadows readline's jump-to-end-of-line in the attached shell
-                    if data.contains(&0x05) {
+                    // Opt-in: this shadows readline's jump-to-end-of-line in the attached
+                    // shell, so we only intercept the byte when the user has set
+                    // `capture_editor_hotkey_in_tmux_session = true` in their config.
+                    if capture_editor_hotkey && data.contains(&0x05) {
                         debug!("Ctrl+E detected, opening editor");
                         let _ = stdin_shutdown.send(AttachResult::OpenEditor).await;
                         break;

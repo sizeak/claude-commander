@@ -88,7 +88,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `r` | Resume session |
 | `d` | Delete session |
 | `D` | Remove project |
-| `Ctrl-Shift-e` | Open in editor/IDE |
+| `e` | Open in editor/IDE |
 | `s` | Open shell in worktree |
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
 | `<` / `>` | Shrink / grow left pane |
@@ -104,7 +104,7 @@ When attached to a session (via `Enter` or `claude-commander attach`):
 |-----|--------|
 | `Ctrl-q` | Detach and return to session list |
 | `Ctrl-\` | Switch between Claude and shell pane |
-| `Ctrl-e` | Open session worktree in editor/IDE |
+| `Ctrl-e` | Open session worktree in editor/IDE (opt-in; see `capture_editor_hotkey_in_tmux_session`) |
 
 ## Configuration
 
@@ -151,6 +151,11 @@ ui_refresh_fps = 30
 # GUI editors are spawned in the background; terminal editors suspend the TUI
 # Auto-detected from a known list if not set (code, zed, subl, JetBrains IDEs, etc.)
 # editor_gui = true
+
+# When attached to a tmux session, intercept Ctrl+E to open the worktree in the
+# editor. Default false because Ctrl+E is readline's jump-to-end-of-line; enable
+# only if you prefer the editor shortcut over the shell binding.
+# capture_editor_hotkey_in_tmux_session = false
 
 # Interval in seconds between GitHub PR checks (0 = disabled)
 pr_check_interval_secs = 600

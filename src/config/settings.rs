@@ -54,6 +54,12 @@ pub struct Config {
     /// If unset, auto-detected from a known list of GUI editors.
     pub editor_gui: Option<bool>,
 
+    /// When attached to a tmux session, intercept Ctrl+E and open the session
+    /// worktree in the configured editor. Default is false because Ctrl+E is
+    /// readline's "jump to end of line"; enabling this shadows that shortcut
+    /// inside attached sessions.
+    pub capture_editor_hotkey_in_tmux_session: bool,
+
     /// Fetch the latest changes from origin before creating a new session
     #[serde(alias = "pull_before_create")]
     pub fetch_before_create: bool,
@@ -98,6 +104,7 @@ impl Default for Config {
             worktrees_dir: None,
             editor: None,
             editor_gui: None,
+            capture_editor_hotkey_in_tmux_session: false,
             shell_program: std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string()),
             pr_check_interval_secs: 600,
             fetch_before_create: true,
