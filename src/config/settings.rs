@@ -54,11 +54,11 @@ pub struct Config {
     /// If unset, auto-detected from a known list of GUI editors.
     pub editor_gui: Option<bool>,
 
-    /// When attached to a tmux session, intercept Ctrl+E and open the session
-    /// worktree in the configured editor. Default is false because Ctrl+E is
-    /// readline's "jump to end of line"; enabling this shadows that shortcut
-    /// inside attached sessions.
-    pub capture_editor_hotkey_in_tmux_session: bool,
+    /// Letter paired with Ctrl to open the worktree in the editor from inside a
+    /// tmux attach session. Empty/unset disables the hotkey. Must be a single
+    /// ASCII letter; other values are ignored. Ctrl is implied by the field.
+    #[serde(default)]
+    pub editor_ctrl_hotkey_in_tmux_session: Option<String>,
 
     /// Fetch the latest changes from origin before creating a new session
     #[serde(alias = "pull_before_create")]
@@ -104,7 +104,7 @@ impl Default for Config {
             worktrees_dir: None,
             editor: None,
             editor_gui: None,
-            capture_editor_hotkey_in_tmux_session: false,
+            editor_ctrl_hotkey_in_tmux_session: None,
             shell_program: std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string()),
             pr_check_interval_secs: 600,
             fetch_before_create: true,
@@ -209,6 +209,22 @@ impl Config {
         std::fs::write(&config_path, toml).map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
 
         Ok(())
+    }
+
+    /// Raw control byte that the tmux attach loop should intercept for the
+    /// editor hotkey, if any.
+    ///
+    /// Reads `editor_ctrl_hotkey_in_tmux_session`, which must be a single ASCII
+    /// letter. The letter is combined implicitly with Ctrl. Empty, absent, or
+    /// malformed values resolve to `None` so no byte is intercepted.
+    pub fn attach_editor_hotkey_byte(&self) -> Option<u8> {
+        let s = self.editor_ctrl_hotkey_in_tmux_session.as_deref()?;
+        let mut chars = s.chars();
+        let c = chars.next()?;
+        if chars.next().is_some() || !c.is_ascii_alphabetic() {
+            return None;
+        }
+        Some(c.to_ascii_lowercase() as u8 & 0x1F)
     }
 
     /// Resolve the editor command: config → $VISUAL → $EDITOR → None
@@ -370,6 +386,59 @@ mod tests {
         assert!(
             result.is_none() || std::env::var("VISUAL").is_ok() || std::env::var("EDITOR").is_ok()
         );
+    }
+
+    #[test]
+    fn test_attach_editor_hotkey_byte_disabled_by_default() {
+        let config = Config::default();
+        assert_eq!(config.attach_editor_hotkey_byte(), None);
+    }
+
+    #[test]
+    fn test_attach_editor_hotkey_byte_empty_string_is_disabled() {
+        let config = Config {
+            editor_ctrl_hotkey_in_tmux_session: Some(String::new()),
+            ..Config::default()
+        };
+        assert_eq!(config.attach_editor_hotkey_byte(), None);
+    }
+
+    #[test]
+    fn test_attach_editor_hotkey_byte_single_letter_resolves_to_ctrl_byte() {
+        let config = Config {
+            editor_ctrl_hotkey_in_tmux_session: Some("e".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(config.attach_editor_hotkey_byte(), Some(0x05));
+        let config = Config {
+            editor_ctrl_hotkey_in_tmux_session: Some("a".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(config.attach_editor_hotkey_byte(), Some(0x01));
+    }
+
+    #[test]
+    fn test_attach_editor_hotkey_byte_uppercase_letter_accepted() {
+        let config = Config {
+            editor_ctrl_hotkey_in_tmux_session: Some("E".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(config.attach_editor_hotkey_byte(), Some(0x05));
+    }
+
+    #[test]
+    fn test_attach_editor_hotkey_byte_rejects_multi_char_or_non_letter() {
+        for bad in ["Ctrl-e", "ee", "1", " ", "-"] {
+            let config = Config {
+                editor_ctrl_hotkey_in_tmux_session: Some(bad.to_string()),
+                ..Config::default()
+            };
+            assert_eq!(
+                config.attach_editor_hotkey_byte(),
+                None,
+                "expected None for {bad:?}"
+            );
+        }
     }
 
     #[test]

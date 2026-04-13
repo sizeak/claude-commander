@@ -436,9 +436,11 @@ impl App {
                             let mut current_session = session_name.clone();
 
                             loop {
+                                let editor_hotkey_byte =
+                                    self.config.attach_editor_hotkey_byte();
                                 match crate::tmux::attach_to_session(
                                     &current_session,
-                                    self.config.capture_editor_hotkey_in_tmux_session,
+                                    editor_hotkey_byte,
                                 )
                                 .await
                                 {
