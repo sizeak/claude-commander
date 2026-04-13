@@ -90,8 +90,10 @@ impl<'a> TreeList<'a> {
         if status == SessionStatus::Running {
             match agent_state {
                 Some(AgentState::Working) => {
-                    let frame = SPINNER_FRAMES[(self.tick as usize / 3) % SPINNER_FRAMES.len()];
-                    return Some((frame.to_string(), self.theme.agent_working));
+                    let step = self.tick as usize / 3;
+                    let frame = SPINNER_FRAMES[step % SPINNER_FRAMES.len()];
+                    let color = self.theme.agent_working.color_for_tick(step as u64);
+                    return Some((frame.to_string(), color));
                 }
                 Some(AgentState::WaitingForInput) => {
                     return Some(("?".to_string(), self.theme.agent_waiting));
@@ -759,7 +761,8 @@ mod tests {
             .session_status_glyph(SessionStatus::Running, Some(AgentState::Working), false)
             .unwrap();
         assert!(SPINNER_FRAMES.contains(&g.as_str()));
-        assert_eq!(c, theme.agent_working);
+        // Default theme uses Rainbow → colour comes from the rainbow palette
+        assert!(crate::config::theme::RAINBOW_PALETTE.contains(&c));
     }
 
     #[test]

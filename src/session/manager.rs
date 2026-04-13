@@ -1,6 +1,6 @@
 //! Session manager - coordinates session lifecycle
 //!
-//! Handles the creation, pause, resume, and termination of sessions,
+//! Handles the creation, restart, and termination of sessions,
 //! coordinating between tmux and git operations.
 
 use std::path::PathBuf;

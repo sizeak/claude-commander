@@ -5,7 +5,7 @@
 
 use ratatui::style::{Color, Style};
 
-use crate::config::theme::ThemeOverrides;
+use crate::config::theme::{AgentWorkingStyle, ThemeOverrides};
 
 /// Terminal color capability
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -68,7 +68,7 @@ pub struct Theme {
     pub pr_closed: Color,
 
     // Agent state and notification indicators
-    pub agent_working: Color,
+    pub agent_working: AgentWorkingStyle,
     pub agent_waiting: Color,
     pub unread_indicator: Color,
 
@@ -129,7 +129,7 @@ impl Theme {
             pr_draft: Color::DarkGray,
             pr_closed: Color::Red,
 
-            agent_working: Color::Green,
+            agent_working: AgentWorkingStyle::Rainbow,
             agent_waiting: Color::Yellow,
             unread_indicator: Color::Blue,
 
@@ -178,7 +178,7 @@ impl Theme {
             pr_draft: Color::Indexed(245),  // Mid-grey
             pr_closed: Color::Indexed(167), // Soft red
 
-            agent_working: Color::Indexed(156),    // Pastel mint
+            agent_working: AgentWorkingStyle::Rainbow,
             agent_waiting: Color::Indexed(208),    // Orange
             unread_indicator: Color::Indexed(117), // Sky blue
 
@@ -227,7 +227,7 @@ impl Theme {
             pr_draft: Color::Rgb(147, 153, 178), // Muted grey-lavender
             pr_closed: Color::Rgb(243, 139, 168), // Pastel rose / soft red
 
-            agent_working: Color::Rgb(166, 227, 161), // Pastel mint
+            agent_working: AgentWorkingStyle::Rainbow,
             agent_waiting: Color::Rgb(250, 179, 135), // Peach/orange
             unread_indicator: Color::Rgb(137, 180, 250), // Sky blue
 
@@ -293,7 +293,6 @@ impl Theme {
         apply!(pr_open);
         apply!(pr_draft);
         apply!(pr_closed);
-        apply!(agent_working);
         apply!(agent_waiting);
         apply!(unread_indicator);
         apply!(text_primary);
@@ -313,6 +312,12 @@ impl Theme {
         // selection_fg is Option<Color> in Theme but Option<ColorValue> in overrides
         if let Some(cv) = overrides.selection_fg {
             self.selection_fg = Some(cv.0);
+        }
+
+        // agent_working uses AgentWorkingStyle, not ColorValue, so it's applied
+        // directly without unwrapping a `.0`.
+        if let Some(style) = overrides.agent_working {
+            self.agent_working = style;
         }
 
         // project_colors is intentionally not overridable — paired-tuple
