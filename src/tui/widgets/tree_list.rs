@@ -432,15 +432,29 @@ fn inject_pr_hyperlinks(
             }
 
             // Collect up to 2 characters for this chunk
-            let chunk_end = (char_idx + 2).min(needle_chars.len());
-            let chunk: String = needle_chars[char_idx..chunk_end].iter().collect();
-            let chunk_len = chunk_end - char_idx;
+            let mut chunk_end = (char_idx + 2).min(needle_chars.len());
+            let mut chunk: String = needle_chars[char_idx..chunk_end].iter().collect();
+            let mut chunk_len = chunk_end - char_idx;
+
+            // If this would be a trailing 1-char chunk, extend it with the
+            // following cell's first character so the chunk is always 2-char.
+            // Reason: the OSC 8 escapes balloon the cell's reported symbol
+            // width far beyond 1, which sets ratatui's `to_skip` and blocks
+            // the very next cell from emitting — leaving a stale 1-col gap
+            // in the highlight when the row is selected.
+            if chunk_len == 1 && x + 1 < list_area.x + list_area.width {
+                let next_char = buf[(x + 1, y)].symbol().chars().next().unwrap_or(' ');
+                chunk.push(next_char);
+                chunk_end += 1; // consume the borrowed cell from the loop's POV
+                chunk_len = 2;
+            }
 
             buf[(x, y)].set_symbol(&format!("{}{}{}", osc_open, chunk, osc_close));
 
-            // If we packed 2 chars into one cell, blank the next cell
+            // If we packed 2 chars into one cell, mark the next cell as a
+            // wide-char continuation so the renderer skips it entirely.
             if chunk_len == 2 && x + 1 < list_area.x + list_area.width {
-                buf[(x + 1, y)].set_symbol("");
+                buf[(x + 1, y)].set_skip(true);
             }
 
             char_idx = chunk_end;
