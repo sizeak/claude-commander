@@ -307,16 +307,17 @@ async fn test_session_manager_restart() {
     let config_store = Arc::new(ConfigStore::new(config).unwrap());
     let manager = SessionManager::new(config_store, store.clone(), "");
 
-    // Add project and create session
+    // Add project and create session (prepare + finalize)
     let project_id = manager.add_project(repo_path).await.unwrap();
     let session_id = manager
-        .create_session(
+        .prepare_session(
             &project_id,
             "restart-test".to_string(),
             Some("bash".to_string()),
         )
         .await
         .unwrap();
+    manager.finalize_session(&session_id).await.unwrap();
 
     // Verify initial status is Running
     {
