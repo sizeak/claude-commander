@@ -92,6 +92,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
 | `<` / `>` | Shrink / grow left pane |
 | `Ctrl-u/d` or `PageUp/Down` | Page up/down in preview |
+| `1`–`99` | Jump to session by number (requires `show_session_numbers`) |
 | `g` | Generate AI summary (Info pane only) |
 | `?` | Show help |
 | `q` or `Ctrl-c` | Quit |
@@ -164,6 +165,12 @@ dim_unfocused_opacity = 0.4
 # Leader key for quick-switch session search
 # Supports: " ", "space", "ctrl+k", "f1", etc.
 # leader_key = " "
+
+# Show sequential numbers next to sessions and enable digit-key jumping (1–99)
+# show_session_numbers = true
+
+# Debounce delay in ms when typing multi-digit session numbers
+# session_number_debounce_ms = 250
 
 # Interval in milliseconds for syncing state file changes from other instances (0 = disabled)
 state_sync_interval_ms = 2000

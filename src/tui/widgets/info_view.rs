@@ -112,6 +112,7 @@ impl<'a> InfoView<'a> {
         ]));
 
         let (icon, color) = match data.status {
+            SessionStatus::Creating => ("…", self.theme.status_creating),
             SessionStatus::Running => ("●", self.theme.status_running),
             SessionStatus::Stopped => ("○", self.theme.status_stopped),
         };

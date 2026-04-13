@@ -56,6 +56,7 @@ pub struct Theme {
     pub selection_fg: Option<Color>,
 
     // Session status indicators
+    pub status_creating: Color,
     pub status_running: Color,
     pub status_stopped: Color,
     pub status_pr: Color,
@@ -120,6 +121,7 @@ impl Theme {
             selection_bg: Color::Blue,
             selection_fg: Some(Color::White),
 
+            status_creating: Color::Yellow,
             status_running: Color::Green,
             status_stopped: Color::DarkGray,
             status_pr: Color::Magenta,
@@ -169,7 +171,8 @@ impl Theme {
             selection_bg: Color::Indexed(60), // Muted purple-blue
             selection_fg: Some(Color::Indexed(255)),
 
-            status_running: Color::Indexed(156), // Pastel mint green
+            status_creating: Color::Indexed(228), // Pastel yellow
+            status_running: Color::Indexed(156),  // Pastel mint green
             status_stopped: Color::Indexed(248),
             status_pr: Color::Indexed(141),       // Medium purple
             status_pr_merged: Color::Indexed(97), // Dark purple
@@ -218,9 +221,10 @@ impl Theme {
             selection_bg: Color::Rgb(69, 71, 90),
             selection_fg: Some(Color::Rgb(245, 245, 250)),
 
-            status_running: Color::Rgb(166, 227, 161), // Pastel mint
-            status_stopped: Color::Rgb(147, 153, 178), // Muted lavender
-            status_pr: Color::Rgb(203, 166, 247),      // Pastel mauve
+            status_creating: Color::Rgb(249, 240, 107), // Pastel yellow
+            status_running: Color::Rgb(166, 227, 161),  // Pastel mint
+            status_stopped: Color::Rgb(147, 153, 178),  // Muted lavender
+            status_pr: Color::Rgb(203, 166, 247),       // Pastel mauve
             status_pr_merged: Color::Rgb(137, 100, 180), // Dark purple
 
             pr_open: Color::Rgb(126, 198, 153), // Soft GitHub-ish green
@@ -286,6 +290,7 @@ impl Theme {
         apply!(border_focused);
         apply!(border_unfocused);
         apply!(selection_bg);
+        apply!(status_creating);
         apply!(status_running);
         apply!(status_stopped);
         apply!(status_pr);

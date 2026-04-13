@@ -179,6 +179,7 @@ async fn main() -> Result<()> {
                 } else {
                     for session in sessions {
                         let status_icon = match session.status {
+                            claude_commander::SessionStatus::Creating => "⠋",
                             claude_commander::SessionStatus::Running => "●",
                             claude_commander::SessionStatus::Stopped => "○",
                         };
@@ -236,7 +237,8 @@ async fn main() -> Result<()> {
             };
 
             println!("Creating session '{}'...", name);
-            let session_id = manager.create_session(&project_id, name, program).await?;
+            let session_id = manager.prepare_session(&project_id, name, program).await?;
+            manager.finalize_session(&session_id).await?;
 
             println!("Session created: {}", session_id);
             println!();

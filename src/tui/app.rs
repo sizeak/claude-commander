@@ -332,6 +332,8 @@ pub struct App {
     /// Suppress key events until this instant (filters stray bytes from
     /// unrecognized escape sequences that crossterm splits into multiple events)
     suppress_keys_until: Instant,
+    /// Two-digit session number accumulator with debounce
+    digit_accumulator: super::digit_accumulator::DigitAccumulator,
 }
 
 impl App {
@@ -352,6 +354,7 @@ impl App {
             .and_then(Theme::from_preset)
             .unwrap_or_default();
         let theme = base.with_overrides(&config.theme);
+        let debounce = Duration::from_millis(config.session_number_debounce_ms);
 
         Self {
             config,
@@ -362,6 +365,7 @@ impl App {
             event_loop: EventLoop::new(),
             theme,
             suppress_keys_until: Instant::now(),
+            digit_accumulator: super::digit_accumulator::DigitAccumulator::new(debounce),
         }
     }
 
@@ -371,6 +375,7 @@ impl App {
         self.session_manager.check_tmux().await?;
 
         // One-time setup
+        self.cleanup_stale_creating_sessions().await;
         self.sync_session_states().await;
 
         // Check gh availability and do initial PR check
@@ -582,6 +587,34 @@ impl App {
         Ok(())
     }
 
+    /// Remove any sessions stuck in `Creating` status from a previous crash.
+    async fn cleanup_stale_creating_sessions(&self) {
+        let creating_ids: Vec<SessionId> = {
+            let state = self.store.read().await;
+            state
+                .sessions
+                .values()
+                .filter(|s| s.status == SessionStatus::Creating)
+                .map(|s| s.id)
+                .collect()
+        };
+
+        if !creating_ids.is_empty() {
+            warn!(
+                "Cleaning up {} stale Creating session(s) from previous run",
+                creating_ids.len()
+            );
+            let _ = self
+                .store
+                .mutate(move |state| {
+                    for sid in &creating_ids {
+                        state.remove_session(sid);
+                    }
+                })
+                .await;
+        }
+    }
+
     /// Sync app state with actual tmux session state
     ///
     /// This method checks all active sessions and updates their status
@@ -592,7 +625,7 @@ impl App {
             state
                 .sessions
                 .values()
-                .filter(|s| s.status.is_active())
+                .filter(|s| s.status.is_active() && s.status != SessionStatus::Creating)
                 .map(|s| (s.id, s.tmux_session_name.clone()))
                 .collect()
         };
@@ -773,6 +806,15 @@ impl App {
                 if self.ui_state.tick_count.is_multiple_of(3) {
                     self.ui_state.throbber_state.calc_next();
                 }
+
+                // Resolve pending digit jump if debounce window expired
+                if self.config.show_session_numbers
+                    && let Some(super::digit_accumulator::DigitResult::Jump(n)) =
+                        self.digit_accumulator.tick()
+                {
+                    self.jump_to_session_number(n);
+                }
+
                 // Check for config file changes roughly once per second
                 // (tick_count wraps at u64::MAX, is_multiple_of(30) at 30fps ≈ 1s)
                 if self.ui_state.tick_count.is_multiple_of(30) {
@@ -1011,8 +1053,9 @@ impl App {
         frame.render_widget(heading, chunks[0]);
 
         let tree_list = TreeList::new(&self.ui_state.list_items, &self.theme)
-            .highlight_style(self.theme.selection().add_modifier(Modifier::BOLD))
+            .show_numbers(self.config.show_session_numbers)
             .tick(self.ui_state.tick_count)
+            .highlight_style(self.theme.selection().add_modifier(Modifier::BOLD))
             .show_status_indicator(self.config.show_status_indicator)
             .review_labels(&self.config.pr_review_labels);
 
@@ -1021,6 +1064,19 @@ impl App {
             chunks[1],
             &mut self.ui_state.list_state.list_state,
         );
+    }
+
+    /// Jump the selection to the session with the given 1-based number,
+    /// update the selection state, and refresh the preview pane.
+    /// Does nothing if the number is out of range.
+    /// Numbering matches `TreeList::to_list_items` — the Nth `Worktree` variant.
+    fn jump_to_session_number(&mut self, number: usize) {
+        if let Some(idx) = session_number_to_list_index(&self.ui_state.list_items, number) {
+            self.ui_state.list_state.list_state.select(Some(idx));
+            self.update_selection();
+            self.ui_state.preview_update_spawned_at = None;
+            self.spawn_preview_update();
+        }
     }
 
     /// Check if a project (not a session) is currently selected
@@ -1566,10 +1622,12 @@ impl App {
                     }
 
                     let status_icon = match m.status {
+                        SessionStatus::Creating => "⠋",
                         SessionStatus::Running => "●",
                         SessionStatus::Stopped => "○",
                     };
                     let status_color = match m.status {
+                        SessionStatus::Creating => self.theme.status_creating,
                         SessionStatus::Running => self.theme.status_running,
                         SessionStatus::Stopped => self.theme.status_stopped,
                     };
@@ -1687,6 +1745,18 @@ impl App {
                         label: "Dim Opacity".into(),
                         value: format!("{:.2}", c.dim_unfocused_opacity),
                         field_key: "dim_unfocused_opacity".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
+                        label: "Session Numbers".into(),
+                        value: c.show_session_numbers.to_string(),
+                        field_key: "show_session_numbers".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
+                        label: "Number Debounce (ms)".into(),
+                        value: c.session_number_debounce_ms.to_string(),
+                        field_key: "session_number_debounce_ms".into(),
                         color_swatch: None,
                     },
                     SettingsRow {
@@ -1998,6 +2068,16 @@ impl App {
                 "dim_unfocused_opacity" => {
                     if let Ok(v) = value.parse::<f32>() {
                         self.config.dim_unfocused_opacity = v.clamp(0.0, 1.0);
+                    }
+                }
+                "show_session_numbers" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        self.config.show_session_numbers = b;
+                    }
+                }
+                "session_number_debounce_ms" => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.session_number_debounce_ms = v;
                     }
                 }
                 "ai_summary_enabled" => {
@@ -2356,6 +2436,20 @@ impl App {
                 let (leader_code, leader_mods) = self.config.parse_leader_key();
                 if key.code == leader_code && key.modifiers == leader_mods {
                     self.open_quick_switch().await;
+                    return;
+                }
+
+                // Number-jump: intercept digit keys when session numbers are enabled
+                if self.config.show_session_numbers
+                    && let crossterm::event::KeyCode::Char(c @ '0'..='9') = key.code
+                    && key.modifiers.is_empty()
+                {
+                    let digit = c as u8 - b'0';
+                    if let super::digit_accumulator::DigitResult::Jump(n) =
+                        self.digit_accumulator.press(digit)
+                    {
+                        self.jump_to_session_number(n);
+                    }
                     return;
                 }
 
@@ -2811,8 +2905,16 @@ impl App {
                 self.update_selection();
                 self.spawn_preview_update();
             }
-            StateUpdate::SessionCreateFailed { message } => {
+            StateUpdate::SessionCreateFailed {
+                session_id,
+                message,
+            } => {
                 debug!("Session creation failed: {}", message);
+                let _ = self
+                    .session_manager
+                    .remove_creating_session(&session_id)
+                    .await;
+                self.refresh_list_items().await;
                 self.ui_state.modal = Modal::Error { message };
             }
             StateUpdate::AgentStatesUpdated { states } => {
@@ -2851,12 +2953,27 @@ impl App {
         }
     }
 
+    /// Check if the selected session is in Creating state
+    fn selected_session_is_creating(&self) -> bool {
+        self.ui_state.list_items.iter().any(|item| {
+            matches!(
+                item,
+                SessionListItem::Worktree { id, status, .. }
+                if self.ui_state.selected_session_id == Some(*id)
+                    && *status == SessionStatus::Creating
+            )
+        })
+    }
+
     /// Handle selection (attach to session)
     async fn handle_select(&mut self) {
         info!(
             "handle_select called, selected_session_id: {:?}",
             self.ui_state.selected_session_id
         );
+        if self.selected_session_is_creating() {
+            return;
+        }
         if let Some(session_id) = self.ui_state.selected_session_id {
             info!("Getting attach command for session: {}", session_id);
             match self.session_manager.get_attach_command(&session_id).await {
@@ -2890,6 +3007,9 @@ impl App {
 
     /// Handle shell selection (attach to shell session)
     async fn handle_select_shell(&mut self) {
+        if self.selected_session_is_creating() {
+            return;
+        }
         if let Some(session_id) = self.ui_state.selected_session_id {
             match self
                 .session_manager
@@ -2997,6 +3117,9 @@ impl App {
 
     /// Handle open in editor command
     async fn handle_open_in_editor(&mut self) {
+        if self.selected_session_is_creating() {
+            return;
+        }
         let path = {
             let state = self.store.read().await;
             if let Some(session_id) = self.ui_state.selected_session_id {
@@ -3071,6 +3194,9 @@ impl App {
         let mut matches = Vec::new();
 
         for session in state.sessions.values() {
+            if session.status == SessionStatus::Creating {
+                continue;
+            }
             if !query.is_empty() && !session.matches_query(query) {
                 continue;
             }
@@ -3178,6 +3304,9 @@ impl App {
 
     /// Handle delete session - show confirmation
     fn handle_delete_session(&mut self) {
+        if self.selected_session_is_creating() {
+            return;
+        }
         if let Some(session_id) = self.ui_state.selected_session_id {
             self.ui_state.modal = Modal::Confirm {
                 title: "Delete Session".to_string(),
@@ -3199,28 +3328,47 @@ impl App {
                     return;
                 }
 
-                self.ui_state.modal = Modal::Loading {
-                    title: "New Session".to_string(),
-                    message: format!("Creating \"{}\"...", value),
+                // Insert placeholder session immediately (no blocking modal)
+                self.ui_state.modal = Modal::None;
+                let session_id = match self
+                    .session_manager
+                    .prepare_session(&project_id, value, None)
+                    .await
+                {
+                    Ok(id) => id,
+                    Err(e) => {
+                        self.ui_state.modal = Modal::Error {
+                            message: format!("Failed to create session: {}", e),
+                        };
+                        return;
+                    }
                 };
 
+                // Refresh list and select the new placeholder
+                self.refresh_list_items().await;
+                if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
+                    matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
+                }) {
+                    self.ui_state.list_state.select(Some(idx));
+                }
+                self.update_selection();
+
+                // Spawn background task for heavy work
                 let session_manager = self.session_manager.clone();
                 let tx = self.event_loop.sender();
                 tokio::spawn(async move {
-                    match session_manager
-                        .create_session(&project_id, value, None)
-                        .await
-                    {
-                        Ok(session_id) => {
+                    match session_manager.finalize_session(&session_id).await {
+                        Ok(sid) => {
                             let _ = tx
                                 .send(AppEvent::StateUpdate(StateUpdate::SessionCreated {
-                                    session_id,
+                                    session_id: sid,
                                 }))
                                 .await;
                         }
                         Err(e) => {
                             let _ = tx
                                 .send(AppEvent::StateUpdate(StateUpdate::SessionCreateFailed {
+                                    session_id,
                                     message: format!("Failed to create session: {}", e),
                                 }))
                                 .await;
@@ -3420,6 +3568,7 @@ impl App {
                 state
                     .sessions
                     .values()
+                    .filter(|s| s.status != SessionStatus::Creating)
                     .filter_map(|s| {
                         let project = state.projects.get(&s.project_id)?;
                         Some((s.id, s.branch.clone(), project.repo_path.clone()))
@@ -3690,6 +3839,21 @@ async fn fetch_preview_data(
     project_id: Option<ProjectId>,
 ) -> (String, Arc<DiffInfo>, String) {
     if let Some(sid) = session_id {
+        // Check if session is still Creating (no tmux session to capture yet)
+        let is_creating = {
+            let state = mgr.store.read().await;
+            state
+                .get_session(&sid)
+                .is_some_and(|s| s.status == SessionStatus::Creating)
+        };
+        if is_creating {
+            return (
+                "Creating session...".to_string(),
+                Arc::new(DiffInfo::empty()),
+                String::new(),
+            );
+        }
+
         debug!(
             "fetch_preview_data: fetching content/diff/shell for session {}",
             sid
@@ -3813,6 +3977,21 @@ async fn cleanup_session_tmux(
     }
 }
 
+/// Map a 1-based session number to its index in the flat list_items vec.
+/// Returns None if the number is out of range.
+fn session_number_to_list_index(items: &[SessionListItem], number: usize) -> Option<usize> {
+    let mut count = 0usize;
+    for (idx, item) in items.iter().enumerate() {
+        if matches!(item, SessionListItem::Worktree { .. }) {
+            count += 1;
+            if count == number {
+                return Some(idx);
+            }
+        }
+    }
+    None
+}
+
 /// Helper to create a centered rect
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let popup_layout = Layout::default()
@@ -3857,5 +4036,69 @@ mod tests {
         assert!(matches!(state.focused_pane, FocusedPane::SessionList));
         assert!(matches!(state.modal, Modal::None));
         assert!(!state.should_quit);
+    }
+
+    fn make_project() -> SessionListItem {
+        SessionListItem::Project {
+            id: ProjectId::new(),
+            name: "test".to_string(),
+            repo_path: std::path::PathBuf::from("/tmp/test"),
+            main_branch: "main".to_string(),
+            worktree_count: 0,
+        }
+    }
+
+    fn make_worktree() -> SessionListItem {
+        SessionListItem::Worktree {
+            id: SessionId::new(),
+            project_id: ProjectId::new(),
+            title: "test".to_string(),
+            branch: "feat".to_string(),
+            status: SessionStatus::Running,
+            program: "claude".to_string(),
+            pr_number: None,
+            pr_url: None,
+            pr_merged: false,
+            pr_state: None,
+            pr_draft: false,
+            pr_labels: Vec::new(),
+            worktree_path: std::path::PathBuf::from("/tmp/test"),
+            created_at: chrono::Utc::now(),
+            agent_state: None,
+            unread: false,
+        }
+    }
+
+    #[test]
+    fn test_session_number_to_list_index_basic() {
+        let items = vec![
+            make_project(),
+            make_worktree(), // index 1, session #1
+            make_worktree(), // index 2, session #2
+            make_project(),
+            make_worktree(), // index 4, session #3
+        ];
+        assert_eq!(session_number_to_list_index(&items, 1), Some(1));
+        assert_eq!(session_number_to_list_index(&items, 2), Some(2));
+        assert_eq!(session_number_to_list_index(&items, 3), Some(4));
+    }
+
+    #[test]
+    fn test_session_number_to_list_index_out_of_range() {
+        let items = vec![make_project(), make_worktree()];
+        assert_eq!(session_number_to_list_index(&items, 2), None);
+        assert_eq!(session_number_to_list_index(&items, 0), None);
+    }
+
+    #[test]
+    fn test_session_number_to_list_index_empty() {
+        let items: Vec<SessionListItem> = vec![];
+        assert_eq!(session_number_to_list_index(&items, 1), None);
+    }
+
+    #[test]
+    fn test_session_number_to_list_index_projects_only() {
+        let items = vec![make_project(), make_project()];
+        assert_eq!(session_number_to_list_index(&items, 1), None);
     }
 }

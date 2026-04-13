@@ -175,9 +175,13 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Create a new worktree session
+    /// Prepare a placeholder session in `Creating` state.
+    ///
+    /// This inserts the session into state immediately so the UI can show a
+    /// spinner. Call `finalize_session` in a background task to do the heavy
+    /// git/tmux work.
     #[instrument(skip(self))]
-    pub async fn create_session(
+    pub async fn prepare_session(
         &self,
         project_id: &ProjectId,
         title: String,
@@ -185,24 +189,59 @@ impl SessionManager {
     ) -> Result<SessionId> {
         let program = program.unwrap_or_else(|| self.config_store.read().default_program.clone());
 
-        // Get project info
-        let (repo_path, main_branch, project_name) = {
+        // Validate project exists
+        {
             let state = self.store.read().await;
-            let project = state
+            state
                 .get_project(project_id)
                 .ok_or_else(|| SessionError::ProjectNotFound(project_id.to_string()))?;
+        }
+
+        let branch_name = self.generate_branch_name(&title);
+
+        let session = WorktreeSession::new_creating(*project_id, title, branch_name, program);
+        let session_id = session.id;
+
+        self.store
+            .mutate(move |state| {
+                state.add_session(session);
+            })
+            .await?;
+
+        info!("Prepared creating session {}", session_id);
+        Ok(session_id)
+    }
+
+    /// Finalize a session that was created with `prepare_session`.
+    ///
+    /// Performs the heavy work: git fetch, worktree creation, tmux session
+    /// setup. On success, transitions the session from `Creating` to `Running`.
+    #[instrument(skip(self))]
+    pub async fn finalize_session(&self, session_id: &SessionId) -> Result<SessionId> {
+        // Read session and project info
+        let (project_id, title, branch_name, program) = {
+            let state = self.store.read().await;
+            let session = state
+                .get_session(session_id)
+                .ok_or(SessionError::NotFound(*session_id))?;
             (
-                project.repo_path.clone(),
-                project.main_branch.clone(),
-                project.name.clone(),
+                session.project_id,
+                session.title.clone(),
+                session.branch.clone(),
+                session.program.clone(),
             )
         };
 
-        // Generate branch name from title
-        let branch_name = self.generate_branch_name(&title);
+        let (repo_path, main_branch) = {
+            let state = self.store.read().await;
+            let project = state
+                .get_project(&project_id)
+                .ok_or_else(|| SessionError::ProjectNotFound(project_id.to_string()))?;
+            (project.repo_path.clone(), project.main_branch.clone())
+        };
 
         info!(
-            "Creating session '{}' with branch '{}' in project {}",
+            "Finalizing session '{}' with branch '{}' in project {}",
             title, branch_name, project_id
         );
 
@@ -263,24 +302,13 @@ impl SessionManager {
         )
         .await?;
 
-        // Create session object
-        let mut session = WorktreeSession::new(
-            *project_id,
-            title,
-            branch_name,
-            worktree_info.path.clone(),
-            program.clone(),
-        );
-        session.base_commit = Some(worktree_info.head);
-        let session_id = session.id;
-        let tmux_session_name = session.tmux_session_name.clone();
-        let status_bar = StatusBarInfo {
-            branch: session.branch.clone(),
-            pr_number: session.pr_number,
-            pr_merged: session.pr_merged,
-            status_style: self.tmux_status_style.clone(),
-            is_shell: false,
-            project_name,
+        // Read tmux_session_name from the placeholder session
+        let tmux_session_name = {
+            let state = self.store.read().await;
+            let session = state
+                .get_session(session_id)
+                .ok_or(SessionError::NotFound(*session_id))?;
+            session.tmux_session_name.clone()
         };
 
         // Create tmux session in the worktree directory
@@ -288,23 +316,50 @@ impl SessionManager {
             .create_session(&tmux_session_name, &worktree_info.path, Some(&program))
             .await?;
 
+        // Update session to Running with the real worktree info
+        let sid = *session_id;
+        let wt_path = worktree_info.path.clone();
+        let head = worktree_info.head.clone();
+        self.store
+            .mutate(move |state| {
+                if let Some(session) = state.get_session_mut(&sid) {
+                    session.worktree_path = wt_path;
+                    session.base_commit = Some(head);
+                    session.set_status(SessionStatus::Running);
+                }
+            })
+            .await?;
+
         // Configure CC status bar (branch only, no PR yet)
+        let status_bar = {
+            let state = self.store.read().await;
+            let session = state
+                .get_session(session_id)
+                .ok_or(SessionError::NotFound(*session_id))?;
+            self.status_bar_info(session, &state)
+        };
         self.tmux
             .configure_status_bar(&tmux_session_name, &status_bar)
             .await;
 
-        // Save session to state
-        self.store
-            .mutate(move |state| {
-                state.add_session(session);
-            })
-            .await?;
-
         info!(
-            "Created session {} with tmux session {}",
+            "Finalized session {} with tmux session {}",
             session_id, tmux_session_name
         );
-        Ok(session_id)
+        Ok(*session_id)
+    }
+
+    /// Remove a session that is still in `Creating` state (e.g., on failure or startup cleanup).
+    #[instrument(skip(self))]
+    pub async fn remove_creating_session(&self, session_id: &SessionId) -> Result<()> {
+        let sid = *session_id;
+        self.store
+            .mutate(move |state| {
+                state.remove_session(&sid);
+            })
+            .await?;
+        info!("Removed creating session {}", session_id);
+        Ok(())
     }
 
     /// Kill tmux sessions (main + shell) for a worktree session.
