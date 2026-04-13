@@ -5,6 +5,7 @@
 
 use std::io::Write;
 use std::os::unix::io::AsRawFd;
+use std::path::PathBuf;
 
 use crossterm::terminal::{self, disable_raw_mode, enable_raw_mode};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -26,11 +27,37 @@ pub enum AttachResult {
     Error(String),
 }
 
+/// Editor hotkey configuration handed to an attach session.
+///
+/// When the user presses the configured Ctrl+<letter> inside the attached
+/// PTY, the byte is intercepted (not forwarded to tmux) and the editor is
+/// spawned detached against `path`. The attach continues — the user stays
+/// inside their tmux session.
+///
+/// Only meaningful for GUI editors, which can run independently of the
+/// terminal the user is attached from.
+#[derive(Debug, Clone)]
+pub struct EditorHotkey {
+    /// Control byte to intercept (e.g. `0x05` for Ctrl+E)
+    pub byte: u8,
+    /// Editor command, e.g. `"code"`
+    pub command: String,
+    /// Directory passed as the editor's argument (the worktree)
+    pub path: PathBuf,
+}
+
 /// Async PTY attachment - runs entirely within tokio
 ///
 /// Spawns `tmux attach-session` in a PTY and bridges stdin/stdout asynchronously.
 /// Returns when the user detaches (Ctrl+Q or Ctrl+B D) or the session ends.
-pub async fn attach_to_session(session_name: &str) -> Result<AttachResult> {
+///
+/// If `editor_hotkey` is `Some`, the configured control byte is intercepted
+/// from stdin and the editor is spawned detached — the user stays attached
+/// to the tmux session.
+pub async fn attach_to_session(
+    session_name: &str,
+    editor_hotkey: Option<EditorHotkey>,
+) -> Result<AttachResult> {
     // Get terminal size
     let (cols, rows) = terminal::size().unwrap_or((80, 24));
 
@@ -53,7 +80,7 @@ pub async fn attach_to_session(session_name: &str) -> Result<AttachResult> {
 
     // Run the async I/O loop
     info!("Starting async I/O loop");
-    let result = run_async_loop(pty, pty_fd, &mut child).await;
+    let result = run_async_loop(pty, pty_fd, &mut child, editor_hotkey).await;
     info!("Async I/O loop ended with result: {:?}", result);
 
     // Restore terminal
@@ -164,6 +191,7 @@ async fn run_async_loop(
     pty: pty_process::Pty,
     pty_fd: i32,
     child: &mut tokio::process::Child,
+    editor_hotkey: Option<EditorHotkey>,
 ) -> AttachResult {
     // Channel for shutdown signal
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<AttachResult>(1);
@@ -226,6 +254,41 @@ async fn run_async_loop(
                         debug!("Ctrl+\\ detected, switching to shell");
                         let _ = stdin_shutdown.send(AttachResult::SwitchToShell).await;
                         break;
+                    }
+
+                    // Check for the configured editor hotkey, if enabled.
+                    // Ctrl+<letter> maps to a control byte in the 0x01..=0x1A range.
+                    // Unlike the other hotkeys we DO NOT break the loop — we
+                    // spawn the editor detached and keep the user attached to
+                    // tmux. Byte is stripped from the forwarded chunk so it
+                    // doesn't reach the pane.
+                    if let Some(ref hotkey) = editor_hotkey
+                        && data.contains(&hotkey.byte)
+                    {
+                        debug!("Editor hotkey byte 0x{:02x} detected", hotkey.byte);
+                        match std::process::Command::new(&hotkey.command)
+                            .arg(&hotkey.path)
+                            .spawn()
+                        {
+                            Ok(_child) => {
+                                info!(
+                                    "Spawned editor '{}' on '{}'",
+                                    hotkey.command,
+                                    hotkey.path.display()
+                                );
+                            }
+                            Err(e) => {
+                                warn!("Failed to spawn editor '{}': {}", hotkey.command, e);
+                            }
+                        }
+                        // Forward every byte except the hotkey itself.
+                        let filtered: Vec<u8> =
+                            data.iter().copied().filter(|b| *b != hotkey.byte).collect();
+                        if !filtered.is_empty() && pty_writer.write_all(&filtered).await.is_err() {
+                            break;
+                        }
+                        let _ = pty_writer.flush().await;
+                        continue;
                     }
 
                     // Forward raw bytes to PTY

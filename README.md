@@ -89,7 +89,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `d` | Delete session |
 | `R` | Restart session (kill tmux + recreate with /resume) |
 | `D` | Remove project |
-| `e` | Open in editor/IDE |
+| `e` (and `Ctrl-e` when `editor_ctrl_hotkey_for_tmux_session` is enabled) | Open in editor/IDE |
 | `s` | Open shell in worktree |
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
 | `<` / `>` | Shrink / grow left pane |
@@ -107,6 +107,7 @@ When attached to a session (via `Enter` or `claude-commander attach`):
 |-----|--------|
 | `Ctrl-q` | Detach and return to session list |
 | `Ctrl-\` | Switch between Claude and shell pane |
+| `Ctrl-e` | Open the current session's worktree in your editor (requires `editor_ctrl_hotkey_for_tmux_session = true`; uses whatever character is bound to `open_in_editor`, default `e`) |
 
 ## Configuration
 
@@ -153,6 +154,12 @@ ui_refresh_fps = 30
 # GUI editors are spawned in the background; terminal editors suspend the TUI
 # Auto-detected from a known list if not set (code, zed, subl, JetBrains IDEs, etc.)
 # editor_gui = true
+
+# When true, binds Ctrl+<editor_key> as an additional hotkey for opening the
+# editor. Unlike the plain editor key, the Ctrl variant is also recognised
+# from inside an attached tmux session — press it to detach and launch the
+# editor on the current session's worktree.
+# editor_ctrl_hotkey_for_tmux_session = false
 
 # Interval in seconds between GitHub PR checks (0 = disabled)
 pr_check_interval_secs = 600

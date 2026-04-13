@@ -105,7 +105,7 @@ fn setup_logging(debug: bool, to_file: bool) -> Result<()> {
 
 /// Execute async PTY-based attach to a tmux session
 async fn execute_attach(session_name: &str) {
-    match attach_to_session(session_name).await {
+    match attach_to_session(session_name, None).await {
         Ok(AttachResult::Detached | AttachResult::SwitchToShell) => {
             info!("Detached from session");
         }

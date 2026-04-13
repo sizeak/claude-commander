@@ -12,7 +12,7 @@ use figment::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::config::keybindings::KeyBindings;
+use crate::config::keybindings::{BindableAction, KeyBinding, KeyBindings};
 use crate::config::theme::ThemeOverrides;
 use crate::error::{ConfigError, Error, Result};
 
@@ -53,6 +53,12 @@ pub struct Config {
     /// Whether the editor is a GUI application (true) or terminal-based (false).
     /// If unset, auto-detected from a known list of GUI editors.
     pub editor_gui: Option<bool>,
+
+    /// When true, binds Ctrl+<editor_key> as an additional hotkey for opening
+    /// the editor. Unlike the plain editor key, the Ctrl variant is also
+    /// recognised from inside an attached tmux session — press it to detach
+    /// and launch the editor on the current session's worktree.
+    pub editor_ctrl_hotkey_for_tmux_session: bool,
 
     /// Fetch the latest changes from origin before creating a new session
     #[serde(alias = "pull_before_create")]
@@ -116,6 +122,7 @@ impl Default for Config {
             worktrees_dir: None,
             editor: None,
             editor_gui: None,
+            editor_ctrl_hotkey_for_tmux_session: false,
             shell_program: std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string()),
             pr_check_interval_secs: 600,
             fetch_before_create: true,
@@ -142,7 +149,7 @@ impl Config {
     pub fn load() -> Result<Self> {
         let config_path = Self::config_file_path()?;
 
-        let config: Config = Figment::new()
+        let mut config: Config = Figment::new()
             // Start with defaults
             .merge(Serialized::defaults(Config::default()))
             // Layer config file if it exists
@@ -152,7 +159,53 @@ impl Config {
             .extract()
             .map_err(|e| ConfigError::LoadFailed(e.to_string()))?;
 
+        config.apply_derived_keybindings();
+
         Ok(config)
+    }
+
+    /// Apply keybindings derived from other config options, such as adding
+    /// `Ctrl-<editor_key>` when `editor_ctrl_hotkey_for_tmux_session` is set.
+    ///
+    /// Idempotent — safe to call multiple times.
+    pub fn apply_derived_keybindings(&mut self) {
+        if self.editor_ctrl_hotkey_for_tmux_session
+            && let Some(c) = self.editor_ctrl_hotkey_char()
+        {
+            self.keybindings.add_binding(
+                BindableAction::OpenInEditor,
+                KeyBinding::new(KeyCode::Char(c), KeyModifiers::CONTROL),
+            );
+        }
+    }
+
+    /// The lowercase ASCII letter used as the editor hotkey — derived from
+    /// the first plain-char binding of `OpenInEditor`.
+    ///
+    /// Only ASCII alphabetic characters are supported, because the Ctrl-byte
+    /// mapping is only well-defined for those.
+    pub fn editor_ctrl_hotkey_char(&self) -> Option<char> {
+        let c = self
+            .keybindings
+            .primary_char_binding(BindableAction::OpenInEditor)?;
+        if c.is_ascii_alphabetic() {
+            Some(c.to_ascii_lowercase())
+        } else {
+            None
+        }
+    }
+
+    /// The raw byte produced by Ctrl+<editor_char> inside a terminal — used
+    /// to intercept the combination when forwarding keystrokes into an
+    /// attached tmux PTY. Returns None if the feature is disabled or the
+    /// editor binding is not a plain ASCII letter.
+    pub fn editor_ctrl_hotkey_byte(&self) -> Option<u8> {
+        if !self.editor_ctrl_hotkey_for_tmux_session {
+            return None;
+        }
+        let c = self.editor_ctrl_hotkey_char()?;
+        // ASCII convention: Ctrl+<letter> = letter_upper - 0x40 (so 'e' -> 0x05)
+        Some((c.to_ascii_uppercase() as u8) - 0x40)
     }
 
     /// Get the configuration file path
@@ -495,6 +548,70 @@ mod tests {
         let config = Config::default();
         assert!(!config.show_session_numbers);
         assert_eq!(config.session_number_debounce_ms, 250);
+    }
+
+    #[test]
+    fn test_editor_ctrl_hotkey_default_off() {
+        let config = Config::default();
+        assert!(!config.editor_ctrl_hotkey_for_tmux_session);
+        assert_eq!(config.editor_ctrl_hotkey_byte(), None);
+    }
+
+    #[test]
+    fn test_editor_ctrl_hotkey_when_enabled_derives_byte_from_default_e() {
+        let mut config = Config {
+            editor_ctrl_hotkey_for_tmux_session: true,
+            ..Config::default()
+        };
+        // Default binding for OpenInEditor is 'e'
+        assert_eq!(config.editor_ctrl_hotkey_char(), Some('e'));
+        // Ctrl+E = 0x05 per standard ASCII control-byte convention
+        assert_eq!(config.editor_ctrl_hotkey_byte(), Some(0x05));
+
+        // After applying derived keybindings the KeyBindings table should
+        // resolve Ctrl+E to OpenInEditor
+        config.apply_derived_keybindings();
+        let ctrl_e = crossterm::event::KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        assert_eq!(
+            config.keybindings.resolve(&ctrl_e),
+            Some(BindableAction::OpenInEditor)
+        );
+        // The original 'e' binding is preserved.
+        let plain_e = crossterm::event::KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE);
+        assert_eq!(
+            config.keybindings.resolve(&plain_e),
+            Some(BindableAction::OpenInEditor)
+        );
+    }
+
+    #[test]
+    fn test_apply_derived_keybindings_is_idempotent() {
+        let mut config = Config {
+            editor_ctrl_hotkey_for_tmux_session: true,
+            ..Config::default()
+        };
+        config.apply_derived_keybindings();
+        let count_after_first = config
+            .keybindings
+            .keys_for(BindableAction::OpenInEditor)
+            .len();
+        config.apply_derived_keybindings();
+        let count_after_second = config
+            .keybindings
+            .keys_for(BindableAction::OpenInEditor)
+            .len();
+        assert_eq!(count_after_first, count_after_second);
+    }
+
+    #[test]
+    fn test_editor_ctrl_hotkey_disabled_gives_no_byte_even_with_letter_binding() {
+        let config = Config {
+            editor_ctrl_hotkey_for_tmux_session: false,
+            ..Config::default()
+        };
+        // Editor character is still 'e' but the feature is off.
+        assert_eq!(config.editor_ctrl_hotkey_char(), Some('e'));
+        assert_eq!(config.editor_ctrl_hotkey_byte(), None);
     }
 
     #[test]

@@ -420,8 +420,7 @@ impl App {
             let interval_ms = self.config.agent_state_poll_interval_ms;
             let tmux = self.session_manager.tmux.clone();
             tokio::spawn(async move {
-                let cache_ttl =
-                    Duration::from_millis(interval_ms.saturating_sub(500).max(500));
+                let cache_ttl = Duration::from_millis(interval_ms.saturating_sub(500).max(500));
                 let mut detector = AgentStateDetector::new(tmux, cache_ttl);
                 let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
                 loop {
@@ -432,9 +431,7 @@ impl App {
                             .sessions
                             .values()
                             .filter(|s| s.status == SessionStatus::Running)
-                            .map(|s| {
-                                (s.id, s.tmux_session_name.clone(), s.program.clone())
-                            })
+                            .map(|s| (s.id, s.tmux_session_name.clone(), s.program.clone()))
                             .collect()
                     };
                     if sessions.is_empty() {
@@ -444,9 +441,9 @@ impl App {
                         detector.detect_all(&sessions).await;
                     if !states.is_empty() {
                         let _ = tx
-                            .send(AppEvent::StateUpdate(
-                                StateUpdate::AgentStatesUpdated { states },
-                            ))
+                            .send(AppEvent::StateUpdate(StateUpdate::AgentStatesUpdated {
+                                states,
+                            }))
                             .await;
                     }
                 }
@@ -507,8 +504,19 @@ impl App {
                         if !session_name.is_empty() {
                             let mut current_session = session_name.clone();
 
+                            // Pre-resolve the editor hotkey bundle for this session
+                            // so pressing Ctrl+<editor-key> inside tmux spawns the
+                            // editor *without* detaching the user from the session.
+                            // Only meaningful for GUI editors.
+                            let editor_hotkey = self.resolve_editor_hotkey(&current_session).await;
+
                             loop {
-                                match crate::tmux::attach_to_session(&current_session).await {
+                                match crate::tmux::attach_to_session(
+                                    &current_session,
+                                    editor_hotkey.clone(),
+                                )
+                                .await
+                                {
                                     Ok(crate::tmux::AttachResult::SwitchToShell) => {
                                         info!(
                                             "Shell toggle requested from session: {}",
@@ -1700,6 +1708,16 @@ impl App {
                         color_swatch: None,
                     },
                     SettingsRow {
+                        label: "Worktrees Dir".into(),
+                        value: c
+                            .worktrees_dir
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "(default)".into()),
+                        field_key: "worktrees_dir".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
                         label: "Editor".into(),
                         value: c.editor.clone().unwrap_or_else(|| "(auto)".into()),
                         field_key: "editor".into(),
@@ -1713,6 +1731,12 @@ impl App {
                             None => "(auto)".into(),
                         },
                         field_key: "editor_gui".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
+                        label: "Editor Ctrl Hotkey in Tmux".into(),
+                        value: c.editor_ctrl_hotkey_for_tmux_session.to_string(),
+                        field_key: "editor_ctrl_hotkey_for_tmux_session".into(),
                         color_swatch: None,
                     },
                     SettingsRow {
@@ -1909,7 +1933,19 @@ impl App {
             ..content_area
         };
 
-        let label_width = 24_u16;
+        // Size the label column to the longest label in the current tab so
+        // long names (e.g. "Editor Ctrl Hotkey in Tmux") aren't truncated.
+        // Floor keeps alignment tidy when every label is short; cap leaves
+        // room for the value column on narrow terminals.
+        let max_label_len = state
+            .rows
+            .iter()
+            .map(|r| r.label.chars().count())
+            .max()
+            .unwrap_or(0) as u16;
+        let label_floor = 24_u16;
+        let label_cap = rows_area.width.saturating_sub(10).max(label_floor);
+        let label_width = max_label_len.max(label_floor).min(label_cap);
         let value_width = rows_area.width.saturating_sub(label_width + 3);
 
         let visible_rows = rows_area.height as usize;
@@ -2028,6 +2064,13 @@ impl App {
                 "default_program" => self.config.default_program = value.to_string(),
                 "branch_prefix" => self.config.branch_prefix = value.to_string(),
                 "shell_program" => self.config.shell_program = value.to_string(),
+                "worktrees_dir" => {
+                    self.config.worktrees_dir = if value.is_empty() || value == "(default)" {
+                        None
+                    } else {
+                        Some(PathBuf::from(value))
+                    };
+                }
                 "editor" => {
                     self.config.editor = if value.is_empty() || value == "(auto)" {
                         None
@@ -2041,6 +2084,17 @@ impl App {
                         "false" => Some(false),
                         _ => None,
                     };
+                }
+                "editor_ctrl_hotkey_for_tmux_session" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        self.config.editor_ctrl_hotkey_for_tmux_session = b;
+                        // Re-apply derived keybindings so the Ctrl-<e> binding
+                        // is added (or the toggle is reflected for the next
+                        // attach). We only add here; toggling off does not
+                        // remove the binding until the TUI is restarted — a
+                        // reasonable limitation for a minor toggle.
+                        self.config.apply_derived_keybindings();
+                    }
                 }
                 "fetch_before_create" => {
                     if let Ok(b) = value.parse::<bool>() {
@@ -2931,8 +2985,7 @@ impl App {
                 let mut unread_ids = Vec::new();
                 for (session_id, new_state) in &states {
                     if *new_state == AgentState::Idle
-                        && self.ui_state.agent_states.get(session_id)
-                            == Some(&AgentState::Working)
+                        && self.ui_state.agent_states.get(session_id) == Some(&AgentState::Working)
                     {
                         unread_ids.push(*session_id);
                     }
@@ -3123,6 +3176,57 @@ impl App {
                 current_tmux_name
             )),
         ))
+    }
+
+    /// Build the editor hotkey bundle passed into `attach_to_session` so
+    /// Ctrl+<editor-key> inside tmux spawns the editor without detaching.
+    ///
+    /// Returns `None` when the feature is disabled, no editor resolves, the
+    /// resolved editor is terminal-based (can't run detached), or the tmux
+    /// session doesn't map to a known worktree.
+    async fn resolve_editor_hotkey(&self, tmux_name: &str) -> Option<crate::tmux::EditorHotkey> {
+        let byte = self.config.editor_ctrl_hotkey_byte()?;
+        let editor = self.config.resolve_editor()?;
+
+        // Only GUI editors make sense from inside an attached PTY — a
+        // terminal editor would fight the tmux pane for stdin/stdout.
+        if !self.config.is_gui_editor(&editor) {
+            warn!(
+                "editor_ctrl_hotkey_for_tmux_session is enabled but editor '{}' \
+                 is not a GUI editor; hotkey inside tmux is disabled",
+                editor
+            );
+            return None;
+        }
+
+        // Shell and Claude sessions share a worktree — strip the "-sh"
+        // suffix before looking up the session.
+        let lookup_name = tmux_name.trim_end_matches("-sh");
+
+        let path = {
+            let state = self.store.read().await;
+            state
+                .sessions
+                .values()
+                .find(|s| s.tmux_session_name == lookup_name)
+                .map(|s| s.worktree_path.clone())
+                .or_else(|| {
+                    state
+                        .projects
+                        .values()
+                        .find(|p| {
+                            p.shell_tmux_session_name.as_deref() == Some(tmux_name)
+                                || p.shell_tmux_session_name.as_deref() == Some(lookup_name)
+                        })
+                        .map(|p| p.repo_path.clone())
+                })
+        }?;
+
+        Some(crate::tmux::EditorHotkey {
+            byte,
+            command: editor,
+            path,
+        })
     }
 
     /// Handle open in editor command

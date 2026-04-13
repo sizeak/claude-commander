@@ -191,12 +191,13 @@ impl ConfigStore {
             providers::{Env, Format, Serialized, Toml},
         };
 
-        let config: Config = Figment::new()
+        let mut config: Config = Figment::new()
             .merge(Serialized::defaults(Config::default()))
             .merge(Toml::file(&self.config_path))
             .merge(Env::prefixed("CC_").split("_"))
             .extract()
             .map_err(|e| ConfigError::LoadFailed(e.to_string()))?;
+        config.apply_derived_keybindings();
         Ok(config)
     }
 }

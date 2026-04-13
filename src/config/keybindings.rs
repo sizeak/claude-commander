@@ -399,6 +399,28 @@ impl KeyBindings {
         self.bindings.get(&action).map_or(&[], |v| v.as_slice())
     }
 
+    /// Add an additional key binding for an action, preserving existing bindings.
+    /// No-op if the binding is already present for that action.
+    pub fn add_binding(&mut self, action: BindableAction, binding: KeyBinding) {
+        let entry = self.bindings.entry(action).or_default();
+        if !entry.contains(&binding) {
+            entry.push(binding.clone());
+        }
+        self.lookup
+            .insert((binding.code, binding.modifiers), action);
+    }
+
+    /// Return the first character-based binding for an action, if any.
+    ///
+    /// Used to derive a Ctrl-modified companion binding (e.g. deriving
+    /// `Ctrl-E` from the default `e` binding for `OpenInEditor`).
+    pub fn primary_char_binding(&self, action: BindableAction) -> Option<char> {
+        self.keys_for(action).iter().find_map(|b| match b.code {
+            KeyCode::Char(c) if b.modifiers == KeyModifiers::NONE => Some(c),
+            _ => None,
+        })
+    }
+
     /// Format the key bindings for an action as a comma-separated string.
     pub fn keys_display(&self, action: BindableAction) -> String {
         self.keys_for(action)
@@ -878,6 +900,45 @@ mod tests {
         assert!(display.contains("k"));
         assert!(display.contains("Up"));
         assert!(display.contains("Ctrl-p"));
+    }
+
+    #[test]
+    fn test_add_binding_preserves_existing_and_resolves_new() {
+        let mut kb = KeyBindings::default();
+        // `e` is bound to OpenInEditor by default
+        let plain_e = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&plain_e), Some(BindableAction::OpenInEditor));
+
+        // Add Ctrl-E
+        kb.add_binding(
+            BindableAction::OpenInEditor,
+            KeyBinding::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+        );
+
+        // Both resolve now
+        let ctrl_e = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        assert_eq!(kb.resolve(&ctrl_e), Some(BindableAction::OpenInEditor));
+        assert_eq!(kb.resolve(&plain_e), Some(BindableAction::OpenInEditor));
+    }
+
+    #[test]
+    fn test_add_binding_is_idempotent() {
+        let mut kb = KeyBindings::default();
+        let before = kb.keys_for(BindableAction::OpenInEditor).len();
+        let binding = KeyBinding::new(KeyCode::Char('e'), KeyModifiers::CONTROL);
+        kb.add_binding(BindableAction::OpenInEditor, binding.clone());
+        kb.add_binding(BindableAction::OpenInEditor, binding);
+        let after = kb.keys_for(BindableAction::OpenInEditor).len();
+        assert_eq!(after, before + 1);
+    }
+
+    #[test]
+    fn test_primary_char_binding_returns_default_editor_key() {
+        let kb = KeyBindings::default();
+        assert_eq!(
+            kb.primary_char_binding(BindableAction::OpenInEditor),
+            Some('e')
+        );
     }
 
     #[test]
