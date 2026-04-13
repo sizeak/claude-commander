@@ -78,6 +78,8 @@ impl fmt::Display for SessionId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
+    /// Session is being created (worktree/tmux setup in progress)
+    Creating,
     /// Session is running and active
     Running,
     /// Session is paused (tmux detached, worktree preserved)
@@ -87,9 +89,9 @@ pub enum SessionStatus {
 }
 
 impl SessionStatus {
-    /// Check if the session is active (running or paused)
+    /// Check if the session is active (creating, running, or paused)
     pub fn is_active(&self) -> bool {
-        matches!(self, Self::Running | Self::Paused)
+        matches!(self, Self::Creating | Self::Running | Self::Paused)
     }
 
     /// Check if the session can be attached to (Stopped sessions are allowed
@@ -112,6 +114,7 @@ impl SessionStatus {
 impl fmt::Display for SessionStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Creating => write!(f, "creating"),
             Self::Running => write!(f, "running"),
             Self::Paused => write!(f, "paused"),
             Self::Stopped => write!(f, "stopped"),
@@ -277,6 +280,42 @@ impl WorktreeSession {
             branch: branch.into(),
             worktree_path,
             status: SessionStatus::Running,
+            program: program.into(),
+            program_args: Vec::new(),
+            created_at: now,
+            last_active_at: now,
+            tmux_session_name,
+            base_commit: None,
+            shell_tmux_session_name: None,
+            pr_number: None,
+            pr_url: None,
+            pr_merged: false,
+            unread: false,
+        }
+    }
+
+    /// Create a placeholder session in the `Creating` state.
+    ///
+    /// The worktree path is left empty because it doesn't exist yet;
+    /// it will be filled in by `SessionManager::finalize_session`.
+    pub fn new_creating(
+        project_id: ProjectId,
+        title: impl Into<String>,
+        branch: impl Into<String>,
+        program: impl Into<String>,
+    ) -> Self {
+        let id = SessionId::new();
+        let title = title.into();
+        let now = Utc::now();
+        let tmux_session_name = format!("cc-{}", &id.0.to_string()[..8]);
+
+        Self {
+            id,
+            project_id,
+            title,
+            branch: branch.into(),
+            worktree_path: PathBuf::new(),
+            status: SessionStatus::Creating,
             program: program.into(),
             program_args: Vec::new(),
             created_at: now,
@@ -506,16 +545,44 @@ mod tests {
 
     #[test]
     fn test_is_active() {
+        assert!(SessionStatus::Creating.is_active());
         assert!(SessionStatus::Running.is_active());
         assert!(SessionStatus::Paused.is_active());
         assert!(!SessionStatus::Stopped.is_active());
     }
 
     #[test]
+    fn test_creating_cannot_attach_pause_resume() {
+        assert!(!SessionStatus::Creating.can_attach());
+        assert!(!SessionStatus::Creating.can_pause());
+        assert!(!SessionStatus::Creating.can_resume());
+    }
+
+    #[test]
     fn test_session_status_display() {
+        assert_eq!(format!("{}", SessionStatus::Creating), "creating");
         assert_eq!(format!("{}", SessionStatus::Running), "running");
         assert_eq!(format!("{}", SessionStatus::Paused), "paused");
         assert_eq!(format!("{}", SessionStatus::Stopped), "stopped");
+    }
+
+    #[test]
+    fn test_new_creating_session() {
+        let project_id = ProjectId::new();
+        let session = WorktreeSession::new_creating(
+            project_id,
+            "Feature Auth",
+            "feature-auth",
+            "claude",
+        );
+
+        assert_eq!(session.project_id, project_id);
+        assert_eq!(session.title, "Feature Auth");
+        assert_eq!(session.branch, "feature-auth");
+        assert_eq!(session.program, "claude");
+        assert_eq!(session.status, SessionStatus::Creating);
+        assert_eq!(session.worktree_path, PathBuf::new());
+        assert!(session.tmux_session_name.starts_with("cc-"));
     }
 
     #[test]

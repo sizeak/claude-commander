@@ -296,6 +296,83 @@ fn test_session_list_mixed_programs() {
     insta::assert_snapshot!(terminal.backend());
 }
 
+#[test]
+fn test_session_list_with_numbers() {
+    let backend = TestBackend::new(70, 12);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = test_theme();
+    let project_id = ProjectId::new();
+
+    terminal
+        .draw(|frame| {
+            let items = vec![
+                SessionListItem::Project {
+                    id: project_id,
+                    name: "claude-commander".to_string(),
+                    repo_path: PathBuf::from("/home/user/projects/cc"),
+                    main_branch: "main".to_string(),
+                    worktree_count: 3,
+                },
+                SessionListItem::Worktree {
+                    id: SessionId::new(),
+                    project_id,
+                    title: "Add auth feature".to_string(),
+                    branch: "feature-auth".to_string(),
+                    status: SessionStatus::Running,
+                    program: "claude".to_string(),
+                    pr_number: None,
+                    pr_url: None,
+                    pr_merged: false,
+                    worktree_path: PathBuf::from("/tmp/wt"),
+                    created_at: chrono::Utc::now(),
+                    agent_state: None,
+                    unread: false,
+                },
+                SessionListItem::Worktree {
+                    id: SessionId::new(),
+                    project_id,
+                    title: "Fix login bug".to_string(),
+                    branch: "fix-login".to_string(),
+                    status: SessionStatus::Paused,
+                    program: "claude".to_string(),
+                    pr_number: None,
+                    pr_url: None,
+                    pr_merged: false,
+                    worktree_path: PathBuf::from("/tmp/wt"),
+                    created_at: chrono::Utc::now(),
+                    agent_state: None,
+                    unread: false,
+                },
+                SessionListItem::Worktree {
+                    id: SessionId::new(),
+                    project_id,
+                    title: "Refactor DB".to_string(),
+                    branch: "refactor-db".to_string(),
+                    status: SessionStatus::Stopped,
+                    program: "claude".to_string(),
+                    pr_number: None,
+                    pr_url: None,
+                    pr_merged: false,
+                    worktree_path: PathBuf::from("/tmp/wt"),
+                    created_at: chrono::Utc::now(),
+                    agent_state: None,
+                    unread: false,
+                },
+            ];
+            let tree_list = TreeList::new(&items, &theme)
+                .highlight_style(theme.selection().add_modifier(Modifier::BOLD))
+                .show_numbers(true);
+            frame.render_stateful_widget(
+                tree_list,
+                frame.area(),
+                &mut ratatui::widgets::ListState::default(),
+            );
+        })
+        .unwrap();
+
+    insta::assert_snapshot!(terminal.backend());
+}
+
 // ── Preview widget ─────────────────────────────────────────────────
 
 #[test]
@@ -1053,6 +1130,69 @@ fn test_quick_switch_with_matches() {
                 };
                 frame.render_widget(Paragraph::new(line), line_area);
             }
+        })
+        .unwrap();
+
+    insta::assert_snapshot!(terminal.backend());
+}
+
+#[test]
+fn test_session_list_creating_status() {
+    let backend = TestBackend::new(70, 10);
+    let mut terminal = Terminal::new(backend).unwrap();
+    let theme = test_theme();
+    let project_id = ProjectId::new();
+
+    terminal
+        .draw(|frame| {
+            let items = vec![
+                SessionListItem::Project {
+                    id: project_id,
+                    name: "my-project".to_string(),
+                    repo_path: PathBuf::from("/home/user/my-project"),
+                    main_branch: "main".to_string(),
+                    worktree_count: 2,
+                },
+                SessionListItem::Worktree {
+                    id: SessionId::new(),
+                    project_id,
+                    title: "Existing session".to_string(),
+                    branch: "feature-existing".to_string(),
+                    status: SessionStatus::Running,
+                    program: "claude".to_string(),
+                    pr_number: None,
+                    pr_url: None,
+                    pr_merged: false,
+                    worktree_path: PathBuf::from("/tmp/wt"),
+                    created_at: chrono::Utc::now(),
+                    agent_state: None,
+                    unread: false,
+                },
+                SessionListItem::Worktree {
+                    id: SessionId::new(),
+                    project_id,
+                    title: "New session".to_string(),
+                    branch: "feature-new".to_string(),
+                    status: SessionStatus::Creating,
+                    program: "claude".to_string(),
+                    pr_number: None,
+                    pr_url: None,
+                    pr_merged: false,
+                    worktree_path: PathBuf::new(),
+                    created_at: chrono::Utc::now(),
+                    agent_state: None,
+                    unread: false,
+                },
+            ];
+            // tick=0 → spinner frame 0 → "⠋"
+            let tree_list = TreeList::new(&items, &theme)
+                .tick(0)
+                .highlight_style(theme.selection().add_modifier(Modifier::BOLD));
+            frame.render_stateful_widget(
+                tree_list,
+                frame.area(),
+                &mut ratatui::widgets::ListState::default(),
+            );
         })
         .unwrap();
 
