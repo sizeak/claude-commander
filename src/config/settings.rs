@@ -374,6 +374,7 @@ default_program_args = ["--resume", "--model=opus"]
         let toml = toml::to_string_pretty(&config).unwrap();
         assert!(toml.contains("default_program"));
         assert!(toml.contains("claude"));
+        assert!(toml.contains(r#"default_program_args = ["--resume"]"#));
     }
 
     #[test]
