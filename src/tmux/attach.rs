@@ -20,6 +20,8 @@ pub enum AttachResult {
     Detached,
     /// User pressed Ctrl+\ to toggle between Claude and shell sessions
     SwitchToShell,
+    /// User pressed Ctrl+. to open the editor for the session's worktree
+    OpenEditor,
     /// The session/process ended
     SessionEnded,
     /// An error occurred during attachment
@@ -30,7 +32,17 @@ pub enum AttachResult {
 ///
 /// Spawns `tmux attach-session` in a PTY and bridges stdin/stdout asynchronously.
 /// Returns when the user detaches (Ctrl+Q or Ctrl+B D) or the session ends.
-pub async fn attach_to_session(session_name: &str) -> Result<AttachResult> {
+///
+/// `editor_triggers` is a list of byte patterns that, when seen on stdin,
+/// cause the attach loop to exit with [`AttachResult::OpenEditor`]. Callers
+/// compute these from the user's `OpenInEditor` keybindings — typically a
+/// single control byte for `Ctrl-<letter>` bindings, or CSI-u/modifyOtherKeys
+/// sequences for `Ctrl-<non-letter>` bindings. Bindings that cannot be
+/// detected in raw stdin (e.g. a bare letter) should simply be omitted.
+pub async fn attach_to_session(
+    session_name: &str,
+    editor_triggers: Vec<Vec<u8>>,
+) -> Result<AttachResult> {
     // Get terminal size
     let (cols, rows) = terminal::size().unwrap_or((80, 24));
 
@@ -53,7 +65,7 @@ pub async fn attach_to_session(session_name: &str) -> Result<AttachResult> {
 
     // Run the async I/O loop
     info!("Starting async I/O loop");
-    let result = run_async_loop(pty, pty_fd, &mut child).await;
+    let result = run_async_loop(pty, pty_fd, &mut child, editor_triggers).await;
     info!("Async I/O loop ended with result: {:?}", result);
 
     // Restore terminal
@@ -79,6 +91,14 @@ pub async fn attach_to_session(session_name: &str) -> Result<AttachResult> {
     info!("Attach complete, result: {:?}", result);
 
     Ok(result)
+}
+
+/// Return true if `haystack` contains `needle` as a contiguous subsequence.
+fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() || needle.len() > haystack.len() {
+        return false;
+    }
+    haystack.windows(needle.len()).any(|w| w == needle)
 }
 
 /// Log any pending bytes in stdin for debugging
@@ -164,6 +184,7 @@ async fn run_async_loop(
     pty: pty_process::Pty,
     pty_fd: i32,
     child: &mut tokio::process::Child,
+    editor_triggers: Vec<Vec<u8>>,
 ) -> AttachResult {
     // Channel for shutdown signal
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<AttachResult>(1);
@@ -228,6 +249,19 @@ async fn run_async_loop(
                         break;
                     }
 
+                    // Check for any user-configured editor trigger bytes.
+                    // Empty `editor_triggers` (the default) disables this
+                    // feature entirely — the user's OpenInEditor binding has
+                    // no encoding that makes sense inside a tmux attach.
+                    if editor_triggers
+                        .iter()
+                        .any(|pat| contains_subsequence(data, pat))
+                    {
+                        debug!("Editor trigger detected, opening editor");
+                        let _ = stdin_shutdown.send(AttachResult::OpenEditor).await;
+                        break;
+                    }
+
                     // Forward raw bytes to PTY
                     if pty_writer.write_all(data).await.is_err() {
                         break;
@@ -280,4 +314,29 @@ async fn run_async_loop(
     resize_task.abort();
 
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_contains_subsequence_finds_needle() {
+        assert!(contains_subsequence(b"hello world", b"world"));
+        assert!(contains_subsequence(b"\x1b[46;5u", b"\x1b[46;5u"));
+        assert!(contains_subsequence(b"abc\x1b[46;5udef", b"\x1b[46;5u"));
+    }
+
+    #[test]
+    fn test_contains_subsequence_rejects_missing() {
+        assert!(!contains_subsequence(b"hello", b"world"));
+        assert!(!contains_subsequence(b"\x1b[45;5u", b"\x1b[46;5u"));
+    }
+
+    #[test]
+    fn test_contains_subsequence_empty_cases() {
+        assert!(!contains_subsequence(b"", b"x"));
+        assert!(!contains_subsequence(b"x", b""));
+        assert!(!contains_subsequence(b"ab", b"abc"));
+    }
 }

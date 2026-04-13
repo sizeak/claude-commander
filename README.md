@@ -89,7 +89,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `d` | Delete session |
 | `R` | Restart session (kill tmux + recreate; adds `--resume` when `resume_session = true`) |
 | `D` | Remove project |
-| `e` | Open in editor/IDE |
+| `.` or `Ctrl-.` | Open in editor/IDE |
 | `o` | Open PR in browser (when the session has a PR) |
 | `s` | Open shell in worktree |
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
@@ -108,6 +108,7 @@ When attached to a session (via `Enter` or `claude-commander attach`):
 |-----|--------|
 | `Ctrl-q` | Detach and return to session list |
 | `Ctrl-\` | Switch between Claude and shell pane |
+| `Ctrl-.` | Open the session worktree in your editor (requires a terminal that emits CSI-u or xterm modifyOtherKeys sequences for Ctrl-.) |
 
 ## Configuration
 

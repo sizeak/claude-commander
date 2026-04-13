@@ -505,7 +505,16 @@ impl App {
                             let mut current_session = session_name.clone();
 
                             loop {
-                                match crate::tmux::attach_to_session(&current_session).await {
+                                let editor_triggers =
+                                    crate::config::keybindings::editor_trigger_bytes(
+                                        &self.config.keybindings,
+                                    );
+                                match crate::tmux::attach_to_session(
+                                    &current_session,
+                                    editor_triggers,
+                                )
+                                .await
+                                {
                                     Ok(crate::tmux::AttachResult::SwitchToShell) => {
                                         info!(
                                             "Shell toggle requested from session: {}",
@@ -547,6 +556,18 @@ impl App {
                                         // Flush between switches
                                         crate::tmux::flush_stdin();
                                         info!("Switching to session: {}", current_session);
+                                        continue;
+                                    }
+                                    Ok(crate::tmux::AttachResult::OpenEditor) => {
+                                        info!(
+                                            "OpenEditor requested from session: {}",
+                                            current_session
+                                        );
+                                        // Run the editor for the session's worktree, keep
+                                        // the tmux session alive, and then re-attach.
+                                        self.open_editor_for_tmux_session(&current_session)
+                                            .await;
+                                        crate::tmux::flush_stdin();
                                         continue;
                                     }
                                     Ok(result) => {
@@ -2189,7 +2210,51 @@ impl App {
                 self.theme = base.with_overrides(&self.config.theme);
             }
             SettingsTab::Keybindings => {
-                // Keybinding editing is not text-based — handled separately
+                use crate::config::keybindings::{BindableAction, KeyBinding};
+                use std::str::FromStr;
+
+                let Ok(action) = BindableAction::from_str(field_key) else {
+                    warn!("Unknown keybinding action: {}", field_key);
+                    return;
+                };
+
+                // The row value is rendered as a comma-separated list
+                // (e.g. `"k, Up, Ctrl-p"`). Parse each entry back into a
+                // `KeyBinding`, ignoring empty tokens. If every token fails
+                // to parse we leave the binding alone rather than silently
+                // clear it.
+                let mut parsed: Vec<KeyBinding> = Vec::new();
+                let mut had_token = false;
+                let mut any_err = false;
+                for token in value.split(',') {
+                    let t = token.trim();
+                    if t.is_empty() {
+                        continue;
+                    }
+                    had_token = true;
+                    match KeyBinding::from_str(t) {
+                        Ok(kb) => parsed.push(kb),
+                        Err(e) => {
+                            warn!("Invalid keybinding '{}': {}", t, e);
+                            any_err = true;
+                        }
+                    }
+                }
+
+                if had_token && parsed.is_empty() && any_err {
+                    // User tried to edit but every token was malformed —
+                    // show the error but don't wipe their existing binding.
+                    self.ui_state.modal = Modal::Error {
+                        message: format!(
+                            "Could not parse any key bindings from '{}'. \
+                             Use e.g. 'k', 'Ctrl-p', 'Shift-N', 'Enter'.",
+                            value
+                        ),
+                    };
+                    return;
+                }
+
+                self.config.keybindings.set_keys_for(action, parsed);
             }
         }
 
@@ -3142,6 +3207,65 @@ impl App {
                 current_tmux_name
             )),
         ))
+    }
+
+    /// Open the editor for the worktree associated with a given tmux session
+    /// name. Used when the user presses Ctrl+. while attached to a tmux
+    /// session — the tmux session itself is not affected, we simply launch
+    /// the configured editor pointing at the session's worktree. This runs
+    /// while we are *between* attaches, so the TUI is torn down and raw mode
+    /// is already disabled.
+    async fn open_editor_for_tmux_session(&mut self, tmux_session_name: &str) {
+        // Shell sessions are named `<claude_name>-sh`; the worktree is owned
+        // by the underlying Claude session.
+        let lookup_name = tmux_session_name
+            .strip_suffix("-sh")
+            .unwrap_or(tmux_session_name)
+            .to_string();
+
+        let path = {
+            let state = self.store.read().await;
+            state
+                .sessions
+                .values()
+                .find(|s| s.tmux_session_name == lookup_name)
+                .map(|s| s.worktree_path.clone())
+        };
+
+        let Some(path) = path else {
+            warn!(
+                "OpenEditor: no session found for tmux name '{}'",
+                tmux_session_name
+            );
+            return;
+        };
+
+        let Some(editor) = self.config.resolve_editor() else {
+            warn!("OpenEditor: no editor configured");
+            return;
+        };
+
+        if self.config.is_gui_editor(&editor) {
+            // GUI editor: spawn detached and return — tmux session is
+            // untouched and we'll re-attach immediately.
+            info!("OpenEditor: launching GUI editor '{}' at {}", editor, path.display());
+            if let Err(e) = std::process::Command::new(&editor).arg(&path).spawn() {
+                warn!("Failed to launch GUI editor '{}': {}", editor, e);
+            }
+        } else {
+            // Terminal editor: run foreground, inheriting stdio. Raw mode is
+            // already off (attach_to_session disabled it on exit) so the
+            // editor gets a cooked terminal. When it returns we loop back
+            // into attach_to_session with the same tmux session name.
+            info!(
+                "OpenEditor: launching terminal editor '{}' at {}",
+                editor,
+                path.display()
+            );
+            if let Err(e) = std::process::Command::new(&editor).arg(&path).status() {
+                warn!("Failed to launch terminal editor '{}': {}", editor, e);
+            }
+        }
     }
 
     /// Handle open in editor command

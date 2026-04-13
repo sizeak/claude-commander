@@ -560,8 +560,13 @@ mod tests {
                 UserCommand::RemoveProject,
             ),
             (
-                KeyCode::Char('e'),
+                KeyCode::Char('.'),
                 KeyModifiers::NONE,
+                UserCommand::OpenInEditor,
+            ),
+            (
+                KeyCode::Char('.'),
+                KeyModifiers::CONTROL,
                 UserCommand::OpenInEditor,
             ),
             (
