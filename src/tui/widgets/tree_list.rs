@@ -13,8 +13,8 @@ use ratatui::{
 use crate::session::{AgentState, SessionListItem, SessionStatus};
 use crate::tui::theme::Theme;
 
-/// Braille spinner frames (same set as the loading modal's BRAILLE_EIGHT)
-const SPINNER_FRAMES: &[&str] = &["⣷", "⣯", "⣟", "⡿", "⢿", "⣻", "⣽", "⣾"];
+/// Braille spinner frames for the Creating status indicator
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 /// Tree list widget for displaying hierarchical sessions
 pub struct TreeList<'a> {
@@ -137,6 +137,11 @@ impl<'a> TreeList<'a> {
                     };
                     let has_pr = pr_number.is_some();
                     let (status_icon, status_color) = match status {
+                        SessionStatus::Creating => {
+                            let frame =
+                                (self.tick / 4) as usize % SPINNER_FRAMES.len();
+                            (SPINNER_FRAMES[frame], self.theme.status_creating)
+                        }
                         SessionStatus::Running => (
                             "●",
                             if has_pr {
@@ -568,5 +573,16 @@ mod tests {
 
         state.previous();
         assert_eq!(state.selected(), Some(0));
+    }
+
+    #[test]
+    fn test_spinner_frame_cycling() {
+        // tick/4 selects the frame index, modulo 10 frames
+        assert_eq!((0u64 / 4) as usize % SPINNER_FRAMES.len(), 0); // "⠋"
+        assert_eq!((4u64 / 4) as usize % SPINNER_FRAMES.len(), 1); // "⠙"
+        assert_eq!((8u64 / 4) as usize % SPINNER_FRAMES.len(), 2); // "⠹"
+        assert_eq!((36u64 / 4) as usize % SPINNER_FRAMES.len(), 9); // "⠏"
+        // Wraps around after 10 frames
+        assert_eq!((40u64 / 4) as usize % SPINNER_FRAMES.len(), 0); // back to "⠋"
     }
 }
