@@ -134,6 +134,8 @@ pub enum UserCommand {
     RemoveProject,
     /// Open worktree in editor/IDE
     OpenInEditor,
+    /// Open the selected session's PR URL in a web browser
+    OpenPullRequest,
     /// Toggle between preview/diff panes
     TogglePane,
     /// Toggle between preview/diff panes (reverse)
@@ -213,6 +215,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::RestartSession => Self::RestartSession,
             BindableAction::RemoveProject => Self::RemoveProject,
             BindableAction::OpenInEditor => Self::OpenInEditor,
+            BindableAction::OpenPullRequest => Self::OpenPullRequest,
             BindableAction::TogglePane => Self::TogglePane,
             BindableAction::TogglePaneReverse => Self::TogglePaneReverse,
             BindableAction::ShrinkLeftPane => Self::ShrinkLeftPane,
@@ -560,6 +563,11 @@ mod tests {
                 KeyCode::Char('e'),
                 KeyModifiers::NONE,
                 UserCommand::OpenInEditor,
+            ),
+            (
+                KeyCode::Char('o'),
+                KeyModifiers::NONE,
+                UserCommand::OpenPullRequest,
             ),
         ];
 

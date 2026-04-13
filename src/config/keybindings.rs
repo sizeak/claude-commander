@@ -33,6 +33,7 @@ pub enum BindableAction {
     RestartSession,
     RemoveProject,
     OpenInEditor,
+    OpenPullRequest,
     TogglePane,
     TogglePaneReverse,
     ShrinkLeftPane,
@@ -60,6 +61,7 @@ impl BindableAction {
         Self::RestartSession,
         Self::RemoveProject,
         Self::OpenInEditor,
+        Self::OpenPullRequest,
         Self::TogglePane,
         Self::TogglePaneReverse,
         Self::ShrinkLeftPane,
@@ -87,6 +89,7 @@ impl BindableAction {
             Self::RestartSession => "restart_session",
             Self::RemoveProject => "remove_project",
             Self::OpenInEditor => "open_in_editor",
+            Self::OpenPullRequest => "open_pull_request",
             Self::TogglePane => "toggle_pane",
             Self::TogglePaneReverse => "toggle_pane_reverse",
             Self::ShrinkLeftPane => "shrink_left_pane",
@@ -115,6 +118,7 @@ impl BindableAction {
             Self::RestartSession => "Restart session",
             Self::RemoveProject => "Remove project",
             Self::OpenInEditor => "Open in editor/IDE",
+            Self::OpenPullRequest => "Open PR in browser",
             Self::TogglePane => "Toggle preview/diff/shell view",
             Self::TogglePaneReverse => "Toggle view (reverse)",
             Self::ShrinkLeftPane => "Shrink left pane",
@@ -140,7 +144,8 @@ impl BindableAction {
             | Self::DeleteSession
             | Self::RestartSession
             | Self::RemoveProject
-            | Self::OpenInEditor => "Session Management",
+            | Self::OpenInEditor
+            | Self::OpenPullRequest => "Session Management",
             Self::TogglePane
             | Self::TogglePaneReverse
             | Self::ShrinkLeftPane
@@ -167,6 +172,7 @@ impl FromStr for BindableAction {
             "restart_session" => Ok(Self::RestartSession),
             "remove_project" => Ok(Self::RemoveProject),
             "open_in_editor" => Ok(Self::OpenInEditor),
+            "open_pull_request" => Ok(Self::OpenPullRequest),
             "toggle_pane" => Ok(Self::TogglePane),
             "toggle_pane_reverse" => Ok(Self::TogglePaneReverse),
             "shrink_left_pane" => Ok(Self::ShrinkLeftPane),
@@ -471,6 +477,10 @@ impl Default for KeyBindings {
         bindings.insert(
             BindableAction::OpenInEditor,
             vec![kb(KeyCode::Char('e'), none)],
+        );
+        bindings.insert(
+            BindableAction::OpenPullRequest,
+            vec![kb(KeyCode::Char('o'), none)],
         );
 
         // Pane control

@@ -2704,6 +2704,9 @@ impl App {
             UserCommand::OpenInEditor => {
                 self.handle_open_in_editor().await;
             }
+            UserCommand::OpenPullRequest => {
+                self.handle_open_pull_request().await;
+            }
             UserCommand::TogglePane => {
                 let on_project = self.ui_state.selected_session_id.is_none()
                     && self.ui_state.selected_project_id.is_some();
@@ -3174,6 +3177,45 @@ impl App {
             // Terminal editor: tear down TUI, run foreground, restore
             self.ui_state.editor_command = Some((editor, path));
             self.ui_state.should_quit = true;
+        }
+    }
+
+    /// Handle "open PR in browser" — looks up the selected session's
+    /// `pr_url` and launches the OS default handler (`open` on macOS,
+    /// `xdg-open` on Linux, `cmd /c start` on Windows).
+    async fn handle_open_pull_request(&mut self) {
+        let Some(session_id) = self.ui_state.selected_session_id else {
+            return;
+        };
+        let pr_url = {
+            let state = self.store.read().await;
+            state
+                .sessions
+                .get(&session_id)
+                .and_then(|s| s.pr_url.clone())
+        };
+        let Some(url) = pr_url else {
+            self.ui_state.status_message = Some((
+                "No PR associated with this session".to_string(),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            return;
+        };
+
+        let result = if cfg!(target_os = "macos") {
+            std::process::Command::new("open").arg(&url).spawn()
+        } else if cfg!(target_os = "windows") {
+            std::process::Command::new("cmd")
+                .args(["/c", "start", "", &url])
+                .spawn()
+        } else {
+            std::process::Command::new("xdg-open").arg(&url).spawn()
+        };
+
+        if let Err(e) = result {
+            self.ui_state.modal = Modal::Error {
+                message: format!("Failed to open PR in browser: {}", e),
+            };
         }
     }
 

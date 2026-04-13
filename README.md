@@ -90,6 +90,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `R` | Restart session (kill tmux + recreate with /resume) |
 | `D` | Remove project |
 | `e` | Open in editor/IDE |
+| `o` | Open PR in browser (when the session has a PR) |
 | `s` | Open shell in worktree |
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
 | `<` / `>` | Shrink / grow left pane |
