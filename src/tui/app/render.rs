@@ -395,7 +395,7 @@ impl App {
 
         let status_area = Rect {
             x: area.x,
-            y: area.height - 1,
+            y: area.bottom().saturating_sub(1),
             width: area.width,
             height: 1,
         };
