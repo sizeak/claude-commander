@@ -179,6 +179,8 @@ pub enum UserCommand {
     QuickSwitch,
     /// Generate AI summary for the current session (Info pane only)
     GenerateSummary,
+    /// Scan a directory for git repos and add them as projects
+    ScanDirectory,
 }
 
 impl UserCommand {
@@ -238,6 +240,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::PageUp => Self::PageUp,
             BindableAction::PageDown => Self::PageDown,
             BindableAction::GenerateSummary => Self::GenerateSummary,
+            BindableAction::ScanDirectory => Self::ScanDirectory,
         }
     }
 }
@@ -584,6 +587,11 @@ mod tests {
                 KeyModifiers::NONE,
                 UserCommand::OpenPullRequest,
             ),
+            (
+                KeyCode::Char('S'),
+                KeyModifiers::SHIFT,
+                UserCommand::ScanDirectory,
+            ),
         ];
 
         for (code, modifiers, expected) in cases {
@@ -603,6 +611,16 @@ mod tests {
                 modifiers
             );
         }
+    }
+
+    #[test]
+    fn test_scan_directory_key() {
+        let b = kb();
+        let key = KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::ScanDirectory)
+        ));
     }
 
     #[test]

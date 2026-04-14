@@ -237,6 +237,7 @@ pub enum SettingsEditing {
 pub enum InputAction {
     CreateSession { project_id: ProjectId },
     AddProject,
+    ScanDirectory,
 }
 
 /// Action to perform when confirm modal is confirmed
@@ -3015,6 +3016,17 @@ impl App {
                     completer: PathCompleter::new(),
                 };
             }
+            UserCommand::ScanDirectory => {
+                self.ui_state.modal = Modal::PathInput {
+                    title: "Scan Directory".to_string(),
+                    prompt: "Enter directory to scan for git repos:".to_string(),
+                    value: std::env::current_dir()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default(),
+                    on_submit: InputAction::ScanDirectory,
+                    completer: PathCompleter::new(),
+                };
+            }
             UserCommand::DeleteSession => {
                 self.handle_delete_session();
             }
@@ -4131,6 +4143,84 @@ impl App {
                     Err(e) => {
                         self.ui_state.modal = Modal::Error {
                             message: format!("Failed to add project: {}", e),
+                        };
+                    }
+                }
+            }
+            InputAction::ScanDirectory => {
+                let expanded = super::path_completer::expand_tilde(value.trim());
+                let path = PathBuf::from(expanded);
+                if !path.exists() {
+                    self.ui_state.modal = Modal::Error {
+                        message: format!("Path does not exist: {}", path.display()),
+                    };
+                    return;
+                }
+                if !path.is_dir() {
+                    self.ui_state.modal = Modal::Error {
+                        message: format!("Not a directory: {}", path.display()),
+                    };
+                    return;
+                }
+
+                // If the path itself is a git repo, just add it directly
+                if path.join(".git").exists() {
+                    match self.session_manager.add_project(path).await {
+                        Ok(project_id) => {
+                            self.ui_state.status_message = Some((
+                                format!("Added project {}", project_id),
+                                Instant::now() + Duration::from_secs(3),
+                            ));
+                            self.refresh_list_items().await;
+                            if let Some(idx) =
+                                self.ui_state.list_items.iter().position(|item| {
+                                    matches!(item, SessionListItem::Project { id, .. } if *id == project_id)
+                                })
+                            {
+                                self.ui_state.list_state.select(Some(idx));
+                            }
+                        }
+                        Err(e) => {
+                            self.ui_state.modal = Modal::Error {
+                                message: format!("Failed to add project: {}", e),
+                            };
+                        }
+                    }
+                    return;
+                }
+
+                // Show loading modal
+                self.ui_state.modal = Modal::Loading {
+                    title: "Scanning".to_string(),
+                    message: format!("Scanning {} for git repos…", path.display()),
+                };
+
+                match self.session_manager.scan_directory(&path).await {
+                    Ok(result) => {
+                        if result.added == 0 && result.skipped == 0 {
+                            self.ui_state.modal = Modal::Error {
+                                message: format!(
+                                    "No git repositories found in {}",
+                                    path.display()
+                                ),
+                            };
+                        } else {
+                            self.ui_state.modal = Modal::None;
+                            self.ui_state.status_message = Some((
+                                format!(
+                                    "Added {} project{} ({} already existed)",
+                                    result.added,
+                                    if result.added == 1 { "" } else { "s" },
+                                    result.skipped,
+                                ),
+                                Instant::now() + Duration::from_secs(5),
+                            ));
+                            self.refresh_list_items().await;
+                        }
+                    }
+                    Err(e) => {
+                        self.ui_state.modal = Modal::Error {
+                            message: format!("Scan failed: {}", e),
                         };
                     }
                 }
