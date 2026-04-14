@@ -29,6 +29,7 @@ pub enum BindableAction {
     SelectShell,
     NewSession,
     NewProject,
+    CheckoutBranch,
     DeleteSession,
     RestartSession,
     RemoveProject,
@@ -57,6 +58,7 @@ impl BindableAction {
         Self::SelectShell,
         Self::NewSession,
         Self::NewProject,
+        Self::CheckoutBranch,
         Self::DeleteSession,
         Self::RestartSession,
         Self::RemoveProject,
@@ -85,6 +87,7 @@ impl BindableAction {
             Self::SelectShell => "select_shell",
             Self::NewSession => "new_session",
             Self::NewProject => "new_project",
+            Self::CheckoutBranch => "checkout_branch",
             Self::DeleteSession => "delete_session",
             Self::RestartSession => "restart_session",
             Self::RemoveProject => "remove_project",
@@ -114,6 +117,7 @@ impl BindableAction {
             Self::SelectShell => "Open shell in worktree",
             Self::NewSession => "New worktree session",
             Self::NewProject => "New project (add git repo)",
+            Self::CheckoutBranch => "Checkout existing branch",
             Self::DeleteSession => "Delete/kill session",
             Self::RestartSession => "Restart session",
             Self::RemoveProject => "Remove project",
@@ -141,6 +145,7 @@ impl BindableAction {
             Self::SelectShell
             | Self::NewSession
             | Self::NewProject
+            | Self::CheckoutBranch
             | Self::DeleteSession
             | Self::RestartSession
             | Self::RemoveProject
@@ -168,6 +173,7 @@ impl FromStr for BindableAction {
             "select_shell" => Ok(Self::SelectShell),
             "new_session" => Ok(Self::NewSession),
             "new_project" => Ok(Self::NewProject),
+            "checkout_branch" => Ok(Self::CheckoutBranch),
             "delete_session" => Ok(Self::DeleteSession),
             "restart_session" => Ok(Self::RestartSession),
             "remove_project" => Ok(Self::RemoveProject),
@@ -467,6 +473,10 @@ impl Default for KeyBindings {
         bindings.insert(
             BindableAction::NewProject,
             vec![kb(KeyCode::Char('N'), shift)],
+        );
+        bindings.insert(
+            BindableAction::CheckoutBranch,
+            vec![kb(KeyCode::Char('c'), none)],
         );
         bindings.insert(
             BindableAction::DeleteSession,

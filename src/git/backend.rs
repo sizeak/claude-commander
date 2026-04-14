@@ -160,6 +160,59 @@ impl GitBackend {
         short.strip_prefix("origin/").map(|s| s.to_string())
     }
 
+    /// List all local and remote branches in the repository.
+    ///
+    /// Returns entries as `(short_name, is_remote)` where:
+    /// - Local branches use their short name (e.g. `"main"`).
+    /// - Remote branches use their short ref name including the remote
+    ///   prefix (e.g. `"origin/feature-foo"`).
+    /// - The remote pseudo-branch `origin/HEAD` is excluded.
+    ///
+    /// Entries are deduplicated and sorted: local branches first (alphabetical),
+    /// then remote branches (alphabetical).
+    pub fn list_branches(&self) -> Result<Vec<(String, bool)>> {
+        let refs = self
+            .repo
+            .references()
+            .map_err(|e| GitError::Gix(e.to_string()))?;
+
+        let mut local: Vec<String> = Vec::new();
+        let mut remote: Vec<String> = Vec::new();
+
+        // Local branches
+        for r in refs
+            .local_branches()
+            .map_err(|e| GitError::Gix(e.to_string()))?
+            .flatten()
+        {
+            let name = r.name().shorten().to_string();
+            local.push(name);
+        }
+
+        // Remote tracking branches (skip symbolic HEAD refs like `origin/HEAD`)
+        for r in refs
+            .remote_branches()
+            .map_err(|e| GitError::Gix(e.to_string()))?
+            .flatten()
+        {
+            let name = r.name().shorten().to_string();
+            if name.ends_with("/HEAD") {
+                continue;
+            }
+            remote.push(name);
+        }
+
+        local.sort();
+        local.dedup();
+        remote.sort();
+        remote.dedup();
+
+        let mut out: Vec<(String, bool)> = Vec::with_capacity(local.len() + remote.len());
+        out.extend(local.into_iter().map(|n| (n, false)));
+        out.extend(remote.into_iter().map(|n| (n, true)));
+        Ok(out)
+    }
+
     /// Check if a reference exists locally (e.g. `"refs/remotes/origin/main"`).
     pub fn ref_exists(&self, ref_name: &str) -> Result<bool> {
         let reference = self
