@@ -96,6 +96,13 @@ pub enum StateUpdate {
     AgentStatesUpdated {
         states: HashMap<SessionId, AgentState>,
     },
+    /// Background `git fetch origin` kicked off by the Checkout modal
+    /// has finished — the modal should refresh its branch list if still open.
+    CheckoutFetchComplete {
+        project_id: ProjectId,
+        /// Fresh branch list produced after the fetch completed.
+        branches: Vec<(String, bool)>,
+    },
     /// Preview/diff/shell data ready from background fetch
     PreviewReady {
         /// Which session this data is for (None if project-level)
@@ -126,6 +133,8 @@ pub enum UserCommand {
     NewSession,
     /// Create new project
     NewProject,
+    /// Checkout an existing branch into a new worktree session
+    CheckoutBranch,
     /// Delete/kill current session
     DeleteSession,
     /// Restart current session (kill tmux and recreate)
@@ -211,6 +220,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::SelectShell => Self::SelectShell,
             BindableAction::NewSession => Self::NewSession,
             BindableAction::NewProject => Self::NewProject,
+            BindableAction::CheckoutBranch => Self::CheckoutBranch,
             BindableAction::DeleteSession => Self::DeleteSession,
             BindableAction::RestartSession => Self::RestartSession,
             BindableAction::RemoveProject => Self::RemoveProject,

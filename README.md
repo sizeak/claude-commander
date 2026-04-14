@@ -122,6 +122,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `Enter` | Attach to selected session |
 | `n` | New worktree session |
 | `N` | Add new project |
+| `c` | Checkout existing branch into a new worktree session (fetches `origin` in the background, filterable list) |
 | `d` | Delete session |
 | `R` | Restart session (kill tmux + recreate; adds `--resume` when `resume_session = true`) |
 | `D` | Remove project |
