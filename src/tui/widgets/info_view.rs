@@ -12,7 +12,7 @@ use ratatui::{
 
 use crate::git::{AiSummary, ChecksStatus, DiffInfo, EnrichedPrInfo, PrState};
 use crate::session::SessionStatus;
-use crate::tui::theme::{Theme, dim_color};
+use crate::tui::theme::Theme;
 
 /// Data required to render the Info pane for a session.
 pub struct InfoSessionData<'a> {
@@ -52,7 +52,6 @@ pub struct InfoView<'a> {
     theme: &'a Theme,
     block: Option<Block<'a>>,
     scroll: u16,
-    dim_opacity: Option<f32>,
 }
 
 impl<'a> InfoView<'a> {
@@ -62,7 +61,6 @@ impl<'a> InfoView<'a> {
             theme,
             block: None,
             scroll: 0,
-            dim_opacity: None,
         }
     }
 
@@ -73,11 +71,6 @@ impl<'a> InfoView<'a> {
 
     pub fn scroll(mut self, scroll: u16) -> Self {
         self.scroll = scroll;
-        self
-    }
-
-    pub fn dim_opacity(mut self, dim_opacity: Option<f32>) -> Self {
-        self.dim_opacity = dim_opacity;
         self
     }
 
@@ -137,12 +130,12 @@ impl<'a> InfoView<'a> {
                 Span::styled(format!("{} file(s), ", data.diff_info.files_changed), value),
                 Span::styled(
                     format!("+{}", data.diff_info.lines_added),
-                    self.apply_dim(Style::default().fg(self.theme.diff_added)),
+                    Style::default().fg(self.theme.diff_added),
                 ),
                 Span::styled(" ", value),
                 Span::styled(
                     format!("-{}", data.diff_info.lines_removed),
-                    self.apply_dim(Style::default().fg(self.theme.diff_removed)),
+                    Style::default().fg(self.theme.diff_removed),
                 ),
                 Span::styled(" lines", value),
             ]));
@@ -179,7 +172,7 @@ impl<'a> InfoView<'a> {
                     Span::styled(" Summary: ", label),
                     Span::styled(
                         format!("Press {key_hint} to generate"),
-                        self.apply_dim(Style::default().fg(self.theme.text_accent)),
+                        Style::default().fg(self.theme.text_accent),
                     ),
                 ]));
             }
@@ -198,11 +191,9 @@ impl<'a> InfoView<'a> {
                 Span::styled(format!(" PR #{}: ", pr.number), label),
                 Span::styled(
                     pr.title.clone(),
-                    self.apply_dim(
-                        Style::default()
-                            .fg(self.theme.text_primary)
-                            .add_modifier(Modifier::BOLD),
-                    ),
+                    Style::default()
+                        .fg(self.theme.text_primary)
+                        .add_modifier(Modifier::BOLD),
                 ),
             ]));
 
@@ -211,7 +202,7 @@ impl<'a> InfoView<'a> {
                     Span::styled(" URL:    ", label),
                     Span::styled(
                         pr.url.clone(),
-                        self.apply_dim(Style::default().fg(self.theme.text_accent)),
+                        Style::default().fg(self.theme.text_accent),
                     ),
                 ]));
             }
@@ -241,7 +232,7 @@ impl<'a> InfoView<'a> {
                     let color = parse_hex_color(&lbl.color).unwrap_or(self.theme.text_accent);
                     spans.push(Span::styled(
                         lbl.name.clone(),
-                        self.apply_dim(Style::default().fg(color)),
+                        Style::default().fg(color),
                     ));
                 }
                 lines.push(Line::from(spans));
@@ -255,7 +246,7 @@ impl<'a> InfoView<'a> {
             };
             lines.push(Line::from(vec![
                 Span::styled(" CI:     ", label),
-                Span::styled(ci_icon, self.apply_dim(Style::default().fg(ci_color))),
+                Span::styled(ci_icon, Style::default().fg(ci_color)),
                 Span::styled(format!(" {ci_text}"), value),
             ]));
 
@@ -284,7 +275,7 @@ impl<'a> InfoView<'a> {
                     Span::styled(" URL:    ", label),
                     Span::styled(
                         url.clone(),
-                        self.apply_dim(Style::default().fg(self.theme.text_accent)),
+                        Style::default().fg(self.theme.text_accent),
                     ),
                 ]));
             }
@@ -349,33 +340,17 @@ impl<'a> InfoView<'a> {
     }
 
     fn label_style(&self) -> Style {
-        self.apply_dim(
-            Style::default()
-                .fg(self.theme.text_accent)
-                .add_modifier(Modifier::BOLD),
-        )
+        Style::default()
+            .fg(self.theme.text_accent)
+            .add_modifier(Modifier::BOLD)
     }
 
     fn value_style(&self) -> Style {
-        self.apply_dim(Style::default().fg(self.theme.text_primary))
+        Style::default().fg(self.theme.text_primary)
     }
 
     fn secondary_style(&self) -> Style {
-        self.apply_dim(Style::default().fg(self.theme.text_secondary))
-    }
-
-    fn apply_dim(&self, style: Style) -> Style {
-        if let Some(opacity) = self.dim_opacity {
-            // Dim by mixing the foreground color toward black
-            if let Some(fg) = style.fg {
-                let dimmed = dim_color(fg, opacity);
-                style.fg(dimmed)
-            } else {
-                style
-            }
-        } else {
-            style
-        }
+        Style::default().fg(self.theme.text_secondary)
     }
 }
 

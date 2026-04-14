@@ -46,6 +46,31 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
         .split(popup_layout[1])[1]
 }
 
+/// Build a styled pane tab title (mirrors `App::build_pane_tabs`)
+fn pane_tabs(theme: &Theme, tabs: &[&str], active: usize) -> Line<'static> {
+    let active_style = Style::default()
+        .fg(theme.text_accent)
+        .add_modifier(Modifier::BOLD);
+    let inactive_style = Style::default().fg(theme.text_secondary);
+    let sep_style = Style::default().fg(theme.text_secondary);
+
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    spans.push(Span::raw(" "));
+    for (i, tab) in tabs.iter().enumerate() {
+        if i > 0 {
+            spans.push(Span::styled(" · ", sep_style));
+        }
+        let style = if i == active {
+            active_style
+        } else {
+            inactive_style
+        };
+        spans.push(Span::styled(tab.to_string(), style));
+    }
+    spans.push(Span::raw(" "));
+    Line::from(spans)
+}
+
 // ── Session list ───────────────────────────────────────────────────
 
 #[test]
@@ -409,13 +434,14 @@ fn test_session_list_with_numbers() {
 fn test_preview_empty() {
     let backend = TestBackend::new(60, 10);
     let mut terminal = Terminal::new(backend).unwrap();
+    let theme = test_theme();
 
     terminal
         .draw(|frame| {
             let preview = Preview::new("")
                 .block(
                     Block::default()
-                        .title(" [Preview] | Info | Shell ")
+                        .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 0))
                         .borders(Borders::ALL),
                 )
                 .scroll(0);
@@ -430,6 +456,7 @@ fn test_preview_empty() {
 fn test_preview_with_content() {
     let backend = TestBackend::new(60, 12);
     let mut terminal = Terminal::new(backend).unwrap();
+    let theme = test_theme();
 
     let content = "$ claude --resume\n\nClaude is thinking...\n\n> I'll help you fix the auth bug.\n> Let me look at the code first.\n\nReading src/auth.rs...";
 
@@ -438,7 +465,7 @@ fn test_preview_with_content() {
             let preview = Preview::new(content)
                 .block(
                     Block::default()
-                        .title(" [Preview] | Info | Shell ")
+                        .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 0))
                         .borders(Borders::ALL),
                 )
                 .scroll(0);
@@ -453,6 +480,7 @@ fn test_preview_with_content() {
 fn test_preview_scrolled() {
     let backend = TestBackend::new(60, 8);
     let mut terminal = Terminal::new(backend).unwrap();
+    let theme = test_theme();
 
     let content = (0..50)
         .map(|i| format!("Line {}: some content here", i))
@@ -464,7 +492,7 @@ fn test_preview_scrolled() {
             let preview = Preview::new(&content)
                 .block(
                     Block::default()
-                        .title(" [Preview] | Info | Shell ")
+                        .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 0))
                         .borders(Borders::ALL),
                 )
                 .scroll(20);
@@ -490,7 +518,7 @@ fn test_info_view_empty() {
             let info_view = InfoView::new(InfoContent::Empty, &theme)
                 .block(
                     Block::default()
-                        .title(" Preview | [Info] | Shell ")
+                        .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 1))
                         .borders(Borders::ALL),
                 )
                 .scroll(0);
@@ -562,7 +590,7 @@ fn test_info_view_session_with_pr() {
             let info_view = InfoView::new(InfoContent::Session(data), &theme)
                 .block(
                     Block::default()
-                        .title(" Preview | [Info] | Shell ")
+                        .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 1))
                         .borders(Borders::ALL),
                 )
                 .scroll(0);
@@ -625,7 +653,7 @@ fn test_info_view_long_text_wraps() {
             let info_view = InfoView::new(InfoContent::Session(data), &theme)
                 .block(
                     Block::default()
-                        .title(" Preview | [Info] | Shell ")
+                        .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 1))
                         .borders(Borders::ALL),
                 )
                 .scroll(0);
@@ -665,7 +693,7 @@ fn test_info_view_summary_placeholder() {
             let info_view = InfoView::new(InfoContent::Session(data), &theme)
                 .block(
                     Block::default()
-                        .title(" Preview | [Info] | Shell ")
+                        .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 1))
                         .borders(Borders::ALL),
                 )
                 .scroll(0);
@@ -913,6 +941,7 @@ fn test_status_bar_with_message() {
 fn test_preview_content_replacement_no_clear() {
     let backend = TestBackend::new(60, 12);
     let mut terminal = Terminal::new(backend).unwrap();
+    let theme = test_theme();
 
     // Render content A (simulating session 1 selected)
     terminal
@@ -920,7 +949,7 @@ fn test_preview_content_replacement_no_clear() {
             let preview = Preview::new("Session 1 output\nLine 2\nLine 3\nLine 4\nLine 5")
                 .block(
                     Block::default()
-                        .title(" [Preview] | Info | Shell ")
+                        .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 0))
                         .borders(Borders::ALL),
                 )
                 .scroll(0);
@@ -934,7 +963,7 @@ fn test_preview_content_replacement_no_clear() {
             let preview = Preview::new("Session 2 output\nDifferent content")
                 .block(
                     Block::default()
-                        .title(" [Preview] | Info | Shell ")
+                        .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 0))
                         .borders(Borders::ALL),
                 )
                 .scroll(0);
@@ -960,7 +989,7 @@ fn test_preview_to_info_view_switch_no_clear() {
             let preview = Preview::new("Preview content here\nLine 2\nLine 3")
                 .block(
                     Block::default()
-                        .title(" [Preview] | Info | Shell ")
+                        .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 0))
                         .borders(Borders::ALL),
                 )
                 .scroll(0);
@@ -990,7 +1019,7 @@ fn test_preview_to_info_view_switch_no_clear() {
             let info_view = InfoView::new(InfoContent::Session(data), &theme)
                 .block(
                     Block::default()
-                        .title(" Preview | [Info] | Shell ")
+                        .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 1))
                         .borders(Borders::ALL),
                 )
                 .scroll(0);
@@ -1006,6 +1035,7 @@ fn test_preview_to_info_view_switch_no_clear() {
 fn test_preview_to_shell_view_switch_no_clear() {
     let backend = TestBackend::new(60, 10);
     let mut terminal = Terminal::new(backend).unwrap();
+    let theme = test_theme();
 
     // Render Preview pane first
     terminal
@@ -1013,7 +1043,7 @@ fn test_preview_to_shell_view_switch_no_clear() {
             let preview = Preview::new("Preview content\nWith multiple lines\nOf output")
                 .block(
                     Block::default()
-                        .title(" [Preview] | Info | Shell ")
+                        .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 0))
                         .borders(Borders::ALL),
                 )
                 .scroll(0);
@@ -1027,7 +1057,7 @@ fn test_preview_to_shell_view_switch_no_clear() {
             let shell = Preview::new("$ ls -la\ntotal 42\ndrwxr-xr-x 5 user user 4096")
                 .block(
                     Block::default()
-                        .title(" Preview | Info | [Shell] ")
+                        .title(pane_tabs(&theme, &["Preview", "Info", "Shell"], 2))
                         .borders(Borders::ALL),
                 )
                 .scroll(0);
