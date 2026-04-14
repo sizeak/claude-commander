@@ -3,16 +3,25 @@
 //! Handles the creation, restart, and termination of sessions,
 //! coordinating between tmux and git operations.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tracing::{info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::config::{AppState, ConfigStore, StateStore};
 use crate::error::{Result, SessionError};
 use crate::git::{DiffCache, DiffInfo, GitBackend, WorktreeManager};
 use crate::session::{Project, ProjectId, SessionId, SessionStatus, WorktreeSession};
 use crate::tmux::{CapturedContent, ContentCapture, StatusBarInfo, TmuxExecutor};
+
+/// Result of scanning a directory for git repositories
+#[derive(Debug, Clone)]
+pub struct ScanResult {
+    /// Number of new projects added
+    pub added: usize,
+    /// Number of repos skipped because they already existed
+    pub skipped: usize,
+}
 
 /// Session manager coordinates all session operations
 pub struct SessionManager {
@@ -127,6 +136,96 @@ impl SessionManager {
         }
 
         Ok(project_id)
+    }
+
+    /// Scan a directory for git repositories and add them as projects.
+    ///
+    /// Walks the directory tree recursively. When a `.git` directory is found
+    /// the repo is registered and that subtree is not descended further.
+    /// Repos that already exist (matched by canonicalized git root) are skipped.
+    #[instrument(skip(self))]
+    pub async fn scan_directory(&self, dir: &Path) -> Result<ScanResult> {
+        // Collect all existing repo paths for duplicate detection
+        let existing_paths: std::collections::HashSet<PathBuf> = {
+            let state = self.store.read().await;
+            state
+                .projects
+                .values()
+                .map(|p| p.repo_path.clone())
+                .collect()
+        };
+
+        // Walk the directory tree and collect git repo roots
+        let repo_paths = Self::find_git_repos(dir);
+        info!("Found {} git repositories in {:?}", repo_paths.len(), dir);
+
+        let mut added = 0;
+        let mut skipped = 0;
+
+        for repo_path in repo_paths {
+            // Resolve to canonical git root for duplicate detection
+            let canonical = match GitBackend::discover(&repo_path) {
+                Ok(backend) => std::fs::canonicalize(backend.path())
+                    .unwrap_or_else(|_| backend.path().to_path_buf()),
+                Err(e) => {
+                    debug!("Skipping {:?}: {}", repo_path, e);
+                    continue;
+                }
+            };
+
+            if existing_paths.contains(&canonical) {
+                skipped += 1;
+                continue;
+            }
+
+            match self.add_project(repo_path).await {
+                Ok(_) => added += 1,
+                Err(e) => {
+                    debug!("Failed to add {:?}: {}", canonical, e);
+                }
+            }
+        }
+
+        Ok(ScanResult { added, skipped })
+    }
+
+    /// Walk a directory tree and collect paths that contain a `.git` directory.
+    /// Prunes subtrees once a `.git` is found (does not descend into repos).
+    fn find_git_repos(dir: &Path) -> Vec<PathBuf> {
+        let mut repos = Vec::new();
+        let mut stack = vec![dir.to_path_buf()];
+
+        while let Some(current) = stack.pop() {
+            let entries = match std::fs::read_dir(&current) {
+                Ok(entries) => entries,
+                Err(_) => continue, // permission denied or other error — skip silently
+            };
+
+            let mut is_git_repo = false;
+            let mut subdirs = Vec::new();
+
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if entry.file_name() == ".git" {
+                        is_git_repo = true;
+                        // Don't break — we still want to avoid descending
+                    } else {
+                        subdirs.push(path);
+                    }
+                }
+            }
+
+            if is_git_repo {
+                repos.push(current);
+                // Prune: don't descend into this repo's subdirectories
+            } else {
+                // Not a repo — continue descending
+                stack.extend(subdirs);
+            }
+        }
+
+        repos
     }
 
     /// Remove a project and all its sessions

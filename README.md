@@ -128,6 +128,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `D` | Remove project |
 | `.` or `Ctrl-.` | Open in editor/IDE |
 | `o` | Open PR in browser (when the session has a PR) |
+| `S` | Scan directory for git repos and add them as projects |
 | `s` | Open shell in worktree |
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
 | `<` / `>` | Shrink / grow left pane |
