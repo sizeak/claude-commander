@@ -118,7 +118,9 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | Key | Action |
 |-----|--------|
 | `j/k` or `↑/↓` or `Ctrl-n/p` | Navigate session list |
-| `Space` | Quick-switch (fuzzy session search) |
+| `Space` | Quick-switch palette (sessions and commands) |
+| `Shift+Space` | Command palette (commands only) |
+| `>` (as first char in palette) | Filter palette to commands only |
 | `Enter` | Attach to selected session |
 | `n` | New worktree session |
 | `N` | Add new project |

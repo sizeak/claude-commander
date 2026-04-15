@@ -24,7 +24,7 @@ impl App {
                 let inner = block.inner(modal_area);
                 frame.render_widget(block, modal_area);
 
-                let text = format!("{}\n\n> {}_", prompt, value);
+                let text = format!("{}\n\n❯ {}_", prompt, value);
                 let paragraph = Paragraph::new(text);
                 frame.render_widget(paragraph, inner);
             }
@@ -57,7 +57,7 @@ impl App {
                     ])
                     .split(inner);
 
-                let input_text = format!("{}\n\n> {}_", prompt, value);
+                let input_text = format!("{}\n\n❯ {}_", prompt, value);
                 let input_para = Paragraph::new(input_text);
                 frame.render_widget(input_para, chunks[0]);
 
@@ -184,11 +184,13 @@ impl App {
             }
 
             Modal::QuickSwitch {
+                mode,
                 query,
                 matches,
                 selected_idx,
+                scroll,
             } => {
-                let max_visible = 10;
+                let max_visible = super::actions::PALETTE_MAX_VISIBLE;
                 let visible_matches = matches.len().min(max_visible);
                 // Dynamic height: border(2) + input(1) + matches
                 let modal_height = (3 + visible_matches) as u16;
@@ -204,8 +206,15 @@ impl App {
 
                 frame.render_widget(Clear, modal_area);
 
+                // Switch the modal title by effective mode so a `>`-prefixed
+                // query in unified mode reads as "Commands" while we type.
+                let effective_mode = App::effective_palette_mode(*mode, query);
+                let title = match effective_mode {
+                    PaletteMode::Unified => " Quick Switch ",
+                    PaletteMode::CommandOnly => " Commands ",
+                };
                 let block = Block::default()
-                    .title(" Quick Switch ")
+                    .title(title)
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(self.theme.modal_info));
 
@@ -217,62 +226,116 @@ impl App {
                 }
 
                 // Input line
-                let input_line = Line::from(format!("> {}_", query));
+                let input_line = Line::from(format!("❯ {}_", query));
                 let input_area = Rect { height: 1, ..inner };
                 frame.render_widget(Paragraph::new(input_line), input_area);
 
-                // Match lines
-                for (i, m) in matches.iter().take(max_visible).enumerate() {
+                // Match lines. The `scroll` offset lets us page through a
+                // list longer than `max_visible`; rows below `scroll` are
+                // off the top of the window, rows at/after
+                // `scroll + max_visible` are off the bottom.
+                let start = (*scroll).min(matches.len());
+                for (i, item) in matches.iter().skip(start).take(max_visible).enumerate() {
                     let row = inner.y + 1 + i as u16;
                     if row >= inner.y + inner.height {
                         break;
                     }
-
-                    let status_icon = match m.status {
-                        SessionStatus::Creating => "⠋",
-                        SessionStatus::Running => "●",
-                        SessionStatus::Stopped => "○",
-                    };
-                    let status_color = match m.status {
-                        SessionStatus::Creating => self.theme.status_creating,
-                        SessionStatus::Running => self.theme.status_running,
-                        SessionStatus::Stopped => self.theme.status_stopped,
-                    };
-
-                    let is_selected = i == *selected_idx;
-                    let mut spans = vec![
-                        Span::styled(
-                            format!(" {} ", status_icon),
-                            Style::default().fg(status_color),
-                        ),
-                        Span::styled(
-                            m.title.clone(),
-                            if is_selected {
-                                self.theme.selection()
-                            } else {
-                                Style::default()
-                            },
-                        ),
-                    ];
-                    if let Some(shown_branch) = crate::session::display_branch(&m.title, &m.branch)
-                    {
-                        spans.push(Span::styled(
-                            format!(" [{}]", shown_branch),
-                            Style::default().fg(self.theme.text_accent),
-                        ));
-                    }
-                    spans.push(Span::styled(
-                        format!(" ({})", m.project_name),
-                        Style::default().fg(self.theme.text_secondary),
-                    ));
-                    let line = Line::from(spans);
+                    let abs_idx = start + i;
+                    let is_selected = abs_idx == *selected_idx;
 
                     let line_area = Rect {
                         y: row,
                         height: 1,
                         ..inner
                     };
-                    frame.render_widget(Paragraph::new(line), line_area);
+
+                    match item {
+                        QuickSwitchItem::Session(m) => {
+                            let status_icon = match m.status {
+                                SessionStatus::Creating => "⠋",
+                                SessionStatus::Running => "●",
+                                SessionStatus::Stopped => "○",
+                            };
+                            let status_color = match m.status {
+                                SessionStatus::Creating => self.theme.status_creating,
+                                SessionStatus::Running => self.theme.status_running,
+                                SessionStatus::Stopped => self.theme.status_stopped,
+                            };
+
+                            let mut spans = vec![
+                                Span::styled(
+                                    format!(" {} ", status_icon),
+                                    Style::default().fg(status_color),
+                                ),
+                                Span::styled(
+                                    m.title.clone(),
+                                    if is_selected {
+                                        self.theme.selection()
+                                    } else {
+                                        Style::default()
+                                    },
+                                ),
+                            ];
+                            if let Some(shown_branch) =
+                                crate::session::display_branch(&m.title, &m.branch)
+                            {
+                                spans.push(Span::styled(
+                                    format!(" [{}]", shown_branch),
+                                    Style::default().fg(self.theme.text_accent),
+                                ));
+                            }
+                            spans.push(Span::styled(
+                                format!(" ({})", m.project_name),
+                                Style::default().fg(self.theme.text_secondary),
+                            ));
+                            frame.render_widget(Paragraph::new(Line::from(spans)), line_area);
+                        }
+                        QuickSwitchItem::Command(entry) => {
+                            // Full-row background distinguishes commands from
+                            // sessions at a glance. Selection highlight takes
+                            // precedence over the command background.
+                            let row_style = if is_selected {
+                                self.theme.selection()
+                            } else {
+                                Style::default()
+                                    .bg(self.theme.palette_command_bg)
+                                    .fg(self.theme.palette_command_fg)
+                            };
+
+                            // Reserve trailing space for the right-aligned
+                            // key hint; keep one space margin on each side.
+                            let available = line_area.width as usize;
+                            let glyph = " ❯ ";
+                            let keys = &entry.keys;
+                            let keys_width = keys.chars().count();
+                            let label = entry.label;
+                            let label_width = label.chars().count();
+                            let glyph_width = glyph.chars().count();
+                            let padding = available
+                                .saturating_sub(glyph_width)
+                                .saturating_sub(label_width)
+                                .saturating_sub(keys_width)
+                                // Leave a 1-char gutter before the key hint
+                                // when it's non-empty.
+                                .saturating_sub(if keys.is_empty() { 0 } else { 1 });
+
+                            let gutter = if keys.is_empty() {
+                                String::new()
+                            } else {
+                                " ".to_string()
+                            };
+                            let content = format!(
+                                "{glyph}{label}{pad}{gutter}{keys}",
+                                glyph = glyph,
+                                label = label,
+                                pad = " ".repeat(padding),
+                                gutter = gutter,
+                                keys = keys,
+                            );
+                            let line = Line::from(Span::styled(content, row_style));
+                            frame.render_widget(Paragraph::new(line).style(row_style), line_area);
+                        }
+                    }
                 }
             }
 
@@ -319,7 +382,7 @@ impl App {
                 }
 
                 // Input line
-                let input_line = Line::from(format!("> {}_", query));
+                let input_line = Line::from(format!("❯ {}_", query));
                 let input_area = Rect { height: 1, ..inner };
                 frame.render_widget(Paragraph::new(input_line), input_area);
 
@@ -427,8 +490,18 @@ impl App {
                 self.config.leader_key.clone()
             };
         lines.push(Line::from(format!(
-            "  {:<width$}Fuzzy session search",
+            "  {:<width$}Quick switch — sessions and commands",
             leader_display,
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}Command palette (commands only)",
+            format!("Shift+{leader_display}"),
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}Filter palette to commands only",
+            ">",
             width = key_col_width,
         )));
 

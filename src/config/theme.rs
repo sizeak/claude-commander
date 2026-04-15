@@ -300,6 +300,10 @@ pub struct ThemeOverrides {
     pub modal_warning: Option<ColorValue>,
     pub modal_error: Option<ColorValue>,
 
+    // Quick-switch palette command rows
+    pub palette_command_bg: Option<ColorValue>,
+    pub palette_command_fg: Option<ColorValue>,
+
     // Status bar
     pub status_bar_bg: Option<ColorValue>,
     pub status_bar_fg: Option<ColorValue>,

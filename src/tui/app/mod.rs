@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 use crossterm::{
     event::{
         DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        MouseEventKind,
+        KeyboardEnhancementFlags, MouseEventKind, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
@@ -124,11 +125,20 @@ pub enum Modal {
     Error { message: String },
     /// Settings modal
     Settings(SettingsState),
-    /// Quick-switch session search modal
+    /// Quick-switch palette modal — searches sessions and/or commands.
     QuickSwitch {
+        /// Entry mode. `Unified` mixes sessions and commands; `CommandOnly`
+        /// was opened via Shift+leader and only shows commands regardless of
+        /// query. A leading `>` in a `Unified` query *effectively* filters
+        /// to commands without changing this field, so backspacing past the
+        /// `>` naturally restores the unified view.
+        mode: PaletteMode,
         query: String,
-        matches: Vec<QuickSwitchMatch>,
+        matches: Vec<QuickSwitchItem>,
         selected_idx: usize,
+        /// Index of the first visible row — keeps `selected_idx` inside
+        /// the visible window when the list is longer than can fit.
+        scroll: usize,
     },
     /// Checkout-existing-branch modal. Shows an input field plus a
     /// filterable/scrollable list of branches (local + remote) and
@@ -159,6 +169,39 @@ pub struct QuickSwitchMatch {
     pub branch: String,
     pub project_name: String,
     pub status: SessionStatus,
+}
+
+/// How the quick-switch palette was opened.
+///
+/// `Unified` is the default (plain leader key) — sessions and commands are
+/// both shown. `CommandOnly` is entered via Shift+leader and restricts the
+/// list to commands regardless of query.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaletteMode {
+    Unified,
+    CommandOnly,
+}
+
+/// A row in the quick-switch palette — either an open session or a
+/// keybound command.
+#[derive(Debug, Clone)]
+pub enum QuickSwitchItem {
+    Session(QuickSwitchMatch),
+    Command(CommandEntry),
+}
+
+/// A command row in the quick-switch palette.
+#[derive(Debug, Clone)]
+pub struct CommandEntry {
+    /// The action to dispatch when the user presses Enter on this row.
+    pub action: BindableAction,
+    /// Human-readable label (from `BindableAction::description`).
+    pub label: &'static str,
+    /// Pre-formatted key-binding string (from `KeyBindings::keys_display`).
+    /// Empty when the action has no binding — the palette intentionally
+    /// still lists these so it can function as the primary command surface
+    /// as hotkeys are trimmed over time.
+    pub keys: String,
 }
 
 /// A single branch entry in the checkout modal list
@@ -359,6 +402,74 @@ impl Default for AppUiState {
             throbber_state: throbber_widgets_tui::ThrobberState::default(),
             agent_states: HashMap::new(),
         }
+    }
+}
+
+impl AppUiState {
+    /// Whether a given command is currently invokable.
+    ///
+    /// These rules mirror the early-return guards scattered across
+    /// `App::handle_command` and friends, so the palette only lists
+    /// commands that would actually *do* something if selected. Pure with
+    /// respect to `self` — safe to unit-test by constructing a default
+    /// `AppUiState` and mutating a few fields.
+    pub fn is_command_available(&self, action: BindableAction) -> bool {
+        let has_session = self.selected_session_id.is_some();
+        let has_project = self.selected_project_id.is_some();
+        match action {
+            // Session-scoped actions require a selected session
+            BindableAction::Select
+            | BindableAction::SelectShell
+            | BindableAction::DeleteSession
+            | BindableAction::RenameSession
+            | BindableAction::RestartSession
+            | BindableAction::OpenInEditor
+            | BindableAction::OpenPullRequest => has_session,
+            // Removing a project is only meaningful from a project row (no session selected)
+            BindableAction::RemoveProject => has_project && !has_session,
+            // GenerateSummary only does something when the Info pane is active
+            BindableAction::GenerateSummary => {
+                has_session && self.right_pane_view == RightPaneView::Info
+            }
+            // All other actions are always available
+            _ => true,
+        }
+    }
+
+    /// Build the palette's command rows for a given filter query.
+    ///
+    /// Commands with no effective keybinding are still included — the
+    /// palette is intended to be the canonical access surface as hotkeys
+    /// get trimmed over time. `NavigateUp` and `NavigateDown` are excluded
+    /// because they only make sense as palette-internal list navigation.
+    pub fn gather_command_entries(
+        &self,
+        kb: &crate::config::KeyBindings,
+        filter_query: &str,
+    ) -> Vec<CommandEntry> {
+        let query_lower = filter_query.to_lowercase();
+        let mut out = Vec::new();
+        for &action in BindableAction::ALL {
+            if matches!(
+                action,
+                BindableAction::NavigateUp | BindableAction::NavigateDown
+            ) {
+                continue;
+            }
+            if !self.is_command_available(action) {
+                continue;
+            }
+            let label = action.description();
+            if !query_lower.is_empty() && !label.to_lowercase().contains(&query_lower) {
+                continue;
+            }
+            out.push(CommandEntry {
+                action,
+                label,
+                keys: kb.keys_display(action),
+            });
+        }
+        out
     }
 }
 
@@ -669,6 +780,18 @@ impl App {
         )
         .map_err(|e| TuiError::InitFailed(e.to_string()))?;
 
+        // Ask the terminal for unambiguous key events (kitty keyboard
+        // protocol). Lets us distinguish Shift+Space from plain Space so
+        // the command palette shortcut can work. Terminals that don't
+        // support the protocol silently ignore the CSI sequence, in which
+        // case Shift+Space falls back to a plain-Space event (opens the
+        // unified palette) and the user can still reach command-only mode
+        // via the `>` prefix.
+        let _ = execute!(
+            io::stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,)
+        );
+
         let backend = CrosstermBackend::new(stdout);
         let terminal = Terminal::new(backend).map_err(|e| TuiError::InitFailed(e.to_string()))?;
 
@@ -679,6 +802,10 @@ impl App {
     fn restore_terminal(&self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
         info!("Disabling raw mode");
         disable_raw_mode().map_err(|e| TuiError::RestoreFailed(e.to_string()))?;
+
+        // Pop the keyboard enhancement flags we pushed on setup. Best-effort —
+        // on terminals that ignored the push this is a no-op.
+        let _ = execute!(terminal.backend_mut(), PopKeyboardEnhancementFlags);
 
         info!("Leaving alternate screen");
         execute!(

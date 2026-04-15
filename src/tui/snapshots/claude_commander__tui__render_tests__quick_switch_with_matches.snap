@@ -1,13 +1,12 @@
 ---
 source: src/tui/render_tests.rs
-assertion_line: 1167
 expression: terminal.backend()
 ---
 "                                                                                "
 "                                                                                "
 "                                                                                "
 "                ┌ Quick Switch ────────────────────────────────┐                "
-"                │> auth_                                       │                "
+"                │❯ auth_                                       │                "
 "                │ ● Add auth [feature-auth] (my-app)           │                "
 "                │ ○ Fix login (my-app)                         │                "
 "                │ ○ Old task [old-branch] (other)              │                "

@@ -28,10 +28,21 @@ impl App {
                     return;
                 }
 
-                // Check for configurable leader key (quick-switch)
+                // Check for configurable leader key (quick-switch).
+                // Shift+<leader> opens directly in command-only mode
+                // (VSCode-style command palette). We check the Shift-variant
+                // first so it wins when the leader itself carries no Shift.
                 let (leader_code, leader_mods) = self.config.parse_leader_key();
+                if key.code == leader_code
+                    && key.modifiers == (leader_mods | crossterm::event::KeyModifiers::SHIFT)
+                    && !leader_mods.contains(crossterm::event::KeyModifiers::SHIFT)
+                {
+                    self.open_quick_switch_with_mode(PaletteMode::CommandOnly)
+                        .await;
+                    return;
+                }
                 if key.code == leader_code && key.modifiers == leader_mods {
-                    self.open_quick_switch().await;
+                    self.open_quick_switch_with_mode(PaletteMode::Unified).await;
                     return;
                 }
 
@@ -181,6 +192,8 @@ impl App {
                 query,
                 matches,
                 selected_idx,
+                scroll,
+                ..
             } => {
                 use crate::config::keybindings::BindableAction;
 
@@ -193,11 +206,21 @@ impl App {
                             } else {
                                 *selected_idx - 1
                             };
+                            *scroll = super::actions::adjust_palette_scroll(
+                                *selected_idx,
+                                *scroll,
+                                super::actions::PALETTE_MAX_VISIBLE,
+                            );
                         }
                     }
                     Some(BindableAction::NavigateDown) => {
                         if !matches.is_empty() {
                             *selected_idx = (*selected_idx + 1) % matches.len();
+                            *scroll = super::actions::adjust_palette_scroll(
+                                *selected_idx,
+                                *scroll,
+                                super::actions::PALETTE_MAX_VISIBLE,
+                            );
                         }
                     }
                     _ => match key.code {
@@ -205,24 +228,40 @@ impl App {
                             self.ui_state.modal = Modal::None;
                         }
                         KeyCode::Enter => {
-                            if let Some(m) = matches.get(*selected_idx) {
-                                let session_id = m.session_id;
-                                self.ui_state.modal = Modal::None;
-                                self.ui_state.selected_session_id = Some(session_id);
-                                if let Some(idx) =
-                                    self.ui_state.list_items.iter().position(|item| {
-                                        matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
-                                    })
-                                {
-                                    self.ui_state.list_state.select(Some(idx));
+                            // Clone the selected item so we can release the
+                            // borrow on `matches` before we mutate `modal`
+                            // and dispatch.
+                            let selected = matches.get(*selected_idx).cloned();
+                            match selected {
+                                Some(QuickSwitchItem::Session(m)) => {
+                                    let session_id = m.session_id;
+                                    self.ui_state.modal = Modal::None;
+                                    self.ui_state.selected_session_id = Some(session_id);
+                                    if let Some(idx) =
+                                        self.ui_state.list_items.iter().position(|item| {
+                                            matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
+                                        })
+                                    {
+                                        self.ui_state.list_state.select(Some(idx));
+                                    }
+                                    self.update_selection();
+                                    self.handle_select().await;
                                 }
-                                self.update_selection();
-                                self.handle_select().await;
+                                Some(QuickSwitchItem::Command(entry)) => {
+                                    self.ui_state.modal = Modal::None;
+                                    self.handle_command(entry.action.into()).await;
+                                }
+                                None => {}
                             }
                         }
                         KeyCode::Tab => {
-                            if let Some(m) = matches.get(*selected_idx) {
-                                *query = m.title.clone();
+                            // Tab autocompletes a session title into the
+                            // query for further refinement. For command rows
+                            // this is meaningless, so skip.
+                            if let Some(QuickSwitchItem::Session(m)) =
+                                matches.get(*selected_idx).cloned()
+                            {
+                                *query = m.title;
                                 self.refilter_quick_switch();
                             }
                         }

@@ -101,6 +101,11 @@ pub struct Theme {
     pub modal_warning: Color,
     pub modal_error: Color,
 
+    // Quick-switch palette: background + text for *command* rows, so they
+    // stand out visually from session rows in the unified palette view.
+    pub palette_command_bg: Color,
+    pub palette_command_fg: Color,
+
     // Status bar
     pub status_bar_bg: Color,
     pub status_bar_fg: Color,
@@ -176,6 +181,9 @@ impl Theme {
             modal_warning: Color::Yellow,
             modal_error: Color::Red,
 
+            palette_command_bg: Color::DarkGray,
+            palette_command_fg: Color::White,
+
             status_bar_bg: Color::Blue,
             status_bar_fg: Color::White,
         }
@@ -234,6 +242,9 @@ impl Theme {
             modal_warning: Color::Indexed(222), // Pastel peach
             modal_error: Color::Indexed(210),   // Pastel coral
 
+            palette_command_bg: Color::Indexed(236), // Dim charcoal
+            palette_command_fg: Color::Indexed(252), // Near-white
+
             status_bar_bg: Color::Indexed(236),
             status_bar_fg: Color::Indexed(252),
         }
@@ -291,6 +302,9 @@ impl Theme {
             modal_info: Color::Rgb(137, 180, 250), // Pastel sky
             modal_warning: Color::Rgb(249, 226, 175), // Pastel peach
             modal_error: Color::Rgb(243, 139, 168), // Pastel rose
+
+            palette_command_bg: Color::Rgb(49, 50, 68), // Base02 — dim charcoal-navy
+            palette_command_fg: Color::Rgb(205, 214, 244), // Near-white lavender
 
             status_bar_bg: Color::Rgb(49, 50, 68),
             status_bar_fg: Color::Rgb(205, 214, 244),
@@ -352,6 +366,8 @@ impl Theme {
         apply!(modal_info);
         apply!(modal_warning);
         apply!(modal_error);
+        apply!(palette_command_bg);
+        apply!(palette_command_fg);
         apply!(status_bar_bg);
         apply!(status_bar_fg);
 

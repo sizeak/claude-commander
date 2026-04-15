@@ -2,6 +2,34 @@
 
 use super::*;
 
+/// Maximum number of rows rendered in the quick-switch palette at once.
+///
+/// Shared between the render layer and the input handler so the scroll
+/// offset and the visible window agree.
+pub(super) const PALETTE_MAX_VISIBLE: usize = 10;
+
+/// Return the `scroll` offset that keeps `selected_idx` inside a visible
+/// window of `visible_rows` rows, starting from the caller's current
+/// scroll position. Handles all four cases (above window, below window,
+/// wrap-around onto either end, and no-op when already in view) in a single
+/// pure function so it can be unit-tested independently.
+pub(super) fn adjust_palette_scroll(
+    selected_idx: usize,
+    scroll: usize,
+    visible_rows: usize,
+) -> usize {
+    if visible_rows == 0 {
+        return 0;
+    }
+    if selected_idx < scroll {
+        selected_idx
+    } else if selected_idx >= scroll + visible_rows {
+        selected_idx + 1 - visible_rows
+    } else {
+        scroll
+    }
+}
+
 impl App {
     /// Check if the selected session is in Creating state
     pub(super) fn selected_session_is_creating(&self) -> bool {
@@ -516,13 +544,15 @@ impl App {
         });
     }
 
-    /// Open the quick-switch modal with all sessions
-    pub(super) async fn open_quick_switch(&mut self) {
-        let matches = self.gather_quick_switch_matches("").await;
+    /// Open the quick-switch palette in the given mode.
+    pub(super) async fn open_quick_switch_with_mode(&mut self, mode: PaletteMode) {
+        let matches = self.build_palette_items(mode, "").await;
         self.ui_state.modal = Modal::QuickSwitch {
+            mode,
             query: String::new(),
             matches,
             selected_idx: 0,
+            scroll: 0,
         };
     }
 
@@ -556,16 +586,72 @@ impl App {
         matches
     }
 
+    /// Compute the *effective* palette mode — a leading `>` in a Unified
+    /// query upgrades it to CommandOnly without mutating the stored mode,
+    /// so backspacing past the `>` naturally restores the unified view.
+    pub(super) fn effective_palette_mode(mode: PaletteMode, query: &str) -> PaletteMode {
+        if mode == PaletteMode::Unified && query.starts_with('>') {
+            PaletteMode::CommandOnly
+        } else {
+            mode
+        }
+    }
+
+    /// Strip the command-only `>` prefix (plus any following whitespace) when
+    /// the effective mode was derived from that prefix.
+    pub(super) fn palette_filter_query(mode: PaletteMode, query: &str) -> &str {
+        match (mode, query.strip_prefix('>')) {
+            (PaletteMode::CommandOnly, Some(rest)) => rest.trim_start(),
+            _ => query,
+        }
+    }
+
+    /// Build the set of command rows matching `filter_query`.
+    ///
+    /// Commands without a keybinding are intentionally still included — the
+    /// palette is the primary access surface going forward, and some commands
+    /// are expected to shed their hotkeys over time.
+    pub(super) fn gather_command_entries(&self, filter_query: &str) -> Vec<CommandEntry> {
+        self.ui_state
+            .gather_command_entries(&self.config.keybindings, filter_query)
+    }
+
+    /// Build the mixed session+command list for the palette.
+    ///
+    /// Sessions first (when the effective mode is Unified), then commands.
+    async fn build_palette_items(&self, mode: PaletteMode, query: &str) -> Vec<QuickSwitchItem> {
+        let eff_mode = Self::effective_palette_mode(mode, query);
+        let eff_query = Self::palette_filter_query(eff_mode, query);
+        let mut out: Vec<QuickSwitchItem> = Vec::new();
+        if eff_mode == PaletteMode::Unified {
+            for m in self.gather_quick_switch_matches(eff_query).await {
+                out.push(QuickSwitchItem::Session(m));
+            }
+        }
+        for c in self.gather_command_entries(eff_query) {
+            out.push(QuickSwitchItem::Command(c));
+        }
+        out
+    }
+
     /// Re-filter the quick-switch matches based on the current query.
     /// Rebuilds from list_items so backspace can widen results.
     pub(super) fn refilter_quick_switch(&mut self) {
-        if let Modal::QuickSwitch {
-            query,
-            matches,
-            selected_idx,
-        } = &mut self.ui_state.modal
-        {
-            let query_lower = query.to_lowercase();
+        // Snapshot the inputs we need so the closure borrow on self doesn't
+        // conflict with the `&mut self.ui_state.modal` below.
+        let (mode, query) = match &self.ui_state.modal {
+            Modal::QuickSwitch { mode, query, .. } => (*mode, query.clone()),
+            _ => return,
+        };
+
+        let eff_mode = Self::effective_palette_mode(mode, &query);
+        let eff_query = Self::palette_filter_query(eff_mode, &query);
+        let eff_query_lower = eff_query.to_lowercase();
+
+        // Build the session rows synchronously from list_items so the refilter
+        // can run without awaiting the store lock on every keystroke.
+        let mut session_items: Vec<QuickSwitchItem> = Vec::new();
+        if eff_mode == PaletteMode::Unified {
             // Build project name lookup from list items
             let mut project_names: std::collections::HashMap<SessionId, String> =
                 std::collections::HashMap::new();
@@ -581,38 +667,52 @@ impl App {
                 }
             }
 
-            *matches = self
-                .ui_state
-                .list_items
-                .iter()
-                .filter_map(|item| {
-                    if let SessionListItem::Worktree {
-                        id,
-                        title,
-                        branch,
-                        status,
-                        ..
-                    } = item
-                    {
-                        let project_name = project_names.get(id).cloned().unwrap_or_default();
-                        if query_lower.is_empty() || title.to_lowercase().contains(&query_lower) {
-                            return Some(QuickSwitchMatch {
-                                session_id: *id,
-                                title: title.clone(),
-                                branch: branch.clone(),
-                                project_name,
-                                status: *status,
-                            });
-                        }
-                    }
-                    None
-                })
-                .collect();
+            for item in &self.ui_state.list_items {
+                if let SessionListItem::Worktree {
+                    id,
+                    title,
+                    branch,
+                    status,
+                    ..
+                } = item
+                    && (eff_query_lower.is_empty()
+                        || title.to_lowercase().contains(&eff_query_lower))
+                {
+                    let project_name = project_names.get(id).cloned().unwrap_or_default();
+                    session_items.push(QuickSwitchItem::Session(QuickSwitchMatch {
+                        session_id: *id,
+                        title: title.clone(),
+                        branch: branch.clone(),
+                        project_name,
+                        status: *status,
+                    }));
+                }
+            }
+        }
 
-            // Clamp selection
+        let command_items: Vec<QuickSwitchItem> = self
+            .gather_command_entries(eff_query)
+            .into_iter()
+            .map(QuickSwitchItem::Command)
+            .collect();
+
+        if let Modal::QuickSwitch {
+            matches,
+            selected_idx,
+            scroll,
+            ..
+        } = &mut self.ui_state.modal
+        {
+            *matches = session_items;
+            matches.extend(command_items);
+
             if *selected_idx >= matches.len() {
                 *selected_idx = matches.len().saturating_sub(1);
             }
+            // Refilter collapses to a fresh window: reset to the top then
+            // adjust so the (now-clamped) selection is still visible.
+            *scroll = 0;
+            *scroll = adjust_palette_scroll(*selected_idx, *scroll, PALETTE_MAX_VISIBLE);
         }
     }
 

@@ -1157,7 +1157,7 @@ fn test_quick_switch_with_matches() {
 
             // Input line
             let input_area = Rect { height: 1, ..inner };
-            frame.render_widget(Paragraph::new(Line::from("> auth_")), input_area);
+            frame.render_widget(Paragraph::new(Line::from("❯ auth_")), input_area);
 
             // Match lines
             for (i, (icon, color, title, branch, project, selected)) in matches.iter().enumerate() {
