@@ -31,6 +31,12 @@ impl App {
                         color_swatch: None,
                     },
                     SettingsRow {
+                        label: "Per-Repo Worktree Dirs".into(),
+                        value: c.per_repo_worktree_dirs.to_string(),
+                        field_key: "per_repo_worktree_dirs".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
                         label: "Editor".into(),
                         value: c.editor.clone().unwrap_or_else(|| "(auto)".into()),
                         field_key: "editor".into(),
@@ -378,6 +384,11 @@ impl App {
                 "default_program" => self.config.default_program = value.to_string(),
                 "branch_prefix" => self.config.branch_prefix = value.to_string(),
                 "shell_program" => self.config.shell_program = value.to_string(),
+                "per_repo_worktree_dirs" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        self.config.per_repo_worktree_dirs = b;
+                    }
+                }
                 "editor" => {
                     self.config.editor = if value.is_empty() || value == "(auto)" {
                         None

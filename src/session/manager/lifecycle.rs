@@ -116,7 +116,13 @@ impl SessionManager {
         // Create worktree — sync gix work (branch check + start point) is done
         // in a block so non-Sync types are dropped before the first .await,
         // keeping the overall future Send.
-        let worktrees_dir = self.config_store.read().worktrees_dir()?;
+        let repo_name = sanitize_name(
+            repo_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown"),
+        );
+        let worktrees_dir = self.config_store.read().resolve_worktrees_dir(&repo_name)?;
         let (branch_exists, start_point) = {
             let backend = GitBackend::open(&repo_path)?;
             let exists = backend.branch_exists(&branch_name)?;

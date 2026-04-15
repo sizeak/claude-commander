@@ -41,6 +41,9 @@ pub struct Config {
     /// Path to worktrees directory
     pub worktrees_dir: Option<PathBuf>,
 
+    /// Organize worktrees into per-repository subdirectories
+    pub per_repo_worktree_dirs: bool,
+
     /// Shell program for shell sessions
     pub shell_program: String,
 
@@ -128,6 +131,7 @@ impl Default for Config {
             diff_cache_ttl_ms: 500,
             ui_refresh_fps: 30,
             worktrees_dir: None,
+            per_repo_worktree_dirs: false,
             editor: None,
             editor_gui: None,
             shell_program: std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string()),
@@ -202,6 +206,16 @@ impl Config {
             Ok(dir.clone())
         } else {
             Ok(Self::data_dir()?.join("worktrees"))
+        }
+    }
+
+    /// Resolve the worktrees directory, nesting under repo name if configured.
+    pub fn resolve_worktrees_dir(&self, repo_name: &str) -> Result<PathBuf> {
+        let base = self.worktrees_dir()?;
+        if self.per_repo_worktree_dirs {
+            Ok(base.join(repo_name))
+        } else {
+            Ok(base)
         }
     }
 
@@ -519,6 +533,28 @@ mod tests {
         let config = Config::default();
         assert!(!config.show_session_numbers);
         assert_eq!(config.session_number_debounce_ms, 250);
+    }
+
+    #[test]
+    fn test_resolve_worktrees_dir_flat_when_disabled() {
+        let config = Config {
+            worktrees_dir: Some(PathBuf::from("/tmp/worktrees")),
+            per_repo_worktree_dirs: false,
+            ..Config::default()
+        };
+        let result = config.resolve_worktrees_dir("genio").unwrap();
+        assert_eq!(result, PathBuf::from("/tmp/worktrees"));
+    }
+
+    #[test]
+    fn test_resolve_worktrees_dir_nested_when_enabled() {
+        let config = Config {
+            worktrees_dir: Some(PathBuf::from("/tmp/worktrees")),
+            per_repo_worktree_dirs: true,
+            ..Config::default()
+        };
+        let result = config.resolve_worktrees_dir("genio").unwrap();
+        assert_eq!(result, PathBuf::from("/tmp/worktrees/genio"));
     }
 
     #[test]
