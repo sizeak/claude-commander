@@ -190,6 +190,9 @@ ui_refresh_fps = 30
 # Custom worktrees directory (default: platform-specific, see Data Storage below)
 # worktrees_dir = "/path/to/worktrees"
 
+# Organize worktrees into per-repository subdirectories (default: false)
+# per_repo_worktree_dirs = true
+
 # Shell program for shell sessions (default: $SHELL or "bash")
 # shell_program = "zsh"
 
