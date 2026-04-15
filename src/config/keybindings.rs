@@ -31,6 +31,7 @@ pub enum BindableAction {
     NewProject,
     CheckoutBranch,
     DeleteSession,
+    RenameSession,
     RestartSession,
     RemoveProject,
     OpenInEditor,
@@ -61,6 +62,7 @@ impl BindableAction {
         Self::NewProject,
         Self::CheckoutBranch,
         Self::DeleteSession,
+        Self::RenameSession,
         Self::RestartSession,
         Self::RemoveProject,
         Self::OpenInEditor,
@@ -91,6 +93,7 @@ impl BindableAction {
             Self::NewProject => "new_project",
             Self::CheckoutBranch => "checkout_branch",
             Self::DeleteSession => "delete_session",
+            Self::RenameSession => "rename_session",
             Self::RestartSession => "restart_session",
             Self::RemoveProject => "remove_project",
             Self::OpenInEditor => "open_in_editor",
@@ -122,6 +125,7 @@ impl BindableAction {
             Self::NewProject => "New project (add git repo)",
             Self::CheckoutBranch => "Checkout existing branch",
             Self::DeleteSession => "Delete/kill session",
+            Self::RenameSession => "Rename session",
             Self::RestartSession => "Restart session",
             Self::RemoveProject => "Remove project",
             Self::OpenInEditor => "Open in editor/IDE",
@@ -151,6 +155,7 @@ impl BindableAction {
             | Self::NewProject
             | Self::CheckoutBranch
             | Self::DeleteSession
+            | Self::RenameSession
             | Self::RestartSession
             | Self::RemoveProject
             | Self::OpenInEditor
@@ -180,6 +185,7 @@ impl FromStr for BindableAction {
             "new_project" => Ok(Self::NewProject),
             "checkout_branch" => Ok(Self::CheckoutBranch),
             "delete_session" => Ok(Self::DeleteSession),
+            "rename_session" => Ok(Self::RenameSession),
             "restart_session" => Ok(Self::RestartSession),
             "remove_project" => Ok(Self::RemoveProject),
             "open_in_editor" => Ok(Self::OpenInEditor),
@@ -487,6 +493,10 @@ impl Default for KeyBindings {
         bindings.insert(
             BindableAction::DeleteSession,
             vec![kb(KeyCode::Char('d'), none)],
+        );
+        bindings.insert(
+            BindableAction::RenameSession,
+            vec![kb(KeyCode::Char('r'), none)],
         );
         bindings.insert(
             BindableAction::RestartSession,
