@@ -614,10 +614,10 @@ impl App {
             && let Some(project_id) = self.ui_state.selected_project_id
         {
             self.ui_state.modal = Modal::Confirm {
-                    title: "Remove Project".to_string(),
-                    message: "Are you sure you want to remove this project?\nThis will kill all sessions and remove all worktrees.".to_string(),
-                    on_confirm: ConfirmAction::RemoveProject { project_id },
-                };
+                title: "Remove Project".to_string(),
+                message: "Are you sure you want to remove this project?\nThis will kill all sessions and remove all worktrees.".to_string(),
+                on_confirm: ConfirmAction::RemoveProject { project_id },
+            };
         }
     }
 
