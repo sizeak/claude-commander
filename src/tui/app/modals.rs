@@ -13,7 +13,17 @@ impl App {
                 value,
                 ..
             } => {
-                let modal_area = centered_rect(60, 20, area);
+                // Fixed height: 2 borders + prompt line + blank + input = 5 rows.
+                // Previous 20%-of-terminal rule wasted ~4 lines of vertical
+                // space for a single-line input.
+                let modal_width = (area.width * 60 / 100).max(40);
+                let modal_height = 5u16;
+                let modal_area = Rect {
+                    x: area.x + (area.width.saturating_sub(modal_width)) / 2,
+                    y: area.y + (area.height.saturating_sub(modal_height)) / 2,
+                    width: modal_width,
+                    height: modal_height.min(area.height),
+                };
                 frame.render_widget(Clear, modal_area);
 
                 let block = Block::default()
