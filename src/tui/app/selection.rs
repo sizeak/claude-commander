@@ -15,10 +15,17 @@ impl App {
                 SessionListItem::Project { id, .. } => {
                     self.ui_state.selected_project_id = Some(*id);
                     self.ui_state.selected_session_id = None;
+                    self.ui_state.selected_multi_repo_id = None;
                 }
                 SessionListItem::Worktree { id, project_id, .. } => {
                     self.ui_state.selected_session_id = Some(*id);
                     self.ui_state.selected_project_id = Some(*project_id);
+                    self.ui_state.selected_multi_repo_id = None;
+                }
+                SessionListItem::MultiRepo { id, .. } => {
+                    self.ui_state.selected_multi_repo_id = Some(*id);
+                    self.ui_state.selected_session_id = None;
+                    self.ui_state.selected_project_id = None;
                 }
             }
         }

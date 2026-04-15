@@ -192,6 +192,64 @@ impl<'a> TreeList<'a> {
 
                     ListItem::new(line)
                 }
+
+                SessionListItem::MultiRepo {
+                    title,
+                    branch,
+                    status,
+                    program,
+                    project_count,
+                    project_names,
+                    agent_state,
+                    unread,
+                    ..
+                } => {
+                    let mut spans = vec![Span::raw(" ")];
+
+                    // Status glyph
+                    if let Some((glyph, color)) =
+                        self.session_status_glyph(*status, *agent_state, *unread)
+                    {
+                        spans.push(Span::styled(
+                            format!("{glyph} "),
+                            Style::default().fg(color),
+                        ));
+                    }
+
+                    let title_style = if *unread {
+                        Style::default()
+                            .fg(self.theme.text_primary)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(self.theme.text_primary)
+                    };
+                    spans.push(Span::styled(title.clone(), title_style));
+                    spans.push(Span::styled(
+                        format!(" [{}]", branch),
+                        Style::default().fg(self.theme.text_accent),
+                    ));
+                    spans.push(Span::styled(
+                        format!(
+                            " ({})",
+                            if project_names.len() <= 3 {
+                                project_names.join(", ")
+                            } else {
+                                format!("{} repos", project_count)
+                            }
+                        ),
+                        Style::default().fg(self.theme.text_secondary),
+                    ));
+
+                    if show_program {
+                        spans.push(Span::raw(" "));
+                        spans.push(Span::styled(
+                            format!("({})", program),
+                            Style::default().fg(self.theme.text_secondary),
+                        ));
+                    }
+
+                    ListItem::new(Line::from(spans))
+                }
             })
             .collect()
     }

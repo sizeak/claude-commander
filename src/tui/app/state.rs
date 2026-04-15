@@ -226,6 +226,35 @@ impl App {
                     self.refilter_checkout_branches();
                 }
             }
+            StateUpdate::MultiRepoSessionCreated { session_id } => {
+                debug!("Multi-repo session created: {}", session_id);
+                self.ui_state.modal = Modal::None;
+                self.ui_state.status_message = Some((
+                    format!("Created multi-repo session {}", session_id),
+                    Instant::now() + Duration::from_secs(3),
+                ));
+                self.refresh_list_items().await;
+                // Select the newly created multi-repo session
+                if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
+                    matches!(item, SessionListItem::MultiRepo { id, .. } if *id == session_id)
+                }) {
+                    self.ui_state.list_state.select(Some(idx));
+                }
+                self.update_selection();
+                self.spawn_preview_update();
+            }
+            StateUpdate::MultiRepoSessionCreateFailed {
+                session_id,
+                message,
+            } => {
+                debug!("Multi-repo session creation failed: {}", message);
+                let _ = self
+                    .session_manager
+                    .remove_creating_multi_repo_session(&session_id)
+                    .await;
+                self.refresh_list_items().await;
+                self.ui_state.modal = Modal::Error { message };
+            }
             StateUpdate::ExternalChange => {
                 debug!("External state change detected, refreshing UI");
                 self.refresh_list_items().await;
@@ -328,6 +357,35 @@ impl App {
 
         let mut items = Vec::new();
 
+        // Multi-repo sessions section (shown first if any exist)
+        let mut mr_sessions: Vec<_> = state.multi_repo_sessions.values().collect();
+        if !mr_sessions.is_empty() {
+            mr_sessions.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            for mr in mr_sessions {
+                let project_names: Vec<String> = mr
+                    .repos
+                    .iter()
+                    .filter_map(|entry| {
+                        state
+                            .get_project(&entry.project_id)
+                            .map(|p| p.name.clone())
+                    })
+                    .collect();
+                items.push(SessionListItem::MultiRepo {
+                    id: mr.id,
+                    title: mr.title.clone(),
+                    branch: mr.branch.clone(),
+                    status: mr.status,
+                    program: mr.program.clone(),
+                    project_count: mr.repos.len(),
+                    project_names,
+                    created_at: mr.created_at,
+                    agent_state: None, // TODO: agent state detection for multi-repo
+                    unread: mr.unread,
+                });
+            }
+        }
+
         // Build hierarchical list with stable sort order
         let mut projects: Vec<_> = state.projects.values().collect();
         projects.sort_by(|a, b| a.name.cmp(&b.name));
@@ -426,6 +484,7 @@ impl App {
             SessionListItem::Project { id, .. } => {
                 last_session.is_none() && last_project.is_some_and(|p| p == *id)
             }
+            SessionListItem::MultiRepo { .. } => false,
         });
 
         if let Some(idx) = target_idx {

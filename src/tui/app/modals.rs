@@ -349,6 +349,101 @@ impl App {
                 }
             }
 
+            Modal::MultiRepoProjectPicker {
+                projects,
+                selected_idx,
+                ..
+            } => {
+                let visible_rows = projects.len().clamp(1, 12);
+                // border(2) + title(1) + hint(1) + rows
+                let modal_height = (4 + visible_rows) as u16;
+                let modal_width = (area.width * 60 / 100).max(40);
+
+                let modal_area = Rect {
+                    x: area.x + (area.width.saturating_sub(modal_width)) / 2,
+                    y: area.y + area.height / 5,
+                    width: modal_width,
+                    height: modal_height.min(area.height),
+                };
+
+                frame.render_widget(Clear, modal_area);
+
+                let block = Block::default()
+                    .title(" New Multi-Repo Session — Select Projects ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.theme.modal_info));
+
+                let inner = block.inner(modal_area);
+                frame.render_widget(block, modal_area);
+
+                if inner.height == 0 {
+                    return;
+                }
+
+                // Hint line
+                let hint_area = Rect { height: 1, ..inner };
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        "[Space] toggle  [Enter] confirm  [Esc] cancel",
+                        Style::default().fg(self.theme.text_secondary),
+                    ))),
+                    hint_area,
+                );
+
+                // Project rows
+                for (i, (_, name, checked)) in projects.iter().enumerate() {
+                    let row = inner.y + 1 + i as u16;
+                    if row >= inner.y + inner.height {
+                        break;
+                    }
+                    let is_selected = i == *selected_idx;
+                    let checkbox = if *checked { "[x]" } else { "[ ]" };
+                    let style = if is_selected {
+                        self.theme.selection()
+                    } else {
+                        Style::default()
+                    };
+                    let line = Line::from(vec![
+                        Span::styled(
+                            format!(" {} ", checkbox),
+                            if *checked {
+                                Style::default().fg(self.theme.status_running)
+                            } else {
+                                Style::default().fg(self.theme.text_secondary)
+                            },
+                        ),
+                        Span::styled(name.clone(), style),
+                    ]);
+                    let line_area = Rect {
+                        y: row,
+                        height: 1,
+                        ..inner
+                    };
+                    frame.render_widget(Paragraph::new(line), line_area);
+                }
+            }
+
+            Modal::MultiRepoTitle {
+                value,
+                project_ids,
+                ..
+            } => {
+                let modal_area = centered_rect(60, 20, area);
+                frame.render_widget(Clear, modal_area);
+
+                let block = Block::default()
+                    .title(format!(" Multi-Repo Session ({} repos) ", project_ids.len()))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.theme.modal_warning));
+
+                let inner = block.inner(modal_area);
+                frame.render_widget(block, modal_area);
+
+                let text = format!("Enter session name:\n\n❯ {}_", value);
+                let paragraph = Paragraph::new(text);
+                frame.render_widget(paragraph, inner);
+            }
+
             Modal::CheckoutBranch {
                 query,
                 filtered,

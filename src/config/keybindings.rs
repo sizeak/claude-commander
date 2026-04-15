@@ -49,6 +49,7 @@ pub enum BindableAction {
     PageDown,
     GenerateSummary,
     ScanDirectory,
+    NewMultiRepoSession,
 }
 
 impl BindableAction {
@@ -68,6 +69,7 @@ impl BindableAction {
         Self::OpenInEditor,
         Self::OpenPullRequest,
         Self::ScanDirectory,
+        Self::NewMultiRepoSession,
         Self::TogglePane,
         Self::TogglePaneReverse,
         Self::ShrinkLeftPane,
@@ -111,6 +113,7 @@ impl BindableAction {
             Self::PageDown => "page_down",
             Self::GenerateSummary => "generate_summary",
             Self::ScanDirectory => "scan_directory",
+            Self::NewMultiRepoSession => "new_multi_repo_session",
         }
     }
 
@@ -143,6 +146,7 @@ impl BindableAction {
             Self::PageDown => "Page down",
             Self::GenerateSummary => "Generate AI summary",
             Self::ScanDirectory => "Scan directory for repos",
+            Self::NewMultiRepoSession => "New multi-repo session",
         }
     }
 
@@ -160,7 +164,8 @@ impl BindableAction {
             | Self::RemoveProject
             | Self::OpenInEditor
             | Self::OpenPullRequest
-            | Self::ScanDirectory => "Session Management",
+            | Self::ScanDirectory
+            | Self::NewMultiRepoSession => "Session Management",
             Self::TogglePane
             | Self::TogglePaneReverse
             | Self::ShrinkLeftPane
@@ -203,6 +208,7 @@ impl FromStr for BindableAction {
             "page_down" => Ok(Self::PageDown),
             "generate_summary" => Ok(Self::GenerateSummary),
             "scan_directory" => Ok(Self::ScanDirectory),
+            "new_multi_repo_session" => Ok(Self::NewMultiRepoSession),
             _ => Err(format!("unknown action: {s}")),
         }
     }

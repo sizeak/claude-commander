@@ -362,6 +362,91 @@ impl App {
                 }
             }
 
+            Modal::MultiRepoProjectPicker {
+                projects,
+                selected_idx,
+                ..
+            } => {
+                use crate::config::keybindings::BindableAction;
+
+                match self.config.keybindings.resolve(&key) {
+                    Some(BindableAction::NavigateUp) => {
+                        if !projects.is_empty() {
+                            *selected_idx = if *selected_idx == 0 {
+                                projects.len() - 1
+                            } else {
+                                *selected_idx - 1
+                            };
+                        }
+                    }
+                    Some(BindableAction::NavigateDown) => {
+                        if !projects.is_empty() {
+                            *selected_idx = (*selected_idx + 1) % projects.len();
+                        }
+                    }
+                    _ => match key.code {
+                        KeyCode::Esc => {
+                            self.ui_state.modal = Modal::None;
+                        }
+                        // Space toggles checkbox
+                        KeyCode::Char(' ') => {
+                            let idx = *selected_idx;
+                            if let Some(entry) = projects.get_mut(idx) {
+                                entry.2 = !entry.2;
+                            }
+                        }
+                        // Enter confirms selection — move to title input
+                        KeyCode::Enter => {
+                            let selected: Vec<ProjectId> = projects
+                                .iter()
+                                .filter(|(_, _, checked)| *checked)
+                                .map(|(id, _, _)| *id)
+                                .collect();
+                            if selected.len() < 2 {
+                                self.ui_state.status_message = Some((
+                                    "Select at least 2 projects".to_string(),
+                                    Instant::now() + Duration::from_secs(3),
+                                ));
+                            } else {
+                                self.ui_state.modal = Modal::MultiRepoTitle {
+                                    project_ids: selected,
+                                    value: String::new(),
+                                };
+                            }
+                        }
+                        _ => {}
+                    },
+                }
+            }
+
+            Modal::MultiRepoTitle {
+                project_ids,
+                value,
+            } => match key.code {
+                KeyCode::Enter => {
+                    if value.trim().is_empty() {
+                        return;
+                    }
+                    let project_ids = project_ids.clone();
+                    let title = value.clone();
+                    self.ui_state.modal = Modal::Loading {
+                        title: "Creating Multi-Repo Session".to_string(),
+                        message: format!("Setting up worktrees across {} repos...", project_ids.len()),
+                    };
+                    self.start_multi_repo_session(project_ids, title).await;
+                }
+                KeyCode::Esc => {
+                    self.ui_state.modal = Modal::None;
+                }
+                KeyCode::Backspace => {
+                    value.pop();
+                }
+                KeyCode::Char(c) => {
+                    value.push(c);
+                }
+                _ => {}
+            },
+
             Modal::None => {}
         }
     }
@@ -383,6 +468,9 @@ impl App {
             }
             UserCommand::NewSession => {
                 self.handle_new_session();
+            }
+            UserCommand::NewMultiRepoSession => {
+                self.handle_new_multi_repo_session().await;
             }
             UserCommand::CheckoutBranch => {
                 self.handle_checkout_branch().await;

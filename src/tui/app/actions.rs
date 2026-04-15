@@ -78,6 +78,32 @@ impl App {
                     };
                 }
             }
+        } else if let Some(mr_id) = self.ui_state.selected_multi_repo_id {
+            info!("Getting attach command for multi-repo session: {}", mr_id);
+            match self
+                .session_manager
+                .get_multi_repo_attach_command(&mr_id)
+                .await
+            {
+                Ok(cmd) => {
+                    let sid = mr_id;
+                    let _ = self
+                        .store
+                        .mutate(move |state| {
+                            if let Some(session) = state.get_multi_repo_session_mut(&sid) {
+                                session.unread = false;
+                            }
+                        })
+                        .await;
+                    self.ui_state.attach_command = Some(cmd);
+                    self.ui_state.should_quit = true;
+                }
+                Err(e) => {
+                    self.ui_state.modal = Modal::Error {
+                        message: format!("Cannot attach: {}", e),
+                    };
+                }
+            }
         } else {
             info!("No session selected");
         }
@@ -664,6 +690,7 @@ impl App {
                     SessionListItem::Worktree { id, .. } => {
                         project_names.insert(*id, current_project_name.clone());
                     }
+                    SessionListItem::MultiRepo { .. } => {}
                 }
             }
 
@@ -755,6 +782,12 @@ impl App {
                 title: "Delete Session".to_string(),
                 message: "Are you sure you want to delete this session?\nThis will kill the tmux session and remove the worktree.".to_string(),
                 on_confirm: ConfirmAction::DeleteSession { session_id },
+            };
+        } else if let Some(mr_id) = self.ui_state.selected_multi_repo_id {
+            self.ui_state.modal = Modal::Confirm {
+                title: "Delete Multi-Repo Session".to_string(),
+                message: "Are you sure you want to delete this multi-repo session?\nThis will kill the tmux session and remove all worktrees.".to_string(),
+                on_confirm: ConfirmAction::DeleteMultiRepoSession { session_id: mr_id },
             };
         }
     }
@@ -1043,6 +1076,32 @@ impl App {
                     }
                 }
             }
+            ConfirmAction::DeleteMultiRepoSession { session_id } => {
+                let session_manager = self.session_manager.clone();
+                let tx = self.event_loop.sender();
+                self.ui_state.selected_multi_repo_id = None;
+                self.ui_state.status_message = Some((
+                    "Multi-repo session deleted".to_string(),
+                    Instant::now() + Duration::from_secs(3),
+                ));
+                tokio::spawn(async move {
+                    if let Err(e) = session_manager
+                        .delete_multi_repo_session(&session_id)
+                        .await
+                    {
+                        let _ = tx
+                            .send(AppEvent::StateUpdate(StateUpdate::Error {
+                                message: format!("Failed to delete multi-repo session: {}", e),
+                            }))
+                            .await;
+                    } else {
+                        let _ = tx
+                            .send(AppEvent::StateUpdate(StateUpdate::ExternalChange))
+                            .await;
+                    }
+                });
+                self.refresh_list_items().await;
+            }
             ConfirmAction::RemoveProject { project_id } => {
                 // 1. Capture project and session data before removal
                 let cleanup_data = {
@@ -1111,6 +1170,81 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Open the multi-repo project picker modal.
+    pub(super) async fn handle_new_multi_repo_session(&mut self) {
+        let state = self.store.read().await;
+        if state.project_count() < 2 {
+            self.ui_state.status_message = Some((
+                "Need at least 2 projects registered".to_string(),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            return;
+        }
+
+        let mut projects: Vec<(ProjectId, String, bool)> = state
+            .projects
+            .values()
+            .map(|p| (p.id, p.name.clone(), false))
+            .collect();
+        projects.sort_by(|a, b| a.1.cmp(&b.1));
+
+        self.ui_state.modal = Modal::MultiRepoProjectPicker {
+            projects,
+            selected_idx: 0,
+            scroll: 0,
+        };
+    }
+
+    /// Spawn background task to create a multi-repo session.
+    pub(super) async fn start_multi_repo_session(
+        &mut self,
+        project_ids: Vec<ProjectId>,
+        title: String,
+    ) {
+        let session_id = match self
+            .session_manager
+            .prepare_multi_repo_session(project_ids, title, None)
+            .await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                self.ui_state.modal = Modal::Error {
+                    message: format!("Failed to create multi-repo session: {}", e),
+                };
+                return;
+            }
+        };
+
+        self.refresh_list_items().await;
+
+        let session_manager = self.session_manager.clone();
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            match session_manager
+                .finalize_multi_repo_session(&session_id)
+                .await
+            {
+                Ok(sid) => {
+                    let _ = tx
+                        .send(AppEvent::StateUpdate(
+                            StateUpdate::MultiRepoSessionCreated { session_id: sid },
+                        ))
+                        .await;
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(AppEvent::StateUpdate(
+                            StateUpdate::MultiRepoSessionCreateFailed {
+                                session_id,
+                                message: format!("Failed to create multi-repo session: {}", e),
+                            },
+                        ))
+                        .await;
+                }
+            }
+        });
     }
 }
 
