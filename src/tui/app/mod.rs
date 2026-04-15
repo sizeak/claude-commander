@@ -109,13 +109,20 @@ pub enum Modal {
         message: String,
         on_confirm: ConfirmAction,
     },
-    /// Path input modal with tab completion
+    /// Path input modal with a live-filtered subdirectory list.
+    ///
+    /// The list is populated on open and re-filtered on every keystroke.
+    /// Arrow keys move `completer.selected_idx`; `scroll` keeps the
+    /// highlighted row inside the visible window (same pattern as
+    /// `Modal::QuickSwitch`).
     PathInput {
         title: String,
         prompt: String,
         value: String,
         on_submit: InputAction,
         completer: PathCompleter,
+        /// First visible row of the completions list.
+        scroll: usize,
     },
     /// Loading spinner modal (non-interactive)
     Loading { title: String, message: String },

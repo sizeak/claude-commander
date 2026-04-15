@@ -91,10 +91,14 @@ impl App {
                         value.push_str(&clean);
                     }
                     Modal::PathInput {
-                        value, completer, ..
+                        value,
+                        completer,
+                        scroll,
+                        ..
                     } => {
                         value.push_str(&clean);
-                        completer.invalidate();
+                        completer.refilter(value);
+                        *scroll = 0;
                     }
                     _ => {}
                 }
@@ -132,31 +136,76 @@ impl App {
                 value,
                 on_submit,
                 completer,
+                scroll,
                 ..
-            } => match key.code {
-                KeyCode::Enter => {
-                    let action = on_submit.clone();
-                    let value = value.clone();
-                    self.ui_state.modal = Modal::None;
-                    self.handle_input_submit(action, value).await;
+            } => {
+                use crate::config::keybindings::BindableAction;
+
+                // Resolve configurable bindings first so arrow keys (and
+                // their j/k/Ctrl-n/p aliases) navigate the completion list.
+                match self.config.keybindings.resolve(&key) {
+                    Some(BindableAction::NavigateUp) => {
+                        completer.move_selection_up();
+                        if let (_, Some(idx)) = completer.visible_completions() {
+                            *scroll = super::actions::adjust_list_scroll(
+                                idx,
+                                *scroll,
+                                super::actions::LIST_MAX_VISIBLE,
+                            );
+                        }
+                    }
+                    Some(BindableAction::NavigateDown) => {
+                        completer.move_selection_down();
+                        if let (_, Some(idx)) = completer.visible_completions() {
+                            *scroll = super::actions::adjust_list_scroll(
+                                idx,
+                                *scroll,
+                                super::actions::LIST_MAX_VISIBLE,
+                            );
+                        }
+                    }
+                    _ => match key.code {
+                        KeyCode::Enter => {
+                            // Prefer the highlighted completion over the
+                            // typed value, so arrow-to-select-then-Enter
+                            // works without first pressing Tab. Fall back
+                            // to the typed value when the list is empty
+                            // (e.g. the user typed a path that doesn't
+                            // exist yet).
+                            let action = on_submit.clone();
+                            let submit_value = completer
+                                .selected_completion()
+                                .map(str::to_string)
+                                .unwrap_or_else(|| value.clone());
+                            self.ui_state.modal = Modal::None;
+                            self.handle_input_submit(action, submit_value).await;
+                        }
+                        KeyCode::Esc => {
+                            self.ui_state.modal = Modal::None;
+                        }
+                        KeyCode::Tab => {
+                            // Tab extends the input to the longest common
+                            // prefix. A single match completes fully + `/`
+                            // and `refilter` below surfaces that dir's
+                            // children so the user can keep drilling in.
+                            *value = completer.complete(value);
+                            completer.refilter(value);
+                            *scroll = 0;
+                        }
+                        KeyCode::Backspace => {
+                            value.pop();
+                            completer.refilter(value);
+                            *scroll = 0;
+                        }
+                        KeyCode::Char(c) => {
+                            value.push(c);
+                            completer.refilter(value);
+                            *scroll = 0;
+                        }
+                        _ => {}
+                    },
                 }
-                KeyCode::Esc => {
-                    self.ui_state.modal = Modal::None;
-                }
-                KeyCode::Tab => {
-                    let completed = completer.complete(value);
-                    *value = completed;
-                }
-                KeyCode::Backspace => {
-                    value.pop();
-                    completer.invalidate();
-                }
-                KeyCode::Char(c) => {
-                    value.push(c);
-                    completer.invalidate();
-                }
-                _ => {}
-            },
+            }
 
             Modal::Confirm { on_confirm, .. } => match key.code {
                 KeyCode::Enter => {
@@ -206,20 +255,20 @@ impl App {
                             } else {
                                 *selected_idx - 1
                             };
-                            *scroll = super::actions::adjust_palette_scroll(
+                            *scroll = super::actions::adjust_list_scroll(
                                 *selected_idx,
                                 *scroll,
-                                super::actions::PALETTE_MAX_VISIBLE,
+                                super::actions::LIST_MAX_VISIBLE,
                             );
                         }
                     }
                     Some(BindableAction::NavigateDown) => {
                         if !matches.is_empty() {
                             *selected_idx = (*selected_idx + 1) % matches.len();
-                            *scroll = super::actions::adjust_palette_scroll(
+                            *scroll = super::actions::adjust_list_scroll(
                                 *selected_idx,
                                 *scroll,
-                                super::actions::PALETTE_MAX_VISIBLE,
+                                super::actions::LIST_MAX_VISIBLE,
                             );
                         }
                     }
@@ -388,26 +437,18 @@ impl App {
                 self.handle_checkout_branch().await;
             }
             UserCommand::NewProject => {
-                self.ui_state.modal = Modal::PathInput {
-                    title: "Add Project".to_string(),
-                    prompt: "Enter path to git repository:".to_string(),
-                    value: std::env::current_dir()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default(),
-                    on_submit: InputAction::AddProject,
-                    completer: PathCompleter::new(),
-                };
+                self.open_path_input(
+                    "Add Project".to_string(),
+                    "Enter path to git repository:".to_string(),
+                    InputAction::AddProject,
+                );
             }
             UserCommand::ScanDirectory => {
-                self.ui_state.modal = Modal::PathInput {
-                    title: "Scan Directory".to_string(),
-                    prompt: "Enter directory to scan for git repos:".to_string(),
-                    value: std::env::current_dir()
-                        .map(|p| p.display().to_string())
-                        .unwrap_or_default(),
-                    on_submit: InputAction::ScanDirectory,
-                    completer: PathCompleter::new(),
-                };
+                self.open_path_input(
+                    "Scan Directory".to_string(),
+                    "Enter directory to scan for git repos:".to_string(),
+                    InputAction::ScanDirectory,
+                );
             }
             UserCommand::DeleteSession => {
                 self.handle_delete_session();

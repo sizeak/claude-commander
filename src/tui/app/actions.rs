@@ -2,22 +2,19 @@
 
 use super::*;
 
-/// Maximum number of rows rendered in the quick-switch palette at once.
+/// Maximum number of rows rendered in a scrollable list modal at once.
 ///
 /// Shared between the render layer and the input handler so the scroll
-/// offset and the visible window agree.
-pub(super) const PALETTE_MAX_VISIBLE: usize = 10;
+/// offset and the visible window agree. Used by both the quick-switch
+/// palette and the path-input completions list.
+pub(super) const LIST_MAX_VISIBLE: usize = 10;
 
 /// Return the `scroll` offset that keeps `selected_idx` inside a visible
 /// window of `visible_rows` rows, starting from the caller's current
 /// scroll position. Handles all four cases (above window, below window,
 /// wrap-around onto either end, and no-op when already in view) in a single
 /// pure function so it can be unit-tested independently.
-pub(super) fn adjust_palette_scroll(
-    selected_idx: usize,
-    scroll: usize,
-    visible_rows: usize,
-) -> usize {
+pub(super) fn adjust_list_scroll(selected_idx: usize, scroll: usize, visible_rows: usize) -> usize {
     if visible_rows == 0 {
         return 0;
     }
@@ -31,6 +28,37 @@ pub(super) fn adjust_palette_scroll(
 }
 
 impl App {
+    /// Open `Modal::PathInput` at the current working directory with its
+    /// subdirectory list already populated.
+    ///
+    /// The initial value is `cwd/` (trailing slash appended) so
+    /// `list_matching_dirs` returns the children of cwd rather than its
+    /// siblings — which is what users almost always want for Add Project /
+    /// Scan Directory.
+    pub(super) fn open_path_input(
+        &mut self,
+        title: String,
+        prompt: String,
+        on_submit: InputAction,
+    ) {
+        let mut value = std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        if !value.ends_with('/') {
+            value.push('/');
+        }
+        let mut completer = PathCompleter::new();
+        completer.refilter(&value);
+        self.ui_state.modal = Modal::PathInput {
+            title,
+            prompt,
+            value,
+            on_submit,
+            completer,
+            scroll: 0,
+        };
+    }
+
     /// Check if the selected session is in Creating state
     pub(super) fn selected_session_is_creating(&self) -> bool {
         self.ui_state.list_items.iter().any(|item| {
@@ -712,7 +740,7 @@ impl App {
             // Refilter collapses to a fresh window: reset to the top then
             // adjust so the (now-clamped) selection is still visible.
             *scroll = 0;
-            *scroll = adjust_palette_scroll(*selected_idx, *scroll, PALETTE_MAX_VISIBLE);
+            *scroll = adjust_list_scroll(*selected_idx, *scroll, LIST_MAX_VISIBLE);
         }
     }
 

@@ -44,9 +44,23 @@ impl App {
                 prompt,
                 value,
                 completer,
+                scroll,
                 ..
             } => {
-                let modal_area = centered_rect(60, 40, area);
+                // Fixed height: 2 border + 3 input block + LIST_MAX_VISIBLE
+                // rows + 1 hint = 16 when the full window fits, capped to
+                // the terminal height. Keeps the modal size predictable so
+                // navigation (which assumes LIST_MAX_VISIBLE) lines up with
+                // the rendered window.
+                let modal_width = (area.width * 60 / 100).max(50);
+                let list_rows = super::actions::LIST_MAX_VISIBLE as u16;
+                let modal_height: u16 = (2 + 3 + list_rows + 1).min(area.height.max(1));
+                let modal_area = Rect {
+                    x: area.x + (area.width.saturating_sub(modal_width)) / 2,
+                    y: area.y + (area.height.saturating_sub(modal_height)) / 2,
+                    width: modal_width,
+                    height: modal_height,
+                };
                 frame.render_widget(Clear, modal_area);
 
                 let block = Block::default()
@@ -71,18 +85,24 @@ impl App {
                 let input_para = Paragraph::new(input_text);
                 frame.render_widget(input_para, chunks[0]);
 
-                // Render completions list
+                // Render completions list with a scroll window so the
+                // highlighted row stays on-screen even when the list is
+                // longer than the visible area.
                 let (completions, highlighted) = completer.visible_completions();
                 if !completions.is_empty() {
+                    let visible = chunks[1].height as usize;
+                    let start = (*scroll).min(completions.len());
                     let lines: Vec<Line> = completions
                         .iter()
                         .enumerate()
-                        .map(|(i, c)| {
+                        .skip(start)
+                        .take(visible)
+                        .map(|(abs_idx, c)| {
                             // Show just the final path component for readability
                             let display = c.rsplit('/').next().unwrap_or(c);
-                            if highlighted == Some(i) {
+                            if highlighted == Some(abs_idx) {
                                 Line::from(Span::styled(
-                                    format!("  > {}", display),
+                                    format!("  ❯ {}", display),
                                     Style::default()
                                         .fg(self.theme.modal_info)
                                         .add_modifier(Modifier::BOLD),
@@ -97,7 +117,7 @@ impl App {
                 }
 
                 let hint = Line::from(Span::styled(
-                    "[Tab] complete  [Enter] submit  [Esc] cancel",
+                    "↑/↓ navigate  Tab complete  Enter submit  Esc cancel",
                     Style::default().add_modifier(Modifier::DIM),
                 ));
                 frame.render_widget(Paragraph::new(hint), chunks[2]);
@@ -200,7 +220,7 @@ impl App {
                 selected_idx,
                 scroll,
             } => {
-                let max_visible = super::actions::PALETTE_MAX_VISIBLE;
+                let max_visible = super::actions::LIST_MAX_VISIBLE;
                 let visible_matches = matches.len().min(max_visible);
                 // Dynamic height: border(2) + input(1) + matches
                 let modal_height = (3 + visible_matches) as u16;
