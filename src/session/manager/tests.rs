@@ -140,6 +140,15 @@ fn test_display_branch_shows_when_prefix_segment_doesnt_match() {
 }
 
 #[test]
+fn test_display_branch_hides_when_title_equals_branch() {
+    // Checkout flow sets title == branch verbatim — no annotation even
+    // if the branch contains characters sanitize_name() would rewrite.
+    assert_eq!(display_branch("Feature-Auth", "Feature-Auth"), None);
+    assert_eq!(display_branch("fix.bug.v2", "fix.bug.v2"), None);
+    assert_eq!(display_branch("user/JIRA-123", "user/JIRA-123"), None);
+}
+
+#[test]
 fn test_generate_branch_name_empty_prefix() {
     let (_cdir, config_store) = test_config_store(Config::default());
     let (_dir, store) = test_store();

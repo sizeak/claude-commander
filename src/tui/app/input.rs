@@ -1,4 +1,4 @@
-//! Input handling: dispatch keyboard/mouse events to commands and modal handlers.
+//! Input handling: keyboard events, modal keys, and command dispatch.
 
 use super::*;
 
@@ -239,6 +239,90 @@ impl App {
                 }
             }
 
+            Modal::CheckoutBranch {
+                query,
+                all_branches: _,
+                filtered,
+                selected_idx,
+                scroll,
+                ..
+            } => {
+                use crate::config::keybindings::BindableAction;
+
+                // Resolve configurable bindings first for navigation
+                match self.config.keybindings.resolve(&key) {
+                    Some(BindableAction::NavigateUp) => {
+                        if !filtered.is_empty() {
+                            *selected_idx = if *selected_idx == 0 {
+                                filtered.len() - 1
+                            } else {
+                                *selected_idx - 1
+                            };
+                            // Ensure selection stays visible
+                            if *selected_idx < *scroll {
+                                *scroll = *selected_idx;
+                            }
+                        }
+                    }
+                    Some(BindableAction::NavigateDown) => {
+                        if !filtered.is_empty() {
+                            *selected_idx = (*selected_idx + 1) % filtered.len();
+                            // Scroll forward when running off the bottom; a
+                            // conservative window of 10 rows keeps the selection
+                            // visible without knowing the exact pane height here.
+                            let visible_rows: usize = 10;
+                            if *selected_idx >= scroll.saturating_add(visible_rows) {
+                                *scroll = selected_idx.saturating_sub(visible_rows - 1);
+                            }
+                            if *selected_idx < *scroll {
+                                *scroll = *selected_idx;
+                            }
+                        }
+                    }
+                    _ => match key.code {
+                        KeyCode::Esc => {
+                            self.ui_state.modal = Modal::None;
+                        }
+                        KeyCode::Enter => {
+                            // Decide which branch to check out:
+                            //   - If filter produced matches, use the highlighted
+                            //     one (even when the user has typed something).
+                            //   - Otherwise fall back to the raw query text so a
+                            //     pasted branch name still works.
+                            let branch_label = if let Some(m) = filtered.get(*selected_idx) {
+                                m.local_name.clone()
+                            } else {
+                                let trimmed = query.trim();
+                                if trimmed.is_empty() {
+                                    return;
+                                }
+                                // Strip a leading "origin/" so we always get a
+                                // local branch name.
+                                trimmed
+                                    .strip_prefix("origin/")
+                                    .unwrap_or(trimmed)
+                                    .to_string()
+                            };
+                            let project_id = match &self.ui_state.modal {
+                                Modal::CheckoutBranch { project_id, .. } => *project_id,
+                                _ => return,
+                            };
+                            self.ui_state.modal = Modal::None;
+                            self.start_checkout_session(project_id, branch_label).await;
+                        }
+                        KeyCode::Backspace => {
+                            query.pop();
+                            self.refilter_checkout_branches();
+                        }
+                        KeyCode::Char(c) => {
+                            query.push(c);
+                            self.refilter_checkout_branches();
+                        }
+                        _ => {}
+                    },
+                }
+            }
+
             Modal::None => {}
         }
     }
@@ -261,6 +345,9 @@ impl App {
             UserCommand::NewSession => {
                 self.handle_new_session();
             }
+            UserCommand::CheckoutBranch => {
+                self.handle_checkout_branch().await;
+            }
             UserCommand::NewProject => {
                 self.ui_state.modal = Modal::PathInput {
                     title: "Add Project".to_string(),
@@ -272,8 +359,22 @@ impl App {
                     completer: PathCompleter::new(),
                 };
             }
+            UserCommand::ScanDirectory => {
+                self.ui_state.modal = Modal::PathInput {
+                    title: "Scan Directory".to_string(),
+                    prompt: "Enter directory to scan for git repos:".to_string(),
+                    value: std::env::current_dir()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default(),
+                    on_submit: InputAction::ScanDirectory,
+                    completer: PathCompleter::new(),
+                };
+            }
             UserCommand::DeleteSession => {
                 self.handle_delete_session();
+            }
+            UserCommand::RenameSession => {
+                self.handle_rename_session().await;
             }
             UserCommand::RestartSession => {
                 self.handle_restart_session();

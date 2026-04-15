@@ -1,8 +1,9 @@
-//! Rendering: main layout, session list, preview, info, shell, and status bar.
+//! Rendering: main layout, session list, preview/info/shell panes, status bar.
 
 use super::*;
 
 impl App {
+    /// Render the UI
     pub(super) fn render(&mut self, frame: &mut Frame) {
         let size = frame.area();
         self.ui_state.terminal_size = size;
@@ -77,6 +78,35 @@ impl App {
         );
     }
 
+    /// Build a styled tab title line for the pane header.
+    ///
+    /// `tabs` is the list of tab labels, `active` is the index of the currently
+    /// selected tab. The active tab is rendered bold in the accent color; inactive
+    /// tabs use the secondary text color. Tabs are separated by ` · `.
+    pub(super) fn build_pane_tabs(&self, tabs: &[&str], active: usize) -> Line<'static> {
+        let active_style = Style::default()
+            .fg(self.theme.text_accent)
+            .add_modifier(Modifier::BOLD);
+        let inactive_style = Style::default().fg(self.theme.text_secondary);
+        let sep_style = Style::default().fg(self.theme.text_secondary);
+
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        spans.push(Span::raw(" "));
+        for (i, tab) in tabs.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(" · ", sep_style));
+            }
+            let style = if i == active {
+                active_style
+            } else {
+                inactive_style
+            };
+            spans.push(Span::styled(tab.to_string(), style));
+        }
+        spans.push(Span::raw(" "));
+        Line::from(spans)
+    }
+
     /// Render the preview pane
     pub(super) fn render_preview(&mut self, frame: &mut Frame, area: Rect) {
         let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
@@ -86,8 +116,7 @@ impl App {
             None
         };
 
-        // Show tab indicator in title
-        let title = " [Preview] | Info | Shell ";
+        let title = self.build_pane_tabs(&["Preview", "Info", "Shell"], 0);
 
         let block = Block::default()
             .title(title)
@@ -115,11 +144,6 @@ impl App {
     /// Render the info pane (session metadata, PR details, AI summary)
     pub(super) fn render_info(&mut self, frame: &mut Frame, area: Rect) {
         let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
-        let dim_opacity = if !is_focused && self.config.dim_unfocused_preview {
-            Some(self.config.dim_unfocused_opacity)
-        } else {
-            None
-        };
         let on_project = self.is_project_selected();
 
         // Compute display string for the generate-summary hotkey (None = AI disabled)
@@ -134,9 +158,9 @@ impl App {
         };
 
         let title = if on_project {
-            " Shell | [Info] "
+            self.build_pane_tabs(&["Shell", "Info"], 1)
         } else {
-            " Preview | [Info] | Shell "
+            self.build_pane_tabs(&["Preview", "Info", "Shell"], 1)
         };
 
         let block = Block::default()
@@ -345,8 +369,7 @@ impl App {
 
         let info_view = InfoView::new(content, &self.theme)
             .block(block)
-            .scroll(self.ui_state.info_state.scroll_offset)
-            .dim_opacity(dim_opacity);
+            .scroll(self.ui_state.info_state.scroll_offset);
 
         frame.render_widget(info_view, area);
     }
@@ -361,9 +384,9 @@ impl App {
         };
 
         let title = if self.is_project_selected() {
-            " [Shell] | Info "
+            self.build_pane_tabs(&["Shell", "Info"], 0)
         } else {
-            " Preview | Info | [Shell] "
+            self.build_pane_tabs(&["Preview", "Info", "Shell"], 2)
         };
 
         let block = Block::default()
@@ -388,6 +411,7 @@ impl App {
         frame.render_widget(preview, area);
     }
 
+    /// Render status bar
     pub(super) fn render_status_bar(&self, frame: &mut Frame, area: Rect) {
         if area.height < 2 {
             return;

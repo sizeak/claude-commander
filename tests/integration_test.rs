@@ -190,6 +190,7 @@ async fn test_session_manager_create_session() {
             &project_id,
             "test-session".to_string(),
             Some("bash".to_string()),
+            None,
         )
         .await
         .expect("prepare_session should succeed");
@@ -251,6 +252,7 @@ async fn test_session_manager_restart() {
             &project_id,
             "restart-test".to_string(),
             Some("bash".to_string()),
+            None,
         )
         .await
         .unwrap();
@@ -530,6 +532,7 @@ async fn test_create_session_no_remote_falls_back() {
             &project_id,
             "fallback-test".to_string(),
             Some("bash".to_string()),
+            None,
         )
         .await
         .expect("prepare_session should succeed");

@@ -3,16 +3,25 @@
 //! Handles the creation, restart, and termination of sessions,
 //! coordinating between tmux and git operations.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tracing::{info, instrument, warn};
+use tracing::{debug, info, instrument, warn};
 
 use crate::config::{AppState, ConfigStore, StateStore};
 use crate::error::{Result, SessionError};
 use crate::git::{DiffCache, DiffInfo, GitBackend, WorktreeManager};
 use crate::session::{Project, ProjectId, SessionId, SessionStatus, WorktreeSession};
 use crate::tmux::{CapturedContent, ContentCapture, StatusBarInfo, TmuxExecutor};
+
+/// Result of scanning a directory for git repositories
+#[derive(Debug, Clone)]
+pub struct ScanResult {
+    /// Number of new projects added
+    pub added: usize,
+    /// Number of repos skipped because they already existed
+    pub skipped: usize,
+}
 
 mod content;
 mod lifecycle;
@@ -151,10 +160,16 @@ pub fn sanitize_name(name: &str) -> String {
 /// title.
 ///
 /// Returns `Some(branch)` when the branch carries information beyond what
-/// sanitizing the title would produce. Returns `None` when the branch matches
-/// `sanitize_name(title)` either exactly or as the last `/`-segment (i.e. a
-/// configured `branch_prefix` like `"user/"` is treated as noise).
+/// the title already conveys. Returns `None` when:
+/// - the title is literally identical to the branch (the checkout-branch
+///   flow sets these equal — no point rendering the same string twice), or
+/// - the branch matches `sanitize_name(title)` either exactly or as the
+///   last `/`-segment (so a configured `branch_prefix` like `"user/"` is
+///   treated as noise).
 pub fn display_branch<'a>(title: &str, branch: &'a str) -> Option<&'a str> {
+    if title == branch {
+        return None;
+    }
     let sanitized = sanitize_name(title);
     if sanitized.is_empty() {
         return Some(branch);

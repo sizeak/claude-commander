@@ -1,4 +1,4 @@
-//! Modal rendering: input, confirm, error, help, loading, quick-switch overlays.
+//! Modal rendering: help, input, confirm, error, settings, quick-switch, checkout overlays.
 
 use super::*;
 
@@ -275,6 +275,133 @@ impl App {
                     frame.render_widget(Paragraph::new(line), line_area);
                 }
             }
+
+            Modal::CheckoutBranch {
+                query,
+                filtered,
+                selected_idx,
+                scroll,
+                fetching,
+                ..
+            } => {
+                // Target up to 12 visible branch rows; grow to fill lower two
+                // thirds of the screen if there are many, but cap at a
+                // reasonable height.
+                let desired_visible = filtered.len().clamp(1, 12);
+                // border(2) + input(1) + hint(1) + rows
+                let modal_height = (4 + desired_visible) as u16;
+                let modal_width = (area.width * 70 / 100).max(50);
+
+                let modal_area = Rect {
+                    x: area.x + (area.width.saturating_sub(modal_width)) / 2,
+                    y: area.y + area.height / 6,
+                    width: modal_width,
+                    height: modal_height.min(area.height),
+                };
+
+                frame.render_widget(Clear, modal_area);
+
+                let title = if *fetching {
+                    " Checkout Branch — fetching origin… "
+                } else {
+                    " Checkout Branch "
+                };
+                let block = Block::default()
+                    .title(title)
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.theme.modal_info));
+
+                let inner = block.inner(modal_area);
+                frame.render_widget(block, modal_area);
+
+                if inner.height == 0 {
+                    return;
+                }
+
+                // Input line
+                let input_line = Line::from(format!("> {}_", query));
+                let input_area = Rect {
+                    height: 1,
+                    ..inner
+                };
+                frame.render_widget(Paragraph::new(input_line), input_area);
+
+                // Hint line
+                let hint = if filtered.is_empty() {
+                    if query.is_empty() {
+                        "No branches found. Press Esc to cancel.".to_string()
+                    } else {
+                        format!(
+                            "No match — press Enter to use '{}' as-is, or keep typing.",
+                            query
+                        )
+                    }
+                } else {
+                    format!(
+                        "{} match{} — ↑/↓ to select, Enter to checkout, Esc to cancel",
+                        filtered.len(),
+                        if filtered.len() == 1 { "" } else { "es" }
+                    )
+                };
+                if inner.height >= 2 {
+                    let hint_area = Rect {
+                        y: inner.y + 1,
+                        height: 1,
+                        ..inner
+                    };
+                    frame.render_widget(
+                        Paragraph::new(Line::from(Span::styled(
+                            hint,
+                            Style::default().fg(self.theme.text_secondary),
+                        ))),
+                        hint_area,
+                    );
+                }
+
+                // Match lines
+                let list_top = inner.y + 2;
+                if inner.height < 3 {
+                    return;
+                }
+                let list_height = (inner.height - 2) as usize;
+                let visible_end = (scroll + list_height).min(filtered.len());
+                for (i, m) in filtered[*scroll..visible_end].iter().enumerate() {
+                    let row = list_top + i as u16;
+                    if row >= inner.y + inner.height {
+                        break;
+                    }
+                    let abs_idx = *scroll + i;
+                    let is_selected = abs_idx == *selected_idx;
+                    let marker = if m.is_remote { "⟳ " } else { "● " };
+                    let marker_color = if m.is_remote {
+                        self.theme.text_secondary
+                    } else {
+                        self.theme.status_running
+                    };
+
+                    let spans = vec![
+                        Span::styled(
+                            format!(" {}", marker),
+                            Style::default().fg(marker_color),
+                        ),
+                        Span::styled(
+                            m.display_name.clone(),
+                            if is_selected {
+                                self.theme.selection()
+                            } else {
+                                Style::default()
+                            },
+                        ),
+                    ];
+                    let line = Line::from(spans);
+                    let line_area = Rect {
+                        y: row,
+                        height: 1,
+                        ..inner
+                    };
+                    frame.render_widget(Paragraph::new(line), line_area);
+                }
+            }
         }
     }
 
@@ -342,6 +469,7 @@ impl App {
     }
 }
 
+/// Helper to center a rect within an area
 pub(super) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let popup_layout = Layout::default()
         .direction(Direction::Vertical)

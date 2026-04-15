@@ -130,6 +130,25 @@ pub enum Modal {
         matches: Vec<QuickSwitchMatch>,
         selected_idx: usize,
     },
+    /// Checkout-existing-branch modal. Shows an input field plus a
+    /// filterable/scrollable list of branches (local + remote) and
+    /// creates a worktree session from the selected branch on submit.
+    CheckoutBranch {
+        /// Project the session will belong to
+        project_id: ProjectId,
+        /// Current input text (filter + paste target)
+        query: String,
+        /// All branches loaded from the repo (source for filtering)
+        all_branches: Vec<BranchEntry>,
+        /// Filtered view of branches matching `query`
+        filtered: Vec<BranchEntry>,
+        /// Index into `filtered` of the currently highlighted branch
+        selected_idx: usize,
+        /// Scroll offset into `filtered` (first visible row)
+        scroll: usize,
+        /// True while `git fetch origin` is running in the background
+        fetching: bool,
+    },
 }
 
 /// A session match in the quick-switch modal
@@ -140,6 +159,21 @@ pub struct QuickSwitchMatch {
     pub branch: String,
     pub project_name: String,
     pub status: SessionStatus,
+}
+
+/// A single branch entry in the checkout modal list
+#[derive(Debug, Clone)]
+pub struct BranchEntry {
+    /// Local branch name used for checkout (e.g. `"feature-auth"`).
+    /// For remote-only branches this is the remote ref without the
+    /// `origin/` prefix.
+    pub local_name: String,
+    /// Label shown in the UI — for remote-only branches this is the
+    /// full `origin/<name>` form; for local branches it's the same as
+    /// `local_name`.
+    pub display_name: String,
+    /// True when this branch only exists remotely (no local tracking branch).
+    pub is_remote: bool,
 }
 
 /// Which tab is active in the settings modal
@@ -216,6 +250,8 @@ pub enum SettingsEditing {
 pub enum InputAction {
     CreateSession { project_id: ProjectId },
     AddProject,
+    ScanDirectory,
+    RenameSession { session_id: SessionId },
 }
 
 /// Action to perform when confirm modal is confirmed

@@ -248,7 +248,9 @@ async fn main() -> Result<()> {
             };
 
             println!("Creating session '{}'...", name);
-            let session_id = manager.prepare_session(&project_id, name, program).await?;
+            let session_id = manager
+                .prepare_session(&project_id, name, program, None)
+                .await?;
             manager.finalize_session(&session_id).await?;
 
             println!("Session created: {}", session_id);

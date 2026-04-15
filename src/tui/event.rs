@@ -96,6 +96,13 @@ pub enum StateUpdate {
     AgentStatesUpdated {
         states: HashMap<SessionId, AgentState>,
     },
+    /// Background `git fetch origin` kicked off by the Checkout modal
+    /// has finished — the modal should refresh its branch list if still open.
+    CheckoutFetchComplete {
+        project_id: ProjectId,
+        /// Fresh branch list produced after the fetch completed.
+        branches: Vec<(String, bool)>,
+    },
     /// Preview/diff/shell data ready from background fetch
     PreviewReady {
         /// Which session this data is for (None if project-level)
@@ -126,8 +133,12 @@ pub enum UserCommand {
     NewSession,
     /// Create new project
     NewProject,
+    /// Checkout an existing branch into a new worktree session
+    CheckoutBranch,
     /// Delete/kill current session
     DeleteSession,
+    /// Rename the currently selected session (UI title only)
+    RenameSession,
     /// Restart current session (kill tmux and recreate)
     RestartSession,
     /// Remove an entire project
@@ -170,6 +181,8 @@ pub enum UserCommand {
     QuickSwitch,
     /// Generate AI summary for the current session (Info pane only)
     GenerateSummary,
+    /// Scan a directory for git repos and add them as projects
+    ScanDirectory,
 }
 
 impl UserCommand {
@@ -211,7 +224,9 @@ impl From<BindableAction> for UserCommand {
             BindableAction::SelectShell => Self::SelectShell,
             BindableAction::NewSession => Self::NewSession,
             BindableAction::NewProject => Self::NewProject,
+            BindableAction::CheckoutBranch => Self::CheckoutBranch,
             BindableAction::DeleteSession => Self::DeleteSession,
+            BindableAction::RenameSession => Self::RenameSession,
             BindableAction::RestartSession => Self::RestartSession,
             BindableAction::RemoveProject => Self::RemoveProject,
             BindableAction::OpenInEditor => Self::OpenInEditor,
@@ -228,6 +243,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::PageUp => Self::PageUp,
             BindableAction::PageDown => Self::PageDown,
             BindableAction::GenerateSummary => Self::GenerateSummary,
+            BindableAction::ScanDirectory => Self::ScanDirectory,
         }
     }
 }
@@ -550,6 +566,11 @@ mod tests {
                 UserCommand::DeleteSession,
             ),
             (
+                KeyCode::Char('r'),
+                KeyModifiers::NONE,
+                UserCommand::RenameSession,
+            ),
+            (
                 KeyCode::Char('R'),
                 KeyModifiers::SHIFT,
                 UserCommand::RestartSession,
@@ -574,6 +595,11 @@ mod tests {
                 KeyModifiers::NONE,
                 UserCommand::OpenPullRequest,
             ),
+            (
+                KeyCode::Char('S'),
+                KeyModifiers::SHIFT,
+                UserCommand::ScanDirectory,
+            ),
         ];
 
         for (code, modifiers, expected) in cases {
@@ -593,6 +619,16 @@ mod tests {
                 modifiers
             );
         }
+    }
+
+    #[test]
+    fn test_scan_directory_key() {
+        let b = kb();
+        let key = KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::ScanDirectory)
+        ));
     }
 
     #[test]

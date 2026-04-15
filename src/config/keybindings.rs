@@ -29,7 +29,9 @@ pub enum BindableAction {
     SelectShell,
     NewSession,
     NewProject,
+    CheckoutBranch,
     DeleteSession,
+    RenameSession,
     RestartSession,
     RemoveProject,
     OpenInEditor,
@@ -46,6 +48,7 @@ pub enum BindableAction {
     PageUp,
     PageDown,
     GenerateSummary,
+    ScanDirectory,
 }
 
 impl BindableAction {
@@ -57,11 +60,14 @@ impl BindableAction {
         Self::SelectShell,
         Self::NewSession,
         Self::NewProject,
+        Self::CheckoutBranch,
         Self::DeleteSession,
+        Self::RenameSession,
         Self::RestartSession,
         Self::RemoveProject,
         Self::OpenInEditor,
         Self::OpenPullRequest,
+        Self::ScanDirectory,
         Self::TogglePane,
         Self::TogglePaneReverse,
         Self::ShrinkLeftPane,
@@ -85,7 +91,9 @@ impl BindableAction {
             Self::SelectShell => "select_shell",
             Self::NewSession => "new_session",
             Self::NewProject => "new_project",
+            Self::CheckoutBranch => "checkout_branch",
             Self::DeleteSession => "delete_session",
+            Self::RenameSession => "rename_session",
             Self::RestartSession => "restart_session",
             Self::RemoveProject => "remove_project",
             Self::OpenInEditor => "open_in_editor",
@@ -102,6 +110,7 @@ impl BindableAction {
             Self::PageUp => "page_up",
             Self::PageDown => "page_down",
             Self::GenerateSummary => "generate_summary",
+            Self::ScanDirectory => "scan_directory",
         }
     }
 
@@ -114,7 +123,9 @@ impl BindableAction {
             Self::SelectShell => "Open shell in worktree",
             Self::NewSession => "New worktree session",
             Self::NewProject => "New project (add git repo)",
+            Self::CheckoutBranch => "Checkout existing branch",
             Self::DeleteSession => "Delete/kill session",
+            Self::RenameSession => "Rename session",
             Self::RestartSession => "Restart session",
             Self::RemoveProject => "Remove project",
             Self::OpenInEditor => "Open in editor/IDE",
@@ -131,6 +142,7 @@ impl BindableAction {
             Self::PageUp => "Page up",
             Self::PageDown => "Page down",
             Self::GenerateSummary => "Generate AI summary",
+            Self::ScanDirectory => "Scan directory for repos",
         }
     }
 
@@ -141,11 +153,14 @@ impl BindableAction {
             Self::SelectShell
             | Self::NewSession
             | Self::NewProject
+            | Self::CheckoutBranch
             | Self::DeleteSession
+            | Self::RenameSession
             | Self::RestartSession
             | Self::RemoveProject
             | Self::OpenInEditor
-            | Self::OpenPullRequest => "Session Management",
+            | Self::OpenPullRequest
+            | Self::ScanDirectory => "Session Management",
             Self::TogglePane
             | Self::TogglePaneReverse
             | Self::ShrinkLeftPane
@@ -168,7 +183,9 @@ impl FromStr for BindableAction {
             "select_shell" => Ok(Self::SelectShell),
             "new_session" => Ok(Self::NewSession),
             "new_project" => Ok(Self::NewProject),
+            "checkout_branch" => Ok(Self::CheckoutBranch),
             "delete_session" => Ok(Self::DeleteSession),
+            "rename_session" => Ok(Self::RenameSession),
             "restart_session" => Ok(Self::RestartSession),
             "remove_project" => Ok(Self::RemoveProject),
             "open_in_editor" => Ok(Self::OpenInEditor),
@@ -185,6 +202,7 @@ impl FromStr for BindableAction {
             "page_up" => Ok(Self::PageUp),
             "page_down" => Ok(Self::PageDown),
             "generate_summary" => Ok(Self::GenerateSummary),
+            "scan_directory" => Ok(Self::ScanDirectory),
             _ => Err(format!("unknown action: {s}")),
         }
     }
@@ -469,8 +487,16 @@ impl Default for KeyBindings {
             vec![kb(KeyCode::Char('N'), shift)],
         );
         bindings.insert(
+            BindableAction::CheckoutBranch,
+            vec![kb(KeyCode::Char('c'), none)],
+        );
+        bindings.insert(
             BindableAction::DeleteSession,
             vec![kb(KeyCode::Char('d'), none)],
+        );
+        bindings.insert(
+            BindableAction::RenameSession,
+            vec![kb(KeyCode::Char('r'), none)],
         );
         bindings.insert(
             BindableAction::RestartSession,
@@ -517,6 +543,11 @@ impl Default for KeyBindings {
         bindings.insert(
             BindableAction::PageDown,
             vec![kb(KeyCode::Char('d'), ctrl), kb(KeyCode::PageDown, none)],
+        );
+
+        bindings.insert(
+            BindableAction::ScanDirectory,
+            vec![kb(KeyCode::Char('S'), shift)],
         );
 
         // Info Pane

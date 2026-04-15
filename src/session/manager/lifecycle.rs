@@ -8,12 +8,18 @@ impl SessionManager {
     /// This inserts the session into state immediately so the UI can show a
     /// spinner. Call `finalize_session` in a background task to do the heavy
     /// git/tmux work.
+    ///
+    /// When `base_branch` is `Some`, the worktree will be created against
+    /// that branch (existing local branch, or created from `origin/<branch>`
+    /// if only the remote tracking branch exists). When `None`, a new branch
+    /// is generated from `title` using the configured branch prefix.
     #[instrument(skip(self))]
     pub async fn prepare_session(
         &self,
         project_id: &ProjectId,
         title: String,
         program: Option<String>,
+        base_branch: Option<String>,
     ) -> Result<SessionId> {
         let program = program.unwrap_or_else(|| self.config_store.read().default_program.clone());
 
@@ -25,7 +31,10 @@ impl SessionManager {
                 .ok_or_else(|| SessionError::ProjectNotFound(project_id.to_string()))?;
         }
 
-        let branch_name = self.generate_branch_name(&title);
+        let branch_name = match base_branch {
+            Some(b) => b,
+            None => self.generate_branch_name(&title),
+        };
 
         let session = WorktreeSession::new_creating(*project_id, title, branch_name, program);
         let session_id = session.id;
@@ -111,8 +120,15 @@ impl SessionManager {
         let (branch_exists, start_point) = {
             let backend = GitBackend::open(&repo_path)?;
             let exists = backend.branch_exists(&branch_name)?;
-            let remote_ref = format!("refs/remotes/origin/{}", main_branch);
-            let sp = if backend.ref_exists(&remote_ref)? {
+            // Prefer origin/<branch_name> as the start point when the local
+            // branch doesn't exist — this supports checking out an existing
+            // remote branch (e.g. via the Checkout modal) as well as falling
+            // back to origin/<main_branch> when creating a fresh branch.
+            let branch_remote_ref = format!("refs/remotes/origin/{}", branch_name);
+            let main_remote_ref = format!("refs/remotes/origin/{}", main_branch);
+            let sp = if !exists && backend.ref_exists(&branch_remote_ref)? {
+                Some(format!("origin/{}", branch_name))
+            } else if backend.ref_exists(&main_remote_ref)? {
                 Some(format!("origin/{}", main_branch))
             } else {
                 None

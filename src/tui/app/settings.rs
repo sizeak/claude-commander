@@ -1,4 +1,4 @@
-//! Settings modal: row building, rendering, edit application, and key handling.
+//! Settings modal: row building, rendering, editing, and key handling.
 
 use super::*;
 

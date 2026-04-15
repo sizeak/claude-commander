@@ -1,4 +1,4 @@
-//! State management: state updates, session sync, list refresh, and selection persistence.
+//! State management: state updates, session sync, list refresh, selection persistence.
 
 use super::*;
 
@@ -171,6 +171,60 @@ impl App {
                 }
                 self.ui_state.agent_states = states;
                 self.refresh_list_items().await;
+            }
+            StateUpdate::CheckoutFetchComplete {
+                project_id: updated_project,
+                branches,
+            } => {
+                // Only apply if the Checkout modal is still open for the
+                // same project. Re-build the entry list and re-run the
+                // current filter so the highlighted branch stays sensible.
+                if let Modal::CheckoutBranch {
+                    project_id,
+                    all_branches,
+                    fetching,
+                    ..
+                } = &mut self.ui_state.modal
+                    && *project_id == updated_project
+                {
+                    *fetching = false;
+
+                    // Reconstruct BranchEntry list from (name, is_remote) pairs,
+                    // mirroring `load_branch_entries`'s dedup behavior.
+                    let mut local_names: std::collections::HashSet<String> =
+                        std::collections::HashSet::new();
+                    let mut entries: Vec<BranchEntry> = Vec::new();
+                    for (name, is_remote) in &branches {
+                        if !is_remote {
+                            local_names.insert(name.clone());
+                            entries.push(BranchEntry {
+                                local_name: name.clone(),
+                                display_name: name.clone(),
+                                is_remote: false,
+                            });
+                        }
+                    }
+                    for (name, is_remote) in &branches {
+                        if !is_remote {
+                            continue;
+                        }
+                        let local = name
+                            .split_once('/')
+                            .map(|(_, rest)| rest.to_string())
+                            .unwrap_or_else(|| name.clone());
+                        if local_names.contains(&local) {
+                            continue;
+                        }
+                        entries.push(BranchEntry {
+                            local_name: local,
+                            display_name: name.clone(),
+                            is_remote: true,
+                        });
+                    }
+
+                    *all_branches = entries;
+                    self.refilter_checkout_branches();
+                }
             }
             StateUpdate::ExternalChange => {
                 debug!("External state change detected, refreshing UI");

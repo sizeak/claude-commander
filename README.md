@@ -75,6 +75,42 @@ The left pane shows projects and their worktree sessions in a tree view. Project
 
 Each session row shows the title and, in `[brackets]`, the branch name — but only when the branch differs from what the title would sanitize to. A session titled "Feature Auth" with branch `feature-auth` (or `prefix/feature-auth` when `branch_prefix` is set) renders as just `Feature Auth`; the bracket reappears only when the branch carries new information, e.g. you renamed it to `feature-auth-v2` outside the app.
 
+### Status Symbols
+
+Each session displays a status indicator to the left of its name:
+
+| Symbol | Meaning |
+|--------|---------|
+| `⠋` (animated spinner) | Session is being created |
+| `●` (rainbow cycling) | Agent is actively working |
+| `?` | Agent is waiting for user input |
+| `◆` | Session has unread output |
+| `●` | Running (agent idle) |
+| `○` | Stopped |
+
+Indicators are shown in priority order — for example, a running session with unread output shows `◆` rather than `●`.
+
+### PR Badges
+
+When a session has a GitHub PR, a badge appears next to the session name. The badge color indicates the PR state:
+
+| Color | Meaning |
+|-------|---------|
+| Green | Open |
+| Purple | Open and awaiting review |
+| Grey | Draft |
+| Red | Closed |
+| Dark purple | Merged |
+
+The info pane shows additional detail when a PR is present, including a CI checks indicator:
+
+| Symbol | Meaning |
+|--------|---------|
+| `✓` (green) | All checks passing |
+| `✗` (red) | Checks failing |
+| `◌` (orange) | Checks pending |
+| `—` (grey) | No checks configured |
+
 ### Keyboard Shortcuts
 
 All keybindings below are defaults and can be customised via the `[keybindings]` config table (see [Configuration](#configuration)).
@@ -86,17 +122,21 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `Enter` | Attach to selected session |
 | `n` | New worktree session |
 | `N` | Add new project |
+| `c` | Checkout existing branch into a new worktree session (fetches `origin` in the background, filterable list) |
 | `d` | Delete session |
+| `r` | Rename session (UI title only; underlying worktree, branch, and tmux session are unchanged) |
 | `R` | Restart session (kill tmux + recreate; adds `--resume` when `resume_session = true`) |
 | `D` | Remove project |
 | `.` or `Ctrl-.` | Open in editor/IDE |
 | `o` | Open PR in browser (when the session has a PR) |
+| `S` | Scan directory for git repos and add them as projects |
 | `s` | Open shell in worktree |
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
 | `<` / `>` | Shrink / grow left pane |
 | `Ctrl-u/d` or `PageUp/Down` | Page up/down in preview |
 | `1`–`99` | Jump to session by number (requires `show_session_numbers`) |
 | `g` | Generate AI summary (Info pane only) |
+| `,` | Open settings |
 | `?` | Show help |
 | `q` or `Ctrl-c` | Quit |
 
@@ -222,27 +262,6 @@ the summary section shows a placeholder instead.
 
 Environment variable overrides: `CC_AI_SUMMARY_ENABLED`, `CC_AI_SUMMARY_MODEL`.
 
-## Architecture
-
-The TUI event loop (`App`) owns the terminal and render state. It sends user commands to a `SessionManager` which coordinates tmux and git operations via async channels. Git read operations use gitoxide (pure Rust); worktree mutations and tmux use CLI subprocesses with semaphore-based throttling.
-
-```
-┌───────────────────────────────────────────┐
-│              TUI (ratatui)                │
-│  Renders widgets, handles input           │
-└─────────────────┬─────────────────────────┘
-                  │ mpsc channels
-┌─────────────────▼─────────────────────────┐
-│           SessionManager                  │
-│  Session lifecycle, state persistence     │
-└──────┬────────────────────┬───────────────┘
-       │                    │
-┌──────▼──────┐      ┌──────▼──────┐
-│ TmuxExecutor│      │ GitBackend  │
-│ (async CLI) │      │ (gitoxide)  │
-└─────────────┘      └─────────────┘
-```
-
 ## Data Storage
 
 Paths are platform-specific, determined by the `directories` crate:
@@ -264,6 +283,27 @@ claude-commander --debug
 
 # Check for issues
 cargo clippy
+```
+
+### Architecture
+
+The TUI event loop (`App`) owns the terminal and render state. It sends user commands to a `SessionManager` which coordinates tmux and git operations via async channels. Git read operations use gitoxide (pure Rust); worktree mutations and tmux use CLI subprocesses with semaphore-based throttling.
+
+```
+┌───────────────────────────────────────────┐
+│              TUI (ratatui)                │
+│  Renders widgets, handles input           │
+└─────────────────┬─────────────────────────┘
+                  │ mpsc channels
+┌─────────────────▼─────────────────────────┐
+│           SessionManager                  │
+│  Session lifecycle, state persistence     │
+└──────┬────────────────────┬───────────────┘
+       │                    │
+┌──────▼──────┐      ┌──────▼──────┐
+│ TmuxExecutor│      │ GitBackend  │
+│ (async CLI) │      │ (gitoxide)  │
+└─────────────┘      └─────────────┘
 ```
 
 ## License

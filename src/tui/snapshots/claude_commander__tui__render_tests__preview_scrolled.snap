@@ -2,7 +2,7 @@
 source: src/tui/render_tests.rs
 expression: terminal.backend()
 ---
-"┌ [Preview] | Info | Shell ────────────────────────────────┐"
+"┌ Preview · Info · Shell ──────────────────────────────────┐"
 "│Line 20: some content here                                │"
 "│Line 21: some content here                                │"
 "│Line 22: some content here                                │"

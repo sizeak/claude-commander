@@ -1,8 +1,9 @@
-//! Action handlers: session management, modal submissions, editor/PR integration.
+//! User actions: session selection, creation, deletion, editor/PR/shell interactions.
 
 use super::*;
 
 impl App {
+    /// Check if the selected session is in Creating state
     pub(super) fn selected_session_is_creating(&self) -> bool {
         self.ui_state.list_items.iter().any(|item| {
             matches!(
@@ -325,6 +326,188 @@ impl App {
         }
     }
 
+    /// Open the Checkout Branch modal.
+    ///
+    /// Loads the current list of branches synchronously via gix and kicks
+    /// off `git fetch origin` in a background task so the list can be
+    /// refreshed once remote changes are pulled in.
+    pub(super) async fn handle_checkout_branch(&mut self) {
+        let Some(project_id) = self.ui_state.selected_project_id else {
+            self.ui_state.status_message = Some((
+                "Select a project first (use N to add one)".to_string(),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            return;
+        };
+
+        let repo_path = {
+            let state = self.store.read().await;
+            match state.get_project(&project_id) {
+                Some(p) => p.repo_path.clone(),
+                None => {
+                    self.ui_state.modal = Modal::Error {
+                        message: "Project not found".to_string(),
+                    };
+                    return;
+                }
+            }
+        };
+
+        let all_branches = match load_branch_entries(&repo_path) {
+            Ok(b) => b,
+            Err(e) => {
+                self.ui_state.modal = Modal::Error {
+                    message: format!("Failed to list branches: {}", e),
+                };
+                return;
+            }
+        };
+
+        let filtered = all_branches.clone();
+        self.ui_state.modal = Modal::CheckoutBranch {
+            project_id,
+            query: String::new(),
+            all_branches,
+            filtered,
+            selected_idx: 0,
+            scroll: 0,
+            fetching: true,
+        };
+
+        // Spawn `git fetch origin` in the background; when it finishes,
+        // post a CheckoutFetchComplete state update so the modal (if still
+        // open) can refresh its list.
+        let tx = self.event_loop.sender();
+        let repo_path_bg = repo_path.clone();
+        tokio::spawn(async move {
+            let _ = tokio::process::Command::new("git")
+                .current_dir(&repo_path_bg)
+                .args(["fetch", "origin"])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .output()
+                .await;
+
+            // Re-list branches after the fetch. Run the sync gix call in a
+            // blocking task so we don't stall the async runtime.
+            let branches = tokio::task::spawn_blocking(move || {
+                crate::git::GitBackend::open(&repo_path_bg)
+                    .and_then(|b| b.list_branches())
+                    .unwrap_or_default()
+            })
+            .await
+            .unwrap_or_default();
+
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::CheckoutFetchComplete {
+                    project_id,
+                    branches,
+                }))
+                .await;
+        });
+    }
+
+    /// Case-insensitive filter over the Checkout modal's branch list.
+    pub(super) fn refilter_checkout_branches(&mut self) {
+        if let Modal::CheckoutBranch {
+            query,
+            all_branches,
+            filtered,
+            selected_idx,
+            scroll,
+            ..
+        } = &mut self.ui_state.modal
+        {
+            let q = query.to_lowercase();
+            *filtered = if q.is_empty() {
+                all_branches.clone()
+            } else {
+                all_branches
+                    .iter()
+                    .filter(|b| {
+                        b.local_name.to_lowercase().contains(&q)
+                            || b.display_name.to_lowercase().contains(&q)
+                    })
+                    .cloned()
+                    .collect()
+            };
+
+            if *selected_idx >= filtered.len() {
+                *selected_idx = filtered.len().saturating_sub(1);
+            }
+            if *scroll > *selected_idx {
+                *scroll = *selected_idx;
+            }
+        }
+    }
+
+    /// Start creating a worktree session from an existing branch.
+    ///
+    /// `branch_name` is the local branch name (remote tracking refs should
+    /// already have had their `origin/` prefix stripped before calling).
+    /// The session title is derived from the branch name so the worktree
+    /// directory uses the same naming as a manually-named new session.
+    pub(super) async fn start_checkout_session(&mut self, project_id: ProjectId, branch_name: String) {
+        let branch_name = branch_name.trim().to_string();
+        if branch_name.is_empty() {
+            return;
+        }
+
+        // Use the branch name verbatim as the session title. This keeps
+        // `display_branch` from rendering a redundant `[branch]` annotation
+        // in the list (it short-circuits on exact title == branch match)
+        // and the worktree directory still comes out sensibly because
+        // `sanitize_name` handles slashes and special chars.
+        let title = branch_name.clone();
+
+        let session_id = match self
+            .session_manager
+            .prepare_session(&project_id, title, None, Some(branch_name.clone()))
+            .await
+        {
+            Ok(id) => id,
+            Err(e) => {
+                self.ui_state.modal = Modal::Error {
+                    message: format!("Failed to create session: {}", e),
+                };
+                return;
+            }
+        };
+
+        // Refresh list and select the new placeholder
+        self.refresh_list_items().await;
+        if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
+            matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
+        }) {
+            self.ui_state.list_state.select(Some(idx));
+        }
+        self.update_selection();
+
+        // Spawn background task for heavy work (same pattern as NewSession)
+        let session_manager = self.session_manager.clone();
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            match session_manager.finalize_session(&session_id).await {
+                Ok(sid) => {
+                    let _ = tx
+                        .send(AppEvent::StateUpdate(StateUpdate::SessionCreated {
+                            session_id: sid,
+                        }))
+                        .await;
+                }
+                Err(e) => {
+                    let _ = tx
+                        .send(AppEvent::StateUpdate(StateUpdate::SessionCreateFailed {
+                            session_id,
+                            message: format!("Failed to create session: {}", e),
+                        }))
+                        .await;
+                }
+            }
+        });
+    }
+
     /// Open the quick-switch modal with all sessions
     pub(super) async fn open_quick_switch(&mut self) {
         let matches = self.gather_quick_switch_matches("").await;
@@ -468,6 +651,28 @@ impl App {
         }
     }
 
+    /// Handle rename session - show input modal pre-filled with current title.
+    /// Only the displayed title is changed; the underlying worktree, branch,
+    /// and tmux session keep their original names.
+    pub(super) async fn handle_rename_session(&mut self) {
+        let Some(session_id) = self.ui_state.selected_session_id else {
+            return;
+        };
+        let current_title = {
+            let state = self.store.read().await;
+            match state.get_session(&session_id) {
+                Some(s) => s.title.clone(),
+                None => return,
+            }
+        };
+        self.ui_state.modal = Modal::Input {
+            title: "Rename Session".to_string(),
+            prompt: "Enter new session name:".to_string(),
+            value: current_title,
+            on_submit: InputAction::RenameSession { session_id },
+        };
+    }
+
     /// Handle input modal submission
     pub(super) async fn handle_input_submit(&mut self, action: InputAction, value: String) {
         match action {
@@ -484,7 +689,7 @@ impl App {
                 self.ui_state.modal = Modal::None;
                 let session_id = match self
                     .session_manager
-                    .prepare_session(&project_id, value, None)
+                    .prepare_session(&project_id, value, None, None)
                     .await
                 {
                     Ok(id) => id,
@@ -555,6 +760,103 @@ impl App {
                     Err(e) => {
                         self.ui_state.modal = Modal::Error {
                             message: format!("Failed to add project: {}", e),
+                        };
+                    }
+                }
+            }
+            InputAction::RenameSession { session_id } => {
+                let new_title = value.trim().to_string();
+                if new_title.is_empty() {
+                    self.ui_state.status_message = Some((
+                        "Session name cannot be empty".to_string(),
+                        Instant::now() + Duration::from_secs(3),
+                    ));
+                    return;
+                }
+                let _ = self
+                    .store
+                    .mutate(move |state| {
+                        if let Some(session) = state.get_session_mut(&session_id) {
+                            session.title = new_title;
+                        }
+                    })
+                    .await;
+                self.refresh_list_items().await;
+            }
+            InputAction::ScanDirectory => {
+                let expanded = crate::tui::path_completer::expand_tilde(value.trim());
+                let path = PathBuf::from(expanded);
+                if !path.exists() {
+                    self.ui_state.modal = Modal::Error {
+                        message: format!("Path does not exist: {}", path.display()),
+                    };
+                    return;
+                }
+                if !path.is_dir() {
+                    self.ui_state.modal = Modal::Error {
+                        message: format!("Not a directory: {}", path.display()),
+                    };
+                    return;
+                }
+
+                // If the path itself is a git repo, just add it directly
+                if path.join(".git").exists() {
+                    match self.session_manager.add_project(path).await {
+                        Ok(project_id) => {
+                            self.ui_state.status_message = Some((
+                                format!("Added project {}", project_id),
+                                Instant::now() + Duration::from_secs(3),
+                            ));
+                            self.refresh_list_items().await;
+                            if let Some(idx) =
+                                self.ui_state.list_items.iter().position(|item| {
+                                    matches!(item, SessionListItem::Project { id, .. } if *id == project_id)
+                                })
+                            {
+                                self.ui_state.list_state.select(Some(idx));
+                            }
+                        }
+                        Err(e) => {
+                            self.ui_state.modal = Modal::Error {
+                                message: format!("Failed to add project: {}", e),
+                            };
+                        }
+                    }
+                    return;
+                }
+
+                // Show loading modal
+                self.ui_state.modal = Modal::Loading {
+                    title: "Scanning".to_string(),
+                    message: format!("Scanning {} for git repos…", path.display()),
+                };
+
+                match self.session_manager.scan_directory(&path).await {
+                    Ok(result) => {
+                        if result.added == 0 && result.skipped == 0 {
+                            self.ui_state.modal = Modal::Error {
+                                message: format!(
+                                    "No git repositories found in {}",
+                                    path.display()
+                                ),
+                            };
+                        } else {
+                            self.ui_state.modal = Modal::None;
+                            self.ui_state.status_message = Some((
+                                format!(
+                                    "Added {} project{} ({} already existed)",
+                                    result.added,
+                                    if result.added == 1 { "" } else { "s" },
+                                    result.skipped,
+                                ),
+                                Instant::now() + Duration::from_secs(5),
+                            ));
+                            self.refresh_list_items().await;
+                        }
+                    }
+                    Err(e) => {
+                        self.ui_state.modal = Modal::Error {
+                            message: format!("Scan failed: {}", e),
                         };
                     }
                 }
@@ -705,4 +1007,51 @@ impl App {
             }
         }
     }
+}
+
+/// Load the branch list for a repo path and convert each entry into
+/// a `BranchEntry` suitable for the Checkout modal.
+///
+/// For branches that exist both locally and as remote tracking refs
+/// we keep only the local entry — it's what we'd check out anyway.
+pub(super) fn load_branch_entries(repo_path: &std::path::Path) -> Result<Vec<BranchEntry>> {
+    let backend = crate::git::GitBackend::open(repo_path)?;
+    let branches = backend.list_branches()?;
+
+    let mut local_names: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
+    let mut entries: Vec<BranchEntry> = Vec::new();
+
+    for (name, is_remote) in &branches {
+        if !is_remote {
+            local_names.insert(name.clone());
+            entries.push(BranchEntry {
+                local_name: name.clone(),
+                display_name: name.clone(),
+                is_remote: false,
+            });
+        }
+    }
+
+    for (name, is_remote) in &branches {
+        if !is_remote {
+            continue;
+        }
+        // "origin/foo" → local candidate "foo"
+        let local = name
+            .split_once('/')
+            .map(|(_, rest)| rest.to_string())
+            .unwrap_or_else(|| name.clone());
+        if local_names.contains(&local) {
+            // Already represented by the local branch — don't double-list.
+            continue;
+        }
+        entries.push(BranchEntry {
+            local_name: local,
+            display_name: name.clone(),
+            is_remote: true,
+        });
+    }
+
+    Ok(entries)
 }
