@@ -124,6 +124,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `N` | Add new project |
 | `c` | Checkout existing branch into a new worktree session (fetches `origin` in the background, filterable list) |
 | `d` | Delete session |
+| `r` | Rename session (UI title only; underlying worktree, branch, and tmux session are unchanged) |
 | `R` | Restart session (kill tmux + recreate; adds `--resume` when `resume_session = true`) |
 | `D` | Remove project |
 | `.` or `Ctrl-.` | Open in editor/IDE |

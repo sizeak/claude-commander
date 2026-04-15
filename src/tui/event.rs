@@ -137,6 +137,8 @@ pub enum UserCommand {
     CheckoutBranch,
     /// Delete/kill current session
     DeleteSession,
+    /// Rename the currently selected session (UI title only)
+    RenameSession,
     /// Restart current session (kill tmux and recreate)
     RestartSession,
     /// Remove an entire project
@@ -224,6 +226,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::NewProject => Self::NewProject,
             BindableAction::CheckoutBranch => Self::CheckoutBranch,
             BindableAction::DeleteSession => Self::DeleteSession,
+            BindableAction::RenameSession => Self::RenameSession,
             BindableAction::RestartSession => Self::RestartSession,
             BindableAction::RemoveProject => Self::RemoveProject,
             BindableAction::OpenInEditor => Self::OpenInEditor,
@@ -561,6 +564,11 @@ mod tests {
                 KeyCode::Char('d'),
                 KeyModifiers::NONE,
                 UserCommand::DeleteSession,
+            ),
+            (
+                KeyCode::Char('r'),
+                KeyModifiers::NONE,
+                UserCommand::RenameSession,
             ),
             (
                 KeyCode::Char('R'),

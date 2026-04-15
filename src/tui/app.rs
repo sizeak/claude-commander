@@ -238,6 +238,7 @@ pub enum InputAction {
     CreateSession { project_id: ProjectId },
     AddProject,
     ScanDirectory,
+    RenameSession { session_id: SessionId },
 }
 
 /// Action to perform when confirm modal is confirmed
@@ -3052,6 +3053,9 @@ impl App {
             UserCommand::DeleteSession => {
                 self.handle_delete_session();
             }
+            UserCommand::RenameSession => {
+                self.handle_rename_session().await;
+            }
             UserCommand::RestartSession => {
                 self.handle_restart_session();
             }
@@ -4078,6 +4082,28 @@ impl App {
         }
     }
 
+    /// Handle rename session - show input modal pre-filled with current title.
+    /// Only the displayed title is changed; the underlying worktree, branch,
+    /// and tmux session keep their original names.
+    async fn handle_rename_session(&mut self) {
+        let Some(session_id) = self.ui_state.selected_session_id else {
+            return;
+        };
+        let current_title = {
+            let state = self.store.read().await;
+            match state.get_session(&session_id) {
+                Some(s) => s.title.clone(),
+                None => return,
+            }
+        };
+        self.ui_state.modal = Modal::Input {
+            title: "Rename Session".to_string(),
+            prompt: "Enter new session name:".to_string(),
+            value: current_title,
+            on_submit: InputAction::RenameSession { session_id },
+        };
+    }
+
     /// Handle input modal submission
     async fn handle_input_submit(&mut self, action: InputAction, value: String) {
         match action {
@@ -4168,6 +4194,25 @@ impl App {
                         };
                     }
                 }
+            }
+            InputAction::RenameSession { session_id } => {
+                let new_title = value.trim().to_string();
+                if new_title.is_empty() {
+                    self.ui_state.status_message = Some((
+                        "Session name cannot be empty".to_string(),
+                        Instant::now() + Duration::from_secs(3),
+                    ));
+                    return;
+                }
+                let _ = self
+                    .store
+                    .mutate(move |state| {
+                        if let Some(session) = state.get_session_mut(&session_id) {
+                            session.title = new_title;
+                        }
+                    })
+                    .await;
+                self.refresh_list_items().await;
             }
             InputAction::ScanDirectory => {
                 let expanded = super::path_completer::expand_tilde(value.trim());
