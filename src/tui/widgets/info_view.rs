@@ -200,10 +200,7 @@ impl<'a> InfoView<'a> {
             if !pr.url.is_empty() {
                 lines.push(Line::from(vec![
                     Span::styled(" URL:    ", label),
-                    Span::styled(
-                        pr.url.clone(),
-                        Style::default().fg(self.theme.text_accent),
-                    ),
+                    Span::styled(pr.url.clone(), Style::default().fg(self.theme.text_accent)),
                 ]));
             }
 
@@ -230,10 +227,7 @@ impl<'a> InfoView<'a> {
                         spans.push(Span::styled("  ", value));
                     }
                     let color = parse_hex_color(&lbl.color).unwrap_or(self.theme.text_accent);
-                    spans.push(Span::styled(
-                        lbl.name.clone(),
-                        Style::default().fg(color),
-                    ));
+                    spans.push(Span::styled(lbl.name.clone(), Style::default().fg(color)));
                 }
                 lines.push(Line::from(spans));
             }
@@ -273,10 +267,7 @@ impl<'a> InfoView<'a> {
             if let Some(ref url) = data.pr_url {
                 lines.push(Line::from(vec![
                     Span::styled(" URL:    ", label),
-                    Span::styled(
-                        url.clone(),
-                        Style::default().fg(self.theme.text_accent),
-                    ),
+                    Span::styled(url.clone(), Style::default().fg(self.theme.text_accent)),
                 ]));
             }
         } else {

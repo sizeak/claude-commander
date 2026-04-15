@@ -4,7 +4,10 @@ use super::*;
 
 impl App {
     /// Main event loop
-    pub(super) async fn main_loop(&mut self, terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<()> {
+    pub(super) async fn main_loop(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    ) -> Result<()> {
         // Kick off an initial background preview fetch
         self.update_selection();
         self.spawn_preview_update();

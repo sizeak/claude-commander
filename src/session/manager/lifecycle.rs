@@ -207,11 +207,7 @@ impl SessionManager {
     }
 
     /// Kill tmux sessions (main + shell) for a worktree session.
-    pub(super) async fn kill_tmux_sessions(
-        &self,
-        tmux_name: &str,
-        shell_tmux_name: Option<&str>,
-    ) {
+    pub(super) async fn kill_tmux_sessions(&self, tmux_name: &str, shell_tmux_name: Option<&str>) {
         if let Err(e) = self.tmux.kill_session(tmux_name).await {
             warn!("Failed to kill tmux session: {}", e);
         }

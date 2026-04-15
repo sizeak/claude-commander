@@ -1,6 +1,6 @@
-use super::*;
 use super::modals::centered_rect;
 use super::selection::session_number_to_list_index;
+use super::*;
 
 #[test]
 fn test_centered_rect() {

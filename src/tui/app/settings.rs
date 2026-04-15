@@ -190,7 +190,12 @@ impl App {
     }
 
     /// Render the settings modal.
-    pub(super) fn render_settings_modal(&self, frame: &mut Frame, area: Rect, state: &SettingsState) {
+    pub(super) fn render_settings_modal(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        state: &SettingsState,
+    ) {
         let modal_area = modals::centered_rect(75, 85, area);
         frame.render_widget(Clear, modal_area);
 

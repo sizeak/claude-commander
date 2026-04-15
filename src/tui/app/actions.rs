@@ -204,7 +204,11 @@ impl App {
         if self.config.is_gui_editor(&editor) {
             // GUI editor: spawn detached and return — tmux session is
             // untouched and we'll re-attach immediately.
-            info!("OpenEditor: launching GUI editor '{}' at {}", editor, path.display());
+            info!(
+                "OpenEditor: launching GUI editor '{}' at {}",
+                editor,
+                path.display()
+            );
             if let Err(e) = std::process::Command::new(&editor).arg(&path).spawn() {
                 warn!("Failed to launch GUI editor '{}': {}", editor, e);
             }
@@ -448,7 +452,11 @@ impl App {
     /// already have had their `origin/` prefix stripped before calling).
     /// The session title is derived from the branch name so the worktree
     /// directory uses the same naming as a manually-named new session.
-    pub(super) async fn start_checkout_session(&mut self, project_id: ProjectId, branch_name: String) {
+    pub(super) async fn start_checkout_session(
+        &mut self,
+        project_id: ProjectId,
+        branch_name: String,
+    ) {
         let branch_name = branch_name.trim().to_string();
         if branch_name.is_empty() {
             return;
@@ -477,9 +485,9 @@ impl App {
 
         // Refresh list and select the new placeholder
         self.refresh_list_items().await;
-        if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
-            matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
-        }) {
+        if let Some(idx) = self.ui_state.list_items.iter().position(
+            |item| matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id),
+        ) {
             self.ui_state.list_state.select(Some(idx));
         }
         self.update_selection();
@@ -835,10 +843,7 @@ impl App {
                     Ok(result) => {
                         if result.added == 0 && result.skipped == 0 {
                             self.ui_state.modal = Modal::Error {
-                                message: format!(
-                                    "No git repositories found in {}",
-                                    path.display()
-                                ),
+                                message: format!("No git repositories found in {}", path.display()),
                             };
                         } else {
                             self.ui_state.modal = Modal::None;
@@ -1018,8 +1023,7 @@ pub(super) fn load_branch_entries(repo_path: &std::path::Path) -> Result<Vec<Bra
     let backend = crate::git::GitBackend::open(repo_path)?;
     let branches = backend.list_branches()?;
 
-    let mut local_names: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut local_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut entries: Vec<BranchEntry> = Vec::new();
 
     for (name, is_remote) in &branches {

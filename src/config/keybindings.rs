@@ -508,10 +508,7 @@ impl Default for KeyBindings {
         );
         bindings.insert(
             BindableAction::OpenInEditor,
-            vec![
-                kb(KeyCode::Char('.'), none),
-                kb(KeyCode::Char('.'), ctrl),
-            ],
+            vec![kb(KeyCode::Char('.'), none), kb(KeyCode::Char('.'), ctrl)],
         );
         bindings.insert(
             BindableAction::OpenPullRequest,

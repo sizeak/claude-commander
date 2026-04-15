@@ -320,10 +320,7 @@ impl App {
 
                 // Input line
                 let input_line = Line::from(format!("> {}_", query));
-                let input_area = Rect {
-                    height: 1,
-                    ..inner
-                };
+                let input_area = Rect { height: 1, ..inner };
                 frame.render_widget(Paragraph::new(input_line), input_area);
 
                 // Hint line
@@ -380,10 +377,7 @@ impl App {
                     };
 
                     let spans = vec![
-                        Span::styled(
-                            format!(" {}", marker),
-                            Style::default().fg(marker_color),
-                        ),
+                        Span::styled(format!(" {}", marker), Style::default().fg(marker_color)),
                         Span::styled(
                             m.display_name.clone(),
                             if is_selected {

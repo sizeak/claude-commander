@@ -614,8 +614,7 @@ impl App {
                                         );
                                         // Run the editor for the session's worktree, keep
                                         // the tmux session alive, and then re-attach.
-                                        self.open_editor_for_tmux_session(&current_session)
-                                            .await;
+                                        self.open_editor_for_tmux_session(&current_session).await;
                                         crate::tmux::flush_stdin();
                                         continue;
                                     }
