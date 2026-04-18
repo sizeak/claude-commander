@@ -132,7 +132,7 @@ impl App {
                     format!("Created session {}", session_id),
                     Instant::now() + Duration::from_secs(3),
                 ));
-                self.reconcile_section_assignments().await;
+                self.reconcile_one_section_assignment(session_id).await;
                 self.refresh_list_items().await;
                 // Select the newly created session
                 if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
@@ -332,26 +332,38 @@ impl App {
     }
 
     /// Run `apply_assignment` over every session against the current
-    /// `[[sections]]` config. Used at startup (reconcile state.json with
-    /// possibly-changed config) and after creating a new session.
+    /// `[[sections]]` config. Used at startup to reconcile state.json with
+    /// possibly-changed config.
     pub(super) async fn reconcile_section_assignments(&mut self) {
         let sections = self.config.sections.clone();
-        if sections.is_empty()
-            && self
-                .store
-                .read()
-                .await
-                .sessions
-                .values()
-                .all(|s| s.current_section.is_none())
-        {
-            return;
-        }
         let now = chrono::Utc::now();
         let _ = self
             .store
             .mutate(move |state| {
+                if sections.is_empty()
+                    && state.sessions.values().all(|s| s.current_section.is_none())
+                {
+                    return;
+                }
                 for session in state.sessions.values_mut() {
+                    crate::session::apply_assignment(session, &sections, now);
+                }
+            })
+            .await;
+    }
+
+    /// Run `apply_assignment` for a single session — used after creating a
+    /// session, where the rest of the session set is already reconciled.
+    pub(super) async fn reconcile_one_section_assignment(&mut self, session_id: SessionId) {
+        if self.config.sections.is_empty() {
+            return;
+        }
+        let sections = self.config.sections.clone();
+        let now = chrono::Utc::now();
+        let _ = self
+            .store
+            .mutate(move |state| {
+                if let Some(session) = state.get_session_mut(&session_id) {
                     crate::session::apply_assignment(session, &sections, now);
                 }
             })

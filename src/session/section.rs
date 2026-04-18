@@ -178,7 +178,6 @@ pub fn apply_assignment(
     sections: &[SectionConfig],
     now: DateTime<Utc>,
 ) -> bool {
-    // Override path: bypass forward-only and predicates entirely.
     if let Some(name) = &session.section_override
         && sections.iter().any(|s| &s.name == name)
     {
