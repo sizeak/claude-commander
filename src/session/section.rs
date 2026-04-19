@@ -134,7 +134,7 @@ pub fn build_sections(
         (0..=sections.len()).map(|_| Vec::new()).collect();
 
     for session in sessions {
-        let idx = section_position(session.current_section.as_deref(), sections);
+        let idx = display_index(session.current_section.as_deref(), sections);
         buckets[idx].push((session.id, session.entered_section_at));
     }
 
@@ -156,11 +156,12 @@ pub fn build_sections(
         .collect()
 }
 
-/// Process-order position of a section name. 0 = In Progress catch-all and
-/// manual-only waypoints (they sit outside the predicate pipeline). Predicate-
-/// bearing sections get positions 1.. in their declared order. Unknown names
-/// (stale `current_section` referring to a removed section) also map to 0.
-fn section_position(name: Option<&str>, sections: &[SectionConfig]) -> usize {
+/// Process-pipeline position, used by the forward-only rule in
+/// [`apply_assignment`]. 0 = In Progress catch-all and manual-only waypoints
+/// (off-pipeline). Predicate-bearing sections get 1.. in their declared order
+/// (skipping manual-only sections). Unknown names (stale `current_section`
+/// referring to a removed section) map to 0.
+fn process_position(name: Option<&str>, sections: &[SectionConfig]) -> usize {
     let Some(n) = name else { return 0 };
     let Some(idx) = sections.iter().position(|s| s.name == n) else {
         return 0;
@@ -169,6 +170,19 @@ fn section_position(name: Option<&str>, sections: &[SectionConfig]) -> usize {
         return 0;
     }
     1 + sections[..idx].iter().filter(|s| has_predicates(s)).count()
+}
+
+/// Display bucket index, used by [`build_sections`] for rendering. 0 = the
+/// implicit "In Progress" row at the top. 1..=N = each user-declared section
+/// in config order (predicate-bearing *and* manual-only). Unknown names fall
+/// to 0.
+fn display_index(name: Option<&str>, sections: &[SectionConfig]) -> usize {
+    let Some(n) = name else { return 0 };
+    sections
+        .iter()
+        .position(|s| s.name == n)
+        .map(|i| i + 1)
+        .unwrap_or(0)
 }
 
 /// Recompute the session's section assignment and update
@@ -206,8 +220,8 @@ pub fn apply_assignment(
         SectionAssignment::InProgress => None,
     };
 
-    let cur_pos = section_position(session.current_section.as_deref(), sections);
-    let new_pos = section_position(new_name.as_deref(), sections);
+    let cur_pos = process_position(session.current_section.as_deref(), sections);
+    let new_pos = process_position(new_name.as_deref(), sections);
     if new_pos < cur_pos {
         return false;
     }
@@ -457,6 +471,37 @@ mod tests {
 
         assert!(changed);
         assert_eq!(session.current_section.as_deref(), Some("Open"));
+    }
+
+    #[test]
+    fn session_pinned_to_manual_only_section_renders_in_that_bucket() {
+        // A session manually moved to "Stale" must render under "Stale",
+        // not fall into In Progress. Display order follows config order
+        // regardless of whether a section has predicates.
+        let sections = vec![
+            SectionConfig {
+                name: "Needs Review".into(),
+                has_label: Some(LabelPredicate::One("dev-review-required".into())),
+                ..Default::default()
+            },
+            SectionConfig {
+                name: "Stale".into(),
+                ..Default::default()
+            },
+        ];
+        let mut session = make_session();
+        session.current_section = Some("Stale".into());
+
+        let groups = build_sections(&[session.clone()], &sections);
+
+        assert_eq!(
+            groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(),
+            vec!["In Progress", "Needs Review", "Stale"]
+        );
+        let stale = groups.iter().find(|g| g.name == "Stale").unwrap();
+        assert_eq!(stale.sessions, vec![session.id]);
+        let in_progress = groups.iter().find(|g| g.name == "In Progress").unwrap();
+        assert!(in_progress.sessions.is_empty());
     }
 
     #[test]
