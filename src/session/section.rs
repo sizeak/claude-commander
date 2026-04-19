@@ -87,11 +87,21 @@ pub fn assign_section(session: &WorktreeSession, sections: &[SectionConfig]) -> 
         return SectionAssignment::Matched(name.clone());
     }
     for section in sections {
-        if section_matches(session, section) {
+        if has_predicates(section) && section_matches(session, section) {
             return SectionAssignment::Matched(section.name.clone());
         }
     }
     SectionAssignment::InProgress
+}
+
+/// True when a section declares at least one predicate field; otherwise the
+/// section is a manual-only waypoint (reachable only via override).
+fn has_predicates(section: &SectionConfig) -> bool {
+    section.pr_state.is_some()
+        || section.is_draft.is_some()
+        || section.has_label.is_some()
+        || section.has_pr.is_some()
+        || section.review_decision.is_some()
 }
 
 /// Reserved name of the implicit catch-all section, always at process
@@ -146,18 +156,19 @@ pub fn build_sections(
         .collect()
 }
 
-/// Process-order position of a section name. 0 = In Progress (catch-all),
-/// 1.. = user sections in declared order. Unknown names → 0 (treated as
-/// In Progress, e.g. stale `current_section` referring to a deleted section).
+/// Process-order position of a section name. 0 = In Progress catch-all and
+/// manual-only waypoints (they sit outside the predicate pipeline). Predicate-
+/// bearing sections get positions 1.. in their declared order. Unknown names
+/// (stale `current_section` referring to a removed section) also map to 0.
 fn section_position(name: Option<&str>, sections: &[SectionConfig]) -> usize {
-    match name {
-        None => 0,
-        Some(n) => sections
-            .iter()
-            .position(|s| s.name == n)
-            .map(|i| i + 1)
-            .unwrap_or(0),
+    let Some(n) = name else { return 0 };
+    let Some(idx) = sections.iter().position(|s| s.name == n) else {
+        return 0;
+    };
+    if !has_predicates(&sections[idx]) {
+        return 0;
     }
+    1 + sections[..idx].iter().filter(|s| has_predicates(s)).count()
 }
 
 /// Recompute the session's section assignment and update
@@ -446,6 +457,77 @@ mod tests {
 
         assert!(changed);
         assert_eq!(session.current_section.as_deref(), Some("Open"));
+    }
+
+    #[test]
+    fn predicate_less_section_is_never_auto_matched() {
+        // "Stale" has no predicates — declaring it first would, under the
+        // old matching rule, swallow every session. It should instead be a
+        // manual-only waypoint.
+        let sections = vec![
+            SectionConfig {
+                name: "Stale".into(),
+                ..Default::default()
+            },
+            SectionConfig {
+                name: "Needs Review".into(),
+                has_label: Some(LabelPredicate::One("dev-review-required".into())),
+                ..Default::default()
+            },
+        ];
+        let session = make_session(); // no PR data
+
+        assert_eq!(
+            assign_section(&session, &sections),
+            SectionAssignment::InProgress
+        );
+    }
+
+    #[test]
+    fn override_still_reaches_predicate_less_section() {
+        let sections = vec![SectionConfig {
+            name: "Stale".into(),
+            ..Default::default()
+        }];
+        let mut session = make_session();
+        session.section_override = Some("Stale".into());
+
+        assert_eq!(
+            assign_section(&session, &sections),
+            SectionAssignment::Matched("Stale".into())
+        );
+    }
+
+    #[test]
+    fn clearing_override_from_predicate_less_section_does_not_get_blocked() {
+        // Session is pinned to "Stale" (manual-only, declared last).
+        // Clearing the override should let predicate-driven auto move the
+        // session into a predicate section — forward-only must treat
+        // manual-only sections as position 0, not their config index.
+        let sections = vec![
+            SectionConfig {
+                name: "Needs Review".into(),
+                has_label: Some(LabelPredicate::One("dev-review-required".into())),
+                ..Default::default()
+            },
+            SectionConfig {
+                name: "Stale".into(),
+                ..Default::default()
+            },
+        ];
+        let mut session = make_session();
+        session.pr_state = Some(PrState::Open);
+        session.pr_labels = vec!["dev-review-required".into()];
+        session.current_section = Some("Stale".into());
+        let original = session.entered_section_at;
+        let later = original + Duration::hours(1);
+
+        session.section_override = None;
+        let changed = apply_assignment(&mut session, &sections, later);
+
+        assert!(changed);
+        assert_eq!(session.current_section.as_deref(), Some("Needs Review"));
+        assert_eq!(session.entered_section_at, later);
     }
 
     #[test]
@@ -854,38 +936,6 @@ mod tests {
         assert!(changed);
         assert_eq!(session.current_section.as_deref(), Some("In progress"));
         assert_eq!(session.entered_section_at, now);
-    }
-
-    #[test]
-    fn clearing_override_does_not_pull_session_backward_in_process_order() {
-        // Process order: 0=In Progress, 1=Open, 2=Pinned
-        let sections = vec![
-            SectionConfig {
-                name: "Open".into(),
-                pr_state: Some(PrState::Open),
-                ..Default::default()
-            },
-            SectionConfig {
-                name: "Pinned".into(),
-                ..Default::default()
-            },
-        ];
-        let mut session = make_session();
-        session.pr_state = Some(PrState::Open);
-        session.section_override = Some("Pinned".into());
-        session.current_section = Some("Pinned".into());
-        let original = session.entered_section_at;
-        let later = original + Duration::hours(1);
-
-        // Clear the override; predicate would put session at "Open" (pos 1),
-        // which is backward from "Pinned" (pos 2). Forward-only rule keeps
-        // it where it is.
-        session.section_override = None;
-        let changed = apply_assignment(&mut session, &sections, later);
-
-        assert!(!changed);
-        assert_eq!(session.current_section.as_deref(), Some("Pinned"));
-        assert_eq!(session.entered_section_at, original);
     }
 
     #[test]

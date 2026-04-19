@@ -270,6 +270,10 @@ state_sync_interval_ms = 2000
 #   review_decision  "approved" | "changes_requested" | "review_required"
 #                    (string or array, any-of)
 #
+# A section declared with no predicates is a *manual-only waypoint* —
+# auto never places sessions there; you can only move into it via the
+# palette (e.g. a "Stale" bucket you curate by hand).
+#
 # Example:
 # [[sections]]
 # name = "Needs Review"
