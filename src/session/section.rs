@@ -76,22 +76,48 @@ pub enum SectionAssignment {
     InProgress,
 }
 
-/// Compute the section a session belongs to given the configured sections.
+/// Where a session should be placed, given its current position and the
+/// configured sections.
 ///
-/// Returns [`SectionAssignment::InProgress`] when no section's predicate
-/// matches.
+/// Evaluation is forward-only by construction: the predicate scan starts at
+/// the session's current config index and never considers earlier sections.
+/// A session therefore stays in its current section until a *later* predicate
+/// matches, or is moved manually via [`WorktreeSession::section_override`].
+///
+/// Rules in order:
+/// 1. If `section_override` names a configured section, use it (hard lock).
+/// 2. Otherwise scan `sections[start..]` and return the first predicate match,
+///    where `start` is the current section's config index (or 0 if the
+///    session has no current section, its current section is predicate-less,
+///    or its current section no longer exists).
+/// 3. If nothing matches in that range, stay where we were. If `current_section`
+///    doesn't exist in the config, fall to [`SectionAssignment::InProgress`].
 pub fn assign_section(session: &WorktreeSession, sections: &[SectionConfig]) -> SectionAssignment {
     if let Some(name) = &session.section_override
         && sections.iter().any(|s| &s.name == name)
     {
         return SectionAssignment::Matched(name.clone());
     }
-    for section in sections {
+
+    let start = session
+        .current_section
+        .as_deref()
+        .and_then(|n| sections.iter().position(|s| s.name == n))
+        .filter(|&i| has_predicates(&sections[i]))
+        .unwrap_or(0);
+
+    for section in &sections[start..] {
         if has_predicates(section) && section_matches(session, section) {
             return SectionAssignment::Matched(section.name.clone());
         }
     }
-    SectionAssignment::InProgress
+
+    match &session.current_section {
+        Some(name) if sections.iter().any(|s| &s.name == name) => {
+            SectionAssignment::Matched(name.clone())
+        }
+        _ => SectionAssignment::InProgress,
+    }
 }
 
 /// True when a section declares at least one predicate field; otherwise the
@@ -156,22 +182,6 @@ pub fn build_sections(
         .collect()
 }
 
-/// Process-pipeline position, used by the forward-only rule in
-/// [`apply_assignment`]. 0 = In Progress catch-all and manual-only waypoints
-/// (off-pipeline). Predicate-bearing sections get 1.. in their declared order
-/// (skipping manual-only sections). Unknown names (stale `current_section`
-/// referring to a removed section) map to 0.
-fn process_position(name: Option<&str>, sections: &[SectionConfig]) -> usize {
-    let Some(n) = name else { return 0 };
-    let Some(idx) = sections.iter().position(|s| s.name == n) else {
-        return 0;
-    };
-    if !has_predicates(&sections[idx]) {
-        return 0;
-    }
-    1 + sections[..idx].iter().filter(|s| has_predicates(s)).count()
-}
-
 /// Display bucket index, used by [`build_sections`] for rendering. 0 = the
 /// implicit "In Progress" row at the top. 1..=N = each user-declared section
 /// in config order (predicate-bearing *and* manual-only). Unknown names fall
@@ -187,45 +197,19 @@ fn display_index(name: Option<&str>, sections: &[SectionConfig]) -> usize {
 
 /// Recompute the session's section assignment and update
 /// `current_section` + `entered_section_at` iff the section changed.
-///
-/// `section_override` is a hard lock: when set to a configured section, the
-/// session is pinned there regardless of process order or predicates, and
-/// auto cannot advance it. Stale overrides (referring to a section no
-/// longer in config) are ignored.
-///
-/// Otherwise, auto moves are **forward-only** in process order: a session
-/// that would match a section at a lower process position than its current
-/// one stays put.
-///
 /// Returns `true` when a transition occurred.
+///
+/// Forward-only semantics live inside [`assign_section`] itself — the scan
+/// only looks at sections at or after the session's current config index.
 pub fn apply_assignment(
     session: &mut WorktreeSession,
     sections: &[SectionConfig],
     now: DateTime<Utc>,
 ) -> bool {
-    if let Some(name) = &session.section_override
-        && sections.iter().any(|s| &s.name == name)
-    {
-        let target = Some(name.clone());
-        if session.current_section == target {
-            return false;
-        }
-        session.current_section = target;
-        session.entered_section_at = now;
-        return true;
-    }
-
     let new_name: Option<String> = match assign_section(session, sections) {
         SectionAssignment::Matched(name) => Some(name),
         SectionAssignment::InProgress => None,
     };
-
-    let cur_pos = process_position(session.current_section.as_deref(), sections);
-    let new_pos = process_position(new_name.as_deref(), sections);
-    if new_pos < cur_pos {
-        return false;
-    }
-
     if session.current_section == new_name {
         return false;
     }
@@ -502,6 +486,36 @@ mod tests {
         assert_eq!(stale.sessions, vec![session.id]);
         let in_progress = groups.iter().find(|g| g.name == "In Progress").unwrap();
         assert!(in_progress.sessions.is_empty());
+    }
+
+    #[test]
+    fn assign_section_ignores_earlier_predicates_from_current_index() {
+        // Sections in priority order: Open (index 0), In Review (index 1).
+        // A session already in "In Review" must not slide back to "Open" just
+        // because "Open" still matches — auto-evaluation is forward-only by
+        // construction: the scan starts at the session's current config index
+        // and never looks at earlier sections.
+        let sections = vec![
+            SectionConfig {
+                name: "Open".into(),
+                pr_state: Some(PrState::Open),
+                ..Default::default()
+            },
+            SectionConfig {
+                name: "In Review".into(),
+                review_decision: Some(DecisionPredicate::One(ReviewDecision::ChangesRequested)),
+                ..Default::default()
+            },
+        ];
+        let mut session = make_session();
+        session.pr_state = Some(PrState::Open); // would match Open at index 0
+        session.review_decision = None; // In Review's predicate no longer matches
+        session.current_section = Some("In Review".into());
+
+        assert_eq!(
+            assign_section(&session, &sections),
+            SectionAssignment::Matched("In Review".into())
+        );
     }
 
     #[test]
