@@ -9,6 +9,7 @@ use ratatui::{
 };
 
 use super::*;
+use crate::git::PrState;
 
 impl<'a> StatefulWidget for TreeList<'a> {
     type State = ListState;
@@ -176,6 +177,15 @@ impl<'a> TreeList<'a> {
                                     .bg(pill_bg)
                                     .fg(self.theme.pr_pill_text)
                                     .add_modifier(Modifier::BOLD),
+                            ));
+                        }
+
+                        let is_merged = matches!(*pr_state, Some(PrState::Merged))
+                            || (pr_state.is_none() && *pr_merged);
+                        if is_merged {
+                            spans.push(Span::styled(
+                                " (merged)",
+                                Style::default().fg(self.theme.text_secondary),
                             ));
                         }
                     }
