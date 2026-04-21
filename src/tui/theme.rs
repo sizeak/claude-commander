@@ -242,7 +242,7 @@ impl Theme {
             modal_warning: Color::Indexed(222), // Pastel peach
             modal_error: Color::Indexed(210),   // Pastel coral
 
-            palette_command_bg: Color::Indexed(236), // Dim charcoal
+            palette_command_bg: Color::Indexed(23), // Deep muted turquoise
             palette_command_fg: Color::Indexed(252), // Near-white
 
             status_bar_bg: Color::Indexed(236),
@@ -303,7 +303,7 @@ impl Theme {
             modal_warning: Color::Rgb(249, 226, 175), // Pastel peach
             modal_error: Color::Rgb(243, 139, 168), // Pastel rose
 
-            palette_command_bg: Color::Rgb(49, 50, 68), // Base02 — dim charcoal-navy
+            palette_command_bg: Color::Rgb(60, 88, 92), // Deep muted turquoise-teal
             palette_command_fg: Color::Rgb(205, 214, 244), // Near-white lavender
 
             status_bar_bg: Color::Rgb(49, 50, 68),
