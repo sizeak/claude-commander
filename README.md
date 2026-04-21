@@ -55,15 +55,17 @@ Releases are cut with [`cargo-release`](https://github.com/crate-ci/cargo-releas
 ```bash
 cargo install cargo-release            # one-time
 
-cargo release patch                    # 0.2.1 -> 0.2.2, dry-run
-cargo release minor                    # 0.2.1 -> 0.3.0, dry-run
-cargo release major                    # 0.2.1 -> 1.0.0, dry-run
-cargo release 0.5.0                    # explicit version, dry-run
+cargo release patch                    # X.Y.Z -> X.Y.(Z+1), dry-run
+cargo release minor                    # X.Y.Z -> X.(Y+1).0, dry-run
+cargo release major                    # X.Y.Z -> (X+1).0.0, dry-run
+cargo release 1.2.3                    # explicit version, dry-run
 
 cargo release <patch|minor|major|X.Y.Z> --execute   # actually release
 ```
 
-Every invocation is a dry-run by default; add `--execute` once the printed plan looks right. The command bumps the version, commits with `Bump version to X.Y.Z`, creates a signed tag `vX.Y.Z`, pushes both, and invokes `gh release create`. The Homebrew tap workflow auto-publishes the formula bump within a minute.
+Every invocation is a dry-run by default; add `--execute` once the printed plan looks right. The command bumps the version in `Cargo.toml`, refreshes `Cargo.lock`, creates a GPG-signed commit (`Bump version to X.Y.Z`) and a GPG-signed tag (`vX.Y.Z`), and pushes both to `origin/main`.
+
+The tag push triggers `.github/workflows/publish-tap.yml`, which creates the GitHub release with auto-generated notes and bumps the formula in [`sizeak/homebrew-tap`](https://github.com/sizeak/homebrew-tap) so `brew upgrade claude-commander` sees the new version within ~60 seconds.
 
 ## Usage
 
