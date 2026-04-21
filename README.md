@@ -48,6 +48,23 @@ cargo build --release
 ./target/release/claude-commander
 ```
 
+## Releasing
+
+Releases are cut with [`cargo-release`](https://github.com/crate-ci/cargo-release):
+
+```bash
+cargo install cargo-release            # one-time
+
+cargo release patch                    # 0.2.1 -> 0.2.2, dry-run
+cargo release minor                    # 0.2.1 -> 0.3.0, dry-run
+cargo release major                    # 0.2.1 -> 1.0.0, dry-run
+cargo release 0.5.0                    # explicit version, dry-run
+
+cargo release <patch|minor|major|X.Y.Z> --execute   # actually release
+```
+
+Every invocation is a dry-run by default; add `--execute` once the printed plan looks right. The command bumps the version, commits with `Bump version to X.Y.Z`, creates a signed tag `vX.Y.Z`, pushes both, and invokes `gh release create`. The Homebrew tap workflow auto-publishes the formula bump within a minute.
+
 ## Usage
 
 ### Interactive TUI (default)

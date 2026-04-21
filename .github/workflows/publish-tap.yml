@@ -1,17 +1,28 @@
 name: Publish to Homebrew tap
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - 'v*'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  bump-tap:
-    if: ${{ !github.event.release.prerelease && !github.event.release.draft }}
+  publish:
+    # Skip pre-release tags like v0.3.0-rc.1
+    if: ${{ !contains(github.ref_name, '-') }}
     runs-on: ubuntu-latest
     steps:
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${{ github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --generate-notes \
+            --latest
+
       - name: Bump claude-commander in sizeak/homebrew-tap
         uses: mislav/bump-homebrew-formula-action@v3
         with:
@@ -19,7 +30,7 @@ jobs:
           formula-path: Formula/claude-commander.rb
           homebrew-tap: sizeak/homebrew-tap
           base-branch: main
-          download-url: https://github.com/sizeak/claude-commander/archive/refs/tags/${{ github.event.release.tag_name }}.tar.gz
+          download-url: https://github.com/sizeak/claude-commander/archive/refs/tags/${{ github.ref_name }}.tar.gz
           commit-message: |
             Bump {{formulaName}} to {{version}}
           create-pullrequest: false
