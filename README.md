@@ -20,6 +20,15 @@ A high-performance terminal UI for managing Claude coding sessions, written in R
 
 ## Installation
 
+### Homebrew (macOS and Linux)
+
+```bash
+brew tap sizeak/tap
+brew install claude-commander
+```
+
+### Cargo
+
 Install directly from GitHub:
 
 ```bash
