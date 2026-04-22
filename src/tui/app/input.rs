@@ -438,6 +438,9 @@ impl App {
             UserCommand::NewSession => {
                 self.handle_new_session();
             }
+            UserCommand::NewStackedSession => {
+                self.handle_new_stacked_session().await;
+            }
             UserCommand::CheckoutBranch => {
                 self.handle_checkout_branch().await;
             }

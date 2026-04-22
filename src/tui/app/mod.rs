@@ -45,6 +45,7 @@ use crate::git::{
 };
 use crate::session::{
     AgentState, ProjectId, SessionId, SessionListItem, SessionManager, SessionStatus,
+    WorktreeSession,
 };
 use crate::tmux::AgentStateDetector;
 
@@ -312,10 +313,19 @@ pub enum SettingsEditing {
 /// Action to perform when input modal is submitted
 #[derive(Debug, Clone)]
 pub enum InputAction {
-    CreateSession { project_id: ProjectId },
+    CreateSession {
+        project_id: ProjectId,
+    },
+    CreateStackedSession {
+        project_id: ProjectId,
+        parent_session_id: SessionId,
+        parent_branch: String,
+    },
     AddProject,
     ScanDirectory,
-    RenameSession { session_id: SessionId },
+    RenameSession {
+        session_id: SessionId,
+    },
 }
 
 /// Action to perform when confirm modal is confirmed

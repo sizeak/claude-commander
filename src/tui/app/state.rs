@@ -77,6 +77,8 @@ impl App {
                                     .as_ref()
                                     .map(|p| p.reviewers.clone())
                                     .unwrap_or_default();
+                                session.pr_base_branch =
+                                    pr_info.as_ref().and_then(|p| p.base_ref_name.clone());
                             }
                         }
                         for session in state.sessions.values_mut() {
@@ -450,10 +452,60 @@ impl App {
     }
 }
 
+/// Compute the display order of a project's sessions, grouping each stack
+/// directly under its base.
+///
+/// Returns `(session_id, stacked_child)` pairs in the order they should appear.
+/// Root-list sessions (unstacked + stack bases) are sorted newest-first by
+/// `created_at`; stacked children follow their root in parent→child (stack
+/// position) order at the single deeper indent.
+fn build_session_order(sessions: &[&WorktreeSession]) -> Vec<(SessionId, bool)> {
+    let mut root_sessions: Vec<&WorktreeSession> = Vec::new();
+    let mut children_by_parent: HashMap<SessionId, Vec<&WorktreeSession>> = HashMap::new();
+    for s in sessions {
+        match crate::session::resolve_stack_parent(s, sessions) {
+            Some(parent_id) => {
+                children_by_parent.entry(parent_id).or_default().push(s);
+            }
+            None => {
+                root_sessions.push(s);
+            }
+        }
+    }
+
+    root_sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
+    for children in children_by_parent.values_mut() {
+        children.sort_by_key(|s| s.created_at);
+    }
+
+    let mut out = Vec::new();
+    for root in root_sessions {
+        out.push((root.id, false));
+        // to_visit is a LIFO stack; reverse the initial children and every
+        // subsequent children-of-children push so pop() yields them in
+        // ascending created_at order.
+        let mut to_visit: Vec<&WorktreeSession> = children_by_parent
+            .get(&root.id)
+            .cloned()
+            .unwrap_or_default();
+        to_visit.reverse();
+        while let Some(next) = to_visit.pop() {
+            out.push((next.id, true));
+            if let Some(grandchildren) = children_by_parent.get(&next.id) {
+                for gc in grandchildren.iter().rev() {
+                    to_visit.push(gc);
+                }
+            }
+        }
+    }
+    out
+}
+
 fn worktree_item(
     session: &crate::session::WorktreeSession,
     agent_states: &HashMap<SessionId, AgentState>,
     project_name_prefix: Option<&str>,
+    stacked_child: bool,
 ) -> SessionListItem {
     let title = match project_name_prefix {
         Some(prefix) => format!("{}/{}", prefix, session.title),
@@ -476,6 +528,7 @@ fn worktree_item(
         created_at: session.created_at,
         agent_state: agent_states.get(&session.id).copied(),
         unread: session.unread,
+        stacked_child,
     }
 }
 
@@ -497,15 +550,17 @@ fn build_project_grouped_items(
             nested: false,
         });
 
-        let mut sessions: Vec<_> = project
+        // Use stack-aware ordering so stacked children render indented
+        // directly beneath their stack base.
+        let sessions: Vec<&WorktreeSession> = project
             .worktrees
             .iter()
             .filter_map(|sid| state.sessions.get(sid))
             .collect();
-        sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
-
-        for session in sessions {
-            items.push(worktree_item(session, agent_states, None));
+        for (sid, stacked_child) in build_session_order(&sessions) {
+            if let Some(session) = state.sessions.get(&sid) {
+                items.push(worktree_item(session, agent_states, None, stacked_child));
+            }
         }
     }
     items
@@ -565,11 +620,150 @@ fn build_section_grouped_items(
             if let Some(sids) = project_sessions {
                 for sid in sids {
                     if let Some(session) = state.sessions.get(sid) {
-                        items.push(worktree_item(session, agent_states, None));
+                        items.push(worktree_item(session, agent_states, None, false));
                     }
                 }
             }
         }
     }
     items
+}
+
+#[cfg(test)]
+mod stack_order_tests {
+    use super::*;
+    use crate::session::{ProjectId, WorktreeSession};
+    use chrono::{Duration as ChronoDuration, Utc};
+    use std::path::PathBuf;
+
+    fn make_session(title: &str, branch: &str, created_offset_secs: i64) -> WorktreeSession {
+        let mut s = WorktreeSession::new(
+            ProjectId::new(),
+            title,
+            branch,
+            PathBuf::from("/tmp/wt"),
+            "claude",
+        );
+        s.created_at = Utc::now() + ChronoDuration::seconds(created_offset_secs);
+        s
+    }
+
+    #[test]
+    fn ordering_unstacked_only_sorts_newest_first() {
+        let a = make_session("a", "a", 0);
+        let b = make_session("b", "b", 10);
+        let c = make_session("c", "c", 20);
+        let order = build_session_order(&[&a, &b, &c]);
+        assert_eq!(
+            order,
+            vec![(c.id, false), (b.id, false), (a.id, false)],
+            "newer sessions should appear first at the root level"
+        );
+    }
+
+    #[test]
+    fn ordering_single_stack_emits_base_then_children_in_stack_order() {
+        // base (oldest) ← child1 ← child2; all stacked, base at root indent.
+        let base = make_session("base", "base-br", 0);
+        let mut child1 = make_session("c1", "c1-br", 5);
+        child1.stack_parent_session_id = Some(base.id);
+        let mut child2 = make_session("c2", "c2-br", 10);
+        child2.stack_parent_session_id = Some(child1.id);
+
+        let order = build_session_order(&[&base, &child1, &child2]);
+        assert_eq!(
+            order,
+            vec![(base.id, false), (child1.id, true), (child2.id, true)]
+        );
+    }
+
+    #[test]
+    fn ordering_two_independent_stacks_interleave_by_base_created_at() {
+        // Two stacks; their bases sort by created_at among root rows. Each
+        // stack's children appear directly beneath its base.
+        let base_a = make_session("base-a", "base-a", 0);
+        let mut child_a = make_session("child-a", "child-a", 1);
+        child_a.stack_parent_session_id = Some(base_a.id);
+
+        let base_b = make_session("base-b", "base-b", 20);
+        let mut child_b = make_session("child-b", "child-b", 21);
+        child_b.stack_parent_session_id = Some(base_b.id);
+
+        let order = build_session_order(&[&base_a, &child_a, &base_b, &child_b]);
+        assert_eq!(
+            order,
+            vec![
+                (base_b.id, false), // newer base first at root level
+                (child_b.id, true),
+                (base_a.id, false),
+                (child_a.id, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn ordering_mixed_stack_and_unstacked_interleaves_correctly() {
+        let base = make_session("base", "base", 0);
+        let mut child = make_session("child", "child", 5);
+        child.stack_parent_session_id = Some(base.id);
+        let solo = make_session("solo", "solo", 10);
+        let order = build_session_order(&[&base, &child, &solo]);
+        assert_eq!(
+            order,
+            vec![
+                (solo.id, false), // newest root first
+                (base.id, false),
+                (child.id, true), // follows its base
+            ]
+        );
+    }
+
+    #[test]
+    fn ordering_orphan_stack_parent_is_treated_as_root() {
+        let mut orphan = make_session("orphan", "orphan", 0);
+        orphan.stack_parent_session_id = Some(SessionId::new()); // dangling
+        let order = build_session_order(&[&orphan]);
+        assert_eq!(order, vec![(orphan.id, false)]);
+    }
+
+    #[test]
+    fn ordering_sibling_children_of_same_base_both_indent() {
+        // Two sessions sharing one base — both should render as stacked
+        // children, in created_at order, both indented.
+        let base = make_session("base", "base", 0);
+        let mut c1 = make_session("c1", "c1", 5);
+        c1.stack_parent_session_id = Some(base.id);
+        let mut c2 = make_session("c2", "c2", 10);
+        c2.stack_parent_session_id = Some(base.id);
+        let order = build_session_order(&[&base, &c1, &c2]);
+        assert_eq!(order, vec![(base.id, false), (c1.id, true), (c2.id, true)]);
+    }
+
+    #[test]
+    fn ordering_pr_base_matching_session_forms_stack() {
+        // No local link — GitHub PR info alone should form the stack.
+        let base = make_session("base", "base-br", 0);
+        let mut child = make_session("child", "child-br", 5);
+        child.pr_base_branch = Some("base-br".to_string());
+        let order = build_session_order(&[&base, &child]);
+        assert_eq!(order, vec![(base.id, false), (child.id, true)]);
+    }
+
+    #[test]
+    fn ordering_pr_base_matching_main_pops_child_to_root() {
+        // When the PR retargets main (e.g. after the prior stack member was
+        // merged), the child becomes a stack root — both base and ex-child are
+        // root-level siblings.
+        let base = make_session("base", "base-br", 0);
+        let mut child = make_session("child", "child-br", 5);
+        child.pr_base_branch = Some("main".to_string());
+        // Local link still hanging around — PR data wins.
+        child.stack_parent_session_id = Some(base.id);
+        let order = build_session_order(&[&base, &child]);
+        assert_eq!(
+            order,
+            vec![(child.id, false), (base.id, false)],
+            "child with PR targeting main should pop to the root list"
+        );
+    }
 }

@@ -109,13 +109,21 @@ impl<'a> TreeList<'a> {
                     pr_labels,
                     agent_state,
                     unread,
+                    stacked_child,
                     ..
                 } => {
                     worktree_number += 1;
 
-                    // Right-aligned session number prefix.
+                    // Right-aligned session number prefix, with an extra
+                    // indent for stacked children so they sit one level deeper
+                    // than their stack base.
+                    let stack_prefix = if *stacked_child { STACK_INDENT } else { "" };
                     let indent_span = Span::styled(
-                        format!("{:>width$} ", worktree_number, width = NUMBER_WIDTH),
+                        format!(
+                            "{stack_prefix}{:>width$} ",
+                            worktree_number,
+                            width = NUMBER_WIDTH
+                        ),
                         Style::default().fg(self.theme.text_secondary),
                     );
                     let mut spans = vec![indent_span];

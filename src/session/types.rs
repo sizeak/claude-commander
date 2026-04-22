@@ -252,6 +252,17 @@ pub struct WorktreeSession {
     /// submitted review authors. Empty when there's no PR or no reviewers.
     #[serde(default)]
     pub pr_reviewers: Vec<String>,
+    /// Branch the PR targets, as reported by GitHub (e.g. `main` or another
+    /// session's branch). Populated from `gh pr` JSON's `baseRefName`; used
+    /// as the source of truth for PR-stack detection.
+    #[serde(default)]
+    pub pr_base_branch: Option<String>,
+    /// Fallback parent link for PR-stack grouping, set when the session is
+    /// created via the "add stacked session" hotkey and the PR doesn't yet
+    /// exist. Once `pr_base_branch` resolves to an in-project session, that
+    /// wins over this field.
+    #[serde(default)]
+    pub stack_parent_session_id: Option<SessionId>,
     /// Whether the session has unread output (agent finished but user hasn't attached)
     #[serde(default)]
     pub unread: bool,
@@ -306,6 +317,8 @@ impl WorktreeSession {
             pr_labels: Vec::new(),
             review_decision: None,
             pr_reviewers: Vec::new(),
+            pr_base_branch: None,
+            stack_parent_session_id: None,
             unread: false,
             section_override: None,
             current_section: None,
@@ -349,6 +362,8 @@ impl WorktreeSession {
             pr_labels: Vec::new(),
             review_decision: None,
             pr_reviewers: Vec::new(),
+            pr_base_branch: None,
+            stack_parent_session_id: None,
             unread: false,
             section_override: None,
             current_section: None,
@@ -388,6 +403,64 @@ impl WorktreeSession {
     }
 }
 
+/// Resolve the stack parent of a session within its project.
+///
+/// `project_sessions` is expected to contain every session belonging to the
+/// same project (including `session` itself — it's filtered out internally).
+///
+/// Resolution rules:
+///
+/// 1. If `session.pr_base_branch` is set, GitHub is the authoritative source.
+///    Return the project session whose `branch` matches. If no session matches
+///    (PR targets `main`, a deleted branch, etc.), the session is **not**
+///    stacked — return `None`, even if `stack_parent_session_id` is set.
+/// 2. If `session.pr_base_branch` is unset (no PR yet), fall back to the local
+///    `stack_parent_session_id` hint set at creation time. Only honour it if
+///    the referenced session still exists in the project.
+/// 3. Otherwise, the session is not stacked.
+pub fn resolve_stack_parent(
+    session: &WorktreeSession,
+    project_sessions: &[&WorktreeSession],
+) -> Option<SessionId> {
+    if let Some(base) = session.pr_base_branch.as_deref() {
+        return project_sessions
+            .iter()
+            .find(|s| s.id != session.id && s.branch == base)
+            .map(|s| s.id);
+    }
+    let parent_id = session.stack_parent_session_id?;
+    project_sessions
+        .iter()
+        .any(|s| s.id == parent_id)
+        .then_some(parent_id)
+}
+
+/// Walk up the stack chain starting from `session_id` to find the session at
+/// the top of its stack.
+///
+/// Returns the leaf session: the member of this session's stack that has no
+/// stacked children. If the selected session is unstacked (no descendants),
+/// returns the session itself.
+///
+/// When a session has multiple direct stacked children (branching), the
+/// walker prefers the most recently created one, so the "top" is
+/// deterministic and matches what the user most likely intends.
+pub fn stack_top(session_id: SessionId, project_sessions: &[&WorktreeSession]) -> SessionId {
+    let mut current = session_id;
+    // Bounded by number of sessions to avoid ever spinning on a corrupted cycle.
+    for _ in 0..project_sessions.len() {
+        let next_child = project_sessions
+            .iter()
+            .filter(|s| resolve_stack_parent(s, project_sessions) == Some(current))
+            .max_by_key(|s| s.created_at);
+        match next_child {
+            Some(child) => current = child.id,
+            None => return current,
+        }
+    }
+    current
+}
+
 /// Represents an item in the hierarchical session list
 /// Used for UI display and navigation
 #[derive(Debug, Clone)]
@@ -421,6 +494,11 @@ pub enum SessionListItem {
         created_at: chrono::DateTime<chrono::Utc>,
         agent_state: Option<AgentState>,
         unread: bool,
+        /// True when this row is a stacked child of the row directly above it,
+        /// meaning it sits one indent deeper than a normal session row. Stack
+        /// bases and unstacked sessions keep the normal indent and have this
+        /// set to `false`.
+        stacked_child: bool,
     },
     /// A section header (used only when config.sections is non-empty).
     /// Not selectable — navigation skips these rows.
@@ -597,6 +675,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             agent_state: None,
             unread: false,
+            stacked_child: false,
         };
 
         assert!(project_item.key().starts_with("project:"));
@@ -767,6 +846,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             agent_state: None,
             unread: false,
+            stacked_child: false,
         };
 
         assert!(!project_item.is_worktree());
@@ -779,5 +859,167 @@ mod tests {
         assert_eq!(format!("{}", AgentState::Idle), "idle");
         assert_eq!(format!("{}", AgentState::WaitingForInput), "waiting");
         assert_eq!(format!("{}", AgentState::Unknown), "unknown");
+    }
+
+    use chrono::Duration as ChronoDuration;
+
+    fn session_with(
+        branch: &str,
+        pr_base: Option<&str>,
+        stack_parent: Option<SessionId>,
+    ) -> WorktreeSession {
+        let mut s = WorktreeSession::new(
+            ProjectId::new(),
+            "t",
+            branch,
+            PathBuf::from("/tmp/wt"),
+            "claude",
+        );
+        s.pr_base_branch = pr_base.map(str::to_string);
+        s.stack_parent_session_id = stack_parent;
+        s
+    }
+
+    #[test]
+    fn resolve_stack_parent_pr_base_matches_other_session() {
+        // Rule 1: pr_base_branch matches a sibling's branch → that's the parent.
+        let parent = session_with("base-branch", None, None);
+        let child = session_with("child-branch", Some("base-branch"), None);
+        let all = [&parent, &child];
+        assert_eq!(resolve_stack_parent(&child, &all), Some(parent.id));
+    }
+
+    #[test]
+    fn resolve_stack_parent_pr_base_matches_main_returns_none() {
+        // When pr_base_branch names main (or any branch not owned by a session),
+        // the session is a stack root targeting main — no stack parent, even
+        // though the local `stack_parent_session_id` hint is set.
+        let bogus_hint = SessionId::new();
+        let s = session_with("feature", Some("main"), Some(bogus_hint));
+        assert_eq!(resolve_stack_parent(&s, &[&s]), None);
+    }
+
+    #[test]
+    fn resolve_stack_parent_falls_back_to_local_link_when_no_pr() {
+        // Rule 3: no PR yet → use the local stack_parent_session_id hint.
+        let parent = session_with("base", None, None);
+        let child = session_with("child", None, Some(parent.id));
+        let all = [&parent, &child];
+        assert_eq!(resolve_stack_parent(&child, &all), Some(parent.id));
+    }
+
+    #[test]
+    fn resolve_stack_parent_ignores_orphaned_local_link() {
+        // If stack_parent_session_id refers to a deleted session, treat as unstacked.
+        let orphaned_id = SessionId::new();
+        let s = session_with("child", None, Some(orphaned_id));
+        assert_eq!(resolve_stack_parent(&s, &[&s]), None);
+    }
+
+    #[test]
+    fn resolve_stack_parent_pr_base_beats_local_link() {
+        // When both are set, pr_base_branch (GitHub) wins over the local link.
+        let real_parent = session_with("real-base", None, None);
+        let fake_parent = session_with("fake-base", None, None);
+        let child = session_with("c", Some("real-base"), Some(fake_parent.id));
+        let all = [&real_parent, &fake_parent, &child];
+        assert_eq!(resolve_stack_parent(&child, &all), Some(real_parent.id));
+    }
+
+    #[test]
+    fn resolve_stack_parent_unstacked_session_returns_none() {
+        let s = session_with("solo", None, None);
+        assert_eq!(resolve_stack_parent(&s, &[&s]), None);
+    }
+
+    #[test]
+    fn stack_top_on_unstacked_session_returns_self() {
+        let s = session_with("solo", None, None);
+        assert_eq!(stack_top(s.id, &[&s]), s.id);
+    }
+
+    #[test]
+    fn stack_top_walks_from_base_to_leaf() {
+        let base = session_with("base", None, None);
+        let mid = session_with("mid", None, Some(base.id));
+        let top = session_with("top", None, Some(mid.id));
+        let all = [&base, &mid, &top];
+        assert_eq!(stack_top(base.id, &all), top.id);
+    }
+
+    #[test]
+    fn stack_top_from_middle_of_stack_returns_leaf() {
+        // Selecting any session in the stack returns the same top.
+        let base = session_with("base", None, None);
+        let mid = session_with("mid", None, Some(base.id));
+        let top = session_with("top", None, Some(mid.id));
+        let all = [&base, &mid, &top];
+        assert_eq!(stack_top(mid.id, &all), top.id);
+        assert_eq!(stack_top(top.id, &all), top.id);
+    }
+
+    #[test]
+    fn stack_top_with_branching_prefers_most_recent_child() {
+        // When a base has multiple direct children, the walker follows the
+        // newest one so the user ends up stacked on the branch they most
+        // recently worked on.
+        let base = session_with("base", None, None);
+        let mut older_child = session_with("older", None, Some(base.id));
+        older_child.created_at = Utc::now() - ChronoDuration::hours(2);
+        let mut newer_child = session_with("newer", None, Some(base.id));
+        newer_child.created_at = Utc::now();
+        let all = [&base, &older_child, &newer_child];
+        assert_eq!(stack_top(base.id, &all), newer_child.id);
+    }
+
+    #[test]
+    fn resolve_stack_parent_does_not_match_self_by_branch() {
+        // If pr_base_branch somehow equals the session's own branch, don't
+        // return self as the parent.
+        let mut s = session_with("same", None, None);
+        s.pr_base_branch = Some("same".to_string());
+        assert_eq!(resolve_stack_parent(&s, &[&s]), None);
+    }
+
+    #[test]
+    fn serde_round_trip_worktree_session_new_fields_default_when_absent() {
+        // Old state.json written before this feature must deserialize cleanly
+        // with the new optional fields defaulting to None.
+        let id = SessionId::new();
+        let project_id = ProjectId::new();
+        let json = serde_json::json!({
+            "id": id,
+            "project_id": project_id,
+            "title": "t",
+            "branch": "b",
+            "worktree_path": "/tmp/wt",
+            "status": "running",
+            "program": "claude",
+            "created_at": "2024-01-01T00:00:00Z",
+            "last_active_at": "2024-01-01T00:00:00Z",
+            "tmux_session_name": "cc-abcd1234",
+        });
+        let s: WorktreeSession = serde_json::from_value(json).unwrap();
+        assert_eq!(s.pr_base_branch, None);
+        assert_eq!(s.stack_parent_session_id, None);
+    }
+
+    #[test]
+    fn serde_round_trip_worktree_session_new_fields_persist() {
+        let parent_id = SessionId::new();
+        let mut s = WorktreeSession::new(
+            ProjectId::new(),
+            "t",
+            "b",
+            PathBuf::from("/tmp/wt"),
+            "claude",
+        );
+        s.pr_base_branch = Some("base".to_string());
+        s.stack_parent_session_id = Some(parent_id);
+
+        let json = serde_json::to_string(&s).unwrap();
+        let roundtripped: WorktreeSession = serde_json::from_str(&json).unwrap();
+        assert_eq!(roundtripped.pr_base_branch.as_deref(), Some("base"));
+        assert_eq!(roundtripped.stack_parent_session_id, Some(parent_id));
     }
 }

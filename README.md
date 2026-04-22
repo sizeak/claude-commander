@@ -103,6 +103,14 @@ The left pane shows projects and their worktree sessions in a tree view. Project
 
 Each session row shows the title and, in `[brackets]`, the branch name — but only when the branch differs from what the title would sanitize to. A session titled "Feature Auth" with branch `feature-auth` (or `prefix/feature-auth` when `branch_prefix` is set) renders as just `Feature Auth`; the bracket reappears only when the branch carries new information, e.g. you renamed it to `feature-auth-v2` outside the app.
 
+#### PR Stacks
+
+When a session's PR targets another session's branch (rather than `main`), the two form a stack. Stacked children render one indent deeper and sit directly beneath the session they're stacked on, in bottom-to-top stack order. The stack base keeps its normal position in the root session list sorted by creation time.
+
+Press `t` on any session in a stack to create a new session on top of that stack — regardless of which member you have selected, the new branch is forked from the topmost session. When you launch Claude in the new session it is told to use `gh pr create --base <parent-branch>` so the PR targets the right place automatically.
+
+Stacks are detected from the PR's `baseRefName` returned by the `gh` CLI, so they stay accurate across GitHub's auto-retargeting when a stack member is merged.
+
 ### Status Symbols
 
 Each session displays a status indicator to the left of its name:
@@ -151,6 +159,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `>` (as first char in palette) | Filter palette to commands only |
 | `Enter` | Attach to selected session |
 | `n` | New worktree session |
+| `t` | New session stacked on top of the selected session's stack |
 | `N` | Add new project |
 | `c` | Checkout existing branch into a new worktree session (fetches `origin` in the background, filterable list) |
 | `d` | Delete session |

@@ -23,6 +23,9 @@ pub use state::TreeListState;
 /// `"{n:>NUMBER_WIDTH$} "` — so the number occupies NUMBER_WIDTH columns and
 /// is followed by a single trailing space, giving a 7-column slot.
 const NUMBER_WIDTH: usize = 6;
+/// Extra indent prepended for stacked-child worktrees (3 display columns),
+/// so they sit one level deeper than the stack base they sit under.
+const STACK_INDENT: &str = "   ";
 
 /// Braille spinner frames for the Creating status indicator
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];

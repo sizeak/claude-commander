@@ -53,6 +53,7 @@ fn make_worktree() -> SessionListItem {
         created_at: chrono::Utc::now(),
         agent_state: None,
         unread: false,
+        stacked_child: false,
     }
 }
 

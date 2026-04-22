@@ -28,6 +28,7 @@ pub enum BindableAction {
     Select,
     SelectShell,
     NewSession,
+    NewStackedSession,
     NewProject,
     CheckoutBranch,
     DeleteSession,
@@ -60,6 +61,7 @@ impl BindableAction {
         Self::Select,
         Self::SelectShell,
         Self::NewSession,
+        Self::NewStackedSession,
         Self::NewProject,
         Self::CheckoutBranch,
         Self::DeleteSession,
@@ -92,6 +94,7 @@ impl BindableAction {
             Self::Select => "select",
             Self::SelectShell => "select_shell",
             Self::NewSession => "new_session",
+            Self::NewStackedSession => "new_stacked_session",
             Self::NewProject => "new_project",
             Self::CheckoutBranch => "checkout_branch",
             Self::DeleteSession => "delete_session",
@@ -125,6 +128,7 @@ impl BindableAction {
             Self::Select => "Attach to selected session",
             Self::SelectShell => "Open shell in worktree",
             Self::NewSession => "New worktree session",
+            Self::NewStackedSession => "New stacked session on selected branch",
             Self::NewProject => "New project (add git repo)",
             Self::CheckoutBranch => "Checkout existing branch",
             Self::DeleteSession => "Delete/kill session",
@@ -156,6 +160,7 @@ impl BindableAction {
             Self::NavigateUp | Self::NavigateDown | Self::Select => "Navigation",
             Self::SelectShell
             | Self::NewSession
+            | Self::NewStackedSession
             | Self::NewProject
             | Self::CheckoutBranch
             | Self::DeleteSession
@@ -187,6 +192,7 @@ impl FromStr for BindableAction {
             "select" => Ok(Self::Select),
             "select_shell" => Ok(Self::SelectShell),
             "new_session" => Ok(Self::NewSession),
+            "new_stacked_session" => Ok(Self::NewStackedSession),
             "new_project" => Ok(Self::NewProject),
             "checkout_branch" => Ok(Self::CheckoutBranch),
             "delete_session" => Ok(Self::DeleteSession),
@@ -487,6 +493,10 @@ impl Default for KeyBindings {
         bindings.insert(
             BindableAction::NewSession,
             vec![kb(KeyCode::Char('n'), none)],
+        );
+        bindings.insert(
+            BindableAction::NewStackedSession,
+            vec![kb(KeyCode::Char('t'), none)],
         );
         bindings.insert(
             BindableAction::NewProject,
@@ -840,6 +850,13 @@ mod tests {
     }
 
     // -- KeyBindings defaults --
+
+    #[test]
+    fn test_default_new_stacked_session_bound_to_t() {
+        let kb = KeyBindings::default();
+        let key = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&key), Some(BindableAction::NewStackedSession));
+    }
 
     #[test]
     fn test_defaults_match_current_bindings() {

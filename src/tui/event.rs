@@ -131,6 +131,8 @@ pub enum UserCommand {
     SelectShell,
     /// Create new session
     NewSession,
+    /// Create a new session stacked on the selected session's branch
+    NewStackedSession,
     /// Create new project
     NewProject,
     /// Checkout an existing branch into a new worktree session
@@ -225,6 +227,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::Select => Self::Select,
             BindableAction::SelectShell => Self::SelectShell,
             BindableAction::NewSession => Self::NewSession,
+            BindableAction::NewStackedSession => Self::NewStackedSession,
             BindableAction::NewProject => Self::NewProject,
             BindableAction::CheckoutBranch => Self::CheckoutBranch,
             BindableAction::DeleteSession => Self::DeleteSession,

@@ -386,6 +386,52 @@ impl App {
         }
     }
 
+    /// Handle "new stacked session" — create a session on top of the stack the
+    /// selected session belongs to. Starting from the selected session, we
+    /// walk to the top of its stack (the leaf, if any), so pressing the
+    /// hotkey from any row in the stack always produces a sibling stacked on
+    /// the current topmost member. Selecting a standalone session starts a
+    /// new stack rooted there.
+    pub(super) async fn handle_new_stacked_session(&mut self) {
+        let Some(selected_session_id) = self.ui_state.selected_session_id else {
+            self.ui_state.status_message = Some((
+                "Select a session to stack on top of".to_string(),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            return;
+        };
+        let resolved = {
+            let state = self.store.read().await;
+            state
+                .get_session(&selected_session_id)
+                .and_then(|selected| {
+                    let project_id = selected.project_id;
+                    let project = state.get_project(&project_id)?;
+                    let project_sessions: Vec<&WorktreeSession> = project
+                        .worktrees
+                        .iter()
+                        .filter_map(|sid| state.sessions.get(sid))
+                        .collect();
+                    let top_id = crate::session::stack_top(selected_session_id, &project_sessions);
+                    let top = state.get_session(&top_id)?;
+                    Some((project_id, top.id, top.branch.clone(), top.title.clone()))
+                })
+        };
+        let Some((project_id, parent_session_id, parent_branch, parent_title)) = resolved else {
+            return;
+        };
+        self.ui_state.modal = Modal::Input {
+            title: format!("New Session Stacked on \"{}\"", parent_title),
+            prompt: "Enter session name:".to_string(),
+            value: String::new(),
+            on_submit: InputAction::CreateStackedSession {
+                project_id,
+                parent_session_id,
+                parent_branch,
+            },
+        };
+    }
+
     /// Open the Checkout Branch modal.
     ///
     /// Loads the current list of branches synchronously via gix and kicks
@@ -942,6 +988,86 @@ impl App {
                         return;
                     }
                 };
+
+                // Refresh list and select the new placeholder
+                self.refresh_list_items().await;
+                if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
+                    matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
+                }) {
+                    self.ui_state.list_state.select(Some(idx));
+                }
+                self.update_selection();
+
+                // Spawn background task for heavy work
+                let session_manager = self.session_manager.clone();
+                let tx = self.event_loop.sender();
+                tokio::spawn(async move {
+                    match session_manager.finalize_session(&session_id).await {
+                        Ok(sid) => {
+                            let _ = tx
+                                .send(AppEvent::StateUpdate(StateUpdate::SessionCreated {
+                                    session_id: sid,
+                                }))
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = tx
+                                .send(AppEvent::StateUpdate(StateUpdate::SessionCreateFailed {
+                                    session_id,
+                                    message: format!("Failed to create session: {}", e),
+                                }))
+                                .await;
+                        }
+                    }
+                });
+            }
+            InputAction::CreateStackedSession {
+                project_id,
+                parent_session_id,
+                parent_branch: _parent_branch,
+            } => {
+                if value.trim().is_empty() {
+                    self.ui_state.status_message = Some((
+                        "Session name cannot be empty".to_string(),
+                        Instant::now() + Duration::from_secs(3),
+                    ));
+                    return;
+                }
+
+                // Insert placeholder session immediately (no blocking modal)
+                self.ui_state.modal = Modal::None;
+                let session_id = match self
+                    .session_manager
+                    .prepare_session(&project_id, value, None, None)
+                    .await
+                {
+                    Ok(id) => id,
+                    Err(e) => {
+                        self.ui_state.modal = Modal::Error {
+                            message: format!("Failed to create session: {}", e),
+                        };
+                        return;
+                    }
+                };
+
+                // Mark the new placeholder as stacked on the parent; finalize
+                // reads `stack_parent_session_id` to fork the worktree branch
+                // from the parent's branch and to inject the PR-base context
+                // into the Claude launch command.
+                if let Err(e) = self
+                    .store
+                    .mutate(move |state| {
+                        if let Some(s) = state.get_session_mut(&session_id) {
+                            s.stack_parent_session_id = Some(parent_session_id);
+                        }
+                    })
+                    .await
+                {
+                    self.ui_state.modal = Modal::Error {
+                        message: format!("Failed to save state: {}", e),
+                    };
+                    return;
+                }
 
                 // Refresh list and select the new placeholder
                 self.refresh_list_items().await;

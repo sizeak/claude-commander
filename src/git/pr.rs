@@ -24,6 +24,10 @@ pub struct PrInfo {
     /// Reviewer logins (users only) — union of requested reviewers and
     /// authors of any submitted review. Deduplicated, sorted.
     pub reviewers: Vec<String>,
+    /// Target branch the PR is opened against (e.g. `main` or another PR branch).
+    /// Used to detect PR stacks — when this matches another session's branch in
+    /// the same project, the sessions are stacked.
+    pub base_ref_name: Option<String>,
 }
 
 impl PrInfo {
@@ -136,7 +140,7 @@ pub async fn check_pr_for_branch(repo_path: &Path, branch: &str) -> Option<PrInf
             "--state",
             "all",
             "--json",
-            "number,url,state,isDraft,labels,reviewDecision,reviewRequests,latestReviews",
+            "number,url,state,isDraft,labels,baseRefName,reviewDecision,reviewRequests,latestReviews",
             "--limit",
             "5",
         ])
@@ -222,6 +226,7 @@ fn parse_pr_entry(v: &serde_json::Value) -> Option<PrInfo> {
     }
     reviewers.sort();
     reviewers.dedup();
+    let base_ref_name = v["baseRefName"].as_str().map(str::to_string);
 
     Some(PrInfo {
         number,
@@ -231,6 +236,7 @@ fn parse_pr_entry(v: &serde_json::Value) -> Option<PrInfo> {
         labels,
         review_decision,
         reviewers,
+        base_ref_name,
     })
 }
 
@@ -352,7 +358,32 @@ mod tests {
         assert_eq!(info.state, PrState::Open);
         assert!(!info.is_draft);
         assert!(info.labels.is_empty());
+        assert!(info.base_ref_name.is_none());
         assert!(!info.merged());
+    }
+
+    #[test]
+    fn test_parse_pr_list_captures_base_ref_name() {
+        // `baseRefName` is the PR's target branch — used for stack detection.
+        let json = r#"[{
+            "number":5,
+            "url":"u",
+            "state":"OPEN",
+            "isDraft":false,
+            "labels":[],
+            "baseRefName":"feature-login"
+        }]"#;
+        let info = parse_pr_list_json(json).unwrap();
+        assert_eq!(info.base_ref_name.as_deref(), Some("feature-login"));
+    }
+
+    #[test]
+    fn test_parse_pr_list_without_base_ref_name() {
+        // Older gh responses / tests that omit baseRefName should leave the
+        // field as None rather than failing.
+        let json = r#"[{"number":9,"url":"u","state":"OPEN","isDraft":false,"labels":[]}]"#;
+        let info = parse_pr_list_json(json).unwrap();
+        assert!(info.base_ref_name.is_none());
     }
 
     #[test]

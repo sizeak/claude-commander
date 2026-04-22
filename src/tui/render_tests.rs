@@ -159,6 +159,7 @@ fn test_session_list_with_sessions() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    stacked_child: false,
                 },
                 SessionListItem::Worktree {
                     id: SessionId::new(),
@@ -177,6 +178,7 @@ fn test_session_list_with_sessions() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    stacked_child: false,
                 },
                 SessionListItem::Worktree {
                     id: SessionId::new(),
@@ -195,6 +197,7 @@ fn test_session_list_with_sessions() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    stacked_child: false,
                 },
             ];
             let tree_list = TreeList::new(&items, &theme)
@@ -245,6 +248,7 @@ fn test_session_list_with_pr_badges() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    stacked_child: false,
                 },
                 SessionListItem::Worktree {
                     id: SessionId::new(),
@@ -263,6 +267,7 @@ fn test_session_list_with_pr_badges() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    stacked_child: false,
                 },
             ];
             let tree_list = TreeList::new(&items, &theme)
@@ -313,6 +318,7 @@ fn test_session_list_mixed_programs() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    stacked_child: false,
                 },
                 SessionListItem::Worktree {
                     id: SessionId::new(),
@@ -331,6 +337,7 @@ fn test_session_list_mixed_programs() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    stacked_child: false,
                 },
             ];
             let tree_list = TreeList::new(&items, &theme)
@@ -381,6 +388,7 @@ fn test_session_list_with_numbers() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    stacked_child: false,
                 },
                 SessionListItem::Worktree {
                     id: SessionId::new(),
@@ -399,6 +407,7 @@ fn test_session_list_with_numbers() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    stacked_child: false,
                 },
                 SessionListItem::Worktree {
                     id: SessionId::new(),
@@ -417,6 +426,7 @@ fn test_session_list_with_numbers() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    stacked_child: false,
                 },
             ];
             let tree_list = TreeList::new(&items, &theme)
@@ -1236,6 +1246,7 @@ fn test_session_list_creating_status() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    stacked_child: false,
                 },
                 SessionListItem::Worktree {
                     id: SessionId::new(),
@@ -1254,6 +1265,7 @@ fn test_session_list_creating_status() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    stacked_child: false,
                 },
             ];
             // tick=0 → spinner frame 0 → "⠋"

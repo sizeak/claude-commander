@@ -16,6 +16,10 @@ fn make_project(name: &str, count: usize) -> SessionListItem {
 }
 
 fn make_worktree(title: &str) -> SessionListItem {
+    make_worktree_with_stack(title, false)
+}
+
+fn make_worktree_with_stack(title: &str, stacked_child: bool) -> SessionListItem {
     SessionListItem::Worktree {
         id: SessionId::new(),
         project_id: ProjectId::new(),
@@ -33,6 +37,7 @@ fn make_worktree(title: &str) -> SessionListItem {
         created_at: chrono::Utc::now(),
         agent_state: None,
         unread: false,
+        stacked_child,
     }
 }
 
@@ -558,4 +563,33 @@ fn test_glyph_creating_shows_spinner() {
         .unwrap();
     assert!(SPINNER_FRAMES.contains(&g.as_str()));
     assert_eq!(c, theme.status_creating);
+}
+
+#[test]
+fn test_stacked_child_row_has_extra_indent() {
+    // The stacked child should sit one extra indent (STACK_INDENT) further
+    // right than its base. The prefix is the right-aligned session number.
+    let items = vec![
+        make_project("proj", 2),
+        make_worktree_with_stack("base", false),
+        make_worktree_with_stack("child", true),
+    ];
+    let lines = render_tree(&items, 60, 4);
+
+    let base_line = &lines[1];
+    let child_line = &lines[2];
+
+    // "1 " marks the base row, "2 " marks the child row. The child's number
+    // should sit STACK_INDENT columns further right.
+    let base_idx = base_line
+        .find("1 ")
+        .expect("base should have number prefix");
+    let child_idx = child_line
+        .find("2 ")
+        .expect("child should have number prefix");
+    assert_eq!(
+        child_idx - base_idx,
+        STACK_INDENT.chars().count(),
+        "stacked child indent should be exactly STACK_INDENT wider than the base\nbase:  {base_line:?}\nchild: {child_line:?}"
+    );
 }
