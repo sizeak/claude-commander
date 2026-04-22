@@ -11,7 +11,7 @@ mod types;
 
 pub use manager::*;
 pub use section::{
-    RenderedSection, SectionAssignment, SectionConfig, apply_assignment, assign_section,
-    build_sections,
+    IN_PROGRESS, RenderedSection, SectionAssignment, SectionConfig, apply_assignment,
+    assign_section, build_sections,
 };
 pub use types::*;

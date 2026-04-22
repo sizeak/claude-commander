@@ -61,6 +61,7 @@ impl<'a> TreeList<'a> {
                     name,
                     main_branch,
                     worktree_count,
+                    nested,
                     ..
                 } => {
                     let (proj_color, sess_color) = self.theme.project_color(project_index);
@@ -73,8 +74,13 @@ impl<'a> TreeList<'a> {
                         String::new()
                     };
 
+                    // Project sub-headers nested under a section header are
+                    // indented one tree-level deeper so the hierarchy reads
+                    // SectionHeader > Project > Worktree.
+                    let pad = if *nested { "   " } else { " " };
+
                     let line = Line::from(vec![
-                        Span::raw(" "),
+                        Span::raw(pad),
                         Span::styled(
                             name.clone(),
                             Style::default().fg(proj_color).add_modifier(Modifier::BOLD),
@@ -88,6 +94,7 @@ impl<'a> TreeList<'a> {
 
                     ListItem::new(line)
                 }
+                SessionListItem::Spacer => ListItem::new(Line::from("")),
 
                 SessionListItem::Worktree {
                     title,

@@ -439,7 +439,7 @@ impl App {
             SessionListItem::Project { id, .. } => {
                 last_session.is_none() && last_project.is_some_and(|p| p == *id)
             }
-            SessionListItem::SectionHeader { .. } => false,
+            SessionListItem::SectionHeader { .. } | SessionListItem::Spacer => false,
         });
 
         if let Some(idx) = target_idx {
@@ -494,6 +494,7 @@ fn build_project_grouped_items(
             repo_path: project.repo_path.clone(),
             main_branch: project.main_branch.clone(),
             worktree_count: project.worktrees.len(),
+            nested: false,
         });
 
         let mut sessions: Vec<_> = project
@@ -518,19 +519,55 @@ fn build_section_grouped_items(
     let sessions: Vec<crate::session::WorktreeSession> = state.sessions.values().cloned().collect();
     let groups = crate::session::build_sections(&sessions, sections);
 
+    let mut projects: Vec<_> = state.projects.values().collect();
+    projects.sort_by(|a, b| a.name.cmp(&b.name));
+
     let mut items = Vec::new();
-    for group in groups {
+    for (group_idx, group) in groups.iter().enumerate() {
+        if group_idx > 0 {
+            items.push(SessionListItem::Spacer);
+        }
         items.push(SessionListItem::SectionHeader {
             name: group.name.clone(),
             count: group.sessions.len(),
         });
-        for sid in group.sessions {
-            if let Some(session) = state.sessions.get(&sid) {
-                let project_name = state
-                    .projects
-                    .get(&session.project_id)
-                    .map(|p| p.name.as_str());
-                items.push(worktree_item(session, agent_states, project_name));
+
+        let is_in_progress = group.name == crate::session::IN_PROGRESS;
+        // Preserve group sort order (oldest-first) while partitioning by project.
+        let mut by_project: std::collections::HashMap<crate::session::ProjectId, Vec<SessionId>> =
+            Default::default();
+        let mut project_order: Vec<crate::session::ProjectId> = Vec::new();
+        for sid in &group.sessions {
+            if let Some(session) = state.sessions.get(sid) {
+                by_project.entry(session.project_id).or_default().push(*sid);
+                if !project_order.contains(&session.project_id) {
+                    project_order.push(session.project_id);
+                }
+            }
+        }
+
+        for project in &projects {
+            let project_sessions = by_project.get(&project.id);
+            let count = project_sessions.map(|v| v.len()).unwrap_or(0);
+            // In Progress shows every project (even empty ones); other
+            // sections only show projects that have sessions in them.
+            if !is_in_progress && count == 0 {
+                continue;
+            }
+            items.push(SessionListItem::Project {
+                id: project.id,
+                name: project.name.clone(),
+                repo_path: project.repo_path.clone(),
+                main_branch: project.main_branch.clone(),
+                worktree_count: count,
+                nested: true,
+            });
+            if let Some(sids) = project_sessions {
+                for sid in sids {
+                    if let Some(session) = state.sessions.get(sid) {
+                        items.push(worktree_item(session, agent_states, None));
+                    }
+                }
             }
         }
     }

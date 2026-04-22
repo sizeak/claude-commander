@@ -11,6 +11,7 @@ fn make_project(name: &str, count: usize) -> SessionListItem {
         repo_path: PathBuf::from("/tmp/test"),
         main_branch: "main".to_string(),
         worktree_count: count,
+        nested: false,
     }
 }
 

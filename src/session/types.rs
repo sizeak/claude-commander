@@ -389,6 +389,9 @@ pub enum SessionListItem {
         repo_path: PathBuf,
         main_branch: String,
         worktree_count: usize,
+        /// When `true`, render indented one level deeper — used for project
+        /// sub-headers nested under a section header.
+        nested: bool,
     },
     /// A worktree session (indented under project)
     Worktree {
@@ -412,6 +415,9 @@ pub enum SessionListItem {
     /// A section header (used only when config.sections is non-empty).
     /// Not selectable — navigation skips these rows.
     SectionHeader { name: String, count: usize },
+    /// A blank spacer row for visual separation between sections.
+    /// Not selectable.
+    Spacer,
 }
 
 impl SessionListItem {
@@ -421,6 +427,7 @@ impl SessionListItem {
             Self::Project { id, .. } => format!("project:{}", id),
             Self::Worktree { id, .. } => format!("worktree:{}", id),
             Self::SectionHeader { name, .. } => format!("section:{}", name),
+            Self::Spacer => "spacer".to_string(),
         }
     }
 
@@ -436,7 +443,7 @@ impl SessionListItem {
 
     /// Whether navigation/selection should land on this row.
     pub fn is_selectable(&self) -> bool {
-        !matches!(self, Self::SectionHeader { .. })
+        !matches!(self, Self::SectionHeader { .. } | Self::Spacer)
     }
 }
 
@@ -527,6 +534,7 @@ mod tests {
             repo_path: PathBuf::from("/tmp"),
             main_branch: "main".to_string(),
             worktree_count: 0,
+            nested: false,
         };
 
         let worktree_item = SessionListItem::Worktree {
@@ -697,6 +705,7 @@ mod tests {
             repo_path: PathBuf::from("/tmp"),
             main_branch: "main".to_string(),
             worktree_count: 0,
+            nested: false,
         };
         let worktree_item = SessionListItem::Worktree {
             id: SessionId::new(),
