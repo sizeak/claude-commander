@@ -40,8 +40,8 @@ use super::widgets::{
 use crate::config::{BindableAction, Config, ConfigStore, StateStore};
 use crate::error::{Result, TuiError};
 use crate::git::{
-    AiSummary, DiffInfo, EnrichedPrInfo, check_pr_for_branch, diff_hash, fetch_branch_summary,
-    fetch_enriched_pr, is_gh_available,
+    AiSummary, DiffInfo, EnrichedPrInfo, PrCheckResult, check_pr_for_branch, diff_hash,
+    fetch_branch_summary, fetch_enriched_pr, is_gh_available,
 };
 use crate::session::{
     AgentState, ProjectId, SessionId, SessionListItem, SessionManager, SessionStatus,

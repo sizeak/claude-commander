@@ -37,6 +37,47 @@ impl PrInfo {
     }
 }
 
+/// Outcome of polling GitHub for PR status of a branch.
+///
+/// `check_pr_for_branch` must distinguish "the repo has no PR for this branch"
+/// from "we couldn't ask GitHub" (gh missing, auth error, network error,
+/// malformed response). Callers handling the result treat these differently:
+/// the former authoritatively clears cached PR state, the latter preserves
+/// whatever was last known so a transient hiccup doesn't flatten a PR stack
+/// in the UI.
+#[derive(Debug, Clone)]
+pub enum PrCheckResult {
+    /// A PR was found for this branch.
+    Found(PrInfo),
+    /// `gh` reported successfully that no PR exists for this branch.
+    NotFound,
+    /// The poll failed to produce an authoritative answer (gh not installed,
+    /// network/auth error, or an unexpected JSON payload). Cached PR state
+    /// on the session must be left untouched.
+    FetchFailed,
+}
+
+impl PrCheckResult {
+    /// Extract the `PrInfo` when the result is `Found`, else `None`.
+    pub fn info(&self) -> Option<&PrInfo> {
+        match self {
+            Self::Found(info) => Some(info),
+            _ => None,
+        }
+    }
+
+    /// True when `gh` authoritatively reported no PR for this branch.
+    pub fn is_not_found(&self) -> bool {
+        matches!(self, Self::NotFound)
+    }
+
+    /// True when the poll failed with a transient error — callers should
+    /// leave cached PR state untouched.
+    pub fn is_fetch_failed(&self) -> bool {
+        matches!(self, Self::FetchFailed)
+    }
+}
+
 /// Rich PR metadata returned by `gh pr view`.
 #[derive(Debug, Clone)]
 pub struct EnrichedPrInfo {
@@ -127,11 +168,15 @@ pub async fn is_gh_available() -> bool {
 
 /// Check whether `branch` has a PR (any state) in the repo at `repo_path`.
 ///
-/// Returns `None` on any failure (gh missing, not authed, network error,
-/// not a GitHub repo, or no PR). Prefers open PRs over closed/merged when a
-/// branch has multiple PRs (rare, but possible after a reopen).
-pub async fn check_pr_for_branch(repo_path: &Path, branch: &str) -> Option<PrInfo> {
-    let output = Command::new("gh")
+/// Returns a three-way result: `Found` when a PR matched, `NotFound` when gh
+/// successfully reported no PR, and `FetchFailed` on any error. Callers must
+/// preserve cached PR state on `FetchFailed` so transient gh/network hiccups
+/// don't wipe UI state (notably the PR-stack topology).
+///
+/// Prefers open PRs over closed/merged when a branch has multiple PRs (rare,
+/// but possible after a reopen).
+pub async fn check_pr_for_branch(repo_path: &Path, branch: &str) -> PrCheckResult {
+    let output = match Command::new("gh")
         .args([
             "pr",
             "list",
@@ -147,7 +192,13 @@ pub async fn check_pr_for_branch(repo_path: &Path, branch: &str) -> Option<PrInf
         .current_dir(repo_path)
         .output()
         .await
-        .ok()?;
+    {
+        Ok(output) => output,
+        Err(e) => {
+            debug!("gh pr list spawn failed for branch {}: {}", branch, e);
+            return PrCheckResult::FetchFailed;
+        }
+    };
 
     if !output.status.success() {
         debug!(
@@ -155,31 +206,42 @@ pub async fn check_pr_for_branch(repo_path: &Path, branch: &str) -> Option<PrInf
             branch,
             String::from_utf8_lossy(&output.stderr)
         );
-        return None;
+        return PrCheckResult::FetchFailed;
     }
 
-    let json = String::from_utf8(output.stdout).ok()?;
+    let Ok(json) = String::from_utf8(output.stdout) else {
+        return PrCheckResult::FetchFailed;
+    };
     parse_pr_list_json(&json)
 }
 
-/// Parse the JSON array returned by `gh pr list --json number,url,state,isDraft,labels`.
+/// Parse the JSON array returned by `gh pr list --json number,url,state,isDraft,labels,baseRefName`.
 ///
-/// Picks the first open PR if any exist, otherwise the first PR in the array
-/// (which gh returns in reverse-creation order).
-fn parse_pr_list_json(json: &str) -> Option<PrInfo> {
-    let v: serde_json::Value = serde_json::from_str(json).ok()?;
-    let arr = v.as_array()?;
+/// Empty array → `NotFound` (gh told us there's no PR). Missing/malformed
+/// JSON → `FetchFailed`. Non-empty array → `Found`, preferring the first
+/// open PR if any exist, otherwise the first entry (gh returns them in
+/// reverse-creation order).
+fn parse_pr_list_json(json: &str) -> PrCheckResult {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
+        return PrCheckResult::FetchFailed;
+    };
+    let Some(arr) = v.as_array() else {
+        return PrCheckResult::FetchFailed;
+    };
     if arr.is_empty() {
-        return None;
+        return PrCheckResult::NotFound;
     }
 
-    // Prefer open PRs over closed/merged when a branch has multiple
     let chosen = arr
         .iter()
         .find(|p| p["state"].as_str() == Some("OPEN"))
         .unwrap_or(&arr[0]);
 
-    parse_pr_entry(chosen)
+    match parse_pr_entry(chosen) {
+        Some(info) => PrCheckResult::Found(info),
+        // Unknown/new state string — treat as malformed.
+        None => PrCheckResult::FetchFailed,
+    }
 }
 
 fn parse_pr_entry(v: &serde_json::Value) -> Option<PrInfo> {
@@ -352,7 +414,8 @@ mod tests {
     #[test]
     fn test_parse_pr_list_open() {
         let json = r#"[{"number":42,"url":"https://github.com/owner/repo/pull/42","state":"OPEN","isDraft":false,"labels":[]}]"#;
-        let info = parse_pr_list_json(json).unwrap();
+        let result = parse_pr_list_json(json);
+        let info = result.info().unwrap();
         assert_eq!(info.number, 42);
         assert_eq!(info.url, "https://github.com/owner/repo/pull/42");
         assert_eq!(info.state, PrState::Open);
@@ -373,7 +436,8 @@ mod tests {
             "labels":[],
             "baseRefName":"feature-login"
         }]"#;
-        let info = parse_pr_list_json(json).unwrap();
+        let result = parse_pr_list_json(json);
+        let info = result.info().unwrap();
         assert_eq!(info.base_ref_name.as_deref(), Some("feature-login"));
     }
 
@@ -382,14 +446,16 @@ mod tests {
         // Older gh responses / tests that omit baseRefName should leave the
         // field as None rather than failing.
         let json = r#"[{"number":9,"url":"u","state":"OPEN","isDraft":false,"labels":[]}]"#;
-        let info = parse_pr_list_json(json).unwrap();
+        let result = parse_pr_list_json(json);
+        let info = result.info().unwrap();
         assert!(info.base_ref_name.is_none());
     }
 
     #[test]
     fn test_parse_pr_list_merged() {
         let json = r#"[{"number":7,"url":"https://x/pull/7","state":"MERGED","isDraft":false,"labels":[]}]"#;
-        let info = parse_pr_list_json(json).unwrap();
+        let result = parse_pr_list_json(json);
+        let info = result.info().unwrap();
         assert_eq!(info.state, PrState::Merged);
         assert!(info.merged());
     }
@@ -403,7 +469,8 @@ mod tests {
             "isDraft":true,
             "labels":[{"name":"dev-review-required","color":"abc"},{"name":"trivial","color":"def"}]
         }]"#;
-        let info = parse_pr_list_json(json).unwrap();
+        let result = parse_pr_list_json(json);
+        let info = result.info().unwrap();
         assert!(info.is_draft);
         assert_eq!(info.labels, vec!["dev-review-required", "trivial"]);
     }
@@ -414,7 +481,8 @@ mod tests {
             {"number":1,"url":"u1","state":"MERGED","isDraft":false,"labels":[]},
             {"number":2,"url":"u2","state":"OPEN","isDraft":false,"labels":[]}
         ]"#;
-        let info = parse_pr_list_json(json).unwrap();
+        let result = parse_pr_list_json(json);
+        let info = result.info().unwrap();
         assert_eq!(info.number, 2);
         assert_eq!(info.state, PrState::Open);
     }
@@ -422,13 +490,17 @@ mod tests {
     #[test]
     fn test_parse_pr_list_closed_when_no_open() {
         let json = r#"[{"number":9,"url":"u","state":"CLOSED","isDraft":false,"labels":[]}]"#;
-        let info = parse_pr_list_json(json).unwrap();
+        let result = parse_pr_list_json(json);
+        let info = result.info().unwrap();
         assert_eq!(info.state, PrState::Closed);
     }
 
     #[test]
     fn test_parse_pr_list_empty_array() {
-        assert!(parse_pr_list_json("[]").is_none());
+        // Empty array is an authoritative "no PR" — must be NotFound, not
+        // FetchFailed. Callers rely on this to clear stale PR state when a PR
+        // is deleted upstream.
+        assert!(parse_pr_list_json("[]").is_not_found());
     }
 
     #[test]
@@ -448,7 +520,8 @@ mod tests {
                     "reviewDecision": "{raw}"
                 }}]"#
             );
-            let info = parse_pr_list_json(&json).expect("parses");
+            let result = parse_pr_list_json(&json);
+            let info = result.info().expect("parses");
             assert_eq!(info.review_decision, expected, "for raw={raw}");
         }
     }
@@ -462,7 +535,8 @@ mod tests {
             "isDraft": false,
             "labels": []
         }]"#;
-        let info = parse_pr_list_json(json).expect("parses");
+        let result = parse_pr_list_json(json);
+        let info = result.info().expect("parses");
         assert_eq!(info.review_decision, None);
     }
 
@@ -486,7 +560,8 @@ mod tests {
                 {"author": {"login": "alice"}, "state": "APPROVED"}
             ]
         }]"#;
-        let info = parse_pr_list_json(json).expect("parses");
+        let result = parse_pr_list_json(json);
+        let info = result.info().expect("parses");
         let mut reviewers = info.reviewers.clone();
         reviewers.sort();
         assert_eq!(reviewers, vec!["alice".to_string(), "bob".to_string()]);
@@ -501,13 +576,30 @@ mod tests {
             "isDraft": false,
             "labels": []
         }]"#;
-        let info = parse_pr_list_json(json).expect("parses");
+        let result = parse_pr_list_json(json);
+        let info = result.info().expect("parses");
         assert!(info.reviewers.is_empty());
     }
 
     #[test]
     fn test_parse_pr_list_garbage() {
-        assert!(parse_pr_list_json("not json").is_none());
+        // Malformed JSON → FetchFailed, so a gh regression/panic doesn't wipe
+        // cached PR state on every poll.
+        assert!(parse_pr_list_json("not json").is_fetch_failed());
+    }
+
+    #[test]
+    fn test_parse_pr_list_not_an_array() {
+        assert!(parse_pr_list_json(r#"{"oops":1}"#).is_fetch_failed());
+    }
+
+    #[test]
+    fn test_parse_pr_list_unknown_state() {
+        // An entry with an unrecognised state string would previously drop to
+        // None; now it's explicitly FetchFailed so we don't mistake it for
+        // "no PR" and wipe stack metadata.
+        let json = r#"[{"number":1,"url":"u","state":"NEW_STATE","isDraft":false,"labels":[]}]"#;
+        assert!(parse_pr_list_json(json).is_fetch_failed());
     }
 
     #[test]

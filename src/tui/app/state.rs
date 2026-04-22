@@ -60,25 +60,42 @@ impl App {
                 let _ = self
                     .store
                     .mutate(move |state| {
-                        for (session_id, pr_info) in &results {
-                            if let Some(session) = state.get_session_mut(session_id) {
-                                session.pr_number = pr_info.as_ref().map(|p| p.number);
-                                session.pr_url = pr_info.as_ref().map(|p| p.url.clone());
-                                session.pr_state = pr_info.as_ref().map(|p| p.state);
-                                session.pr_draft = pr_info.as_ref().is_some_and(|p| p.is_draft);
-                                session.pr_labels = pr_info
-                                    .as_ref()
-                                    .map(|p| p.labels.clone())
-                                    .unwrap_or_default();
-                                session.pr_merged = pr_info.as_ref().is_some_and(|p| p.merged());
-                                session.review_decision =
-                                    pr_info.as_ref().and_then(|p| p.review_decision);
-                                session.pr_reviewers = pr_info
-                                    .as_ref()
-                                    .map(|p| p.reviewers.clone())
-                                    .unwrap_or_default();
-                                session.pr_base_branch =
-                                    pr_info.as_ref().and_then(|p| p.base_ref_name.clone());
+                        for (session_id, result) in &results {
+                            let Some(session) = state.get_session_mut(session_id) else {
+                                continue;
+                            };
+                            match result {
+                                PrCheckResult::Found(info) => {
+                                    session.pr_number = Some(info.number);
+                                    session.pr_url = Some(info.url.clone());
+                                    session.pr_state = Some(info.state);
+                                    session.pr_draft = info.is_draft;
+                                    session.pr_labels = info.labels.clone();
+                                    session.pr_merged = info.merged();
+                                    session.review_decision = info.review_decision;
+                                    session.pr_reviewers = info.reviewers.clone();
+                                    session.pr_base_branch = info.base_ref_name.clone();
+                                }
+                                PrCheckResult::NotFound => {
+                                    // Authoritative "no PR" — clear cached fields so
+                                    // stale data (e.g. after a PR was deleted) doesn't
+                                    // linger.
+                                    session.pr_number = None;
+                                    session.pr_url = None;
+                                    session.pr_state = None;
+                                    session.pr_draft = false;
+                                    session.pr_labels.clear();
+                                    session.pr_merged = false;
+                                    session.review_decision = None;
+                                    session.pr_reviewers.clear();
+                                    session.pr_base_branch = None;
+                                }
+                                PrCheckResult::FetchFailed => {
+                                    // Transient error (gh missing, network, auth) —
+                                    // preserve cached PR state including `pr_base_branch`
+                                    // so the PR-stack topology doesn't flicker off and
+                                    // sessions don't collapse to a flat list.
+                                }
                             }
                         }
                         for session in state.sessions.values_mut() {

@@ -69,7 +69,7 @@ pub enum StateUpdate {
     Error { message: String },
     /// PR status results ready from background check
     PrStatusReady {
-        results: Vec<(SessionId, Option<crate::git::PrInfo>)>,
+        results: Vec<(SessionId, crate::git::PrCheckResult)>,
     },
     /// Session creation completed successfully
     SessionCreated { session_id: SessionId },
