@@ -111,6 +111,8 @@ Press `t` on any session in a stack to create a new session on top of that stack
 
 Stacks are detected from the PR's `baseRefName` returned by the `gh` CLI, so they stay accurate across GitHub's auto-retargeting when a stack member is merged.
 
+Stack grouping is only active in the default project-grouped view. When [Session List Sections](#session-list-sections) is configured, sessions are ordered by their section instead and stacked children render at the normal indent — the `t` hotkey and `stack_parent_session_id` still work, but a base and its child may land in different sections depending on their PR state.
+
 ### Status Symbols
 
 Each session displays a status indicator to the left of its name:
@@ -286,6 +288,8 @@ state_sync_interval_ms = 2000
 Group the session list under configurable headers based on GitHub PR state.
 
 By default `[[sections]]` is empty and the list keeps its project-grouped view. Once you declare one or more sections, the list switches to a section-grouped layout: section headers at the top level, each repo nested beneath as a sub-header, and sessions indented below their repo.
+
+Sections replace [PR-stack grouping](#pr-stacks) — when sections are configured, stacked children are no longer visually nested under their stack base. The underlying stack links are still tracked and the `t` hotkey still stacks new sessions onto the top of a stack, but ordering within the list follows the section rules.
 
 An implicit **"In Progress"** section is always the first row and acts as the catch-all — any session whose PR state doesn't match a later section's predicate lands here. It also lists every repo that hasn't placed a session into a later section, so newly added projects remain visible.
 
