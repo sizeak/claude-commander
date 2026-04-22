@@ -21,6 +21,9 @@ pub struct PrInfo {
     /// GitHub-derived review decision; `None` when no decision has been
     /// formed (e.g. no reviews requested) or the field is absent.
     pub review_decision: Option<ReviewDecision>,
+    /// Reviewer logins (users only) — union of requested reviewers and
+    /// authors of any submitted review. Deduplicated, sorted.
+    pub reviewers: Vec<String>,
 }
 
 impl PrInfo {
@@ -133,7 +136,7 @@ pub async fn check_pr_for_branch(repo_path: &Path, branch: &str) -> Option<PrInf
             "--state",
             "all",
             "--json",
-            "number,url,state,isDraft,labels,reviewDecision",
+            "number,url,state,isDraft,labels,reviewDecision,reviewRequests,latestReviews",
             "--limit",
             "5",
         ])
@@ -200,6 +203,26 @@ fn parse_pr_entry(v: &serde_json::Value) -> Option<PrInfo> {
         _ => None,
     });
 
+    // Union of requested reviewer user logins and submitted review authors.
+    // Team reviewer requests are skipped (they have `slug` not `login`).
+    let mut reviewers: Vec<String> = Vec::new();
+    if let Some(arr) = v["reviewRequests"].as_array() {
+        for req in arr {
+            if let Some(login) = req["login"].as_str() {
+                reviewers.push(login.to_string());
+            }
+        }
+    }
+    if let Some(arr) = v["latestReviews"].as_array() {
+        for r in arr {
+            if let Some(login) = r["author"]["login"].as_str() {
+                reviewers.push(login.to_string());
+            }
+        }
+    }
+    reviewers.sort();
+    reviewers.dedup();
+
     Some(PrInfo {
         number,
         url,
@@ -207,6 +230,7 @@ fn parse_pr_entry(v: &serde_json::Value) -> Option<PrInfo> {
         is_draft,
         labels,
         review_decision,
+        reviewers,
     })
 }
 
@@ -409,6 +433,45 @@ mod tests {
         }]"#;
         let info = parse_pr_list_json(json).expect("parses");
         assert_eq!(info.review_decision, None);
+    }
+
+    #[test]
+    fn test_parse_pr_list_reviewers_unions_requests_and_submitted() {
+        // Requested reviewers and submitted review authors should both end
+        // up in `reviewers` (deduped). Teams in reviewRequests are skipped
+        // (we surface only user logins).
+        let json = r#"[{
+            "number": 1,
+            "url": "https://x/1",
+            "state": "OPEN",
+            "isDraft": false,
+            "labels": [],
+            "reviewRequests": [
+                {"__typename": "User", "login": "alice"},
+                {"__typename": "Team", "slug": "platform"}
+            ],
+            "latestReviews": [
+                {"author": {"login": "bob"}, "state": "COMMENTED"},
+                {"author": {"login": "alice"}, "state": "APPROVED"}
+            ]
+        }]"#;
+        let info = parse_pr_list_json(json).expect("parses");
+        let mut reviewers = info.reviewers.clone();
+        reviewers.sort();
+        assert_eq!(reviewers, vec!["alice".to_string(), "bob".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_pr_list_missing_reviewer_fields_is_empty() {
+        let json = r#"[{
+            "number": 1,
+            "url": "https://x/1",
+            "state": "OPEN",
+            "isDraft": false,
+            "labels": []
+        }]"#;
+        let info = parse_pr_list_json(json).expect("parses");
+        assert!(info.reviewers.is_empty());
     }
 
     #[test]

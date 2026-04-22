@@ -73,6 +73,10 @@ impl App {
                                 session.pr_merged = pr_info.as_ref().is_some_and(|p| p.merged());
                                 session.review_decision =
                                     pr_info.as_ref().and_then(|p| p.review_decision);
+                                session.pr_reviewers = pr_info
+                                    .as_ref()
+                                    .map(|p| p.reviewers.clone())
+                                    .unwrap_or_default();
                             }
                         }
                         for session in state.sessions.values_mut() {

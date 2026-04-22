@@ -248,6 +248,10 @@ pub struct WorktreeSession {
     /// GitHub `reviewDecision` for the PR (None when no PR or no decision data).
     #[serde(default)]
     pub review_decision: Option<crate::git::ReviewDecision>,
+    /// Reviewer logins on the PR — the union of requested reviewers and
+    /// submitted review authors. Empty when there's no PR or no reviewers.
+    #[serde(default)]
+    pub pr_reviewers: Vec<String>,
     /// Whether the session has unread output (agent finished but user hasn't attached)
     #[serde(default)]
     pub unread: bool,
@@ -301,6 +305,7 @@ impl WorktreeSession {
             pr_draft: false,
             pr_labels: Vec::new(),
             review_decision: None,
+            pr_reviewers: Vec::new(),
             unread: false,
             section_override: None,
             current_section: None,
@@ -343,6 +348,7 @@ impl WorktreeSession {
             pr_draft: false,
             pr_labels: Vec::new(),
             review_decision: None,
+            pr_reviewers: Vec::new(),
             unread: false,
             section_override: None,
             current_section: None,

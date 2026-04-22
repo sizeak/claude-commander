@@ -25,6 +25,42 @@ pub struct SectionConfig {
     pub has_pr: Option<bool>,
     #[serde(default)]
     pub review_decision: Option<DecisionPredicate>,
+    #[serde(default)]
+    pub has_reviewer: Option<ReviewerPredicate>,
+}
+
+/// Reviewer predicate.
+///
+/// Accepts:
+/// - `true` — at least one reviewer that isn't Copilot (its GitHub bot
+///   login is matched case-insensitively, so `copilot-pull-request-reviewer[bot]`
+///   or any variant is excluded).
+/// - `false` — no non-Copilot reviewers on the PR.
+/// - a specific login string — matches literally (no Copilot filtering).
+/// - an array of login strings — any-of, literal match.
+///
+/// "Reviewer" = the union of requested reviewers and submitted review authors.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ReviewerPredicate {
+    Bool(bool),
+    One(String),
+    Any(Vec<String>),
+}
+
+impl ReviewerPredicate {
+    fn matches(&self, reviewers: &[String]) -> bool {
+        match self {
+            Self::Bool(true) => reviewers.iter().any(|r| !is_copilot_login(r)),
+            Self::Bool(false) => !reviewers.iter().any(|r| !is_copilot_login(r)),
+            Self::One(needle) => reviewers.iter().any(|r| r == needle),
+            Self::Any(needles) => needles.iter().any(|n| reviewers.iter().any(|r| r == n)),
+        }
+    }
+}
+
+fn is_copilot_login(login: &str) -> bool {
+    login.to_lowercase().contains("copilot")
 }
 
 /// Accepts either a single value (scalar in TOML) or a list (array, any-of
@@ -130,6 +166,7 @@ fn has_predicates(section: &SectionConfig) -> bool {
         || section.has_label.is_some()
         || section.has_pr.is_some()
         || section.review_decision.is_some()
+        || section.has_reviewer.is_some()
 }
 
 /// Reserved name of the implicit catch-all section, always at process
@@ -243,6 +280,11 @@ fn section_matches(session: &WorktreeSession, section: &SectionConfig) -> bool {
     }
     if let Some(decision_pred) = &section.review_decision
         && !decision_pred.matches(session.review_decision)
+    {
+        return false;
+    }
+    if let Some(reviewer_pred) = &section.has_reviewer
+        && !reviewer_pred.matches(&session.pr_reviewers)
     {
         return false;
     }
@@ -1025,6 +1067,77 @@ mod tests {
         assert_eq!(
             assign_section(&open_session, &sections),
             SectionAssignment::InProgress
+        );
+    }
+
+    #[test]
+    fn has_reviewer_true_matches_session_with_human_reviewer() {
+        let mut session = make_session();
+        session.pr_reviewers = vec!["alice".into()];
+
+        let sections = vec![SectionConfig {
+            name: "In Review".into(),
+            has_reviewer: Some(ReviewerPredicate::Bool(true)),
+            ..Default::default()
+        }];
+
+        assert_eq!(
+            assign_section(&session, &sections),
+            SectionAssignment::Matched("In Review".into())
+        );
+    }
+
+    #[test]
+    fn has_reviewer_true_ignores_copilot_only_reviewers() {
+        // Copilot's reviewer bot login. `has_reviewer = true` means
+        // "engaged by someone other than Copilot" and must not match a PR
+        // where Copilot is the only reviewer.
+        let mut session = make_session();
+        session.pr_reviewers = vec!["copilot-pull-request-reviewer[bot]".into()];
+
+        let sections = vec![SectionConfig {
+            name: "In Review".into(),
+            has_reviewer: Some(ReviewerPredicate::Bool(true)),
+            ..Default::default()
+        }];
+
+        assert_eq!(
+            assign_section(&session, &sections),
+            SectionAssignment::InProgress
+        );
+    }
+
+    #[test]
+    fn has_reviewer_specific_login_matches_literally() {
+        let mut session = make_session();
+        session.pr_reviewers = vec!["alice".into(), "bob".into()];
+
+        let sections = vec![SectionConfig {
+            name: "Alice's".into(),
+            has_reviewer: Some(ReviewerPredicate::One("alice".into())),
+            ..Default::default()
+        }];
+
+        assert_eq!(
+            assign_section(&session, &sections),
+            SectionAssignment::Matched("Alice's".into())
+        );
+    }
+
+    #[test]
+    fn has_reviewer_array_matches_any_of_the_logins() {
+        let mut session = make_session();
+        session.pr_reviewers = vec!["bob".into()];
+
+        let sections = vec![SectionConfig {
+            name: "Team".into(),
+            has_reviewer: Some(ReviewerPredicate::Any(vec!["alice".into(), "bob".into()])),
+            ..Default::default()
+        }];
+
+        assert_eq!(
+            assign_section(&session, &sections),
+            SectionAssignment::Matched("Team".into())
         );
     }
 
