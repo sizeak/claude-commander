@@ -415,8 +415,7 @@ fn test_session_list_with_numbers() {
                 },
             ];
             let tree_list = TreeList::new(&items, &theme)
-                .highlight_style(theme.selection().add_modifier(Modifier::BOLD))
-                .show_numbers(true);
+                .highlight_style(theme.selection().add_modifier(Modifier::BOLD));
             frame.render_stateful_widget(
                 tree_list,
                 frame.area(),
@@ -1114,7 +1113,7 @@ fn test_quick_switch_with_matches() {
         .draw(|frame| {
             let area = frame.area();
             let modal_width = area.width * 60 / 100;
-            let matches = vec![
+            let matches = [
                 (
                     "●",
                     theme.status_running,

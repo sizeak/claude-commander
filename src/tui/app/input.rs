@@ -46,9 +46,8 @@ impl App {
                     return;
                 }
 
-                // Number-jump: intercept digit keys when session numbers are enabled
-                if self.config.show_session_numbers
-                    && let crossterm::event::KeyCode::Char(c @ '0'..='9') = key.code
+                // Number-jump: intercept digit keys to select by session number.
+                if let crossterm::event::KeyCode::Char(c @ '0'..='9') = key.code
                     && key.modifiers.is_empty()
                 {
                     let digit = c as u8 - b'0';

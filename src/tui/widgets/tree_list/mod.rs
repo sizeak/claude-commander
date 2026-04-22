@@ -19,13 +19,10 @@ mod tests;
 
 pub use state::TreeListState;
 
-/// Tree branch prefix for worktree items (7 display columns)
-const TREE_INDENT: &str = "   └── ";
-/// Display width of `TREE_INDENT` in columns
-const TREE_INDENT_WIDTH: usize = 7;
-/// Width of the number field when `show_numbers` is enabled.
-/// Number + trailing space = TREE_INDENT_WIDTH, keeping alignment consistent.
-const NUMBER_WIDTH: usize = TREE_INDENT_WIDTH - 1;
+/// Width of the right-aligned session-number field. The rendered prefix is
+/// `"{n:>NUMBER_WIDTH$} "` — so the number occupies NUMBER_WIDTH columns and
+/// is followed by a single trailing space, giving a 7-column slot.
+const NUMBER_WIDTH: usize = 6;
 
 /// Braille spinner frames for the Creating status indicator
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -40,8 +37,6 @@ pub struct TreeList<'a> {
     block: Option<Block<'a>>,
     /// Style for selected item
     highlight_style: Style,
-    /// Show sequential numbers instead of tree branch prefixes
-    show_numbers: bool,
     /// Tick counter for spinner animation
     tick: u64,
     /// Label names that mark an open PR as awaiting reviewer action.
@@ -59,7 +54,6 @@ impl<'a> TreeList<'a> {
             theme,
             block: None,
             highlight_style: theme.selection().add_modifier(Modifier::BOLD),
-            show_numbers: false,
             tick: 0,
             review_labels: &[],
             invert_pr_label_color: false,
@@ -88,12 +82,6 @@ impl<'a> TreeList<'a> {
     /// Set the highlight style
     pub fn highlight_style(mut self, style: Style) -> Self {
         self.highlight_style = style;
-        self
-    }
-
-    /// Show sequential numbers instead of tree branch prefixes
-    pub fn show_numbers(mut self, show: bool) -> Self {
-        self.show_numbers = show;
         self
     }
 

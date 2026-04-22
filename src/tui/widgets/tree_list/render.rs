@@ -106,17 +106,12 @@ impl<'a> TreeList<'a> {
                 } => {
                     worktree_number += 1;
 
-                    let mut spans = vec![
-                        // Indentation or number prefix for worktrees
-                        if self.show_numbers {
-                            Span::styled(
-                                format!("{:>width$} ", worktree_number, width = NUMBER_WIDTH),
-                                Style::default().fg(self.theme.text_secondary),
-                            )
-                        } else {
-                            Span::raw(TREE_INDENT)
-                        },
-                    ];
+                    // Right-aligned session number prefix.
+                    let indent_span = Span::styled(
+                        format!("{:>width$} ", worktree_number, width = NUMBER_WIDTH),
+                        Style::default().fg(self.theme.text_secondary),
+                    );
+                    let mut spans = vec![indent_span];
 
                     // Single status glyph: spinner > waiting > unread > running > stopped
                     if let Some((glyph, color)) =

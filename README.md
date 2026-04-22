@@ -164,7 +164,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
 | `<` / `>` | Shrink / grow left pane |
 | `Ctrl-u/d` or `PageUp/Down` | Page up/down in preview |
-| `1`–`99` | Jump to session by number (requires `show_session_numbers`) |
+| `1`–`99` | Jump to session by number |
 | `g` | Generate AI summary (Info pane only) |
 | `,` | Open settings |
 | `?` | Show help |
@@ -243,9 +243,6 @@ dim_unfocused_opacity = 0.4
 # Leader key for quick-switch session search
 # Supports: " ", "space", "ctrl+k", "f1", etc.
 # leader_key = " "
-
-# Show sequential numbers next to sessions and enable digit-key jumping (1–99)
-# show_session_numbers = true
 
 # Render PR labels as colored text on the default background (the pre-pill
 # style). Default false renders them as colored "pill" blocks that stand out

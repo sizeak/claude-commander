@@ -36,18 +36,13 @@ fn make_worktree(title: &str) -> SessionListItem {
 }
 
 /// Render a TreeList to a buffer and return lines as strings
-fn render_tree(
-    items: &[SessionListItem],
-    show_numbers: bool,
-    width: u16,
-    height: u16,
-) -> Vec<String> {
+fn render_tree(items: &[SessionListItem], width: u16, height: u16) -> Vec<String> {
     let theme = Theme::basic();
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|frame| {
-            let tree = TreeList::new(items, &theme).show_numbers(show_numbers);
+            let tree = TreeList::new(items, &theme);
             frame.render_stateful_widget(tree, frame.area(), &mut ListState::default());
         })
         .unwrap();
@@ -62,25 +57,13 @@ fn render_tree(
 }
 
 #[test]
-fn test_to_list_items_without_numbers_uses_tree_branch() {
-    let items = vec![make_project("proj", 1), make_worktree("session-a")];
-    let lines = render_tree(&items, false, 40, 3);
-    // Worktree line should contain tree branch
-    assert!(
-        lines[1].contains("└──"),
-        "Expected tree branch in: {}",
-        lines[1]
-    );
-}
-
-#[test]
-fn test_to_list_items_with_numbers_uses_number_prefix() {
+fn test_worktree_rows_use_number_prefix() {
     let items = vec![
         make_project("proj", 2),
         make_worktree("session-a"),
         make_worktree("session-b"),
     ];
-    let lines = render_tree(&items, true, 40, 4);
+    let lines = render_tree(&items, 40, 4);
     // First worktree starts with right-aligned "1"
     assert!(
         lines[1].trim_start().starts_with("1 "),
@@ -93,10 +76,10 @@ fn test_to_list_items_with_numbers_uses_number_prefix() {
         "Expected number prefix in: '{}'",
         lines[2]
     );
-    // No tree branches
+    // No ASCII tree glyph — numbering is the only supported prefix.
     assert!(
         !lines[1].contains("└──"),
-        "Should not have tree branch with numbers"
+        "Tree glyph should no longer appear"
     );
 }
 
@@ -108,7 +91,7 @@ fn test_numbers_are_sequential_across_projects() {
         make_project("proj-b", 1),
         make_worktree("session-2"),
     ];
-    let lines = render_tree(&items, true, 40, 5);
+    let lines = render_tree(&items, 40, 5);
     // Session under proj-a is #1
     assert!(
         lines[1].trim_start().starts_with("1 "),
@@ -129,7 +112,7 @@ fn test_double_digit_number_formatting() {
     for i in 1..=12 {
         items.push(make_worktree(&format!("s-{}", i)));
     }
-    let lines = render_tree(&items, true, 40, 14);
+    let lines = render_tree(&items, 40, 14);
     // Single digit right-aligned
     assert!(
         lines[1].trim_start().starts_with("1 "),

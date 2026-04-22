@@ -89,12 +89,6 @@ impl App {
                         color_swatch: None,
                     },
                     SettingsRow {
-                        label: "Session Numbers".into(),
-                        value: c.show_session_numbers.to_string(),
-                        field_key: "show_session_numbers".into(),
-                        color_swatch: None,
-                    },
-                    SettingsRow {
                         label: "Invert PR Label Color".into(),
                         value: c.invert_pr_label_color.to_string(),
                         field_key: "invert_pr_label_color".into(),
@@ -425,11 +419,6 @@ impl App {
                 "dim_unfocused_opacity" => {
                     if let Ok(v) = value.parse::<f32>() {
                         self.config.dim_unfocused_opacity = v.clamp(0.0, 1.0);
-                    }
-                }
-                "show_session_numbers" => {
-                    if let Ok(b) = value.parse::<bool>() {
-                        self.config.show_session_numbers = b;
                     }
                 }
                 "invert_pr_label_color" => {

@@ -480,7 +480,7 @@ impl AppUiState {
         }
         if !filter_query.is_empty() {
             // Stable sort by score desc preserves enum order among ties.
-            scored.sort_by(|a, b| b.0.cmp(&a.0));
+            scored.sort_by_key(|(score, _)| std::cmp::Reverse(*score));
         }
         scored.into_iter().map(|(_, e)| e).collect()
     }

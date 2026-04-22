@@ -65,7 +65,6 @@ impl App {
         frame.render_widget(heading, chunks[0]);
 
         let tree_list = TreeList::new(&self.ui_state.list_items, &self.theme)
-            .show_numbers(self.config.show_session_numbers)
             .tick(self.ui_state.tick_count)
             .highlight_style(self.theme.selection().add_modifier(Modifier::BOLD))
             .review_labels(&self.config.pr_review_labels)
