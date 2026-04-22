@@ -269,6 +269,9 @@ state_sync_interval_ms = 2000
 #   has_label        string or [string, …]  (any-of)
 #   review_decision  "approved" | "changes_requested" | "review_required"
 #                    (string or array, any-of)
+#   has_reviewer     bool  (true = any reviewer that isn't Copilot)
+#                    | string (specific login)
+#                    | [string, …] (any-of, literal)
 #
 # A section declared with no predicates is a *manual-only waypoint* —
 # auto never places sessions there; you can only move into it via the
