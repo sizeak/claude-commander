@@ -264,6 +264,12 @@ impl App {
             StateUpdate::Error { message } => {
                 self.ui_state.modal = Modal::Error { message };
             }
+            StateUpdate::CascadeFinished { result } => {
+                self.handle_cascade_finished(result).await;
+            }
+            StateUpdate::PushStackFinished { result } => {
+                self.handle_push_stack_finished(result).await;
+            }
             _ => {}
         }
     }
@@ -289,6 +295,44 @@ impl App {
                 .mutate(move |state| {
                     for sid in &creating_ids {
                         state.remove_session(sid);
+                    }
+                })
+                .await;
+        }
+    }
+
+    /// Reset any sessions left in transient stack-operation states to `Running`.
+    ///
+    /// Both `Merging` and `Pushing` are transient — they're only valid while
+    /// a cascade-merge or push-stack step is actively running. If the process
+    /// died mid-op the git state is whatever it was, but the session-level
+    /// status is stale and must be cleared so the UI doesn't show a spinner
+    /// forever. `CascadePaused` is deliberately not touched: it's the durable
+    /// signal that a conflict is outstanding, and pairs with the persisted
+    /// `cascade_paused_at`.
+    pub(super) async fn cleanup_stale_merging_sessions(&self) {
+        let stale_ids: Vec<SessionId> = {
+            let state = self.store.read().await;
+            state
+                .sessions
+                .values()
+                .filter(|s| matches!(s.status, SessionStatus::Merging | SessionStatus::Pushing))
+                .map(|s| s.id)
+                .collect()
+        };
+
+        if !stale_ids.is_empty() {
+            warn!(
+                "Resetting {} stale Merging/Pushing session(s) to Running",
+                stale_ids.len()
+            );
+            let _ = self
+                .store
+                .mutate(move |state| {
+                    for sid in &stale_ids {
+                        if let Some(session) = state.get_session_mut(sid) {
+                            session.set_status(SessionStatus::Running);
+                        }
                     }
                 })
                 .await;
@@ -404,6 +448,7 @@ impl App {
 
         let selectable: Vec<bool> = items.iter().map(|i| i.is_selectable()).collect();
         self.ui_state.list_items = items;
+        self.ui_state.cascade_paused = state.cascade_paused_at.is_some();
         if self.config.sections.is_empty() {
             self.ui_state
                 .list_state

@@ -441,6 +441,18 @@ impl App {
             UserCommand::NewStackedSession => {
                 self.handle_new_stacked_session().await;
             }
+            UserCommand::CascadeMergeMain => {
+                self.handle_cascade_merge_main().await;
+            }
+            UserCommand::CascadeResume => {
+                self.handle_cascade_resume().await;
+            }
+            UserCommand::CascadeAbandon => {
+                self.handle_cascade_abandon().await;
+            }
+            UserCommand::PushStack => {
+                self.handle_push_stack();
+            }
             UserCommand::CheckoutBranch => {
                 self.handle_checkout_branch().await;
             }

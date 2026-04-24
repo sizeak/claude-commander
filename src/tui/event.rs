@@ -116,6 +116,17 @@ pub enum StateUpdate {
         /// Shell pane content
         shell_content: String,
     },
+    /// Cascade-merge background task finished (completed, paused on conflict,
+    /// or errored). The TUI refreshes and shows an appropriate toast.
+    CascadeFinished {
+        result: std::result::Result<crate::session::CascadeOutcome, String>,
+    },
+    /// Push-stack background task finished. `Ok` carries the number of
+    /// sessions pushed before the task ended; `Err` carries the git error
+    /// from the first failed push (later sessions not attempted).
+    PushStackFinished {
+        result: std::result::Result<crate::session::PushStackOutcome, String>,
+    },
 }
 
 /// User commands triggered by input
@@ -133,6 +144,14 @@ pub enum UserCommand {
     NewSession,
     /// Create a new session stacked on the selected session's branch
     NewStackedSession,
+    /// Cascade-merge main through the selected session's stack
+    CascadeMergeMain,
+    /// Resume a cascade-merge that paused on conflicts
+    CascadeResume,
+    /// Abandon a paused cascade-merge without continuing
+    CascadeAbandon,
+    /// Push every branch in the selected session's stack to the remote
+    PushStack,
     /// Create new project
     NewProject,
     /// Checkout an existing branch into a new worktree session
@@ -228,6 +247,10 @@ impl From<BindableAction> for UserCommand {
             BindableAction::SelectShell => Self::SelectShell,
             BindableAction::NewSession => Self::NewSession,
             BindableAction::NewStackedSession => Self::NewStackedSession,
+            BindableAction::CascadeMergeMain => Self::CascadeMergeMain,
+            BindableAction::CascadeResume => Self::CascadeResume,
+            BindableAction::CascadeAbandon => Self::CascadeAbandon,
+            BindableAction::PushStack => Self::PushStack,
             BindableAction::NewProject => Self::NewProject,
             BindableAction::CheckoutBranch => Self::CheckoutBranch,
             BindableAction::DeleteSession => Self::DeleteSession,

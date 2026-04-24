@@ -91,22 +91,29 @@ impl<'a> TreeList<'a> {
     /// Pick the single status glyph and colour for a worktree row.
     ///
     /// Priority (first wins):
-    /// 1. Creating             → animated spinner
-    /// 2. Agent `Working`      → animated spinner
-    /// 3. Agent `WaitingForInput` → `?` glyph
-    /// 4. `unread`             → `◆` diamond
-    /// 5. Running (idle/unknown, no unread) → `●` filled circle
-    /// 6. Stopped              → `○` open circle
+    /// 1. Creating / Merging / Pushing → animated spinner
+    /// 2. CascadePaused        → `⏸` with warning accent
+    /// 3. Agent `Working`      → animated spinner
+    /// 4. Agent `WaitingForInput` → `?` glyph
+    /// 5. `unread`             → `◆` diamond
+    /// 6. Running (idle/unknown, no unread) → `●` filled circle
+    /// 7. Stopped              → `○` open circle
     fn session_status_glyph(
         &self,
         status: SessionStatus,
         agent_state: Option<AgentState>,
         unread: bool,
     ) -> Option<(String, Color)> {
-        if status == SessionStatus::Creating {
+        if matches!(
+            status,
+            SessionStatus::Creating | SessionStatus::Merging | SessionStatus::Pushing
+        ) {
             let step = self.tick as usize / 3;
             let frame = SPINNER_FRAMES[step % SPINNER_FRAMES.len()];
             return Some((frame.to_string(), self.theme.status_creating));
+        }
+        if status == SessionStatus::CascadePaused {
+            return Some(("⏸".to_string(), self.theme.agent_waiting));
         }
         if status == SessionStatus::Running {
             match agent_state {

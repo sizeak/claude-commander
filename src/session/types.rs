@@ -85,18 +85,44 @@ pub enum SessionStatus {
     /// Session has completed or been killed
     #[serde(alias = "paused")]
     Stopped,
+    /// Cascade-merge is running `git merge` in this session's worktree.
+    /// Transient: cleared as soon as the merge step completes, conflicts or
+    /// not. `cleanup_stale_merging_sessions` resets any stragglers at startup
+    /// in case the process died mid-merge.
+    Merging,
+    /// Cascade-merge hit a conflict in this session. Persists until the user
+    /// runs `CascadeResume` (after resolving + committing) or `CascadeAbandon`,
+    /// so the stalled session is still visible after restarting the TUI.
+    CascadePaused,
+    /// `git push` is running against this session's branch as part of a
+    /// push-stack operation. Transient: cleared as soon as the push completes
+    /// (success or failure). Same stale-cleanup treatment as `Merging` — a
+    /// crash mid-push shouldn't leave the UI stuck.
+    Pushing,
 }
 
 impl SessionStatus {
-    /// Check if the session is active (creating or running)
+    /// Check if the session is active (creating, running, or mid-cascade).
+    ///
+    /// `Merging` and `CascadePaused` both mean the tmux session is still
+    /// alive — the underlying program is running even if the worktree is
+    /// temporarily locked by the cascade.
     pub fn is_active(&self) -> bool {
-        matches!(self, Self::Creating | Self::Running)
+        matches!(
+            self,
+            Self::Creating | Self::Running | Self::Merging | Self::CascadePaused | Self::Pushing
+        )
     }
 
     /// Check if the session can be attached to (Stopped sessions are allowed
-    /// because get_attach_command will recreate the tmux session automatically)
+    /// because get_attach_command will recreate the tmux session automatically).
+    /// Cascade-involved sessions are attachable — users often attach to a
+    /// `CascadePaused` session specifically to resolve conflicts there.
     pub fn can_attach(&self) -> bool {
-        matches!(self, Self::Running | Self::Stopped)
+        matches!(
+            self,
+            Self::Running | Self::Stopped | Self::Merging | Self::CascadePaused | Self::Pushing
+        )
     }
 }
 
@@ -106,6 +132,9 @@ impl fmt::Display for SessionStatus {
             Self::Creating => write!(f, "creating"),
             Self::Running => write!(f, "running"),
             Self::Stopped => write!(f, "stopped"),
+            Self::Merging => write!(f, "merging"),
+            Self::CascadePaused => write!(f, "cascade_paused"),
+            Self::Pushing => write!(f, "pushing"),
         }
     }
 }
@@ -459,6 +488,37 @@ pub fn stack_top(session_id: SessionId, project_sessions: &[&WorktreeSession]) -
         }
     }
     current
+}
+
+/// Linearise a stack from its base, returning `[base, child, grandchild, …]`.
+///
+/// Walks downward the same way as `stack_top` — on each hop, the session whose
+/// resolved parent is the current one, picking the most recently created when
+/// a base has multiple direct children. Used to drive a cascade-merge that
+/// propagates a merge commit up through the chain.
+///
+/// The starting `base_id` is always the first element of the returned vector,
+/// even when it has no children.
+pub fn stack_chain_from_base(
+    base_id: SessionId,
+    project_sessions: &[&WorktreeSession],
+) -> Vec<SessionId> {
+    let mut chain = vec![base_id];
+    let mut current = base_id;
+    for _ in 0..project_sessions.len() {
+        let next_child = project_sessions
+            .iter()
+            .filter(|s| resolve_stack_parent(s, project_sessions) == Some(current))
+            .max_by_key(|s| s.created_at);
+        match next_child {
+            Some(child) => {
+                current = child.id;
+                chain.push(current);
+            }
+            None => break,
+        }
+    }
+    chain
 }
 
 /// Represents an item in the hierarchical session list
@@ -970,6 +1030,48 @@ mod tests {
         newer_child.created_at = Utc::now();
         let all = [&base, &older_child, &newer_child];
         assert_eq!(stack_top(base.id, &all), newer_child.id);
+    }
+
+    #[test]
+    fn stack_chain_from_base_linear_three_levels() {
+        let base = session_with("base", None, None);
+        let mid = session_with("mid", None, Some(base.id));
+        let top = session_with("top", None, Some(mid.id));
+        let all = [&base, &mid, &top];
+        assert_eq!(
+            stack_chain_from_base(base.id, &all),
+            vec![base.id, mid.id, top.id]
+        );
+    }
+
+    #[test]
+    fn stack_chain_from_base_unstacked_returns_singleton() {
+        let solo = session_with("solo", None, None);
+        assert_eq!(stack_chain_from_base(solo.id, &[&solo]), vec![solo.id]);
+    }
+
+    #[test]
+    fn stack_chain_from_base_with_branching_picks_newest_chain() {
+        // mirrors stack_top's tiebreak so both helpers stay consistent
+        let base = session_with("base", None, None);
+        let mut older_child = session_with("older", None, Some(base.id));
+        older_child.created_at = Utc::now() - ChronoDuration::hours(2);
+        let mut newer_child = session_with("newer", None, Some(base.id));
+        newer_child.created_at = Utc::now();
+        let all = [&base, &older_child, &newer_child];
+        assert_eq!(
+            stack_chain_from_base(base.id, &all),
+            vec![base.id, newer_child.id]
+        );
+    }
+
+    #[test]
+    fn stack_chain_from_base_missing_session_still_yields_base() {
+        // Defensive: even if the base id isn't in project_sessions, the
+        // returned chain starts with it (the caller may look up the session
+        // separately).
+        let base_id = SessionId::new();
+        assert_eq!(stack_chain_from_base(base_id, &[]), vec![base_id]);
     }
 
     #[test]

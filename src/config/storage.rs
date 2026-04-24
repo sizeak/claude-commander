@@ -39,6 +39,13 @@ pub struct AppState {
     #[serde(default)]
     pub left_pane_pct: Option<u16>,
 
+    /// Session where an in-flight cascade-merge hit a conflict and paused.
+    /// While set, `CascadeResume` (or `CascadeAbandon`) is available; cleared
+    /// once resume succeeds or the user abandons. Pairs with the affected
+    /// session's `SessionStatus::CascadePaused`.
+    #[serde(default)]
+    pub cascade_paused_at: Option<SessionId>,
+
     /// Application version that last wrote this state
     #[serde(default)]
     pub version: String,
@@ -533,5 +540,35 @@ mod tests {
         let loaded = AppState::load_from(&state_path).unwrap();
         assert_eq!(loaded.left_pane_pct, None);
         assert!(loaded.seen_help);
+    }
+
+    #[test]
+    fn test_cascade_paused_at_defaults_to_none() {
+        let state = AppState::new();
+        assert!(state.cascade_paused_at.is_none());
+    }
+
+    #[test]
+    fn test_cascade_paused_at_roundtrips_through_json() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+
+        let mut state = AppState::new();
+        let sid = SessionId::new();
+        state.cascade_paused_at = Some(sid);
+        state.save_to(&state_path).unwrap();
+
+        let loaded = AppState::load_from(&state_path).unwrap();
+        assert_eq!(loaded.cascade_paused_at, Some(sid));
+    }
+
+    #[test]
+    fn test_cascade_paused_at_missing_from_json_defaults_to_none() {
+        // A state file written before this feature must still load cleanly.
+        let temp_dir = TempDir::new().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+        std::fs::write(&state_path, r#"{"seen_help": true, "version": "0.1.0"}"#).unwrap();
+        let loaded = AppState::load_from(&state_path).unwrap();
+        assert!(loaded.cascade_paused_at.is_none());
     }
 }

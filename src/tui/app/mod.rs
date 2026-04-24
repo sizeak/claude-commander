@@ -397,6 +397,11 @@ pub struct AppUiState {
     pub throbber_state: throbber_widgets_tui::ThrobberState,
     /// Current agent states for Running Claude sessions (ephemeral, from background poller)
     pub agent_states: HashMap<SessionId, AgentState>,
+    /// Cached mirror of `AppState::cascade_paused_at.is_some()` — used by
+    /// `is_command_available` to gate the `CascadeResume` / `CascadeAbandon`
+    /// palette entries without an async read on every keystroke. Refreshed
+    /// alongside `list_items`.
+    pub cascade_paused: bool,
 }
 
 impl Default for AppUiState {
@@ -432,6 +437,7 @@ impl Default for AppUiState {
             tick_count: 0,
             throbber_state: throbber_widgets_tui::ThrobberState::default(),
             agent_states: HashMap::new(),
+            cascade_paused: false,
         }
     }
 }
@@ -457,6 +463,12 @@ impl AppUiState {
             | BindableAction::OpenInEditor
             | BindableAction::OpenPullRequest
             | BindableAction::MoveToSection => has_session,
+            // Cascade merge is only meaningful from a session that's part of
+            // a stack. We accept any selected session here; the handler is
+            // cheap to no-op if the stack chain turns out to be length 1.
+            BindableAction::CascadeMergeMain | BindableAction::PushStack => has_session,
+            // Cascade resume / abandon are only meaningful when a cascade is paused.
+            BindableAction::CascadeResume | BindableAction::CascadeAbandon => self.cascade_paused,
             // Removing a project is only meaningful from a project row (no session selected)
             BindableAction::RemoveProject => has_project && !has_session,
             // GenerateSummary only does something when the Info pane is active
@@ -574,6 +586,7 @@ impl App {
 
         // One-time setup
         self.cleanup_stale_creating_sessions().await;
+        self.cleanup_stale_merging_sessions().await;
         self.sync_session_states().await;
         self.reconcile_section_assignments().await;
 

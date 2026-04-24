@@ -179,9 +179,12 @@ async fn main() -> Result<()> {
                 } else {
                     for session in sessions {
                         let status_icon = match session.status {
-                            claude_commander::SessionStatus::Creating => "⠋",
+                            claude_commander::SessionStatus::Creating
+                            | claude_commander::SessionStatus::Merging
+                            | claude_commander::SessionStatus::Pushing => "⠋",
                             claude_commander::SessionStatus::Running => "●",
                             claude_commander::SessionStatus::Stopped => "○",
+                            claude_commander::SessionStatus::CascadePaused => "⏸",
                         };
                         match claude_commander::session::display_branch(
                             &session.title,

@@ -283,14 +283,20 @@ impl App {
                     match item {
                         QuickSwitchItem::Session(m) => {
                             let status_icon = match m.status {
-                                SessionStatus::Creating => "⠋",
+                                SessionStatus::Creating
+                                | SessionStatus::Merging
+                                | SessionStatus::Pushing => "⠋",
                                 SessionStatus::Running => "●",
                                 SessionStatus::Stopped => "○",
+                                SessionStatus::CascadePaused => "⏸",
                             };
                             let status_color = match m.status {
-                                SessionStatus::Creating => self.theme.status_creating,
+                                SessionStatus::Creating
+                                | SessionStatus::Merging
+                                | SessionStatus::Pushing => self.theme.status_creating,
                                 SessionStatus::Running => self.theme.status_running,
                                 SessionStatus::Stopped => self.theme.status_stopped,
+                                SessionStatus::CascadePaused => self.theme.agent_waiting,
                             };
 
                             let mut spans = vec![

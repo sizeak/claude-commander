@@ -113,15 +113,30 @@ Stacks are detected from the PR's `baseRefName` returned by the `gh` CLI, so the
 
 Stack grouping is only active in the default project-grouped view. When [Session List Sections](#session-list-sections) is configured, sessions are ordered by their section instead and stacked children render at the normal indent — the `t` hotkey and `stack_parent_session_id` still work, but a base and its child may land in different sections depending on their PR state.
 
+##### Cascade merge main through a stack
+
+When `main` moves forward, use **Cascade merge main** from the command palette to propagate it up the stack in one step: the command merges `main` into the stack base, then the base into its child, and so on to the leaf. Running it from any session in a stack works — the cascade always starts from the base.
+
+Before touching any worktree, the cascade fetches `origin`, verifies no live agent in the stack is `Working` or `WaitingForInput` (racing a `git merge` against Claude writing files is unrecoverable), and refuses if any worktree has uncommitted changes. Each session shows a `⟳` spinner while its step is running.
+
+On the first conflict the cascade pauses: the affected session gets a persistent `⏸` glyph (survives a restart of the TUI), and the worktree is left in the usual `git merge` in-progress state so you can resolve it however you like — typically by attaching to the session and asking the live Claude. Once you've committed the resolved merge, **Cascade resume** from the palette picks up where it stopped and propagates the new commit on up the chain. **Cascade abandon** clears the pause without continuing, if you decide to back out.
+
+##### Push stack
+
+**Push stack** (palette) runs `git push -u origin <branch>` across every session in the stack, base first then each child up the chain — pushing the base before its children keeps GitHub's PR base refs consistent. Each session shows the spinner glyph while its own push is in flight.
+
+Pre-flight is the same as cascade merge: no live agent may be `Working` or `WaitingForInput`, and worktrees must have no uncommitted changes. On the first `git push` failure (rejection, auth, non-fast-forward, etc.) the chain stops and the toast shows git's stderr — no "resume" command is needed since `git push` is idempotent, so fix the root cause and re-run **Push stack** to continue.
+
 ### Status Symbols
 
 Each session displays a status indicator to the left of its name:
 
 | Symbol | Meaning |
 |--------|---------|
-| `⠋` (animated spinner) | Session is being created |
+| `⠋` (animated spinner) | Session is being created or mid-cascade-merge |
 | `●` (rainbow cycling) | Agent is actively working |
 | `?` | Agent is waiting for user input |
+| `⏸` | Cascade merge paused here — resolve conflicts and resume from the palette |
 | `◆` | Session has unread output |
 | `●` | Running (agent idle) |
 | `○` | Stopped |

@@ -2,6 +2,13 @@
 
 use super::*;
 
+/// Which cascade entrypoint `run_cascade_action` should invoke.
+#[derive(Debug, Clone, Copy)]
+enum CascadeAction {
+    Start,
+    Resume,
+}
+
 /// Maximum number of rows rendered in a scrollable list modal at once.
 ///
 /// Shared between the render layer and the input handler so the scroll
@@ -430,6 +437,189 @@ impl App {
                 parent_branch,
             },
         };
+    }
+
+    /// Handle `Cascade merge main` — walk to the base of the selected
+    /// session's stack and merge main → base → each descendant. Pauses on
+    /// the first conflict; surface the outcome as a status-message toast.
+    pub(super) async fn handle_cascade_merge_main(&mut self) {
+        let Some(selected_session_id) = self.ui_state.selected_session_id else {
+            self.ui_state.status_message = Some((
+                "Select a session in a stack to cascade from".to_string(),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            return;
+        };
+        self.run_cascade_action(selected_session_id, CascadeAction::Start);
+    }
+
+    /// Handle `Cascade resume` — continue a previously paused cascade.
+    pub(super) async fn handle_cascade_resume(&mut self) {
+        let paused_at = {
+            let state = self.store.read().await;
+            state.cascade_paused_at
+        };
+        let Some(sid) = paused_at else {
+            self.ui_state.status_message = Some((
+                "No cascade in progress".to_string(),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            return;
+        };
+        self.run_cascade_action(sid, CascadeAction::Resume);
+    }
+
+    /// Handle `Push stack` — push every branch in the selected session's
+    /// stack to origin, in base→leaf order, on a background task.
+    pub(super) fn handle_push_stack(&mut self) {
+        let Some(session_id) = self.ui_state.selected_session_id else {
+            self.ui_state.status_message = Some((
+                "Select a session in a stack to push".to_string(),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            return;
+        };
+
+        // Close the modal (if dispatched from the palette) and drop a toast
+        // so the TUI renders immediately before the push spawns.
+        self.ui_state.modal = Modal::None;
+        self.ui_state.status_message = Some((
+            "Push stack starting…".to_string(),
+            Instant::now() + Duration::from_secs(30),
+        ));
+
+        let agent_states = self.ui_state.agent_states.clone();
+        let mgr = self.session_manager.clone();
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let result = mgr
+                .push_stack(&session_id, &agent_states)
+                .await
+                .map_err(|e| e.to_string());
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::PushStackFinished {
+                    result,
+                }))
+                .await;
+        });
+    }
+
+    pub(super) async fn handle_push_stack_finished(
+        &mut self,
+        result: std::result::Result<crate::session::PushStackOutcome, String>,
+    ) {
+        self.refresh_list_items().await;
+        match result {
+            Ok(outcome) => {
+                let msg = if outcome.sessions_pushed == 0 {
+                    "Push stack complete (nothing to push)".to_string()
+                } else {
+                    format!(
+                        "Push stack complete: pushed {} branch(es)",
+                        outcome.sessions_pushed
+                    )
+                };
+                self.ui_state.status_message = Some((msg, Instant::now() + Duration::from_secs(5)));
+            }
+            Err(e) => {
+                self.ui_state.status_message = Some((
+                    format!("Push stack failed: {e}"),
+                    Instant::now() + Duration::from_secs(15),
+                ));
+            }
+        }
+    }
+
+    /// Handle `Cascade abandon` — clear the paused state without merging.
+    pub(super) async fn handle_cascade_abandon(&mut self) {
+        match self.session_manager.cascade_abandon().await {
+            Ok(()) => {
+                self.ui_state.status_message = Some((
+                    "Cascade pause cleared".to_string(),
+                    Instant::now() + Duration::from_secs(3),
+                ));
+                self.refresh_list_items().await;
+            }
+            Err(e) => {
+                self.ui_state.status_message = Some((
+                    format!("Cascade abandon failed: {e}"),
+                    Instant::now() + Duration::from_secs(5),
+                ));
+            }
+        }
+    }
+
+    fn run_cascade_action(&mut self, session_id: SessionId, action: CascadeAction) {
+        // Close any open modal (e.g. the palette that dispatched us) and
+        // drop a "running" toast immediately so the TUI redraws with neither
+        // blocked before the cascade starts. The cascade itself runs on a
+        // background task so git merges / fetches don't stall the event loop.
+        self.ui_state.modal = Modal::None;
+        let action_label = match action {
+            CascadeAction::Start => "Cascade merge starting…",
+            CascadeAction::Resume => "Resuming cascade merge…",
+        };
+        self.ui_state.status_message = Some((
+            action_label.to_string(),
+            Instant::now() + Duration::from_secs(30),
+        ));
+
+        let agent_states = self.ui_state.agent_states.clone();
+        let mgr = self.session_manager.clone();
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let result = match action {
+                CascadeAction::Start => mgr.cascade_merge_stack(&session_id, &agent_states).await,
+                CascadeAction::Resume => mgr.cascade_resume(&agent_states).await,
+            };
+            let result = result.map_err(|e| e.to_string());
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::CascadeFinished {
+                    result,
+                }))
+                .await;
+        });
+    }
+
+    pub(super) async fn handle_cascade_finished(
+        &mut self,
+        result: std::result::Result<crate::session::CascadeOutcome, String>,
+    ) {
+        self.refresh_list_items().await;
+        match result {
+            Ok(crate::session::CascadeOutcome::Complete { sessions_merged }) => {
+                let msg = if sessions_merged == 0 {
+                    "Cascade complete (nothing to merge)".to_string()
+                } else {
+                    format!("Cascade complete: merged {sessions_merged} session(s)")
+                };
+                self.ui_state.status_message = Some((msg, Instant::now() + Duration::from_secs(5)));
+            }
+            Ok(crate::session::CascadeOutcome::PausedOnConflict {
+                at,
+                sessions_merged,
+            }) => {
+                let title = {
+                    let state = self.store.read().await;
+                    state
+                        .get_session(&at)
+                        .map(|s| s.title.clone())
+                        .unwrap_or_else(|| at.to_string())
+                };
+                self.ui_state.status_message = Some((
+                    format!(
+                        "Cascade paused at '{title}' ({sessions_merged} merged). Resolve conflicts and run `Cascade resume`."
+                    ),
+                    Instant::now() + Duration::from_secs(15),
+                ));
+            }
+            Err(e) => {
+                self.ui_state.status_message = Some((
+                    format!("Cascade failed: {e}"),
+                    Instant::now() + Duration::from_secs(10),
+                ));
+            }
+        }
     }
 
     /// Open the Checkout Branch modal.
