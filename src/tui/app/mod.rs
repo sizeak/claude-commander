@@ -26,7 +26,9 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{
+        Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+    },
 };
 use tracing::{debug, info, warn};
 
@@ -126,8 +128,9 @@ pub enum Modal {
     },
     /// Loading spinner modal (non-interactive)
     Loading { title: String, message: String },
-    /// Help modal
-    Help,
+    /// Help modal. `scroll` is the first visible line of `build_help_lines`.
+    /// Clamped against the rendered content height in `render_help_modal`.
+    Help { scroll: u16 },
     /// Error modal
     Error { message: String },
     /// Settings modal

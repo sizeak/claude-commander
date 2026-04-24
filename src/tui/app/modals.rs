@@ -185,28 +185,12 @@ impl App {
                 frame.render_widget(paragraph, inner);
             }
 
-            Modal::Help => {
-                let modal_area = centered_rect(70, 80, area);
-                frame.render_widget(Clear, modal_area);
-
-                let block = Block::default()
-                    .title(" Help ")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(self.theme.modal_info));
-
-                let inner = block.inner(modal_area);
-                frame.render_widget(block, modal_area);
-
-                // Add margin inside the modal for better readability
-                let content_area = inner.inner(Margin {
-                    horizontal: 2,
-                    vertical: 1,
-                });
-
-                let help_lines = self.build_help_lines();
-
-                let paragraph = Paragraph::new(help_lines);
-                frame.render_widget(paragraph, content_area);
+            Modal::Help { scroll } => {
+                let mut offset = *scroll;
+                self.render_help_modal(frame, area, &mut offset);
+                if let Modal::Help { scroll } = &mut self.ui_state.modal {
+                    *scroll = offset;
+                }
             }
 
             Modal::Settings(state) => {
@@ -570,9 +554,57 @@ impl App {
         ]));
 
         lines.push(Line::from(""));
-        lines.push(Line::from("Press any key to close this help."));
+        lines.push(Line::from(
+            "Esc/Enter/q/? to close · ↑/↓ k/j to scroll · PgUp/PgDn · Home/End",
+        ));
 
         lines
+    }
+
+    pub(super) fn render_help_modal(&mut self, frame: &mut Frame, area: Rect, scroll: &mut u16) {
+        let modal_area = centered_rect(70, 80, area);
+        frame.render_widget(Clear, modal_area);
+
+        let block = Block::default()
+            .title(" Help ")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(self.theme.modal_info));
+        let inner = block.inner(modal_area);
+        frame.render_widget(block, modal_area);
+
+        let content_area = inner.inner(Margin {
+            horizontal: 2,
+            vertical: 1,
+        });
+
+        let help_lines = self.build_help_lines();
+        let total_lines = help_lines.len() as u16;
+        let visible = content_area.height;
+        let max_scroll = total_lines.saturating_sub(visible);
+
+        if *scroll > max_scroll {
+            *scroll = max_scroll;
+        }
+        let offset = *scroll;
+
+        let paragraph = Paragraph::new(help_lines).scroll((offset, 0));
+        frame.render_widget(paragraph, content_area);
+
+        if max_scroll > 0 {
+            // ratatui 0.29's Scrollbar treats `content_length - 1` as the
+            // max scroll position (scrollbar.rs:562). Passing the full line
+            // count leaves the thumb short of the bottom at max scroll —
+            // use the number of distinct scroll positions instead so the
+            // thumb hits the track ends at offset=0 and offset=max_scroll.
+            let mut sb_state = ScrollbarState::new(max_scroll as usize + 1)
+                .position(offset as usize)
+                .viewport_content_length(visible as usize);
+            let scrollbar = Scrollbar::default()
+                .orientation(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None);
+            frame.render_stateful_widget(scrollbar, content_area, &mut sb_state);
+        }
     }
 }
 

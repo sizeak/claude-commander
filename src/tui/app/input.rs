@@ -2,6 +2,52 @@
 
 use super::*;
 
+/// One screen's worth of scroll for the Help modal. Approximate — the
+/// render pass clamps against the real content-area height each frame.
+const HELP_PAGE: u16 = 10;
+
+/// Outcome of interpreting a key inside the Help modal.
+#[derive(Debug, PartialEq, Eq)]
+enum HelpKey {
+    ScrollBy(i16),
+    Home,
+    End,
+    Close,
+    Ignore,
+}
+
+/// Classify a key press within the Help modal. Kept as a free function
+/// so it can be unit-tested without constructing an `App`.
+///
+/// Raw `KeyCode` matches take precedence over `kb.resolve` so modal-native
+/// keys (arrows, Enter, Esc) are not shadowed by global bindings like
+/// `NavigateUp`/`Submit`. `kb.resolve` fills in configured scroll bindings
+/// — notably the default `Ctrl-u`/`Ctrl-d` for `PageUp`/`PageDown`.
+fn classify_help_key(key: &crossterm::event::KeyEvent, kb: &crate::config::KeyBindings) -> HelpKey {
+    use crossterm::event::KeyCode;
+
+    match key.code {
+        KeyCode::Up => return HelpKey::ScrollBy(-1),
+        KeyCode::Down => return HelpKey::ScrollBy(1),
+        KeyCode::PageUp => return HelpKey::ScrollBy(-(HELP_PAGE as i16)),
+        KeyCode::PageDown => return HelpKey::ScrollBy(HELP_PAGE as i16),
+        KeyCode::Home => return HelpKey::Home,
+        KeyCode::End => return HelpKey::End,
+        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?') => {
+            return HelpKey::Close;
+        }
+        _ => {}
+    }
+
+    match kb.resolve(key) {
+        Some(BindableAction::ScrollUp) => HelpKey::ScrollBy(-1),
+        Some(BindableAction::ScrollDown) => HelpKey::ScrollBy(1),
+        Some(BindableAction::PageUp) => HelpKey::ScrollBy(-(HELP_PAGE as i16)),
+        Some(BindableAction::PageDown) => HelpKey::ScrollBy(HELP_PAGE as i16),
+        _ => HelpKey::Ignore,
+    }
+}
+
 impl App {
     pub(super) async fn handle_input(&mut self, input: InputEvent) {
         match input {
@@ -222,8 +268,24 @@ impl App {
                 // Non-interactive — swallow all keys while loading
             }
 
-            Modal::Help | Modal::Error { .. } => {
-                // Any key closes help/error
+            Modal::Help { scroll } => match classify_help_key(&key, &self.config.keybindings) {
+                HelpKey::ScrollBy(n) => {
+                    *scroll = scroll.saturating_add_signed(n);
+                }
+                HelpKey::Home => {
+                    *scroll = 0;
+                }
+                HelpKey::End => {
+                    *scroll = u16::MAX;
+                }
+                HelpKey::Close => {
+                    self.ui_state.modal = Modal::None;
+                }
+                HelpKey::Ignore => {}
+            },
+
+            Modal::Error { .. } => {
+                // Any key closes the error modal.
                 self.ui_state.modal = Modal::None;
             }
 
@@ -530,7 +592,7 @@ impl App {
                 self.save_left_pane_pct().await;
             }
             UserCommand::ShowHelp => {
-                self.ui_state.modal = Modal::Help;
+                self.ui_state.modal = Modal::Help { scroll: 0 };
             }
             UserCommand::ShowSettings => {
                 let rows = self.build_settings_rows(SettingsTab::General);
@@ -558,5 +620,106 @@ impl App {
             }
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::KeyBindings;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn ctrl(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::CONTROL)
+    }
+
+    #[test]
+    fn arrows_scroll_one_line() {
+        let kb = KeyBindings::default();
+        assert_eq!(
+            classify_help_key(&key(KeyCode::Down), &kb),
+            HelpKey::ScrollBy(1)
+        );
+        assert_eq!(
+            classify_help_key(&key(KeyCode::Up), &kb),
+            HelpKey::ScrollBy(-1)
+        );
+    }
+
+    #[test]
+    fn default_jk_bindings_scroll_one_line() {
+        // Default KeyBindings bind j/k to NavigateDown/NavigateUp, not scroll,
+        // so plain j/k should NOT produce ScrollBy here — they are ignored in
+        // the Help modal. This pins the current default so a future remapping
+        // doesn't silently change modal behavior.
+        let kb = KeyBindings::default();
+        assert_eq!(
+            classify_help_key(&key(KeyCode::Char('j')), &kb),
+            HelpKey::Ignore
+        );
+        assert_eq!(
+            classify_help_key(&key(KeyCode::Char('k')), &kb),
+            HelpKey::Ignore
+        );
+    }
+
+    #[test]
+    fn page_keys_scroll_by_page() {
+        let kb = KeyBindings::default();
+        let page = HELP_PAGE as i16;
+        assert_eq!(
+            classify_help_key(&key(KeyCode::PageDown), &kb),
+            HelpKey::ScrollBy(page)
+        );
+        assert_eq!(
+            classify_help_key(&key(KeyCode::PageUp), &kb),
+            HelpKey::ScrollBy(-page)
+        );
+        // Default bindings: Ctrl-d / Ctrl-u for PageDown / PageUp.
+        assert_eq!(
+            classify_help_key(&ctrl(KeyCode::Char('d')), &kb),
+            HelpKey::ScrollBy(page)
+        );
+        assert_eq!(
+            classify_help_key(&ctrl(KeyCode::Char('u')), &kb),
+            HelpKey::ScrollBy(-page)
+        );
+    }
+
+    #[test]
+    fn home_and_end_jump() {
+        let kb = KeyBindings::default();
+        assert_eq!(classify_help_key(&key(KeyCode::Home), &kb), HelpKey::Home);
+        assert_eq!(classify_help_key(&key(KeyCode::End), &kb), HelpKey::End);
+    }
+
+    #[test]
+    fn close_keys() {
+        let kb = KeyBindings::default();
+        for code in [
+            KeyCode::Esc,
+            KeyCode::Enter,
+            KeyCode::Char('q'),
+            KeyCode::Char('?'),
+        ] {
+            assert_eq!(
+                classify_help_key(&key(code), &kb),
+                HelpKey::Close,
+                "{code:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn unrelated_key_is_ignored() {
+        let kb = KeyBindings::default();
+        assert_eq!(
+            classify_help_key(&key(KeyCode::Char('x')), &kb),
+            HelpKey::Ignore
+        );
     }
 }
