@@ -105,7 +105,8 @@ fn setup_logging(debug: bool, to_file: bool) -> Result<()> {
 
 /// Execute async PTY-based attach to a tmux session
 async fn execute_attach(session_name: &str, editor_triggers: Vec<Vec<u8>>) {
-    match attach_to_session(session_name, editor_triggers).await {
+    // CLI `attach` resolves a Claude session by title/ID, never a shell.
+    match attach_to_session(session_name, editor_triggers, true).await {
         Ok(AttachResult::Detached | AttachResult::SwitchToShell | AttachResult::OpenEditor) => {
             info!("Detached from session");
         }

@@ -724,9 +724,16 @@ impl App {
                                     crate::config::keybindings::editor_trigger_bytes(
                                         &self.config.keybindings,
                                     );
+                                // Shell sessions are named with a trailing
+                                // "-sh" (see resolve_shell_toggle_pair). Only
+                                // intercept Ctrl+Z for non-shell (Claude)
+                                // sessions, where SIGTSTP would freeze the
+                                // pane with no shell to recover from.
+                                let intercept_ctrl_z = !current_session.ends_with("-sh");
                                 match crate::tmux::attach_to_session(
                                     &current_session,
                                     editor_triggers,
+                                    intercept_ctrl_z,
                                 )
                                 .await
                                 {
