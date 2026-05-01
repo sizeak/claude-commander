@@ -24,6 +24,7 @@ pub mod config;
 pub mod error;
 pub mod fuzzy;
 pub mod git;
+pub mod remote;
 pub mod session;
 pub mod tmux;
 pub mod tui;

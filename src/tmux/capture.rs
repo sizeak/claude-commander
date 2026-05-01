@@ -13,7 +13,7 @@ use tokio::sync::RwLock;
 use tracing::{debug, instrument};
 use xxhash_rust::xxh3::xxh3_64;
 
-use super::TmuxExecutor;
+use super::TmuxExec;
 use crate::error::Result;
 
 /// Default cache TTL (50ms)
@@ -64,36 +64,34 @@ impl CapturedContent {
 
 /// Cached pane content capture manager
 ///
-/// Maintains a cache of captured pane content with configurable TTL.
-/// Fast path returns cached content if fresh; slow path performs async capture.
+/// Maintains a cache of captured pane content with configurable TTL. Callers
+/// supply the [`TmuxExec`] per call so the same cache works across local and
+/// SSH-backed sessions — the cache key (tmux session name) is unique per
+/// session regardless of transport.
 pub struct ContentCapture {
-    /// Tmux executor for actual captures
-    executor: TmuxExecutor,
-    /// Cache of tmux session name -> captured content
     cache: Arc<RwLock<HashMap<String, CapturedContent>>>,
-    /// Cache TTL
     ttl: Duration,
 }
 
 impl ContentCapture {
-    /// Create a new content capture manager
-    pub fn new(executor: TmuxExecutor) -> Self {
-        Self::with_ttl(executor, DEFAULT_CACHE_TTL)
+    pub fn new() -> Self {
+        Self::with_ttl(DEFAULT_CACHE_TTL)
     }
 
-    /// Create with custom TTL
-    pub fn with_ttl(executor: TmuxExecutor, ttl: Duration) -> Self {
+    pub fn with_ttl(ttl: Duration) -> Self {
         Self {
-            executor,
             cache: Arc::new(RwLock::new(HashMap::new())),
             ttl,
         }
     }
 
-    /// Get content for a tmux session, using cache if fresh
-    #[instrument(skip(self))]
-    pub async fn get_content(&self, tmux_session_name: &str) -> Result<CapturedContent> {
-        // Fast path: check cache with read lock
+    /// Get content for a tmux session, using cache if fresh.
+    #[instrument(skip(self, executor))]
+    pub async fn get_content(
+        &self,
+        executor: &dyn TmuxExec,
+        tmux_session_name: &str,
+    ) -> Result<CapturedContent> {
         {
             let cache = self.cache.read().await;
             if let Some(cached) = cache.get(tmux_session_name)
@@ -107,48 +105,47 @@ impl ContentCapture {
                 return Ok(cached.clone());
             }
         }
-
-        // Slow path: capture fresh content
         debug!("Cache miss for {}, capturing fresh", tmux_session_name);
-        self.capture_fresh(tmux_session_name).await
+        self.capture_fresh(executor, tmux_session_name).await
     }
 
-    /// Force a fresh capture, bypassing cache
-    pub async fn capture_fresh(&self, tmux_session_name: &str) -> Result<CapturedContent> {
-        // Capture with scrollback (last 1000 lines)
-        let content = self
-            .executor
+    /// Force a fresh capture, bypassing cache.
+    pub async fn capture_fresh(
+        &self,
+        executor: &dyn TmuxExec,
+        tmux_session_name: &str,
+    ) -> Result<CapturedContent> {
+        let content = executor
             .capture_pane(tmux_session_name, Some(-1000), None)
             .await?;
-
         let captured = CapturedContent::new(content);
-
-        // Update cache
         {
             let mut cache = self.cache.write().await;
             cache.insert(tmux_session_name.to_string(), captured.clone());
         }
-
         Ok(captured)
     }
 
-    /// Invalidate cache for a tmux session
     pub async fn invalidate(&self, tmux_session_name: &str) {
         let mut cache = self.cache.write().await;
         cache.remove(tmux_session_name);
     }
 
-    /// Clear all cached content
     pub async fn clear(&self) {
         let mut cache = self.cache.write().await;
         cache.clear();
     }
 }
 
+impl Default for ContentCapture {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Clone for ContentCapture {
     fn clone(&self) -> Self {
         Self {
-            executor: self.executor.clone(),
             cache: self.cache.clone(),
             ttl: self.ttl,
         }

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, instrument};
 
-use super::TmuxExecutor;
+use super::TmuxExec;
 use crate::error::Result;
 
 /// Input event to send to a tmux session
@@ -83,7 +83,7 @@ impl InputEvent {
 /// Provides buffered, non-blocking input forwarding.
 pub struct InputForwarder {
     /// Tmux executor
-    executor: TmuxExecutor,
+    executor: Arc<dyn TmuxExec>,
     /// Session name
     session_name: String,
     /// Input queue
@@ -94,7 +94,7 @@ pub struct InputForwarder {
 
 impl InputForwarder {
     /// Create a new input forwarder
-    pub fn new(executor: TmuxExecutor, session_name: String) -> Self {
+    pub fn new(executor: Arc<dyn TmuxExec>, session_name: String) -> Self {
         let (tx, mut rx) = mpsc::channel::<()>(32);
         let queue = Arc::new(Mutex::new(VecDeque::new()));
 

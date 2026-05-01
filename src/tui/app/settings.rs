@@ -71,6 +71,12 @@ impl App {
                         color_swatch: None,
                     },
                     SettingsRow {
+                        label: "Remote Preview Refresh (ms)".into(),
+                        value: c.remote_preview_refresh_ms.to_string(),
+                        field_key: "remote_preview_refresh_ms".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
                         label: "Max Concurrent Tmux".into(),
                         value: c.max_concurrent_tmux.to_string(),
                         field_key: "max_concurrent_tmux".into(),
@@ -420,6 +426,11 @@ impl App {
                 "pr_check_interval_secs" => {
                     if let Ok(v) = value.parse::<u64>() {
                         self.config.pr_check_interval_secs = v;
+                    }
+                }
+                "remote_preview_refresh_ms" => {
+                    if let Ok(v) = value.parse::<u64>() {
+                        self.config.remote_preview_refresh_ms = v;
                     }
                 }
                 "max_concurrent_tmux" => {

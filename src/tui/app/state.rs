@@ -270,6 +270,52 @@ impl App {
             StateUpdate::PushStackFinished { result } => {
                 self.handle_push_stack_finished(result).await;
             }
+            StateUpdate::CodespaceListReady { result } => match result {
+                Ok(codespaces) => {
+                    let filtered: Vec<usize> = (0..codespaces.len()).collect();
+                    self.ui_state.modal = Modal::CodespacePicker {
+                        codespaces,
+                        query: String::new(),
+                        filtered,
+                        selected_idx: 0,
+                        scroll: 0,
+                    };
+                }
+                Err(message) => {
+                    self.ui_state.modal = Modal::Error { message };
+                }
+            },
+            StateUpdate::CodespaceCreateReady { result } => match result {
+                Ok(info) => {
+                    let remote_path = super::actions::codespace_default_remote_path(&info);
+                    self.add_remote_project_with_progress(
+                        crate::session::RemoteTransport::Codespace { name: info.name },
+                        remote_path,
+                    )
+                    .await;
+                }
+                Err(message) => {
+                    self.ui_state.modal = Modal::Error { message };
+                }
+            },
+            StateUpdate::RemoteProjectAdded { result } => match result {
+                Ok(project_id) => {
+                    self.ui_state.modal = Modal::None;
+                    self.ui_state.status_message = Some((
+                        format!("Added remote project {}", project_id),
+                        Instant::now() + Duration::from_secs(3),
+                    ));
+                    self.refresh_list_items().await;
+                    if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
+                        matches!(item, SessionListItem::Project { id, .. } if *id == project_id)
+                    }) {
+                        self.ui_state.list_state.select(Some(idx));
+                    }
+                }
+                Err(message) => {
+                    self.ui_state.modal = Modal::Error { message };
+                }
+            },
             _ => {}
         }
     }
@@ -449,6 +495,12 @@ impl App {
         let selectable: Vec<bool> = items.iter().map(|i| i.is_selectable()).collect();
         self.ui_state.list_items = items;
         self.ui_state.cascade_paused = state.cascade_paused_at.is_some();
+        self.ui_state.remote_project_ids = state
+            .projects
+            .values()
+            .filter(|p| p.is_remote())
+            .map(|p| p.id)
+            .collect();
         if self.config.sections.is_empty() {
             self.ui_state
                 .list_state

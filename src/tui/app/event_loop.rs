@@ -86,7 +86,10 @@ impl App {
                     || self.ui_state.selected_project_id != old_project
                 {
                     // Cancel any in-flight fetch for the old selection
+                    // and reset the throttle floor so the new selection
+                    // gets an immediate fetch.
                     self.ui_state.preview_update_spawned_at = None;
+                    self.ui_state.last_preview_spawn_at = None;
                     self.spawn_preview_update();
                 }
             }

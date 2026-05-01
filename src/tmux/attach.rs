@@ -22,10 +22,31 @@ pub enum AttachResult {
     SwitchToShell,
     /// User pressed Ctrl+. to open the editor for the session's worktree
     OpenEditor,
+    /// User pressed Ctrl+] to relaunch the program without `--resume`.
+    /// Used to recover from cases where `claude --resume` fails (no session
+    /// to resume against, etc.) and the auto-recreate path keeps re-running
+    /// the same broken command.
+    RestartFresh,
     /// The session/process ended
     SessionEnded,
     /// An error occurred during attachment
     Error(String),
+}
+
+/// Where the tmux session lives — controls whether `attach_to_session`
+/// spawns local `tmux attach`, `ssh -tt host tmux attach`, or
+/// `gh codespace ssh -c <name> -- tmux attach` inside the local PTY.
+#[derive(Debug, Clone)]
+pub enum AttachTarget {
+    Local,
+    Ssh { host: String },
+    Codespace { codespace_name: String },
+}
+
+impl AttachTarget {
+    pub fn is_remote(&self) -> bool {
+        !matches!(self, Self::Local)
+    }
 }
 
 /// Async PTY attachment - runs entirely within tokio
@@ -46,6 +67,7 @@ pub enum AttachResult {
 /// shell sessions, where Ctrl+Z is genuinely useful for job control.
 pub async fn attach_to_session(
     session_name: &str,
+    target: &AttachTarget,
     editor_triggers: Vec<Vec<u8>>,
     intercept_ctrl_z: bool,
 ) -> Result<AttachResult> {
@@ -59,11 +81,51 @@ pub async fn attach_to_session(
     // Get the raw fd for resize operations (before we split the pty)
     let pty_fd = pty.as_raw_fd();
 
-    // Spawn tmux attach-session
-    let cmd = pty_process::Command::new("tmux").args(["attach-session", "-t", session_name]);
-    let mut child = cmd.spawn(pts)?;
+    // Spawn the right command based on transport. For SSH, `-tt` forces a
+    // remote PTY even when stdin isn't a terminal (defensive against
+    // ~/.ssh/config overrides). For Codespace, `gh codespace ssh -c <name>`
+    // already allocates a remote PTY when run interactively.
+    //
+    // Two subtleties for the remote variants:
+    //
+    //   1. Both `ssh host arg1 arg2 …` and `gh codespace ssh -- arg1 arg2 …`
+    //      space-join the remote argv WITHOUT quoting, so the remote shell
+    //      re-tokenizes. Passing ["bash", "-ilc", "tmux attach-session -t X"]
+    //      ends up as `bash -ilc tmux attach-session -t X` on the remote —
+    //      bash then takes COMMAND_STRING="tmux" and $0="attach-session".
+    //      Fix: shell-escape the whole bash invocation into a single arg.
+    //
+    //   2. `-ilc` (interactive login) so both .bash_profile AND .bashrc get
+    //      sourced. Many Nix-based codespaces put tmux on PATH only via
+    //      .bashrc; plain `-lc` would still produce "tmux: command not found".
+    let inner = format!("tmux attach-session -t {}", shell_quote_arg(session_name));
+    let bash_invocation = format!("bash -ilc {}", shell_quote_arg(&inner));
+    let mut child = match target {
+        AttachTarget::Local => pty_process::Command::new("tmux")
+            .args(["attach-session", "-t", session_name])
+            .spawn(pts)?,
+        AttachTarget::Ssh { host } => pty_process::Command::new("ssh")
+            .args(["-tt", host, &bash_invocation])
+            .spawn(pts)?,
+        AttachTarget::Codespace { codespace_name } => pty_process::Command::new("gh")
+            .args([
+                "codespace",
+                "ssh",
+                "-c",
+                codespace_name,
+                "--",
+                // gh codespace ssh's argv after `--` is `<ssh-flags...> <command>`,
+                // so `-tt` is forwarded to ssh and forces a remote PTY.
+                // Without it, bash -i complains "cannot set terminal process
+                // group" and tmux fails with "open terminal failed: not a
+                // terminal".
+                "-tt",
+                &bash_invocation,
+            ])
+            .spawn(pts)?,
+    };
 
-    info!("Spawned tmux attach-session for {}", session_name);
+    info!("Spawned attach to {} (target: {:?})", session_name, target);
 
     // Enter raw mode
     info!("Enabling raw mode for PTY session");
@@ -105,6 +167,11 @@ fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
         return false;
     }
     haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Shell-quote a single argument for safe inclusion in a `bash -lc` script.
+fn shell_quote_arg(arg: &str) -> String {
+    shell_escape::unix::escape(arg.into()).into_owned()
 }
 
 /// Strip Ctrl+Z (0x1A) bytes from `data`. Returns `Some(filtered)` when any
@@ -269,6 +336,18 @@ async fn run_async_loop(
                         break;
                     }
 
+                    // Check for Ctrl+] (0x1D) to restart the program WITHOUT
+                    // `--resume`. Manual escape hatch for when the program's
+                    // resume path is broken (e.g. `claude --resume` fails
+                    // because there's no session to resume) and the
+                    // auto-recreate keeps relaunching the same broken
+                    // command.
+                    if data.contains(&0x1D) {
+                        debug!("Ctrl+] detected, restarting program without --resume");
+                        let _ = stdin_shutdown.send(AttachResult::RestartFresh).await;
+                        break;
+                    }
+
                     // Check for any user-configured editor trigger bytes.
                     // Empty `editor_triggers` (the default) disables this
                     // feature entirely — the user's OpenInEditor binding has
@@ -335,6 +414,12 @@ async fn run_async_loop(
         status = child.wait() => {
             match status {
                 Ok(s) if s.success() => AttachResult::Detached,
+                // ssh/gh return 255 when the connection drops mid-session.
+                // Surface that as a real error rather than letting the user
+                // think they detached cleanly.
+                Ok(s) if s.code() == Some(255) => AttachResult::Error(
+                    "remote connection lost".to_string()
+                ),
                 Ok(_) => AttachResult::SessionEnded,
                 Err(_) => AttachResult::SessionEnded,
             }

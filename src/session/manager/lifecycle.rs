@@ -75,12 +75,16 @@ impl SessionManager {
             )
         };
 
-        let (repo_path, main_branch) = {
+        let (repo_path, main_branch, repo_is_remote) = {
             let state = self.store.read().await;
             let project = state
                 .get_project(&project_id)
                 .ok_or_else(|| SessionError::ProjectNotFound(project_id.to_string()))?;
-            (project.repo_path.clone(), project.main_branch.clone())
+            (
+                project.repo_path.clone(),
+                project.main_branch.clone(),
+                project.is_remote(),
+            )
         };
 
         info!(
@@ -88,24 +92,16 @@ impl SessionManager {
             title, branch_name, project_id
         );
 
+        // Resolve the (tmux, git) pair for this project's transport.
+        let (tmux, git_ops) = self.ops_for(&project_id).await?;
+
         // Fetch latest changes from origin
         if self.config_store.read().fetch_before_create {
             info!(
                 "Fetching latest changes from origin in {}",
                 repo_path.display()
             );
-            let output = tokio::process::Command::new("git")
-                .current_dir(&repo_path)
-                .args(["fetch", "origin"])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .output()
-                .await?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                warn!("git fetch failed (continuing anyway): {}", stderr);
-            }
+            git_ops.fetch_origin(&repo_path).await?;
         }
 
         // Generate unique worktree name
@@ -119,50 +115,51 @@ impl SessionManager {
                 .unwrap_or("")
         );
 
-        // Create worktree — sync gix work (branch check + start point) is done
-        // in a block so non-Sync types are dropped before the first .await,
-        // keeping the overall future Send.
-        let worktrees_dir = self.config_store.read().worktrees_dir()?;
-        let (branch_exists, start_point) = {
-            let backend = GitBackend::open(&repo_path)?;
-            let exists = backend.branch_exists(&branch_name)?;
-            // For a stacked session we fork the new branch off the parent
-            // session's local branch (which exists on disk thanks to its own
-            // worktree). This overrides the usual origin/<branch>/origin/<main>
-            // fallback so the stack topology is preserved.
-            let sp = if let Some(parent_branch) = stack_parent_branch.as_deref() {
-                if !exists && backend.branch_exists(parent_branch)? {
+        // Decide whether the branch already exists, and pick a sensible
+        // start point if we need to create it.
+        let branch_exists = git_ops.branch_exists(&repo_path, &branch_name).await?;
+        let start_point: Option<String> =
+            if let Some(parent_branch) = stack_parent_branch.as_deref() {
+                // Stacked session: fork off the parent's local branch so the
+                // stack topology is preserved.
+                if !branch_exists && git_ops.branch_exists(&repo_path, parent_branch).await? {
                     Some(parent_branch.to_string())
                 } else {
                     None
                 }
             } else {
-                // Prefer origin/<branch_name> as the start point when the local
-                // branch doesn't exist — this supports checking out an existing
-                // remote branch (e.g. via the Checkout modal) as well as falling
-                // back to origin/<main_branch> when creating a fresh branch.
+                // Prefer origin/<branch_name> when the local branch doesn't yet
+                // exist (covers Checkout-existing-remote as well as falling back
+                // to origin/<main_branch> for a freshly created branch).
                 let branch_remote_ref = format!("refs/remotes/origin/{}", branch_name);
                 let main_remote_ref = format!("refs/remotes/origin/{}", main_branch);
-                if !exists && backend.ref_exists(&branch_remote_ref)? {
+                if !branch_exists && git_ops.ref_exists(&repo_path, &branch_remote_ref).await? {
                     Some(format!("origin/{}", branch_name))
-                } else if backend.ref_exists(&main_remote_ref)? {
+                } else if git_ops.ref_exists(&repo_path, &main_remote_ref).await? {
                     Some(format!("origin/{}", main_branch))
                 } else {
                     None
                 }
             };
-            (exists, sp)
+
+        // Worktrees live next to the repo for remote projects (so `git
+        // worktree add` works without coordinating with the remote machine's
+        // local config), and in the configured `worktrees_dir` for local.
+        let worktrees_dir = if repo_is_remote {
+            repo_path.join(".cc-worktrees")
+        } else {
+            self.config_store.read().worktrees_dir()?
         };
         let worktree_path = worktrees_dir.join(&worktree_name);
-        let worktree_info = WorktreeManager::run_create_worktree(
-            worktrees_dir,
-            repo_path.clone(),
-            worktree_path,
-            branch_name.clone(),
-            branch_exists,
-            start_point,
-        )
-        .await?;
+        let worktree_info = git_ops
+            .worktree_add(
+                &repo_path,
+                &worktree_path,
+                &branch_name,
+                branch_exists,
+                start_point.as_deref(),
+            )
+            .await?;
 
         // Read tmux_session_name from the placeholder session
         let tmux_session_name = {
@@ -181,9 +178,8 @@ impl SessionManager {
             _ => program.clone(),
         };
 
-        // Create tmux session in the worktree directory
-        self.tmux
-            .create_session(&tmux_session_name, &worktree_info.path, Some(&launch_cmd))
+        // Create tmux session in the worktree directory (on the right host).
+        tmux.create_session(&tmux_session_name, &worktree_info.path, Some(&launch_cmd))
             .await?;
 
         // Update session to Running with the real worktree info
@@ -208,8 +204,7 @@ impl SessionManager {
                 .ok_or(SessionError::NotFound(*session_id))?;
             self.status_bar_info(session, &state)
         };
-        self.tmux
-            .configure_status_bar(&tmux_session_name, &status_bar)
+        tmux.configure_status_bar(&tmux_session_name, &status_bar)
             .await;
 
         info!(
@@ -232,20 +227,24 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Kill tmux sessions (main + shell) for a worktree session.
-    pub(super) async fn kill_tmux_sessions(&self, tmux_name: &str, shell_tmux_name: Option<&str>) {
-        if let Err(e) = self.tmux.kill_session(tmux_name).await {
+    /// Kill tmux sessions (main + shell) for a worktree session via the given executor.
+    pub(super) async fn kill_tmux_sessions(
+        tmux: &dyn TmuxExec,
+        tmux_name: &str,
+        shell_tmux_name: Option<&str>,
+    ) {
+        if let Err(e) = tmux.kill_session(tmux_name).await {
             warn!("Failed to kill tmux session: {}", e);
         }
         if let Some(shell_name) = shell_tmux_name {
-            let _ = self.tmux.kill_session(shell_name).await;
+            let _ = tmux.kill_session(shell_name).await;
         }
     }
 
     /// Restart a session (kill tmux and recreate, optionally with --resume)
     #[instrument(skip(self))]
     pub async fn restart_session(&self, session_id: &SessionId) -> Result<()> {
-        let (tmux_session_name, shell_tmux_name, worktree_path, program, status_bar) = {
+        let (tmux_session_name, shell_tmux_name, worktree_path, program, project_id, status_bar) = {
             let state = self.store.read().await;
             let session = state
                 .get_session(session_id)
@@ -255,12 +254,14 @@ impl SessionManager {
                 session.shell_tmux_session_name.clone(),
                 session.worktree_path.clone(),
                 session.program.clone(),
+                session.project_id,
                 self.status_bar_info(session, &state),
             )
         };
 
-        self.kill_tmux_sessions(&tmux_session_name, shell_tmux_name.as_deref())
-            .await;
+        let (tmux, _) = self.ops_for(&project_id).await?;
+
+        Self::kill_tmux_sessions(&*tmux, &tmux_session_name, shell_tmux_name.as_deref()).await;
 
         // Create a fresh tmux session, adding --resume if configured
         let resume_program = if self.config_store.read().resume_session {
@@ -268,8 +269,7 @@ impl SessionManager {
         } else {
             program.clone()
         };
-        let create_result = self
-            .tmux
+        let create_result = tmux
             .create_session(&tmux_session_name, &worktree_path, Some(&resume_program))
             .await;
 
@@ -287,9 +287,7 @@ impl SessionManager {
             return Err(e);
         }
 
-        // Configure status bar on the new session
-        self.tmux
-            .configure_status_bar(&tmux_session_name, &status_bar)
+        tmux.configure_status_bar(&tmux_session_name, &status_bar)
             .await;
 
         // Set status to Running
@@ -317,13 +315,14 @@ impl SessionManager {
                 .clone()
         };
 
-        self.kill_tmux_sessions(
+        let (tmux, git_ops) = self.ops_for(&session.project_id).await?;
+        Self::kill_tmux_sessions(
+            &*tmux,
             &session.tmux_session_name,
             session.shell_tmux_session_name.as_deref(),
         )
         .await;
 
-        // Optionally remove worktree
         if remove_worktree {
             let repo_path = {
                 let state = self.store.read().await;
@@ -333,16 +332,11 @@ impl SessionManager {
             };
 
             if let Some(repo_path) = repo_path
-                && let Ok(backend) = GitBackend::open(&repo_path)
-            {
-                let worktree_manager =
-                    WorktreeManager::new(backend, self.config_store.read().worktrees_dir()?);
-                if let Err(e) = worktree_manager
-                    .remove_worktree(&session.worktree_path, true)
+                && let Err(e) = git_ops
+                    .worktree_remove(&repo_path, &session.worktree_path, true)
                     .await
-                {
-                    warn!("Failed to remove worktree: {}", e);
-                }
+            {
+                warn!("Failed to remove worktree: {}", e);
             }
         }
 

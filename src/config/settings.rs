@@ -75,6 +75,14 @@ pub struct Config {
     /// Interval in milliseconds for polling agent state (Working/Idle/Waiting) (0 = disabled)
     pub agent_state_poll_interval_ms: u64,
 
+    /// Minimum interval in milliseconds between preview refreshes for
+    /// **remote** projects/sessions. Local previews refresh at the UI tick
+    /// rate (subject to capture cache TTL); remote previews go over SSH and
+    /// each refresh is multiple round-trips, so a slow throttle is needed
+    /// to keep input responsive. Default 30000 (30s).
+    #[serde(default = "default_remote_preview_refresh_ms")]
+    pub remote_preview_refresh_ms: u64,
+
     /// When true, render PR labels as colored text on the default background
     /// (the pre-pill behavior). When false (default), PR labels render as a
     /// pill — colored background block with contrasting text — so they stand
@@ -147,6 +155,7 @@ impl Default for Config {
             resume_session: true,
             state_sync_interval_ms: 2000,
             agent_state_poll_interval_ms: 3000,
+            remote_preview_refresh_ms: default_remote_preview_refresh_ms(),
             invert_pr_label_color: false,
             show_session_program: true,
             dim_unfocused_preview: true,
@@ -166,6 +175,10 @@ impl Default for Config {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_remote_preview_refresh_ms() -> u64 {
+    30_000
 }
 
 fn default_pr_review_labels() -> Vec<String> {
@@ -542,6 +555,7 @@ has_label = ["blocked", "waiting-on-author"]
         assert!(config.resume_session);
         assert_eq!(config.state_sync_interval_ms, 2000);
         assert_eq!(config.agent_state_poll_interval_ms, 3000);
+        assert_eq!(config.remote_preview_refresh_ms, 30_000);
         assert!(config.ai_summary_enabled);
         assert_eq!(config.ai_summary_model, "claude-haiku-4-5-20251001");
         assert!(config.show_session_program);

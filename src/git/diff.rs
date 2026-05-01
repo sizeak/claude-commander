@@ -15,6 +15,7 @@ use tokio::process::Command;
 use tokio::sync::RwLock;
 use tracing::{debug, instrument};
 
+use super::GitOps;
 use crate::error::{GitError, Result};
 
 /// Default diff cache TTL (500ms)
@@ -100,9 +101,14 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
         }
     }
 
-    /// Get cached diff or compute fresh
-    #[instrument(skip(self, worktree_path))]
-    pub async fn get_diff(&self, key: &K, worktree_path: &Path) -> Result<Arc<DiffInfo>> {
+    /// Get cached diff or compute fresh via the supplied `GitOps`.
+    #[instrument(skip(self, git_ops, worktree_path))]
+    pub async fn get_diff(
+        &self,
+        key: &K,
+        git_ops: &dyn GitOps,
+        worktree_path: &Path,
+    ) -> Result<Arc<DiffInfo>> {
         // Fast path: check cache
         {
             let cache = self.cache.read().await;
@@ -114,16 +120,19 @@ impl<K: Eq + std::hash::Hash + Copy + std::fmt::Debug + std::fmt::Display + Send
             }
         }
 
-        // Slow path: compute fresh diff
         debug!("Diff cache miss for {}, computing", key);
-        self.compute_diff(key, worktree_path).await
+        self.compute_diff(key, git_ops, worktree_path).await
     }
 
-    /// Compute a fresh diff
-    pub async fn compute_diff(&self, key: &K, worktree_path: &Path) -> Result<Arc<DiffInfo>> {
-        let info = Arc::new(compute_diff_for_path(worktree_path).await?);
+    /// Compute a fresh diff via the supplied `GitOps`.
+    pub async fn compute_diff(
+        &self,
+        key: &K,
+        git_ops: &dyn GitOps,
+        worktree_path: &Path,
+    ) -> Result<Arc<DiffInfo>> {
+        let info = Arc::new(git_ops.compute_diff(worktree_path).await?);
 
-        // Update cache
         {
             let mut cache = self.cache.write().await;
             cache.insert(*key, Arc::clone(&info));
@@ -269,7 +278,7 @@ pub async fn compute_diff_for_path(path: &Path) -> Result<DiffInfo> {
 }
 
 /// Parse git diff --stat output to extract statistics
-fn parse_diff_stat(output: &str) -> (usize, usize, usize) {
+pub(crate) fn parse_diff_stat(output: &str) -> (usize, usize, usize) {
     let mut files_changed = 0;
     let mut lines_added = 0;
     let mut lines_removed = 0;

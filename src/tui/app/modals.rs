@@ -369,6 +369,272 @@ impl App {
                 }
             }
 
+            Modal::CodespacePicker {
+                codespaces,
+                query,
+                filtered,
+                selected_idx,
+                scroll,
+            } => {
+                let total_rows = filtered.len() + 1; // +1 for "Create new"
+                let desired_visible = total_rows.clamp(1, 12);
+                let modal_height = (4 + desired_visible) as u16;
+                let modal_width = (area.width * 70 / 100).max(56);
+
+                let modal_area = Rect {
+                    x: area.x + (area.width.saturating_sub(modal_width)) / 2,
+                    y: area.y + area.height / 6,
+                    width: modal_width,
+                    height: modal_height.min(area.height),
+                };
+                frame.render_widget(Clear, modal_area);
+
+                let block = Block::default()
+                    .title(" Pick a Codespace ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.theme.modal_info));
+                let inner = block.inner(modal_area);
+                frame.render_widget(block, modal_area);
+                if inner.height == 0 {
+                    return;
+                }
+
+                // Input line
+                let input_line = Line::from(format!("❯ {}_", query));
+                let input_area = Rect { height: 1, ..inner };
+                frame.render_widget(Paragraph::new(input_line), input_area);
+
+                // Hint line
+                let hint = if filtered.is_empty() {
+                    if codespaces.is_empty() {
+                        "No codespaces — pick `+ Create new codespace…`".to_string()
+                    } else {
+                        format!("No match for '{}'", query)
+                    }
+                } else {
+                    format!(
+                        "{} codespace{} — ↑/↓ select, Enter pick, Esc cancel",
+                        filtered.len(),
+                        if filtered.len() == 1 { "" } else { "s" }
+                    )
+                };
+                if inner.height >= 2 {
+                    let hint_area = Rect {
+                        y: inner.y + 1,
+                        height: 1,
+                        ..inner
+                    };
+                    frame.render_widget(
+                        Paragraph::new(Line::from(Span::styled(
+                            hint,
+                            Style::default().fg(self.theme.text_secondary),
+                        ))),
+                        hint_area,
+                    );
+                }
+
+                // Row list
+                let list_top = inner.y + 2;
+                if inner.height < 3 {
+                    return;
+                }
+                let list_height = (inner.height - 2) as usize;
+                let visible_end = (scroll + list_height).min(total_rows);
+
+                for i in 0..(visible_end.saturating_sub(*scroll)) {
+                    let abs_idx = scroll + i;
+                    let row = list_top + i as u16;
+                    if row >= inner.y + inner.height {
+                        break;
+                    }
+                    let is_selected = abs_idx == *selected_idx;
+                    let line_area = Rect {
+                        y: row,
+                        height: 1,
+                        ..inner
+                    };
+
+                    if abs_idx >= filtered.len() {
+                        // The "+ Create new codespace…" row.
+                        let style = if is_selected {
+                            self.theme.selection()
+                        } else {
+                            Style::default().fg(self.theme.modal_info)
+                        };
+                        let line = Line::from(Span::styled("  + Create new codespace…", style));
+                        frame.render_widget(Paragraph::new(line), line_area);
+                    } else {
+                        let cs = &codespaces[filtered[abs_idx]];
+                        let state_label = match &cs.state {
+                            crate::remote::CodespaceState::Available => "Available",
+                            crate::remote::CodespaceState::Shutdown => "Shutdown",
+                            crate::remote::CodespaceState::Starting => "Starting",
+                            crate::remote::CodespaceState::Provisioning => "Provisioning",
+                            crate::remote::CodespaceState::Other(s) => s.as_str(),
+                        };
+                        let state_color = match &cs.state {
+                            crate::remote::CodespaceState::Available => self.theme.status_running,
+                            crate::remote::CodespaceState::Shutdown => self.theme.text_secondary,
+                            _ => self.theme.agent_waiting,
+                        };
+                        let primary_label = cs
+                            .display_name
+                            .as_deref()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or(&cs.name);
+                        let mut spans = vec![
+                            Span::raw("  "),
+                            Span::styled(
+                                primary_label.to_string(),
+                                if is_selected {
+                                    self.theme.selection()
+                                } else {
+                                    Style::default()
+                                },
+                            ),
+                            Span::styled(
+                                format!("  {}", cs.repository),
+                                Style::default().fg(self.theme.text_secondary),
+                            ),
+                            Span::raw("  "),
+                            Span::styled(
+                                format!("[{}]", state_label),
+                                Style::default().fg(state_color),
+                            ),
+                        ];
+                        if let Some(branch) = &cs.git_status {
+                            spans.push(Span::styled(
+                                format!("  {}", branch),
+                                Style::default().fg(self.theme.text_accent),
+                            ));
+                        }
+                        frame.render_widget(Paragraph::new(Line::from(spans)), line_area);
+                    }
+                }
+            }
+
+            Modal::CodespaceCreate {
+                repo,
+                branch,
+                focus,
+            } => {
+                let modal_width = (area.width * 60 / 100).max(50);
+                let modal_height: u16 = 9;
+                let modal_area = Rect {
+                    x: area.x + (area.width.saturating_sub(modal_width)) / 2,
+                    y: area.y + (area.height.saturating_sub(modal_height)) / 2,
+                    width: modal_width,
+                    height: modal_height.min(area.height),
+                };
+                frame.render_widget(Clear, modal_area);
+
+                let block = Block::default()
+                    .title(" Create Codespace ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.theme.modal_info));
+                let inner = block.inner(modal_area);
+                frame.render_widget(block, modal_area);
+
+                let repo_active = *focus == 0;
+                let branch_active = *focus == 1;
+                let mark = |on: bool| if on { "❯" } else { " " };
+                let cursor = |on: bool| if on { "_" } else { "" };
+
+                let lines: Vec<Line> = vec![
+                    Line::from(Span::styled(
+                        "Provision a new GitHub Codespace",
+                        Style::default().add_modifier(Modifier::BOLD),
+                    )),
+                    Line::from(""),
+                    Line::from(format!(
+                        "{} Repo (owner/name): {}{}",
+                        mark(repo_active),
+                        repo,
+                        cursor(repo_active),
+                    )),
+                    Line::from(format!(
+                        "{} Branch (optional): {}{}",
+                        mark(branch_active),
+                        branch,
+                        cursor(branch_active),
+                    )),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "Tab switch field  Enter create  Esc cancel",
+                        Style::default().add_modifier(Modifier::DIM),
+                    )),
+                ];
+                frame.render_widget(Paragraph::new(lines), inner);
+            }
+
+            Modal::AddProjectKind { selected } => {
+                let modal_width = (area.width * 50 / 100).max(46);
+                let modal_height: u16 = 9; // 2 border + 1 prompt + 3 rows + 2 spacers + 1 hint
+                let modal_area = Rect {
+                    x: area.x + (area.width.saturating_sub(modal_width)) / 2,
+                    y: area.y + (area.height.saturating_sub(modal_height)) / 2,
+                    width: modal_width,
+                    height: modal_height.min(area.height),
+                };
+                frame.render_widget(Clear, modal_area);
+
+                let block = Block::default()
+                    .title(" Add Project ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.theme.modal_info));
+                let inner = block.inner(modal_area);
+                frame.render_widget(block, modal_area);
+
+                let options: [(&str, &str); 3] = [
+                    ("Local", "Path to a git repo on this machine"),
+                    (
+                        "GitHub Codespace",
+                        "Connects via `gh codespace ssh` (Recommended)",
+                    ),
+                    ("SSH host", "Any SSH host — uses ~/.ssh/config"),
+                ];
+
+                let mut lines: Vec<Line> = Vec::new();
+                lines.push(Line::from(Span::styled(
+                    "Where does the project live?",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(""));
+                for (idx, (label, desc)) in options.iter().enumerate() {
+                    if idx == *selected {
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                format!("  ❯ {label}"),
+                                Style::default()
+                                    .fg(self.theme.modal_info)
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                format!("  — {desc}"),
+                                Style::default().fg(self.theme.text_secondary),
+                            ),
+                        ]));
+                    } else {
+                        lines.push(Line::from(vec![
+                            Span::raw(format!("    {label}")),
+                            Span::styled(
+                                format!("  — {desc}"),
+                                Style::default()
+                                    .fg(self.theme.text_secondary)
+                                    .add_modifier(Modifier::DIM),
+                            ),
+                        ]));
+                    }
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "↑/↓ navigate  Enter select  Esc cancel",
+                    Style::default().add_modifier(Modifier::DIM),
+                )));
+
+                frame.render_widget(Paragraph::new(lines), inner);
+            }
+
             Modal::CheckoutBranch {
                 query,
                 filtered,
@@ -532,6 +798,31 @@ impl App {
         lines.push(Line::from(format!(
             "  {:<width$}Filter palette to commands only",
             ">",
+            width = key_col_width,
+        )));
+
+        // Attached-session shortcuts — hardcoded byte intercepts in
+        // `tmux/attach.rs`, not part of the configurable keybindings.
+        lines.push(Line::from(""));
+        lines.push(Line::from("Attached Session:"));
+        lines.push(Line::from(format!(
+            "  {:<width$}Detach and return to session list",
+            "Ctrl-q",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}Switch between Claude and shell pane",
+            "Ctrl-\\",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}Open the worktree in your editor",
+            "Ctrl-.",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}Restart program WITHOUT --resume",
+            "Ctrl-]",
             width = key_col_width,
         )));
 

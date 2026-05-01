@@ -269,7 +269,7 @@ impl WorktreeManager {
 }
 
 /// Parse git worktree list --porcelain output
-fn parse_worktree_list(output: &str) -> Result<Vec<WorktreeInfo>> {
+pub(crate) fn parse_worktree_list(output: &str) -> Result<Vec<WorktreeInfo>> {
     let mut worktrees = Vec::new();
     let mut current_path: Option<PathBuf> = None;
     let mut current_head: Option<String> = None;

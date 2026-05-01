@@ -177,6 +177,41 @@ impl App {
                 _ => {}
             },
 
+            Modal::AddProjectKind { selected } => match key.code {
+                crossterm::event::KeyCode::Up if *selected > 0 => {
+                    *selected -= 1;
+                }
+                crossterm::event::KeyCode::Down if *selected < 2 => {
+                    *selected += 1;
+                }
+                crossterm::event::KeyCode::Esc => {
+                    self.ui_state.modal = Modal::None;
+                }
+                crossterm::event::KeyCode::Enter => {
+                    let pick = *selected;
+                    self.ui_state.modal = Modal::None;
+                    match pick {
+                        0 => self.open_path_input(
+                            "Add Local Project".to_string(),
+                            "Enter path to git repository:".to_string(),
+                            InputAction::AddProject,
+                        ),
+                        1 => {
+                            self.open_codespace_picker().await;
+                        }
+                        _ => {
+                            self.ui_state.modal = Modal::Input {
+                                title: "Add SSH Project".to_string(),
+                                prompt: "user@host:/remote/path".to_string(),
+                                value: String::new(),
+                                on_submit: InputAction::AddSshProject,
+                            };
+                        }
+                    }
+                }
+                _ => {}
+            },
+
             Modal::PathInput {
                 value,
                 on_submit,
@@ -478,6 +513,86 @@ impl App {
                 }
             }
 
+            Modal::CodespacePicker {
+                query,
+                filtered,
+                selected_idx,
+                scroll,
+                ..
+            } => {
+                use crate::config::keybindings::BindableAction;
+                // Total selectable rows: codespaces + 1 for "Create new".
+                let total_rows = filtered.len() + 1;
+                match self.config.keybindings.resolve(&key) {
+                    Some(BindableAction::NavigateUp) => {
+                        if total_rows > 0 {
+                            *selected_idx = if *selected_idx == 0 {
+                                total_rows - 1
+                            } else {
+                                *selected_idx - 1
+                            };
+                            if *selected_idx < *scroll {
+                                *scroll = *selected_idx;
+                            }
+                        }
+                    }
+                    Some(BindableAction::NavigateDown) => {
+                        if total_rows > 0 {
+                            *selected_idx = (*selected_idx + 1) % total_rows;
+                            let visible_rows: usize = 10;
+                            if *selected_idx >= scroll.saturating_add(visible_rows) {
+                                *scroll = selected_idx.saturating_sub(visible_rows - 1);
+                            }
+                            if *selected_idx < *scroll {
+                                *scroll = *selected_idx;
+                            }
+                        }
+                    }
+                    _ => match key.code {
+                        KeyCode::Esc => {
+                            self.ui_state.modal = Modal::None;
+                        }
+                        KeyCode::Enter => {
+                            self.submit_codespace_picker().await;
+                        }
+                        KeyCode::Backspace => {
+                            query.pop();
+                            self.refilter_codespaces();
+                        }
+                        KeyCode::Char(c) => {
+                            query.push(c);
+                            self.refilter_codespaces();
+                        }
+                        _ => {}
+                    },
+                }
+            }
+
+            Modal::CodespaceCreate {
+                repo,
+                branch,
+                focus,
+            } => match key.code {
+                KeyCode::Esc => {
+                    self.ui_state.modal = Modal::None;
+                }
+                KeyCode::Tab => {
+                    *focus = if *focus == 0 { 1 } else { 0 };
+                }
+                KeyCode::Enter => {
+                    self.submit_codespace_create().await;
+                }
+                KeyCode::Backspace => {
+                    let target = if *focus == 0 { repo } else { branch };
+                    target.pop();
+                }
+                KeyCode::Char(c) => {
+                    let target = if *focus == 0 { repo } else { branch };
+                    target.push(c);
+                }
+                _ => {}
+            },
+
             Modal::None => {}
         }
     }
@@ -519,11 +634,7 @@ impl App {
                 self.handle_checkout_branch().await;
             }
             UserCommand::NewProject => {
-                self.open_path_input(
-                    "Add Project".to_string(),
-                    "Enter path to git repository:".to_string(),
-                    InputAction::AddProject,
-                );
+                self.ui_state.modal = Modal::AddProjectKind { selected: 0 };
             }
             UserCommand::ScanDirectory => {
                 self.open_path_input(

@@ -16,26 +16,24 @@ impl SessionManager {
                 project_id.to_string(),
             )
         };
+        let (tmux, _) = self.ops_for(project_id).await?;
 
-        // If shell session already exists in tmux, return its name
         if let Some(ref shell_name) = existing_shell_name
-            && self.tmux.session_exists(shell_name).await.unwrap_or(false)
+            && tmux.session_exists(shell_name).await.unwrap_or(false)
         {
             return Ok(shell_name.clone());
         }
 
-        // Create new shell tmux session
         let shell_name = format!("cc-proj-{}-sh", id_prefix);
 
-        // Check if a tmux session with this name already exists (stale state)
-        if self.tmux.session_exists(&shell_name).await.unwrap_or(false) {
-            let pane_dead = self.tmux.is_pane_dead(&shell_name).await.unwrap_or(false);
+        if tmux.session_exists(&shell_name).await.unwrap_or(false) {
+            let pane_dead = tmux.is_pane_dead(&shell_name).await.unwrap_or(false);
             if pane_dead {
                 info!(
                     "Project shell session {} has dead pane, killing for recreation",
                     shell_name
                 );
-                let _ = self.tmux.kill_session(&shell_name).await;
+                let _ = tmux.kill_session(&shell_name).await;
             } else {
                 info!("Reusing existing project shell session {}", shell_name);
                 let pid = *project_id;
@@ -52,8 +50,7 @@ impl SessionManager {
         }
 
         let shell_program = self.config_store.read().shell_program.clone();
-        self.tmux
-            .create_session(&shell_name, &repo_path, Some(&shell_program))
+        tmux.create_session(&shell_name, &repo_path, Some(&shell_program))
             .await?;
 
         // Store in project state
@@ -77,9 +74,9 @@ impl SessionManager {
     /// Get attach command for the project shell session (creates it if needed)
     pub async fn get_project_shell_attach_command(&self, project_id: &ProjectId) -> Result<String> {
         let shell_name = self.ensure_project_shell_session(project_id).await?;
+        let (tmux, _) = self.ops_for(project_id).await?;
 
-        // Verify tmux session exists and pane is alive
-        let exists = self.tmux.session_exists(&shell_name).await?;
+        let exists = tmux.session_exists(&shell_name).await?;
         if !exists {
             let pid = *project_id;
             let _ = self
@@ -93,9 +90,9 @@ impl SessionManager {
             return Err(SessionError::TmuxSessionNotFound(shell_name).into());
         }
 
-        let pane_dead = self.tmux.is_pane_dead(&shell_name).await.unwrap_or(false);
+        let pane_dead = tmux.is_pane_dead(&shell_name).await.unwrap_or(false);
         if pane_dead {
-            let _ = self.tmux.kill_session(&shell_name).await;
+            let _ = tmux.kill_session(&shell_name).await;
             let pid = *project_id;
             let _ = self
                 .store
@@ -133,8 +130,8 @@ impl SessionManager {
             None => return Ok(None),
         };
 
-        // Check if tmux session still exists
-        if !self.tmux.session_exists(&shell_name).await.unwrap_or(false) {
+        let (tmux, _) = self.ops_for(project_id).await?;
+        if !tmux.session_exists(&shell_name).await.unwrap_or(false) {
             let pid = *project_id;
             let _ = self
                 .store
@@ -147,7 +144,7 @@ impl SessionManager {
             return Ok(None);
         }
 
-        match self.content_capture.get_content(&shell_name).await {
+        match self.content_capture.get_content(&*tmux, &shell_name).await {
             Ok(content) => Ok(Some(content)),
             Err(_) => Ok(None),
         }
@@ -162,9 +159,9 @@ impl SessionManager {
                 .ok_or_else(|| SessionError::ProjectNotFound(project_id.to_string()))?;
             project.repo_path.clone()
         };
-
+        let (_tmux, git) = self.ops_for(project_id).await?;
         self.project_diff_cache
-            .get_diff(project_id, &repo_path)
+            .get_diff(project_id, &*git, &repo_path)
             .await
     }
 }

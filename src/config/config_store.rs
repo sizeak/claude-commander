@@ -53,7 +53,7 @@ impl InitSnapshot {
 /// detects a new mtime on the config file.
 ///
 /// Values baked into subsystem constructors at init time require a restart:
-/// - `max_concurrent_tmux` (TmuxExecutor semaphore size)
+/// - `max_concurrent_tmux` (LocalTmuxExec semaphore size)
 /// - `capture_cache_ttl_ms` / `diff_cache_ttl_ms` (cache durations)
 /// - `ui_refresh_fps` (event loop tick rate)
 /// - `state_sync_interval_ms` (state sync background task interval)

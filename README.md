@@ -206,6 +206,7 @@ When attached to a session (via `Enter` or `claude-commander attach`):
 | `Ctrl-q` | Detach and return to session list |
 | `Ctrl-\` | Switch between Claude and shell pane |
 | `Ctrl-.` | Open the session worktree in your editor (requires a terminal that emits CSI-u or xterm modifyOtherKeys sequences for Ctrl-.) |
+| `Ctrl-]` | Restart the program in this pane WITHOUT `--resume` (escape hatch when `claude --resume` fails because there's no session to resume against) |
 
 ## Configuration
 
@@ -259,6 +260,12 @@ ui_refresh_fps = 30
 
 # Interval in seconds between GitHub PR checks (0 = disabled)
 pr_check_interval_secs = 600
+
+# Minimum interval in ms between preview refreshes for remote (Codespace/SSH)
+# projects and sessions. Each refresh is multiple SSH round-trips, so a slow
+# throttle keeps input responsive. Local previews ignore this setting and
+# refresh at the UI tick rate.
+remote_preview_refresh_ms = 30000
 
 # Dim the right pane (preview/diff/shell) when the session list is focused
 dim_unfocused_preview = true

@@ -8,11 +8,17 @@ use std::sync::Arc;
 
 use tracing::{debug, info, instrument, warn};
 
+use std::collections::HashMap;
+use tokio::sync::RwLock as TokioRwLock;
+
 use crate::config::{AppState, ConfigStore, StateStore};
 use crate::error::{Result, SessionError};
-use crate::git::{DiffCache, DiffInfo, GitBackend, WorktreeManager};
-use crate::session::{Project, ProjectId, SessionId, SessionStatus, WorktreeSession};
-use crate::tmux::{CapturedContent, ContentCapture, StatusBarInfo, TmuxExecutor};
+use crate::git::{DiffCache, DiffInfo, GitBackend, GitOps, LocalGitOps, WorktreeManager};
+use crate::remote::{SshGitOps, SshSessionPool, SshTmuxExec};
+use crate::session::{
+    Project, ProjectId, RemoteTransport, SessionId, SessionStatus, WorktreeSession,
+};
+use crate::tmux::{CapturedContent, ContentCapture, LocalTmuxExec, StatusBarInfo, TmuxExec};
 
 /// Result of scanning a directory for git repositories
 #[derive(Debug, Clone)]
@@ -36,14 +42,29 @@ pub use cascade::{CascadeOutcome, PushStackOutcome};
 #[cfg(test)]
 mod tests;
 
+/// Cached `(TmuxExec, GitOps)` pair for one remote host.
+#[derive(Clone)]
+struct RemoteOps {
+    tmux: Arc<dyn TmuxExec>,
+    git: Arc<dyn GitOps>,
+}
+
 /// Session manager coordinates all session operations
 pub struct SessionManager {
     /// Shared configuration store (hot-reloaded)
     config_store: Arc<ConfigStore>,
     /// Concurrent-safe persistent state store
     pub store: Arc<StateStore>,
-    /// Tmux executor
-    pub tmux: TmuxExecutor,
+    /// Local tmux executor (used for local-project sessions).
+    pub tmux: Arc<dyn TmuxExec>,
+    /// Local git ops (used for local-project sessions).
+    pub git_ops: Arc<dyn GitOps>,
+    /// Pool of `openssh::Session`s, one per remote host.
+    ssh_pool: Arc<SshSessionPool>,
+    /// Cached SSH-backed ops per `RemoteTransport::connection_key()`.
+    remote_ops: Arc<TokioRwLock<HashMap<String, RemoteOps>>>,
+    /// Max concurrent tmux commands (used for SSH executors as well).
+    max_concurrent_tmux: usize,
     /// Content capture cache
     content_capture: ContentCapture,
     /// Diff cache for sessions
@@ -60,6 +81,10 @@ impl Clone for SessionManager {
             config_store: self.config_store.clone(),
             store: self.store.clone(),
             tmux: self.tmux.clone(),
+            git_ops: self.git_ops.clone(),
+            ssh_pool: self.ssh_pool.clone(),
+            remote_ops: self.remote_ops.clone(),
+            max_concurrent_tmux: self.max_concurrent_tmux,
             content_capture: self.content_capture.clone(),
             diff_cache: self.diff_cache.clone(),
             project_diff_cache: self.project_diff_cache.clone(),
@@ -79,21 +104,28 @@ impl SessionManager {
         tmux_status_style: impl Into<String>,
     ) -> Self {
         let config = config_store.read();
-        let tmux = TmuxExecutor::with_max_concurrent(config.max_concurrent_tmux);
-        let content_capture = ContentCapture::with_ttl(
-            tmux.clone(),
-            std::time::Duration::from_millis(config.capture_cache_ttl_ms),
-        );
+        let tmux: Arc<dyn TmuxExec> = Arc::new(LocalTmuxExec::with_max_concurrent(
+            config.max_concurrent_tmux,
+        ));
+        let content_capture = ContentCapture::with_ttl(std::time::Duration::from_millis(
+            config.capture_cache_ttl_ms,
+        ));
         let diff_cache =
             DiffCache::with_ttl(std::time::Duration::from_millis(config.diff_cache_ttl_ms));
         let project_diff_cache =
             DiffCache::with_ttl(std::time::Duration::from_millis(config.diff_cache_ttl_ms));
         drop(config);
 
+        let git_ops: Arc<dyn GitOps> = Arc::new(LocalGitOps::new());
+        let max_concurrent_tmux = config_store.read().max_concurrent_tmux;
         Self {
             config_store,
             store,
             tmux,
+            git_ops,
+            ssh_pool: Arc::new(SshSessionPool::new()),
+            remote_ops: Arc::new(TokioRwLock::new(HashMap::new())),
+            max_concurrent_tmux,
             content_capture,
             diff_cache,
             project_diff_cache,
@@ -104,6 +136,101 @@ impl SessionManager {
     /// Check if tmux is available
     pub async fn check_tmux(&self) -> Result<()> {
         self.tmux.check_installed().await
+    }
+
+    /// Resolve the [`AttachTarget`] for a project — i.e. how should the
+    /// PTY-attach loop dispatch its `tmux attach-session` invocation?
+    pub async fn attach_target_for_project(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<crate::tmux::AttachTarget> {
+        let state = self.store.read().await;
+        let project = state
+            .get_project(project_id)
+            .ok_or_else(|| SessionError::ProjectNotFound(project_id.to_string()))?;
+        Ok(match &project.remote {
+            None => crate::tmux::AttachTarget::Local,
+            Some(RemoteTransport::Ssh { host }) => {
+                crate::tmux::AttachTarget::Ssh { host: host.clone() }
+            }
+            Some(RemoteTransport::Codespace { name }) => crate::tmux::AttachTarget::Codespace {
+                codespace_name: name.clone(),
+            },
+        })
+    }
+
+    /// Convenience: resolve attach target by session id (looks up the
+    /// owning project).
+    pub async fn attach_target_for_session(
+        &self,
+        session_id: &SessionId,
+    ) -> Result<crate::tmux::AttachTarget> {
+        let project_id = {
+            let state = self.store.read().await;
+            state
+                .get_session(session_id)
+                .ok_or(SessionError::NotFound(*session_id))?
+                .project_id
+        };
+        self.attach_target_for_project(&project_id).await
+    }
+
+    /// Resolve the `(TmuxExec, GitOps)` pair for the project that owns
+    /// `project_id`. Local projects route through the local backends; remote
+    /// projects open (or reuse) one persistent `openssh::Session` per host.
+    ///
+    /// Use this whenever a session-management code path needs to dispatch
+    /// commands; never use `self.tmux` / `self.git_ops` directly inside
+    /// project-scoped flows.
+    pub async fn ops_for(
+        &self,
+        project_id: &ProjectId,
+    ) -> Result<(Arc<dyn TmuxExec>, Arc<dyn GitOps>)> {
+        let remote = {
+            let state = self.store.read().await;
+            state
+                .get_project(project_id)
+                .ok_or_else(|| SessionError::ProjectNotFound(project_id.to_string()))?
+                .remote
+                .clone()
+        };
+        match remote {
+            None => Ok((Arc::clone(&self.tmux), Arc::clone(&self.git_ops))),
+            Some(transport) => self.ops_for_remote(&transport).await,
+        }
+    }
+
+    /// Build (or fetch from cache) an SSH-backed ops pair for `transport`.
+    async fn ops_for_remote(
+        &self,
+        transport: &RemoteTransport,
+    ) -> Result<(Arc<dyn TmuxExec>, Arc<dyn GitOps>)> {
+        let key = transport.connection_key();
+        {
+            let guard = self.remote_ops.read().await;
+            if let Some(ops) = guard.get(&key) {
+                return Ok((Arc::clone(&ops.tmux), Arc::clone(&ops.git)));
+            }
+        }
+        let runner = self.ssh_pool.get_or_connect(transport).await?;
+        let tmux: Arc<dyn TmuxExec> = Arc::new(SshTmuxExec::new(
+            Arc::clone(&runner),
+            self.max_concurrent_tmux,
+        ));
+        let git: Arc<dyn GitOps> = Arc::new(SshGitOps::new(Arc::clone(&runner)));
+
+        let mut guard = self.remote_ops.write().await;
+        if let Some(ops) = guard.get(&key) {
+            return Ok((Arc::clone(&ops.tmux), Arc::clone(&ops.git)));
+        }
+        guard.insert(
+            key,
+            RemoteOps {
+                tmux: Arc::clone(&tmux),
+                git: Arc::clone(&git),
+            },
+        );
+        Ok((tmux, git))
     }
 
     /// Build a `StatusBarInfo` from session metadata

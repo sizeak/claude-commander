@@ -105,6 +105,7 @@ impl App {
             self.ui_state.list_state.list_state.select(Some(idx));
             self.update_selection();
             self.ui_state.preview_update_spawned_at = None;
+            self.ui_state.last_preview_spawn_at = None;
             self.spawn_preview_update();
         }
     }

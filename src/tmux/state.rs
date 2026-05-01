@@ -16,8 +16,9 @@ static ANSI_RE: LazyLock<Regex> = LazyLock::new(|| {
         .expect("valid regex")
 });
 
-use super::TmuxExecutor;
-use crate::error::Result;
+use std::sync::Arc;
+
+use super::TmuxExec;
 use crate::session::{AgentState, SessionId};
 
 /// Detect agent state from the tmux pane title.
@@ -93,14 +94,14 @@ pub fn is_claude_program(program: &str) -> bool {
 
 /// Agent state detector that polls tmux sessions and caches results.
 pub struct AgentStateDetector {
-    executor: TmuxExecutor,
+    executor: Arc<dyn TmuxExec>,
     cache: HashMap<String, (AgentState, Instant)>,
     cache_ttl: Duration,
 }
 
 impl AgentStateDetector {
     /// Create a new detector with the given cache TTL.
-    pub fn new(executor: TmuxExecutor, cache_ttl: Duration) -> Self {
+    pub fn new(executor: Arc<dyn TmuxExec>, cache_ttl: Duration) -> Self {
         Self {
             executor,
             cache: HashMap::new(),
@@ -126,10 +127,15 @@ impl AgentStateDetector {
     }
 
     /// Perform fresh detection bypassing cache.
+    ///
+    /// Uses `agent_probe` to fetch `(pane_title, visible_content)` in one
+    /// call so SSH backends can collapse the two tmux invocations into a
+    /// single round-trip. The local backend still runs them sequentially,
+    /// at the cost of a wasted content fetch when the title alone suffices —
+    /// negligible vs. the SSH win.
     async fn detect_fresh(&self, tmux_session_name: &str) -> AgentState {
-        // Primary: check pane title
-        match self.get_pane_title(tmux_session_name).await {
-            Ok(title) => {
+        match self.executor.agent_probe(tmux_session_name).await {
+            Ok((title, content)) => {
                 if let Some(state) = parse_pane_title(&title) {
                     debug!(
                         "Pane title detection for {}: {:?}",
@@ -137,17 +143,6 @@ impl AgentStateDetector {
                     );
                     return state;
                 }
-                // Title says "not working", check content
-            }
-            Err(e) => {
-                debug!("Failed to get pane title for {}: {}", tmux_session_name, e);
-                return AgentState::Unknown;
-            }
-        }
-
-        // Secondary: parse visible pane content
-        match self.capture_visible_pane(tmux_session_name).await {
-            Ok(content) => {
                 let state = parse_pane_content(&content);
                 debug!(
                     "Pane content detection for {}: {:?}",
@@ -156,30 +151,10 @@ impl AgentStateDetector {
                 state
             }
             Err(e) => {
-                debug!("Failed to capture pane for {}: {}", tmux_session_name, e);
+                debug!("Failed to probe pane for {}: {}", tmux_session_name, e);
                 AgentState::Unknown
             }
         }
-    }
-
-    /// Get the tmux pane title.
-    async fn get_pane_title(&self, tmux_session_name: &str) -> Result<String> {
-        self.executor
-            .execute(&[
-                "display-message",
-                "-t",
-                tmux_session_name,
-                "-p",
-                "#{pane_title}",
-            ])
-            .await
-    }
-
-    /// Capture visible pane content (no scrollback, no ANSI escapes).
-    async fn capture_visible_pane(&self, tmux_session_name: &str) -> Result<String> {
-        self.executor
-            .execute(&["capture-pane", "-t", tmux_session_name, "-p"])
-            .await
     }
 
     /// Detect agent states for a batch of sessions.
@@ -374,7 +349,7 @@ mod tests {
         // non-Claude programs get Unknown without attempting detection.
         // This test verifies the filtering logic by checking that aider
         // sessions produce Unknown.
-        let executor = TmuxExecutor::new();
+        let executor: Arc<dyn TmuxExec> = Arc::new(super::super::LocalTmuxExec::new());
         let mut detector = AgentStateDetector::new(executor, Duration::from_secs(10));
 
         let sessions = vec![(

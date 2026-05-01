@@ -10,7 +10,7 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 use claude_commander::{
     APP_NAME, VERSION,
     config::{AppState, Config, ConfigStore, StateStore},
-    tmux::{AttachResult, attach_to_session},
+    tmux::{AttachResult, AttachTarget, attach_to_session},
     tui::App,
 };
 
@@ -106,8 +106,13 @@ fn setup_logging(debug: bool, to_file: bool) -> Result<()> {
 /// Execute async PTY-based attach to a tmux session
 async fn execute_attach(session_name: &str, editor_triggers: Vec<Vec<u8>>) {
     // CLI `attach` resolves a Claude session by title/ID, never a shell.
-    match attach_to_session(session_name, editor_triggers, true).await {
-        Ok(AttachResult::Detached | AttachResult::SwitchToShell | AttachResult::OpenEditor) => {
+    match attach_to_session(session_name, &AttachTarget::Local, editor_triggers, true).await {
+        Ok(
+            AttachResult::Detached
+            | AttachResult::SwitchToShell
+            | AttachResult::OpenEditor
+            | AttachResult::RestartFresh,
+        ) => {
             info!("Detached from session");
         }
         Ok(AttachResult::SessionEnded) => {

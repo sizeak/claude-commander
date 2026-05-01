@@ -5,7 +5,7 @@
 //! - User input handling
 //! - Background state updates
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -150,6 +150,38 @@ pub enum Modal {
         /// Index of the first visible row — keeps `selected_idx` inside
         /// the visible window when the list is longer than can fit.
         scroll: usize,
+    },
+    /// Three-way picker for "Add Project": Local / Codespace / SSH.
+    ///
+    /// `selected` is the highlighted row index. On Enter, the selected
+    /// option opens a follow-up modal (path input for Local, codespace
+    /// picker for Codespace, host input for SSH).
+    AddProjectKind { selected: usize },
+    /// Picker for an existing GitHub Codespace.
+    ///
+    /// Rows are the user's codespaces from `gh codespace list`, plus a
+    /// trailing "+ Create new codespace…" row. Filtering matches against
+    /// codespace name + repo. Selecting a row triggers either
+    /// `add_remote_project` (existing) or transitions to
+    /// [`Modal::CodespaceCreate`].
+    CodespacePicker {
+        codespaces: Vec<crate::remote::CodespaceInfo>,
+        query: String,
+        /// Indices into `codespaces` that match the current `query`.
+        filtered: Vec<usize>,
+        /// Highlighted row. `0..filtered.len()` is an existing codespace;
+        /// `filtered.len()` is the synthetic "+ Create new…" row.
+        selected_idx: usize,
+        /// First visible row.
+        scroll: usize,
+    },
+    /// Sub-modal: capture `owner/repo` + optional branch and run
+    /// `gh codespace create`.
+    CodespaceCreate {
+        repo: String,
+        branch: String,
+        /// 0 = repo field has focus, 1 = branch field has focus.
+        focus: u8,
     },
     /// Checkout-existing-branch modal. Shows an input field plus a
     /// filterable/scrollable list of branches (local + remote) and
@@ -325,6 +357,12 @@ pub enum InputAction {
         parent_branch: String,
     },
     AddProject,
+    /// Add a new GitHub Codespace project. Value is the codespace name
+    /// (matches `gh codespace list` "name" field).
+    AddCodespaceProject,
+    /// Add a new SSH-host project. Value is `user@host:/remote/path`
+    /// (the colon separates host from path; same form as `scp`).
+    AddSshProject,
     ScanDirectory,
     RenameSession {
         session_id: SessionId,
@@ -379,6 +417,10 @@ pub struct AppUiState {
     pub selected_project_id: Option<ProjectId>,
     /// Attach command to run after exiting TUI
     pub attach_command: Option<String>,
+    /// Where to attach when `attach_command` fires — local tmux, ssh, or
+    /// `gh codespace ssh`. Set alongside `attach_command` so the attach
+    /// loop knows which transport to spawn.
+    pub attach_target: Option<crate::tmux::AttachTarget>,
     /// Editor command + path to open after exiting TUI
     pub editor_command: Option<(String, PathBuf)>,
     /// When attached via shell toggle (Ctrl+\), stores the session name to switch back to.
@@ -392,8 +434,20 @@ pub struct AppUiState {
     pub last_pr_check: Option<Instant>,
     /// Whether the `gh` CLI is available
     pub gh_available: bool,
-    /// When the last background preview fetch was spawned (None = not in flight)
+    /// When the last background preview fetch was spawned (None = not in flight).
+    /// Cleared on `PreviewReady` arrival so a follow-up fetch can start.
     pub preview_update_spawned_at: Option<Instant>,
+    /// When the most recent preview fetch was *initiated*, regardless of
+    /// whether it has completed. Used purely as a throttle floor — separate
+    /// from `preview_update_spawned_at` so the in-flight guard and the
+    /// throttle can have different lifetimes. Reset to `None` only on
+    /// selection change so a new selection always sees an immediate fetch.
+    pub last_preview_spawn_at: Option<Instant>,
+    /// Project IDs whose `Project::is_remote()` is currently `true`. Refreshed
+    /// from `store` whenever `refresh_list_items` runs. Lets `spawn_preview_update`
+    /// pick the right throttle interval without having to take the store
+    /// lock on every tick.
+    pub remote_project_ids: HashSet<ProjectId>,
     /// Tick counter for animations (incremented each render tick)
     pub tick_count: u64,
     /// Throbber/spinner state for loading modals
@@ -429,6 +483,7 @@ impl Default for AppUiState {
             selected_session_id: None,
             selected_project_id: None,
             attach_command: None,
+            attach_target: None,
             editor_command: None,
             shell_toggle_pair: None,
             clear_right_pane: false,
@@ -436,6 +491,8 @@ impl Default for AppUiState {
             last_pr_check: None,
             gh_available: false,
             preview_update_spawned_at: None,
+            last_preview_spawn_at: None,
+            remote_project_ids: HashSet::new(),
             terminal_size: Rect::default(),
             tick_count: 0,
             throbber_state: throbber_widgets_tui::ThrobberState::default(),
@@ -705,6 +762,16 @@ impl App {
             } else {
                 match self.ui_state.attach_command.take() {
                     Some(cmd) => {
+                        // Resolve the transport target captured alongside the
+                        // attach command. Defaults to Local for legacy code
+                        // paths that haven't been updated yet.
+                        let attach_target = self
+                            .ui_state
+                            .attach_target
+                            .take()
+                            .unwrap_or(crate::tmux::AttachTarget::Local);
+                        let target_is_remote = attach_target.is_remote();
+
                         // Stop the input reader BEFORE attaching so it doesn't compete for stdin
                         self.event_loop.stop_input();
                         // Brief delay to let the reader task actually stop
@@ -720,10 +787,18 @@ impl App {
                             let mut current_session = session_name.clone();
 
                             loop {
-                                let editor_triggers =
+                                // Editor-trigger interception currently
+                                // launches a *local* editor against the
+                                // session's worktree path — meaningless
+                                // for sessions on a remote host. Suppress
+                                // for remote so the keybind is a no-op.
+                                let editor_triggers = if target_is_remote {
+                                    Vec::new()
+                                } else {
                                     crate::config::keybindings::editor_trigger_bytes(
                                         &self.config.keybindings,
-                                    );
+                                    )
+                                };
                                 // Shell sessions are named with a trailing
                                 // "-sh" (see resolve_shell_toggle_pair). Only
                                 // intercept Ctrl+Z for non-shell (Claude)
@@ -732,6 +807,7 @@ impl App {
                                 let intercept_ctrl_z = !current_session.ends_with("-sh");
                                 match crate::tmux::attach_to_session(
                                     &current_session,
+                                    &attach_target,
                                     editor_triggers,
                                     intercept_ctrl_z,
                                 )
@@ -790,6 +866,55 @@ impl App {
                                         self.open_editor_for_tmux_session(&current_session).await;
                                         crate::tmux::flush_stdin();
                                         continue;
+                                    }
+                                    Ok(crate::tmux::AttachResult::RestartFresh) => {
+                                        info!(
+                                            "RestartFresh requested from session: {}",
+                                            current_session
+                                        );
+                                        // Resolve the session_id behind this tmux name and
+                                        // relaunch its program without `--resume`.
+                                        let session_id = {
+                                            let state = self.store.read().await;
+                                            state
+                                                .sessions
+                                                .values()
+                                                .find(|s| {
+                                                    s.tmux_session_name == current_session
+                                                        || s.shell_tmux_session_name.as_deref()
+                                                            == Some(&current_session)
+                                                })
+                                                .map(|s| s.id)
+                                        };
+                                        if let Some(sid) = session_id {
+                                            match self
+                                                .session_manager
+                                                .restart_session_fresh(&sid)
+                                                .await
+                                            {
+                                                Ok(_cmd) => {
+                                                    crate::tmux::flush_stdin();
+                                                    continue;
+                                                }
+                                                Err(e) => {
+                                                    warn!("Failed to restart fresh: {}", e);
+                                                    self.ui_state.modal = Modal::Error {
+                                                        message: format!(
+                                                            "Failed to restart fresh: {}",
+                                                            e
+                                                        ),
+                                                    };
+                                                    self.ui_state.shell_toggle_pair = None;
+                                                    break;
+                                                }
+                                            }
+                                        } else {
+                                            warn!(
+                                                "RestartFresh: no session found for tmux name {}",
+                                                current_session
+                                            );
+                                            break;
+                                        }
                                     }
                                     Ok(result) => {
                                         info!("Attach ended: {:?}", result);

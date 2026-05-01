@@ -1,19 +1,21 @@
-//! Async tmux integration module
+//! Async tmux integration module.
 //!
-//! Provides non-blocking tmux operations:
-//! - `TmuxExecutor` - Semaphore-controlled async command execution
-//! - `ContentCapture` - Cached pane content capture
-//! - `InputForwarder` - Non-blocking input queue
-//! - `attach_to_session` - Async PTY-based session attachment
+//! - [`TmuxExec`] — trait abstracting how tmux commands are dispatched.
+//! - [`LocalTmuxExec`] — local-process backend.
+//! - [`ContentCapture`] — cached pane content capture.
+//! - [`InputForwarder`] — non-blocking input queue.
+//! - [`attach_to_session`] — async PTY-based session attachment.
 
 mod attach;
 mod capture;
+mod exec;
 mod executor;
 mod input;
 mod state;
 
 pub use attach::*;
 pub use capture::*;
+pub use exec::*;
 pub use executor::*;
 pub use input::*;
 pub use state::*;

@@ -17,12 +17,40 @@ impl App {
             debug!("Preview update stale (>5s), spawning new one");
         }
 
+        // Throttle floor — even after a fetch completes, don't immediately
+        // re-spawn at the 30Hz tick rate. Each preview fetch can do real
+        // I/O (capture, diff, shell), so an unthrottled tick-driven loop
+        // contends with the input handler.
+        //
+        // For LOCAL targets, the floor is short (50ms — matches the capture
+        // cache TTL so most spawns hit cache anyway). For REMOTE targets it
+        // uses `config.remote_preview_refresh_ms` (default 30s) — every
+        // remote refresh is multiple SSH round trips and project/session
+        // content doesn't change at frame rate. Without the long floor,
+        // steady-state SSH activity caused noticeable keypress lag.
+        let on_remote = self
+            .ui_state
+            .selected_project_id
+            .is_some_and(|pid| self.ui_state.remote_project_ids.contains(&pid));
+        let min_interval = if on_remote {
+            Duration::from_millis(self.config.remote_preview_refresh_ms)
+        } else {
+            Duration::from_millis(50)
+        };
+        if let Some(last_at) = self.ui_state.last_preview_spawn_at
+            && last_at.elapsed() < min_interval
+        {
+            return;
+        }
+
         let session_id = self.ui_state.selected_session_id;
         let project_id = self.ui_state.selected_project_id;
         let mgr = self.session_manager.clone();
         let tx = self.event_loop.sender();
 
-        self.ui_state.preview_update_spawned_at = Some(Instant::now());
+        let now = Instant::now();
+        self.ui_state.preview_update_spawned_at = Some(now);
+        self.ui_state.last_preview_spawn_at = Some(now);
 
         debug!(
             "Spawning preview update for session={:?} project={:?}",
@@ -59,7 +87,10 @@ impl App {
         let tx = self.event_loop.sender();
 
         tokio::spawn(async move {
-            // Collect session info under a brief read lock
+            // Collect session info under a brief read lock. Remote projects
+            // are skipped here — gh/gix run against `project.repo_path` which
+            // is interpreted on the remote host, not locally. Remote PR
+            // status will be handled in a follow-up via SSH dispatch.
             let sessions_to_check: Vec<(SessionId, String, std::path::PathBuf)> = {
                 let state = store.read().await;
                 state
@@ -68,6 +99,9 @@ impl App {
                     .filter(|s| s.status != SessionStatus::Creating)
                     .filter_map(|s| {
                         let project = state.projects.get(&s.project_id)?;
+                        if project.is_remote() {
+                            return None;
+                        }
                         Some((s.id, s.branch.clone(), project.repo_path.clone()))
                     })
                     .collect()
@@ -133,13 +167,15 @@ impl App {
             let tx = self.event_loop.sender();
 
             tokio::spawn(async move {
-                // Look up the project repo path
+                // Look up the project repo path; bail out for remote projects
+                // (the local `gh` path won't see the remote repo).
                 let repo_path = {
                     let state = store.read().await;
                     state
                         .sessions
                         .get(&session_id)
                         .and_then(|s| state.projects.get(&s.project_id))
+                        .filter(|p| !p.is_remote())
                         .map(|p| p.repo_path.clone())
                 };
 
@@ -190,6 +226,9 @@ impl App {
                 let state = store.read().await;
                 state.sessions.get(&session_id).and_then(|s| {
                     let project = state.projects.get(&s.project_id)?;
+                    if project.is_remote() {
+                        return None;
+                    }
                     Some((s.worktree_path.clone(), project.main_branch.clone()))
                 })
             };
@@ -300,7 +339,7 @@ pub(super) async fn fetch_preview_data(
 ///
 /// Sends an error event if worktree removal fails.
 pub(super) async fn cleanup_session_tmux(
-    tmux: &crate::tmux::TmuxExecutor,
+    tmux: &dyn crate::tmux::TmuxExec,
     tmux_name: &str,
     shell_tmux_name: Option<&str>,
     worktree_path: Option<(&std::path::Path, &std::path::Path)>,

@@ -66,6 +66,191 @@ impl App {
         };
     }
 
+    /// Kick off `gh codespace list` in the background and show a Loading
+    /// modal until the result lands as `StateUpdate::CodespaceListReady`.
+    /// `gh codespace list` is usually <1s but can stretch to 30–60s on slow
+    /// auth or token refresh — we don't want to freeze the input loop for
+    /// that window.
+    pub(super) async fn open_codespace_picker(&mut self) {
+        self.ui_state.modal = Modal::Loading {
+            title: "Codespaces".to_string(),
+            message: "Listing codespaces…".to_string(),
+        };
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let result = crate::remote::gh_codespace_list().await.map_err(|e| {
+                format!(
+                    "Failed to list codespaces: {}\n\nIs `gh` installed and `gh auth login` complete?",
+                    e
+                )
+            });
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::CodespaceListReady {
+                    result,
+                }))
+                .await;
+        });
+    }
+
+    /// Refilter the codespace picker against its current query (case-insensitive
+    /// substring match over name and repo).
+    pub(super) fn refilter_codespaces(&mut self) {
+        if let Modal::CodespacePicker {
+            codespaces,
+            query,
+            filtered,
+            selected_idx,
+            scroll,
+        } = &mut self.ui_state.modal
+        {
+            let q = query.to_lowercase();
+            *filtered = codespaces
+                .iter()
+                .enumerate()
+                .filter(|(_, c)| {
+                    if q.is_empty() {
+                        return true;
+                    }
+                    c.name.to_lowercase().contains(&q)
+                        || c.repository.to_lowercase().contains(&q)
+                        || c.display_name
+                            .as_ref()
+                            .map(|d| d.to_lowercase().contains(&q))
+                            .unwrap_or(false)
+                })
+                .map(|(i, _)| i)
+                .collect();
+            // The trailing "+ Create new" row sits at index `filtered.len()`.
+            let max_idx = filtered.len();
+            if *selected_idx > max_idx {
+                *selected_idx = max_idx;
+            }
+            if *scroll > *selected_idx {
+                *scroll = *selected_idx;
+            }
+        }
+    }
+
+    /// Submit the codespace picker: add the highlighted codespace as a
+    /// remote project (or open the create sub-modal for "+ Create new").
+    pub(super) async fn submit_codespace_picker(&mut self) {
+        let picked = if let Modal::CodespacePicker {
+            codespaces,
+            filtered,
+            selected_idx,
+            ..
+        } = &self.ui_state.modal
+        {
+            if *selected_idx >= filtered.len() {
+                None // create-new row
+            } else {
+                let idx = filtered[*selected_idx];
+                Some(codespaces[idx].clone())
+            }
+        } else {
+            return;
+        };
+
+        match picked {
+            Some(cs) => {
+                self.ui_state.modal = Modal::None;
+                let remote_path = codespace_default_remote_path(&cs);
+                self.add_remote_project_with_progress(
+                    crate::session::RemoteTransport::Codespace { name: cs.name },
+                    remote_path,
+                )
+                .await;
+            }
+            None => {
+                self.ui_state.modal = Modal::CodespaceCreate {
+                    repo: String::new(),
+                    branch: String::new(),
+                    focus: 0,
+                };
+            }
+        }
+    }
+
+    /// Submit the codespace-create sub-modal: kick off `gh codespace create`
+    /// (5-min provisioning window) in the background. `StateUpdate::CodespaceCreateReady`
+    /// then drives the follow-up `add_remote_project_with_progress`.
+    pub(super) async fn submit_codespace_create(&mut self) {
+        let (repo, branch) =
+            if let Modal::CodespaceCreate { repo, branch, .. } = &self.ui_state.modal {
+                (repo.trim().to_string(), branch.trim().to_string())
+            } else {
+                return;
+            };
+        if repo.is_empty() || !repo.contains('/') {
+            self.ui_state.modal = Modal::Error {
+                message: "Expected `owner/repo` (e.g. anthropics/claude-code)".to_string(),
+            };
+            return;
+        }
+
+        self.ui_state.modal = Modal::Loading {
+            title: "Create Codespace".to_string(),
+            message: format!("Provisioning codespace for {}…", repo),
+        };
+
+        let branch_opt = if branch.is_empty() {
+            None
+        } else {
+            Some(branch)
+        };
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let timeout = std::time::Duration::from_secs(300); // 5 min — codespace boot can take this long
+            let result = crate::remote::gh_codespace_create(&repo, branch_opt.as_deref(), timeout)
+                .await
+                .map_err(|e| format!("Failed to create codespace: {}", e));
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::CodespaceCreateReady {
+                    result,
+                }))
+                .await;
+        });
+    }
+
+    /// Open a Loading modal and kick off `add_remote_project` in the
+    /// background. `StateUpdate::RemoteProjectAdded` lands the result.
+    /// Used by Codespace and SSH project flows alike (same "connect,
+    /// discover, persist" shape). Background-spawning matters because
+    /// `add_remote_project` warms up the SSH/codespace pool — for a
+    /// `Shutdown` codespace that wake-up regularly costs 30–60s.
+    pub(super) async fn add_remote_project_with_progress(
+        &mut self,
+        transport: crate::session::RemoteTransport,
+        remote_path: PathBuf,
+    ) {
+        let label = match &transport {
+            crate::session::RemoteTransport::Codespace { name } => {
+                format!("Connecting to Codespace {}…", name)
+            }
+            crate::session::RemoteTransport::Ssh { host } => {
+                format!("Connecting to {}…", host)
+            }
+        };
+        self.ui_state.modal = Modal::Loading {
+            title: "Add Project".to_string(),
+            message: label,
+        };
+
+        let session_manager = self.session_manager.clone();
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let result = session_manager
+                .add_remote_project(remote_path, transport)
+                .await
+                .map_err(|e| format!("Failed to add remote project: {}", e));
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::RemoteProjectAdded {
+                    result,
+                }))
+                .await;
+        });
+    }
+
     /// Check if the selected session is in Creating state
     pub(super) fn selected_session_is_creating(&self) -> bool {
         self.ui_state.list_items.iter().any(|item| {
@@ -92,6 +277,12 @@ impl App {
             match self.session_manager.get_attach_command(&session_id).await {
                 Ok(cmd) => {
                     info!("Got attach command: {}", cmd);
+                    // Resolve the transport for the loop alongside the cmd.
+                    let target = self
+                        .session_manager
+                        .attach_target_for_session(&session_id)
+                        .await
+                        .unwrap_or(crate::tmux::AttachTarget::Local);
                     // Clear unread flag when attaching
                     let sid = session_id;
                     let _ = self
@@ -103,6 +294,7 @@ impl App {
                         })
                         .await;
                     self.ui_state.attach_command = Some(cmd);
+                    self.ui_state.attach_target = Some(target);
                     self.ui_state.should_quit = true;
                     info!("Set should_quit = true");
                 }
@@ -130,7 +322,13 @@ impl App {
                 .await
             {
                 Ok(cmd) => {
+                    let target = self
+                        .session_manager
+                        .attach_target_for_session(&session_id)
+                        .await
+                        .unwrap_or(crate::tmux::AttachTarget::Local);
                     self.ui_state.attach_command = Some(cmd);
+                    self.ui_state.attach_target = Some(target);
                     self.ui_state.should_quit = true;
                 }
                 Err(e) => {
@@ -146,7 +344,13 @@ impl App {
                 .await
             {
                 Ok(cmd) => {
+                    let target = self
+                        .session_manager
+                        .attach_target_for_project(&project_id)
+                        .await
+                        .unwrap_or(crate::tmux::AttachTarget::Local);
                     self.ui_state.attach_command = Some(cmd);
+                    self.ui_state.attach_target = Some(target);
                     self.ui_state.should_quit = true;
                 }
                 Err(e) => {
@@ -1308,7 +1512,6 @@ impl App {
                             Instant::now() + Duration::from_secs(3),
                         ));
                         self.refresh_list_items().await;
-                        // Select the newly added project
                         if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
                             matches!(item, SessionListItem::Project { id, .. } if *id == project_id)
                         }) {
@@ -1321,6 +1524,43 @@ impl App {
                         };
                     }
                 }
+            }
+            InputAction::AddCodespaceProject => {
+                // Legacy text-input fallback (no longer reachable from the
+                // UI — the picker is the canonical entry point — but kept
+                // so any direct dispatch of this action still works).
+                let name = value.trim().to_string();
+                if name.is_empty() {
+                    self.ui_state.modal = Modal::Error {
+                        message: "Codespace name cannot be empty".to_string(),
+                    };
+                    return;
+                }
+                self.add_remote_project_with_progress(
+                    crate::session::RemoteTransport::Codespace { name },
+                    PathBuf::from("/workspaces"),
+                )
+                .await;
+            }
+            InputAction::AddSshProject => {
+                // Parse "user@host:/path" — same form as scp.
+                let raw = value.trim();
+                let (host, path) = match raw.split_once(':') {
+                    Some((h, p)) if !h.is_empty() && !p.is_empty() => {
+                        (h.to_string(), p.to_string())
+                    }
+                    _ => {
+                        self.ui_state.modal = Modal::Error {
+                            message: format!("Expected `user@host:/remote/path`, got: {}", raw),
+                        };
+                        return;
+                    }
+                };
+                self.add_remote_project_with_progress(
+                    crate::session::RemoteTransport::Ssh { host },
+                    PathBuf::from(path),
+                )
+                .await;
             }
             InputAction::RenameSession { session_id } => {
                 let new_title = value.trim().to_string();
@@ -1465,7 +1705,7 @@ impl App {
                     let tx = self.event_loop.sender();
                     tokio::spawn(async move {
                         background::cleanup_session_tmux(
-                            &tmux,
+                            tmux.as_ref(),
                             &tmux_name,
                             shell_tmux_name.as_deref(),
                             repo_path
@@ -1549,7 +1789,7 @@ impl App {
                         // Kill all session tmux sessions + remove worktrees
                         for (tmux_name, shell_tmux_name, worktree_path) in &sessions {
                             background::cleanup_session_tmux(
-                                &tmux,
+                                tmux.as_ref(),
                                 tmux_name,
                                 shell_tmux_name.as_deref(),
                                 Some((worktree_path.as_path(), repo_path.as_path())),
@@ -1561,6 +1801,24 @@ impl App {
                 }
             }
         }
+    }
+}
+
+/// Default remote path for a codespace. Codespaces mount the repo at
+/// `/workspaces/<repo-basename>`; we extract the basename from the
+/// `repository` field (which is `owner/repo`).
+pub(super) fn codespace_default_remote_path(
+    info: &crate::remote::CodespaceInfo,
+) -> std::path::PathBuf {
+    let basename = info
+        .repository
+        .rsplit_once('/')
+        .map(|(_, name)| name)
+        .unwrap_or(&info.repository);
+    if basename.is_empty() {
+        std::path::PathBuf::from("/workspaces")
+    } else {
+        std::path::PathBuf::from(format!("/workspaces/{}", basename))
     }
 }
 

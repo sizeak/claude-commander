@@ -127,6 +127,21 @@ pub enum StateUpdate {
     PushStackFinished {
         result: std::result::Result<crate::session::PushStackOutcome, String>,
     },
+    /// `gh codespace list` finished — used to populate the codespace picker
+    /// modal without blocking the input handler.
+    CodespaceListReady {
+        result: std::result::Result<Vec<crate::remote::CodespaceInfo>, String>,
+    },
+    /// `gh codespace create` provisioning finished. The dispatcher kicks off
+    /// the follow-up `add_remote_project` spawn from this variant's `Ok` arm.
+    CodespaceCreateReady {
+        result: std::result::Result<crate::remote::CodespaceInfo, String>,
+    },
+    /// `add_remote_project` (pool warm-up + discovery + persist) finished —
+    /// fired by both the codespace and SSH "add project" paths.
+    RemoteProjectAdded {
+        result: std::result::Result<crate::session::ProjectId, String>,
+    },
 }
 
 /// User commands triggered by input

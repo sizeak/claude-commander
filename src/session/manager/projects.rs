@@ -3,7 +3,7 @@
 use super::*;
 
 impl SessionManager {
-    /// Add a new project (git repository)
+    /// Add a new local project (git repository).
     #[instrument(skip(self))]
     pub async fn add_project(&self, repo_path: PathBuf) -> Result<ProjectId> {
         // Discover git repository
@@ -29,6 +29,51 @@ impl SessionManager {
             warn!("Failed to sync worktrees on project add: {}", e);
         }
 
+        Ok(project_id)
+    }
+
+    /// Add a new remote project (Codespace or SSH host).
+    ///
+    /// Connects to the remote, discovers the repo via `git rev-parse
+    /// --show-toplevel` and detects the main branch. Returns the new
+    /// project ID once it's been persisted.
+    #[instrument(skip(self))]
+    pub async fn add_remote_project(
+        &self,
+        remote_path: PathBuf,
+        transport: RemoteTransport,
+    ) -> Result<ProjectId> {
+        // Open the runner and a fresh GitOps for this transport.
+        let runner = self.ssh_pool.get_or_connect(&transport).await?;
+        let git: Arc<dyn GitOps> = Arc::new(SshGitOps::new(runner));
+
+        let discovered = git.discover(&remote_path).await?;
+        info!(
+            "Adding remote project '{}' on {:?} via {:?}",
+            discovered.name, discovered.canonical_path, transport
+        );
+
+        let project = Project::new_remote(
+            discovered.name,
+            discovered.canonical_path,
+            discovered.main_branch,
+            transport,
+        );
+        let project_id = project.id;
+
+        self.store
+            .mutate(move |state| {
+                state.add_project(project);
+            })
+            .await?;
+
+        // Skip the local `sync_worktrees` path for remote projects — it
+        // would just `GitBackend::open` a `/workspaces/...` remote path
+        // locally and fail. Remote-worktree import is PR 2 work (sidecar
+        // metadata + `git worktree list` over SSH). Avoiding the call
+        // also keeps `add_remote_project`'s future `Send` so it can be
+        // `tokio::spawn`'d from the input handler — `WorktreeManager`
+        // wraps gix's `Repository` which is `!Send`.
         Ok(project_id)
     }
 
@@ -134,9 +179,11 @@ impl SessionManager {
                 .clone()
         };
 
+        let (tmux, _) = self.ops_for(project_id).await?;
+
         // Kill project shell tmux session if it exists
         if let Some(ref shell_name) = project.shell_tmux_session_name {
-            let _ = self.tmux.kill_session(shell_name).await;
+            let _ = tmux.kill_session(shell_name).await;
         }
 
         // Kill all sessions' tmux processes
@@ -145,12 +192,12 @@ impl SessionManager {
             for session_id in &project.worktrees {
                 if let Some(session) = state.get_session(session_id) {
                     if session.status.is_active()
-                        && let Err(e) = self.tmux.kill_session(&session.tmux_session_name).await
+                        && let Err(e) = tmux.kill_session(&session.tmux_session_name).await
                     {
                         warn!("Failed to kill tmux session: {}", e);
                     }
                     if let Some(ref shell_name) = session.shell_tmux_session_name {
-                        let _ = self.tmux.kill_session(shell_name).await;
+                        let _ = tmux.kill_session(shell_name).await;
                     }
                 }
             }

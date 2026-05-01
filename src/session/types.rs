@@ -164,10 +164,43 @@ impl fmt::Display for AgentState {
     }
 }
 
+/// Where the project's repo physically lives.
+///
+/// Carried on `Project` as an `Option<RemoteTransport>` (`None` ⇒ local).
+/// Persisted JSON shape: `{"type": "codespace", "name": "..."}` /
+/// `{"type": "ssh", "host": "..."}`. Old state.json files without a
+/// `remote` field deserialize cleanly as local thanks to `#[serde(default)]`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum RemoteTransport {
+    /// First-class GitHub Codespace; dispatched through `gh codespace ssh`.
+    Codespace { name: String },
+    /// Generic SSH host (resolved through `~/.ssh/config`).
+    Ssh { host: String },
+}
+
+impl RemoteTransport {
+    /// Stable key used to pool SSH sessions per host.
+    pub fn connection_key(&self) -> String {
+        match self {
+            Self::Codespace { name } => format!("codespace:{}", name),
+            Self::Ssh { host } => format!("ssh:{}", host),
+        }
+    }
+
+    /// Short label suitable for display next to a project name.
+    pub fn display_label(&self) -> String {
+        match self {
+            Self::Codespace { name } => format!("⌬ {}", name),
+            Self::Ssh { host } => format!("⇄ {}", host),
+        }
+    }
+}
+
 /// Project represents a git repository (parent session)
 ///
 /// A project is the top-level container that holds:
-/// - Reference to the main git repository
+/// - Reference to the main git repository (local FS path or remote-host path)
 /// - Collection of worktree sessions
 /// - Project-level metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -176,7 +209,11 @@ pub struct Project {
     pub id: ProjectId,
     /// Display name (typically repo directory name)
     pub name: String,
-    /// Path to the main repository
+    /// Path to the main repository.
+    ///
+    /// For local projects this is a path on the local filesystem. For remote
+    /// projects (`remote.is_some()`) this is the path *on the remote host*,
+    /// interpreted by the SSH backend — the local machine never reads it.
     pub repo_path: PathBuf,
     /// Main branch name (e.g., "main", "master")
     pub main_branch: String,
@@ -188,10 +225,14 @@ pub struct Project {
     /// Shell tmux session name (for project-level shell)
     #[serde(default)]
     pub shell_tmux_session_name: Option<String>,
+    /// Remote transport when this project lives on another host.
+    /// `None` ⇒ local (default for backwards-compat with old state.json).
+    #[serde(default)]
+    pub remote: Option<RemoteTransport>,
 }
 
 impl Project {
-    /// Create a new project
+    /// Create a new local project.
     pub fn new(
         name: impl Into<String>,
         repo_path: PathBuf,
@@ -205,7 +246,35 @@ impl Project {
             created_at: Utc::now(),
             worktrees: Vec::new(),
             shell_tmux_session_name: None,
+            remote: None,
         }
+    }
+
+    /// Create a new remote project (SSH host or Codespace).
+    ///
+    /// `remote_path` is interpreted on the remote host — typically
+    /// `/workspaces/<repo>` for a Codespace.
+    pub fn new_remote(
+        name: impl Into<String>,
+        remote_path: PathBuf,
+        main_branch: impl Into<String>,
+        transport: RemoteTransport,
+    ) -> Self {
+        Self {
+            id: ProjectId::new(),
+            name: name.into(),
+            repo_path: remote_path,
+            main_branch: main_branch.into(),
+            created_at: Utc::now(),
+            worktrees: Vec::new(),
+            shell_tmux_session_name: None,
+            remote: Some(transport),
+        }
+    }
+
+    /// Whether this project is hosted on a remote machine (Codespace or SSH).
+    pub fn is_remote(&self) -> bool {
+        self.remote.is_some()
     }
 
     /// Add a worktree session to this project
@@ -1104,6 +1173,78 @@ mod tests {
         let s: WorktreeSession = serde_json::from_value(json).unwrap();
         assert_eq!(s.pr_base_branch, None);
         assert_eq!(s.stack_parent_session_id, None);
+    }
+
+    #[test]
+    fn project_legacy_state_deserializes_as_local() {
+        // state.json files written before remote-sessions support have no
+        // `remote` field; they must deserialize cleanly with `remote: None`.
+        let id = ProjectId::new();
+        let json = serde_json::json!({
+            "id": id,
+            "name": "my-app",
+            "repo_path": "/home/user/my-app",
+            "main_branch": "main",
+            "created_at": "2024-01-01T00:00:00Z",
+        });
+        let p: Project = serde_json::from_value(json).unwrap();
+        assert!(!p.is_remote());
+        assert!(p.remote.is_none());
+        assert_eq!(p.repo_path, PathBuf::from("/home/user/my-app"));
+    }
+
+    #[test]
+    fn project_remote_codespace_round_trip() {
+        let p = Project::new_remote(
+            "my-app",
+            PathBuf::from("/workspaces/my-app"),
+            "main",
+            RemoteTransport::Codespace {
+                name: "codespace-name".to_string(),
+            },
+        );
+        let json = serde_json::to_string(&p).unwrap();
+        let back: Project = serde_json::from_str(&json).unwrap();
+        assert!(back.is_remote());
+        assert_eq!(
+            back.remote,
+            Some(RemoteTransport::Codespace {
+                name: "codespace-name".to_string()
+            })
+        );
+        assert_eq!(back.repo_path, PathBuf::from("/workspaces/my-app"));
+    }
+
+    #[test]
+    fn project_remote_ssh_round_trip() {
+        let p = Project::new_remote(
+            "my-app",
+            PathBuf::from("/srv/repos/my-app"),
+            "main",
+            RemoteTransport::Ssh {
+                host: "user@dev-box".to_string(),
+            },
+        );
+        let json = serde_json::to_string(&p).unwrap();
+        let back: Project = serde_json::from_str(&json).unwrap();
+        assert!(back.is_remote());
+        assert_eq!(
+            back.remote,
+            Some(RemoteTransport::Ssh {
+                host: "user@dev-box".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn remote_transport_connection_keys_distinct() {
+        let cs = RemoteTransport::Codespace {
+            name: "foo".to_string(),
+        };
+        let ssh = RemoteTransport::Ssh {
+            host: "foo".to_string(),
+        };
+        assert_ne!(cs.connection_key(), ssh.connection_key());
     }
 
     #[test]

@@ -69,6 +69,8 @@ throbber-widgets-tui = "0.8"
 
 # Fuzzy matching for the quick-select palette
 fuzzy-matcher = "0.3"
+openssh = "0.11.6"
+shell-escape = "0.1.5"
 
 [dev-dependencies]
 # Property-based testing
