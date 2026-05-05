@@ -17,6 +17,11 @@ A high-performance terminal UI for managing Claude coding sessions, written in R
 - **Rust/Cargo** - Required to build from source ([install via rustup](https://rustup.rs/))
 - **tmux** - Required for session management
 - **git** - For worktree operations
+- **cloudflared** *(optional)* - Required only if using the multi-user
+  session-share feature (`Invite to Session` / `Join Shared Session`).
+  Both inviter and joiner need it on their PATH.
+  [Install instructions](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/).
+  The codespace-side binary is auto-downloaded on first invite if missing.
 
 ## Installation
 
@@ -188,6 +193,8 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `S` | Scan directory for git repos and add them as projects |
 | `s` | Open shell in worktree |
 | palette only | Move session to section (manual override; see [Session List Sections](#session-list-sections)) |
+| palette only | Invite to Session — share a remote session with another user (see [Multi-user sharing](#multi-user-session-sharing-spike)) |
+| palette only | Join Shared Session — paste a `cc-share://…` URL from a collaborator |
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
 | `<` / `>` | Shrink / grow left pane |
 | `Ctrl-u/d` or `PageUp/Down` | Page up/down in preview |
@@ -410,6 +417,49 @@ the summary section shows a placeholder instead.
 | `ai_summary_model` | `claude-haiku-4-5-20251001` | Claude model used for summaries (Haiku recommended for cost efficiency) |
 
 Environment variable overrides: `CC_AI_SUMMARY_ENABLED`, `CC_AI_SUMMARY_MODEL`.
+
+## Multi-user session sharing (spike)
+
+Claude Commander includes a **spike-quality** flow for inviting another
+user into a remote session you're working in. Both users end up attached
+to the same tmux pane, so they see Claude's output and can both type.
+
+How it works:
+
+1. Inviter selects a remote session (Codespace or SSH host) and runs
+   **Invite to Session** from the command palette. Claude Commander:
+   - downloads `cloudflared` into `~/.local/bin/` on the codespace if
+     missing, then starts a quick TCP tunnel against port 22;
+   - generates a fresh ed25519 SSH keypair locally;
+   - creates a `ccshare-<hex>` Linux user on the codespace (via `sudo
+     useradd`), installs the public key, and adds it to the inviter's
+     primary group so it can read the inviter's tmux socket;
+   - shows a **`cc-share://v1?…`** join URL and auto-copies it to the
+     system clipboard via OSC 52.
+2. Inviter pastes the URL to the joiner over Slack/email.
+3. Joiner runs **Join Shared Session** from the palette and pastes the
+   URL. Claude Commander:
+   - writes the embedded private key to a 0600 tempfile;
+   - starts a local `cloudflared access tcp` against the published
+     hostname, bound to a free `localhost:<port>`;
+   - SSHes through that local port to the codespace as the share user
+     and runs `tmux -S /tmp/tmux-<inviter-uid>/default attach -t <name>`.
+
+Both users now share the same tmux pane.
+
+Caveats (this is a spike):
+
+- The provisioned Linux user + cloudflared tunnel persist until the
+  codespace stops. There is no "Uninvite" command yet.
+- Quick tunnels generate a fresh hostname per invocation and expire when
+  the codespace stops; reconnecting after a stop requires re-inviting.
+- Private keys are embedded in the join URL — treat the URL like a
+  password.
+- Both inviter and joiner need `cloudflared` on their `PATH`. The
+  codespace-side binary auto-installs on first invite.
+- Codespaces are private to one GitHub account, so we can't reach the
+  codespace's sshd via gh's tunnel; the cloudflared quick tunnel is the
+  workaround.
 
 ## Data Storage
 

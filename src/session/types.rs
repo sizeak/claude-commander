@@ -229,6 +229,28 @@ pub struct Project {
     /// `None` ⇒ local (default for backwards-compat with old state.json).
     #[serde(default)]
     pub remote: Option<RemoteTransport>,
+    /// Linux users that have been provisioned on this project's remote
+    /// host for session-sharing invites. Tracked so re-inviting the same
+    /// joiner can reuse the existing user, and so cleanup can remove
+    /// them on project delete. Empty for local projects.
+    #[serde(default)]
+    pub shared_users: Vec<SharedUser>,
+}
+
+/// A Linux user account that's been provisioned on the remote host as part
+/// of a session-share invite. The user's authorized_keys holds an ephemeral
+/// public key; the matching private key is what was embedded in the
+/// `JoinCode` we handed out.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SharedUser {
+    /// `ccshare-<6-hex>` username on the remote host.
+    pub username: String,
+    /// When the user was provisioned.
+    pub created_at: DateTime<Utc>,
+    /// The cloudflared tunnel hostname this user is reached through.
+    /// Tunnels die with the codespace, so this is informational — the
+    /// next invite refreshes it.
+    pub tunnel_url: Option<String>,
 }
 
 impl Project {
@@ -247,6 +269,7 @@ impl Project {
             worktrees: Vec::new(),
             shell_tmux_session_name: None,
             remote: None,
+            shared_users: Vec::new(),
         }
     }
 
@@ -269,6 +292,7 @@ impl Project {
             worktrees: Vec::new(),
             shell_tmux_session_name: None,
             remote: Some(transport),
+            shared_users: Vec::new(),
         }
     }
 

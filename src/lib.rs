@@ -26,6 +26,7 @@ pub mod fuzzy;
 pub mod git;
 pub mod remote;
 pub mod session;
+pub mod share;
 pub mod tmux;
 pub mod tui;
 

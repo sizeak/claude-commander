@@ -39,8 +39,44 @@ pub enum AttachResult {
 #[derive(Debug, Clone)]
 pub enum AttachTarget {
     Local,
-    Ssh { host: String },
-    Codespace { codespace_name: String },
+    Ssh {
+        host: String,
+    },
+    Codespace {
+        codespace_name: String,
+    },
+    /// "Joining" path for shared sessions: SSH directly through a
+    /// pre-bound localhost port (typically opened by `cloudflared access
+    /// tcp` against a `*.trycloudflare.com` tunnel running inside the
+    /// inviter's codespace), authenticating with the ed25519 private
+    /// key the inviter generated for us.
+    SharedSshTunnel {
+        /// Localhost port that proxies to the codespace's sshd (set up
+        /// by the joiner-side cloudflared client before this attach
+        /// runs).
+        local_port: u16,
+        /// Linux username of the freshly-provisioned share user that
+        /// the joiner ssh's in as.
+        user: String,
+        /// Linux username of the codespace owner. The remote command
+        /// runs `sudo -u <inviter_user> tmux …` — running tmux as the
+        /// inviter's uid is the only way to satisfy tmux's
+        /// `st_uid != getuid()` self-check. The provisioner installed a
+        /// tightly-scoped `/etc/sudoers.d/cc-share-<user>` rule that
+        /// authorises only this single command.
+        inviter_user: String,
+        /// Path to the temp file holding the OpenSSH private key. The
+        /// caller (`session::manager::share`) owns the file's lifetime;
+        /// we just `-i` it and don't touch it ourselves.
+        key_path: std::path::PathBuf,
+        /// Inviter's tmux socket path on the remote, e.g.
+        /// `/tmp/tmux-1000/default`. Required because the joiner's uid
+        /// is different from the inviter's, so tmux's default per-uid
+        /// socket lookup wouldn't find it.
+        socket: std::path::PathBuf,
+        /// Tmux session name on the inviter's tmux server to attach to.
+        tmux_session: String,
+    },
 }
 
 impl AttachTarget {
@@ -123,6 +159,81 @@ pub async fn attach_to_session(
                 &bash_invocation,
             ])
             .spawn(pts)?,
+        AttachTarget::SharedSshTunnel {
+            local_port,
+            user,
+            inviter_user,
+            key_path,
+            socket,
+            tmux_session,
+        } => {
+            // Direct ssh against a pre-bound localhost port (cloudflared
+            // access tcp owns the actual tunnel to the codespace). Key
+            // auth via `-i` — never re-uses the user's ssh-agent or
+            // ~/.ssh/config, which keeps the joiner's identity fully
+            // scoped to this invite. Disable host-key persistence
+            // because the cloudflared port is ephemeral (different
+            // forwarded sshd each invite) and we'd otherwise clutter
+            // known_hosts with one-shot keys.
+            let key_path_str = key_path.to_str().ok_or_else(|| {
+                crate::error::TmuxError::PtyError("non-UTF-8 SSH key path".to_string())
+            })?;
+            let socket_str = socket.to_str().ok_or_else(|| {
+                crate::error::TmuxError::PtyError("non-UTF-8 tmux socket path".to_string())
+            })?;
+            // tmux refuses cross-uid attaches even with chmod, so we
+            // run tmux *as* the inviter via `sudo -u <inviter>`.
+            // `provision_invite` dropped a sudoers.d rule whose
+            // command match is exactly the same shape as what we send
+            // here (specific tmux path, specific socket path, `cc-*`
+            // session-name pattern), so this is the *only* command
+            // the share user can sudo. `--preserve-env=TERM` lets
+            // tmux see the right terminal type even though the rest
+            // of the env gets reset by sudo.
+            //
+            // No `bash -ilc` wrapper this time: that would let the
+            // share user smuggle arbitrary commands past sudoers via
+            // `bash -c`. Direct invocation keeps the sudoers match
+            // tight.
+            let remote_cmd = format!(
+                "sudo --preserve-env=TERM -u {} /usr/local/bin/tmux -S {} attach -t {}",
+                shell_quote_arg(inviter_user),
+                shell_quote_arg(socket_str),
+                shell_quote_arg(tmux_session),
+            );
+            let port_str = local_port.to_string();
+            let user_host = format!("{user}@localhost");
+            // Stuff ssh's verbose debug output into a stable file path so
+            // we can post-mortem failures (the PTY swallows stderr, and
+            // a SharedSshTunnel that crashes mid-handshake leaves no
+            // other trace). `-E` appends; `-vv` is enough detail to
+            // identify auth/kex failures without being overwhelming.
+            let ssh_log_path = "/tmp/cc-share-ssh.log";
+            pty_process::Command::new("ssh")
+                .args([
+                    "-tt",
+                    "-vv",
+                    "-E",
+                    ssh_log_path,
+                    "-i",
+                    key_path_str,
+                    "-o",
+                    "StrictHostKeyChecking=accept-new",
+                    "-o",
+                    "UserKnownHostsFile=/dev/null",
+                    "-o",
+                    // Stop ssh from prompting for an interactive password
+                    // or trying to read terminfo from /dev/tty if key
+                    // auth fails — surface the failure as a clean exit
+                    // code instead.
+                    "BatchMode=yes",
+                    "-p",
+                    &port_str,
+                    &user_host,
+                    &remote_cmd,
+                ])
+                .spawn(pts)?
+        }
     };
 
     info!("Spawned attach to {} (target: {:?})", session_name, target);

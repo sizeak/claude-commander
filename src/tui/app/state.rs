@@ -316,6 +316,50 @@ impl App {
                     self.ui_state.modal = Modal::Error { message };
                 }
             },
+            StateUpdate::RemoteShareReady { result } => match result {
+                Ok(code) => {
+                    self.ui_state.modal = Modal::InviteCode {
+                        code: code.to_url(),
+                        copied: false,
+                    };
+                }
+                Err(message) => {
+                    self.ui_state.modal = Modal::Error { message };
+                }
+            },
+            StateUpdate::RemoteShareJoined { result } => match result {
+                Ok(boxed) => {
+                    let target = *boxed;
+                    // The AttachTarget describes the ssh transport; the
+                    // attach loop in mod.rs uses `attach_command`'s last
+                    // whitespace-token as the "current session name" for
+                    // logging + shell-toggle tracking. For a shared
+                    // attach we pull the tmux session out of the target
+                    // and feed it through that path verbatim.
+                    let attach_target = target.target.clone();
+                    let session_name =
+                        if let crate::tmux::AttachTarget::SharedSshTunnel { tmux_session, .. } =
+                            &attach_target
+                        {
+                            tmux_session.clone()
+                        } else {
+                            String::new()
+                        };
+                    // Keep the JoinedShareTarget alive in `pending_share_join`
+                    // so its NamedTempFile and cloudflared child outlive
+                    // the ssh invocation. Drop happens in the post-attach
+                    // cleanup in mod.rs after the loop returns.
+                    self.ui_state.pending_share_join = Some(target);
+                    self.ui_state.attach_command =
+                        Some(format!("tmux attach-session -t {}", session_name));
+                    self.ui_state.attach_target = Some(attach_target);
+                    self.ui_state.modal = Modal::None;
+                    self.ui_state.should_quit = true;
+                }
+                Err(message) => {
+                    self.ui_state.modal = Modal::Error { message };
+                }
+            },
             _ => {}
         }
     }

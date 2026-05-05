@@ -251,6 +251,103 @@ impl App {
         });
     }
 
+    /// Run the "Invite to Session" command. Provisions a fresh share
+    /// user and cloudflared tunnel on the selected remote session's host
+    /// in a background task; the result lands as
+    /// `StateUpdate::RemoteShareReady` and the dispatcher swaps the
+    /// Loading modal for an `InviteCode` modal carrying the join URL.
+    pub(super) async fn handle_invite_to_session(&mut self) {
+        let Some(session_id) = self.ui_state.selected_session_id else {
+            self.ui_state.modal = Modal::Error {
+                message: "Select a remote session before inviting.".to_string(),
+            };
+            return;
+        };
+
+        // Hard-gate: we can't invite into a session that lives on the
+        // local machine — there's no codespace/host to tunnel out from.
+        let is_remote = {
+            let state = self.store.read().await;
+            state
+                .get_session(&session_id)
+                .and_then(|s| state.get_project(&s.project_id))
+                .is_some_and(|p| p.is_remote())
+        };
+        if !is_remote {
+            self.ui_state.modal = Modal::Error {
+                message: "Inviting only works for remote sessions.".to_string(),
+            };
+            return;
+        }
+
+        self.ui_state.modal = Modal::Loading {
+            title: "Invite to Session".to_string(),
+            message: "Provisioning share user + tunnel…".to_string(),
+        };
+        let session_manager = self.session_manager.clone();
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let result = session_manager
+                .provision_invite(&session_id)
+                .await
+                .map_err(|e| format!("Failed to provision invite: {}", e));
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::RemoteShareReady {
+                    result,
+                }))
+                .await;
+        });
+    }
+
+    /// Run the "Join Shared Session" command. Opens a text-input modal
+    /// that takes a `cc-share://…` URL on submit.
+    pub(super) fn handle_join_shared_session(&mut self) {
+        self.ui_state.modal = Modal::Input {
+            title: "Join Shared Session".to_string(),
+            prompt: "Paste the cc-share:// invite URL:".to_string(),
+            value: String::new(),
+            on_submit: InputAction::JoinSharedSession,
+        };
+    }
+
+    /// Submit handler for the join-URL input modal. Parses the URL, then
+    /// hands off to `SessionManager::join_shared_session` in a background
+    /// task; the result lands as `StateUpdate::RemoteShareJoined`.
+    pub(super) async fn handle_join_shared_session_submit(&mut self, value: String) {
+        let value = value.trim();
+        if value.is_empty() {
+            self.ui_state.modal = Modal::None;
+            return;
+        }
+        let code = match crate::share::JoinCode::from_url(value) {
+            Ok(c) => c,
+            Err(e) => {
+                self.ui_state.modal = Modal::Error {
+                    message: format!("Invalid join URL: {}", e),
+                };
+                return;
+            }
+        };
+        self.ui_state.modal = Modal::Loading {
+            title: "Join Shared Session".to_string(),
+            message: format!("Connecting to {} as {}…", code.host, code.user),
+        };
+        let session_manager = self.session_manager.clone();
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let result = session_manager
+                .join_shared_session(code)
+                .await
+                .map(Box::new)
+                .map_err(|e| format!("Failed to join shared session: {}", e));
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::RemoteShareJoined {
+                    result,
+                }))
+                .await;
+        });
+    }
+
     /// Check if the selected session is in Creating state
     pub(super) fn selected_session_is_creating(&self) -> bool {
         self.ui_state.list_items.iter().any(|item| {
@@ -1655,6 +1752,9 @@ impl App {
                         };
                     }
                 }
+            }
+            InputAction::JoinSharedSession => {
+                self.handle_join_shared_session_submit(value).await;
             }
         }
     }

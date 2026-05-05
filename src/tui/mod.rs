@@ -9,6 +9,7 @@
 mod app;
 mod digit_accumulator;
 mod event;
+pub mod osc52;
 mod path_completer;
 pub mod theme;
 mod widgets;

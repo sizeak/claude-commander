@@ -183,6 +183,16 @@ pub enum Modal {
         /// 0 = repo field has focus, 1 = branch field has focus.
         focus: u8,
     },
+    /// Display a `cc-share://...` join URL after a successful Invite. The
+    /// URL is auto-copied to the system clipboard via OSC 52 the first
+    /// time the modal renders. Esc/Enter dismiss.
+    InviteCode {
+        /// Full join URL.
+        code: String,
+        /// Whether the OSC 52 copy has already been emitted. The renderer
+        /// reads this to decide whether to side-effect, then sets it.
+        copied: bool,
+    },
     /// Checkout-existing-branch modal. Shows an input field plus a
     /// filterable/scrollable list of branches (local + remote) and
     /// creates a worktree session from the selected branch on submit.
@@ -367,6 +377,10 @@ pub enum InputAction {
     RenameSession {
         session_id: SessionId,
     },
+    /// Join a shared session — the input value is a `cc-share://...` URL
+    /// that the joiner pasted. On submit, parse + dispatch to
+    /// `SessionManager::join_shared_session` in a spawned task.
+    JoinSharedSession,
 }
 
 /// Action to perform when confirm modal is confirmed
@@ -423,6 +437,11 @@ pub struct AppUiState {
     pub attach_target: Option<crate::tmux::AttachTarget>,
     /// Editor command + path to open after exiting TUI
     pub editor_command: Option<(String, PathBuf)>,
+    /// While attached to a shared session via `JoinSharedSession`, holds the
+    /// drop guards for the joiner-side cloudflared child + SSH key tempfile.
+    /// `None` outside the share-attach lifecycle. Taken (dropped) after the
+    /// attach exits so the child gets killed and the tempfile deleted.
+    pub pending_share_join: Option<crate::session::JoinedShareTarget>,
     /// When attached via shell toggle (Ctrl+\), stores the session name to switch back to.
     /// Contains (current_session_name, paired_session_name) so we can toggle between them.
     pub shell_toggle_pair: Option<(String, String)>,
@@ -493,6 +512,7 @@ impl Default for AppUiState {
             preview_update_spawned_at: None,
             last_preview_spawn_at: None,
             remote_project_ids: HashSet::new(),
+            pending_share_join: None,
             terminal_size: Rect::default(),
             tick_count: 0,
             throbber_state: throbber_widgets_tui::ThrobberState::default(),
@@ -535,6 +555,23 @@ impl AppUiState {
             BindableAction::GenerateSummary => {
                 has_session && self.right_pane_view == RightPaneView::Info
             }
+            // Invite needs a remote session selected. We resolve the
+            // selected session → its project via `list_items`, then check
+            // the cached remote-project-id set.
+            BindableAction::InviteToSession => {
+                let Some(session_id) = self.selected_session_id else {
+                    return false;
+                };
+                self.list_items.iter().any(|item| {
+                    matches!(
+                        item,
+                        SessionListItem::Worktree { id, project_id, .. }
+                        if *id == session_id && self.remote_project_ids.contains(project_id)
+                    )
+                })
+            }
+            // Join is always available — no preconditions.
+            BindableAction::JoinSharedSession => true,
             // All other actions are always available
             _ => true,
         }
@@ -936,6 +973,12 @@ impl App {
 
                         // Flush stdin again after detach to discard any stale input
                         crate::tmux::flush_stdin();
+
+                        // Drop any joiner-side share resources held during
+                        // the attach. `JoinedShareTarget`'s Drop kills the
+                        // local cloudflared child + deletes the SSH key
+                        // tempfile.
+                        let _ = self.ui_state.pending_share_join.take();
 
                         // Restart the input reader after detach
                         info!("Returned from attach, restarting input reader");

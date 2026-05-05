@@ -34,10 +34,12 @@ mod content;
 mod lifecycle;
 mod project_shell;
 mod projects;
+mod share;
 mod shell;
 mod worktree_sync;
 
 pub use cascade::{CascadeOutcome, PushStackOutcome};
+pub use share::JoinedShareTarget;
 
 #[cfg(test)]
 mod tests;

@@ -142,6 +142,22 @@ pub enum StateUpdate {
     RemoteProjectAdded {
         result: std::result::Result<crate::session::ProjectId, String>,
     },
+    /// "Invite to Session" finished provisioning the cloudflared tunnel +
+    /// share user. The dispatcher swaps the Loading modal for an
+    /// `Modal::InviteCode` so the user can copy the join URL.
+    RemoteShareReady {
+        result: std::result::Result<crate::share::JoinCode, String>,
+    },
+    /// "Join Shared Session" finished setting up the joiner-side cloudflared
+    /// tunnel and key tempfile. The dispatcher pushes the resulting
+    /// `AttachTarget::SharedSshTunnel` into `attach_command` /
+    /// `attach_target` and quits the loop so the outer attach driver runs.
+    /// Boxed because `JoinedShareTarget` is large (holds a `NamedTempFile`
+    /// and a `tokio::process::Child`) and would otherwise dominate the size
+    /// of every `StateUpdate`.
+    RemoteShareJoined {
+        result: std::result::Result<Box<crate::session::JoinedShareTarget>, String>,
+    },
 }
 
 /// User commands triggered by input
@@ -221,6 +237,11 @@ pub enum UserCommand {
     ScanDirectory,
     /// Open the "Move to section" modal for the selected session.
     MoveToSection,
+    /// Invite a second user to the selected remote session — provision a
+    /// cloudflared tunnel + share user, hand back a copy-pasteable join URL.
+    InviteToSession,
+    /// Paste a join URL from another user and connect to their shared session.
+    JoinSharedSession,
 }
 
 impl UserCommand {
@@ -288,6 +309,8 @@ impl From<BindableAction> for UserCommand {
             BindableAction::GenerateSummary => Self::GenerateSummary,
             BindableAction::ScanDirectory => Self::ScanDirectory,
             BindableAction::MoveToSection => Self::MoveToSection,
+            BindableAction::InviteToSession => Self::InviteToSession,
+            BindableAction::JoinSharedSession => Self::JoinSharedSession,
         }
     }
 }

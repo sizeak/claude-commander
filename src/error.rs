@@ -76,6 +76,9 @@ pub enum SessionError {
 
     #[error("Push failed in session {session}: {reason}")]
     PushFailed { session: SessionId, reason: String },
+
+    #[error("Session sharing failed: {0}")]
+    ShareFailed(String),
 }
 
 /// Tmux integration errors

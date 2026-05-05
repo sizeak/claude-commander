@@ -55,6 +55,8 @@ pub enum BindableAction {
     GenerateSummary,
     ScanDirectory,
     MoveToSection,
+    InviteToSession,
+    JoinSharedSession,
 }
 
 impl BindableAction {
@@ -80,6 +82,8 @@ impl BindableAction {
         Self::OpenPullRequest,
         Self::ScanDirectory,
         Self::MoveToSection,
+        Self::InviteToSession,
+        Self::JoinSharedSession,
         Self::TogglePane,
         Self::TogglePaneReverse,
         Self::ShrinkLeftPane,
@@ -129,6 +133,8 @@ impl BindableAction {
             Self::GenerateSummary => "generate_summary",
             Self::ScanDirectory => "scan_directory",
             Self::MoveToSection => "move_to_section",
+            Self::InviteToSession => "invite_to_session",
+            Self::JoinSharedSession => "join_shared_session",
         }
     }
 
@@ -167,6 +173,8 @@ impl BindableAction {
             Self::GenerateSummary => "Generate AI summary",
             Self::ScanDirectory => "Scan directory for repos",
             Self::MoveToSection => "Move session to section…",
+            Self::InviteToSession => "Invite another user to this remote session",
+            Self::JoinSharedSession => "Join a shared session via invite URL",
         }
     }
 
@@ -190,7 +198,9 @@ impl BindableAction {
             | Self::OpenInEditor
             | Self::OpenPullRequest
             | Self::ScanDirectory
-            | Self::MoveToSection => "Session Management",
+            | Self::MoveToSection
+            | Self::InviteToSession
+            | Self::JoinSharedSession => "Session Management",
             Self::TogglePane
             | Self::TogglePaneReverse
             | Self::ShrinkLeftPane
@@ -239,6 +249,8 @@ impl FromStr for BindableAction {
             "generate_summary" => Ok(Self::GenerateSummary),
             "scan_directory" => Ok(Self::ScanDirectory),
             "move_to_section" => Ok(Self::MoveToSection),
+            "invite_to_session" => Ok(Self::InviteToSession),
+            "join_shared_session" => Ok(Self::JoinSharedSession),
             _ => Err(format!("unknown action: {s}")),
         }
     }

@@ -303,6 +303,13 @@ impl App {
                 // Non-interactive — swallow all keys while loading
             }
 
+            Modal::InviteCode { .. } => match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => {
+                    self.ui_state.modal = Modal::None;
+                }
+                _ => {}
+            },
+
             Modal::Help { scroll } => match classify_help_key(&key, &self.config.keybindings) {
                 HelpKey::ScrollBy(n) => {
                     *scroll = scroll.saturating_add_signed(n);
@@ -651,6 +658,12 @@ impl App {
             }
             UserCommand::MoveToSection => {
                 self.handle_move_to_section().await;
+            }
+            UserCommand::InviteToSession => {
+                self.handle_invite_to_session().await;
+            }
+            UserCommand::JoinSharedSession => {
+                self.handle_join_shared_session();
             }
             UserCommand::RestartSession => {
                 self.handle_restart_session();

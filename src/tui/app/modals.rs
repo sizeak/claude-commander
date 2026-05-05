@@ -4,6 +4,20 @@ use super::*;
 
 impl App {
     pub(super) fn render_modal(&mut self, frame: &mut Frame, area: Rect) {
+        // One-shot side effect: when the InviteCode modal first appears,
+        // emit OSC 52 to copy the join URL to the user's system clipboard
+        // and flip `copied = true` so we don't re-emit on every frame.
+        if let Modal::InviteCode {
+            code,
+            copied: copied @ false,
+        } = &mut self.ui_state.modal
+        {
+            // Fire-and-forget; if the terminal ignores OSC 52 we'll just
+            // tell the user "Press y to copy" via a fallback shortcut later.
+            let _ = crate::tui::osc52::copy_to_clipboard(code);
+            *copied = true;
+        }
+
         match &self.ui_state.modal {
             Modal::None => {}
 
@@ -121,6 +135,67 @@ impl App {
                     Style::default().add_modifier(Modifier::DIM),
                 ));
                 frame.render_widget(Paragraph::new(hint), chunks[2]);
+            }
+
+            Modal::InviteCode { code, .. } => {
+                // 70% width so a typical join URL (~500 chars) wraps over
+                // a few lines without dominating the screen.
+                let modal_width = (area.width * 80 / 100).max(60);
+                let inner_width = modal_width.saturating_sub(2) as usize;
+                // Estimate wrapped line count for the URL block.
+                let wrapped_lines = code.len().div_ceil(inner_width).max(1) as u16;
+                // 2 border + 2 prompt lines + 1 spacer + N url lines +
+                // 1 spacer + 1 status + 1 hint
+                let modal_height: u16 = (2 + 2 + 1 + wrapped_lines + 1 + 1 + 1)
+                    .min(area.height.saturating_sub(2).max(4));
+                let modal_area = Rect {
+                    x: area.x + (area.width.saturating_sub(modal_width)) / 2,
+                    y: area.y + (area.height.saturating_sub(modal_height)) / 2,
+                    width: modal_width,
+                    height: modal_height,
+                };
+                frame.render_widget(Clear, modal_area);
+
+                let block = Block::default()
+                    .title(" Invite to Session ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(self.theme.modal_info));
+                let inner = block.inner(modal_area);
+                frame.render_widget(block, modal_area);
+
+                let mut lines: Vec<Line> = Vec::new();
+                lines.push(Line::from(Span::styled(
+                    "Share this URL with your collaborator:",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "They run \"Join Shared Session\" from the palette and paste it.",
+                    Style::default().fg(self.theme.text_secondary),
+                )));
+                lines.push(Line::from(""));
+                // Wrap the URL into chunks of `inner_width` chars so it
+                // displays on multiple lines without ratatui truncating.
+                for chunk in code
+                    .as_bytes()
+                    .chunks(inner_width)
+                    .map(|c| std::str::from_utf8(c).unwrap_or(""))
+                {
+                    lines.push(Line::from(Span::styled(
+                        chunk.to_string(),
+                        Style::default().fg(self.theme.modal_info),
+                    )));
+                }
+                lines.push(Line::from(""));
+                lines.push(Line::from(Span::styled(
+                    "✓ Copied to clipboard",
+                    Style::default().fg(self.theme.status_running),
+                )));
+                lines.push(Line::from(Span::styled(
+                    "Press Esc / Enter / q to close",
+                    Style::default().add_modifier(Modifier::DIM),
+                )));
+
+                frame.render_widget(Paragraph::new(lines), inner);
             }
 
             Modal::Loading { title, message } => {
