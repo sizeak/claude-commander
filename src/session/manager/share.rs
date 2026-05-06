@@ -298,8 +298,30 @@ impl super::SessionManager {
 
     /// Joiner-side: turn a parsed `JoinCode` into a `JoinedShareTarget`
     /// the attach loop can consume.
-    pub async fn join_shared_session(&self, code: JoinCode) -> Result<JoinedShareTarget> {
+    pub async fn join_shared_session(
+        &self,
+        code: JoinCode,
+        progress: tokio::sync::mpsc::Sender<crate::tui::AppEvent>,
+    ) -> Result<JoinedShareTarget> {
+        // Helper: post a status message into the joiner's `Modal::Loading`
+        // so the user sees the join move through stages instead of a
+        // single static spinner. A dropped send means the modal already
+        // closed (user dismissed / something else landed first) — fine
+        // to ignore.
+        let report = |msg: &str| {
+            let tx = progress.clone();
+            let message = msg.to_string();
+            async move {
+                let _ = tx
+                    .send(crate::tui::AppEvent::StateUpdate(
+                        crate::tui::StateUpdate::RemoteShareJoinProgress { message },
+                    ))
+                    .await;
+            }
+        };
+
         // ── Write the private key to a 0600 tempfile ────────────────────
+        report("Preparing local SSH key…").await;
         let mut key_file = tempfile::Builder::new()
             .prefix("cc-share-key-")
             .tempfile()
@@ -321,6 +343,7 @@ impl super::SessionManager {
         let key_path = key_file.path().to_path_buf();
 
         // ── Pick a free local port + start joiner-side cloudflared ──────
+        report("Allocating joiner port…").await;
         let local_port = pick_free_port().ok_or_else(|| {
             SessionError::ShareFailed("Could not find a free local port".to_string())
         })?;
@@ -333,6 +356,7 @@ impl super::SessionManager {
             )
         })?;
 
+        report("Starting cloudflared client…").await;
         info!(
             "Starting joiner cloudflared: {} access tcp --hostname {} --url localhost:{}",
             cloudflared_bin.display(),
@@ -373,8 +397,10 @@ impl super::SessionManager {
         // adequate for a spike: wait until either the port accepts TCP
         // or we time out. Real impl would parse stderr for the listening
         // line.
+        report("Waiting for tunnel to come online (up to 10s)…").await;
         wait_for_port(local_port, Duration::from_secs(10)).await?;
 
+        report("Tunnel ready, attaching…").await;
         let target = AttachTarget::SharedSshTunnel {
             local_port,
             user: code.user.clone(),
@@ -397,6 +423,119 @@ impl super::SessionManager {
 pub(crate) fn random_share_username() -> String {
     let id = uuid::Uuid::new_v4().simple().to_string();
     format!("ccshare-{}", &id[..6])
+}
+
+/// Standard log paths the joiner attach pipeline writes to. Surfaced as
+/// constants so the diagnosis helper and the attach plumbing agree on
+/// where to read/write.
+pub const JOINER_SSH_LOG_PATH: &str = "/tmp/cc-share-ssh.log";
+pub const JOINER_CLOUDFLARED_LOG_PATH: &str = "/tmp/cc-share-cloudflared-client.log";
+
+/// Read the trailing chunk of a log file (best-effort). Returns the
+/// empty string if the file doesn't exist or can't be read — this is
+/// diagnostic-only, never fatal.
+fn read_log_tail(path: &str, max_bytes: usize) -> String {
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let start = len.saturating_sub(max_bytes as u64);
+    let _ = std::io::Seek::seek(&mut f, std::io::SeekFrom::Start(start));
+    let mut buf = String::new();
+    let _ = std::io::Read::read_to_string(&mut f, &mut buf);
+    buf
+}
+
+const LOG_FOOTER: &str =
+    "\n\nFull logs: /tmp/cc-share-ssh.log and /tmp/cc-share-cloudflared-client.log";
+
+/// Turn the tails of the joiner-side ssh + cloudflared logs into a
+/// human-readable diagnosis string suitable for `Modal::Error.message`.
+///
+/// Pattern-matches well-known failure shapes in priority order. Order
+/// matters — cloudflared NXDOMAIN is checked first because a dead
+/// tunnel makes ssh's secondary errors meaningless.
+pub fn diagnose_share_attach_failure(ssh_log: &str, cloudflared_log: &str) -> String {
+    // Cloudflared lookup failure is the most common cause and produces
+    // a clear NXDOMAIN message — surface it before we even look at ssh.
+    if cloudflared_log.contains("no such host") || cloudflared_log.contains("dial tcp: lookup") {
+        return format!(
+            "The invite's tunnel has expired. Ask the inviter to re-share the session.{LOG_FOOTER}"
+        );
+    }
+
+    // Auth failure on the share user's side.
+    if ssh_log.contains("Permission denied (publickey")
+        || ssh_log.contains("No more authentication methods")
+    {
+        return format!(
+            "SSH key auth refused. The share user may have been removed; ask for a fresh invite.{LOG_FOOTER}"
+        );
+    }
+
+    // sshd dropped during initial banner exchange. Almost always means
+    // the tunnel reached *something* on the codespace but not sshd
+    // (wrong port, sshd not running).
+    if ssh_log.contains("kex_exchange_identification") {
+        return format!(
+            "The codespace's sshd dropped the connection during handshake. \
+             Likely sshd isn't running on the expected port — re-invite to refresh.{LOG_FOOTER}"
+        );
+    }
+
+    // sudoers refusal — share user can't run tmux as the inviter.
+    if ssh_log.contains("Sorry, user") && ssh_log.contains("not allowed to execute") {
+        return format!(
+            "Sudoers rule on the codespace doesn't authorise this attach. \
+             Re-invite to refresh it.{LOG_FOOTER}"
+        );
+    }
+
+    // tmux's UID self-check rejected the call (unlikely with the sudo
+    // path, but possible if the sudoers rule misfires and tmux runs
+    // as the share user). Same remediation as the sudoers case.
+    if ssh_log.contains("access not allowed") {
+        return format!(
+            "tmux refused the attach (uid mismatch). Re-invite to refresh the sudoers entry.{LOG_FOOTER}"
+        );
+    }
+
+    // cloudflared bound the port but the tunnel itself crashed before
+    // ssh could ride through.
+    if ssh_log.contains("Connection refused") || ssh_log.contains("connect to host localhost port")
+    {
+        return format!(
+            "The local cloudflared client closed before ssh could connect.{LOG_FOOTER}"
+        );
+    }
+
+    // Fallback: last few non-debug lines of ssh.log are usually
+    // informative even when no pattern matches.
+    let mut tail: Vec<&str> = ssh_log
+        .lines()
+        .rev()
+        .filter(|l| !l.starts_with("debug"))
+        .filter(|l| !l.is_empty())
+        .take(5)
+        .collect();
+    tail.reverse();
+    if tail.is_empty() {
+        format!("Connection failed for an unknown reason.{LOG_FOOTER}")
+    } else {
+        format!("Connection failed:\n{}{LOG_FOOTER}", tail.join("\n"))
+    }
+}
+
+/// Read both joiner-side log tails and run them through
+/// `diagnose_share_attach_failure`. Convenience wrapper for the attach
+/// driver in `app/mod.rs`.
+pub fn diagnose_joiner_logs() -> String {
+    // 32 KiB is plenty for the last few hundred verbose ssh + cloudflared
+    // lines without dragging the entire (potentially-huge) accumulated
+    // log into memory.
+    let ssh = read_log_tail(JOINER_SSH_LOG_PATH, 32 * 1024);
+    let cf = read_log_tail(JOINER_CLOUDFLARED_LOG_PATH, 32 * 1024);
+    diagnose_share_attach_failure(&ssh, &cf)
 }
 
 /// Single-quote a value for safe inclusion in a remote `bash -c` script.
@@ -724,5 +863,112 @@ mod tests {
     fn pick_free_port_returns_a_port() {
         let port = pick_free_port().expect("should find a free port");
         assert!(port > 1024, "port {port} suspiciously low");
+    }
+
+    #[test]
+    fn diagnose_expired_tunnel_from_cloudflared_log() {
+        let cf = "2026-05-05T10:00:00Z ERR failed to connect to origin \
+                  error=\"dial tcp: lookup foo-bar-baz.trycloudflare.com: \
+                  no such host\"";
+        let msg = diagnose_share_attach_failure("", cf);
+        assert!(msg.contains("tunnel has expired"), "got message: {msg:?}");
+        assert!(msg.contains("/tmp/cc-share-ssh.log"));
+    }
+
+    #[test]
+    fn diagnose_publickey_rejected_from_ssh_log() {
+        let ssh = "debug1: Authentications that can continue: publickey,password\n\
+                   ccshare-abc123@localhost: Permission denied (publickey,password).";
+        let msg = diagnose_share_attach_failure(ssh, "");
+        assert!(msg.contains("SSH key auth refused"), "got: {msg:?}");
+    }
+
+    #[test]
+    fn diagnose_kex_reset_from_ssh_log() {
+        let ssh = "debug1: Connecting to localhost [127.0.0.1] port 12345.\n\
+                   debug1: Connection established.\n\
+                   kex_exchange_identification: read: Connection reset by peer";
+        let msg = diagnose_share_attach_failure(ssh, "");
+        assert!(msg.contains("dropped the connection"), "got: {msg:?}");
+    }
+
+    #[test]
+    fn diagnose_sudoers_refusal_from_ssh_log() {
+        let ssh = "Sorry, user ccshare-abc123 is not allowed to execute \
+                   '/usr/local/bin/tmux -S /tmp/tmux-1000/default attach -t cc-deadbeef' \
+                   as vscode on codespace.";
+        let msg = diagnose_share_attach_failure(ssh, "");
+        assert!(
+            msg.contains("Sudoers rule") && msg.contains("doesn't authorise"),
+            "got: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn diagnose_tmux_uid_refusal_from_ssh_log() {
+        // tmux's own check, not sudoers — produced when sudo runs but
+        // tmux-as-target-user can't read the socket for some reason.
+        let ssh = "Some debug stuff\n\
+                   access not allowed\n\
+                   debug1: Exit status 1";
+        let msg = diagnose_share_attach_failure(ssh, "");
+        assert!(msg.contains("uid mismatch"), "got: {msg:?}");
+    }
+
+    #[test]
+    fn diagnose_local_cloudflared_crash() {
+        let ssh = "ssh: connect to host localhost port 49887: Connection refused";
+        let msg = diagnose_share_attach_failure(ssh, "");
+        assert!(
+            msg.contains("local cloudflared client closed"),
+            "got: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn diagnose_falls_back_to_log_tail_on_unknown_failure() {
+        // No known pattern matches — we should at least surface the last
+        // few non-debug lines.
+        let ssh = "debug1: line that should be filtered\n\
+                   weird custom error: please contact your administrator\n\
+                   debug2: another debug line\n\
+                   another informative line\n\
+                   debug1: more debug noise";
+        let msg = diagnose_share_attach_failure(ssh, "");
+        assert!(msg.contains("Connection failed"), "got: {msg:?}");
+        assert!(
+            msg.contains("weird custom error") || msg.contains("informative line"),
+            "fallback should include log tail; got: {msg:?}"
+        );
+        assert!(
+            !msg.contains("debug1") && !msg.contains("debug2"),
+            "fallback should filter debug noise; got: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn diagnose_handles_completely_empty_logs() {
+        // Both files were never written or are empty — we shouldn't
+        // panic, and the message should still be useful.
+        let msg = diagnose_share_attach_failure("", "");
+        assert!(
+            msg.contains("unknown reason"),
+            "expected fallback message; got: {msg:?}"
+        );
+    }
+
+    #[test]
+    fn diagnose_priority_cloudflared_beats_ssh_kex() {
+        // If both signal failure, the dead tunnel is the more
+        // actionable diagnosis (re-invite) — it should win over the
+        // downstream kex error which is a *symptom* of the dead tunnel.
+        let ssh = "kex_exchange_identification: read: Connection reset by peer";
+        let cf = "ERR failed to connect to origin error=\"dial tcp: lookup \
+                  foo.trycloudflare.com: no such host\"";
+        let msg = diagnose_share_attach_failure(ssh, cf);
+        assert!(
+            msg.contains("tunnel has expired"),
+            "cloudflared NXDOMAIN should win; got: {msg:?}"
+        );
     }
 }

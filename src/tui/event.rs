@@ -158,6 +158,13 @@ pub enum StateUpdate {
     RemoteShareJoined {
         result: std::result::Result<Box<crate::session::JoinedShareTarget>, String>,
     },
+    /// In-flight progress update for "Join Shared Session". The
+    /// `join_shared_session` task fans out a few of these between
+    /// stages (preparing key, picking port, starting cloudflared,
+    /// waiting for tunnel, connecting). The dispatcher rewrites the
+    /// active `Modal::Loading.message` so the user sees actual
+    /// movement during the multi-second setup window.
+    RemoteShareJoinProgress { message: String },
 }
 
 /// User commands triggered by input

@@ -823,6 +823,23 @@ impl App {
                         if !session_name.is_empty() {
                             let mut current_session = session_name.clone();
 
+                            // For SharedSshTunnel joins, print a hint to the
+                            // (now non-raw) terminal so the user has visual
+                            // feedback during the 1–3s gap between the TUI
+                            // closing and the first PTY frame from ssh+tmux.
+                            // Without this the terminal goes blank for what
+                            // feels like a hang.
+                            if let crate::tmux::AttachTarget::SharedSshTunnel {
+                                inviter_user, ..
+                            } = &attach_target
+                            {
+                                println!(
+                                    "\nConnecting to {}'s tmux session… \
+                                     (this can take 5–15 seconds on first attach)\n",
+                                    inviter_user
+                                );
+                            }
+
                             loop {
                                 // Editor-trigger interception currently
                                 // launches a *local* editor against the
@@ -842,6 +859,12 @@ impl App {
                                 // sessions, where SIGTSTP would freeze the
                                 // pane with no shell to recover from.
                                 let intercept_ctrl_z = !current_session.ends_with("-sh");
+                                // Stopwatch for the diagnose-on-quick-failure
+                                // path below. ssh failing during kex / sudo /
+                                // tmux setup typically returns in under a
+                                // second; an actually-attached session that
+                                // gets cleanly detached is always > 3s.
+                                let attach_started_at = Instant::now();
                                 match crate::tmux::attach_to_session(
                                     &current_session,
                                     &attach_target,
@@ -955,6 +978,27 @@ impl App {
                                     }
                                     Ok(result) => {
                                         info!("Attach ended: {:?}", result);
+                                        // Clean detach: nothing to surface. Anything
+                                        // else combined with a < 3s duration on a
+                                        // SharedSshTunnel target is almost certainly
+                                        // an ssh/sudo/tmux setup failure that the PTY
+                                        // ate — read the joiner-side logs and
+                                        // surface a specific diagnosis instead of
+                                        // dumping the user back to the TUI silently.
+                                        let was_quick =
+                                            attach_started_at.elapsed() < Duration::from_secs(3);
+                                        let was_shared = matches!(
+                                            attach_target,
+                                            crate::tmux::AttachTarget::SharedSshTunnel { .. }
+                                        );
+                                        let was_clean_detach =
+                                            matches!(result, crate::tmux::AttachResult::Detached);
+                                        if was_shared && was_quick && !was_clean_detach {
+                                            let diagnosis = crate::session::diagnose_joiner_logs();
+                                            warn!("Quick-exit on shared attach: {}", diagnosis);
+                                            self.ui_state.modal =
+                                                Modal::Error { message: diagnosis };
+                                        }
                                         // Clear toggle state on normal detach
                                         self.ui_state.shell_toggle_pair = None;
                                         break;

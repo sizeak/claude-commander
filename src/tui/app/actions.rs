@@ -334,9 +334,10 @@ impl App {
         };
         let session_manager = self.session_manager.clone();
         let tx = self.event_loop.sender();
+        let progress_tx = tx.clone();
         tokio::spawn(async move {
             let result = session_manager
-                .join_shared_session(code)
+                .join_shared_session(code, progress_tx)
                 .await
                 .map(Box::new)
                 .map_err(|e| format!("Failed to join shared session: {}", e));

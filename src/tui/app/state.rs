@@ -360,6 +360,19 @@ impl App {
                     self.ui_state.modal = Modal::Error { message };
                 }
             },
+            StateUpdate::RemoteShareJoinProgress { message } => {
+                // Mutate the in-place Loading modal so the spinner keeps
+                // animating with fresh status text. If the modal isn't
+                // Loading any more (user dismissed, error landed first),
+                // silently drop — no point flickering a fresh modal up.
+                if let Modal::Loading {
+                    message: current_message,
+                    ..
+                } = &mut self.ui_state.modal
+                {
+                    *current_message = message;
+                }
+            }
             _ => {}
         }
     }

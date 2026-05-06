@@ -39,7 +39,7 @@ mod shell;
 mod worktree_sync;
 
 pub use cascade::{CascadeOutcome, PushStackOutcome};
-pub use share::JoinedShareTarget;
+pub use share::{JoinedShareTarget, diagnose_joiner_logs};
 
 #[cfg(test)]
 mod tests;
