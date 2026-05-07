@@ -911,7 +911,8 @@ impl App {
     }
 
     /// Build the section-picker rows for the move-to-section palette mode.
-    /// Always includes an "Auto" entry first to clear any existing override.
+    /// Always includes an "Auto" entry first to clear any existing override,
+    /// followed by the implicit "In Progress" catch-all.
     fn gather_section_picker_items(
         &self,
         session_id: SessionId,
@@ -925,6 +926,14 @@ impl App {
                 session_id,
                 target: None,
                 label: auto_label,
+            });
+        }
+        let in_progress = crate::session::IN_PROGRESS;
+        if q.is_empty() || in_progress.to_lowercase().contains(&q) {
+            out.push(QuickSwitchItem::SectionMove {
+                session_id,
+                target: Some(in_progress.to_string()),
+                label: in_progress.to_string(),
             });
         }
         for section in &self.config.sections {
