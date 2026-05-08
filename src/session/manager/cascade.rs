@@ -117,18 +117,19 @@ impl SessionManager {
             return Ok(CascadeOutcome::Complete { sessions_merged: 0 });
         }
 
-        // Pre-flight: fetch origin once, then validate every session in the
-        // chain before touching any worktree.
-        fetch_origin(&repo_path).await;
+        // Pre-flight: fetch origin's main once, then validate every session
+        // in the chain before touching any worktree.
+        fetch_origin_main(&repo_path, &main_branch).await;
         for (sid, wt_path, _, title) in &worktrees {
             preflight_session(*sid, wt_path, title, agent_states)?;
         }
 
         // Walk the chain. Step i merges the previous step's branch into
         // chain[i]'s worktree. For the base (i == 0) the upstream is
-        // `origin/<main>` — the remote ref just refreshed by `fetch_origin`,
-        // not the local `main` branch which may be stale (a plain `git fetch`
-        // updates `origin/main` but leaves local `main` alone).
+        // `origin/<main>` — the remote ref just refreshed by
+        // `fetch_origin_main`, not the local `main` branch which may be stale
+        // (a plain `git fetch` updates `origin/main` but leaves local `main`
+        // alone).
         let mut sessions_merged = 0usize;
         for (i, (sid, wt_path, _branch, title)) in worktrees.iter().enumerate() {
             let upstream = if i == 0 {
@@ -265,7 +266,7 @@ impl SessionManager {
         for (sid, wt_path, _, title) in tail {
             preflight_session(*sid, wt_path, title, agent_states)?;
         }
-        fetch_origin(&repo_path).await;
+        fetch_origin_main(&repo_path, &main_branch).await;
 
         let mut sessions_merged = 0usize;
         for (i, (sid, wt_path, _branch, title)) in tail.iter().enumerate() {
@@ -489,13 +490,15 @@ fn merge_in_progress(worktree_path: &Path) -> bool {
     false
 }
 
-/// Non-blocking best-effort `git fetch origin`. Failures are logged and
-/// treated as soft errors — the cascade still runs against whatever main
-/// happens to be at locally.
-async fn fetch_origin(repo_path: &Path) {
+/// Non-blocking best-effort `git fetch origin <main_branch>`. Cascade only
+/// reads `origin/<main_branch>` (as the upstream for the base of the stack);
+/// fetching just that ref skips the rest of the remote's branches. Failures
+/// are logged and treated as soft errors — the cascade still runs against
+/// whatever main happens to be at locally.
+async fn fetch_origin_main(repo_path: &Path, main_branch: &str) {
     match Command::new("git")
         .current_dir(repo_path)
-        .args(["fetch", "origin"])
+        .args(["fetch", "origin", main_branch])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -505,12 +508,16 @@ async fn fetch_origin(repo_path: &Path) {
         Ok(out) if out.status.success() => {}
         Ok(out) => {
             warn!(
-                "cascade: git fetch origin failed (continuing): {}",
+                "cascade: git fetch origin {} failed (continuing): {}",
+                main_branch,
                 String::from_utf8_lossy(&out.stderr)
             );
         }
         Err(e) => {
-            warn!("cascade: git fetch origin failed to spawn: {}", e);
+            warn!(
+                "cascade: git fetch origin {} failed to spawn: {}",
+                main_branch, e
+            );
         }
     }
 }

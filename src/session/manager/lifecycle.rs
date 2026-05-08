@@ -89,23 +89,60 @@ impl SessionManager {
         );
         let finalize_start = std::time::Instant::now();
 
-        // Fetch latest changes from origin
-        if self.config_store.read().fetch_before_create {
+        // Decide which refs the fetch needs to freshen. A bare `git fetch
+        // origin` would refresh every `refs/remotes/origin/*`, but we only
+        // ever read at most two of them (origin/<main> and, for the
+        // checkout-existing-branch flow, origin/<branch_name>) — so we narrow
+        // the fetch to skip the rest of the remote's branches.
+        //
+        // Stacked sessions don't read any origin/* ref (they fork off the
+        // parent session's local branch), so the fetch is skipped entirely.
+        //
+        // For non-stacked sessions, we always need origin/<main>. We
+        // additionally fetch origin/<branch_name> when that ref already
+        // exists locally — i.e. the Checkout modal's pre-fetch has already
+        // populated it. (If the user confirms the Checkout modal before its
+        // background fetch completes, the ref won't exist yet and we'll fall
+        // back to origin/<main> as start point. Re-creating the session is
+        // the workaround for that rare race.)
+        let refs_to_fetch: Vec<String> = {
+            let branch_remote_ref_exists = if stack_parent_branch.is_none()
+                && branch_name != main_branch
+            {
+                let backend = GitBackend::open(&repo_path)?;
+                backend.ref_exists(&format!("refs/remotes/origin/{}", branch_name))?
+            } else {
+                false
+            };
+            refs_to_fetch_for_session(
+                stack_parent_branch.as_deref(),
+                &main_branch,
+                &branch_name,
+                branch_remote_ref_exists,
+            )
+        };
+
+        if self.config_store.read().fetch_before_create && !refs_to_fetch.is_empty() {
             info!(
-                "Fetching latest changes from origin in {}",
+                "Fetching {} from origin in {}",
+                refs_to_fetch.join(", "),
                 repo_path.display()
             );
             let fetch_start = std::time::Instant::now();
-            let output = tokio::process::Command::new("git")
-                .current_dir(&repo_path)
-                .args(["fetch", "origin"])
+            let mut cmd = tokio::process::Command::new("git");
+            cmd.current_dir(&repo_path).arg("fetch").arg("origin");
+            for r in &refs_to_fetch {
+                cmd.arg(r);
+            }
+            let output = cmd
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .output()
                 .await?;
             info!(
-                "[timing] git fetch origin took {}ms",
+                "[timing] git fetch origin {} took {}ms",
+                refs_to_fetch.join(" "),
                 fetch_start.elapsed().as_millis()
             );
             if !output.status.success() {
@@ -420,6 +457,32 @@ fn program_is_claude(program: &str) -> bool {
     program.split_whitespace().next() == Some("claude")
 }
 
+/// Decide which refs `git fetch origin` should freshen for a session create.
+///
+/// Returns an empty vec when the fetch can be skipped entirely. We narrow
+/// the fetch to skip the rest of the remote's branches because session
+/// creation only ever reads at most two `origin/*` refs.
+fn refs_to_fetch_for_session(
+    stack_parent_branch: Option<&str>,
+    main_branch: &str,
+    branch_name: &str,
+    branch_remote_ref_exists: bool,
+) -> Vec<String> {
+    // Stacked sessions fork off the parent's local branch; no origin/* needed.
+    if stack_parent_branch.is_some() {
+        return Vec::new();
+    }
+    let mut refs = vec![main_branch.to_string()];
+    // Only refresh origin/<branch_name> when it already exists locally — a
+    // signal that the Checkout modal pre-fetched it. For brand-new generated
+    // branch names, origin/<branch_name> doesn't exist on the remote and
+    // attempting to fetch it would fail.
+    if branch_name != main_branch && branch_remote_ref_exists {
+        refs.push(branch_name.to_string());
+    }
+    refs
+}
+
 /// Build the launch command for a stacked session running Claude Code.
 ///
 /// Appends a single-quoted initial prompt telling Claude the stack parent's
@@ -469,5 +532,32 @@ mod lifecycle_tests {
     fn stack_context_preserves_program_flags() {
         let cmd = program_with_stack_context("claude --resume", "base-branch");
         assert!(cmd.starts_with("claude --resume '"));
+    }
+
+    #[test]
+    fn refs_to_fetch_skips_for_stacked_session() {
+        let refs = refs_to_fetch_for_session(Some("parent-branch"), "main", "child-branch", true);
+        assert!(refs.is_empty());
+    }
+
+    #[test]
+    fn refs_to_fetch_main_only_for_fresh_branch() {
+        // Generated branch name; no remote counterpart yet.
+        let refs = refs_to_fetch_for_session(None, "main", "platform/cool-feature", false);
+        assert_eq!(refs, vec!["main".to_string()]);
+    }
+
+    #[test]
+    fn refs_to_fetch_main_and_branch_when_checking_out_existing() {
+        // Checkout-modal flow: origin/<branch_name> already exists locally.
+        let refs = refs_to_fetch_for_session(None, "main", "feature-foo", true);
+        assert_eq!(refs, vec!["main".to_string(), "feature-foo".to_string()]);
+    }
+
+    #[test]
+    fn refs_to_fetch_main_only_when_branch_equals_main() {
+        // Don't add a duplicate ref when branch_name happens to equal main.
+        let refs = refs_to_fetch_for_session(None, "main", "main", true);
+        assert_eq!(refs, vec!["main".to_string()]);
     }
 }
