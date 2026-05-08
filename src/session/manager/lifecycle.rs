@@ -87,6 +87,7 @@ impl SessionManager {
             "Finalizing session '{}' with branch '{}' in project {}",
             title, branch_name, project_id
         );
+        let finalize_start = std::time::Instant::now();
 
         // Fetch latest changes from origin
         if self.config_store.read().fetch_before_create {
@@ -94,6 +95,7 @@ impl SessionManager {
                 "Fetching latest changes from origin in {}",
                 repo_path.display()
             );
+            let fetch_start = std::time::Instant::now();
             let output = tokio::process::Command::new("git")
                 .current_dir(&repo_path)
                 .args(["fetch", "origin"])
@@ -102,6 +104,10 @@ impl SessionManager {
                 .stderr(std::process::Stdio::piped())
                 .output()
                 .await?;
+            info!(
+                "[timing] git fetch origin took {}ms",
+                fetch_start.elapsed().as_millis()
+            );
             if !output.status.success() {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 warn!("git fetch failed (continuing anyway): {}", stderr);
@@ -160,6 +166,7 @@ impl SessionManager {
             (exists, sp)
         };
         let worktree_path = worktrees_dir.join(&worktree_name);
+        let worktree_create_start = std::time::Instant::now();
         let worktree_info = WorktreeManager::run_create_worktree(
             worktrees_dir,
             repo_path.clone(),
@@ -169,6 +176,10 @@ impl SessionManager {
             start_point,
         )
         .await?;
+        info!(
+            "[timing] run_create_worktree (git worktree add + worktree includes) took {}ms",
+            worktree_create_start.elapsed().as_millis()
+        );
 
         // Read tmux_session_name from the placeholder session
         let tmux_session_name = {
@@ -188,9 +199,14 @@ impl SessionManager {
         };
 
         // Create tmux session in the worktree directory
+        let tmux_start = std::time::Instant::now();
         self.tmux
             .create_session(&tmux_session_name, &worktree_info.path, Some(&launch_cmd))
             .await?;
+        info!(
+            "[timing] tmux create_session took {}ms",
+            tmux_start.elapsed().as_millis()
+        );
 
         // Update session to Running with the real worktree info
         let sid = *session_id;
@@ -221,6 +237,10 @@ impl SessionManager {
         info!(
             "Finalized session {} with tmux session {}",
             session_id, tmux_session_name
+        );
+        info!(
+            "[timing] finalize_session total took {}ms",
+            finalize_start.elapsed().as_millis()
         );
         Ok(*session_id)
     }
