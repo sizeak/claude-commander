@@ -202,9 +202,18 @@ impl<'a> TreeList<'a> {
 
                     ListItem::new(line)
                 }
-                SessionListItem::SectionHeader { name, count } => {
+                SessionListItem::SectionHeader {
+                    name,
+                    count,
+                    collapsed,
+                } => {
+                    let twistie = if *collapsed { "▸ " } else { "▾ " };
                     let line = Line::from(vec![
                         Span::raw(" "),
+                        Span::styled(
+                            twistie,
+                            Style::default().fg(self.theme.text_secondary),
+                        ),
                         Span::styled(
                             name.clone(),
                             Style::default()

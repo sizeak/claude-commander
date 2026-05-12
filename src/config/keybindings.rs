@@ -55,6 +55,7 @@ pub enum BindableAction {
     GenerateSummary,
     ScanDirectory,
     MoveToSection,
+    ToggleSection,
 }
 
 impl BindableAction {
@@ -80,6 +81,7 @@ impl BindableAction {
         Self::OpenPullRequest,
         Self::ScanDirectory,
         Self::MoveToSection,
+        Self::ToggleSection,
         Self::TogglePane,
         Self::TogglePaneReverse,
         Self::ShrinkLeftPane,
@@ -129,6 +131,7 @@ impl BindableAction {
             Self::GenerateSummary => "generate_summary",
             Self::ScanDirectory => "scan_directory",
             Self::MoveToSection => "move_to_section",
+            Self::ToggleSection => "toggle_section",
         }
     }
 
@@ -167,6 +170,7 @@ impl BindableAction {
             Self::GenerateSummary => "Generate AI summary",
             Self::ScanDirectory => "Scan directory for repos",
             Self::MoveToSection => "Move session to section…",
+            Self::ToggleSection => "Collapse/expand section",
         }
     }
 
@@ -190,7 +194,8 @@ impl BindableAction {
             | Self::OpenInEditor
             | Self::OpenPullRequest
             | Self::ScanDirectory
-            | Self::MoveToSection => "Session Management",
+            | Self::MoveToSection
+            | Self::ToggleSection => "Session Management",
             Self::TogglePane
             | Self::TogglePaneReverse
             | Self::ShrinkLeftPane
@@ -239,6 +244,7 @@ impl FromStr for BindableAction {
             "generate_summary" => Ok(Self::GenerateSummary),
             "scan_directory" => Ok(Self::ScanDirectory),
             "move_to_section" => Ok(Self::MoveToSection),
+            "toggle_section" => Ok(Self::ToggleSection),
             _ => Err(format!("unknown action: {s}")),
         }
     }
@@ -586,6 +592,7 @@ impl Default for KeyBindings {
             BindableAction::ScanDirectory,
             vec![kb(KeyCode::Char('S'), shift)],
         );
+        bindings.insert(BindableAction::ToggleSection, vec![]);
 
         // Info Pane
         bindings.insert(
@@ -880,6 +887,12 @@ mod tests {
         let kb = KeyBindings::default();
         let key = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE);
         assert_eq!(kb.resolve(&key), Some(BindableAction::NewStackedSession));
+    }
+
+    #[test]
+    fn test_toggle_section_default_unbound() {
+        let kb = KeyBindings::default();
+        assert!(kb.keys_for(BindableAction::ToggleSection).is_empty());
     }
 
     #[test]

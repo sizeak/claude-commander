@@ -1092,6 +1092,68 @@ impl App {
         }
     }
 
+    /// Whether the currently selected list item is a section header.
+    pub(super) fn selected_item_is_section_header(&self) -> bool {
+        self.ui_state
+            .list_state
+            .selected()
+            .and_then(|idx| self.ui_state.list_items.get(idx))
+            .is_some_and(|item| matches!(item, SessionListItem::SectionHeader { .. }))
+    }
+
+    /// Toggle collapse/expand for the section that contains the selected item.
+    ///
+    /// When the selected item is a section header, toggle that section directly.
+    /// When the selected item is a project or worktree, walk backwards to find
+    /// the nearest section header and toggle it.
+    pub(super) async fn handle_toggle_section(&mut self) {
+        if self.config.sections.is_empty() {
+            return;
+        }
+        let Some(idx) = self.ui_state.list_state.selected() else {
+            return;
+        };
+
+        let section_name = self.find_parent_section_name(idx);
+        let Some(name) = section_name else {
+            return;
+        };
+
+        if self.ui_state.collapsed_sections.contains(&name) {
+            self.ui_state.collapsed_sections.remove(&name);
+        } else {
+            self.ui_state.collapsed_sections.insert(name.clone());
+        }
+
+        self.refresh_list_items().await;
+
+        // After rebuilding the list, find the section header and select it.
+        // This handles both collapse (selected child is now hidden) and expand
+        // (keep focus on the header).
+        for (i, item) in self.ui_state.list_items.iter().enumerate() {
+            if let SessionListItem::SectionHeader { name: n, .. } = item
+                && *n == name
+            {
+                self.ui_state.list_state.list_state.select(Some(i));
+                break;
+            }
+        }
+
+        self.update_selection();
+        self.spawn_preview_update();
+    }
+
+    /// Walk backwards from `idx` to find the name of the nearest section header.
+    fn find_parent_section_name(&self, idx: usize) -> Option<String> {
+        for i in (0..=idx).rev() {
+            if let Some(SessionListItem::SectionHeader { name, .. }) = self.ui_state.list_items.get(i)
+            {
+                return Some(name.clone());
+            }
+        }
+        None
+    }
+
     /// Open the "Move to section" palette for the selected session.
     /// The palette lists "Auto" plus one entry per configured `[[sections]]`;
     /// selecting "Auto" clears any override.

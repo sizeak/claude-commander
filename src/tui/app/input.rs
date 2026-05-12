@@ -492,7 +492,11 @@ impl App {
                 self.ui_state.list_state.next();
             }
             UserCommand::Select => {
-                self.handle_select().await;
+                if self.selected_item_is_section_header() {
+                    self.handle_toggle_section().await;
+                } else {
+                    self.handle_select().await;
+                }
             }
             UserCommand::SelectShell => {
                 self.handle_select_shell().await;
@@ -633,6 +637,9 @@ impl App {
                 {
                     self.spawn_ai_summary_if_needed(session_id);
                 }
+            }
+            UserCommand::ToggleSection => {
+                self.handle_toggle_section().await;
             }
             _ => {}
         }

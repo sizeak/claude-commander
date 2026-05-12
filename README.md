@@ -187,6 +187,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `o` | Open PR in browser (when the session has a PR) |
 | `S` | Scan directory for git repos and add them as projects |
 | `s` | Open shell in worktree |
+| palette only | Collapse/expand section (press on any item in the section, or `Enter` on the section header) |
 | palette only | Move session to section (manual override; see [Session List Sections](#session-list-sections)) |
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
 | `<` / `>` | Shrink / grow left pane |

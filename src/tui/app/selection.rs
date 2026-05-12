@@ -20,7 +20,11 @@ impl App {
                     self.ui_state.selected_session_id = Some(*id);
                     self.ui_state.selected_project_id = Some(*project_id);
                 }
-                SessionListItem::SectionHeader { .. } | SessionListItem::Spacer => {}
+                SessionListItem::SectionHeader { .. } => {
+                    self.ui_state.selected_session_id = None;
+                    self.ui_state.selected_project_id = None;
+                }
+                SessionListItem::Spacer => {}
             }
         }
 

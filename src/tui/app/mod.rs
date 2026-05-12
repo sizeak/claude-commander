@@ -447,6 +447,8 @@ pub struct AppUiState {
     /// palette entries without an async read on every keystroke. Refreshed
     /// alongside `list_items`.
     pub cascade_paused: bool,
+    /// Section names that are currently collapsed in the list view.
+    pub collapsed_sections: std::collections::HashSet<String>,
 }
 
 impl Default for AppUiState {
@@ -483,6 +485,7 @@ impl Default for AppUiState {
             throbber_state: throbber_widgets_tui::ThrobberState::default(),
             agent_states: HashMap::new(),
             cascade_paused: false,
+            collapsed_sections: std::collections::HashSet::new(),
         }
     }
 }

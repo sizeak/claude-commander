@@ -561,8 +561,11 @@ pub enum SessionListItem {
         stacked_child: bool,
     },
     /// A section header (used only when config.sections is non-empty).
-    /// Not selectable — navigation skips these rows.
-    SectionHeader { name: String, count: usize },
+    SectionHeader {
+        name: String,
+        count: usize,
+        collapsed: bool,
+    },
     /// A blank spacer row for visual separation between sections.
     /// Not selectable.
     Spacer,
@@ -591,7 +594,7 @@ impl SessionListItem {
 
     /// Whether navigation/selection should land on this row.
     pub fn is_selectable(&self) -> bool {
-        !matches!(self, Self::SectionHeader { .. } | Self::Spacer)
+        !matches!(self, Self::Spacer)
     }
 }
 
