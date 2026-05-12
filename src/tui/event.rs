@@ -206,6 +206,8 @@ pub enum UserCommand {
     ScanDirectory,
     /// Open the "Move to section" modal for the selected session.
     MoveToSection,
+    /// Collapse or expand the section containing the selected item.
+    ToggleSection,
 }
 
 impl UserCommand {
@@ -273,6 +275,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::GenerateSummary => Self::GenerateSummary,
             BindableAction::ScanDirectory => Self::ScanDirectory,
             BindableAction::MoveToSection => Self::MoveToSection,
+            BindableAction::ToggleSection => Self::ToggleSection,
         }
     }
 }
@@ -750,6 +753,16 @@ mod tests {
             state: KeyEventState::empty(),
         };
         assert!(UserCommand::from_key(key, &b).is_none());
+    }
+
+    #[test]
+    fn test_z_toggles_section() {
+        let b = kb();
+        let key = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::ToggleSection)
+        ));
     }
 
     #[test]
