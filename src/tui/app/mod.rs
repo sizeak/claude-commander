@@ -772,14 +772,39 @@ impl App {
                                 // sessions, where SIGTSTP would freeze the
                                 // pane with no shell to recover from.
                                 let intercept_ctrl_z = !current_session.ends_with("-sh");
-                                match crate::tmux::attach_to_session(
+                                let outcome = match crate::tmux::attach_to_session(
                                     &current_session,
                                     editor_triggers,
                                     intercept_ctrl_z,
                                 )
                                 .await
                                 {
-                                    Ok(crate::tmux::AttachResult::SwitchToShell) => {
+                                    Ok(o) => o,
+                                    Err(e) => {
+                                        warn!("Failed to attach to session: {}", e);
+                                        self.ui_state.modal = Modal::Error {
+                                            message: format!("Failed to attach: {}", e),
+                                        };
+                                        self.ui_state.shell_toggle_pair = None;
+                                        break;
+                                    }
+                                };
+
+                                // The in-session switcher may have run `tmux switch-client`
+                                // mid-attach, so the session we exited from isn't
+                                // necessarily the one we entered with. Trust the outcome.
+                                let switched_via_popup =
+                                    outcome.final_session != current_session;
+                                current_session = outcome.final_session;
+                                if switched_via_popup {
+                                    // Picking a new session in the popup invalidates the
+                                    // shell-toggle pair (which is tied to a specific
+                                    // Claude/shell duo).
+                                    self.ui_state.shell_toggle_pair = None;
+                                }
+
+                                match outcome.result {
+                                    crate::tmux::AttachResult::SwitchToShell => {
                                         info!(
                                             "Shell toggle requested from session: {}",
                                             current_session
@@ -822,7 +847,7 @@ impl App {
                                         info!("Switching to session: {}", current_session);
                                         continue;
                                     }
-                                    Ok(crate::tmux::AttachResult::OpenEditor) => {
+                                    crate::tmux::AttachResult::OpenEditor => {
                                         info!(
                                             "OpenEditor requested from session: {}",
                                             current_session
@@ -833,17 +858,9 @@ impl App {
                                         crate::tmux::flush_stdin();
                                         continue;
                                     }
-                                    Ok(result) => {
+                                    result => {
                                         info!("Attach ended: {:?}", result);
                                         // Clear toggle state on normal detach
-                                        self.ui_state.shell_toggle_pair = None;
-                                        break;
-                                    }
-                                    Err(e) => {
-                                        warn!("Failed to attach to session: {}", e);
-                                        self.ui_state.modal = Modal::Error {
-                                            message: format!("Failed to attach: {}", e),
-                                        };
                                         self.ui_state.shell_toggle_pair = None;
                                         break;
                                     }

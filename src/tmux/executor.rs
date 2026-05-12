@@ -240,7 +240,7 @@ impl TmuxExecutor {
         let options: &[(&str, &str)] = &[
             ("status-style", &info.status_style),
             ("status-left", &left),
-            ("status-left-length", "80"),
+            ("status-left-length", "200"),
             ("status-right", &right),
             // Suppress the default window list so only our left/right content shows
             ("window-status-format", ""),
@@ -309,8 +309,8 @@ pub struct StatusBarInfo {
 impl StatusBarInfo {
     /// Format the left side of the status bar.
     ///
-    /// Agent session: `project | branch | PR #N | Ctrl-q: detach | Ctrl-\: shell`
-    /// Shell session: `project | branch | PR #N | Ctrl-q: detach | Ctrl-\: agent`
+    /// Agent session: `project | branch | PR #N | Ctrl-q: detach | Ctrl-\: shell | Ctrl-o: switch`
+    /// Shell session: `project | branch | PR #N | Ctrl-q: detach | Ctrl-\: agent | Ctrl-o: switch`
     /// `#` is escaped to `##` for tmux format safety.
     pub fn format_left(&self) -> String {
         let safe_branch = self.branch.replace('#', "##");
@@ -321,7 +321,7 @@ impl StatusBarInfo {
         };
         let toggle_hint = if self.is_shell { "agent" } else { "shell" };
         format!(
-            " {} | {}{} | Ctrl-q: detach | Ctrl-\\: {} ",
+            " {} | {}{} | Ctrl-q: detach | Ctrl-\\: {} | Ctrl-o: switch ",
             self.project_name, safe_branch, pr, toggle_hint
         )
     }
@@ -374,7 +374,7 @@ mod tests {
         let info = test_info("feature-auth", None, false);
         assert_eq!(
             info.format_left(),
-            " my-project | feature-auth | Ctrl-q: detach | Ctrl-\\: shell "
+            " my-project | feature-auth | Ctrl-q: detach | Ctrl-\\: shell | Ctrl-o: switch "
         );
     }
 
@@ -389,7 +389,7 @@ mod tests {
         let info = test_info("feature", Some(42), false);
         assert_eq!(
             info.format_left(),
-            " my-project | feature | PR ##42 | Ctrl-q: detach | Ctrl-\\: shell "
+            " my-project | feature | PR ##42 | Ctrl-q: detach | Ctrl-\\: shell | Ctrl-o: switch "
         );
     }
 
@@ -398,7 +398,7 @@ mod tests {
         let info = test_info("feature", Some(42), true);
         assert_eq!(
             info.format_left(),
-            " my-project | feature | PR ##42 merged | Ctrl-q: detach | Ctrl-\\: shell "
+            " my-project | feature | PR ##42 merged | Ctrl-q: detach | Ctrl-\\: shell | Ctrl-o: switch "
         );
     }
 
@@ -408,7 +408,7 @@ mod tests {
         info.is_shell = true;
         assert_eq!(
             info.format_left(),
-            " my-project | feature-auth | Ctrl-q: detach | Ctrl-\\: agent "
+            " my-project | feature-auth | Ctrl-q: detach | Ctrl-\\: agent | Ctrl-o: switch "
         );
     }
 

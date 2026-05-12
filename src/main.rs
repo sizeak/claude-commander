@@ -70,6 +70,16 @@ enum Commands {
         #[arg(long)]
         init: bool,
     },
+
+    /// Show the in-session session picker (used by Ctrl+O inside an attached
+    /// session via `tmux display-popup`). Writes the chosen tmux session name
+    /// to `--out` on selection; writes nothing on cancel.
+    #[command(hide = true)]
+    PickSession {
+        /// Path to write the chosen tmux session name to
+        #[arg(long)]
+        out: std::path::PathBuf,
+    },
 }
 
 fn setup_logging(debug: bool, to_file: bool) -> Result<()> {
@@ -107,15 +117,17 @@ fn setup_logging(debug: bool, to_file: bool) -> Result<()> {
 async fn execute_attach(session_name: &str, editor_triggers: Vec<Vec<u8>>) {
     // CLI `attach` resolves a Claude session by title/ID, never a shell.
     match attach_to_session(session_name, editor_triggers, true).await {
-        Ok(AttachResult::Detached | AttachResult::SwitchToShell | AttachResult::OpenEditor) => {
-            info!("Detached from session");
-        }
-        Ok(AttachResult::SessionEnded) => {
-            info!("Session ended");
-        }
-        Ok(AttachResult::Error(e)) => {
-            eprintln!("Attach error: {}", e);
-        }
+        Ok(outcome) => match outcome.result {
+            AttachResult::Detached | AttachResult::SwitchToShell | AttachResult::OpenEditor => {
+                info!("Detached from session");
+            }
+            AttachResult::SessionEnded => {
+                info!("Session ended");
+            }
+            AttachResult::Error(e) => {
+                eprintln!("Attach error: {}", e);
+            }
+        },
         Err(e) => {
             eprintln!("Failed to attach: {}", e);
         }
@@ -285,6 +297,11 @@ async fn main() -> Result<()> {
                     eprintln!("Use 'claude-commander list' to see available sessions.");
                 }
             }
+        }
+
+        Some(Commands::PickSession { out }) => {
+            // No logging — the popup terminal is the picker's UI.
+            claude_commander::picker::run_session_picker(&out)?;
         }
 
         Some(Commands::Config { init }) => {
