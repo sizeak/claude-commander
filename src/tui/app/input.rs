@@ -616,6 +616,7 @@ impl App {
                     selected_row: 0,
                     editing: None,
                     rows,
+                    sections_state: SectionsState::default(),
                 });
             }
             UserCommand::Quit => {

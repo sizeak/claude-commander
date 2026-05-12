@@ -251,16 +251,18 @@ pub enum SettingsTab {
     General,
     Keybindings,
     Theme,
+    Sections,
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 3] = [Self::General, Self::Keybindings, Self::Theme];
+    const ALL: [SettingsTab; 4] = [Self::General, Self::Keybindings, Self::Theme, Self::Sections];
 
     fn label(self) -> &'static str {
         match self {
             Self::General => "General",
             Self::Keybindings => "Keybindings",
             Self::Theme => "Theme",
+            Self::Sections => "Sections",
         }
     }
 
@@ -268,15 +270,53 @@ impl SettingsTab {
         match self {
             Self::General => Self::Keybindings,
             Self::Keybindings => Self::Theme,
-            Self::Theme => Self::General,
+            Self::Theme => Self::Sections,
+            Self::Sections => Self::General,
         }
     }
 
     fn prev(self) -> Self {
         match self {
-            Self::General => Self::Theme,
+            Self::General => Self::Sections,
             Self::Keybindings => Self::General,
             Self::Theme => Self::Keybindings,
+            Self::Sections => Self::Theme,
+        }
+    }
+}
+
+/// Which pane is focused in the Sections tab
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SectionsFocus {
+    #[default]
+    List,
+    Predicates,
+}
+
+/// State for the Sections tab within the settings modal
+#[derive(Debug, Clone)]
+pub struct SectionsState {
+    pub selected_section: usize,
+    pub focus: SectionsFocus,
+    pub pred_selected: usize,
+    pub editing: Option<SectionsEditing>,
+}
+
+/// Editing state for the Sections tab
+#[derive(Debug, Clone)]
+pub enum SectionsEditing {
+    RenamingSection { value: String },
+    EditingPredicate { value: String },
+    CreatingSection { value: String },
+}
+
+impl Default for SectionsState {
+    fn default() -> Self {
+        Self {
+            selected_section: 0,
+            focus: SectionsFocus::List,
+            pred_selected: 0,
+            editing: None,
         }
     }
 }
@@ -289,6 +329,8 @@ pub struct SettingsState {
     pub editing: Option<SettingsEditing>,
     /// Cached row data for the current tab
     pub rows: Vec<SettingsRow>,
+    /// State for the Sections tab (lazily initialised on first tab switch)
+    pub sections_state: SectionsState,
 }
 
 /// A single row in the settings list
