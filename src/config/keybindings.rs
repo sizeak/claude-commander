@@ -592,10 +592,7 @@ impl Default for KeyBindings {
             BindableAction::ScanDirectory,
             vec![kb(KeyCode::Char('S'), shift)],
         );
-        bindings.insert(
-            BindableAction::ToggleSection,
-            vec![kb(KeyCode::Char('z'), none)],
-        );
+        bindings.insert(BindableAction::ToggleSection, vec![]);
 
         // Info Pane
         bindings.insert(
@@ -893,10 +890,9 @@ mod tests {
     }
 
     #[test]
-    fn test_default_toggle_section_bound_to_z() {
+    fn test_toggle_section_default_unbound() {
         let kb = KeyBindings::default();
-        let key = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
-        assert_eq!(kb.resolve(&key), Some(BindableAction::ToggleSection));
+        assert!(kb.keys_for(BindableAction::ToggleSection).is_empty());
     }
 
     #[test]

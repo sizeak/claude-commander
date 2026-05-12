@@ -756,12 +756,13 @@ mod tests {
     }
 
     #[test]
-    fn test_z_toggles_section() {
+    fn test_toggle_section_not_bound_by_default() {
         let b = kb();
+        // z is unbound by default, falls through to TextInput
         let key = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
         assert!(matches!(
             UserCommand::from_key(key, &b),
-            Some(UserCommand::ToggleSection)
+            Some(UserCommand::TextInput('z'))
         ));
     }
 
