@@ -328,12 +328,7 @@ async fn run_async_loop(
                     // pane the whole time.
                     if data.contains(&0x0F) {
                         if popup_open
-                            .compare_exchange(
-                                false,
-                                true,
-                                Ordering::AcqRel,
-                                Ordering::Acquire,
-                            )
+                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                             .is_ok()
                         {
                             debug!("Ctrl+O detected, spawning switcher popup");

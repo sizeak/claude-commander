@@ -109,8 +109,7 @@ fn run_loop(
             .draw(|f| draw(f, &query, &matches, selected_idx, &mut scroll))
             .map_err(|e| TuiError::InitFailed(e.to_string()))?;
 
-        let Event::Key(key) =
-            event::read().map_err(|e| TuiError::InitFailed(e.to_string()))?
+        let Event::Key(key) = event::read().map_err(|e| TuiError::InitFailed(e.to_string()))?
         else {
             continue;
         };
@@ -128,10 +127,10 @@ fn run_loop(
             (KeyCode::Up, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
                 selected_idx = selected_idx.saturating_sub(1);
             }
-            (KeyCode::Down, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
-                if selected_idx + 1 < matches.len() {
-                    selected_idx += 1;
-                }
+            (KeyCode::Down, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL)
+                if selected_idx + 1 < matches.len() =>
+            {
+                selected_idx += 1;
             }
             (KeyCode::Backspace, _) => {
                 query.pop();

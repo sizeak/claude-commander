@@ -210,10 +210,7 @@ impl<'a> TreeList<'a> {
                     let twistie = if *collapsed { "▸ " } else { "▾ " };
                     let line = Line::from(vec![
                         Span::raw(" "),
-                        Span::styled(
-                            twistie,
-                            Style::default().fg(self.theme.text_secondary),
-                        ),
+                        Span::styled(twistie, Style::default().fg(self.theme.text_secondary)),
                         Span::styled(
                             name.clone(),
                             Style::default()

@@ -430,6 +430,15 @@ impl WorktreeSession {
         .filter_map(|s| crate::fuzzy::fuzzy_score(s, query))
         .max()
     }
+
+    /// True when the session's PR is merged on GitHub. Honours the legacy
+    /// `pr_merged` flag for state.json files written before `pr_state` existed.
+    pub fn pr_is_merged(&self) -> bool {
+        matches!(
+            crate::git::effective_pr_state(self.pr_state, self.pr_merged),
+            crate::git::PrState::Merged,
+        )
+    }
 }
 
 /// Resolve the stack parent of a session within its project.
@@ -655,6 +664,40 @@ mod tests {
         assert_eq!(session.program, "claude");
         assert!(session.tmux_session_name.starts_with("cc-"));
         assert_eq!(session.status, SessionStatus::Running);
+    }
+
+    #[test]
+    fn test_pr_is_merged() {
+        let mut session = WorktreeSession::new(
+            ProjectId::new(),
+            "x",
+            "b",
+            PathBuf::from("/tmp/x"),
+            "claude",
+        );
+
+        // Default (no PR info): not merged.
+        assert!(!session.pr_is_merged());
+
+        // Explicit pr_state == Merged → merged.
+        session.pr_state = Some(crate::git::PrState::Merged);
+        session.pr_merged = false;
+        assert!(session.pr_is_merged());
+
+        // Backward compat: pre-pr_state state.json with pr_merged=true.
+        session.pr_state = None;
+        session.pr_merged = true;
+        assert!(session.pr_is_merged());
+
+        // Explicit state wins over the legacy bool when they disagree.
+        session.pr_state = Some(crate::git::PrState::Open);
+        session.pr_merged = true;
+        assert!(!session.pr_is_merged());
+
+        // Explicit Open with bool false → not merged.
+        session.pr_state = Some(crate::git::PrState::Open);
+        session.pr_merged = false;
+        assert!(!session.pr_is_merged());
     }
 
     #[test]

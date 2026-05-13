@@ -459,10 +459,7 @@ impl App {
                 );
             }
             let input_y = list_area.y + name_rows as u16;
-            let input_style = self
-                .theme
-                .selection()
-                .add_modifier(Modifier::UNDERLINED);
+            let input_style = self.theme.selection().add_modifier(Modifier::UNDERLINED);
             let display = format!("  {value}▏");
             frame.render_widget(
                 Paragraph::new(Span::styled(display, input_style)),
@@ -479,12 +476,7 @@ impl App {
             } else {
                 0
             };
-            for (i, section) in sections
-                .iter()
-                .enumerate()
-                .skip(scroll)
-                .take(visible)
-            {
+            for (i, section) in sections.iter().enumerate().skip(scroll).take(visible) {
                 let y = list_area.y + (i - scroll) as u16;
                 let is_selected = i == sec.selected_section;
                 let is_focused = sec.focus == SectionsFocus::List;
@@ -612,18 +604,14 @@ impl App {
 
         // --- Footer ---
         let footer_text = match &sec.editing {
-            Some(SectionsEditing::RenamingSection { .. } | SectionsEditing::EditingPredicate { .. }) => {
-                "Enter: save  Esc: cancel"
-            }
-            Some(SectionsEditing::CreatingSection { .. }) => {
-                "Enter: create  Esc: cancel"
-            }
+            Some(
+                SectionsEditing::RenamingSection { .. } | SectionsEditing::EditingPredicate { .. },
+            ) => "Enter: save  Esc: cancel",
+            Some(SectionsEditing::CreatingSection { .. }) => "Enter: create  Esc: cancel",
             None if sec.focus == SectionsFocus::List => {
                 "n: new  r: rename  d: delete  J/K: reorder  →/Enter: predicates  Tab: switch tab"
             }
-            None => {
-                "Enter: edit  ←: back to list  Tab: switch tab"
-            }
+            None => "Enter: edit  ←: back to list  Tab: switch tab",
         };
         frame.render_widget(
             Paragraph::new(Span::styled(
@@ -1056,12 +1044,10 @@ impl App {
                         if !new_name.is_empty() {
                             let has_dup = self.config.sections.iter().any(|s| s.name == new_name);
                             if !has_dup {
-                                self.config.sections.push(
-                                    crate::session::SectionConfig {
-                                        name: new_name,
-                                        ..Default::default()
-                                    },
-                                );
+                                self.config.sections.push(crate::session::SectionConfig {
+                                    name: new_name,
+                                    ..Default::default()
+                                });
                                 sec.selected_section = self.config.sections.len() - 1;
                                 self.save_sections_config().await;
                             }
@@ -1099,8 +1085,7 @@ impl App {
                 match self.config.keybindings.resolve(&key) {
                     Some(BindableAction::NavigateDown) => {
                         if sections_len > 0 {
-                            sec.selected_section =
-                                (sec.selected_section + 1) % sections_len;
+                            sec.selected_section = (sec.selected_section + 1) % sections_len;
                             sec.pred_selected = 0;
                         }
                         self.ui_state.modal = Modal::Settings(state);
@@ -1143,8 +1128,9 @@ impl App {
                             self.ui_state.modal = Modal::Settings(state);
                         }
                         KeyCode::Char('n') => {
-                            sec.editing =
-                                Some(SectionsEditing::CreatingSection { value: String::new() });
+                            sec.editing = Some(SectionsEditing::CreatingSection {
+                                value: String::new(),
+                            });
                             self.ui_state.modal = Modal::Settings(state);
                         }
                         KeyCode::Char('r') => {
@@ -1313,19 +1299,29 @@ fn predicate_rows(section: &crate::session::SectionConfig) -> Vec<(String, Strin
     vec![
         (
             "pr_state".into(),
-            section.pr_state.as_ref().map_or_else(|| not_set.clone(), fmt_state),
+            section
+                .pr_state
+                .as_ref()
+                .map_or_else(|| not_set.clone(), fmt_state),
         ),
         (
             "is_draft".into(),
-            section.is_draft.map_or_else(|| not_set.clone(), |b| b.to_string()),
+            section
+                .is_draft
+                .map_or_else(|| not_set.clone(), |b| b.to_string()),
         ),
         (
             "has_label".into(),
-            section.has_label.as_ref().map_or_else(|| not_set.clone(), fmt_label),
+            section
+                .has_label
+                .as_ref()
+                .map_or_else(|| not_set.clone(), fmt_label),
         ),
         (
             "has_pr".into(),
-            section.has_pr.map_or_else(|| not_set.clone(), |b| b.to_string()),
+            section
+                .has_pr
+                .map_or_else(|| not_set.clone(), |b| b.to_string()),
         ),
         (
             "review_decision".into(),
@@ -1345,11 +1341,7 @@ fn predicate_rows(section: &crate::session::SectionConfig) -> Vec<(String, Strin
 }
 
 /// Apply a user-edited predicate value string to a SectionConfig field.
-fn apply_predicate_edit(
-    section: &mut crate::session::SectionConfig,
-    pred_idx: usize,
-    value: &str,
-) {
+fn apply_predicate_edit(section: &mut crate::session::SectionConfig, pred_idx: usize, value: &str) {
     use crate::git::{PrState, ReviewDecision};
     use crate::session::section::{LabelPredicate, OneOrMany, ReviewerPredicate};
 
@@ -1383,8 +1375,11 @@ fn apply_predicate_edit(
             if trimmed.is_empty() {
                 section.has_label = None;
             } else {
-                let labels: Vec<String> =
-                    trimmed.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                let labels: Vec<String> = trimmed
+                    .split(',')
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
                 section.has_label = match labels.len() {
                     0 => None,
                     1 => Some(LabelPredicate::One(labels.into_iter().next().unwrap())),
@@ -1406,8 +1401,10 @@ fn apply_predicate_edit(
                 section.review_decision = None;
             } else {
                 let parts: Vec<&str> = trimmed.split(',').map(str::trim).collect();
-                let parsed: Vec<ReviewDecision> =
-                    parts.iter().filter_map(|s| parse_review_decision(s)).collect();
+                let parsed: Vec<ReviewDecision> = parts
+                    .iter()
+                    .filter_map(|s| parse_review_decision(s))
+                    .collect();
                 section.review_decision = match parsed.len() {
                     0 => None,
                     1 => Some(OneOrMany::One(parsed[0])),

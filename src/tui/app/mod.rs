@@ -255,7 +255,12 @@ pub enum SettingsTab {
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 4] = [Self::General, Self::Keybindings, Self::Theme, Self::Sections];
+    const ALL: [SettingsTab; 4] = [
+        Self::General,
+        Self::Keybindings,
+        Self::Theme,
+        Self::Sections,
+    ];
 
     fn label(self) -> &'static str {
         match self {
@@ -377,6 +382,7 @@ pub enum InputAction {
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
     DeleteSession { session_id: SessionId },
+    DeleteMergedPrSessions { session_ids: Vec<SessionId> },
     RestartSession { session_id: SessionId },
     RemoveProject { project_id: ProjectId },
 }
@@ -796,8 +802,7 @@ impl App {
                                 // The in-session switcher may have run `tmux switch-client`
                                 // mid-attach, so the session we exited from isn't
                                 // necessarily the one we entered with. Trust the outcome.
-                                let switched_via_popup =
-                                    outcome.final_session != current_session;
+                                let switched_via_popup = outcome.final_session != current_session;
                                 current_session = outcome.final_session;
                                 if switched_via_popup {
                                     // Picking a new session in the popup invalidates the

@@ -539,6 +539,9 @@ impl App {
             UserCommand::DeleteSession => {
                 self.handle_delete_session();
             }
+            UserCommand::DeleteMergedPrSessions => {
+                self.handle_delete_merged_pr_sessions().await;
+            }
             UserCommand::RenameSession => {
                 self.handle_rename_session().await;
             }
