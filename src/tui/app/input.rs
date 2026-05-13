@@ -48,6 +48,20 @@ fn classify_help_key(key: &crossterm::event::KeyEvent, kb: &crate::config::KeyBi
     }
 }
 
+/// Plain printable characters (no modifier, or Shift only) belong in a
+/// fuzzy-search query box and must not be intercepted by global j/k →
+/// NavigateUp/Down bindings. Other key combos (Ctrl/Alt, arrows, Tab, …)
+/// return `None` and fall through to the configurable resolver.
+fn palette_text_char(key: &crossterm::event::KeyEvent) -> Option<char> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    if let KeyCode::Char(c) = key.code
+        && (key.modifiers - KeyModifiers::SHIFT).is_empty()
+    {
+        return Some(c);
+    }
+    None
+}
+
 impl App {
     pub(super) async fn handle_input(&mut self, input: InputEvent) {
         match input {
@@ -195,8 +209,17 @@ impl App {
             } => {
                 use crate::config::keybindings::BindableAction;
 
-                // Resolve configurable bindings first so arrow keys (and
-                // their j/k/Ctrl-n/p aliases) navigate the completion list.
+                // Plain printable chars are text input — keep them out of
+                // the j/k navigation bindings.
+                if let Some(c) = palette_text_char(&key) {
+                    value.push(c);
+                    completer.refilter(value);
+                    *scroll = 0;
+                    return;
+                }
+
+                // Arrow keys (and Ctrl-n/p aliases) navigate the completion
+                // list via the configurable resolver.
                 match self.config.keybindings.resolve(&key) {
                     Some(BindableAction::NavigateUp) => {
                         completer.move_selection_up();
@@ -248,11 +271,6 @@ impl App {
                         }
                         KeyCode::Backspace => {
                             value.pop();
-                            completer.refilter(value);
-                            *scroll = 0;
-                        }
-                        KeyCode::Char(c) => {
-                            value.push(c);
                             completer.refilter(value);
                             *scroll = 0;
                         }
@@ -316,7 +334,15 @@ impl App {
             } => {
                 use crate::config::keybindings::BindableAction;
 
-                // Resolve configurable bindings first for navigation
+                // Plain printable chars are text input — keep them out of
+                // the j/k navigation bindings.
+                if let Some(c) = palette_text_char(&key) {
+                    query.push(c);
+                    self.refilter_quick_switch();
+                    return;
+                }
+
+                // Arrow keys (and Ctrl-n/p aliases) navigate the match list.
                 match self.config.keybindings.resolve(&key) {
                     Some(BindableAction::NavigateUp) => {
                         if !matches.is_empty() {
@@ -394,10 +420,6 @@ impl App {
                             query.pop();
                             self.refilter_quick_switch();
                         }
-                        KeyCode::Char(c) => {
-                            query.push(c);
-                            self.refilter_quick_switch();
-                        }
                         _ => {}
                     },
                 }
@@ -413,7 +435,15 @@ impl App {
             } => {
                 use crate::config::keybindings::BindableAction;
 
-                // Resolve configurable bindings first for navigation
+                // Plain printable chars are text input — keep them out of
+                // the j/k navigation bindings.
+                if let Some(c) = palette_text_char(&key) {
+                    query.push(c);
+                    self.refilter_checkout_branches();
+                    return;
+                }
+
+                // Arrow keys (and Ctrl-n/p aliases) navigate the branch list.
                 match self.config.keybindings.resolve(&key) {
                     Some(BindableAction::NavigateUp) => {
                         if !filtered.is_empty() {
@@ -476,10 +506,6 @@ impl App {
                         }
                         KeyCode::Backspace => {
                             query.pop();
-                            self.refilter_checkout_branches();
-                        }
-                        KeyCode::Char(c) => {
-                            query.push(c);
                             self.refilter_checkout_branches();
                         }
                         _ => {}
@@ -806,5 +832,51 @@ mod tests {
             classify_help_key(&key(KeyCode::Char('x')), &kb),
             HelpKey::Ignore
         );
+    }
+
+    #[test]
+    fn palette_text_char_accepts_plain_letters_including_jk() {
+        for c in ['j', 'k', 'a', 'z', ' ', '1', '?'] {
+            assert_eq!(
+                palette_text_char(&key(KeyCode::Char(c))),
+                Some(c),
+                "plain {c:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn palette_text_char_accepts_shifted_letters() {
+        // Kitty-style: Char('K') with SHIFT.
+        assert_eq!(
+            palette_text_char(&KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT)),
+            Some('K')
+        );
+        // Non-kitty: Char('J') with no modifier.
+        assert_eq!(palette_text_char(&key(KeyCode::Char('J'))), Some('J'));
+    }
+
+    #[test]
+    fn palette_text_char_rejects_modifier_combos() {
+        assert_eq!(palette_text_char(&ctrl(KeyCode::Char('p'))), None);
+        assert_eq!(palette_text_char(&ctrl(KeyCode::Char('n'))), None);
+        assert_eq!(
+            palette_text_char(&KeyEvent::new(KeyCode::Char('j'), KeyModifiers::ALT)),
+            None
+        );
+    }
+
+    #[test]
+    fn palette_text_char_rejects_non_char_keys() {
+        for code in [
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::Tab,
+            KeyCode::Enter,
+            KeyCode::Esc,
+            KeyCode::Backspace,
+        ] {
+            assert_eq!(palette_text_char(&key(code)), None, "{code:?}");
+        }
     }
 }
