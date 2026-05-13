@@ -307,6 +307,11 @@ pub struct WorktreeSession {
     /// oldest-in-section-first sort order.
     #[serde(default = "chrono::Utc::now")]
     pub entered_section_at: DateTime<Utc>,
+    /// Most recent time the user attached to this session. Drives the
+    /// Alt+Tab-style MRU ordering in the in-tmux session picker.
+    /// `None` for sessions never attached since adopting the field.
+    #[serde(default)]
+    pub last_attached_at: Option<DateTime<Utc>>,
 }
 
 impl WorktreeSession {
@@ -352,6 +357,7 @@ impl WorktreeSession {
             section_override: None,
             current_section: None,
             entered_section_at: now,
+            last_attached_at: None,
         }
     }
 
@@ -397,6 +403,7 @@ impl WorktreeSession {
             section_override: None,
             current_section: None,
             entered_section_at: now,
+            last_attached_at: None,
         }
     }
 
@@ -411,6 +418,18 @@ impl WorktreeSession {
     /// Mark the session as active (update last_active_at)
     pub fn touch(&mut self) {
         self.last_active_at = Utc::now();
+    }
+
+    /// Record an attach event. Used by the in-tmux switcher to order
+    /// sessions Alt+Tab-style by most-recently viewed.
+    pub fn mark_attached(&mut self) {
+        self.last_attached_at = Some(Utc::now());
+    }
+
+    /// Whether `name` refers to this session — either the primary tmux
+    /// session or its paired shell session (toggled via Ctrl+\).
+    pub fn matches_tmux_name(&self, name: &str) -> bool {
+        self.tmux_session_name == name || self.shell_tmux_session_name.as_deref() == Some(name)
     }
 
     /// Check if this session matches a search query (fuzzy subsequence).

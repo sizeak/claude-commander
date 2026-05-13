@@ -785,6 +785,26 @@ impl App {
                                 // sessions, where SIGTSTP would freeze the
                                 // pane with no shell to recover from.
                                 let intercept_ctrl_z = !current_session.ends_with("-sh");
+
+                                // Stamp last_attached_at so the in-tmux
+                                // switcher can sort Alt+Tab-style by MRU.
+                                let to_stamp = current_session.clone();
+                                if let Err(e) = self
+                                    .store
+                                    .mutate(move |state| {
+                                        if let Some(session) = state
+                                            .sessions
+                                            .values_mut()
+                                            .find(|s| s.matches_tmux_name(&to_stamp))
+                                        {
+                                            session.mark_attached();
+                                        }
+                                    })
+                                    .await
+                                {
+                                    warn!("Failed to stamp last_attached_at: {}", e);
+                                }
+
                                 let outcome = match crate::tmux::attach_to_session(
                                     &current_session,
                                     editor_triggers,

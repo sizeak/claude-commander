@@ -79,6 +79,11 @@ enum Commands {
         /// Path to write the chosen tmux session name to
         #[arg(long)]
         out: std::path::PathBuf,
+        /// tmux name of the currently-attached session — excluded from the
+        /// picker list (Alt+Tab style; switching to where you already are
+        /// is a no-op).
+        #[arg(long)]
+        current: Option<String>,
     },
 }
 
@@ -299,9 +304,9 @@ async fn main() -> Result<()> {
             }
         }
 
-        Some(Commands::PickSession { out }) => {
+        Some(Commands::PickSession { out, current }) => {
             // No logging — the popup terminal is the picker's UI.
-            claude_commander::picker::run_session_picker(&out)?;
+            claude_commander::picker::run_session_picker(&out, current.as_deref())?;
         }
 
         Some(Commands::Config { init }) => {
