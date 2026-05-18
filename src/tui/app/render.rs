@@ -3,6 +3,15 @@
 use super::*;
 
 impl App {
+    /// Return the border type based on config: rounded or plain (square).
+    pub(super) fn border_type(&self) -> BorderType {
+        if self.config.rounded_borders {
+            BorderType::Rounded
+        } else {
+            BorderType::Plain
+        }
+    }
+
     /// Render the UI
     pub(super) fn render(&mut self, frame: &mut Frame) {
         let size = frame.area();
@@ -121,6 +130,7 @@ impl App {
         let block = Block::default()
             .title(title)
             .borders(Borders::ALL)
+            .border_type(self.border_type())
             .border_style(if is_focused {
                 self.theme.border_focused()
             } else {
@@ -166,6 +176,7 @@ impl App {
         let block = Block::default()
             .title(title)
             .borders(Borders::ALL)
+            .border_type(self.border_type())
             .border_style(if is_focused {
                 self.theme.border_focused()
             } else {
@@ -392,6 +403,7 @@ impl App {
         let block = Block::default()
             .title(title)
             .borders(Borders::ALL)
+            .border_type(self.border_type())
             .border_style(if is_focused {
                 self.theme.border_focused()
             } else {
