@@ -7,6 +7,17 @@ use ratatui::style::{Color, Style};
 
 use crate::config::theme::{AgentWorkingStyle, ThemeOverrides};
 
+/// All recognised preset names, in display order.
+pub const PRESET_NAMES: &[&str] = &[
+    "(auto)",
+    "basic",
+    "indexed",
+    "truecolor",
+    "monokai-dimmed",
+    "zedokai",
+    "rose-pine",
+];
+
 /// Terminal color capability
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ColorMode {
