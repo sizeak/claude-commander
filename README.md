@@ -264,6 +264,9 @@ ui_refresh_fps = 30
 # Interval in seconds between GitHub PR checks (0 = disabled)
 pr_check_interval_secs = 120
 
+# Use rounded border corners (╭╮╰╯) instead of square (┌┐└┘)
+rounded_borders = false
+
 # Dim the right pane (preview/diff/shell) when the session list is focused
 dim_unfocused_preview = true
 

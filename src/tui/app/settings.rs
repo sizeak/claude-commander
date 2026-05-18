@@ -107,6 +107,12 @@ impl App {
                         color_swatch: None,
                     },
                     SettingsRow {
+                        label: "Rounded Borders".into(),
+                        value: c.rounded_borders.to_string(),
+                        field_key: "rounded_borders".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
                         label: "Number Debounce (ms)".into(),
                         value: c.session_number_debounce_ms.to_string(),
                         field_key: "session_number_debounce_ms".into(),
@@ -211,7 +217,7 @@ impl App {
         let block = Block::default()
             .title(" Settings ")
             .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
+            .border_type(self.border_type())
             .border_style(Style::default().fg(self.theme.modal_info));
         let inner = block.inner(modal_area);
         frame.render_widget(block, modal_area);
@@ -692,6 +698,11 @@ impl App {
                 "show_session_program" => {
                     if let Ok(b) = value.parse::<bool>() {
                         self.config.show_session_program = b;
+                    }
+                }
+                "rounded_borders" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        self.config.rounded_borders = b;
                     }
                 }
                 "session_number_debounce_ms" => {

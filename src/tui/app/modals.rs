@@ -29,7 +29,7 @@ impl App {
                 let block = Block::default()
                     .title(format!(" {} ", title))
                     .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
+                    .border_type(self.border_type())
                     .border_style(Style::default().fg(self.theme.modal_warning));
 
                 let inner = block.inner(modal_area);
@@ -67,7 +67,7 @@ impl App {
                 let block = Block::default()
                     .title(format!(" {} ", title))
                     .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
+                    .border_type(self.border_type())
                     .border_style(Style::default().fg(self.theme.modal_warning));
 
                 let inner = block.inner(modal_area);
@@ -132,7 +132,7 @@ impl App {
                 let block = Block::default()
                     .title(format!(" {} ", title))
                     .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
+                    .border_type(self.border_type())
                     .border_style(Style::default().fg(self.theme.modal_info));
 
                 let inner = block.inner(modal_area);
@@ -161,7 +161,7 @@ impl App {
                 let block = Block::default()
                     .title(format!(" {} ", title))
                     .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
+                    .border_type(self.border_type())
                     .border_style(Style::default().fg(self.theme.modal_error));
 
                 let inner = block.inner(modal_area);
@@ -179,7 +179,7 @@ impl App {
                 let block = Block::default()
                     .title(" Error ")
                     .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
+                    .border_type(self.border_type())
                     .border_style(Style::default().fg(self.theme.modal_error));
 
                 let inner = block.inner(modal_area);
@@ -236,7 +236,7 @@ impl App {
                 let block = Block::default()
                     .title(title)
                     .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
+                    .border_type(self.border_type())
                     .border_style(Style::default().fg(self.theme.modal_info));
 
                 let inner = block.inner(modal_area);
@@ -408,7 +408,7 @@ impl App {
                 let block = Block::default()
                     .title(title)
                     .borders(Borders::ALL)
-                    .border_type(BorderType::Rounded)
+                    .border_type(self.border_type())
                     .border_style(Style::default().fg(self.theme.modal_info));
 
                 let inner = block.inner(modal_area);
@@ -600,7 +600,7 @@ impl App {
         let block = Block::default()
             .title(" Help ")
             .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
+            .border_type(self.border_type())
             .border_style(Style::default().fg(self.theme.modal_info));
         let inner = block.inner(modal_area);
         frame.render_widget(block, modal_area);
