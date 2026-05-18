@@ -121,6 +121,7 @@ impl App {
         let block = Block::default()
             .title(title)
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(if is_focused {
                 self.theme.border_focused()
             } else {
@@ -166,6 +167,7 @@ impl App {
         let block = Block::default()
             .title(title)
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(if is_focused {
                 self.theme.border_focused()
             } else {
@@ -392,6 +394,7 @@ impl App {
         let block = Block::default()
             .title(title)
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(if is_focused {
                 self.theme.border_focused()
             } else {

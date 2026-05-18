@@ -211,6 +211,7 @@ impl App {
         let block = Block::default()
             .title(" Settings ")
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(self.theme.modal_info));
         let inner = block.inner(modal_area);
         frame.render_widget(block, modal_area);
