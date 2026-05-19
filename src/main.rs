@@ -49,12 +49,16 @@ enum Commands {
         /// Session name
         name: String,
 
+        /// Program to run (default: claude)
+        #[arg(short, long)]
+        program: Option<String>,
+
         /// Project path (default: current directory)
         #[arg(short = 'd', long)]
         path: Option<std::path::PathBuf>,
 
         /// Initial prompt to send to the Claude agent
-        #[arg(short, long)]
+        #[arg(short = 'i', long)]
         prompt: Option<String>,
 
         /// Claude effort level
@@ -296,6 +300,7 @@ async fn main() -> Result<()> {
 
         Some(Commands::New {
             name,
+            program,
             path,
             prompt,
             effort,
@@ -308,7 +313,7 @@ async fn main() -> Result<()> {
 
             use claude_commander::git::GitBackend;
             use claude_commander::session::{
-                program_with_claude_flags, SessionManager,
+                program_is_claude, program_with_claude_flags, SessionManager,
             };
             use claude_commander::tui::theme::Theme;
             use std::sync::Arc;
@@ -325,8 +330,19 @@ async fn main() -> Result<()> {
             // Check tmux
             manager.check_tmux().await?;
 
-            // Build program string from default_program + Claude-specific flags
-            let base_program = config_store.read().default_program.clone();
+            // Build program string from --program (or default) + Claude-specific flags
+            let base_program = program
+                .unwrap_or_else(|| config_store.read().default_program.clone());
+            if !program_is_claude(&base_program)
+                && (effort.is_some() || mode.is_some() || prompt.is_some())
+            {
+                eprintln!(
+                    "Error: --effort, --mode, and --prompt are only supported \
+                     when the program is claude (got {:?})",
+                    base_program
+                );
+                std::process::exit(1);
+            }
             let program = program_with_claude_flags(
                 &base_program,
                 mode.as_deref(),
