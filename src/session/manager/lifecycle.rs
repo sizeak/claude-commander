@@ -54,7 +54,11 @@ impl SessionManager {
     /// Performs the heavy work: git fetch, worktree creation, tmux session
     /// setup. On success, transitions the session from `Creating` to `Running`.
     #[instrument(skip(self))]
-    pub async fn finalize_session(&self, session_id: &SessionId) -> Result<SessionId> {
+    pub async fn finalize_session(
+        &self,
+        session_id: &SessionId,
+        initial_prompt: Option<String>,
+    ) -> Result<SessionId> {
         // Read session and project info, plus stack parent's branch if any so
         // we know to fork from it below.
         let (project_id, title, branch_name, program, stack_parent_branch) = {
@@ -190,12 +194,32 @@ impl SessionManager {
             session.tmux_session_name.clone()
         };
 
-        // For stacked sessions running `claude`, prepend an initial prompt
-        // arg so Claude knows the correct `--base` when the user asks it to
-        // open a PR. Non-claude programs get the unchanged program string.
-        let launch_cmd = match stack_parent_branch.as_deref() {
-            Some(pb) if program_is_claude(&program) => program_with_stack_context(&program, pb),
-            _ => program.clone(),
+        // Build a single positional prompt arg combining stack context (for
+        // stacked sessions) and any user-provided initial prompt. The Claude
+        // CLI accepts exactly one positional prompt, so both must be merged.
+        let launch_cmd = {
+            let mut prompt_parts: Vec<String> = Vec::new();
+            if let Some(pb) = stack_parent_branch.as_deref()
+                && program_is_claude(&program)
+            {
+                prompt_parts.push(format!(
+                    "This branch is stacked on `{pb}` (not main). \
+                     When creating a PR for this session, use: \
+                     gh pr create --base {pb}"
+                ));
+            }
+            if let Some(ref user_prompt) = initial_prompt
+                && program_is_claude(&program)
+            {
+                prompt_parts.push(user_prompt.clone());
+            }
+            if prompt_parts.is_empty() {
+                program.clone()
+            } else {
+                let combined = prompt_parts.join("\n\n");
+                let escaped = shell_escape_single_quote(&combined);
+                format!("{program} '{escaped}'")
+            }
         };
         let launch_cmd = program_with_session_name(&launch_cmd, &title);
 
@@ -419,8 +443,44 @@ impl SessionManager {
 /// Whether the program string starts with the `claude` CLI. Used to decide
 /// whether an appended initial-prompt arg will be understood or will break
 /// the invocation (e.g. for `bash` or `zsh` as the program).
-fn program_is_claude(program: &str) -> bool {
+pub fn program_is_claude(program: &str) -> bool {
     program.split_whitespace().next() == Some("claude")
+}
+
+/// Insert `--permission-mode <mode>` and/or `--effort <level>` into a Claude
+/// command string. Always uses long-form flags (never short flags like `-p`)
+/// because short flags on the Claude CLI can have different meanings.
+///
+/// No-op when the program isn't Claude.
+pub fn program_with_claude_flags(
+    program: &str,
+    mode: Option<&str>,
+    effort: Option<&str>,
+) -> String {
+    if !program_is_claude(program) || (mode.is_none() && effort.is_none()) {
+        return program.to_string();
+    }
+
+    let mut parts = program.splitn(2, char::is_whitespace);
+    let cmd = parts.next().unwrap();
+    let rest = parts.next();
+
+    let mut flags = Vec::new();
+    if let Some(m) = mode
+        && m != "default"
+    {
+        flags.push(format!("--permission-mode {m}"));
+    }
+    if let Some(e) = effort {
+        flags.push(format!("--effort {e}"));
+    }
+
+    match (flags.is_empty(), rest) {
+        (true, Some(r)) => format!("{cmd} {r}"),
+        (true, None) => cmd.to_string(),
+        (false, Some(r)) => format!("{cmd} {} {r}", flags.join(" ")),
+        (false, None) => format!("{cmd} {}", flags.join(" ")),
+    }
 }
 
 /// Inject `-n <session_title>` into a Claude command so the Claude Code
@@ -444,24 +504,11 @@ fn shell_escape_single_quote(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
-/// Build the launch command for a stacked session running Claude Code.
-///
-/// Appends a single-quoted initial prompt telling Claude the stack parent's
-/// branch name, so that when the user later asks Claude to open a PR it uses
-/// `--base <parent_branch>` rather than defaulting to `main`. Branch names
-/// cannot contain single quotes per git's refname rules, so no extra escaping
-/// is needed.
-fn program_with_stack_context(program: &str, parent_branch: &str) -> String {
-    let prompt = format!(
-        "This branch is stacked on `{parent_branch}` (not main). \
-         When creating a PR for this session, use: gh pr create --base {parent_branch}"
-    );
-    format!("{program} '{prompt}'")
-}
-
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+
+    // --- program_is_claude ---
 
     #[test]
     fn program_is_claude_matches_bare_command() {
@@ -480,20 +527,65 @@ mod lifecycle_tests {
         assert!(!program_is_claude(""));
     }
 
+    // --- program_with_claude_flags ---
+
     #[test]
-    fn stack_context_embeds_parent_branch() {
-        let cmd = program_with_stack_context("claude", "feature-auth");
-        assert!(cmd.starts_with("claude '"));
-        assert!(cmd.contains("feature-auth"));
-        assert!(cmd.contains("gh pr create --base feature-auth"));
-        assert!(cmd.ends_with('\''));
+    fn claude_flags_effort_only() {
+        assert_eq!(
+            program_with_claude_flags("claude", None, Some("high")),
+            "claude --effort high"
+        );
     }
 
     #[test]
-    fn stack_context_preserves_program_flags() {
-        let cmd = program_with_stack_context("claude --resume", "base-branch");
-        assert!(cmd.starts_with("claude --resume '"));
+    fn claude_flags_mode_only() {
+        assert_eq!(
+            program_with_claude_flags("claude", Some("auto"), None),
+            "claude --permission-mode auto"
+        );
     }
+
+    #[test]
+    fn claude_flags_both() {
+        assert_eq!(
+            program_with_claude_flags("claude", Some("plan"), Some("low")),
+            "claude --permission-mode plan --effort low"
+        );
+    }
+
+    #[test]
+    fn claude_flags_default_mode_is_noop() {
+        assert_eq!(
+            program_with_claude_flags("claude", Some("default"), None),
+            "claude"
+        );
+    }
+
+    #[test]
+    fn claude_flags_preserves_existing_args() {
+        assert_eq!(
+            program_with_claude_flags("claude --resume", Some("auto"), Some("high")),
+            "claude --permission-mode auto --effort high --resume"
+        );
+    }
+
+    #[test]
+    fn claude_flags_noop_for_non_claude() {
+        assert_eq!(
+            program_with_claude_flags("bash", Some("auto"), Some("high")),
+            "bash"
+        );
+    }
+
+    #[test]
+    fn claude_flags_noop_when_no_flags() {
+        assert_eq!(
+            program_with_claude_flags("claude --resume", None, None),
+            "claude --resume"
+        );
+    }
+
+    // --- program_with_session_name ---
 
     #[test]
     fn session_name_injected_for_bare_claude() {
@@ -526,10 +618,11 @@ mod lifecycle_tests {
     }
 
     #[test]
-    fn session_name_with_stack_context() {
-        let stacked = program_with_stack_context("claude", "parent-branch");
-        let cmd = program_with_session_name(&stacked, "my session");
+    fn session_name_with_prompt_arg() {
+        // Simulates the shape produced when an initial prompt is appended
+        let with_prompt = "claude 'Fix the auth bug'";
+        let cmd = program_with_session_name(with_prompt, "my session");
         assert!(cmd.starts_with("claude -n 'my session' '"));
-        assert!(cmd.contains("parent-branch"));
+        assert!(cmd.contains("Fix the auth bug"));
     }
 }

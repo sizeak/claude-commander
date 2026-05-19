@@ -49,13 +49,25 @@ enum Commands {
         /// Session name
         name: String,
 
-        /// Program to run (default: claude)
-        #[arg(short, long)]
-        program: Option<String>,
-
         /// Project path (default: current directory)
         #[arg(short = 'd', long)]
         path: Option<std::path::PathBuf>,
+
+        /// Initial prompt to send to the Claude agent
+        #[arg(short, long)]
+        prompt: Option<String>,
+
+        /// Claude effort level
+        #[arg(short, long, value_parser = ["high", "medium", "low"])]
+        effort: Option<String>,
+
+        /// Claude permission mode
+        #[arg(short, long, value_parser = ["auto", "plan", "default"])]
+        mode: Option<String>,
+
+        /// Branch to fork from (default: origin/main)
+        #[arg(short = 'b', long)]
+        base_branch: Option<String>,
     },
 
     /// Attach to an existing session
@@ -284,14 +296,19 @@ async fn main() -> Result<()> {
 
         Some(Commands::New {
             name,
-            program,
             path,
+            prompt,
+            effort,
+            mode,
+            base_branch,
         }) => {
             setup_logging(cli.debug, false)?;
 
             let path = path.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
-            use claude_commander::session::SessionManager;
+            use claude_commander::session::{
+                program_with_claude_flags, SessionManager,
+            };
             use claude_commander::tui::theme::Theme;
             use std::sync::Arc;
 
@@ -299,13 +316,21 @@ async fn main() -> Result<()> {
             let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
             let store = Arc::new(StateStore::new(app_state)?);
             let manager = SessionManager::new(
-                config_store,
+                config_store.clone(),
                 store.clone(),
                 Theme::default().tmux_status_style(),
             );
 
             // Check tmux
             manager.check_tmux().await?;
+
+            // Build program string from default_program + Claude-specific flags
+            let base_program = config_store.read().default_program.clone();
+            let program = program_with_claude_flags(
+                &base_program,
+                mode.as_deref(),
+                effort.as_deref(),
+            );
 
             // First, try to find or add the project
             let project_id = {
@@ -327,9 +352,9 @@ async fn main() -> Result<()> {
 
             println!("Creating session '{}'...", name);
             let session_id = manager
-                .prepare_session(&project_id, name, program, None)
+                .prepare_session(&project_id, name, Some(program), base_branch)
                 .await?;
-            manager.finalize_session(&session_id).await?;
+            manager.finalize_session(&session_id, prompt).await?;
 
             println!("Session created: {}", session_id);
             println!();

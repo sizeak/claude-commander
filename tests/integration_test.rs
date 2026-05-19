@@ -195,7 +195,7 @@ async fn test_session_manager_create_session() {
         .await
         .expect("prepare_session should succeed");
 
-    let result = manager.finalize_session(&session_id).await;
+    let result = manager.finalize_session(&session_id, None).await;
 
     if let Err(e) = &result {
         eprintln!("Error finalizing session: {}", e);
@@ -256,7 +256,7 @@ async fn test_session_manager_restart() {
         )
         .await
         .unwrap();
-    manager.finalize_session(&session_id).await.unwrap();
+    manager.finalize_session(&session_id, None).await.unwrap();
 
     // Verify initial status is Running
     {
@@ -537,7 +537,7 @@ async fn test_create_session_no_remote_falls_back() {
         .await
         .expect("prepare_session should succeed");
 
-    let result = manager.finalize_session(&session_id).await;
+    let result = manager.finalize_session(&session_id, None).await;
 
     assert!(
         result.is_ok(),

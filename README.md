@@ -84,6 +84,12 @@ claude-commander list
 # Create a new session
 claude-commander new "feature-auth" --path /path/to/repo
 
+# Create a session with an initial prompt (starts working immediately)
+claude-commander new "fix-auth" --prompt "Fix the auth bypass in login.rs" --effort high
+
+# Create a session in plan mode, forking from a specific branch
+claude-commander new "feature-api" --base-branch develop --mode plan
+
 # Attach to a session
 claude-commander attach feature-auth
 
