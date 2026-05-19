@@ -306,6 +306,24 @@ impl App {
             0
         };
 
+        // Check if the OptionPicker is active and how many rows it occupies
+        let picker_info: Option<(usize, &[String], usize)> =
+            if let Some(SettingsEditing::OptionPicker { options, selected }) = &state.editing {
+                // screen_row is the row index (within visible area) where the picker starts
+                let screen_row = state.selected_row.saturating_sub(scroll_offset);
+                Some((screen_row, options.as_slice(), *selected))
+            } else {
+                None
+            };
+
+        // How many rows the picker will overlay (starting from the selected row)
+        let picker_row_count = picker_info
+            .map(|(screen_row, opts, _)| {
+                let rows_below = visible_rows.saturating_sub(screen_row);
+                opts.len().min(rows_below)
+            })
+            .unwrap_or(0);
+
         for (i, row) in state
             .rows
             .iter()
@@ -313,8 +331,19 @@ impl App {
             .skip(scroll_offset)
             .take(visible_rows)
         {
-            let y = rows_area.y + (i - scroll_offset) as u16;
+            let screen_idx = i - scroll_offset;
+            let y = rows_area.y + screen_idx as u16;
             let is_selected = i == state.selected_row;
+
+            // If the OptionPicker is open, skip rendering normal rows that are
+            // overlaid by picker options (except the first picker row itself,
+            // which replaces the selected row).
+            if let Some((picker_screen_row, _, _)) = picker_info
+                && screen_idx > picker_screen_row
+                && screen_idx < picker_screen_row + picker_row_count
+            {
+                continue;
+            }
 
             let row_style = if is_selected {
                 self.theme.selection()
@@ -368,6 +397,11 @@ impl App {
                 let display_val = if is_selected {
                     if let Some(SettingsEditing::TextInput { value }) = &state.editing {
                         format!("{value}▏")
+                    } else if let Some(SettingsEditing::OptionPicker { options, selected }) =
+                        &state.editing
+                    {
+                        // Show the currently highlighted option on the selected row
+                        format!("▸ {}", options[*selected])
                     } else {
                         row.value.clone()
                     }
@@ -388,8 +422,61 @@ impl App {
             }
         }
 
+        // Render the OptionPicker dropdown rows below the selected row
+        if let Some((picker_screen_row, options, selected_opt)) = picker_info {
+            let val_x = rows_area.x + label_width + 2;
+            let val_w = value_width;
+
+            for (opt_idx, option) in options.iter().enumerate().take(picker_row_count) {
+                let row_y = rows_area.y + (picker_screen_row + opt_idx) as u16;
+                let is_highlighted = opt_idx == selected_opt;
+
+                // Clear the label area for overlay rows beyond the first
+                if opt_idx > 0 {
+                    let clear_area = Rect {
+                        x: rows_area.x,
+                        y: row_y,
+                        width: label_width.min(rows_area.width),
+                        height: 1,
+                    };
+                    frame.render_widget(Clear, clear_area);
+                    frame.render_widget(
+                        Paragraph::new(Span::raw("")),
+                        clear_area,
+                    );
+                }
+
+                let opt_area = Rect {
+                    x: val_x,
+                    y: row_y,
+                    width: val_w,
+                    height: 1,
+                };
+
+                // Clear before rendering
+                frame.render_widget(Clear, opt_area);
+
+                let prefix = if is_highlighted { "▸ " } else { "  " };
+                let opt_style = if is_highlighted {
+                    self.theme.selection()
+                } else {
+                    Style::default().fg(self.theme.text_accent)
+                };
+
+                frame.render_widget(
+                    Paragraph::new(Span::styled(format!("{prefix}{option}"), opt_style)),
+                    opt_area,
+                );
+            }
+        }
+
         let footer_text = if state.editing.is_some() {
-            "Enter: save  Esc: cancel"
+            match &state.editing {
+                Some(SettingsEditing::OptionPicker { .. }) => {
+                    "j/k: navigate  Enter: select  Esc: cancel"
+                }
+                _ => "Enter: save  Esc: cancel",
+            }
         } else {
             "Tab: switch tab  j/k: navigate  Enter: edit  Esc: close"
         };
@@ -909,6 +996,41 @@ impl App {
                         }
                     }
                 }
+                SettingsEditing::OptionPicker { options, selected } => match key.code {
+                    KeyCode::Enter => {
+                        let chosen = options[*selected].clone();
+                        let field_key = state.rows[state.selected_row].field_key.clone();
+                        // Treat "(auto)" as empty string for apply_settings_edit
+                        let val = if chosen == "(auto)" {
+                            String::new()
+                        } else {
+                            chosen
+                        };
+                        state.editing = None;
+                        self.apply_settings_edit(state.tab, &field_key, &val);
+                        state.rows = self.build_settings_rows(state.tab);
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Esc => {
+                        state.editing = None;
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        *selected = (*selected + 1) % options.len();
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        *selected = if *selected == 0 {
+                            options.len() - 1
+                        } else {
+                            *selected - 1
+                        };
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    _ => {
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                },
             }
         } else {
             // Not editing — navigation mode: resolve via configurable keybindings
@@ -952,14 +1074,31 @@ impl App {
                     }
                     KeyCode::Enter => {
                         if !state.rows.is_empty() {
-                            let current_value = state.rows[state.selected_row].value.clone();
-                            let initial = if current_value == "(auto)" || current_value == "(none)"
-                            {
-                                String::new()
+                            let field_key = &state.rows[state.selected_row].field_key;
+                            if state.tab == SettingsTab::Theme && field_key == "preset" {
+                                // Open an inline option picker for theme presets
+                                use crate::tui::theme::PRESET_NAMES;
+                                let options: Vec<String> =
+                                    PRESET_NAMES.iter().map(|s| (*s).to_string()).collect();
+                                let current_value = &state.rows[state.selected_row].value;
+                                let selected = options
+                                    .iter()
+                                    .position(|o| o == current_value)
+                                    .unwrap_or(0);
+                                state.editing =
+                                    Some(SettingsEditing::OptionPicker { options, selected });
                             } else {
-                                current_value
-                            };
-                            state.editing = Some(SettingsEditing::TextInput { value: initial });
+                                let current_value =
+                                    state.rows[state.selected_row].value.clone();
+                                let initial =
+                                    if current_value == "(auto)" || current_value == "(none)" {
+                                        String::new()
+                                    } else {
+                                        current_value
+                                    };
+                                state.editing =
+                                    Some(SettingsEditing::TextInput { value: initial });
+                            }
                         }
                         self.ui_state.modal = Modal::Settings(state);
                     }

@@ -359,6 +359,11 @@ pub enum SettingsEditing {
         action_name: String,
         keys: Vec<String>,
     },
+    /// Picking from a list of options (used for theme presets)
+    OptionPicker {
+        options: Vec<String>,
+        selected: usize,
+    },
 }
 
 /// Action to perform when input modal is submitted
