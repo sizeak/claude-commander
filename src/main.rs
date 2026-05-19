@@ -306,6 +306,7 @@ async fn main() -> Result<()> {
 
             let path = path.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
 
+            use claude_commander::git::GitBackend;
             use claude_commander::session::{
                 program_with_claude_flags, SessionManager,
             };
@@ -331,6 +332,15 @@ async fn main() -> Result<()> {
                 mode.as_deref(),
                 effort.as_deref(),
             );
+
+            // Resolve the path to the actual repo root. This handles the case
+            // where the user passes a worktree path, a subdirectory, or a
+            // symlinked path — all resolve to the same canonical repo root.
+            let path = {
+                let backend = GitBackend::discover(&path)?;
+                std::fs::canonicalize(backend.path())
+                    .unwrap_or_else(|_| backend.path().to_path_buf())
+            };
 
             // First, try to find or add the project
             let project_id = {
