@@ -245,7 +245,7 @@ impl App {
                     None
                 };
 
-                let data = InfoSessionData {
+                InfoContent::Session(InfoSessionData {
                     title,
                     branch,
                     created_at,
@@ -258,83 +258,8 @@ impl App {
                     pr_merged,
                     enriched_pr,
                     ai_summary,
-                    summary_key_hint: summary_key_hint.clone(),
-                };
-
-                // Count lines for scroll state
-                let line_count = InfoView::new(InfoContent::Session(data), &self.theme)
-                    .build_lines()
-                    .len();
-                let inner_height = area.height.saturating_sub(2);
-                self.ui_state
-                    .info_state
-                    .set_metrics(line_count, inner_height);
-
-                // Rebuild data (it was consumed by the line count call)
-                let enriched_pr = self
-                    .ui_state
-                    .enriched_pr
-                    .as_ref()
-                    .and_then(|(sid, pr)| if *sid == session_id { Some(pr) } else { None });
-                let ai_summary = if self.config.ai_summary_enabled {
-                    self.ui_state.ai_summaries.get(&session_id)
-                } else {
-                    None
-                };
-                // Re-find session data (original was consumed)
-                let session_data2 = self.ui_state.list_items.iter().find_map(|item| {
-                    if let SessionListItem::Worktree {
-                        id,
-                        title,
-                        branch,
-                        status,
-                        program,
-                        pr_number,
-                        pr_url,
-                        pr_merged,
-                        worktree_path,
-                        created_at,
-                        ..
-                    } = item
-                    {
-                        if *id == session_id {
-                            Some((
-                                title.clone(),
-                                branch.clone(),
-                                *status,
-                                program.clone(),
-                                *pr_number,
-                                pr_url.clone(),
-                                *pr_merged,
-                                worktree_path.display().to_string(),
-                                created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
-                            ))
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                });
-                if let Some((t, b, s, p, pn, pu, pm, wp, ca)) = session_data2 {
-                    InfoContent::Session(InfoSessionData {
-                        title: t,
-                        branch: b,
-                        created_at: ca,
-                        status: s,
-                        program: p,
-                        worktree_path: wp,
-                        diff_info: &self.ui_state.diff_info,
-                        pr_number: pn,
-                        pr_url: pu,
-                        pr_merged: pm,
-                        enriched_pr,
-                        ai_summary,
-                        summary_key_hint,
-                    })
-                } else {
-                    InfoContent::Empty
-                }
+                    summary_key_hint,
+                })
             } else {
                 InfoContent::Empty
             }
@@ -363,9 +288,6 @@ impl App {
             });
 
             if let Some((name, repo_path, main_branch)) = project_data {
-                let inner_height = area.height.saturating_sub(2);
-                self.ui_state.info_state.set_metrics(3, inner_height);
-
                 InfoContent::Project(InfoProjectData {
                     name,
                     repo_path,
@@ -378,7 +300,16 @@ impl App {
             InfoContent::Empty
         };
 
-        let info_view = InfoView::new(content, &self.theme)
+        // Build lines once, use for both scroll metrics and rendering
+        let info_view = InfoView::new(content, &self.theme);
+        let lines = info_view.build_lines();
+        let inner_height = area.height.saturating_sub(2);
+        self.ui_state
+            .info_state
+            .set_metrics(lines.len(), inner_height);
+
+        let info_view = info_view
+            .with_prebuilt_lines(lines)
             .block(block)
             .scroll(self.ui_state.info_state.scroll_offset);
 
