@@ -59,7 +59,7 @@ enum Commands {
 
         /// Initial prompt to send to the Claude agent
         #[arg(short = 'i', long)]
-        prompt: Option<String>,
+        initial_prompt: Option<String>,
 
         /// Claude effort level
         #[arg(short, long)]
@@ -302,7 +302,7 @@ async fn main() -> Result<()> {
             name,
             program,
             path,
-            prompt,
+            initial_prompt,
             effort,
             mode,
             base_branch,
@@ -334,10 +334,10 @@ async fn main() -> Result<()> {
             let base_program = program
                 .unwrap_or_else(|| config_store.read().default_program.clone());
             if !program_is_claude(&base_program)
-                && (effort.is_some() || mode.is_some() || prompt.is_some())
+                && (effort.is_some() || mode.is_some() || initial_prompt.is_some())
             {
                 eprintln!(
-                    "Error: --effort, --mode, and --prompt are only supported \
+                    "Error: --effort, --mode, and --initial-prompt are only supported \
                      when the program is claude (got {:?})",
                     base_program
                 );
@@ -380,7 +380,7 @@ async fn main() -> Result<()> {
             let session_id = manager
                 .prepare_session(&project_id, name, Some(program), base_branch)
                 .await?;
-            manager.finalize_session(&session_id, prompt).await?;
+            manager.finalize_session(&session_id, initial_prompt).await?;
 
             println!("Session created: {}", session_id);
             println!();
