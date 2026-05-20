@@ -376,9 +376,24 @@ async fn main() -> Result<()> {
                 }
             };
 
+            // When base_branch matches an existing session's branch, don't
+            // pass it to prepare_session — the child needs its own branch
+            // (generated from the title). The fork point is handled by
+            // link_stack_parent_by_branch + finalize_session instead.
+            let is_stacked = if let Some(ref base) = base_branch {
+                let state = store.read().await;
+                state
+                    .sessions
+                    .values()
+                    .any(|s| s.project_id == project_id && s.branch == *base)
+            } else {
+                false
+            };
+            let branch_for_prepare = if is_stacked { None } else { base_branch.clone() };
+
             println!("Creating session '{}'...", name);
             let session_id = manager
-                .prepare_session(&project_id, name, Some(program), base_branch.clone())
+                .prepare_session(&project_id, name, Some(program), branch_for_prepare)
                 .await?;
             manager
                 .link_stack_parent_by_branch(&session_id, base_branch.as_deref())
