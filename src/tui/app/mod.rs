@@ -106,6 +106,16 @@ pub enum Modal {
         prompt: String,
         value: String,
         on_submit: InputAction,
+        /// When `Some`, the dialog renders a dynamic hint indicating whether
+        /// the sanitized session name corresponds to an already-existing
+        /// branch (local or remote). Populated by `handle_new_session` /
+        /// `handle_new_stacked_session`; other Input flows (Rename) leave
+        /// this as `None`.
+        ///
+        /// Entries are the local-name form returned by `load_branch_entries`
+        /// (i.e. remote-only `origin/<x>` is stored as just `<x>` to match
+        /// `finalize_session`'s resolution logic).
+        existing_branches: Option<Vec<String>>,
     },
     /// Confirmation modal
     Confirm {
