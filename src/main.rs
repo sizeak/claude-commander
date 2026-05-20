@@ -330,7 +330,7 @@ async fn main() -> Result<()> {
             // Check tmux
             manager.check_tmux().await?;
 
-            // Build program string from --program (or default) + Claude-specific flags
+            // Build program string with Claude-specific flags
             let base_program = program
                 .unwrap_or_else(|| config_store.read().default_program.clone());
             if !program_is_claude(&base_program)
@@ -352,15 +352,13 @@ async fn main() -> Result<()> {
                 effort.as_deref(),
             );
 
-            // Resolve the path to the actual repo root. This handles the case
-            // where the user passes a worktree path, a subdirectory, or a
-            // symlinked path — all resolve to the same canonical repo root.
+            // Resolve path to repo root (handles worktrees, subdirectories, symlinks)
             let path = {
                 let backend = GitBackend::discover(&path)?;
                 backend.path().to_path_buf()
             };
 
-            // First, try to find or add the project
+            // Find or add the project
             let project_id = {
                 let state = store.read().await;
                 state
