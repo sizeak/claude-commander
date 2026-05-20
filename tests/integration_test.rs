@@ -594,9 +594,7 @@ async fn test_base_branch_links_stack_parent_when_session_matches() {
         state.get_session(&parent_id).unwrap().branch.clone()
     };
 
-    // Create child session with base_branch matching the parent's branch.
-    // prepare_session uses base_branch as the fork point but generates a
-    // new branch name from the title, so the child gets its own branch.
+    // Create child session and link it to the parent via branch name
     let child_id = manager
         .prepare_session(
             &project_id,
@@ -606,29 +604,10 @@ async fn test_base_branch_links_stack_parent_when_session_matches() {
         )
         .await
         .unwrap();
-
-    // Link stack parent — same logic as main.rs handler
-    {
-        let sid = child_id;
-        let base = parent_branch;
-        let pid = project_id;
-        store
-            .mutate(move |state| {
-                let found_parent = state
-                    .sessions
-                    .values()
-                    .find(|s| s.project_id == pid && s.branch == base && s.id != sid)
-                    .map(|s| s.id);
-                if let Some(found_parent) = found_parent
-                    && let Some(session) = state.get_session_mut(&sid)
-                {
-                    session.stack_parent_session_id = Some(found_parent);
-                }
-            })
-            .await
-            .unwrap();
-    }
-
+    manager
+        .link_stack_parent_by_branch(&child_id, Some(&parent_branch))
+        .await
+        .unwrap();
     manager.finalize_session(&child_id, None).await.unwrap();
 
     // Verify the child is linked to the parent
@@ -683,28 +662,11 @@ async fn test_base_branch_no_link_when_no_session_matches() {
         .await
         .unwrap();
 
-    // Run the same linking logic — should be a no-op
-    {
-        let sid = session_id;
-        let base = "develop".to_string();
-        let pid = project_id;
-        store
-            .mutate(move |state| {
-                let found_parent = state
-                    .sessions
-                    .values()
-                    .find(|s| s.project_id == pid && s.branch == base && s.id != sid)
-                    .map(|s| s.id);
-                if let Some(found_parent) = found_parent
-                    && let Some(session) = state.get_session_mut(&sid)
-                {
-                    session.stack_parent_session_id = Some(found_parent);
-                }
-            })
-            .await
-            .unwrap();
-    }
-
+    // Link attempt — should be a no-op since no session has branch "develop"
+    manager
+        .link_stack_parent_by_branch(&session_id, Some("develop"))
+        .await
+        .unwrap();
     manager.finalize_session(&session_id, None).await.unwrap();
 
     // Verify no stack link

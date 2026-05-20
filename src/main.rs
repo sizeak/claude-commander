@@ -379,38 +379,12 @@ async fn main() -> Result<()> {
             };
 
             println!("Creating session '{}'...", name);
-            let base_branch_clone = base_branch.clone();
             let session_id = manager
-                .prepare_session(&project_id, name, Some(program), base_branch)
+                .prepare_session(&project_id, name, Some(program), base_branch.clone())
                 .await?;
-
-            // If base_branch matches an existing session's branch in this
-            // project, link the new session as stacked. This mirrors what
-            // the TUI's stacked-create flow does (actions.rs:1421-1434)
-            // so that finalize_session injects the PR-base context into
-            // the Claude prompt and cascade/push-stack operations recognise
-            // the stack relationship immediately.
-            if let Some(ref base) = base_branch_clone {
-                let sid = session_id;
-                let base = base.clone();
-                let pid = project_id;
-                store
-                    .mutate(move |state| {
-                        let parent_id = state
-                            .sessions
-                            .values()
-                            .filter(|s| s.project_id == pid && s.branch == base && s.id != sid)
-                            .max_by_key(|s| s.created_at)
-                            .map(|s| s.id);
-                        if let Some(parent_id) = parent_id
-                            && let Some(session) = state.get_session_mut(&sid)
-                        {
-                            session.stack_parent_session_id = Some(parent_id);
-                        }
-                    })
-                    .await?;
-            }
-
+            manager
+                .link_stack_parent_by_branch(&session_id, base_branch.as_deref())
+                .await?;
             manager.finalize_session(&session_id, initial_prompt).await?;
 
             println!("Session created: {}", session_id);

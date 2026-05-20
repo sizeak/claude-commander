@@ -49,6 +49,47 @@ impl SessionManager {
         Ok(session_id)
     }
 
+    /// If `base_branch` matches an existing session's branch in the same
+    /// project, link the new session as stacked by setting
+    /// `stack_parent_session_id`. When multiple sessions share a branch, the
+    /// most recently created one is chosen. No-op when `base_branch` is `None`
+    /// or doesn't match any session.
+    ///
+    /// Call this between `prepare_session` and `finalize_session` so that
+    /// `finalize_session` can inject the PR-base context into the Claude
+    /// prompt and cascade/push-stack operations recognise the relationship.
+    pub async fn link_stack_parent_by_branch(
+        &self,
+        session_id: &SessionId,
+        base_branch: Option<&str>,
+    ) -> Result<()> {
+        let Some(base) = base_branch else {
+            return Ok(());
+        };
+        let sid = *session_id;
+        let base = base.to_string();
+        self.store
+            .mutate(move |state| {
+                let session_project = state
+                    .get_session(&sid)
+                    .map(|s| s.project_id);
+                if let Some(pid) = session_project {
+                    let parent_id = state
+                        .sessions
+                        .values()
+                        .filter(|s| s.project_id == pid && s.branch == base && s.id != sid)
+                        .max_by_key(|s| s.created_at)
+                        .map(|s| s.id);
+                    if let Some(parent_id) = parent_id
+                        && let Some(session) = state.get_session_mut(&sid)
+                    {
+                        session.stack_parent_session_id = Some(parent_id);
+                    }
+                }
+            })
+            .await
+    }
+
     /// Finalize a session that was created with `prepare_session`.
     ///
     /// Performs the heavy work: git fetch, worktree creation, tmux session
