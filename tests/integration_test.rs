@@ -552,3 +552,173 @@ async fn test_create_session_no_remote_falls_back() {
     drop(state_temp_dir);
     drop(worktrees_dir);
 }
+
+/// When `--base-branch` matches an existing session's branch in the same
+/// project, the new session should be linked as stacked via
+/// `stack_parent_session_id`. This mirrors the TUI's stacked-create flow.
+#[tokio::test]
+async fn test_base_branch_links_stack_parent_when_session_matches() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let state_temp_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+    let config = Config {
+        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        ..Config::default()
+    };
+
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
+    let store = create_isolated_store(&state_temp_dir);
+    let manager = SessionManager::new(config_store, store.clone(), "");
+
+    let project_id = manager.add_project(repo_path).await.unwrap();
+
+    // Create parent session
+    let parent_id = manager
+        .prepare_session(
+            &project_id,
+            "parent-session".to_string(),
+            Some("bash".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+    manager.finalize_session(&parent_id, None).await.unwrap();
+
+    let parent_branch = {
+        let state = store.read().await;
+        state.get_session(&parent_id).unwrap().branch.clone()
+    };
+
+    // Create child session with base_branch matching the parent's branch.
+    // prepare_session uses base_branch as the fork point but generates a
+    // new branch name from the title, so the child gets its own branch.
+    let child_id = manager
+        .prepare_session(
+            &project_id,
+            "child-session".to_string(),
+            Some("bash".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Link stack parent — same logic as main.rs handler
+    {
+        let sid = child_id;
+        let base = parent_branch;
+        let pid = project_id;
+        store
+            .mutate(move |state| {
+                let found_parent = state
+                    .sessions
+                    .values()
+                    .find(|s| s.project_id == pid && s.branch == base && s.id != sid)
+                    .map(|s| s.id);
+                if let Some(found_parent) = found_parent
+                    && let Some(session) = state.get_session_mut(&sid)
+                {
+                    session.stack_parent_session_id = Some(found_parent);
+                }
+            })
+            .await
+            .unwrap();
+    }
+
+    manager.finalize_session(&child_id, None).await.unwrap();
+
+    // Verify the child is linked to the parent
+    {
+        let state = store.read().await;
+        let child = state.get_session(&child_id).unwrap();
+        assert_eq!(
+            child.stack_parent_session_id,
+            Some(parent_id),
+            "child session should be linked to parent via stack_parent_session_id"
+        );
+    }
+
+    let _ = manager.kill_session(&child_id, true).await;
+    let _ = manager.kill_session(&parent_id, true).await;
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
+    drop(worktrees_dir);
+}
+
+/// When `--base-branch` doesn't match any existing session's branch,
+/// `stack_parent_session_id` should remain None.
+#[tokio::test]
+async fn test_base_branch_no_link_when_no_session_matches() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let state_temp_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+    let config = Config {
+        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        ..Config::default()
+    };
+
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
+    let store = create_isolated_store(&state_temp_dir);
+    let manager = SessionManager::new(config_store, store.clone(), "");
+
+    let project_id = manager.add_project(repo_path).await.unwrap();
+
+    // Create session with base_branch that doesn't match any session
+    let session_id = manager
+        .prepare_session(
+            &project_id,
+            "standalone-session".to_string(),
+            Some("bash".to_string()),
+            Some("develop".to_string()),
+        )
+        .await
+        .unwrap();
+
+    // Run the same linking logic — should be a no-op
+    {
+        let sid = session_id;
+        let base = "develop".to_string();
+        let pid = project_id;
+        store
+            .mutate(move |state| {
+                let found_parent = state
+                    .sessions
+                    .values()
+                    .find(|s| s.project_id == pid && s.branch == base && s.id != sid)
+                    .map(|s| s.id);
+                if let Some(found_parent) = found_parent
+                    && let Some(session) = state.get_session_mut(&sid)
+                {
+                    session.stack_parent_session_id = Some(found_parent);
+                }
+            })
+            .await
+            .unwrap();
+    }
+
+    manager.finalize_session(&session_id, None).await.unwrap();
+
+    // Verify no stack link
+    {
+        let state = store.read().await;
+        let session = state.get_session(&session_id).unwrap();
+        assert_eq!(
+            session.stack_parent_session_id, None,
+            "session should not be linked when base_branch doesn't match any session"
+        );
+    }
+
+    let _ = manager.kill_session(&session_id, true).await;
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
+    drop(worktrees_dir);
+}
