@@ -336,12 +336,15 @@ async fn main() -> Result<()> {
             if !program_is_claude(&base_program)
                 && (effort.is_some() || mode.is_some() || initial_prompt.is_some())
             {
-                eprintln!(
-                    "Error: --effort, --mode, and --initial-prompt are only supported \
-                     when the program is claude (got {:?})",
-                    base_program
-                );
-                std::process::exit(1);
+                clap::Error::raw(
+                    clap::error::ErrorKind::ArgumentConflict,
+                    format!(
+                        "--effort, --mode, and --initial-prompt are only supported \
+                         when the program is claude (got {:?})\n",
+                        base_program
+                    ),
+                )
+                .exit();
             }
             let program = program_with_claude_flags(
                 &base_program,
@@ -354,8 +357,7 @@ async fn main() -> Result<()> {
             // symlinked path — all resolve to the same canonical repo root.
             let path = {
                 let backend = GitBackend::discover(&path)?;
-                std::fs::canonicalize(backend.path())
-                    .unwrap_or_else(|_| backend.path().to_path_buf())
+                backend.path().to_path_buf()
             };
 
             // First, try to find or add the project

@@ -451,6 +451,10 @@ pub fn program_is_claude(program: &str) -> bool {
 /// command string. Always uses long-form flags (never short flags like `-p`)
 /// because short flags on the Claude CLI can have different meanings.
 ///
+/// `"default"` mode is treated as a no-op — the Claude CLI uses its own
+/// default when the flag is absent. Effort has no equivalent no-op value
+/// (its levels are `high`/`medium`/`low`), so all values are passed through.
+///
 /// No-op when the program isn't Claude.
 pub fn program_with_claude_flags(
     program: &str,
