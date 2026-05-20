@@ -587,6 +587,70 @@ fn test_glyph_creating_shows_spinner() {
     assert_eq!(c, theme.status_creating);
 }
 
+// Cycle-arithmetic tests for the spinner index computation in
+// `session_status_glyph`: `SPINNER_FRAMES[(tick as usize / 3) % SPINNER_FRAMES.len()]`.
+// SPINNER_FRAMES has 10 entries, so the cycle is `(tick / 3) % 10`. Each
+// test below picks tick values whose original-vs-mutant outputs differ:
+//
+//   tick=3  → original `(3/3)%10 = 1` ⇒ frame[1] = "⠙"
+//             `/`→`%`: `(3%3)%10 = 0` ⇒ "⠋"  (distinguishes / from %)
+//             `/`→`*`: `(3*3)%10 = 9` ⇒ "⠏"  (distinguishes / from *)
+//             `%`→`/`: `(3/3)/10 = 0` ⇒ "⠋"  (distinguishes % from /)
+//   tick=30 → original `(30/3)%10 = 0` ⇒ "⠋"
+//             `%`→`/`: `(30/3)/10 = 1` ⇒ "⠙"  (extra guard for % from /)
+
+#[test]
+fn test_glyph_creating_spinner_uses_tick_div_three_mod_len() {
+    let theme = Theme::basic();
+    let items = empty_items();
+
+    // tick=3: original index 1 → "⠙"
+    let (g, _) = make_tree(&theme, &items)
+        .tick(3)
+        .session_status_glyph(SessionStatus::Creating, None, false)
+        .unwrap();
+    assert_eq!(
+        g, "⠙",
+        "tick=3 must select SPINNER_FRAMES[(3/3)%10] = SPINNER_FRAMES[1]"
+    );
+
+    // tick=30: original index 0 → "⠋" (catches `%` → `/` which would give 1)
+    let (g, _) = make_tree(&theme, &items)
+        .tick(30)
+        .session_status_glyph(SessionStatus::Creating, None, false)
+        .unwrap();
+    assert_eq!(
+        g, "⠋",
+        "tick=30 must select SPINNER_FRAMES[(30/3)%10] = SPINNER_FRAMES[0]"
+    );
+}
+
+#[test]
+fn test_glyph_working_spinner_uses_tick_div_three_mod_len() {
+    let theme = Theme::basic();
+    let items = empty_items();
+
+    // tick=3: original index 1 → "⠙"
+    let (g, _) = make_tree(&theme, &items)
+        .tick(3)
+        .session_status_glyph(SessionStatus::Running, Some(AgentState::Working), false)
+        .unwrap();
+    assert_eq!(
+        g, "⠙",
+        "tick=3 must select SPINNER_FRAMES[(3/3)%10] = SPINNER_FRAMES[1]"
+    );
+
+    // tick=30: original index 0 → "⠋" (catches `%` → `/` which would give 1)
+    let (g, _) = make_tree(&theme, &items)
+        .tick(30)
+        .session_status_glyph(SessionStatus::Running, Some(AgentState::Working), false)
+        .unwrap();
+    assert_eq!(
+        g, "⠋",
+        "tick=30 must select SPINNER_FRAMES[(30/3)%10] = SPINNER_FRAMES[0]"
+    );
+}
+
 #[test]
 fn test_stacked_child_row_has_extra_indent() {
     // The stacked child should sit one extra indent (STACK_INDENT) further
