@@ -151,7 +151,16 @@ impl TmuxExecutor {
             format!("TERM_PROGRAM=claude-commander TERM_PROGRAM_VERSION={version} {cmd}")
         });
 
-        // Create session with remain-on-exit option so pane stays open if command exits
+        // Enable remain-on-exit globally BEFORE creating the session. If we
+        // set it per-session after `new-session`, a fast-exiting command can
+        // close the only pane, end the session, shut down the tmux server,
+        // and break the follow-up set-option call with "no server running".
+        // Setting it globally first means the pane is born with the option
+        // already in effect, so the server stays alive regardless of how
+        // quickly the launched command terminates.
+        self.execute(&["set-option", "-g", "remain-on-exit", "on"])
+            .await?;
+
         let args: Vec<&str> = if let Some(cmd) = wrapped_cmd.as_deref() {
             vec![
                 "new-session",
@@ -182,10 +191,6 @@ impl TmuxExecutor {
         };
 
         self.execute(&args).await?;
-
-        // Set remain-on-exit so pane stays open if the program exits/crashes
-        self.execute(&["set-option", "-t", session_name, "remain-on-exit", "on"])
-            .await?;
 
         // Enable mouse support so scroll wheel enters copy mode for scrollback
         self.execute(&["set-option", "-t", session_name, "mouse", "on"])
