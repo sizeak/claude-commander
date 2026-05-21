@@ -151,44 +151,43 @@ impl TmuxExecutor {
             format!("TERM_PROGRAM=claude-commander TERM_PROGRAM_VERSION={version} {cmd}")
         });
 
-        // Enable remain-on-exit globally BEFORE creating the session. If we
-        // set it per-session after `new-session`, a fast-exiting command can
-        // close the only pane, end the session, shut down the tmux server,
-        // and break the follow-up set-option call with "no server running".
-        // Setting it globally first means the pane is born with the option
-        // already in effect, so the server stays alive regardless of how
-        // quickly the launched command terminates.
-        self.execute(&["set-option", "-g", "remain-on-exit", "on"])
-            .await?;
-
-        let args: Vec<&str> = if let Some(cmd) = wrapped_cmd.as_deref() {
-            vec![
-                "new-session",
-                "-d",
-                "-s",
-                session_name,
-                "-c",
-                working_dir_str,
-                "-x",
-                "200",
-                "-y",
-                "50",
-                cmd,
-            ]
-        } else {
-            vec![
-                "new-session",
-                "-d",
-                "-s",
-                session_name,
-                "-c",
-                working_dir_str,
-                "-x",
-                "200",
-                "-y",
-                "50",
-            ]
-        };
+        // Enable remain-on-exit globally BEFORE the new session's pane is
+        // born, in the SAME tmux invocation as new-session. If we set the
+        // option in a separate tmux call, two failure modes appear in
+        // environments without a pre-existing tmux server (e.g. CI):
+        //   1. `set-option -g` doesn't auto-start the server, so it fails
+        //      with "error connecting to /tmp/tmux-1001/default".
+        //   2. If we instead set remain-on-exit per-session AFTER
+        //      new-session, a fast-exiting command (e.g. non-interactive
+        //      `bash` with no controlling tty) can close the only pane,
+        //      end the session, and shut the server down before the
+        //      follow-up set-option call runs.
+        // Chaining `start-server`, `set-option -g`, and `new-session` into
+        // a single tmux invocation sidesteps both: the server is alive
+        // when set-option runs, and the new pane inherits the option from
+        // the moment it's created.
+        let mut args: Vec<&str> = vec![
+            "start-server",
+            ";",
+            "set-option",
+            "-g",
+            "remain-on-exit",
+            "on",
+            ";",
+            "new-session",
+            "-d",
+            "-s",
+            session_name,
+            "-c",
+            working_dir_str,
+            "-x",
+            "200",
+            "-y",
+            "50",
+        ];
+        if let Some(cmd) = wrapped_cmd.as_deref() {
+            args.push(cmd);
+        }
 
         self.execute(&args).await?;
 
