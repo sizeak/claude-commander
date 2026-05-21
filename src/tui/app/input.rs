@@ -48,6 +48,14 @@ fn classify_help_key(key: &crossterm::event::KeyEvent, kb: &crate::config::KeyBi
     }
 }
 
+/// Which filterable modal needs its filter recomputed after a paste.
+/// Used to defer the `&mut self` refilter call until after the
+/// `&mut self.ui_state.modal` borrow has been released.
+enum PasteRefilter {
+    CheckoutBranch,
+    QuickSwitch,
+}
+
 /// Plain printable characters (no modifier, or Shift only) belong in a
 /// fuzzy-search query box and must not be intercepted by global j/k →
 /// NavigateUp/Down bindings. Other key combos (Ctrl/Alt, arrows, Tab, …)
@@ -154,9 +162,10 @@ impl App {
             InputEvent::Paste(text) => {
                 // Handle paste in modal input, ignore otherwise
                 let clean = text.replace(['\n', '\r'], "");
-                match &mut self.ui_state.modal {
+                let needs_refilter = match &mut self.ui_state.modal {
                     Modal::Input { value, .. } => {
                         value.push_str(&clean);
+                        None
                     }
                     Modal::PathInput {
                         value,
@@ -167,8 +176,22 @@ impl App {
                         value.push_str(&clean);
                         completer.refilter(value);
                         *scroll = 0;
+                        None
                     }
-                    _ => {}
+                    Modal::CheckoutBranch { query, .. } => {
+                        query.push_str(&clean);
+                        Some(PasteRefilter::CheckoutBranch)
+                    }
+                    Modal::QuickSwitch { query, .. } => {
+                        query.push_str(&clean);
+                        Some(PasteRefilter::QuickSwitch)
+                    }
+                    _ => None,
+                };
+                match needs_refilter {
+                    Some(PasteRefilter::CheckoutBranch) => self.refilter_checkout_branches(),
+                    Some(PasteRefilter::QuickSwitch) => self.refilter_quick_switch(),
+                    None => {}
                 }
             }
         }
