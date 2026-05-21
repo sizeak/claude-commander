@@ -911,8 +911,7 @@ impl App {
                                     }
                                     crate::tmux::AttachResult::SessionEnded => {
                                         info!("Session ended, attempting fresh restart");
-                                        let is_claude_session =
-                                            !current_session.ends_with("-sh");
+                                        let is_claude_session = !current_session.ends_with("-sh");
                                         if is_claude_session && consecutive_ends < 3 {
                                             consecutive_ends += 1;
                                             match self
@@ -931,10 +930,7 @@ impl App {
                                                     continue;
                                                 }
                                                 Err(e) => {
-                                                    warn!(
-                                                        "Failed to auto-restart session: {}",
-                                                        e
-                                                    );
+                                                    warn!("Failed to auto-restart session: {}", e);
                                                     self.ui_state.shell_toggle_pair = None;
                                                     break;
                                                 }
