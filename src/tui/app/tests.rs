@@ -479,8 +479,15 @@ fn test_info_view_renders_stack_chain() {
     };
     let view = InfoView::new(InfoContent::Session(data), &theme);
     let lines = view.build_lines();
-    let text: String = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
-    assert!(text.contains("Stack (2 sessions)"), "should show stack header");
+    let text: String = lines
+        .iter()
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        text.contains("Stack (2 sessions)"),
+        "should show stack header"
+    );
     assert!(text.contains("base"), "should list base session");
     assert!(text.contains("← current"), "should mark current session");
 }
@@ -509,6 +516,13 @@ fn test_info_view_no_stack_section_for_unstacked() {
     };
     let view = InfoView::new(InfoContent::Session(data), &theme);
     let lines = view.build_lines();
-    let text: String = lines.iter().map(|l| l.to_string()).collect::<Vec<_>>().join("\n");
-    assert!(!text.contains("Stack"), "unstacked session should not show stack section");
+    let text: String = lines
+        .iter()
+        .map(|l| l.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !text.contains("Stack"),
+        "unstacked session should not show stack section"
+    );
 }

@@ -440,9 +440,7 @@ impl App {
     pub(super) async fn refresh_list_items(&mut self) {
         // Guard: if view mode is SectionGrouped but sections were removed from
         // config (hot-reload), fall back to ProjectGrouped.
-        if self.ui_state.view_mode == ViewMode::SectionGrouped
-            && self.config.sections.is_empty()
-        {
+        if self.ui_state.view_mode == ViewMode::SectionGrouped && self.config.sections.is_empty() {
             self.ui_state.view_mode = ViewMode::ProjectGrouped;
         }
 

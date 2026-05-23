@@ -742,18 +742,15 @@ impl App {
                 self.refresh_list_items().await;
                 // Restore selection after rebuilding the list
                 if let Some(sid) = selected_session {
-                    if let Some(idx) =
-                        self.ui_state.list_items.iter().position(|item| {
-                            matches!(item, SessionListItem::Worktree { id, .. } if *id == sid)
-                        })
-                    {
+                    if let Some(idx) = self.ui_state.list_items.iter().position(
+                        |item| matches!(item, SessionListItem::Worktree { id, .. } if *id == sid),
+                    ) {
                         self.ui_state.list_state.select(Some(idx));
                     }
                 } else if let Some(pid) = selected_project
-                    && let Some(idx) =
-                        self.ui_state.list_items.iter().position(|item| {
-                            matches!(item, SessionListItem::Project { id, .. } if *id == pid)
-                        })
+                    && let Some(idx) = self.ui_state.list_items.iter().position(
+                        |item| matches!(item, SessionListItem::Project { id, .. } if *id == pid),
+                    )
                 {
                     self.ui_state.list_state.select(Some(idx));
                 }
