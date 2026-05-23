@@ -729,6 +729,37 @@ impl App {
             UserCommand::ToggleSection => {
                 self.handle_toggle_section().await;
             }
+            UserCommand::ToggleViewMode => {
+                if self.config.sections.is_empty() {
+                    return;
+                }
+                self.ui_state.view_mode = match self.ui_state.view_mode {
+                    ViewMode::ProjectGrouped => ViewMode::SectionGrouped,
+                    ViewMode::SectionGrouped => ViewMode::ProjectGrouped,
+                };
+                let selected_session = self.ui_state.selected_session_id;
+                let selected_project = self.ui_state.selected_project_id;
+                self.refresh_list_items().await;
+                // Restore selection after rebuilding the list
+                if let Some(sid) = selected_session {
+                    if let Some(idx) =
+                        self.ui_state.list_items.iter().position(|item| {
+                            matches!(item, SessionListItem::Worktree { id, .. } if *id == sid)
+                        })
+                    {
+                        self.ui_state.list_state.select(Some(idx));
+                    }
+                } else if let Some(pid) = selected_project
+                    && let Some(idx) =
+                        self.ui_state.list_items.iter().position(|item| {
+                            matches!(item, SessionListItem::Project { id, .. } if *id == pid)
+                        })
+                {
+                    self.ui_state.list_state.select(Some(idx));
+                }
+                self.update_selection();
+                self.spawn_preview_update();
+            }
             _ => {}
         }
     }
