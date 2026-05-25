@@ -12,6 +12,7 @@ use ratatui::{
 
 use crate::git::{AiSummary, ChecksStatus, DiffInfo, EnrichedPrInfo, PrState};
 use crate::session::SessionStatus;
+use crate::tui::app::StackChainEntry;
 use crate::tui::theme::Theme;
 
 /// Data required to render the Info pane for a session.
@@ -30,6 +31,8 @@ pub struct InfoSessionData<'a> {
     pub ai_summary: Option<&'a AiSummary>,
     /// Display string for the generate-summary hotkey (e.g. "g"). None = AI disabled.
     pub summary_key_hint: Option<String>,
+    /// Pre-computed stack chain (empty if session is not stacked).
+    pub stack_chain: &'a [StackChainEntry],
 }
 
 /// Data required to render the Info pane for a project.
@@ -167,6 +170,42 @@ impl<'a> InfoView<'a> {
 
         // PR section
         self.build_pr_lines(data, &mut lines);
+
+        // Stack chain section
+        if !data.stack_chain.is_empty() {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                " ─────────────────────────────────",
+                self.secondary_style(),
+            )));
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                format!(" Stack ({} sessions)", data.stack_chain.len()),
+                label,
+            )));
+            for entry in data.stack_chain {
+                let (icon, color) = match entry.status {
+                    SessionStatus::Running => ("●", self.theme.status_running),
+                    SessionStatus::Stopped => ("○", self.theme.status_stopped),
+                    SessionStatus::Creating => ("…", self.theme.status_creating),
+                    SessionStatus::Merging => ("⟳", self.theme.status_creating),
+                    SessionStatus::CascadePaused => ("⏸", self.theme.agent_waiting),
+                    SessionStatus::Pushing => ("↑", self.theme.status_creating),
+                };
+                let mut spans = vec![
+                    Span::styled("   ", value),
+                    Span::styled(icon, Style::default().fg(color)),
+                    Span::styled(format!(" {}", entry.title), value),
+                ];
+                if entry.is_current {
+                    spans.push(Span::styled(
+                        "  ← current",
+                        Style::default().fg(self.theme.text_accent),
+                    ));
+                }
+                lines.push(Line::from(spans));
+            }
+        }
 
         // AI summary section (only when AI is enabled, i.e. key hint is present)
         if let Some(ref key_hint) = data.summary_key_hint {
@@ -455,6 +494,7 @@ mod tests {
             enriched_pr: None,
             ai_summary: None,
             summary_key_hint: Some("g".into()),
+            stack_chain: &[],
         };
         let view = InfoView::new(InfoContent::Session(data), &theme);
         let lines = view.build_lines();
@@ -495,6 +535,7 @@ mod tests {
                 diff_hash: 123,
             }),
             summary_key_hint: Some("g".into()),
+            stack_chain: &[],
         };
         let view = InfoView::new(InfoContent::Session(data), &theme);
         let lines = view.build_lines();
@@ -532,6 +573,7 @@ mod tests {
             enriched_pr: None,
             ai_summary: Some(&AiSummary::Loading),
             summary_key_hint: Some("g".into()),
+            stack_chain: &[],
         };
         let view = InfoView::new(InfoContent::Session(data), &theme);
         let lines = view.build_lines();
@@ -562,6 +604,7 @@ mod tests {
             enriched_pr: None,
             ai_summary: Some(&summary),
             summary_key_hint: Some("g".into()),
+            stack_chain: &[],
         };
         let view = InfoView::new(InfoContent::Session(data), &theme);
         let lines = view.build_lines();
@@ -622,6 +665,7 @@ mod tests {
             enriched_pr: None,
             ai_summary: None,
             summary_key_hint: Some("g".into()),
+            stack_chain: &[],
         };
         let view = InfoView::new(InfoContent::Session(data), &theme);
         let lines = view.build_lines();
