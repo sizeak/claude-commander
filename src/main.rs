@@ -396,12 +396,21 @@ async fn main() -> Result<()> {
             let session_id = manager
                 .prepare_session(&project_id, name, Some(program), branch_for_prepare)
                 .await?;
-            manager
+
+            if let Err(e) = manager
                 .link_stack_parent_by_branch(&session_id, base_branch.as_deref())
-                .await?;
-            manager
+                .await
+            {
+                let _ = manager.remove_creating_session(&session_id).await;
+                return Err(e.into());
+            }
+            if let Err(e) = manager
                 .finalize_session(&session_id, initial_prompt)
-                .await?;
+                .await
+            {
+                let _ = manager.remove_creating_session(&session_id).await;
+                return Err(e.into());
+            }
 
             println!("Session created: {}", session_id);
             println!();
