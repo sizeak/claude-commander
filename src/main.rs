@@ -404,10 +404,7 @@ async fn main() -> Result<()> {
                 let _ = manager.remove_creating_session(&session_id).await;
                 return Err(e.into());
             }
-            if let Err(e) = manager
-                .finalize_session(&session_id, initial_prompt)
-                .await
-            {
+            if let Err(e) = manager.finalize_session(&session_id, initial_prompt).await {
                 let _ = manager.remove_creating_session(&session_id).await;
                 return Err(e.into());
             }
