@@ -140,8 +140,14 @@ pub fn format_status_human(entry: &StatusJsonEntry) -> String {
     let mut lines = Vec::new();
     lines.push(format!("Session: {} ({})", entry.title, entry.id));
     lines.push(format!("Branch:  {}", entry.branch));
-    lines.push(format!("Status:  {} | Agent: {}", entry.status, entry.agent_state));
-    lines.push(format!("Program: {} | Project: {}", entry.program, entry.project_name));
+    lines.push(format!(
+        "Status:  {} | Agent: {}",
+        entry.status, entry.agent_state
+    ));
+    lines.push(format!(
+        "Program: {} | Project: {}",
+        entry.program, entry.project_name
+    ));
 
     if let Some(ref stat) = entry.diff_stat {
         lines.push(format!("Diff:    {}", stat.trim()));
@@ -387,8 +393,12 @@ mod tests {
     #[test]
     fn status_entry_has_expected_fields() {
         let session = make_session("fix-bug");
-        let entry =
-            StatusJsonEntry::from_session(&session, "proj", AgentState::Working, Some("3 files changed".to_string()));
+        let entry = StatusJsonEntry::from_session(
+            &session,
+            "proj",
+            AgentState::Working,
+            Some("3 files changed".to_string()),
+        );
         let json: serde_json::Value = serde_json::to_value(&entry).unwrap();
 
         assert_eq!(json["title"], "fix-bug");
