@@ -27,6 +27,12 @@ brew tap sizeak/tap
 brew install claude-commander
 ```
 
+### Arch Linux (AUR)
+
+```bash
+yay -S claude-commander
+```
+
 ### Cargo
 
 Install directly from GitHub:
@@ -65,7 +71,14 @@ cargo release <patch|minor|major|X.Y.Z> --execute   # actually release
 
 Every invocation is a dry-run by default; add `--execute` once the printed plan looks right. The command bumps the version in `Cargo.toml`, refreshes `Cargo.lock`, creates a GPG-signed commit (`Bump version to X.Y.Z`) and a GPG-signed tag (`vX.Y.Z`), and pushes both to `origin/main`.
 
-The tag push triggers `.github/workflows/publish-tap.yml`, which creates the GitHub release with auto-generated notes and bumps the formula in [`sizeak/homebrew-tap`](https://github.com/sizeak/homebrew-tap) so `brew upgrade claude-commander` sees the new version within ~60 seconds.
+The tag push triggers `.github/workflows/publish-tap.yml`, which creates the GitHub release with auto-generated notes and bumps the formula in [`sizeak/homebrew-tap`](https://github.com/sizeak/homebrew-tap) so `brew upgrade claude-commander` sees the new version within ~60 seconds. In parallel, `.github/workflows/publish-aur.yml` rewrites the `sha256sums` line in `packaging/aur/PKGBUILD` against the new GitHub source tarball and pushes the result to the [`claude-commander`](https://aur.archlinux.org/packages/claude-commander) AUR package so `yay -Syu claude-commander` picks it up.
+
+The AUR job depends on:
+
+- A repo secret `AUR_SSH_PRIVATE_KEY` containing the private half of an SSH key registered against the maintainer's [aur.archlinux.org](https://aur.archlinux.org) account.
+- The package already existing on AUR — the first publish must be done by hand (`git clone ssh://aur@aur.archlinux.org/claude-commander.git`, copy `packaging/aur/PKGBUILD`, run `makepkg --printsrcinfo > .SRCINFO`, commit and push). Every subsequent tag is handled by the workflow.
+
+`cargo-release` keeps `pkgver` in `packaging/aur/PKGBUILD` in sync with `Cargo.toml` via the `pre-release-replacements` block in `release.toml`; the workflow fills in `sha256sums` at publish time.
 
 ## Usage
 
