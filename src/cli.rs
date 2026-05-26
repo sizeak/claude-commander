@@ -54,7 +54,7 @@ mod tests {
         WorktreeSession::new(
             ProjectId::new(),
             title,
-            &format!("branch-{}", title),
+            format!("branch-{}", title),
             PathBuf::from("/tmp/wt"),
             "claude",
         )
