@@ -170,6 +170,14 @@ pub fn format_status_human(entry: &StatusJsonEntry) -> String {
     lines.join("\n")
 }
 
+/// Maximum lines allowed for the `log` command's `--lines` flag.
+pub const LOG_MAX_LINES: usize = 10_000;
+
+/// Clamp a requested line count to the allowed range [1, LOG_MAX_LINES].
+pub fn clamp_log_lines(requested: usize) -> usize {
+    requested.clamp(1, LOG_MAX_LINES)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,5 +490,28 @@ mod tests {
         assert!(!output.contains("PR:"));
         assert!(!output.contains("Review:"));
         assert!(!output.contains("Labels:"));
+    }
+
+    // -- clamp_log_lines tests --
+
+    #[test]
+    fn clamp_log_lines_default_passthrough() {
+        assert_eq!(clamp_log_lines(100), 100);
+    }
+
+    #[test]
+    fn clamp_log_lines_zero_becomes_one() {
+        assert_eq!(clamp_log_lines(0), 1);
+    }
+
+    #[test]
+    fn clamp_log_lines_max_boundary() {
+        assert_eq!(clamp_log_lines(LOG_MAX_LINES), LOG_MAX_LINES);
+    }
+
+    #[test]
+    fn clamp_log_lines_over_max() {
+        assert_eq!(clamp_log_lines(LOG_MAX_LINES + 1), LOG_MAX_LINES);
+        assert_eq!(clamp_log_lines(usize::MAX), LOG_MAX_LINES);
     }
 }
