@@ -44,6 +44,16 @@ enum Commands {
         all: bool,
     },
 
+    /// Dump recent terminal output from a session
+    Log {
+        /// Session name or ID prefix
+        session: String,
+
+        /// Number of scrollback lines to capture (default: 100, max: 10000)
+        #[arg(short, long, default_value_t = 100)]
+        lines: usize,
+    },
+
     /// Create a new session
     New {
         /// Session name
@@ -295,6 +305,49 @@ async fn main() -> Result<()> {
                     }
                 }
                 println!();
+            }
+        }
+
+        Some(Commands::Log { session, lines }) => {
+            setup_logging(cli.debug, false)?;
+
+            let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
+
+            let found = match claude_commander::cli::find_session(&app_state, &session) {
+                Some(s) => s,
+                None => {
+                    eprintln!("Session not found: {}", session);
+                    eprintln!("Use 'claude-commander list' to see available sessions.");
+                    std::process::exit(1);
+                }
+            };
+
+            if !found.status.is_active() {
+                eprintln!(
+                    "Session '{}' is {} — no tmux session to capture from.",
+                    found.title, found.status
+                );
+                std::process::exit(1);
+            }
+
+            let lines = claude_commander::cli::clamp_log_lines(lines);
+            let executor = claude_commander::tmux::TmuxExecutor::new();
+            match executor
+                .execute(&[
+                    "capture-pane",
+                    "-t",
+                    &found.tmux_session_name,
+                    "-p",
+                    "-S",
+                    &format!("-{}", lines),
+                ])
+                .await
+            {
+                Ok(content) => print!("{}", content),
+                Err(e) => {
+                    eprintln!("Failed to capture pane: {}", e);
+                    std::process::exit(1);
+                }
             }
         }
 
