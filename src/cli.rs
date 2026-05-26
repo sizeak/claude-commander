@@ -96,10 +96,7 @@ mod tests {
         Project::new(name, PathBuf::from("/tmp/repo"), "main")
     }
 
-    fn make_state_with_project(
-        project: &Project,
-        sessions: Vec<WorktreeSession>,
-    ) -> AppState {
+    fn make_state_with_project(project: &Project, sessions: Vec<WorktreeSession>) -> AppState {
         let mut state = AppState::new();
         let mut proj = project.clone();
         for s in &sessions {
@@ -134,7 +131,7 @@ mod tests {
         WorktreeSession::new(
             project_id,
             title,
-            &format!("branch-{}", title),
+            format!("branch-{}", title),
             PathBuf::from("/tmp/wt"),
             "claude",
         )
