@@ -373,28 +373,15 @@ async fn main() -> Result<()> {
                 }
             };
 
-            // When base_branch matches an existing session's branch, don't
-            // pass it to prepare_session — the child needs its own branch
-            // (generated from the title). The fork point is handled by
-            // link_stack_parent_by_branch + finalize_session instead.
-            let is_stacked = if let Some(ref base) = base_branch {
-                let state = store.read().await;
-                state
-                    .sessions
-                    .values()
-                    .any(|s| s.project_id == project_id && s.branch == *base)
-            } else {
-                false
-            };
-            let branch_for_prepare = if is_stacked {
-                None
-            } else {
-                base_branch.clone()
-            };
-
+            // `--base-branch` means "fork the new session off this branch",
+            // never "reuse this branch as the session's own branch". So the
+            // session always gets a freshly generated branch (None below); the
+            // base is applied as the fork point in finalize_session. When the
+            // base happens to be another session's branch,
+            // link_stack_parent_by_branch additionally records the stack link.
             println!("Creating session '{}'...", name);
             let session_id = manager
-                .prepare_session(&project_id, name, Some(program), branch_for_prepare)
+                .prepare_session(&project_id, name, Some(program), None)
                 .await?;
 
             let result = async {
@@ -402,7 +389,7 @@ async fn main() -> Result<()> {
                     .link_stack_parent_by_branch(&session_id, base_branch.as_deref())
                     .await?;
                 manager
-                    .finalize_session(&session_id, initial_prompt)
+                    .finalize_session(&session_id, initial_prompt, base_branch)
                     .await?;
                 Ok::<(), claude_commander::Error>(())
             }
