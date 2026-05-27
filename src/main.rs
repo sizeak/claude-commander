@@ -48,6 +48,16 @@ enum Commands {
         json: bool,
     },
 
+    /// Show detailed status of a session
+    Status {
+        /// Session name or ID prefix
+        session: String,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Create a new session
     New {
         /// Session name
@@ -304,6 +314,61 @@ async fn main() -> Result<()> {
                     }
                     println!();
                 }
+            }
+        }
+
+        Some(Commands::Status { session, json }) => {
+            setup_logging(cli.debug, false)?;
+
+            let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
+
+            let found = match claude_commander::cli::find_session(&app_state, &session) {
+                Some(s) => s.clone(),
+                None => {
+                    eprintln!("Session not found: {}", session);
+                    eprintln!("Use 'claude-commander list' to see available sessions.");
+                    std::process::exit(1);
+                }
+            };
+
+            let project_name = app_state
+                .projects
+                .get(&found.project_id)
+                .map(|p| p.name.as_str())
+                .unwrap_or("unknown");
+
+            // Detect live agent state
+            let agent_state = if found.status.is_active() {
+                use claude_commander::tmux::{AgentStateDetector, TmuxExecutor};
+                use std::time::Duration;
+
+                let executor = TmuxExecutor::new();
+                let mut detector = AgentStateDetector::new(executor, Duration::ZERO);
+                detector.detect(&found.tmux_session_name).await
+            } else {
+                claude_commander::AgentState::Unknown
+            };
+
+            // Get diff stat — diff against base_commit (branch fork point) when
+            // available, otherwise fall back to HEAD for uncommitted changes.
+            let diff_stat = if found.worktree_path.exists() {
+                let diff_base = found.base_commit.as_deref().unwrap_or("HEAD");
+                claude_commander::git::diff_stat_summary(&found.worktree_path, diff_base).await
+            } else {
+                None
+            };
+
+            let entry = claude_commander::cli::StatusJsonEntry::from_session(
+                &found,
+                project_name,
+                agent_state,
+                diff_stat,
+            );
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&entry)?);
+            } else {
+                println!("{}", claude_commander::cli::format_status_human(&entry));
             }
         }
 
