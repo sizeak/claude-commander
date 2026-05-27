@@ -322,16 +322,27 @@ async fn main() -> Result<()> {
                 }
             };
 
-            if !found.status.is_active() {
-                eprintln!(
-                    "Session '{}' is {} — no tmux session to capture from.",
-                    found.title, found.status
-                );
-                std::process::exit(1);
-            }
-
             let lines = claude_commander::cli::clamp_log_lines(lines);
             let executor = claude_commander::tmux::TmuxExecutor::new();
+
+            // Check the live tmux session rather than the persisted status,
+            // which can be stale (e.g. a session marked Stopped may still have a
+            // live pane, or a Running one whose pane has since died).
+            match executor.session_exists(&found.tmux_session_name).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    eprintln!(
+                        "Session '{}' has no live tmux session to capture from.",
+                        found.title
+                    );
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("Failed to query tmux: {}", e);
+                    std::process::exit(1);
+                }
+            }
+
             match executor
                 .execute(&[
                     "capture-pane",
@@ -343,7 +354,15 @@ async fn main() -> Result<()> {
                 ])
                 .await
             {
-                Ok(content) => print!("{}", content),
+                Ok(content) => {
+                    // capture-pane output is not guaranteed to end in a newline;
+                    // ensure one so the shell prompt doesn't glue to the last line.
+                    if content.ends_with('\n') {
+                        print!("{}", content);
+                    } else {
+                        println!("{}", content);
+                    }
+                }
                 Err(e) => {
                     eprintln!("Failed to capture pane: {}", e);
                     std::process::exit(1);

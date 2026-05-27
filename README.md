@@ -106,6 +106,9 @@ claude-commander new "feature-api" --base-branch develop --mode plan
 # Attach to a session
 claude-commander attach feature-auth
 
+# Dump recent terminal output from a session (default 100 lines, max 10000)
+claude-commander log feature-auth --lines 200
+
 # Show configuration
 claude-commander config
 
