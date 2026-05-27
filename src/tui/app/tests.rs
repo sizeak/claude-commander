@@ -602,7 +602,7 @@ fn test_project_pull_rows_present_in_general_tab() {
         .iter()
         .find(|r| r.field_key == "project_pull_enabled")
         .expect("project_pull_enabled row missing");
-    assert_eq!(enabled.value, "false");
+    assert_eq!(enabled.value, "true");
     let interval = rows
         .iter()
         .find(|r| r.field_key == "project_pull_interval_secs")

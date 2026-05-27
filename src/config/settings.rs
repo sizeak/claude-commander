@@ -158,7 +158,7 @@ impl Default for Config {
             editor_gui: None,
             shell_program: std::env::var("SHELL").unwrap_or_else(|_| "bash".to_string()),
             pr_check_interval_secs: 120,
-            project_pull_enabled: false,
+            project_pull_enabled: true,
             project_pull_interval_secs: 3600,
             pr_review_labels: default_pr_review_labels(),
             fetch_before_create: true,
