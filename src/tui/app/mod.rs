@@ -845,7 +845,8 @@ impl App {
                                 // switcher can sort Alt+Tab-style by MRU.
                                 let to_stamp = current_session.clone();
                                 if let Err(e) = self
-                                    .service.store()
+                                    .service
+                                    .store()
                                     .mutate(move |state| {
                                         if let Some(session) = state
                                             .sessions
@@ -953,7 +954,8 @@ impl App {
                                         if is_claude_session && consecutive_ends < 3 {
                                             consecutive_ends += 1;
                                             match self
-                                                .service.session_manager()
+                                                .service
+                                                .session_manager()
                                                 .restart_session_fresh_by_tmux_name(
                                                     &current_session,
                                                 )

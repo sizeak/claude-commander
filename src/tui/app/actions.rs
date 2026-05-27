@@ -89,13 +89,19 @@ impl App {
         }
         if let Some(session_id) = self.ui_state.selected_session_id {
             info!("Getting attach command for session: {}", session_id);
-            match self.service.session_manager().get_attach_command(&session_id).await {
+            match self
+                .service
+                .session_manager()
+                .get_attach_command(&session_id)
+                .await
+            {
                 Ok(cmd) => {
                     info!("Got attach command: {}", cmd);
                     // Clear unread flag when attaching
                     let sid = session_id;
                     let _ = self
-                        .service.store()
+                        .service
+                        .store()
                         .mutate(move |state| {
                             if let Some(session) = state.get_session_mut(&sid) {
                                 session.unread = false;
@@ -125,7 +131,8 @@ impl App {
         }
         if let Some(session_id) = self.ui_state.selected_session_id {
             match self
-                .service.session_manager()
+                .service
+                .session_manager()
                 .get_shell_attach_command(&session_id)
                 .await
             {
@@ -141,7 +148,8 @@ impl App {
             }
         } else if let Some(project_id) = self.ui_state.selected_project_id {
             match self
-                .service.session_manager()
+                .service
+                .session_manager()
                 .get_project_shell_attach_command(&project_id)
                 .await
             {
@@ -172,7 +180,8 @@ impl App {
             let claude_name = current_tmux_name.trim_end_matches("-sh").to_string();
             // Verify the Claude session exists
             if self
-                .service.session_manager()
+                .service
+                .session_manager()
                 .tmux
                 .session_exists(&claude_name)
                 .await?
@@ -196,7 +205,8 @@ impl App {
 
         if let Some(session_id) = session_id {
             let shell_name = self
-                .service.session_manager()
+                .service
+                .session_manager()
                 .ensure_shell_session(&session_id)
                 .await?;
             return Ok(shell_name);
@@ -214,7 +224,8 @@ impl App {
 
         if let Some(project_id) = project_id {
             let shell_name = self
-                .service.session_manager()
+                .service
+                .session_manager()
                 .ensure_project_shell_session(&project_id)
                 .await?;
             return Ok(shell_name);
@@ -774,7 +785,8 @@ impl App {
         let title = branch_name.clone();
 
         let session_id = match self
-            .service.session_manager()
+            .service
+            .session_manager()
             .prepare_session(&project_id, title, None, Some(branch_name.clone()))
             .await
         {
@@ -1179,7 +1191,8 @@ impl App {
             })
         };
 
-        self.service.store()
+        self.service
+            .store()
             .mutate(move |state| {
                 state.remove_session(&session_id);
             })
@@ -1307,7 +1320,8 @@ impl App {
         let sections = self.config.sections.clone();
         let now = chrono::Utc::now();
         let _ = self
-            .service.store()
+            .service
+            .store()
             .mutate(move |state| {
                 if let Some(session) = state.get_session_mut(&session_id) {
                     session.section_override = target;
@@ -1356,7 +1370,8 @@ impl App {
                 // Insert placeholder session immediately (no blocking modal)
                 self.ui_state.modal = Modal::None;
                 let session_id = match self
-                    .service.session_manager()
+                    .service
+                    .session_manager()
                     .prepare_session(&project_id, value, None, None)
                     .await
                 {
@@ -1420,7 +1435,8 @@ impl App {
                 // Insert placeholder session immediately (no blocking modal)
                 self.ui_state.modal = Modal::None;
                 let session_id = match self
-                    .service.session_manager()
+                    .service
+                    .session_manager()
                     .prepare_session(&project_id, value, None, None)
                     .await
                 {
@@ -1438,7 +1454,8 @@ impl App {
                 // from the parent's branch and to inject the PR-base context
                 // into the Claude launch command.
                 if let Err(e) = self
-                    .service.store()
+                    .service
+                    .store()
                     .mutate(move |state| {
                         if let Some(s) = state.get_session_mut(&session_id) {
                             s.stack_parent_session_id = Some(parent_session_id);
@@ -1528,7 +1545,8 @@ impl App {
                     return;
                 }
                 let _ = self
-                    .service.store()
+                    .service
+                    .store()
                     .mutate(move |state| {
                         if let Some(session) = state.get_session_mut(&session_id) {
                             session.title = new_title;
@@ -1657,7 +1675,12 @@ impl App {
                 }
             }
             ConfirmAction::RestartSession { session_id } => {
-                match self.service.session_manager().restart_session(&session_id).await {
+                match self
+                    .service
+                    .session_manager()
+                    .restart_session(&session_id)
+                    .await
+                {
                     Ok(_) => {
                         self.ui_state.status_message = Some((
                             "Session restarted".to_string(),
@@ -1698,7 +1721,8 @@ impl App {
 
                 // 2. Remove from state immediately so the UI updates
                 if let Err(e) = self
-                    .service.store()
+                    .service
+                    .store()
                     .mutate(move |state| {
                         state.remove_project(&project_id);
                     })

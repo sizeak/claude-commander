@@ -58,7 +58,8 @@ impl App {
                 let sections = self.config.sections.clone();
                 let now = chrono::Utc::now();
                 let _ = self
-                    .service.store()
+                    .service
+                    .store()
                     .mutate(move |state| {
                         for (session_id, result) in &results {
                             let Some(session) = state.get_session_mut(session_id) else {
@@ -109,8 +110,12 @@ impl App {
                     let state = self.service.store().read().await;
                     for session in state.sessions.values() {
                         if session.status == SessionStatus::Running {
-                            let info = self.service.session_manager().status_bar_info(session, &state);
-                            self.service.session_manager()
+                            let info = self
+                                .service
+                                .session_manager()
+                                .status_bar_info(session, &state);
+                            self.service
+                                .session_manager()
                                 .tmux
                                 .configure_status_bar(&session.tmux_session_name, &info)
                                 .await;
@@ -172,7 +177,8 @@ impl App {
             } => {
                 debug!("Session creation failed: {}", message);
                 let _ = self
-                    .service.session_manager()
+                    .service
+                    .session_manager()
                     .remove_creating_session(&session_id)
                     .await;
                 self.refresh_list_items().await;
@@ -190,7 +196,8 @@ impl App {
                 }
                 if !unread_ids.is_empty() {
                     let _ = self
-                        .service.store()
+                        .service
+                        .store()
                         .mutate(move |state| {
                             for sid in &unread_ids {
                                 if let Some(session) = state.get_session_mut(sid) {
@@ -321,7 +328,8 @@ impl App {
                 creating_ids.len()
             );
             let _ = self
-                .service.store()
+                .service
+                .store()
                 .mutate(move |state| {
                     for sid in &creating_ids {
                         state.remove_session(sid);
@@ -357,7 +365,8 @@ impl App {
                 stale_ids.len()
             );
             let _ = self
-                .service.store()
+                .service
+                .store()
                 .mutate(move |state| {
                     for sid in &stale_ids {
                         if let Some(session) = state.get_session_mut(sid) {
@@ -385,28 +394,40 @@ impl App {
         };
 
         for (session_id, tmux_name) in session_ids {
-            let should_mark_stopped =
-                if let Ok(exists) = self.service.session_manager().tmux.session_exists(&tmux_name).await {
-                    if !exists {
-                        true
-                    } else {
-                        // Session exists, but check if pane is dead (program exited)
-                        self.service.session_manager()
-                            .tmux
-                            .is_pane_dead(&tmux_name)
-                            .await
-                            .unwrap_or(false)
-                    }
+            let should_mark_stopped = if let Ok(exists) = self
+                .service
+                .session_manager()
+                .tmux
+                .session_exists(&tmux_name)
+                .await
+            {
+                if !exists {
+                    true
                 } else {
-                    false
-                };
+                    // Session exists, but check if pane is dead (program exited)
+                    self.service
+                        .session_manager()
+                        .tmux
+                        .is_pane_dead(&tmux_name)
+                        .await
+                        .unwrap_or(false)
+                }
+            } else {
+                false
+            };
 
             if should_mark_stopped {
                 // Kill the tmux session if it exists but pane is dead
-                let _ = self.service.session_manager().tmux.kill_session(&tmux_name).await;
+                let _ = self
+                    .service
+                    .session_manager()
+                    .tmux
+                    .kill_session(&tmux_name)
+                    .await;
 
                 let _ = self
-                    .service.store()
+                    .service
+                    .store()
                     .mutate(move |state| {
                         if let Some(session) = state.get_session_mut(&session_id) {
                             session.set_status(SessionStatus::Stopped);
@@ -422,7 +443,12 @@ impl App {
             state.projects.keys().copied().collect()
         };
         for project_id in project_ids {
-            if let Err(e) = self.service.session_manager().sync_worktrees(&project_id).await {
+            if let Err(e) = self
+                .service
+                .session_manager()
+                .sync_worktrees(&project_id)
+                .await
+            {
                 debug!("Failed to sync worktrees for project {}: {}", project_id, e);
             }
         }
@@ -435,7 +461,8 @@ impl App {
         let sections = self.config.sections.clone();
         let now = chrono::Utc::now();
         let _ = self
-            .service.store()
+            .service
+            .store()
             .mutate(move |state| {
                 if sections.is_empty()
                     && state.sessions.values().all(|s| s.current_section.is_none())
@@ -458,7 +485,8 @@ impl App {
         let sections = self.config.sections.clone();
         let now = chrono::Utc::now();
         let _ = self
-            .service.store()
+            .service
+            .store()
             .mutate(move |state| {
                 if let Some(session) = state.get_session_mut(&session_id) {
                     crate::session::apply_assignment(session, &sections, now);
@@ -545,7 +573,8 @@ impl App {
         let session_id = self.ui_state.selected_session_id;
         let project_id = self.ui_state.selected_project_id;
         let _ = self
-            .service.store()
+            .service
+            .store()
             .mutate(move |state| {
                 state.last_selected_session = session_id;
                 state.last_selected_project = project_id;
@@ -557,7 +586,8 @@ impl App {
     pub(super) async fn save_left_pane_pct(&self) {
         let pct = self.ui_state.left_pane_pct;
         let _ = self
-            .service.store()
+            .service
+            .store()
             .mutate(move |state| {
                 state.left_pane_pct = Some(pct);
             })
