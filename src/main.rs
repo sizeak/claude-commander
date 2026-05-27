@@ -58,6 +58,16 @@ enum Commands {
         json: bool,
     },
 
+    /// Dump recent terminal output from a session
+    Log {
+        /// Session name or ID prefix
+        session: String,
+
+        /// Number of scrollback lines to capture (default: 100, max: 10000)
+        #[arg(short, long, default_value_t = 100)]
+        lines: usize,
+    },
+
     /// Create a new session
     New {
         /// Session name
@@ -369,6 +379,68 @@ async fn main() -> Result<()> {
                 println!("{}", serde_json::to_string_pretty(&entry)?);
             } else {
                 println!("{}", claude_commander::cli::format_status_human(&entry));
+            }
+        }
+
+        Some(Commands::Log { session, lines }) => {
+            setup_logging(cli.debug, false)?;
+
+            let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
+
+            let found = match claude_commander::cli::find_session(&app_state, &session) {
+                Some(s) => s,
+                None => {
+                    eprintln!("Session not found: {}", session);
+                    eprintln!("Use 'claude-commander list' to see available sessions.");
+                    std::process::exit(1);
+                }
+            };
+
+            let lines = claude_commander::cli::clamp_log_lines(lines);
+            let executor = claude_commander::tmux::TmuxExecutor::new();
+
+            // Check the live tmux session rather than the persisted status,
+            // which can be stale (e.g. a session marked Stopped may still have a
+            // live pane, or a Running one whose pane has since died).
+            match executor.session_exists(&found.tmux_session_name).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    eprintln!(
+                        "Session '{}' has no live tmux session to capture from.",
+                        found.title
+                    );
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("Failed to query tmux: {}", e);
+                    std::process::exit(1);
+                }
+            }
+
+            match executor
+                .execute(&[
+                    "capture-pane",
+                    "-t",
+                    &found.tmux_session_name,
+                    "-p",
+                    "-S",
+                    &format!("-{}", lines),
+                ])
+                .await
+            {
+                Ok(content) => {
+                    // capture-pane output is not guaranteed to end in a newline;
+                    // ensure one so the shell prompt doesn't glue to the last line.
+                    if content.ends_with('\n') {
+                        print!("{}", content);
+                    } else {
+                        println!("{}", content);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Failed to capture pane: {}", e);
+                    std::process::exit(1);
+                }
             }
         }
 
