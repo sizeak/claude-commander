@@ -58,7 +58,7 @@ impl App {
                 let sections = self.config.sections.clone();
                 let now = chrono::Utc::now();
                 let _ = self
-                    .store
+                    .service.store()
                     .mutate(move |state| {
                         for (session_id, result) in &results {
                             let Some(session) = state.get_session_mut(session_id) else {
@@ -106,11 +106,11 @@ impl App {
 
                 // Update tmux status bars for running sessions with PR info
                 {
-                    let state = self.store.read().await;
+                    let state = self.service.store().read().await;
                     for session in state.sessions.values() {
                         if session.status == SessionStatus::Running {
-                            let info = self.session_manager.status_bar_info(session, &state);
-                            self.session_manager
+                            let info = self.service.session_manager().status_bar_info(session, &state);
+                            self.service.session_manager()
                                 .tmux
                                 .configure_status_bar(&session.tmux_session_name, &info)
                                 .await;
@@ -172,7 +172,7 @@ impl App {
             } => {
                 debug!("Session creation failed: {}", message);
                 let _ = self
-                    .session_manager
+                    .service.session_manager()
                     .remove_creating_session(&session_id)
                     .await;
                 self.refresh_list_items().await;
@@ -190,7 +190,7 @@ impl App {
                 }
                 if !unread_ids.is_empty() {
                     let _ = self
-                        .store
+                        .service.store()
                         .mutate(move |state| {
                             for sid in &unread_ids {
                                 if let Some(session) = state.get_session_mut(sid) {
@@ -306,7 +306,7 @@ impl App {
 
     pub(super) async fn cleanup_stale_creating_sessions(&self) {
         let creating_ids: Vec<SessionId> = {
-            let state = self.store.read().await;
+            let state = self.service.store().read().await;
             state
                 .sessions
                 .values()
@@ -321,7 +321,7 @@ impl App {
                 creating_ids.len()
             );
             let _ = self
-                .store
+                .service.store()
                 .mutate(move |state| {
                     for sid in &creating_ids {
                         state.remove_session(sid);
@@ -342,7 +342,7 @@ impl App {
     /// `cascade_paused_at`.
     pub(super) async fn cleanup_stale_merging_sessions(&self) {
         let stale_ids: Vec<SessionId> = {
-            let state = self.store.read().await;
+            let state = self.service.store().read().await;
             state
                 .sessions
                 .values()
@@ -357,7 +357,7 @@ impl App {
                 stale_ids.len()
             );
             let _ = self
-                .store
+                .service.store()
                 .mutate(move |state| {
                     for sid in &stale_ids {
                         if let Some(session) = state.get_session_mut(sid) {
@@ -375,7 +375,7 @@ impl App {
     /// if the corresponding tmux session no longer exists or the pane is dead.
     pub(super) async fn sync_session_states(&self) {
         let session_ids: Vec<(SessionId, String)> = {
-            let state = self.store.read().await;
+            let state = self.service.store().read().await;
             state
                 .sessions
                 .values()
@@ -386,12 +386,12 @@ impl App {
 
         for (session_id, tmux_name) in session_ids {
             let should_mark_stopped =
-                if let Ok(exists) = self.session_manager.tmux.session_exists(&tmux_name).await {
+                if let Ok(exists) = self.service.session_manager().tmux.session_exists(&tmux_name).await {
                     if !exists {
                         true
                     } else {
                         // Session exists, but check if pane is dead (program exited)
-                        self.session_manager
+                        self.service.session_manager()
                             .tmux
                             .is_pane_dead(&tmux_name)
                             .await
@@ -403,10 +403,10 @@ impl App {
 
             if should_mark_stopped {
                 // Kill the tmux session if it exists but pane is dead
-                let _ = self.session_manager.tmux.kill_session(&tmux_name).await;
+                let _ = self.service.session_manager().tmux.kill_session(&tmux_name).await;
 
                 let _ = self
-                    .store
+                    .service.store()
                     .mutate(move |state| {
                         if let Some(session) = state.get_session_mut(&session_id) {
                             session.set_status(SessionStatus::Stopped);
@@ -418,11 +418,11 @@ impl App {
 
         // Sync unmanaged worktrees for all projects
         let project_ids: Vec<ProjectId> = {
-            let state = self.store.read().await;
+            let state = self.service.store().read().await;
             state.projects.keys().copied().collect()
         };
         for project_id in project_ids {
-            if let Err(e) = self.session_manager.sync_worktrees(&project_id).await {
+            if let Err(e) = self.service.session_manager().sync_worktrees(&project_id).await {
                 debug!("Failed to sync worktrees for project {}: {}", project_id, e);
             }
         }
@@ -435,7 +435,7 @@ impl App {
         let sections = self.config.sections.clone();
         let now = chrono::Utc::now();
         let _ = self
-            .store
+            .service.store()
             .mutate(move |state| {
                 if sections.is_empty()
                     && state.sessions.values().all(|s| s.current_section.is_none())
@@ -458,7 +458,7 @@ impl App {
         let sections = self.config.sections.clone();
         let now = chrono::Utc::now();
         let _ = self
-            .store
+            .service.store()
             .mutate(move |state| {
                 if let Some(session) = state.get_session_mut(&session_id) {
                     crate::session::apply_assignment(session, &sections, now);
@@ -474,7 +474,7 @@ impl App {
             self.ui_state.view_mode = ViewMode::ProjectGrouped;
         }
 
-        let state = self.store.read().await;
+        let state = self.service.store().read().await;
 
         let items = match self.ui_state.view_mode {
             ViewMode::ProjectGrouped => {
@@ -545,7 +545,7 @@ impl App {
         let session_id = self.ui_state.selected_session_id;
         let project_id = self.ui_state.selected_project_id;
         let _ = self
-            .store
+            .service.store()
             .mutate(move |state| {
                 state.last_selected_session = session_id;
                 state.last_selected_project = project_id;
@@ -557,7 +557,7 @@ impl App {
     pub(super) async fn save_left_pane_pct(&self) {
         let pct = self.ui_state.left_pane_pct;
         let _ = self
-            .store
+            .service.store()
             .mutate(move |state| {
                 state.left_pane_pct = Some(pct);
             })
@@ -567,7 +567,7 @@ impl App {
     /// Restore selection and UI preferences from persisted state
     pub(super) async fn restore_selection(&mut self) {
         let (last_session, last_project, left_pane_pct) = {
-            let state = self.store.read().await;
+            let state = self.service.store().read().await;
             (
                 state.last_selected_session,
                 state.last_selected_project,
