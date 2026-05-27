@@ -2,10 +2,6 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-## Interaction rules
-
-- When asking the user a yes/no or confirmation question, do not proceed until receiving an explicit affirmative. If the user responds with feedback or refinements without confirming, incorporate their input and re-ask.
-
 ## Commands
 
 - `cargo build` — debug build
