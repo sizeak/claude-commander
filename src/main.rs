@@ -413,20 +413,10 @@ async fn main() -> Result<()> {
 
             let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
 
-            // Find session by name or ID prefix
-            let tmux_name = app_state
-                .sessions
-                .iter()
-                .find(|(id, s)| {
-                    s.title.to_lowercase() == session.to_lowercase()
-                        || id.to_string().starts_with(&session)
-                })
-                .map(|(_, s)| s.tmux_session_name.clone());
-
-            match tmux_name {
-                Some(name) => {
+            match claude_commander::cli::find_session(&app_state, &session) {
+                Some(s) => {
                     let triggers = claude_commander::editor_trigger_bytes(&config.keybindings);
-                    execute_attach(&name, triggers).await;
+                    execute_attach(&s.tmux_session_name, triggers).await;
                 }
                 None => {
                     eprintln!("Session not found: {}", session);
