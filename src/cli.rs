@@ -60,6 +60,23 @@ pub struct SessionJsonEntry {
 }
 
 impl SessionJsonEntry {
+    pub fn from_info(info: &crate::api::SessionInfo) -> Self {
+        Self {
+            id: info.id.clone(),
+            title: info.title.clone(),
+            branch: info.branch.clone(),
+            status: info.status.to_string(),
+            program: info.program.clone(),
+            project_name: info.project_name.clone(),
+            pr_number: info.pr_number,
+            pr_url: info.pr_url.clone(),
+            pr_state: info.pr_state,
+            pr_draft: info.pr_draft,
+            pr_labels: info.pr_labels.clone(),
+            created_at: info.created_at,
+        }
+    }
+
     pub fn from_session(session: &WorktreeSession, project_name: &str) -> Self {
         Self {
             id: session.id.as_uuid().to_string(),
@@ -116,6 +133,28 @@ pub struct StatusJsonEntry {
 }
 
 impl StatusJsonEntry {
+    pub fn from_detail(detail: &crate::api::SessionDetail) -> Self {
+        let info = &detail.info;
+        Self {
+            id: info.id.clone(),
+            title: info.title.clone(),
+            branch: info.branch.clone(),
+            status: info.status.to_string(),
+            program: info.program.clone(),
+            project_name: info.project_name.clone(),
+            agent_state: detail.agent_state.to_string(),
+            diff_stat: detail.diff_stat.clone(),
+            pr_number: info.pr_number,
+            pr_url: info.pr_url.clone(),
+            pr_state: info.pr_state,
+            pr_draft: info.pr_draft,
+            pr_labels: info.pr_labels.clone(),
+            review_decision: info.review_decision,
+            pr_reviewers: info.pr_reviewers.clone(),
+            created_at: info.created_at,
+        }
+    }
+
     pub fn from_session(
         session: &WorktreeSession,
         project_name: &str,

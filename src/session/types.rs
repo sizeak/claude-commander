@@ -141,7 +141,8 @@ impl fmt::Display for SessionStatus {
 
 /// Sub-state of a Running Claude Code session, detected via pane content parsing.
 /// This is ephemeral (not persisted) and only meaningful when SessionStatus == Running.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentState {
     /// Claude is actively generating output
     Working,
