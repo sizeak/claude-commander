@@ -40,19 +40,25 @@ pub enum PullAction {
     SkipDirty,
     /// Local has commits not on the remote (or histories have diverged).
     SkipDiverged,
+    /// Local branch is checked out in a *different* worktree. `git update-ref`
+    /// has no in-use safety check, so advancing the ref would leave that
+    /// worktree's index and `git status` stale — skip instead.
+    SkipWorktreeConflict,
 }
 
 impl PullAction {
     /// Whether this outcome should surface the "blocked" badge on the project row.
     pub fn is_blocked(self) -> bool {
-        matches!(self, PullAction::SkipDirty | PullAction::SkipDiverged)
+        self.block_reason().is_some()
     }
 
-    /// Short human-friendly reason for the "blocked" Info-pane line.
-    pub fn block_reason(self) -> Option<&'static str> {
+    /// The block reason this action maps to, if any. Single source of truth
+    /// for the user-visible string (shared with [`BlockReason`]).
+    pub fn block_reason(self) -> Option<BlockReason> {
         match self {
-            PullAction::SkipDirty => Some("Working tree dirty"),
-            PullAction::SkipDiverged => Some("Branch diverged from origin"),
+            PullAction::SkipDirty => Some(BlockReason::Dirty),
+            PullAction::SkipDiverged => Some(BlockReason::Diverged),
+            PullAction::SkipWorktreeConflict => Some(BlockReason::WorktreeConflict),
             _ => None,
         }
     }
@@ -62,6 +68,7 @@ impl PullAction {
 pub fn decide_pull_action(
     relation: BranchRelation,
     checked_out_at_repo_path: bool,
+    checked_out_elsewhere: bool,
     worktree_dirty: bool,
 ) -> PullAction {
     match relation {
@@ -74,6 +81,8 @@ pub fn decide_pull_action(
                 } else {
                     PullAction::FastForwardCheckout
                 }
+            } else if checked_out_elsewhere {
+                PullAction::SkipWorktreeConflict
             } else {
                 PullAction::FastForwardRef
             }
@@ -99,6 +108,7 @@ pub enum PullOutcome {
 pub enum BlockReason {
     Dirty,
     Diverged,
+    WorktreeConflict,
 }
 
 impl BlockReason {
@@ -106,6 +116,7 @@ impl BlockReason {
         match self {
             BlockReason::Dirty => "Working tree dirty",
             BlockReason::Diverged => "Branch diverged from origin",
+            BlockReason::WorktreeConflict => "Checked out in another worktree",
         }
     }
 }
@@ -145,17 +156,25 @@ pub async fn run_project_pull(repo_path: &Path, main_branch: &str) -> PullOutcom
 
     let relation = classify_relation(repo_path, &local_sha, &origin_sha).await;
     let checked_out = head_is_branch(repo_path, main_branch).await;
-    let dirty = if checked_out && relation == BranchRelation::LocalBehind {
+    // Only the FF-relevant `LocalBehind` case needs the extra git probes.
+    let behind = relation == BranchRelation::LocalBehind;
+    let dirty = if behind && checked_out {
         worktree_is_dirty(repo_path).await
     } else {
         false
     };
+    let checked_out_elsewhere = if behind && !checked_out {
+        branch_checked_out_in_worktree(repo_path, main_branch).await
+    } else {
+        false
+    };
 
-    let action = decide_pull_action(relation, checked_out, dirty);
+    let action = decide_pull_action(relation, checked_out, checked_out_elsewhere, dirty);
+    if let Some(reason) = action.block_reason() {
+        return PullOutcome::Blocked(reason);
+    }
     match action {
         PullAction::UpToDate => PullOutcome::UpToDate,
-        PullAction::SkipDirty => PullOutcome::Blocked(BlockReason::Dirty),
-        PullAction::SkipDiverged => PullOutcome::Blocked(BlockReason::Diverged),
         PullAction::FastForwardRef => {
             if update_ref(repo_path, main_branch, &origin_sha).await {
                 PullOutcome::Advanced
@@ -169,6 +188,10 @@ pub async fn run_project_pull(repo_path: &Path, main_branch: &str) -> PullOutcom
             } else {
                 PullOutcome::SoftFail
             }
+        }
+        // Blocked variants are returned above via `block_reason`.
+        PullAction::SkipDirty | PullAction::SkipDiverged | PullAction::SkipWorktreeConflict => {
+            unreachable!("blocked actions handled by early return")
         }
     }
 }
@@ -248,6 +271,38 @@ async fn head_is_branch(repo_path: &Path, main_branch: &str) -> bool {
     }
 }
 
+/// Whether `<main>` is checked out in any worktree linked to this repo.
+/// Used to avoid `git update-ref`-ing a branch that another worktree has
+/// checked out (which would leave that worktree's index/status stale).
+/// On any git error we fail *closed* (assume a conflict) so we never move a
+/// ref we're unsure about.
+async fn branch_checked_out_in_worktree(repo_path: &Path, main_branch: &str) -> bool {
+    let out = Command::new("git")
+        .current_dir(repo_path)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+        .await;
+    match out {
+        Ok(o) if o.status.success() => {
+            let target = format!("branch refs/heads/{main_branch}");
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .any(|line| line.trim_end() == target)
+        }
+        Ok(o) => {
+            debug!(
+                "auto_pull: git worktree list failed: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            true
+        }
+        Err(e) => {
+            debug!("auto_pull: git worktree list failed to spawn: {}", e);
+            true
+        }
+    }
+}
+
 async fn worktree_is_dirty(repo_path: &Path) -> bool {
     let out = Command::new("git")
         .current_dir(repo_path)
@@ -322,20 +377,22 @@ mod decision_tests {
 
     #[test]
     fn up_to_date_is_no_op() {
-        let a = decide_pull_action(BranchRelation::UpToDate, false, false);
+        let a = decide_pull_action(BranchRelation::UpToDate, false, false, false);
         assert_eq!(a, PullAction::UpToDate);
-        let a = decide_pull_action(BranchRelation::UpToDate, true, true);
+        let a = decide_pull_action(BranchRelation::UpToDate, true, true, true);
         assert_eq!(a, PullAction::UpToDate);
     }
 
     #[test]
     fn diverged_always_skips() {
         for &co in &[true, false] {
-            for &dirty in &[true, false] {
-                assert_eq!(
-                    decide_pull_action(BranchRelation::Diverged, co, dirty),
-                    PullAction::SkipDiverged
-                );
+            for &elsewhere in &[true, false] {
+                for &dirty in &[true, false] {
+                    assert_eq!(
+                        decide_pull_action(BranchRelation::Diverged, co, elsewhere, dirty),
+                        PullAction::SkipDiverged
+                    );
+                }
             }
         }
     }
@@ -343,20 +400,44 @@ mod decision_tests {
     #[test]
     fn behind_and_not_checked_out_uses_ref_update() {
         assert_eq!(
-            decide_pull_action(BranchRelation::LocalBehind, false, false),
+            decide_pull_action(BranchRelation::LocalBehind, false, false, false),
             PullAction::FastForwardRef
         );
-        // Dirty is irrelevant when main isn't the active checkout.
+        // Dirty is irrelevant when main isn't the active checkout here.
         assert_eq!(
-            decide_pull_action(BranchRelation::LocalBehind, false, true),
+            decide_pull_action(BranchRelation::LocalBehind, false, false, true),
             PullAction::FastForwardRef
+        );
+    }
+
+    #[test]
+    fn behind_and_checked_out_elsewhere_skips() {
+        // Main is checked out in another worktree: a ref update would
+        // desync that worktree, so we must skip rather than fast-forward.
+        assert_eq!(
+            decide_pull_action(BranchRelation::LocalBehind, false, true, false),
+            PullAction::SkipWorktreeConflict
+        );
+        assert_eq!(
+            decide_pull_action(BranchRelation::LocalBehind, false, true, true),
+            PullAction::SkipWorktreeConflict
+        );
+    }
+
+    #[test]
+    fn behind_and_checked_out_here_ignores_elsewhere() {
+        // When main is the active checkout at repo_path, the merge path is
+        // taken regardless of any other worktree claim.
+        assert_eq!(
+            decide_pull_action(BranchRelation::LocalBehind, true, true, false),
+            PullAction::FastForwardCheckout
         );
     }
 
     #[test]
     fn behind_and_checked_out_clean_merges() {
         assert_eq!(
-            decide_pull_action(BranchRelation::LocalBehind, true, false),
+            decide_pull_action(BranchRelation::LocalBehind, true, false, false),
             PullAction::FastForwardCheckout
         );
     }
@@ -364,7 +445,7 @@ mod decision_tests {
     #[test]
     fn behind_and_checked_out_dirty_skips() {
         assert_eq!(
-            decide_pull_action(BranchRelation::LocalBehind, true, true),
+            decide_pull_action(BranchRelation::LocalBehind, true, false, true),
             PullAction::SkipDirty
         );
     }
@@ -373,20 +454,25 @@ mod decision_tests {
     fn is_blocked_matches_skip_variants() {
         assert!(PullAction::SkipDirty.is_blocked());
         assert!(PullAction::SkipDiverged.is_blocked());
+        assert!(PullAction::SkipWorktreeConflict.is_blocked());
         assert!(!PullAction::UpToDate.is_blocked());
         assert!(!PullAction::FastForwardRef.is_blocked());
         assert!(!PullAction::FastForwardCheckout.is_blocked());
     }
 
     #[test]
-    fn block_reason_strings() {
+    fn block_reason_maps_to_block_reason_enum() {
         assert_eq!(
             PullAction::SkipDirty.block_reason(),
-            Some("Working tree dirty")
+            Some(BlockReason::Dirty)
         );
         assert_eq!(
             PullAction::SkipDiverged.block_reason(),
-            Some("Branch diverged from origin")
+            Some(BlockReason::Diverged)
+        );
+        assert_eq!(
+            PullAction::SkipWorktreeConflict.block_reason(),
+            Some(BlockReason::WorktreeConflict)
         );
         assert_eq!(PullAction::FastForwardRef.block_reason(), None);
     }
@@ -575,5 +661,27 @@ mod executor_tests {
 
         let outcome = run_project_pull(&local, "main").await;
         assert_eq!(outcome, PullOutcome::SoftFail);
+    }
+
+    #[tokio::test]
+    async fn pull_blocks_when_main_checked_out_in_other_worktree() {
+        let (tmp, remote, local) = setup_origin_and_local();
+        // Move `local` off main, then link a second worktree that checks out
+        // main. `update-ref` on main would now desync that worktree.
+        git(&local, &["checkout", "-b", "parking"]);
+        let wt_main = tmp.path().join("wt-main");
+        git(
+            &local,
+            &["worktree", "add", wt_main.to_str().unwrap(), "main"],
+        );
+        advance_remote_by_one(&remote);
+
+        let outcome = run_project_pull(&local, "main").await;
+        assert_eq!(outcome, PullOutcome::Blocked(BlockReason::WorktreeConflict));
+
+        // Local main ref must NOT have moved — the other worktree still owns it.
+        let local_main = git_capture(&local, &["rev-parse", "refs/heads/main"]);
+        let origin_main = git_capture(&local, &["rev-parse", "refs/remotes/origin/main"]);
+        assert_ne!(local_main, origin_main);
     }
 }

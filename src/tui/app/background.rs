@@ -185,6 +185,18 @@ impl App {
         }
 
         let interval = Duration::from_secs(self.config.project_pull_interval_secs);
+
+        // Cheap global throttle: a project can become due at most once per
+        // `interval`, so sweeping the project list (state lock + clone) more
+        // often than that on every render tick is wasted work. The per-project
+        // `last_project_pull` cadence still governs which projects actually run.
+        if let Some(last) = self.ui_state.last_project_pull_sweep
+            && last.elapsed() < interval
+        {
+            return;
+        }
+        self.ui_state.last_project_pull_sweep = Some(Instant::now());
+
         let projects: Vec<(ProjectId, std::path::PathBuf, String)> = {
             let state = self.store.read().await;
             state

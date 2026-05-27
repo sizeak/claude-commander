@@ -276,8 +276,9 @@ pr_check_interval_secs = 120
 # When enabled, runs `git fetch origin <main>` and advances the local
 # `<main>` ref whenever a fast-forward is possible. If `<main>` is the
 # currently checked-out branch in the project repo, `git merge --ff-only`
-# is used when the working tree is clean; otherwise the pull is held
-# back and the project row shows a ⚠ badge.
+# is used when the working tree is clean. The pull is held back (and the
+# project row shows a ⚠ badge) when the working tree is dirty, the branch
+# has diverged from origin, or `<main>` is checked out in another worktree.
 # Default: disabled.
 project_pull_enabled = false
 

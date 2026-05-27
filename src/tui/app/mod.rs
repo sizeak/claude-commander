@@ -506,6 +506,10 @@ pub struct AppUiState {
     /// When the app launched. Used to give the background pull task a short
     /// grace period before its first fire after startup.
     pub started_at: Instant,
+    /// When the project-pull scheduler last swept the project list. A cheap
+    /// global throttle so the per-tick check doesn't acquire the state lock
+    /// and clone the project list on every render frame.
+    pub last_project_pull_sweep: Option<Instant>,
 }
 
 impl Default for AppUiState {
@@ -550,6 +554,7 @@ impl Default for AppUiState {
             project_pull_blocked: HashMap::new(),
             project_pull_in_flight: std::collections::HashSet::new(),
             started_at: Instant::now(),
+            last_project_pull_sweep: None,
         }
     }
 }
