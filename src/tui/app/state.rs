@@ -179,8 +179,7 @@ impl App {
                 self.ui_state.modal = Modal::Error { message };
             }
             StateUpdate::AgentStatesUpdated { states } => {
-                let unread_ids =
-                    detect_unread_transitions(&self.ui_state.agent_states, &states);
+                let unread_ids = detect_unread_transitions(&self.ui_state.agent_states, &states);
                 if !unread_ids.is_empty() {
                     let _ = self
                         .store
