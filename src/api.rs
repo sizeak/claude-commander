@@ -78,11 +78,7 @@ pub trait Commander {
         query: &str,
         lines: Option<usize>,
     ) -> Result<Option<SessionDetail>>;
-    async fn get_pane_content(
-        &self,
-        query: &str,
-        lines: Option<usize>,
-    ) -> Result<Option<String>>;
+    async fn get_pane_content(&self, query: &str, lines: Option<usize>) -> Result<Option<String>>;
     async fn check_tmux(&self) -> Result<()>;
     async fn create_session(&self, opts: CreateSessionOpts) -> Result<SessionId>;
     async fn ensure_project(&self, path: PathBuf) -> Result<ProjectId>;
@@ -164,11 +160,7 @@ impl Commander for CommanderService {
         }))
     }
 
-    async fn get_pane_content(
-        &self,
-        query: &str,
-        lines: Option<usize>,
-    ) -> Result<Option<String>> {
+    async fn get_pane_content(&self, query: &str, lines: Option<usize>) -> Result<Option<String>> {
         let state = self.store.read().await;
         let Some(session) = crate::cli::find_session(&state, query) else {
             return Ok(None);
@@ -686,11 +678,7 @@ mod tests {
         fn update_config(&self, _config: Config) -> Result<()> {
             unimplemented!()
         }
-        fn status_bar_info(
-            &self,
-            _session: &WorktreeSession,
-            _state: &AppState,
-        ) -> StatusBarInfo {
+        fn status_bar_info(&self, _session: &WorktreeSession, _state: &AppState) -> StatusBarInfo {
             unimplemented!()
         }
     }
