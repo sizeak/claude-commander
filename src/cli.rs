@@ -653,8 +653,8 @@ mod tests {
 
     #[tokio::test]
     async fn run_list_json_emits_expected_session_fields() {
-        let mock = MockCommander::new()
-            .with_sessions(vec![info("fix-auth", SessionStatus::Running)]);
+        let mock =
+            MockCommander::new().with_sessions(vec![info("fix-auth", SessionStatus::Running)]);
         let out = run_list_json(&mock, false).await.unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
         let entry = &parsed[0];
@@ -675,7 +675,10 @@ mod tests {
     async fn run_status_json_includes_title() {
         let mock =
             MockCommander::new().with_sessions(vec![info("with-detail", SessionStatus::Running)]);
-        let out = run_status(&mock, "with-detail", true).await.unwrap().unwrap();
+        let out = run_status(&mock, "with-detail", true)
+            .await
+            .unwrap()
+            .unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(parsed["title"], "with-detail");
     }
@@ -684,7 +687,10 @@ mod tests {
     async fn run_status_human_output_does_not_start_with_brace() {
         let mock =
             MockCommander::new().with_sessions(vec![info("human-out", SessionStatus::Running)]);
-        let out = run_status(&mock, "human-out", false).await.unwrap().unwrap();
+        let out = run_status(&mock, "human-out", false)
+            .await
+            .unwrap()
+            .unwrap();
         // JSON output starts with '{'; the human formatter is plain key/value lines.
         assert!(!out.trim_start().starts_with('{'));
         assert!(out.contains("human-out"));

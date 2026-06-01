@@ -278,7 +278,10 @@ async fn main() -> Result<()> {
 
             if json {
                 let service = claude_commander::api::CommanderService::for_cli(config)?;
-                println!("{}", claude_commander::cli::run_list_json(&service, all).await?);
+                println!(
+                    "{}",
+                    claude_commander::cli::run_list_json(&service, all).await?
+                );
             } else {
                 let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
 

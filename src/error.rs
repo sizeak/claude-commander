@@ -303,8 +303,7 @@ mod tests {
 
     #[test]
     fn test_json_error_conversion() {
-        let json_err: serde_json::Error =
-            serde_json::from_str::<i32>("not a number").unwrap_err();
+        let json_err: serde_json::Error = serde_json::from_str::<i32>("not a number").unwrap_err();
         let top_err: Error = json_err.into();
         assert!(matches!(top_err, Error::Json(_)));
     }
