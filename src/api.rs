@@ -166,6 +166,17 @@ impl CommanderService {
             .prepare_session(&project_id, opts.title, Some(program), None)
             .await?;
 
+        if let Some(section) = &opts.section {
+            let section = section.clone();
+            self.store
+                .mutate(move |state| {
+                    if let Some(session) = state.sessions.get_mut(&session_id) {
+                        session.section_override = Some(section);
+                    }
+                })
+                .await?;
+        }
+
         let result = async {
             self.manager
                 .link_stack_parent_by_branch(&session_id, opts.base_branch.as_deref())
@@ -221,6 +232,7 @@ pub struct CreateSessionOpts {
     pub effort: Option<String>,
     pub mode: Option<String>,
     pub base_branch: Option<String>,
+    pub section: Option<String>,
 }
 
 impl CreateSessionOpts {
@@ -478,6 +490,7 @@ mod tests {
             effort: Some("high".to_string()),
             mode: None,
             base_branch: None,
+            section: None,
         };
         let err = opts.validate_program_flags("bash").unwrap_err();
         assert!(err.to_string().contains("--effort"));
@@ -493,6 +506,7 @@ mod tests {
             effort: None,
             mode: Some("auto".to_string()),
             base_branch: None,
+            section: None,
         };
         let err = opts.validate_program_flags("vim").unwrap_err();
         assert!(err.to_string().contains("--mode"));
@@ -508,6 +522,7 @@ mod tests {
             effort: Some("high".to_string()),
             mode: Some("auto".to_string()),
             base_branch: None,
+            section: None,
         };
         opts.validate_program_flags("claude").unwrap();
     }
@@ -522,6 +537,7 @@ mod tests {
             effort: None,
             mode: None,
             base_branch: None,
+            section: None,
         };
         opts.validate_program_flags("bash").unwrap();
     }
