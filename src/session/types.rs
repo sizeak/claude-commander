@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Unique identifier for a project (git repository)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ProjectId(Uuid);
 
 impl ProjectId {
@@ -41,7 +41,7 @@ impl fmt::Display for ProjectId {
 }
 
 /// Unique identifier for a worktree session
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct SessionId(Uuid);
 
 impl SessionId {
@@ -575,7 +575,7 @@ pub fn stack_chain_from_base(
 
 /// Represents an item in the hierarchical session list
 /// Used for UI display and navigation
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionListItem {
     /// A project header
     Project {

@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 ///   stacks indented under their parent. The default.
 /// * `SectionGrouped` — sessions bucketed by user-configured sections based
 ///   on each session's own PR state. Stacks may be split across sections.
-/// * `SectionGroupedWithStacks` — same section layout, but stacks are
+/// * `SectionStacks` — same section layout, but stacks are
 ///   grouped as a unit; the whole stack lands in the section chosen by
 ///   the newest leaf, and indentation is preserved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -22,17 +22,17 @@ pub enum ViewMode {
     #[default]
     ProjectGrouped,
     SectionGrouped,
-    SectionGroupedWithStacks,
+    SectionStacks,
 }
 
 impl ViewMode {
     /// Returns the next view in the cycle:
-    /// Project → Sections → Stacks → Project.
+    /// Project → Sections → Section Stacks → Project.
     pub fn next(self) -> Self {
         match self {
             Self::ProjectGrouped => Self::SectionGrouped,
-            Self::SectionGrouped => Self::SectionGroupedWithStacks,
-            Self::SectionGroupedWithStacks => Self::ProjectGrouped,
+            Self::SectionGrouped => Self::SectionStacks,
+            Self::SectionStacks => Self::ProjectGrouped,
         }
     }
 
@@ -42,7 +42,7 @@ impl ViewMode {
         match self {
             Self::ProjectGrouped => " Sessions [Project]:",
             Self::SectionGrouped => " Sessions [Sections]:",
-            Self::SectionGroupedWithStacks => " Sessions [Stacks]:",
+            Self::SectionStacks => " Sessions [Section Stacks]:",
         }
     }
 
@@ -51,6 +51,6 @@ impl ViewMode {
     /// no sections are configured, and to skip section modes in the cycle
     /// when sections are absent.
     pub fn is_section_view(self) -> bool {
-        matches!(self, Self::SectionGrouped | Self::SectionGroupedWithStacks)
+        matches!(self, Self::SectionGrouped | Self::SectionStacks)
     }
 }

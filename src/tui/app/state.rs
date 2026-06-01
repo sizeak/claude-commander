@@ -496,7 +496,7 @@ impl App {
         // config (hot-reload), fall back to ProjectGrouped.
         if matches!(
             self.ui_state.view_mode,
-            ViewMode::SectionGrouped | ViewMode::SectionGroupedWithStacks
+            ViewMode::SectionGrouped | ViewMode::SectionStacks
         ) && self.config.sections.is_empty()
         {
             self.ui_state.view_mode = ViewMode::ProjectGrouped;
@@ -514,7 +514,7 @@ impl App {
                 &self.ui_state.agent_states,
                 &self.ui_state.collapsed_sections,
             ),
-            ViewMode::SectionGroupedWithStacks => build_stacked_section_items(
+            ViewMode::SectionStacks => build_stacked_section_items(
                 &state,
                 &self.config.sections,
                 &self.ui_state.agent_states,
@@ -831,11 +831,19 @@ fn build_stacked_section_items(
     #[derive(Clone)]
     struct GroupRender {
         sort_key: DateTime<Utc>,
+        // Tiebreaker for groups whose leaves share an entered_section_at —
+        // common when one apply_assignment pass stamps multiple sessions
+        // with the same `now`. Without a stable tiebreaker, HashMap-
+        // randomised insertion order leaks into the sort and the UI
+        // appears to churn on every refresh.
+        leaf_id: SessionId,
         order: Vec<(SessionId, bool)>,
     }
 
+    // Stable project order. Ties on `name` (unusual but possible) fall
+    // back to project id so we never depend on HashMap iteration order.
     let mut projects: Vec<_> = state.projects.values().collect();
-    projects.sort_by(|a, b| a.name.cmp(&b.name));
+    projects.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
 
     // section_name → project_id → Vec<GroupRender>
     let mut by_section: std::collections::HashMap<
@@ -846,7 +854,10 @@ fn build_stacked_section_items(
         |name: &str| name == crate::session::IN_PROGRESS || sections.iter().any(|s| s.name == name);
 
     for project in &projects {
-        let project_sessions: Vec<&WorktreeSession> = state
+        // Sort by (created_at, id) so any downstream max_by_key on this
+        // slice (e.g. fan-out children with identical created_at in
+        // `stack_top`) picks a deterministic winner.
+        let mut project_sessions: Vec<&WorktreeSession> = state
             .sessions
             .values()
             .filter(|s| s.project_id == project.id)
@@ -854,16 +865,25 @@ fn build_stacked_section_items(
         if project_sessions.is_empty() {
             continue;
         }
+        project_sessions.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
 
-        // Bucket every session by its stack root (returns self for unstacked).
+        // Bucket every session by its stack root (returns self for
+        // unstacked). Track first-encounter root order so we iterate
+        // groups deterministically below without leaking
+        // HashMap-iteration order into the output.
         let mut groups: std::collections::HashMap<SessionId, Vec<&WorktreeSession>> =
             std::collections::HashMap::new();
+        let mut group_roots: Vec<SessionId> = Vec::new();
         for s in &project_sessions {
             let root_id = crate::session::stack_root(s.id, &project_sessions);
+            if !groups.contains_key(&root_id) {
+                group_roots.push(root_id);
+            }
             groups.entry(root_id).or_default().push(s);
         }
 
-        for (root_id, members) in groups {
+        for root_id in group_roots {
+            let members = groups.remove(&root_id).unwrap_or_default();
             // Pick the leaf in the whole subgraph; its section drives placement.
             let leaf_id = crate::session::stack_top(root_id, &project_sessions);
             let Some(leaf) = members.iter().find(|s| s.id == leaf_id).copied() else {
@@ -906,6 +926,7 @@ fn build_stacked_section_items(
                 .or_default()
                 .push(GroupRender {
                     sort_key: leaf.entered_section_at,
+                    leaf_id,
                     order,
                 });
         }
@@ -963,8 +984,11 @@ fn build_stacked_section_items(
             });
 
             // Stacks within a section sort by their leaf's
-            // entered_section_at — same source of truth as section choice.
-            groups_in_proj.sort_by_key(|g| g.sort_key);
+            // entered_section_at, with leaf_id as a stable tiebreaker so
+            // batched apply_assignment calls (which stamp many sessions
+            // with the same `now`) don't make the view churn.
+            groups_in_proj
+                .sort_by(|a, b| a.sort_key.cmp(&b.sort_key).then(a.leaf_id.cmp(&b.leaf_id)));
             for group in groups_in_proj {
                 for (sid, stacked_child) in group.order {
                     if let Some(session) = state.sessions.get(&sid) {
@@ -1454,6 +1478,53 @@ mod stack_order_tests {
             open_count, 3,
             "all three subgraph members should appear under Open: {items:?}"
         );
+    }
+
+    #[test]
+    fn stacked_sections_output_stable_across_repeated_calls_with_tied_timestamps() {
+        // Two stacks whose leaves both entered the section at the same
+        // instant (apply_assignment uses one `now` for the whole batch).
+        // Output must be deterministic between calls or the UI churns on
+        // every refresh.
+        let project_id = ProjectId::new();
+        let same_ts = Utc::now();
+        let mk = |title: &str, branch: &str| {
+            let mut s = make_session_in_section(title, branch, 0, "Open");
+            s.project_id = project_id;
+            s.entered_section_at = same_ts;
+            s
+        };
+        let mut base_a = mk("base-a", "base-a");
+        base_a.created_at = same_ts;
+        let mut child_a = mk("child-a", "child-a");
+        child_a.created_at = same_ts;
+        child_a.stack_parent_session_id = Some(base_a.id);
+        let mut base_b = mk("base-b", "base-b");
+        base_b.created_at = same_ts;
+        let mut child_b = mk("child-b", "child-b");
+        child_b.created_at = same_ts;
+        child_b.stack_parent_session_id = Some(base_b.id);
+
+        let state = appstate_from(vec![
+            base_a.clone(),
+            child_a.clone(),
+            base_b.clone(),
+            child_b.clone(),
+        ]);
+        let sections = vec![section_named("Open")];
+        let collapsed = std::collections::HashSet::new();
+
+        let first = build_stacked_section_items(&state, &sections, &HashMap::new(), &collapsed);
+        // Call many times — every iteration constructs fresh internal
+        // HashMaps with a new RandomState, so any non-determinism shows up
+        // here. 32 calls is well past the birthday-paradox threshold.
+        for _ in 0..32 {
+            let again = build_stacked_section_items(&state, &sections, &HashMap::new(), &collapsed);
+            assert_eq!(
+                again, first,
+                "build_stacked_section_items must produce identical output on every call"
+            );
+        }
     }
 
     #[test]

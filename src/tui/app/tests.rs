@@ -442,14 +442,8 @@ fn test_toggle_view_mode_always_available_in_palette() {
 #[test]
 fn test_view_mode_cycles_through_three_views() {
     assert_eq!(ViewMode::ProjectGrouped.next(), ViewMode::SectionGrouped);
-    assert_eq!(
-        ViewMode::SectionGrouped.next(),
-        ViewMode::SectionGroupedWithStacks
-    );
-    assert_eq!(
-        ViewMode::SectionGroupedWithStacks.next(),
-        ViewMode::ProjectGrouped
-    );
+    assert_eq!(ViewMode::SectionGrouped.next(), ViewMode::SectionStacks);
+    assert_eq!(ViewMode::SectionStacks.next(), ViewMode::ProjectGrouped);
 }
 
 #[test]
@@ -463,8 +457,8 @@ fn test_view_mode_heading_label() {
         " Sessions [Sections]:"
     );
     assert_eq!(
-        ViewMode::SectionGroupedWithStacks.heading_label(),
-        " Sessions [Stacks]:"
+        ViewMode::SectionStacks.heading_label(),
+        " Sessions [Section Stacks]:"
     );
 }
 

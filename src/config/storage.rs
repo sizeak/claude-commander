@@ -333,11 +333,11 @@ mod tests {
         let state_path = temp_dir.path().join("state.json");
 
         let mut state = AppState::new();
-        state.view_mode = Some(ViewMode::SectionGroupedWithStacks);
+        state.view_mode = Some(ViewMode::SectionStacks);
         state.save_to(&state_path).unwrap();
 
         let loaded = AppState::load_from(&state_path).unwrap();
-        assert_eq!(loaded.view_mode, Some(ViewMode::SectionGroupedWithStacks));
+        assert_eq!(loaded.view_mode, Some(ViewMode::SectionStacks));
     }
 
     #[test]
