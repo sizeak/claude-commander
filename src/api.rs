@@ -90,8 +90,7 @@ impl CommanderService {
         };
 
         let agent_state = if found.status.is_active() {
-            let mut detector =
-                AgentStateDetector::new(self.manager.tmux.clone(), Duration::ZERO);
+            let mut detector = AgentStateDetector::new(self.manager.tmux.clone(), Duration::ZERO);
             detector.detect(&found.tmux_session_name).await
         } else {
             AgentState::Unknown
