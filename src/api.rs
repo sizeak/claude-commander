@@ -1,6 +1,6 @@
 //! Commander API — unified service layer for CLI and TUI consumers.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,14 +8,14 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::config::{AppState, ConfigStore, StateStore};
+use crate::config::{AppState, Config, ConfigStore, StateStore};
 use crate::error::{Result, SessionError};
 use crate::git::{GitBackend, PrState, ReviewDecision, diff_stat_summary, effective_pr_state};
 use crate::session::{
-    AgentState, ProjectId, SessionId, SessionManager, SessionStatus, WorktreeSession,
+    AgentState, ProjectId, ScanResult, SessionId, SessionManager, SessionStatus, WorktreeSession,
     program_is_claude, program_with_claude_flags,
 };
-use crate::tmux::{AgentStateDetector, TmuxExecutor};
+use crate::tmux::{AgentStateDetector, StatusBarInfo, TmuxExecutor};
 use crate::tui::theme::Theme;
 
 /// High-level service that wraps `SessionManager`, state stores, and agent
@@ -86,9 +86,23 @@ pub trait Commander {
     async fn check_tmux(&self) -> Result<()>;
     async fn create_session(&self, opts: CreateSessionOpts) -> Result<SessionId>;
     async fn ensure_project(&self, path: PathBuf) -> Result<ProjectId>;
+    async fn add_project(&self, path: PathBuf) -> Result<ProjectId>;
+    async fn scan_directory(&self, dir: &Path) -> Result<ScanResult>;
+    async fn cascade_abandon(&self) -> Result<()>;
     async fn kill_session(&self, id: &SessionId) -> Result<()>;
     async fn restart_session(&self, id: &SessionId) -> Result<()>;
     async fn delete_session(&self, id: &SessionId) -> Result<()>;
+
+    // -- Config --
+
+    fn config(&self) -> Config;
+    fn restart_required(&self) -> bool;
+    fn reload_config(&self) -> Result<bool>;
+    fn update_config(&self, config: Config) -> Result<()>;
+
+    // -- TUI helpers --
+
+    fn status_bar_info(&self, session: &WorktreeSession, state: &AppState) -> StatusBarInfo;
 }
 
 #[async_trait(?Send)]
@@ -251,6 +265,39 @@ impl Commander for CommanderService {
 
     async fn delete_session(&self, id: &SessionId) -> Result<()> {
         self.manager.delete_session(id).await
+    }
+
+    async fn add_project(&self, path: PathBuf) -> Result<ProjectId> {
+        self.manager.add_project(path).await
+    }
+
+    async fn scan_directory(&self, dir: &Path) -> Result<ScanResult> {
+        self.manager.scan_directory(dir).await
+    }
+
+    async fn cascade_abandon(&self) -> Result<()> {
+        self.manager.cascade_abandon().await
+    }
+
+    fn config(&self) -> Config {
+        self.config_store.read().clone()
+    }
+
+    fn restart_required(&self) -> bool {
+        self.config_store.restart_required()
+    }
+
+    fn reload_config(&self) -> Result<bool> {
+        self.config_store.reload_if_changed()
+    }
+
+    fn update_config(&self, config: Config) -> Result<()> {
+        self.config_store.mutate(|c| *c = config)?;
+        Ok(())
+    }
+
+    fn status_bar_info(&self, session: &WorktreeSession, state: &AppState) -> StatusBarInfo {
+        self.manager.status_bar_info(session, state)
     }
 }
 
@@ -616,6 +663,34 @@ mod tests {
             unimplemented!()
         }
         async fn delete_session(&self, _id: &SessionId) -> Result<()> {
+            unimplemented!()
+        }
+        async fn add_project(&self, _path: PathBuf) -> Result<ProjectId> {
+            unimplemented!()
+        }
+        async fn scan_directory(&self, _dir: &Path) -> Result<ScanResult> {
+            unimplemented!()
+        }
+        async fn cascade_abandon(&self) -> Result<()> {
+            unimplemented!()
+        }
+        fn config(&self) -> Config {
+            unimplemented!()
+        }
+        fn restart_required(&self) -> bool {
+            unimplemented!()
+        }
+        fn reload_config(&self) -> Result<bool> {
+            unimplemented!()
+        }
+        fn update_config(&self, _config: Config) -> Result<()> {
+            unimplemented!()
+        }
+        fn status_bar_info(
+            &self,
+            _session: &WorktreeSession,
+            _state: &AppState,
+        ) -> StatusBarInfo {
             unimplemented!()
         }
     }
