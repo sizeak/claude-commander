@@ -28,6 +28,9 @@ pub enum Error {
 
     #[error("TUI error: {0}")]
     Tui(#[from] TuiError),
+
+    #[error("JSON serialization error: {0}")]
+    Json(#[from] serde_json::Error),
 }
 
 /// Session management errors
@@ -296,5 +299,13 @@ mod tests {
         let tui_err = TuiError::InitFailed("test".to_string());
         let top_err: Error = tui_err.into();
         assert!(matches!(top_err, Error::Tui(_)));
+    }
+
+    #[test]
+    fn test_json_error_conversion() {
+        let json_err: serde_json::Error =
+            serde_json::from_str::<i32>("not a number").unwrap_err();
+        let top_err: Error = json_err.into();
+        assert!(matches!(top_err, Error::Json(_)));
     }
 }

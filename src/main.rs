@@ -278,12 +278,7 @@ async fn main() -> Result<()> {
 
             if json {
                 let service = claude_commander::api::CommanderService::for_cli(config)?;
-                let sessions = service.list_sessions(all).await?;
-                let entries: Vec<_> = sessions
-                    .iter()
-                    .map(claude_commander::cli::SessionJsonEntry::from_info)
-                    .collect();
-                println!("{}", serde_json::to_string_pretty(&entries)?);
+                println!("{}", claude_commander::cli::run_list_json(&service, all).await?);
             } else {
                 let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
 
@@ -341,21 +336,13 @@ async fn main() -> Result<()> {
             setup_logging(cli.debug, false)?;
 
             let service = claude_commander::api::CommanderService::for_cli(config)?;
-            let detail = match service.get_session_detail(&session, None).await? {
-                Some(d) => d,
+            match claude_commander::cli::run_status(&service, &session, json).await? {
+                Some(output) => println!("{}", output),
                 None => {
                     eprintln!("Session not found: {}", session);
                     eprintln!("Use 'claude-commander list' to see available sessions.");
                     std::process::exit(1);
                 }
-            };
-
-            let entry = claude_commander::cli::StatusJsonEntry::from_detail(&detail);
-
-            if json {
-                println!("{}", serde_json::to_string_pretty(&entry)?);
-            } else {
-                println!("{}", claude_commander::cli::format_status_human(&entry));
             }
         }
 
@@ -363,7 +350,7 @@ async fn main() -> Result<()> {
             setup_logging(cli.debug, false)?;
 
             let service = claude_commander::api::CommanderService::for_cli(config)?;
-            match service.get_pane_content(&session, Some(lines)).await? {
+            match claude_commander::cli::run_log(&service, &session, lines).await? {
                 Some(content) => {
                     if content.ends_with('\n') {
                         print!("{}", content);

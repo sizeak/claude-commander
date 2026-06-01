@@ -3,7 +3,9 @@
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
+use crate::api::Commander;
 use crate::config::AppState;
+use crate::error::Result;
 use crate::git::{PrState, ReviewDecision, effective_pr_state};
 use crate::session::{AgentState, WorktreeSession};
 
@@ -221,6 +223,47 @@ pub fn format_status_human(entry: &StatusJsonEntry) -> String {
     }
 
     lines.join("\n")
+}
+
+// -- Command runners (called from main.rs, tested via MockCommander) --
+
+/// `list --json` body: fetch sessions and return them as pretty-printed JSON.
+pub async fn run_list_json<C: Commander>(commander: &C, all: bool) -> Result<String> {
+    let sessions = commander.list_sessions(all).await?;
+    let entries: Vec<_> = sessions.iter().map(SessionJsonEntry::from_info).collect();
+    Ok(serde_json::to_string_pretty(&entries)?)
+}
+
+/// `status` body: fetch detail and format as JSON or human-readable. Returns
+/// `Ok(None)` when the session is not found, leaving caller to handle the
+/// "not found" UX (exit code, error message, etc).
+pub async fn run_status<C: Commander>(
+    commander: &C,
+    session: &str,
+    json: bool,
+) -> Result<Option<String>> {
+    let Some(detail) = commander.get_session_detail(session, None).await? else {
+        return Ok(None);
+    };
+    let entry = StatusJsonEntry::from_detail(&detail);
+    Ok(Some(if json {
+        serde_json::to_string_pretty(&entry)?
+    } else {
+        format_status_human(&entry)
+    }))
+}
+
+/// `log` body: fetch the tmux pane content for a session. `lines` is clamped
+/// to the sane range. Returns `Ok(None)` when the session is missing or has
+/// no live tmux.
+pub async fn run_log<C: Commander>(
+    commander: &C,
+    session: &str,
+    lines: usize,
+) -> Result<Option<String>> {
+    commander
+        .get_pane_content(session, Some(clamp_log_lines(lines)))
+        .await
 }
 
 #[cfg(test)]
@@ -559,5 +602,108 @@ mod tests {
         assert!(!output.contains("PR:"));
         assert!(!output.contains("Review:"));
         assert!(!output.contains("Labels:"));
+    }
+
+    // -- Runner tests (drive the CLI handlers via MockCommander) --
+
+    use crate::api::SessionInfo;
+    use crate::test_support::MockCommander;
+
+    fn info(title: &str, status: SessionStatus) -> SessionInfo {
+        let mut s = WorktreeSession::new(
+            ProjectId::new(),
+            title,
+            format!("branch-{}", title),
+            PathBuf::from("/tmp/wt"),
+            "claude",
+        );
+        s.set_status(status);
+        SessionInfo::from_session(&s, "mock-project")
+    }
+
+    #[tokio::test]
+    async fn run_list_json_returns_empty_array_when_no_sessions() {
+        let mock = MockCommander::new();
+        let out = run_list_json(&mock, false).await.unwrap();
+        // serde_json::to_string_pretty emits "[]" for an empty Vec.
+        assert_eq!(out.trim(), "[]");
+    }
+
+    #[tokio::test]
+    async fn run_list_json_excludes_stopped_by_default() {
+        let mock = MockCommander::new().with_sessions(vec![
+            info("running", SessionStatus::Running),
+            info("stopped", SessionStatus::Stopped),
+        ]);
+        let out = run_list_json(&mock, false).await.unwrap();
+        assert!(out.contains("\"running\""));
+        assert!(!out.contains("\"stopped\""));
+    }
+
+    #[tokio::test]
+    async fn run_list_json_includes_stopped_when_all_flag_set() {
+        let mock = MockCommander::new().with_sessions(vec![
+            info("running", SessionStatus::Running),
+            info("stopped", SessionStatus::Stopped),
+        ]);
+        let out = run_list_json(&mock, true).await.unwrap();
+        assert!(out.contains("\"running\""));
+        assert!(out.contains("\"stopped\""));
+    }
+
+    #[tokio::test]
+    async fn run_list_json_emits_expected_session_fields() {
+        let mock = MockCommander::new()
+            .with_sessions(vec![info("fix-auth", SessionStatus::Running)]);
+        let out = run_list_json(&mock, false).await.unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let entry = &parsed[0];
+        assert_eq!(entry["title"], "fix-auth");
+        assert_eq!(entry["branch"], "branch-fix-auth");
+        assert_eq!(entry["program"], "claude");
+        assert_eq!(entry["project_name"], "mock-project");
+    }
+
+    #[tokio::test]
+    async fn run_status_returns_none_for_missing_session() {
+        let mock = MockCommander::new();
+        let out = run_status(&mock, "does-not-exist", false).await.unwrap();
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn run_status_json_includes_title() {
+        let mock =
+            MockCommander::new().with_sessions(vec![info("with-detail", SessionStatus::Running)]);
+        let out = run_status(&mock, "with-detail", true).await.unwrap().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(parsed["title"], "with-detail");
+    }
+
+    #[tokio::test]
+    async fn run_status_human_output_does_not_start_with_brace() {
+        let mock =
+            MockCommander::new().with_sessions(vec![info("human-out", SessionStatus::Running)]);
+        let out = run_status(&mock, "human-out", false).await.unwrap().unwrap();
+        // JSON output starts with '{'; the human formatter is plain key/value lines.
+        assert!(!out.trim_start().starts_with('{'));
+        assert!(out.contains("human-out"));
+    }
+
+    #[tokio::test]
+    async fn run_log_returns_canned_pane_content() {
+        let mock = MockCommander::new()
+            .with_sessions(vec![info("with-log", SessionStatus::Running)])
+            .with_pane_content("line1\nline2\n");
+        let out = run_log(&mock, "with-log", 100).await.unwrap();
+        assert_eq!(out, Some("line1\nline2\n".to_string()));
+    }
+
+    #[tokio::test]
+    async fn run_log_returns_none_when_mock_has_no_pane_content() {
+        let mock =
+            MockCommander::new().with_sessions(vec![info("no-pane", SessionStatus::Running)]);
+        let out = run_log(&mock, "no-pane", 100).await.unwrap();
+        assert!(out.is_none());
     }
 }
