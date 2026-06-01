@@ -105,22 +105,29 @@ impl App {
                     })
                     .await;
 
-                // Update tmux status bars for running sessions with PR info
-                {
+                // Update tmux status bars for running sessions with PR info.
+                // Snapshot under the lock, then release before async tmux I/O.
+                let status_bar_updates: Vec<_> = {
                     let state = self.service.store().read().await;
-                    for session in state.sessions.values() {
-                        if session.status == SessionStatus::Running {
+                    state
+                        .sessions
+                        .values()
+                        .filter(|s| s.status == SessionStatus::Running)
+                        .map(|s| {
                             let info = self
                                 .service
                                 .session_manager()
-                                .status_bar_info(session, &state);
-                            self.service
-                                .session_manager()
-                                .tmux
-                                .configure_status_bar(&session.tmux_session_name, &info)
-                                .await;
-                        }
-                    }
+                                .status_bar_info(s, &state);
+                            (s.tmux_session_name.clone(), info)
+                        })
+                        .collect()
+                };
+                for (tmux_name, info) in &status_bar_updates {
+                    self.service
+                        .session_manager()
+                        .tmux
+                        .configure_status_bar(tmux_name, info)
+                        .await;
                 }
 
                 self.refresh_list_items().await;
