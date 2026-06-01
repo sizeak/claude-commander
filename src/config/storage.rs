@@ -11,6 +11,7 @@ use crate::error::{ConfigError, Result};
 use crate::session::{Project, ProjectId, SessionId, WorktreeSession};
 
 use super::Config;
+use super::view_mode::ViewMode;
 
 /// Persistent application state
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -49,6 +50,13 @@ pub struct AppState {
     /// Application version that last wrote this state
     #[serde(default)]
     pub version: String,
+
+    /// Last-selected session list view (Project / Sections / Stacks).
+    /// `None` means the user has never made a choice — the TUI then picks a
+    /// section-aware default at startup (SectionGrouped if sections are
+    /// configured, otherwise ProjectGrouped).
+    #[serde(default)]
+    pub view_mode: Option<ViewMode>,
 
     /// Path to save state to (not serialized, set at load time)
     #[serde(skip)]
@@ -316,6 +324,33 @@ mod tests {
             Some("In Progress")
         );
         assert_eq!(loaded_session.entered_section_at, stamp);
+    }
+
+    #[test]
+    fn test_view_mode_roundtrip() {
+        use super::super::ViewMode;
+        let temp_dir = TempDir::new().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+
+        let mut state = AppState::new();
+        state.view_mode = Some(ViewMode::SectionGroupedWithStacks);
+        state.save_to(&state_path).unwrap();
+
+        let loaded = AppState::load_from(&state_path).unwrap();
+        assert_eq!(loaded.view_mode, Some(ViewMode::SectionGroupedWithStacks));
+    }
+
+    #[test]
+    fn test_view_mode_missing_field_loads_as_none() {
+        // Older state files written before this field existed should
+        // deserialize cleanly and present no preference, so the app can
+        // fall back to a section-aware default.
+        let temp_dir = TempDir::new().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+        std::fs::write(&state_path, "{}").unwrap();
+
+        let loaded = AppState::load_from(&state_path).unwrap();
+        assert!(loaded.view_mode.is_none());
     }
 
     #[test]

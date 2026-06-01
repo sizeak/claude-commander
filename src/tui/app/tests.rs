@@ -439,6 +439,35 @@ fn test_toggle_view_mode_always_available_in_palette() {
     assert!(s.is_command_available(BindableAction::ToggleViewMode));
 }
 
+#[test]
+fn test_view_mode_cycles_through_three_views() {
+    assert_eq!(ViewMode::ProjectGrouped.next(), ViewMode::SectionGrouped);
+    assert_eq!(
+        ViewMode::SectionGrouped.next(),
+        ViewMode::SectionGroupedWithStacks
+    );
+    assert_eq!(
+        ViewMode::SectionGroupedWithStacks.next(),
+        ViewMode::ProjectGrouped
+    );
+}
+
+#[test]
+fn test_view_mode_heading_label() {
+    assert_eq!(
+        ViewMode::ProjectGrouped.heading_label(),
+        " Sessions [Project]:"
+    );
+    assert_eq!(
+        ViewMode::SectionGrouped.heading_label(),
+        " Sessions [Sections]:"
+    );
+    assert_eq!(
+        ViewMode::SectionGroupedWithStacks.heading_label(),
+        " Sessions [Stacks]:"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Stack chain info in Info pane
 // ---------------------------------------------------------------------------
