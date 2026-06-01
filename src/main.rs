@@ -390,106 +390,32 @@ async fn main() -> Result<()> {
         }) => {
             setup_logging(cli.debug, false)?;
 
-            let path = path.unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+            let service = claude_commander::api::CommanderService::for_cli(config)?;
 
-            use claude_commander::git::GitBackend;
-            use claude_commander::session::{
-                SessionManager, program_is_claude, program_with_claude_flags,
-            };
-            use claude_commander::tui::theme::Theme;
-            use std::sync::Arc;
-
-            let config_store = Arc::new(ConfigStore::new(config)?);
-            let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
-            let store = Arc::new(StateStore::new(app_state)?);
-            let manager = SessionManager::new(
-                config_store.clone(),
-                store.clone(),
-                Theme::default().tmux_status_style(),
-            );
-
-            // Check tmux
-            manager.check_tmux().await?;
-
-            // Build program string with Claude-specific flags
-            let base_program =
-                program.unwrap_or_else(|| config_store.read().default_program.clone());
-            if !program_is_claude(&base_program)
-                && (effort.is_some() || mode.is_some() || initial_prompt.is_some())
-            {
-                clap::Error::raw(
-                    clap::error::ErrorKind::ArgumentConflict,
-                    format!(
-                        "--effort, --mode, and --initial-prompt are only supported \
-                         when the program is claude (got {:?})\n",
-                        base_program
-                    ),
-                )
-                .exit();
-            }
-            let program =
-                program_with_claude_flags(&base_program, mode.as_deref(), effort.as_deref());
-
-            // Resolve path to repo root (handles worktrees, subdirectories, symlinks)
-            let path = {
-                let backend = GitBackend::discover(&path)?;
-                backend.path().to_path_buf()
-            };
-
-            // Find or add the project
-            let project_id = {
-                let state = store.read().await;
-                state
-                    .projects
-                    .values()
-                    .find(|p| p.repo_path == path)
-                    .map(|p| p.id)
-            };
-
-            let project_id = match project_id {
-                Some(id) => id,
-                None => {
-                    println!("Adding project from {:?}...", path);
-                    manager.add_project(path).await?
-                }
-            };
-
-            // `--base-branch` means "fork the new session off this branch",
-            // never "reuse this branch as the session's own branch". So the
-            // session always gets a freshly generated branch (None below); the
-            // base is applied as the fork point in finalize_session. When the
-            // base happens to be another session's branch,
-            // link_stack_parent_by_branch additionally records the stack link.
             println!("Creating session '{}'...", name);
-            let session_id = manager
-                .prepare_session(&project_id, name, Some(program), None)
-                .await?;
-
-            if let Some(section) = section {
-                store
-                    .mutate(move |state| {
-                        if let Some(session) = state.sessions.get_mut(&session_id) {
-                            session.section_override = Some(section);
-                        }
-                    })
-                    .await?;
-            }
-
-            let result = async {
-                manager
-                    .link_stack_parent_by_branch(&session_id, base_branch.as_deref())
-                    .await?;
-                manager
-                    .finalize_session(&session_id, initial_prompt, base_branch)
-                    .await?;
-                Ok::<(), claude_commander::Error>(())
-            }
-            .await;
-
-            if let Err(e) = result {
-                let _ = manager.remove_creating_session(&session_id).await;
-                return Err(e.into());
-            }
+            let session_id = match service
+                .create_session(claude_commander::api::CreateSessionOpts {
+                    project_path: path
+                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
+                    title: name,
+                    program,
+                    initial_prompt,
+                    effort,
+                    mode,
+                    base_branch,
+                    section,
+                })
+                .await
+            {
+                Ok(id) => id,
+                Err(claude_commander::Error::Session(
+                    claude_commander::error::SessionError::InvalidProgram(msg),
+                )) => {
+                    clap::Error::raw(clap::error::ErrorKind::ArgumentConflict, format!("{msg}\n"))
+                        .exit();
+                }
+                Err(e) => return Err(e.into()),
+            };
 
             println!("Session created: {}", session_id);
             println!();

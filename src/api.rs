@@ -1,5 +1,6 @@
 //! Commander API — unified service layer for CLI and TUI consumers.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,10 +8,11 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 
 use crate::config::{AppState, ConfigStore, StateStore};
-use crate::error::Result;
-use crate::git::{PrState, ReviewDecision, diff_stat_summary, effective_pr_state};
+use crate::error::{Result, SessionError};
+use crate::git::{GitBackend, PrState, ReviewDecision, diff_stat_summary, effective_pr_state};
 use crate::session::{
     AgentState, ProjectId, SessionId, SessionManager, SessionStatus, WorktreeSession,
+    program_is_claude, program_with_claude_flags,
 };
 use crate::tmux::{AgentStateDetector, TmuxExecutor};
 use crate::tui::theme::Theme;
@@ -134,6 +136,118 @@ impl CommanderService {
 
     pub async fn check_tmux(&self) -> Result<()> {
         self.manager.check_tmux().await
+    }
+
+    // -- Mutations --
+
+    pub async fn create_session(&self, opts: CreateSessionOpts) -> Result<SessionId> {
+        self.manager.check_tmux().await?;
+
+        let base_program = opts
+            .program
+            .as_deref()
+            .map(str::to_string)
+            .unwrap_or_else(|| self.config_store.read().default_program.clone());
+
+        opts.validate_program_flags(&base_program)?;
+
+        let program =
+            program_with_claude_flags(&base_program, opts.mode.as_deref(), opts.effort.as_deref());
+
+        let path = {
+            let backend = GitBackend::discover(&opts.project_path)?;
+            backend.path().to_path_buf()
+        };
+
+        let project_id = self.ensure_project(path).await?;
+
+        let session_id = self
+            .manager
+            .prepare_session(&project_id, opts.title, Some(program), None)
+            .await?;
+
+        if let Some(section) = &opts.section {
+            let section = section.clone();
+            self.store
+                .mutate(move |state| {
+                    if let Some(session) = state.sessions.get_mut(&session_id) {
+                        session.section_override = Some(section);
+                    }
+                })
+                .await?;
+        }
+
+        let result = async {
+            self.manager
+                .link_stack_parent_by_branch(&session_id, opts.base_branch.as_deref())
+                .await?;
+            self.manager
+                .finalize_session(&session_id, opts.initial_prompt, opts.base_branch)
+                .await?;
+            Ok::<(), crate::Error>(())
+        }
+        .await;
+
+        if let Err(e) = result {
+            let _ = self.manager.remove_creating_session(&session_id).await;
+            return Err(e);
+        }
+
+        Ok(session_id)
+    }
+
+    pub async fn ensure_project(&self, path: PathBuf) -> Result<ProjectId> {
+        let existing = {
+            let state = self.store.read().await;
+            state
+                .projects
+                .values()
+                .find(|p| p.repo_path == path)
+                .map(|p| p.id)
+        };
+        match existing {
+            Some(id) => Ok(id),
+            None => self.manager.add_project(path).await,
+        }
+    }
+
+    pub async fn kill_session(&self, id: &SessionId) -> Result<()> {
+        self.manager.kill_session(id, false).await
+    }
+
+    pub async fn restart_session(&self, id: &SessionId) -> Result<()> {
+        self.manager.restart_session(id).await
+    }
+
+    pub async fn delete_session(&self, id: &SessionId) -> Result<()> {
+        self.manager.delete_session(id).await
+    }
+}
+
+pub struct CreateSessionOpts {
+    pub project_path: PathBuf,
+    pub title: String,
+    pub program: Option<String>,
+    pub initial_prompt: Option<String>,
+    pub effort: Option<String>,
+    pub mode: Option<String>,
+    pub base_branch: Option<String>,
+    pub section: Option<String>,
+}
+
+impl CreateSessionOpts {
+    pub fn validate_program_flags(&self, resolved_program: &str) -> Result<()> {
+        if !program_is_claude(resolved_program)
+            && (self.effort.is_some() || self.mode.is_some() || self.initial_prompt.is_some())
+        {
+            return Err(SessionError::InvalidProgram(format!(
+                "--effort, --mode, and --initial-prompt are only supported \
+                 when the program is claude (got {:?})",
+                resolved_program
+            ))
+            .into());
+        }
+        Ok(())
     }
 }
 
@@ -364,5 +478,67 @@ mod tests {
         assert_eq!(json["agent_state"], "working");
         assert_eq!(json["diff_stat"], "3 files changed");
         assert!(json["pane_content"].is_null());
+    }
+
+    #[test]
+    fn validate_rejects_non_claude_program_with_effort() {
+        let opts = CreateSessionOpts {
+            project_path: PathBuf::from("/tmp/repo"),
+            title: "test".to_string(),
+            program: Some("bash".to_string()),
+            initial_prompt: None,
+            effort: Some("high".to_string()),
+            mode: None,
+            base_branch: None,
+            section: None,
+        };
+        let err = opts.validate_program_flags("bash").unwrap_err();
+        assert!(err.to_string().contains("--effort"));
+    }
+
+    #[test]
+    fn validate_rejects_non_claude_program_with_mode() {
+        let opts = CreateSessionOpts {
+            project_path: PathBuf::from("/tmp/repo"),
+            title: "test".to_string(),
+            program: Some("vim".to_string()),
+            initial_prompt: None,
+            effort: None,
+            mode: Some("auto".to_string()),
+            base_branch: None,
+            section: None,
+        };
+        let err = opts.validate_program_flags("vim").unwrap_err();
+        assert!(err.to_string().contains("--mode"));
+    }
+
+    #[test]
+    fn validate_allows_claude_with_flags() {
+        let opts = CreateSessionOpts {
+            project_path: PathBuf::from("/tmp/repo"),
+            title: "test".to_string(),
+            program: Some("claude".to_string()),
+            initial_prompt: Some("hello".to_string()),
+            effort: Some("high".to_string()),
+            mode: Some("auto".to_string()),
+            base_branch: None,
+            section: None,
+        };
+        opts.validate_program_flags("claude").unwrap();
+    }
+
+    #[test]
+    fn validate_allows_non_claude_without_flags() {
+        let opts = CreateSessionOpts {
+            project_path: PathBuf::from("/tmp/repo"),
+            title: "test".to_string(),
+            program: Some("bash".to_string()),
+            initial_prompt: None,
+            effort: None,
+            mode: None,
+            base_branch: None,
+            section: None,
+        };
+        opts.validate_program_flags("bash").unwrap();
     }
 }
