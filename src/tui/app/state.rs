@@ -114,10 +114,7 @@ impl App {
                         .values()
                         .filter(|s| s.status == SessionStatus::Running)
                         .map(|s| {
-                            let info = self
-                                .service
-                                .session_manager()
-                                .status_bar_info(s, &state);
+                            let info = self.service.session_manager().status_bar_info(s, &state);
                             (s.tmux_session_name.clone(), info)
                         })
                         .collect()
