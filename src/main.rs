@@ -275,12 +275,17 @@ async fn main() -> Result<()> {
         Some(Commands::List { all, json }) => {
             setup_logging(cli.debug, false)?;
 
-            let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
-
             if json {
-                let entries = claude_commander::cli::build_session_list(&app_state, all);
+                let service = claude_commander::api::CommanderService::for_cli(config)?;
+                let sessions = service.list_sessions(all).await?;
+                let entries: Vec<_> = sessions
+                    .iter()
+                    .map(claude_commander::cli::SessionJsonEntry::from_info)
+                    .collect();
                 println!("{}", serde_json::to_string_pretty(&entries)?);
             } else {
+                let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
+
                 println!("Sessions:");
                 println!();
 
@@ -334,10 +339,9 @@ async fn main() -> Result<()> {
         Some(Commands::Status { session, json }) => {
             setup_logging(cli.debug, false)?;
 
-            let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
-
-            let found = match claude_commander::cli::find_session(&app_state, &session) {
-                Some(s) => s.clone(),
+            let service = claude_commander::api::CommanderService::for_cli(config)?;
+            let detail = match service.get_session_detail(&session, None).await? {
+                Some(d) => d,
                 None => {
                     eprintln!("Session not found: {}", session);
                     eprintln!("Use 'claude-commander list' to see available sessions.");
@@ -345,39 +349,7 @@ async fn main() -> Result<()> {
                 }
             };
 
-            let project_name = app_state
-                .projects
-                .get(&found.project_id)
-                .map(|p| p.name.as_str())
-                .unwrap_or("unknown");
-
-            // Detect live agent state
-            let agent_state = if found.status.is_active() {
-                use claude_commander::tmux::{AgentStateDetector, TmuxExecutor};
-                use std::time::Duration;
-
-                let executor = TmuxExecutor::new();
-                let mut detector = AgentStateDetector::new(executor, Duration::ZERO);
-                detector.detect(&found.tmux_session_name).await
-            } else {
-                claude_commander::AgentState::Unknown
-            };
-
-            // Get diff stat — diff against base_commit (branch fork point) when
-            // available, otherwise fall back to HEAD for uncommitted changes.
-            let diff_stat = if found.worktree_path.exists() {
-                let diff_base = found.base_commit.as_deref().unwrap_or("HEAD");
-                claude_commander::git::diff_stat_summary(&found.worktree_path, diff_base).await
-            } else {
-                None
-            };
-
-            let entry = claude_commander::cli::StatusJsonEntry::from_session(
-                &found,
-                project_name,
-                agent_state,
-                diff_stat,
-            );
+            let entry = claude_commander::cli::StatusJsonEntry::from_detail(&detail);
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&entry)?);
@@ -389,60 +361,18 @@ async fn main() -> Result<()> {
         Some(Commands::Log { session, lines }) => {
             setup_logging(cli.debug, false)?;
 
-            let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
-
-            let found = match claude_commander::cli::find_session(&app_state, &session) {
-                Some(s) => s,
-                None => {
-                    eprintln!("Session not found: {}", session);
-                    eprintln!("Use 'claude-commander list' to see available sessions.");
-                    std::process::exit(1);
-                }
-            };
-
-            let lines = claude_commander::cli::clamp_log_lines(lines);
-            let executor = claude_commander::tmux::TmuxExecutor::new();
-
-            // Check the live tmux session rather than the persisted status,
-            // which can be stale (e.g. a session marked Stopped may still have a
-            // live pane, or a Running one whose pane has since died).
-            match executor.session_exists(&found.tmux_session_name).await {
-                Ok(true) => {}
-                Ok(false) => {
-                    eprintln!(
-                        "Session '{}' has no live tmux session to capture from.",
-                        found.title
-                    );
-                    std::process::exit(1);
-                }
-                Err(e) => {
-                    eprintln!("Failed to query tmux: {}", e);
-                    std::process::exit(1);
-                }
-            }
-
-            match executor
-                .execute(&[
-                    "capture-pane",
-                    "-t",
-                    &found.tmux_session_name,
-                    "-p",
-                    "-S",
-                    &format!("-{}", lines),
-                ])
-                .await
-            {
-                Ok(content) => {
-                    // capture-pane output is not guaranteed to end in a newline;
-                    // ensure one so the shell prompt doesn't glue to the last line.
+            let service = claude_commander::api::CommanderService::for_cli(config)?;
+            match service.get_pane_content(&session, Some(lines)).await? {
+                Some(content) => {
                     if content.ends_with('\n') {
                         print!("{}", content);
                     } else {
                         println!("{}", content);
                     }
                 }
-                Err(e) => {
-                    eprintln!("Failed to capture pane: {}", e);
+                None => {
+                    eprintln!("Session not found or has no live tmux session: {}", session);
+                    eprintln!("Use 'claude-commander list' to see available sessions.");
                     std::process::exit(1);
                 }
             }

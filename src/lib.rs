@@ -20,6 +20,7 @@
 //! - [`config`] - Configuration and state persistence
 //! - [`error`] - Error types
 
+pub mod api;
 pub mod cli;
 pub mod config;
 pub mod error;
