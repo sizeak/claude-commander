@@ -90,8 +90,8 @@ impl CommanderService {
         };
 
         let agent_state = if found.status.is_active() {
-            let executor = TmuxExecutor::new();
-            let mut detector = AgentStateDetector::new(executor, Duration::ZERO);
+            let mut detector =
+                AgentStateDetector::new(self.manager.tmux.clone(), Duration::ZERO);
             detector.detect(&found.tmux_session_name).await
         } else {
             AgentState::Unknown
@@ -104,7 +104,7 @@ impl CommanderService {
             None
         };
 
-        let pane_content = if found.status.is_active() {
+        let pane_content = if found.status.is_active() && lines.is_some() {
             let n = lines.map(crate::cli::clamp_log_lines);
             capture_pane(&self.manager.tmux, &found.tmux_session_name, n).await?
         } else {
