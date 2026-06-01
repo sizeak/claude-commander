@@ -619,95 +619,19 @@ mod tests {
         opts.validate_program_flags("bash").unwrap();
     }
 
-    /// Stub `Commander` used to verify the trait is `dyn`-safe and that
-    /// alternative implementations can be written without touching tmux/git.
-    struct StubCommander {
-        canned_sessions: Vec<SessionInfo>,
-    }
-
-    #[async_trait(?Send)]
-    impl Commander for StubCommander {
-        async fn list_sessions(&self, _include_stopped: bool) -> Result<Vec<SessionInfo>> {
-            Ok(self.canned_sessions.clone())
-        }
-        async fn find_session(&self, _query: &str) -> Result<Option<SessionInfo>> {
-            unimplemented!()
-        }
-        async fn get_session_detail(
-            &self,
-            _query: &str,
-            _lines: Option<usize>,
-        ) -> Result<Option<SessionDetail>> {
-            unimplemented!()
-        }
-        async fn get_pane_content(
-            &self,
-            _query: &str,
-            _lines: Option<usize>,
-        ) -> Result<Option<String>> {
-            unimplemented!()
-        }
-        async fn check_tmux(&self) -> Result<()> {
-            unimplemented!()
-        }
-        async fn create_session(&self, _opts: CreateSessionOpts) -> Result<SessionId> {
-            unimplemented!()
-        }
-        async fn ensure_project(&self, _path: PathBuf) -> Result<ProjectId> {
-            unimplemented!()
-        }
-        async fn kill_session(&self, _id: &SessionId) -> Result<()> {
-            unimplemented!()
-        }
-        async fn restart_session(&self, _id: &SessionId) -> Result<()> {
-            unimplemented!()
-        }
-        async fn delete_session(&self, _id: &SessionId) -> Result<()> {
-            unimplemented!()
-        }
-        async fn add_project(&self, _path: PathBuf) -> Result<ProjectId> {
-            unimplemented!()
-        }
-        async fn scan_directory(&self, _dir: &Path) -> Result<ScanResult> {
-            unimplemented!()
-        }
-        async fn cascade_abandon(&self) -> Result<()> {
-            unimplemented!()
-        }
-        fn config(&self) -> Config {
-            unimplemented!()
-        }
-        fn restart_required(&self) -> bool {
-            unimplemented!()
-        }
-        fn reload_config(&self) -> Result<bool> {
-            unimplemented!()
-        }
-        fn update_config(&self, _config: Config) -> Result<()> {
-            unimplemented!()
-        }
-        fn status_bar_info(
-            &self,
-            _session: &WorktreeSession,
-            _state: &AppState,
-        ) -> StatusBarInfo {
-            unimplemented!()
-        }
-    }
-
     #[tokio::test]
-    async fn commander_trait_is_dyn_safe_and_callable_through_stub() {
-        let session = make_session_for_project("stub-session", ProjectId::new());
-        let info = SessionInfo::from_session(&session, "stub-project");
-        let stub = StubCommander {
-            canned_sessions: vec![info.clone()],
-        };
+    async fn commander_trait_is_dyn_safe_via_mock_commander() {
+        use crate::test_support::MockCommander;
 
-        let commander: &dyn Commander = &stub;
+        let session = make_session_for_project("via-mock", ProjectId::new());
+        let info = SessionInfo::from_session(&session, "mock-project");
+        let mock = MockCommander::new().with_sessions(vec![info]);
+
+        let commander: &dyn Commander = &mock;
         let listed = commander.list_sessions(false).await.unwrap();
 
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].title, "stub-session");
-        assert_eq!(listed[0].project_name, "stub-project");
+        assert_eq!(listed[0].title, "via-mock");
+        assert_eq!(listed[0].project_name, "mock-project");
     }
 }

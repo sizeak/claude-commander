@@ -31,6 +31,9 @@ pub mod session;
 pub mod tmux;
 pub mod tui;
 
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub use config::keybindings::editor_trigger_bytes;
 pub use config::{AppState, Config, StateStore};
 pub use error::{Error, Result};
