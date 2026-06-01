@@ -227,10 +227,8 @@ mod tests {
 
     #[tokio::test]
     async fn find_session_matches_by_title() {
-        let mock = MockCommander::new().with_sessions(vec![session(
-            "fix-auth",
-            SessionStatus::Running,
-        )]);
+        let mock =
+            MockCommander::new().with_sessions(vec![session("fix-auth", SessionStatus::Running)]);
         let found = mock.find_session("fix-auth").await.unwrap();
         assert_eq!(found.unwrap().title, "fix-auth");
     }
@@ -275,11 +273,9 @@ mod tests {
 
     #[tokio::test]
     async fn mock_is_usable_through_dyn_commander() {
-        let mock: Box<dyn Commander> =
-            Box::new(MockCommander::new().with_sessions(vec![session(
-                "via-dyn",
-                SessionStatus::Running,
-            )]));
+        let mock: Box<dyn Commander> = Box::new(
+            MockCommander::new().with_sessions(vec![session("via-dyn", SessionStatus::Running)]),
+        );
         let listed = mock.list_sessions(false).await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].title, "via-dyn");
