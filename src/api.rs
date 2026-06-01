@@ -146,18 +146,12 @@ impl CommanderService {
 
         let base_program = opts
             .program
+            .as_deref()
+            .map(str::to_string)
             .unwrap_or_else(|| self.config_store.read().default_program.clone());
 
-        if !program_is_claude(&base_program)
-            && (opts.effort.is_some() || opts.mode.is_some() || opts.initial_prompt.is_some())
-        {
-            return Err(SessionError::InvalidProgram(format!(
-                "--effort, --mode, and --initial-prompt are only supported \
-                 when the program is claude (got {:?})",
-                base_program
-            ))
-            .into());
-        }
+        opts.validate_program_flags(&base_program)?;
+
         let program =
             program_with_claude_flags(&base_program, opts.mode.as_deref(), opts.effort.as_deref());
 
@@ -228,6 +222,22 @@ pub struct CreateSessionOpts {
     pub effort: Option<String>,
     pub mode: Option<String>,
     pub base_branch: Option<String>,
+}
+
+impl CreateSessionOpts {
+    pub fn validate_program_flags(&self, resolved_program: &str) -> Result<()> {
+        if !program_is_claude(resolved_program)
+            && (self.effort.is_some() || self.mode.is_some() || self.initial_prompt.is_some())
+        {
+            return Err(SessionError::InvalidProgram(format!(
+                "--effort, --mode, and --initial-prompt are only supported \
+                 when the program is claude (got {:?})",
+                resolved_program
+            ))
+            .into());
+        }
+        Ok(())
+    }
 }
 
 // -- Response types --
@@ -460,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn create_session_opts_validates_non_claude_program_with_effort() {
+    fn validate_rejects_non_claude_program_with_effort() {
         let opts = CreateSessionOpts {
             project_path: PathBuf::from("/tmp/repo"),
             title: "test".to_string(),
@@ -470,12 +480,12 @@ mod tests {
             mode: None,
             base_branch: None,
         };
-        assert!(!program_is_claude(opts.program.as_deref().unwrap()));
-        assert!(opts.effort.is_some());
+        let err = opts.validate_program_flags("bash").unwrap_err();
+        assert!(err.to_string().contains("--effort"));
     }
 
     #[test]
-    fn create_session_opts_validates_non_claude_program_with_mode() {
+    fn validate_rejects_non_claude_program_with_mode() {
         let opts = CreateSessionOpts {
             project_path: PathBuf::from("/tmp/repo"),
             title: "test".to_string(),
@@ -485,12 +495,12 @@ mod tests {
             mode: Some("auto".to_string()),
             base_branch: None,
         };
-        assert!(!program_is_claude(opts.program.as_deref().unwrap()));
-        assert!(opts.mode.is_some());
+        let err = opts.validate_program_flags("vim").unwrap_err();
+        assert!(err.to_string().contains("--mode"));
     }
 
     #[test]
-    fn create_session_opts_allows_claude_with_flags() {
+    fn validate_allows_claude_with_flags() {
         let opts = CreateSessionOpts {
             project_path: PathBuf::from("/tmp/repo"),
             title: "test".to_string(),
@@ -500,6 +510,20 @@ mod tests {
             mode: Some("auto".to_string()),
             base_branch: None,
         };
-        assert!(program_is_claude(opts.program.as_deref().unwrap()));
+        opts.validate_program_flags("claude").unwrap();
+    }
+
+    #[test]
+    fn validate_allows_non_claude_without_flags() {
+        let opts = CreateSessionOpts {
+            project_path: PathBuf::from("/tmp/repo"),
+            title: "test".to_string(),
+            program: Some("bash".to_string()),
+            initial_prompt: None,
+            effort: None,
+            mode: None,
+            base_branch: None,
+        };
+        opts.validate_program_flags("bash").unwrap();
     }
 }

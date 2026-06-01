@@ -388,7 +388,7 @@ async fn main() -> Result<()> {
             let service = claude_commander::api::CommanderService::for_cli(config)?;
 
             println!("Creating session '{}'...", name);
-            let session_id = service
+            let session_id = match service
                 .create_session(claude_commander::api::CreateSessionOpts {
                     project_path: path
                         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
@@ -399,7 +399,17 @@ async fn main() -> Result<()> {
                     mode,
                     base_branch,
                 })
-                .await?;
+                .await
+            {
+                Ok(id) => id,
+                Err(claude_commander::Error::Session(
+                    claude_commander::error::SessionError::InvalidProgram(msg),
+                )) => {
+                    clap::Error::raw(clap::error::ErrorKind::ArgumentConflict, format!("{msg}\n"))
+                        .exit();
+                }
+                Err(e) => return Err(e.into()),
+            };
 
             println!("Session created: {}", session_id);
             println!();
