@@ -40,7 +40,7 @@ use super::widgets::{
     InfoContent, InfoProjectData, InfoSessionData, InfoView, InfoViewState, Preview, PreviewState,
     TreeList, TreeListState,
 };
-use crate::api::CommanderService;
+use crate::api::{Commander, CommanderService};
 use crate::config::{BindableAction, Config, ConfigStore, StateStore};
 use crate::error::{Result, TuiError};
 use crate::git::{

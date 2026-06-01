@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
@@ -58,20 +59,51 @@ impl CommanderService {
     pub fn config_store(&self) -> &Arc<ConfigStore> {
         &self.config_store
     }
+}
 
-    // -- Queries --
+/// Trait abstraction over `CommanderService`'s public API.
+///
+/// Lets callers (CLI today, future Tauri/RPC layers, tests) work against an
+/// interface instead of the concrete struct that owns tmux/git/state.
+///
+/// `?Send` is used because the underlying tmux/git layer holds non-`Send`
+/// types (e.g. `gix` internals); methods are awaited inline rather than
+/// `tokio::spawn`ed, so this is fine.
+#[async_trait(?Send)]
+pub trait Commander {
+    async fn list_sessions(&self, include_stopped: bool) -> Result<Vec<SessionInfo>>;
+    async fn find_session(&self, query: &str) -> Result<Option<SessionInfo>>;
+    async fn get_session_detail(
+        &self,
+        query: &str,
+        lines: Option<usize>,
+    ) -> Result<Option<SessionDetail>>;
+    async fn get_pane_content(
+        &self,
+        query: &str,
+        lines: Option<usize>,
+    ) -> Result<Option<String>>;
+    async fn check_tmux(&self) -> Result<()>;
+    async fn create_session(&self, opts: CreateSessionOpts) -> Result<SessionId>;
+    async fn ensure_project(&self, path: PathBuf) -> Result<ProjectId>;
+    async fn kill_session(&self, id: &SessionId) -> Result<()>;
+    async fn restart_session(&self, id: &SessionId) -> Result<()>;
+    async fn delete_session(&self, id: &SessionId) -> Result<()>;
+}
 
-    pub async fn list_sessions(&self, include_stopped: bool) -> Result<Vec<SessionInfo>> {
+#[async_trait(?Send)]
+impl Commander for CommanderService {
+    async fn list_sessions(&self, include_stopped: bool) -> Result<Vec<SessionInfo>> {
         let state = self.store.read().await;
         Ok(build_session_info_list(&state, include_stopped))
     }
 
-    pub async fn find_session(&self, query: &str) -> Result<Option<SessionInfo>> {
+    async fn find_session(&self, query: &str) -> Result<Option<SessionInfo>> {
         let state = self.store.read().await;
         Ok(find_session_info(&state, query))
     }
 
-    pub async fn get_session_detail(
+    async fn get_session_detail(
         &self,
         query: &str,
         lines: Option<usize>,
@@ -118,7 +150,7 @@ impl CommanderService {
         }))
     }
 
-    pub async fn get_pane_content(
+    async fn get_pane_content(
         &self,
         query: &str,
         lines: Option<usize>,
@@ -134,13 +166,11 @@ impl CommanderService {
         capture_pane(&self.manager.tmux, &tmux_name, n).await
     }
 
-    pub async fn check_tmux(&self) -> Result<()> {
+    async fn check_tmux(&self) -> Result<()> {
         self.manager.check_tmux().await
     }
 
-    // -- Mutations --
-
-    pub async fn create_session(&self, opts: CreateSessionOpts) -> Result<SessionId> {
+    async fn create_session(&self, opts: CreateSessionOpts) -> Result<SessionId> {
         self.manager.check_tmux().await?;
 
         let base_program = opts
@@ -196,7 +226,7 @@ impl CommanderService {
         Ok(session_id)
     }
 
-    pub async fn ensure_project(&self, path: PathBuf) -> Result<ProjectId> {
+    async fn ensure_project(&self, path: PathBuf) -> Result<ProjectId> {
         let existing = {
             let state = self.store.read().await;
             state
@@ -211,15 +241,15 @@ impl CommanderService {
         }
     }
 
-    pub async fn kill_session(&self, id: &SessionId) -> Result<()> {
+    async fn kill_session(&self, id: &SessionId) -> Result<()> {
         self.manager.kill_session(id, false).await
     }
 
-    pub async fn restart_session(&self, id: &SessionId) -> Result<()> {
+    async fn restart_session(&self, id: &SessionId) -> Result<()> {
         self.manager.restart_session(id).await
     }
 
-    pub async fn delete_session(&self, id: &SessionId) -> Result<()> {
+    async fn delete_session(&self, id: &SessionId) -> Result<()> {
         self.manager.delete_session(id).await
     }
 }
@@ -540,5 +570,69 @@ mod tests {
             section: None,
         };
         opts.validate_program_flags("bash").unwrap();
+    }
+
+    /// Stub `Commander` used to verify the trait is `dyn`-safe and that
+    /// alternative implementations can be written without touching tmux/git.
+    struct StubCommander {
+        canned_sessions: Vec<SessionInfo>,
+    }
+
+    #[async_trait(?Send)]
+    impl Commander for StubCommander {
+        async fn list_sessions(&self, _include_stopped: bool) -> Result<Vec<SessionInfo>> {
+            Ok(self.canned_sessions.clone())
+        }
+        async fn find_session(&self, _query: &str) -> Result<Option<SessionInfo>> {
+            unimplemented!()
+        }
+        async fn get_session_detail(
+            &self,
+            _query: &str,
+            _lines: Option<usize>,
+        ) -> Result<Option<SessionDetail>> {
+            unimplemented!()
+        }
+        async fn get_pane_content(
+            &self,
+            _query: &str,
+            _lines: Option<usize>,
+        ) -> Result<Option<String>> {
+            unimplemented!()
+        }
+        async fn check_tmux(&self) -> Result<()> {
+            unimplemented!()
+        }
+        async fn create_session(&self, _opts: CreateSessionOpts) -> Result<SessionId> {
+            unimplemented!()
+        }
+        async fn ensure_project(&self, _path: PathBuf) -> Result<ProjectId> {
+            unimplemented!()
+        }
+        async fn kill_session(&self, _id: &SessionId) -> Result<()> {
+            unimplemented!()
+        }
+        async fn restart_session(&self, _id: &SessionId) -> Result<()> {
+            unimplemented!()
+        }
+        async fn delete_session(&self, _id: &SessionId) -> Result<()> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn commander_trait_is_dyn_safe_and_callable_through_stub() {
+        let session = make_session_for_project("stub-session", ProjectId::new());
+        let info = SessionInfo::from_session(&session, "stub-project");
+        let stub = StubCommander {
+            canned_sessions: vec![info.clone()],
+        };
+
+        let commander: &dyn Commander = &stub;
+        let listed = commander.list_sessions(false).await.unwrap();
+
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].title, "stub-session");
+        assert_eq!(listed[0].project_name, "stub-project");
     }
 }
