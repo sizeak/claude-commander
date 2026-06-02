@@ -555,7 +555,7 @@ impl App {
 
     /// Handle `Cascade abandon` — clear the paused state without merging.
     pub(super) async fn handle_cascade_abandon(&mut self) {
-        match self.service.session_manager().cascade_abandon().await {
+        match self.service.cascade_abandon().await {
             Ok(()) => {
                 self.ui_state.status_message = Some((
                     "Cascade pause cleared".to_string(),
@@ -1524,7 +1524,7 @@ impl App {
                     return;
                 }
 
-                match self.service.session_manager().add_project(path).await {
+                match self.service.add_project(path).await {
                     Ok(project_id) => {
                         self.ui_state.status_message = Some((
                             format!("Added project {}", project_id),
@@ -1583,7 +1583,7 @@ impl App {
 
                 // If the path itself is a git repo, just add it directly
                 if path.join(".git").exists() {
-                    match self.service.session_manager().add_project(path).await {
+                    match self.service.add_project(path).await {
                         Ok(project_id) => {
                             self.ui_state.status_message = Some((
                                 format!("Added project {}", project_id),
@@ -1613,7 +1613,7 @@ impl App {
                     message: format!("Scanning {} for git repos…", path.display()),
                 };
 
-                match self.service.session_manager().scan_directory(&path).await {
+                match self.service.scan_directory(&path).await {
                     Ok(result) => {
                         if result.added == 0 && result.skipped == 0 {
                             self.ui_state.modal = Modal::Error {

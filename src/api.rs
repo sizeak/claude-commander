@@ -1,20 +1,20 @@
 //! Commander API — unified service layer for CLI and TUI consumers.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
-use crate::config::{AppState, ConfigStore, StateStore};
+use crate::config::{AppState, Config, ConfigStore, StateStore};
 use crate::error::{Result, SessionError};
 use crate::git::{GitBackend, PrState, ReviewDecision, diff_stat_summary, effective_pr_state};
 use crate::session::{
-    AgentState, ProjectId, SessionId, SessionManager, SessionStatus, WorktreeSession,
+    AgentState, ProjectId, ScanResult, SessionId, SessionManager, SessionStatus, WorktreeSession,
     program_is_claude, program_with_claude_flags,
 };
-use crate::tmux::{AgentStateDetector, TmuxExecutor};
+use crate::tmux::{AgentStateDetector, StatusBarInfo, TmuxExecutor};
 use crate::tui::theme::Theme;
 
 /// High-level service that wraps `SessionManager`, state stores, and agent
@@ -55,8 +55,49 @@ impl CommanderService {
         &self.store
     }
 
-    pub fn config_store(&self) -> &Arc<ConfigStore> {
-        &self.config_store
+    // -- Config --
+
+    /// Snapshot the current in-memory config.
+    pub fn read_config(&self) -> Config {
+        self.config_store.read().clone()
+    }
+
+    /// Overwrite the persisted config (updates mtime so the hot-reload watcher
+    /// won't re-read our own write).
+    pub fn update_config(&self, config: Config) -> Result<()> {
+        self.config_store.mutate(|c| *c = config)
+    }
+
+    /// Reload config from disk if the file changed since the last read.
+    pub fn reload_config(&self) -> Result<bool> {
+        self.config_store.reload_if_changed()
+    }
+
+    /// Whether a pending config change requires an app restart to take effect.
+    pub fn restart_required(&self) -> bool {
+        self.config_store.restart_required()
+    }
+
+    // -- Projects --
+
+    /// Register a git repository as a project.
+    pub async fn add_project(&self, repo_path: PathBuf) -> Result<ProjectId> {
+        self.manager.add_project(repo_path).await
+    }
+
+    /// Scan a directory for git repositories and register them as projects.
+    pub async fn scan_directory(&self, dir: &Path) -> Result<ScanResult> {
+        self.manager.scan_directory(dir).await
+    }
+
+    /// Clear the paused cascade state without merging.
+    pub async fn cascade_abandon(&self) -> Result<()> {
+        self.manager.cascade_abandon().await
+    }
+
+    /// Status-bar summary for a running session.
+    pub fn status_bar_info(&self, session: &WorktreeSession, state: &AppState) -> StatusBarInfo {
+        self.manager.status_bar_info(session, state)
     }
 
     // -- Queries --
