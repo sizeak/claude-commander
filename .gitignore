@@ -20,3 +20,4 @@ Thumbs.db
 
 # claude-commander
 .claude/worktrees/
+.claude/scheduled_tasks.lock
