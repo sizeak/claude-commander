@@ -619,10 +619,14 @@ pub enum SessionListItem {
         collapsed: bool,
     },
     /// The synthetic commander row, pinned under a "System" header. Not backed
-    /// by a [`WorktreeSession`] — it carries only the live agent state for its
-    /// glyph. Selecting it routes to the commander attach path, not the normal
-    /// session lookup. See [`crate::commander`].
-    Commander { agent_state: Option<AgentState> },
+    /// by a [`WorktreeSession`] — it carries the commander's live running state
+    /// and agent state for its glyph (running ● / stopped ○ / working / waiting).
+    /// Selecting it routes to the commander attach path, not the normal session
+    /// lookup. See [`crate::commander`].
+    Commander {
+        running: bool,
+        agent_state: Option<AgentState>,
+    },
     /// A blank spacer row for visual separation between sections.
     /// Not selectable.
     Spacer,
@@ -676,7 +680,10 @@ mod tests {
 
     #[test]
     fn commander_list_item_is_selectable_but_not_a_worktree() {
-        let item = SessionListItem::Commander { agent_state: None };
+        let item = SessionListItem::Commander {
+            running: true,
+            agent_state: None,
+        };
         // Selectable so the cursor can land on it and Enter can attach...
         assert!(item.is_selectable());
         // ...but never a worktree, so it is excluded from the `Sessions: N`

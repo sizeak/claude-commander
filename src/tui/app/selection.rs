@@ -270,7 +270,10 @@ mod tests {
 
     #[test]
     fn selection_for_commander_sets_flag_and_clears_ids() {
-        let target = selection_for_item(&SessionListItem::Commander { agent_state: None });
+        let target = selection_for_item(&SessionListItem::Commander {
+            running: true,
+            agent_state: None,
+        });
         assert!(target.commander);
         assert_eq!(
             target.session, None,

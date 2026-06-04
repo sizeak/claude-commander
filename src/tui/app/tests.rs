@@ -127,7 +127,10 @@ fn make_commander_list() -> Vec<SessionListItem> {
             count: 1,
             collapsed: false,
         },
-        SessionListItem::Commander { agent_state: None },
+        SessionListItem::Commander {
+            running: true,
+            agent_state: None,
+        },
         make_worktree(),
     ]
 }

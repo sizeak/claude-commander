@@ -136,10 +136,12 @@ fn test_numbers_are_sequential_across_projects() {
 
 #[test]
 fn commander_row_renders_label_and_running_glyph_when_idle() {
-    // agent_state None → the commander is running-but-idle. It must show the
-    // running `●`, NOT the stopped `○` (the glyph helper gates `●` on a
-    // `Running` status, which the Commander arm synthesises).
-    let items = vec![SessionListItem::Commander { agent_state: None }];
+    // running + agent_state None → running-but-idle. It must show the running
+    // `●`, NOT the stopped `○`.
+    let items = vec![SessionListItem::Commander {
+        running: true,
+        agent_state: None,
+    }];
     let lines = render_tree(&items, 40, 2);
     assert!(lines[0].contains("Commander"), "got: '{}'", lines[0]);
     assert!(
@@ -155,8 +157,32 @@ fn commander_row_renders_label_and_running_glyph_when_idle() {
 }
 
 #[test]
+fn commander_row_renders_stopped_glyph_when_not_running() {
+    // running == false (enabled but the commander isn't up) → the row must show
+    // the stopped `○`, matching the hidden footer chip and the hint pane. The
+    // agent state is ignored once stopped.
+    let items = vec![SessionListItem::Commander {
+        running: false,
+        agent_state: Some(AgentState::Working),
+    }];
+    let lines = render_tree(&items, 40, 2);
+    assert!(lines[0].contains("Commander"), "got: '{}'", lines[0]);
+    assert!(
+        lines[0].contains('○'),
+        "expected stopped glyph in: '{}'",
+        lines[0]
+    );
+    assert!(
+        !lines[0].contains('●'),
+        "must not show running glyph when stopped: '{}'",
+        lines[0]
+    );
+}
+
+#[test]
 fn commander_row_shows_waiting_glyph() {
     let items = vec![SessionListItem::Commander {
+        running: true,
         agent_state: Some(AgentState::WaitingForInput),
     }];
     let lines = render_tree(&items, 40, 2);
@@ -172,7 +198,10 @@ fn commander_row_is_not_session_numbered() {
     // A worktree following the commander row is still session #1 — the
     // commander must not consume a number.
     let items = vec![
-        SessionListItem::Commander { agent_state: None },
+        SessionListItem::Commander {
+            running: true,
+            agent_state: None,
+        },
         make_project("proj", 1),
         make_worktree("session-a"),
     ];

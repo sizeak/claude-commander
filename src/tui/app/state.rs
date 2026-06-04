@@ -540,7 +540,11 @@ impl App {
             .agent_states
             .get(&crate::commander::commander_sentinel_id())
             .copied();
-        let commander = commander_rows(self.config.commander_enabled, commander_agent_state);
+        let commander = commander_rows(
+            self.config.commander_enabled,
+            self.ui_state.commander_running,
+            commander_agent_state,
+        );
         if !commander.is_empty() {
             items.splice(0..0, commander);
         }
@@ -739,9 +743,15 @@ fn worktree_item(
 
 /// The pinned "System" section rows for the commander, or empty when the
 /// commander is disabled. Prepended to every view so the commander is reachable
-/// regardless of grouping mode. The agent state drives the row glyph; it is
-/// `None` until the background poll reports the commander's live state.
-fn commander_rows(enabled: bool, agent_state: Option<AgentState>) -> Vec<SessionListItem> {
+/// regardless of grouping mode. `running` drives the running ●/stopped ○ glyph
+/// (the row shows whenever enabled, including when stopped); `agent_state`
+/// refines a running row to working/waiting and is `None` until the background
+/// poll reports the commander's live state.
+fn commander_rows(
+    enabled: bool,
+    running: bool,
+    agent_state: Option<AgentState>,
+) -> Vec<SessionListItem> {
     if !enabled {
         return Vec::new();
     }
@@ -751,7 +761,10 @@ fn commander_rows(enabled: bool, agent_state: Option<AgentState>) -> Vec<Session
             count: 1,
             collapsed: false,
         },
-        SessionListItem::Commander { agent_state },
+        SessionListItem::Commander {
+            running,
+            agent_state,
+        },
     ]
 }
 
@@ -1121,14 +1134,14 @@ mod commander_rows_tests {
 
     #[test]
     fn disabled_yields_no_rows() {
-        assert!(commander_rows(false, None).is_empty());
-        // The agent state is irrelevant when the commander is disabled.
-        assert!(commander_rows(false, Some(AgentState::Working)).is_empty());
+        assert!(commander_rows(false, false, None).is_empty());
+        // Running/agent state are irrelevant when the commander is disabled.
+        assert!(commander_rows(false, true, Some(AgentState::Working)).is_empty());
     }
 
     #[test]
     fn enabled_yields_system_header_then_commander() {
-        let rows = commander_rows(true, Some(AgentState::WaitingForInput));
+        let rows = commander_rows(true, true, Some(AgentState::WaitingForInput));
         assert_eq!(rows.len(), 2);
         match &rows[0] {
             SessionListItem::SectionHeader { name, count, .. } => {
@@ -1138,9 +1151,28 @@ mod commander_rows_tests {
             other => panic!("expected System header, got {other:?}"),
         }
         match &rows[1] {
-            SessionListItem::Commander { agent_state } => {
+            SessionListItem::Commander {
+                running,
+                agent_state,
+            } => {
+                assert!(*running);
                 assert_eq!(*agent_state, Some(AgentState::WaitingForInput));
             }
+            other => panic!("expected Commander row, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enabled_but_stopped_commander_row_carries_running_false() {
+        // The row shows whenever enabled, including when the commander is not
+        // running — and must report `running: false` so its glyph renders ○,
+        // matching the footer chip (hidden) and the hint pane (○ stopped).
+        let rows = commander_rows(true, false, None);
+        match &rows[1] {
+            SessionListItem::Commander { running, .. } => assert!(
+                !*running,
+                "a stopped-but-enabled commander row must carry running=false"
+            ),
             other => panic!("expected Commander row, got {other:?}"),
         }
     }
@@ -1149,7 +1181,7 @@ mod commander_rows_tests {
     fn commander_row_is_not_counted_as_a_worktree() {
         // Guards the `Sessions: N` footer count and session-numbering: the
         // commander must never be mistaken for a real session.
-        let rows = commander_rows(true, None);
+        let rows = commander_rows(true, true, None);
         assert!(!rows.iter().any(|i| i.is_worktree()));
     }
 }
