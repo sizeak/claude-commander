@@ -15,20 +15,14 @@ impl App {
         if let Some(idx) = self.ui_state.list_state.selected()
             && let Some(item) = self.ui_state.list_items.get(idx)
         {
-            match item {
-                SessionListItem::Project { id, .. } => {
-                    self.ui_state.selected_project_id = Some(*id);
-                    self.ui_state.selected_session_id = None;
-                }
-                SessionListItem::Worktree { id, project_id, .. } => {
-                    self.ui_state.selected_session_id = Some(*id);
-                    self.ui_state.selected_project_id = Some(*project_id);
-                }
-                SessionListItem::SectionHeader { .. } | SessionListItem::Commander { .. } => {
-                    self.ui_state.selected_session_id = None;
-                    self.ui_state.selected_project_id = None;
-                }
-                SessionListItem::Spacer => {}
+            // Spacer rows leave the current selection untouched; every other
+            // item type maps to a concrete selection via the pure helper.
+            // (Commander selection is derived on demand by
+            // `AppUiState::commander_selected`, not stored here.)
+            if !matches!(item, SessionListItem::Spacer) {
+                let target = selection_for_item(item);
+                self.ui_state.selected_session_id = target.session;
+                self.ui_state.selected_project_id = target.project;
             }
         }
 
@@ -137,6 +131,44 @@ impl App {
     }
 }
 
+/// The selection state implied by landing on a list item. Exactly one of a
+/// session, a project, or the commander is ever active; `commander` is kept out
+/// of `session` so the commander row can never reach a session mutation handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct SelectionTarget {
+    pub session: Option<SessionId>,
+    pub project: Option<ProjectId>,
+    pub commander: bool,
+}
+
+/// Pure mapping from a (non-spacer) list item to its selection state. `Spacer`
+/// is handled by the caller (it leaves the existing selection unchanged) and
+/// maps here to "nothing selected" for completeness.
+pub(super) fn selection_for_item(item: &SessionListItem) -> SelectionTarget {
+    match item {
+        SessionListItem::Project { id, .. } => SelectionTarget {
+            session: None,
+            project: Some(*id),
+            commander: false,
+        },
+        SessionListItem::Worktree { id, project_id, .. } => SelectionTarget {
+            session: Some(*id),
+            project: Some(*project_id),
+            commander: false,
+        },
+        SessionListItem::Commander { .. } => SelectionTarget {
+            session: None,
+            project: None,
+            commander: true,
+        },
+        SessionListItem::SectionHeader { .. } | SessionListItem::Spacer => SelectionTarget {
+            session: None,
+            project: None,
+            commander: false,
+        },
+    }
+}
+
 /// Pure mapping from absolute mouse coordinates to a list item index.
 ///
 /// Mirrors the layout in `App::render` (see `render.rs`): the content area
@@ -234,6 +266,55 @@ mod tests {
             .split(content_area);
         let left = chunks[0];
         Rect::new(left.x, left.y + 1, left.width, left.height - 1)
+    }
+
+    #[test]
+    fn selection_for_commander_sets_flag_and_clears_ids() {
+        let target = selection_for_item(&SessionListItem::Commander { agent_state: None });
+        assert!(target.commander);
+        assert_eq!(target.session, None, "commander must never set a session id");
+        assert_eq!(target.project, None);
+    }
+
+    #[test]
+    fn selection_for_worktree_sets_ids_not_commander() {
+        let sid = SessionId::new();
+        let pid = ProjectId::new();
+        let item = SessionListItem::Worktree {
+            id: sid,
+            project_id: pid,
+            title: "t".into(),
+            branch: "b".into(),
+            status: SessionStatus::Running,
+            program: "claude".into(),
+            pr_number: None,
+            pr_url: None,
+            pr_merged: false,
+            pr_state: None,
+            pr_draft: false,
+            pr_labels: Vec::new(),
+            worktree_path: std::path::PathBuf::from("/tmp/wt"),
+            created_at: chrono::Utc::now(),
+            agent_state: None,
+            unread: false,
+            stacked_child: false,
+        };
+        let target = selection_for_item(&item);
+        assert!(!target.commander);
+        assert_eq!(target.session, Some(sid));
+        assert_eq!(target.project, Some(pid));
+    }
+
+    #[test]
+    fn selection_for_section_header_selects_nothing() {
+        let target = selection_for_item(&SessionListItem::SectionHeader {
+            name: "System".into(),
+            count: 1,
+            collapsed: false,
+        });
+        assert!(!target.commander);
+        assert_eq!(target.session, None);
+        assert_eq!(target.project, None);
     }
 
     #[test]

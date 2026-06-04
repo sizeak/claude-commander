@@ -469,6 +469,10 @@ pub struct AppUiState {
     pub selected_session_id: Option<SessionId>,
     /// Currently selected project
     pub selected_project_id: Option<ProjectId>,
+    /// Whether the `cc-commander` tmux session is currently running. Cached from
+    /// the background agent-state poll so the (sync) renderers — the footer chip
+    /// and the commander hint pane — can read it without awaiting tmux.
+    pub commander_running: bool,
     /// Attach command to run after exiting TUI
     pub attach_command: Option<String>,
     /// Editor command + path to open after exiting TUI
@@ -544,6 +548,7 @@ impl Default for AppUiState {
             should_quit: false,
             selected_session_id: None,
             selected_project_id: None,
+            commander_running: false,
             attach_command: None,
             editor_command: None,
             shell_toggle_pair: None,
@@ -571,6 +576,19 @@ impl Default for AppUiState {
 }
 
 impl AppUiState {
+    /// Whether the synthetic commander row is the one currently highlighted.
+    ///
+    /// Derived on demand from the cursor + `list_items` rather than stored, so
+    /// it can never go stale: it stays correct when the commander row moves,
+    /// disappears (commander disabled), or the selection is changed by any of
+    /// the many programmatic-select paths that don't run `update_selection`.
+    pub fn commander_selected(&self) -> bool {
+        self.list_state
+            .selected()
+            .and_then(|idx| self.list_items.get(idx))
+            .is_some_and(|item| matches!(item, SessionListItem::Commander { .. }))
+    }
+
     /// Whether a given command is currently invokable.
     ///
     /// These rules mirror the early-return guards scattered across

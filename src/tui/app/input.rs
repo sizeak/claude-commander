@@ -796,9 +796,20 @@ impl App {
                 }
                 let selected_session = self.ui_state.selected_session_id;
                 let selected_project = self.ui_state.selected_project_id;
+                let was_commander = self.ui_state.commander_selected();
                 self.refresh_list_items().await;
                 // Restore selection after rebuilding the list
-                if let Some(sid) = selected_session {
+                if was_commander {
+                    // The commander has no id to match on; re-find its row by variant.
+                    if let Some(idx) = self
+                        .ui_state
+                        .list_items
+                        .iter()
+                        .position(|item| matches!(item, SessionListItem::Commander { .. }))
+                    {
+                        self.ui_state.list_state.select(Some(idx));
+                    }
+                } else if let Some(sid) = selected_session {
                     if let Some(idx) = self.ui_state.list_items.iter().position(
                         |item| matches!(item, SessionListItem::Worktree { id, .. } if *id == sid),
                     ) {

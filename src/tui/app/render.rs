@@ -46,10 +46,16 @@ impl App {
         } else {
             self.ui_state.right_pane_view
         };
-        match view {
-            RightPaneView::Preview => self.render_preview(frame, main_chunks[1]),
-            RightPaneView::Info => self.render_info(frame, main_chunks[1]),
-            RightPaneView::Shell => self.render_shell(frame, main_chunks[1]),
+        if self.ui_state.commander_selected() {
+            // The commander row backs no session/worktree, so the normal
+            // preview/info/shell panes have nothing to show — render a hint.
+            self.render_commander_pane(frame, main_chunks[1]);
+        } else {
+            match view {
+                RightPaneView::Preview => self.render_preview(frame, main_chunks[1]),
+                RightPaneView::Info => self.render_info(frame, main_chunks[1]),
+                RightPaneView::Shell => self.render_shell(frame, main_chunks[1]),
+            }
         }
 
         // Render modal if open
@@ -97,6 +103,38 @@ impl App {
             chunks[1],
             &mut self.ui_state.list_state.list_state,
         );
+    }
+
+    /// Render the right-pane hint shown while the commander row is selected.
+    /// The commander is not a worktree session, so there is no preview/diff to
+    /// show — point the user at the attach action instead.
+    fn render_commander_pane(&self, frame: &mut Frame, area: Rect) {
+        let block = self.pane_block(&["Commander"], 0);
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let running = self.ui_state.commander_running;
+        let (status, status_color) = if running {
+            ("● running", self.theme.status_running)
+        } else {
+            ("○ stopped", self.theme.status_stopped)
+        };
+        let lines = vec![
+            Line::from(Span::styled(
+                "Commander session",
+                Style::default()
+                    .fg(self.theme.text_primary)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(""),
+            Line::from(Span::styled(status, Style::default().fg(status_color))),
+            Line::from(""),
+            Line::from(Span::styled(
+                "Press Enter to attach.",
+                Style::default().fg(self.theme.text_secondary),
+            )),
+        ];
+        frame.render_widget(Paragraph::new(lines), inner);
     }
 
     /// Build a styled tab title line for the pane header.

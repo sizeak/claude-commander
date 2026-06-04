@@ -85,6 +85,53 @@ fn make_worktree() -> SessionListItem {
     }
 }
 
+fn make_commander_list() -> Vec<SessionListItem> {
+    vec![
+        SessionListItem::SectionHeader {
+            name: "System".to_string(),
+            count: 1,
+            collapsed: false,
+        },
+        SessionListItem::Commander { agent_state: None },
+        make_worktree(),
+    ]
+}
+
+#[test]
+fn commander_selected_tracks_highlighted_row() {
+    let mut ui = AppUiState {
+        list_items: make_commander_list(),
+        ..AppUiState::default()
+    };
+    // Nothing highlighted yet.
+    assert!(!ui.commander_selected());
+    // The commander row (index 1).
+    ui.list_state.select(Some(1));
+    assert!(ui.commander_selected());
+    // A real worktree (index 2) is not the commander.
+    ui.list_state.select(Some(2));
+    assert!(!ui.commander_selected());
+}
+
+#[test]
+fn commander_selected_clears_when_row_disappears() {
+    // Regression: the commander is selected, then disabled so its row vanishes.
+    // A stored flag would stay true; deriving it from the cursor must not.
+    let mut ui = AppUiState {
+        list_items: make_commander_list(),
+        ..AppUiState::default()
+    };
+    ui.list_state.select(Some(1));
+    assert!(ui.commander_selected());
+
+    // Commander disabled → rows gone; the old index now points past the end.
+    ui.list_items = vec![make_worktree()];
+    assert!(
+        !ui.commander_selected(),
+        "commander_selected must not stay true when the row is no longer present"
+    );
+}
+
 #[test]
 fn test_session_number_to_list_index_basic() {
     let items = vec![

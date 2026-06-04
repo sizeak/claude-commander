@@ -87,6 +87,12 @@ impl App {
         if self.selected_session_is_creating() {
             return;
         }
+        // The commander has no real SessionId; route it through the idempotent
+        // ensure-session + attach path instead of the normal session lookup.
+        if self.ui_state.commander_selected() {
+            self.handle_open_commander().await;
+            return;
+        }
         if let Some(session_id) = self.ui_state.selected_session_id {
             info!("Getting attach command for session: {}", session_id);
             match self
