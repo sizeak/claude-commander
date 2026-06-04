@@ -221,6 +221,25 @@ impl<'a> TreeList<'a> {
 
                     ListItem::new(line)
                 }
+                SessionListItem::Commander { agent_state } => {
+                    // Reuse the worktree glyph logic with a synthesised
+                    // `Running` status: the commander is always "running" when
+                    // shown, and the agent state drives Working/Waiting/idle.
+                    let mut spans: Vec<Span<'static>> =
+                        vec![Span::styled("   ", Style::default())];
+                    if let Some((glyph, color)) =
+                        self.session_status_glyph(SessionStatus::Running, *agent_state, false)
+                    {
+                        spans.push(Span::styled(format!("{glyph} "), Style::default().fg(color)));
+                    }
+                    spans.push(Span::styled(
+                        "Commander".to_string(),
+                        Style::default()
+                            .fg(self.theme.text_primary)
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                    ListItem::new(Line::from(spans))
+                }
                 SessionListItem::SectionHeader {
                     name,
                     count,

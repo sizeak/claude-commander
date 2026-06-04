@@ -618,6 +618,11 @@ pub enum SessionListItem {
         count: usize,
         collapsed: bool,
     },
+    /// The synthetic commander row, pinned under a "System" header. Not backed
+    /// by a [`WorktreeSession`] — it carries only the live agent state for its
+    /// glyph. Selecting it routes to the commander attach path, not the normal
+    /// session lookup. See [`crate::commander`].
+    Commander { agent_state: Option<AgentState> },
     /// A blank spacer row for visual separation between sections.
     /// Not selectable.
     Spacer,
@@ -630,6 +635,7 @@ impl SessionListItem {
             Self::Project { id, .. } => format!("project:{}", id),
             Self::Worktree { id, .. } => format!("worktree:{}", id),
             Self::SectionHeader { name, .. } => format!("section:{}", name),
+            Self::Commander { .. } => "commander".to_string(),
             Self::Spacer => "spacer".to_string(),
         }
     }
@@ -666,6 +672,18 @@ mod tests {
         let id = ProjectId::new();
         let display = id.to_string();
         assert_eq!(display.len(), 8);
+    }
+
+    #[test]
+    fn commander_list_item_is_selectable_but_not_a_worktree() {
+        let item = SessionListItem::Commander { agent_state: None };
+        // Selectable so the cursor can land on it and Enter can attach...
+        assert!(item.is_selectable());
+        // ...but never a worktree, so it is excluded from the `Sessions: N`
+        // count, session-numbering, and every `matches!(.., Worktree)` filter.
+        assert!(!item.is_worktree());
+        assert!(!item.is_project());
+        assert_eq!(item.key(), "commander");
     }
 
     #[test]

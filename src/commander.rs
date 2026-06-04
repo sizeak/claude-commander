@@ -14,10 +14,23 @@ use std::path::Path;
 
 use crate::config::Config;
 use crate::error::Result;
+use crate::session::SessionId;
 use crate::tmux::TmuxExecutor;
 
 /// tmux session name for the singleton commander session.
 pub const COMMANDER_TMUX_NAME: &str = "cc-commander";
+
+/// Fixed in-memory identity for the commander session.
+///
+/// The commander is never stored in `state.sessions`, so it has no real
+/// [`SessionId`]. This sentinel is used **only** as the key into the in-memory
+/// agent-state map (`UiState::agent_states`) so the existing agent-state
+/// detector can carry the commander's live state to its synthetic list row.
+/// It is never persisted and never placed in `selected_session_id`, so it can
+/// never reach a mutation handler (kill/delete/restart/diff/PR).
+pub fn commander_sentinel_id() -> SessionId {
+    SessionId::from_uuid(uuid::Uuid::from_u128(0xc0_3a_de_cc_00_00_00_00_00_00_00_00_00_00_00_00))
+}
 
 /// Handwritten role/safety preamble. Ships with each build; humans edit this
 /// when the commander's intent changes. The live CLI reference is appended at
@@ -245,6 +258,15 @@ mod tests {
     fn plan_recreates_dead_pane() {
         // The corpse-reattach bug: existing + dead must kill & recreate, never reuse.
         assert_eq!(plan_session_action(true, true), SessionAction::RecreateDead);
+    }
+
+    #[test]
+    fn commander_sentinel_id_is_stable_and_distinct_from_new() {
+        // The sentinel must be deterministic across calls (it keys the
+        // agent-state map every poll tick) and must never collide with a real
+        // randomly-generated session id.
+        assert_eq!(commander_sentinel_id(), commander_sentinel_id());
+        assert_ne!(commander_sentinel_id(), SessionId::new());
     }
 
     #[test]

@@ -1038,7 +1038,9 @@ impl App {
                     SessionListItem::Worktree { id, .. } => {
                         project_names.insert(*id, current_project_name.clone());
                     }
-                    SessionListItem::SectionHeader { .. } | SessionListItem::Spacer => {}
+                    SessionListItem::SectionHeader { .. }
+                    | SessionListItem::Commander { .. }
+                    | SessionListItem::Spacer => {}
                 }
             }
 

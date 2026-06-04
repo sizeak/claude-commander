@@ -504,7 +504,7 @@ impl App {
 
         let state = self.service.store().read().await;
 
-        let items = match self.ui_state.view_mode {
+        let mut items = match self.ui_state.view_mode {
             ViewMode::ProjectGrouped => {
                 build_project_grouped_items(&state, &self.ui_state.agent_states)
             }
@@ -521,6 +521,17 @@ impl App {
                 &self.ui_state.collapsed_sections,
             ),
         };
+
+        // Pin the commander's "System" section at the top of every view.
+        let commander_agent_state = self
+            .ui_state
+            .agent_states
+            .get(&crate::commander::commander_sentinel_id())
+            .copied();
+        let commander = commander_rows(self.config.commander_enabled, commander_agent_state);
+        if !commander.is_empty() {
+            items.splice(0..0, commander);
+        }
 
         let selectable: Vec<bool> = items.iter().map(|i| i.is_selectable()).collect();
         self.ui_state.list_items = items;
@@ -621,7 +632,9 @@ impl App {
             SessionListItem::Project { id, .. } => {
                 last_session.is_none() && last_project.is_some_and(|p| p == *id)
             }
-            SessionListItem::SectionHeader { .. } | SessionListItem::Spacer => false,
+            SessionListItem::SectionHeader { .. }
+            | SessionListItem::Commander { .. }
+            | SessionListItem::Spacer => false,
         });
 
         if let Some(idx) = target_idx {
@@ -710,6 +723,24 @@ fn worktree_item(
         unread: session.unread,
         stacked_child,
     }
+}
+
+/// The pinned "System" section rows for the commander, or empty when the
+/// commander is disabled. Prepended to every view so the commander is reachable
+/// regardless of grouping mode. The agent state drives the row glyph; it is
+/// `None` until the background poll reports the commander's live state.
+fn commander_rows(enabled: bool, agent_state: Option<AgentState>) -> Vec<SessionListItem> {
+    if !enabled {
+        return Vec::new();
+    }
+    vec![
+        SessionListItem::SectionHeader {
+            name: "System".to_string(),
+            count: 1,
+            collapsed: false,
+        },
+        SessionListItem::Commander { agent_state },
+    ]
 }
 
 fn build_project_grouped_items(
@@ -1053,6 +1084,45 @@ mod unread_transition_tests {
         let prev = HashMap::new();
         let new = HashMap::from([(sid, AgentState::Working)]);
         assert!(detect_unread_transitions(&prev, &new).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod commander_rows_tests {
+    use super::*;
+
+    #[test]
+    fn disabled_yields_no_rows() {
+        assert!(commander_rows(false, None).is_empty());
+        // The agent state is irrelevant when the commander is disabled.
+        assert!(commander_rows(false, Some(AgentState::Working)).is_empty());
+    }
+
+    #[test]
+    fn enabled_yields_system_header_then_commander() {
+        let rows = commander_rows(true, Some(AgentState::WaitingForInput));
+        assert_eq!(rows.len(), 2);
+        match &rows[0] {
+            SessionListItem::SectionHeader { name, count, .. } => {
+                assert_eq!(name, "System");
+                assert_eq!(*count, 1);
+            }
+            other => panic!("expected System header, got {other:?}"),
+        }
+        match &rows[1] {
+            SessionListItem::Commander { agent_state } => {
+                assert_eq!(*agent_state, Some(AgentState::WaitingForInput));
+            }
+            other => panic!("expected Commander row, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn commander_row_is_not_counted_as_a_worktree() {
+        // Guards the `Sessions: N` footer count and session-numbering: the
+        // commander must never be mistaken for a real session.
+        let rows = commander_rows(true, None);
+        assert!(!rows.iter().any(|i| i.is_worktree()));
     }
 }
 

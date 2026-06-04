@@ -135,6 +135,45 @@ fn test_numbers_are_sequential_across_projects() {
 }
 
 #[test]
+fn commander_row_renders_label_and_running_glyph_when_idle() {
+    // agent_state None → the commander is running-but-idle. It must show the
+    // running `●`, NOT the stopped `○` (the glyph helper gates `●` on a
+    // `Running` status, which the Commander arm synthesises).
+    let items = vec![SessionListItem::Commander { agent_state: None }];
+    let lines = render_tree(&items, 40, 2);
+    assert!(lines[0].contains("Commander"), "got: '{}'", lines[0]);
+    assert!(lines[0].contains('●'), "expected running glyph in: '{}'", lines[0]);
+    assert!(!lines[0].contains('○'), "must not show stopped glyph: '{}'", lines[0]);
+}
+
+#[test]
+fn commander_row_shows_waiting_glyph() {
+    let items = vec![SessionListItem::Commander {
+        agent_state: Some(AgentState::WaitingForInput),
+    }];
+    let lines = render_tree(&items, 40, 2);
+    assert!(lines[0].contains('?'), "expected waiting glyph in: '{}'", lines[0]);
+}
+
+#[test]
+fn commander_row_is_not_session_numbered() {
+    // A worktree following the commander row is still session #1 — the
+    // commander must not consume a number.
+    let items = vec![
+        SessionListItem::Commander { agent_state: None },
+        make_project("proj", 1),
+        make_worktree("session-a"),
+    ];
+    let lines = render_tree(&items, 40, 4);
+    assert!(!lines[0].trim_start().starts_with("1 "), "commander must not be numbered");
+    assert!(
+        lines[2].trim_start().starts_with("1 "),
+        "first real session should be #1, got: '{}'",
+        lines[2]
+    );
+}
+
+#[test]
 fn test_double_digit_number_formatting() {
     let mut items = vec![make_project("proj", 12)];
     for i in 1..=12 {
