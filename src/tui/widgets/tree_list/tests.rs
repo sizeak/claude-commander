@@ -142,8 +142,16 @@ fn commander_row_renders_label_and_running_glyph_when_idle() {
     let items = vec![SessionListItem::Commander { agent_state: None }];
     let lines = render_tree(&items, 40, 2);
     assert!(lines[0].contains("Commander"), "got: '{}'", lines[0]);
-    assert!(lines[0].contains('●'), "expected running glyph in: '{}'", lines[0]);
-    assert!(!lines[0].contains('○'), "must not show stopped glyph: '{}'", lines[0]);
+    assert!(
+        lines[0].contains('●'),
+        "expected running glyph in: '{}'",
+        lines[0]
+    );
+    assert!(
+        !lines[0].contains('○'),
+        "must not show stopped glyph: '{}'",
+        lines[0]
+    );
 }
 
 #[test]
@@ -152,7 +160,11 @@ fn commander_row_shows_waiting_glyph() {
         agent_state: Some(AgentState::WaitingForInput),
     }];
     let lines = render_tree(&items, 40, 2);
-    assert!(lines[0].contains('?'), "expected waiting glyph in: '{}'", lines[0]);
+    assert!(
+        lines[0].contains('?'),
+        "expected waiting glyph in: '{}'",
+        lines[0]
+    );
 }
 
 #[test]
@@ -165,7 +177,10 @@ fn commander_row_is_not_session_numbered() {
         make_worktree("session-a"),
     ];
     let lines = render_tree(&items, 40, 4);
-    assert!(!lines[0].trim_start().starts_with("1 "), "commander must not be numbered");
+    assert!(
+        !lines[0].trim_start().starts_with("1 "),
+        "commander must not be numbered"
+    );
     assert!(
         lines[2].trim_start().starts_with("1 "),
         "first real session should be #1, got: '{}'",

@@ -811,8 +811,8 @@ impl App {
                             .map(|s| (s.id, s.tmux_session_name.clone(), s.program.clone()))
                             .collect()
                     };
-                    let commander_running = commander_enabled
-                        && crate::commander::is_running(&commander_tmux).await;
+                    let commander_running =
+                        commander_enabled && crate::commander::is_running(&commander_tmux).await;
                     if commander_running {
                         sessions.push((
                             crate::commander::commander_sentinel_id(),

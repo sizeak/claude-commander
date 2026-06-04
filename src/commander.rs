@@ -29,7 +29,9 @@ pub const COMMANDER_TMUX_NAME: &str = "cc-commander";
 /// It is never persisted and never placed in `selected_session_id`, so it can
 /// never reach a mutation handler (kill/delete/restart/diff/PR).
 pub fn commander_sentinel_id() -> SessionId {
-    SessionId::from_uuid(uuid::Uuid::from_u128(0xc0_3a_de_cc_00_00_00_00_00_00_00_00_00_00_00_00))
+    SessionId::from_uuid(uuid::Uuid::from_u128(
+        0xc0_3a_de_cc_00_00_00_00_00_00_00_00_00_00_00_00,
+    ))
 }
 
 /// Handwritten role/safety preamble. Ships with each build; humans edit this
