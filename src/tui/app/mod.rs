@@ -73,6 +73,19 @@ enum ScrollDirection {
     Down,
 }
 
+/// Whether an ended attached session should be auto-restarted fresh.
+///
+/// Shell sessions (suffix `-sh`) and the project-less commander are never
+/// auto-restarted: the commander is absent from `state.sessions`, so a
+/// restart-by-name would fail — it is revived lazily by
+/// [`commander::ensure_session`](crate::commander::ensure_session) on next
+/// open. A crash-loop guard stops after 3 consecutive ends.
+fn should_auto_restart_ended(session_name: &str, consecutive_ends: u8) -> bool {
+    !session_name.ends_with("-sh")
+        && session_name != crate::commander::COMMANDER_TMUX_NAME
+        && consecutive_ends < 3
+}
+
 /// Minimum left pane width as a percentage of the content area
 const MIN_LEFT_PANE_PCT: u16 = 15;
 /// Maximum left pane width as a percentage of the content area
@@ -954,8 +967,10 @@ impl App {
                                     }
                                     crate::tmux::AttachResult::SessionEnded => {
                                         info!("Session ended, attempting fresh restart");
-                                        let is_claude_session = !current_session.ends_with("-sh");
-                                        if is_claude_session && consecutive_ends < 3 {
+                                        if should_auto_restart_ended(
+                                            &current_session,
+                                            consecutive_ends,
+                                        ) {
                                             consecutive_ends += 1;
                                             match self
                                                 .service

@@ -211,6 +211,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `D` | Remove project |
 | `.` or `Ctrl-.` | Open in editor/IDE |
 | `o` | Open PR in browser (when the session has a PR) |
+| `C` | Open the commander session (a persistent, project-less Claude session that coordinates others; requires `commander_enabled = true`) |
 | `S` | Scan directory for git repos and add them as projects |
 | `s` | Open shell in worktree |
 | `v` | Cycle session list view: Project → Sections → Section Stacks (requires `[[sections]]` config) |
@@ -344,6 +345,15 @@ state_sync_interval_ms = 2000
 
 # Claude model used for AI summaries (default: Haiku for cost efficiency)
 # ai_summary_model = "claude-haiku-4-5-20251001"
+
+# Persistent "commander" session — a project-less Claude session (opened with
+# `C` or `claude-commander commander`) that coordinates other sessions via the
+# CLI. Disabled by default.
+# commander_enabled = false
+# Program (with flags) for the commander; defaults to `default_program`.
+# commander_program = "claude --model opus-4-7"
+# Working directory for the commander; defaults to <data dir>/commander.
+# commander_dir = "/path/to/commander"
 
 # Custom key bindings — override any default key with one or more alternatives
 # [keybindings]

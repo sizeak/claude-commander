@@ -687,6 +687,9 @@ impl App {
             UserCommand::OpenPullRequest => {
                 self.handle_open_pull_request().await;
             }
+            UserCommand::OpenCommander => {
+                self.handle_open_commander().await;
+            }
             UserCommand::TogglePane => {
                 let on_project = self.ui_state.selected_session_id.is_none()
                     && self.ui_state.selected_project_id.is_some();

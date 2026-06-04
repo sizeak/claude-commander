@@ -42,6 +42,7 @@ pub enum BindableAction {
     RemoveProject,
     OpenInEditor,
     OpenPullRequest,
+    OpenCommander,
     TogglePane,
     TogglePaneReverse,
     ShrinkLeftPane,
@@ -82,6 +83,7 @@ impl BindableAction {
         Self::RemoveProject,
         Self::OpenInEditor,
         Self::OpenPullRequest,
+        Self::OpenCommander,
         Self::ScanDirectory,
         Self::MoveToSection,
         Self::ToggleSection,
@@ -122,6 +124,7 @@ impl BindableAction {
             Self::RemoveProject => "remove_project",
             Self::OpenInEditor => "open_in_editor",
             Self::OpenPullRequest => "open_pull_request",
+            Self::OpenCommander => "open_commander",
             Self::TogglePane => "toggle_pane",
             Self::TogglePaneReverse => "toggle_pane_reverse",
             Self::ShrinkLeftPane => "shrink_left_pane",
@@ -163,6 +166,7 @@ impl BindableAction {
             Self::RemoveProject => "Remove project",
             Self::OpenInEditor => "Open in editor/IDE",
             Self::OpenPullRequest => "Open PR in browser",
+            Self::OpenCommander => "Open commander session",
             Self::TogglePane => "Toggle preview/diff/shell view",
             Self::TogglePaneReverse => "Toggle view (reverse)",
             Self::ShrinkLeftPane => "Shrink left pane",
@@ -202,6 +206,7 @@ impl BindableAction {
             | Self::RemoveProject
             | Self::OpenInEditor
             | Self::OpenPullRequest
+            | Self::OpenCommander
             | Self::ScanDirectory
             | Self::MoveToSection
             | Self::ToggleSection
@@ -241,6 +246,7 @@ impl FromStr for BindableAction {
             "remove_project" => Ok(Self::RemoveProject),
             "open_in_editor" => Ok(Self::OpenInEditor),
             "open_pull_request" => Ok(Self::OpenPullRequest),
+            "open_commander" => Ok(Self::OpenCommander),
             "toggle_pane" => Ok(Self::TogglePane),
             "toggle_pane_reverse" => Ok(Self::TogglePaneReverse),
             "shrink_left_pane" => Ok(Self::ShrinkLeftPane),
@@ -571,6 +577,10 @@ impl Default for KeyBindings {
         bindings.insert(
             BindableAction::OpenPullRequest,
             vec![kb(KeyCode::Char('o'), none)],
+        );
+        bindings.insert(
+            BindableAction::OpenCommander,
+            vec![kb(KeyCode::Char('C'), shift)],
         );
 
         // Pane control
@@ -910,6 +920,22 @@ mod tests {
         let kb = KeyBindings::default();
         let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE);
         assert_eq!(kb.resolve(&key), Some(BindableAction::ToggleViewMode));
+    }
+
+    #[test]
+    fn test_open_commander_default_bound_to_shift_c() {
+        let kb = KeyBindings::default();
+        let key = KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT);
+        assert_eq!(kb.resolve(&key), Some(BindableAction::OpenCommander));
+    }
+
+    #[test]
+    fn test_open_commander_round_trips_through_from_str() {
+        let name = BindableAction::OpenCommander.config_name();
+        assert_eq!(
+            BindableAction::from_str(name).unwrap(),
+            BindableAction::OpenCommander
+        );
     }
 
     #[test]

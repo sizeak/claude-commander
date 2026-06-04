@@ -16,6 +16,34 @@ fn test_centered_rect() {
 }
 
 #[test]
+fn test_should_auto_restart_regular_claude_session() {
+    // A normal Claude session that just ended should be auto-restarted.
+    assert!(should_auto_restart_ended("my-feature", 0));
+}
+
+#[test]
+fn test_should_not_auto_restart_after_repeated_ends() {
+    // Crash-loop guard: stop after 3 consecutive ends.
+    assert!(!should_auto_restart_ended("my-feature", 3));
+}
+
+#[test]
+fn test_should_not_auto_restart_shell_session() {
+    // Shell sessions (suffix `-sh`) are not Claude sessions.
+    assert!(!should_auto_restart_ended("my-feature-sh", 0));
+}
+
+#[test]
+fn test_should_not_auto_restart_commander() {
+    // The commander is project-less and absent from `state.sessions`, so a
+    // restart-by-name would fail; it is revived lazily on next open instead.
+    assert!(!should_auto_restart_ended(
+        crate::commander::COMMANDER_TMUX_NAME,
+        0
+    ));
+}
+
+#[test]
 fn test_app_ui_state_default() {
     let state = AppUiState::default();
     assert!(state.list_items.is_empty());
@@ -671,6 +699,67 @@ fn test_apply_worktrees_dir_default_sentinel_clears_to_none() {
     app.config.worktrees_dir = Some(std::path::PathBuf::from("/custom"));
     app.apply_settings_edit(SettingsTab::General, "worktrees_dir", "(default)");
     assert_eq!(app.config.worktrees_dir, None);
+}
+
+#[test]
+fn test_commander_rows_present_with_defaults() {
+    let app = make_test_app();
+    let rows = app.build_settings_rows(SettingsTab::General);
+
+    let enabled = rows
+        .iter()
+        .find(|r| r.field_key == "commander_enabled")
+        .unwrap();
+    assert_eq!(enabled.value, "false");
+
+    let program = rows
+        .iter()
+        .find(|r| r.field_key == "commander_program")
+        .unwrap();
+    assert_eq!(program.value, "(default)");
+
+    let dir = rows
+        .iter()
+        .find(|r| r.field_key == "commander_dir")
+        .unwrap();
+    assert_eq!(dir.value, "(default)");
+}
+
+#[test]
+fn test_apply_commander_enabled_toggles_bool() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(SettingsTab::General, "commander_enabled", "true");
+    assert!(app.config.commander_enabled);
+    app.apply_settings_edit(SettingsTab::General, "commander_enabled", "false");
+    assert!(!app.config.commander_enabled);
+}
+
+#[test]
+fn test_apply_commander_program_sets_and_clears() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(
+        SettingsTab::General,
+        "commander_program",
+        "claude --model opus",
+    );
+    assert_eq!(
+        app.config.commander_program.as_deref(),
+        Some("claude --model opus")
+    );
+    app.apply_settings_edit(SettingsTab::General, "commander_program", "");
+    assert_eq!(app.config.commander_program, None);
+}
+
+#[test]
+fn test_apply_commander_dir_sets_and_clears() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(SettingsTab::General, "commander_dir", "/my/commander");
+    assert_eq!(
+        app.config.commander_dir,
+        Some(std::path::PathBuf::from("/my/commander"))
+    );
+    app.apply_settings_edit(SettingsTab::General, "commander_dir", "(default)");
+    assert_eq!(app.config.commander_dir, None);
 }
 
 #[tokio::test]

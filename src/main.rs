@@ -2,134 +2,18 @@
 //!
 //! Run with `claude-commander` or `claude-commander --help` for usage.
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 use color_eyre::eyre::Result;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use claude_commander::{
-    APP_NAME, VERSION,
+    VERSION,
+    cli_args::{Cli, Commands, cli_command},
     config::{AppState, Config, ConfigStore, StateStore},
     tmux::{AttachResult, attach_to_session},
     tui::App,
 };
-
-#[derive(Parser)]
-#[command(name = APP_NAME)]
-#[command(version = VERSION)]
-#[command(about = "A high-performance terminal UI for managing Claude coding sessions")]
-#[command(long_about = None)]
-struct Cli {
-    /// Enable debug logging
-    #[arg(short, long)]
-    debug: bool,
-
-    /// Path to config file
-    #[arg(short, long)]
-    config: Option<std::path::PathBuf>,
-
-    #[command(subcommand)]
-    command: Option<Commands>,
-}
-
-#[derive(Subcommand)]
-enum Commands {
-    /// Start the interactive TUI (default)
-    Tui,
-
-    /// List all sessions
-    List {
-        /// Show all sessions including stopped ones
-        #[arg(short, long)]
-        all: bool,
-
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Show detailed status of a session
-    Status {
-        /// Session name or ID prefix
-        session: String,
-
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Dump recent terminal output from a session
-    Log {
-        /// Session name or ID prefix
-        session: String,
-
-        /// Number of scrollback lines to capture (default: 100, max: 10000)
-        #[arg(short, long, default_value_t = 100)]
-        lines: usize,
-    },
-
-    /// Create a new session
-    New {
-        /// Session name
-        name: String,
-
-        /// Program to run (default: claude)
-        #[arg(short, long)]
-        program: Option<String>,
-
-        /// Project path (default: current directory)
-        #[arg(short = 'd', long)]
-        path: Option<std::path::PathBuf>,
-
-        /// Initial prompt to send to the Claude agent
-        #[arg(short = 'i', long)]
-        initial_prompt: Option<String>,
-
-        /// Claude effort level
-        #[arg(short, long)]
-        effort: Option<String>,
-
-        /// Claude permission mode
-        #[arg(short, long)]
-        mode: Option<String>,
-
-        /// Branch to fork from (default: origin/main)
-        #[arg(short = 'b', long)]
-        base_branch: Option<String>,
-
-        /// Place session in a specific section
-        #[arg(short = 's', long)]
-        section: Option<String>,
-    },
-
-    /// Attach to an existing session
-    Attach {
-        /// Session name or ID
-        session: String,
-    },
-
-    /// Show configuration
-    Config {
-        /// Initialize config file with defaults
-        #[arg(long)]
-        init: bool,
-    },
-
-    /// Show the in-session session picker (used by Ctrl+Space inside an attached
-    /// session via `tmux display-popup`). Writes the chosen tmux session name
-    /// to `--out` on selection; writes nothing on cancel.
-    #[command(hide = true)]
-    PickSession {
-        /// Path to write the chosen tmux session name to
-        #[arg(long)]
-        out: std::path::PathBuf,
-        /// tmux name of the currently-attached session — excluded from the
-        /// picker list (Alt+Tab style; switching to where you already are
-        /// is a no-op).
-        #[arg(long)]
-        current: Option<String>,
-    },
-}
 
 fn setup_logging(debug: bool, to_file: bool) -> Result<()> {
     let filter = if debug {
@@ -437,6 +321,28 @@ async fn main() -> Result<()> {
                     eprintln!("Use 'claude-commander list' to see available sessions.");
                 }
             }
+        }
+
+        Some(Commands::Commander) => {
+            setup_logging(cli.debug, false)?;
+
+            if !config.commander_enabled {
+                println!(
+                    "Commander session is disabled. Enable it with \
+                     `commander_enabled = true` in config.toml, or toggle it in \
+                     the in-app settings."
+                );
+                return Ok(());
+            }
+
+            // One-shot CLI process: a bare executor is sufficient (no shared
+            // semaphore to honour as there is in the long-lived TUI).
+            let tmux = claude_commander::tmux::TmuxExecutor::new();
+            let name =
+                claude_commander::commander::ensure_session(&config, &tmux, &cli_command()).await?;
+
+            let triggers = claude_commander::editor_trigger_bytes(&config.keybindings);
+            execute_attach(&name, triggers).await;
         }
 
         Some(Commands::PickSession { out, current }) => {

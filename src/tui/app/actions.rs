@@ -387,6 +387,39 @@ impl App {
         }
     }
 
+    /// Open (creating or reviving if needed) the persistent commander session,
+    /// then hand off to the attach loop the same way `handle_select` does.
+    pub(super) async fn handle_open_commander(&mut self) {
+        if !self.config.commander_enabled {
+            self.ui_state.status_message = Some((
+                "Commander session is disabled — enable it in settings".to_string(),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            return;
+        }
+
+        // Reuse the TUI's existing tmux executor (shared semaphore) rather than
+        // constructing a second one.
+        let result = crate::commander::ensure_session(
+            &self.config,
+            &self.service.session_manager().tmux,
+            &crate::cli_args::cli_command(),
+        )
+        .await;
+
+        match result {
+            Ok(name) => {
+                self.ui_state.attach_command = Some(format!("attach {name}"));
+                self.ui_state.should_quit = true;
+            }
+            Err(e) => {
+                self.ui_state.modal = Modal::Error {
+                    message: format!("Failed to open commander: {}", e),
+                };
+            }
+        }
+    }
+
     /// Handle new session command
     pub(super) async fn handle_new_session(&mut self) {
         if let Some(project_id) = self.ui_state.selected_project_id {

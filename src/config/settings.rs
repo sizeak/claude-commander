@@ -141,6 +141,23 @@ pub struct Config {
     /// built-in "Other" catch-all.
     #[serde(default)]
     pub sections: Vec<crate::session::SectionConfig>,
+
+    /// Enable the persistent top-level "commander" Claude session — a session
+    /// (not tied to any project) that coordinates other sessions via the CLI.
+    /// Disabled by default; opt-in via config or the settings UI.
+    #[serde(default)]
+    pub commander_enabled: bool,
+
+    /// Program (with flags) to launch for the commander session. When unset,
+    /// falls back to `default_program`. Use this to pin a specific model,
+    /// e.g. `claude --model opus-4-7`.
+    #[serde(default)]
+    pub commander_program: Option<String>,
+
+    /// Working directory for the commander session. When unset, defaults to
+    /// `<data dir>/commander`.
+    #[serde(default)]
+    pub commander_dir: Option<PathBuf>,
 }
 
 impl Default for Config {
@@ -179,6 +196,9 @@ impl Default for Config {
             theme: ThemeOverrides::default(),
             rounded_borders: false,
             sections: Vec::new(),
+            commander_enabled: false,
+            commander_program: None,
+            commander_dir: None,
         }
     }
 }
@@ -237,6 +257,24 @@ impl Config {
         } else {
             Ok(Self::data_dir()?.join("worktrees"))
         }
+    }
+
+    /// Working directory for the commander session (config override or the
+    /// default `<data dir>/commander`).
+    pub fn commander_dir(&self) -> Result<PathBuf> {
+        if let Some(ref dir) = self.commander_dir {
+            Ok(dir.clone())
+        } else {
+            Ok(Self::data_dir()?.join("commander"))
+        }
+    }
+
+    /// Program (with flags) to launch for the commander session, falling back
+    /// to `default_program` when `commander_program` is unset.
+    pub fn commander_program(&self) -> String {
+        self.commander_program
+            .clone()
+            .unwrap_or_else(|| self.default_program.clone())
     }
 
     /// Resolve the worktrees directory, nesting under repo name if configured.
@@ -627,6 +665,55 @@ show_session_program = false
         };
         let result = config.resolve_worktrees_dir("genio").unwrap();
         assert_eq!(result, PathBuf::from("/tmp/worktrees/genio"));
+    }
+
+    #[test]
+    fn test_commander_disabled_by_default() {
+        let config = Config::default();
+        assert!(!config.commander_enabled);
+        assert!(config.commander_program.is_none());
+        assert!(config.commander_dir.is_none());
+    }
+
+    #[test]
+    fn test_commander_program_falls_back_to_default_program() {
+        let config = Config {
+            default_program: "claude".to_string(),
+            commander_program: None,
+            ..Config::default()
+        };
+        assert_eq!(config.commander_program(), "claude");
+    }
+
+    #[test]
+    fn test_commander_program_override_wins() {
+        let config = Config {
+            default_program: "claude".to_string(),
+            commander_program: Some("claude --model opus-4-7".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(config.commander_program(), "claude --model opus-4-7");
+    }
+
+    #[test]
+    fn test_commander_dir_override_wins() {
+        let config = Config {
+            commander_dir: Some(PathBuf::from("/tmp/commander")),
+            ..Config::default()
+        };
+        assert_eq!(
+            config.commander_dir().unwrap(),
+            PathBuf::from("/tmp/commander")
+        );
+    }
+
+    #[test]
+    fn test_commander_enabled_deserialises() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(!cfg.commander_enabled);
+
+        let cfg: Config = toml::from_str("commander_enabled = true\n").unwrap();
+        assert!(cfg.commander_enabled);
     }
 
     #[test]

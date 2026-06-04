@@ -152,6 +152,31 @@ impl App {
                         field_key: "ai_summary_model".into(),
                         color_swatch: None,
                     },
+                    SettingsRow {
+                        label: "Commander Enabled".into(),
+                        value: c.commander_enabled.to_string(),
+                        field_key: "commander_enabled".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
+                        label: "Commander Program".into(),
+                        value: c
+                            .commander_program
+                            .clone()
+                            .unwrap_or_else(|| "(default)".into()),
+                        field_key: "commander_program".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
+                        label: "Commander Directory".into(),
+                        value: c
+                            .commander_dir
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "(default)".into()),
+                        field_key: "commander_dir".into(),
+                        color_swatch: None,
+                    },
                 ]
             }
             SettingsTab::Sections => {
@@ -847,6 +872,25 @@ impl App {
                 }
                 "ai_summary_model" => {
                     self.config.ai_summary_model = value.to_string();
+                }
+                "commander_enabled" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        self.config.commander_enabled = b;
+                    }
+                }
+                "commander_program" => {
+                    self.config.commander_program = if value.is_empty() || value == "(default)" {
+                        None
+                    } else {
+                        Some(value.to_string())
+                    };
+                }
+                "commander_dir" => {
+                    self.config.commander_dir = if value.is_empty() || value == "(default)" {
+                        None
+                    } else {
+                        Some(PathBuf::from(value))
+                    };
                 }
                 _ => {}
             },
