@@ -400,10 +400,11 @@ impl App {
 
         // Reuse the TUI's existing tmux executor (shared semaphore) rather than
         // constructing a second one.
+        let cmd = crate::cli_args::cli_command();
         let result = crate::commander::ensure_session(
             &self.config,
             &self.service.session_manager().tmux,
-            &crate::cli_args::cli_command(),
+            &cmd,
         )
         .await;
 

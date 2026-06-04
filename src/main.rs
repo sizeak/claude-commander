@@ -338,8 +338,8 @@ async fn main() -> Result<()> {
             // One-shot CLI process: a bare executor is sufficient (no shared
             // semaphore to honour as there is in the long-lived TUI).
             let tmux = claude_commander::tmux::TmuxExecutor::new();
-            let name =
-                claude_commander::commander::ensure_session(&config, &tmux, &cli_command()).await?;
+            let cmd = cli_command();
+            let name = claude_commander::commander::ensure_session(&config, &tmux, &cmd).await?;
 
             let triggers = claude_commander::editor_trigger_bytes(&config.keybindings);
             execute_attach(&name, triggers).await;
