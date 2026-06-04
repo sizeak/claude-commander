@@ -188,8 +188,20 @@ impl App {
                 self.refresh_list_items().await;
                 self.ui_state.modal = Modal::Error { message };
             }
-            StateUpdate::AgentStatesUpdated { states } => {
-                let unread_ids = detect_unread_transitions(&self.ui_state.agent_states, &states);
+            StateUpdate::AgentStatesUpdated {
+                states,
+                commander_running,
+            } => {
+                self.ui_state.commander_running = commander_running;
+                // The commander has no `WorktreeSession`, so its sentinel id
+                // must not drive the unread/`mutate` path (which would take the
+                // write lock for a no-op `get_session_mut` miss every idle).
+                let sentinel = crate::commander::commander_sentinel_id();
+                let unread_ids: Vec<_> =
+                    detect_unread_transitions(&self.ui_state.agent_states, &states)
+                        .into_iter()
+                        .filter(|sid| *sid != sentinel)
+                        .collect();
                 if !unread_ids.is_empty() {
                     let _ = self
                         .service
@@ -1084,6 +1096,22 @@ mod unread_transition_tests {
         let prev = HashMap::new();
         let new = HashMap::from([(sid, AgentState::Working)]);
         assert!(detect_unread_transitions(&prev, &new).is_empty());
+    }
+
+    #[test]
+    fn commander_sentinel_would_be_flagged_so_handler_must_filter_it() {
+        // The detector treats the sentinel like any other id, so a commander
+        // Working→Idle transition WOULD be reported as unread. The handler
+        // filters the sentinel out to avoid a no-op write-lock/`mutate` on a
+        // session that does not exist in `state.sessions`.
+        let sentinel = crate::commander::commander_sentinel_id();
+        let prev = HashMap::from([(sentinel, AgentState::Working)]);
+        let new = HashMap::from([(sentinel, AgentState::Idle)]);
+        assert_eq!(
+            detect_unread_transitions(&prev, &new),
+            vec![sentinel],
+            "if this stops flagging the sentinel, the handler's filter is dead code"
+        );
     }
 }
 

@@ -43,6 +43,41 @@ fn test_should_not_auto_restart_commander() {
     ));
 }
 
+// --- agent-state poll tick decisions ----------------------------------------
+
+#[test]
+fn poll_skips_when_idle_and_commander_unchanged() {
+    // No sessions, commander not running, was not running → nothing to do.
+    assert!(poll_tick_can_skip(true, false, false));
+    // No sessions, commander running and was already running → row glyph may
+    // refresh via states, but the *skip* gate only guards the empty case;
+    // here sessions_empty is false at the call site (commander pushed one), so
+    // this exact combination never reaches the gate. Guard the pure contract:
+    assert!(poll_tick_can_skip(true, true, true));
+}
+
+#[test]
+fn poll_does_not_skip_when_commander_flips() {
+    // Commander just stopped (true → false) with no other sessions: must NOT
+    // skip, so the trailing-edge "turn off" update is emitted.
+    assert!(!poll_tick_can_skip(true, false, true));
+    // Commander just started (false → true).
+    assert!(!poll_tick_can_skip(true, true, false));
+}
+
+#[test]
+fn poll_sends_on_fresh_states_or_commander_flip() {
+    // Fresh states → always send.
+    assert!(poll_tick_should_send(false, false, false));
+    // No states but commander flipped on → send (chip turns on).
+    assert!(poll_tick_should_send(true, true, false));
+    // No states but commander flipped off → send (chip turns off).
+    assert!(poll_tick_should_send(true, false, true));
+    // No states, commander unchanged → nothing to send.
+    assert!(!poll_tick_should_send(true, true, true));
+    assert!(!poll_tick_should_send(true, false, false));
+}
+
 #[test]
 fn test_app_ui_state_default() {
     let state = AppUiState::default();

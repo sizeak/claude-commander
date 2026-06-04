@@ -86,6 +86,29 @@ fn should_auto_restart_ended(session_name: &str, consecutive_ends: u8) -> bool {
         && consecutive_ends < 3
 }
 
+/// Whether the agent-state poll tick can skip entirely: there is nothing to
+/// detect (no regular sessions and the commander isn't running) AND the
+/// commander's running state has not changed since the last emitted update.
+/// Skipping keeps the no-sessions path quiet — no event, no list rebuild.
+fn poll_tick_can_skip(
+    sessions_empty: bool,
+    commander_running: bool,
+    last_commander_running: bool,
+) -> bool {
+    sessions_empty && commander_running == last_commander_running
+}
+
+/// Whether a poll tick (that wasn't skipped) should emit an update: when there
+/// are fresh agent states, or the commander's running state flipped — the
+/// latter is what lets the chip/row turn *off* on the trailing edge.
+fn poll_tick_should_send(
+    states_empty: bool,
+    commander_running: bool,
+    last_commander_running: bool,
+) -> bool {
+    !states_empty || commander_running != last_commander_running
+}
+
 /// Minimum left pane width as a percentage of the content area
 const MIN_LEFT_PANE_PCT: u16 = 15;
 /// Maximum left pane width as a percentage of the content area
@@ -766,13 +789,20 @@ impl App {
             let tx = self.event_loop.sender();
             let interval_ms = self.config.agent_state_poll_interval_ms;
             let tmux = self.service.session_manager().tmux.clone();
+            // The commander is project-less and absent from `state.sessions`, so
+            // it is polled separately. Enablement is restart-required, so a
+            // snapshot captured here cannot go stale within the process.
+            let commander_enabled = self.config.commander_enabled;
+            let commander_program = self.config.commander_program();
+            let commander_tmux = tmux.clone();
             tokio::spawn(async move {
                 let cache_ttl = Duration::from_millis(interval_ms.saturating_sub(500).max(500));
                 let mut detector = AgentStateDetector::new(tmux, cache_ttl);
                 let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+                let mut last_commander_running = false;
                 loop {
                     interval.tick().await;
-                    let sessions: Vec<(SessionId, String, String)> = {
+                    let mut sessions: Vec<(SessionId, String, String)> = {
                         let state = store.read().await;
                         state
                             .sessions
@@ -781,15 +811,41 @@ impl App {
                             .map(|s| (s.id, s.tmux_session_name.clone(), s.program.clone()))
                             .collect()
                     };
-                    if sessions.is_empty() {
+                    let commander_running = commander_enabled
+                        && crate::commander::is_running(&commander_tmux).await;
+                    if commander_running {
+                        sessions.push((
+                            crate::commander::commander_sentinel_id(),
+                            crate::commander::COMMANDER_TMUX_NAME.to_string(),
+                            commander_program.clone(),
+                        ));
+                    }
+                    // Quiet path: nothing to detect and the commander's running
+                    // state is unchanged — skip the tick (no list rebuild).
+                    if poll_tick_can_skip(
+                        sessions.is_empty(),
+                        commander_running,
+                        last_commander_running,
+                    ) {
                         continue;
                     }
-                    let states: HashMap<SessionId, AgentState> =
-                        detector.detect_all(&sessions).await;
-                    if !states.is_empty() {
+                    let states: HashMap<SessionId, AgentState> = if sessions.is_empty() {
+                        HashMap::new()
+                    } else {
+                        detector.detect_all(&sessions).await
+                    };
+                    // Send on any real change: fresh states, or the commander
+                    // flipped (so its chip/row can turn on *and* off).
+                    if poll_tick_should_send(
+                        states.is_empty(),
+                        commander_running,
+                        last_commander_running,
+                    ) {
+                        last_commander_running = commander_running;
                         let _ = tx
                             .send(AppEvent::StateUpdate(StateUpdate::AgentStatesUpdated {
                                 states,
+                                commander_running,
                             }))
                             .await;
                     }
