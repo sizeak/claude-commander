@@ -90,12 +90,18 @@ fn should_auto_restart_ended(session_name: &str, consecutive_ends: u8) -> bool {
 /// detect (no regular sessions and the commander isn't running) AND the
 /// commander's running state has not changed since the last emitted update.
 /// Skipping keeps the no-sessions path quiet — no event, no list rebuild.
+///
+/// The `!commander_running` term is what the docstring promises: a *running*
+/// commander always has agent state worth forwarding, so we never skip then.
+/// At the current call site `sessions_empty` already implies `!commander_running`
+/// (a running commander pushes its sentinel), so the term is belt-and-braces —
+/// but it keeps the predicate honest if the call site ever changes.
 fn poll_tick_can_skip(
     sessions_empty: bool,
     commander_running: bool,
     last_commander_running: bool,
 ) -> bool {
-    sessions_empty && commander_running == last_commander_running
+    sessions_empty && !commander_running && !last_commander_running
 }
 
 /// Whether a poll tick (that wasn't skipped) should emit an update: when there
@@ -696,6 +702,13 @@ impl AppUiState {
 pub struct App {
     /// Local config cache — refreshed from config_store on tick when file changes
     config: Config,
+    /// Frozen snapshot of `commander_enabled`, captured at startup. The
+    /// commander's enablement is restart-required: the agent-state poll task
+    /// captures it at spawn, so the pinned commander row and footer chip read
+    /// this same frozen value rather than the hot-reloaded
+    /// `config.commander_enabled`. Toggling it at runtime only surfaces the
+    /// restart warning; the commander UI doesn't move until the next launch.
+    commander_enabled_at_init: bool,
     /// Unified service layer — owns SessionManager, StateStore, and ConfigStore
     service: CommanderService,
     /// UI state
@@ -725,9 +738,11 @@ impl App {
             .unwrap_or_default();
         let theme = base.with_overrides(&config.theme);
         let debounce = Duration::from_millis(config.session_number_debounce_ms);
+        let commander_enabled_at_init = config.commander_enabled;
 
         Self {
             config,
+            commander_enabled_at_init,
             service,
             ui_state: AppUiState::default(),
             event_loop: EventLoop::new(),
@@ -790,9 +805,10 @@ impl App {
             let interval_ms = self.config.agent_state_poll_interval_ms;
             let tmux = self.service.session_manager().tmux.clone();
             // The commander is project-less and absent from `state.sessions`, so
-            // it is polled separately. Enablement is restart-required, so a
-            // snapshot captured here cannot go stale within the process.
-            let commander_enabled = self.config.commander_enabled;
+            // it is polled separately. Enablement is restart-required: the poll
+            // task and the pinned row share `commander_enabled_at_init` so the
+            // chip and row can't disagree when the live config is toggled.
+            let commander_enabled = self.commander_enabled_at_init;
             let commander_program = self.config.commander_program();
             let commander_tmux = tmux.clone();
             tokio::spawn(async move {

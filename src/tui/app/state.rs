@@ -541,7 +541,7 @@ impl App {
             .get(&crate::commander::commander_sentinel_id())
             .copied();
         let commander = commander_rows(
-            self.config.commander_enabled,
+            self.commander_enabled_at_init,
             self.ui_state.commander_running,
             commander_agent_state,
         );

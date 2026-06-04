@@ -49,11 +49,15 @@ fn test_should_not_auto_restart_commander() {
 fn poll_skips_when_idle_and_commander_unchanged() {
     // No sessions, commander not running, was not running → nothing to do.
     assert!(poll_tick_can_skip(true, false, false));
-    // No sessions, commander running and was already running → row glyph may
-    // refresh via states, but the *skip* gate only guards the empty case;
-    // here sessions_empty is false at the call site (commander pushed one), so
-    // this exact combination never reaches the gate. Guard the pure contract:
-    assert!(poll_tick_can_skip(true, true, true));
+}
+
+#[test]
+fn poll_never_skips_while_commander_is_running() {
+    // A running commander always has agent state worth forwarding, so the gate
+    // must not skip even if the running flag is unchanged — the pure contract
+    // matches the docstring regardless of what the call site can reach today.
+    assert!(!poll_tick_can_skip(true, true, true));
+    assert!(!poll_tick_can_skip(false, true, true));
 }
 
 #[test]
