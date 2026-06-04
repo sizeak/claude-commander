@@ -951,6 +951,20 @@ async fn test_commander_session_lifecycle() {
         return;
     }
 
+    // Best-effort cleanup so a panicking assertion can't leak the global
+    // `cc-commander` session into later tests or the developer's tmux. Drop
+    // can't await, so shell out to tmux synchronously. Instantiated only after
+    // the "already exists" guard, so it never kills a session we didn't create.
+    struct KillOnDrop;
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("tmux")
+                .args(["kill-session", "-t", COMMANDER_TMUX_NAME])
+                .status();
+        }
+    }
+    let _cleanup = KillOnDrop;
+
     let dir = TempDir::new().unwrap();
     let cmd = cli_command();
     let live_config = Config {
@@ -1018,6 +1032,7 @@ async fn test_commander_session_lifecycle() {
         "ensure_session must revive a dead commander into a running one"
     );
 
-    let _ = tmux.kill_session(COMMANDER_TMUX_NAME).await;
+    // `_cleanup` (KillOnDrop) tears down the session as the scope unwinds —
+    // on success here and on a panic at any assertion above.
     drop(dir);
 }
