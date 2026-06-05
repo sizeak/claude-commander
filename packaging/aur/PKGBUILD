@@ -8,6 +8,10 @@ url='https://github.com/sizeak/claude-commander'
 license=('MIT')
 depends=('tmux' 'git')
 makedepends=('cargo')
+# claude-commander strips its own binary via [profile.release] (strip = true),
+# so opt out of makepkg's default debug-package split to avoid a broken/empty
+# claude-commander-debug package.
+options=('!debug')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/sizeak/claude-commander/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('SKIP')
 
