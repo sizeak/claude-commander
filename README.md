@@ -215,7 +215,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `s` | Open shell in worktree |
 | `v` | Cycle session list view: Project → Sections → Section Stacks (requires `[[sections]]` config) |
 | palette only | Collapse/expand section (press on any item in the section, or `Enter` on the section header) |
-| palette only | Move session to section (manual override; see [Session List Sections](#session-list-sections)) |
+| `m` | Move session to section (manual override; see [Session List Sections](#session-list-sections)) |
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
 | `<` / `>` | Shrink / grow left pane |
 | `Ctrl-u/d` or `PageUp/Down` | Page up/down in preview |
@@ -453,7 +453,7 @@ Config order is the pipeline. A session's section is re-evaluated on every PR re
 
 #### Moving sessions manually
 
-Select a session, open the palette (`Space`, or `Shift+Space` for commands-only), run **Move session to section…**, then pick a target. An **Auto** entry clears an existing pin. The override is persisted to `state.json` and survives restarts; auto-moves are suppressed until the pin is released.
+Select a session and press `m` (or open the palette with `Space`, or `Shift+Space` for commands-only, and run **Move session to section…**), then pick a target. An **Auto** entry clears an existing pin. The override is persisted to `state.json` and survives restarts; auto-moves are suppressed until the pin is released.
 
 #### Reordering, adding, or removing sections
 
