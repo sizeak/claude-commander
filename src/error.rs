@@ -93,6 +93,14 @@ pub enum TmuxError {
     #[error("Tmux command failed: {command} - {stderr}")]
     CommandFailed { command: String, stderr: String },
 
+    /// tmux could not be launched at all (e.g. fork/exec failed because the
+    /// process hit the open-file limit). Distinct from `CommandFailed`, which
+    /// means tmux *ran* and exited non-zero — a difference that matters when
+    /// interpreting `has-session`: a non-zero exit can mean "no such session",
+    /// but a launch failure tells us nothing about whether the session exists.
+    #[error("Failed to execute tmux command: {command} - {reason}")]
+    ExecFailed { command: String, reason: String },
+
     #[error("Failed to capture pane content: {0}")]
     CaptureFailed(String),
 
@@ -257,6 +265,10 @@ mod tests {
             TmuxError::CommandFailed {
                 command: "cmd".to_string(),
                 stderr: "err".to_string(),
+            },
+            TmuxError::ExecFailed {
+                command: "cmd".to_string(),
+                reason: "io".to_string(),
             },
             TmuxError::CaptureFailed("fail".to_string()),
             TmuxError::SessionNotFound("sess".to_string()),

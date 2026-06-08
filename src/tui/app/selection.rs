@@ -135,6 +135,55 @@ impl App {
     pub(super) fn is_project_selected(&self) -> bool {
         self.ui_state.selected_session_id.is_none() && self.ui_state.selected_project_id.is_some()
     }
+
+    /// Move the tree cursor to the `Worktree` row for `session_id` and sync
+    /// selection state. No-op (returns `false`) if the session has no row in
+    /// the current `list_items` — e.g. it was deleted. Callers that want the
+    /// preview pane to repaint immediately should follow with
+    /// `spawn_preview_update()`.
+    pub(super) fn select_session_in_tree(&mut self, session_id: SessionId) -> bool {
+        match worktree_list_index(&self.ui_state.list_items, session_id) {
+            Some(idx) => {
+                self.ui_state.list_state.select(Some(idx));
+                self.update_selection();
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Resolve a tmux session name (primary or paired shell) to its session
+    /// and focus it in the tree, repainting the preview pane. Used on the way
+    /// out of an attach so the tree lands on the session the user just left —
+    /// which, after the in-session switcher, may differ from the one they
+    /// entered. No-op if the session no longer exists.
+    pub(super) async fn focus_session_in_tree(&mut self, tmux_name: &str) {
+        let session_id = {
+            let state = self.service.store().read().await;
+            state
+                .sessions
+                .values()
+                .find(|s| s.matches_tmux_name(tmux_name))
+                .map(|s| s.id)
+        };
+        if let Some(id) = session_id
+            && self.select_session_in_tree(id)
+        {
+            self.ui_state.preview_update_spawned_at = None;
+            self.spawn_preview_update();
+        }
+    }
+}
+
+/// Find the flat `list_items` index of the `Worktree` row for `session_id`,
+/// or `None` if no such row is present.
+pub(super) fn worktree_list_index(
+    items: &[SessionListItem],
+    session_id: SessionId,
+) -> Option<usize> {
+    items
+        .iter()
+        .position(|item| matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id))
 }
 
 /// Pure mapping from absolute mouse coordinates to a list item index.

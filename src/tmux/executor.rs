@@ -105,10 +105,10 @@ impl TmuxExecutor {
                 }
             }
             Ok(Err(e)) => {
-                warn!("tmux command failed: {}", e);
-                Err(TmuxError::CommandFailed {
+                warn!("tmux command failed to execute: {}", e);
+                Err(TmuxError::ExecFailed {
                     command: format!("tmux {}", args.join(" ")),
-                    stderr: e.to_string(),
+                    reason: e.to_string(),
                 }
                 .into())
             }
@@ -121,10 +121,20 @@ impl TmuxExecutor {
         let result = self.execute(&["has-session", "-t", session_name]).await;
         match result {
             Ok(_) => Ok(true),
-            Err(crate::error::Error::Tmux(TmuxError::CommandFailed { .. })) => {
-                // "has-session" returns non-zero if session doesn't exist
+            // `has-session` exits non-zero both when the session is genuinely
+            // gone AND when tmux itself hits a transient failure (e.g. the
+            // server crashes, or a sibling command exhausted file descriptors
+            // and left the server in a bad state). Only the former means the
+            // session doesn't exist. Treating the latter as "absent" makes the
+            // reconciler mark live sessions Stopped — see `stderr_means_session_absent`.
+            Err(crate::error::Error::Tmux(TmuxError::CommandFailed { stderr, .. }))
+                if stderr_means_session_absent(&stderr) =>
+            {
                 Ok(false)
             }
+            // Launch failures (`ExecFailed`), timeouts, and unrecognised
+            // command failures tell us nothing about the session's existence,
+            // so we propagate them rather than guessing it's gone.
             Err(e) => Err(e),
         }
     }
@@ -349,6 +359,19 @@ impl Default for TmuxExecutor {
     }
 }
 
+/// Whether a non-zero `tmux has-session` stderr means the session genuinely
+/// does not exist (as opposed to a transient tmux failure).
+///
+/// tmux prints `can't find session: NAME` when the target session is absent,
+/// and `no server running on PATH` when there's no server at all (so, no
+/// sessions). Anything else — `server exited unexpectedly`, `lost server`,
+/// resource errors — is a failure we must NOT mistake for absence, or the
+/// state reconciler will wrongly mark a live session as Stopped.
+fn stderr_means_session_absent(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    s.contains("can't find session") || s.contains("no server running")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,5 +450,28 @@ mod tests {
     fn test_status_bar_format_right_empty() {
         let info = test_info("main", None, false);
         assert_eq!(info.format_right(), "");
+    }
+
+    #[test]
+    fn stderr_absent_recognises_missing_session() {
+        // The two messages tmux emits when the session is genuinely gone.
+        assert!(stderr_means_session_absent("can't find session: cc-abc123"));
+        assert!(stderr_means_session_absent(
+            "no server running on /tmp/tmux-501/default"
+        ));
+        // Case-insensitive, since wording can vary slightly across versions.
+        assert!(stderr_means_session_absent("Can't find session cc-abc123"));
+    }
+
+    #[test]
+    fn stderr_absent_rejects_transient_failures() {
+        // These are the failures that previously got misread as "session
+        // gone", causing the reconciler to mark live sessions Stopped.
+        assert!(!stderr_means_session_absent("server exited unexpectedly"));
+        assert!(!stderr_means_session_absent("lost server"));
+        assert!(!stderr_means_session_absent(
+            "Too many open files (os error 24)"
+        ));
+        assert!(!stderr_means_session_absent(""));
     }
 }
