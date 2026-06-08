@@ -11,7 +11,8 @@ use crossterm::event::KeyEvent;
 use crate::annotation::{Annotation, AnnotationSide, AnnotationStatus};
 use crate::api::AnnotationDraft;
 use crate::git::{DiffLine, FileDiff, FileStatus, Hunk, LineOrigin, ParsedDiff};
-use crate::tui::theme::ReviewPalette;
+use crate::tui::syntax_highlight::highlight_line;
+use crate::tui::theme::{ColorMode, ReviewPalette};
 
 /// Rough viewport height used to keep the cursor visible while scrolling. The
 /// renderer doesn't report its height back to the state, so we approximate
@@ -809,10 +810,19 @@ impl App {
         };
 
         let pal = self.theme.review_palette();
+        // Syntax highlighting emits RGB foregrounds, so only apply it on
+        // true-color terminals; otherwise fall back to the palette text colour.
+        let highlight = self.theme.mode == ColorMode::TrueColor;
+        let ext = state
+            .current_file()
+            .map(|f| file_extension(f.display_path()).to_string())
+            .unwrap_or_default();
         let width = area.width.saturating_sub(2) as usize;
         let lines = match state.layout {
-            ReviewLayout::Inline => review_body_lines(state, focused, &pal, width),
-            ReviewLayout::SideBySide => review_body_lines_side_by_side(state, focused, &pal, width),
+            ReviewLayout::Inline => review_body_lines(state, focused, &pal, &ext, highlight, width),
+            ReviewLayout::SideBySide => {
+                review_body_lines_side_by_side(state, focused, &pal, &ext, highlight, width)
+            }
         };
 
         let block = Block::default()
@@ -1017,6 +1027,8 @@ fn review_body_lines(
     state: &DiffReviewState,
     focused: bool,
     pal: &ReviewPalette,
+    ext: &str,
+    highlight: bool,
     width: usize,
 ) -> Vec<Line<'static>> {
     let Some(file) = state.current_file() else {
@@ -1068,10 +1080,7 @@ fn review_body_lines(
             ];
             for (text, emph) in &segs[idx] {
                 let bg = if *emph { emph_bg } else { line_bg };
-                spans.push(Span::styled(
-                    text.clone(),
-                    Style::default().fg(pal.text).bg(bg),
-                ));
+                push_segment(&mut spans, text, ext, highlight, pal.text, bg);
             }
             let mut spans = fit_spans(spans, width, line_bg);
             if focused && idx >= sel_lo && idx <= sel_hi {
@@ -1133,6 +1142,38 @@ fn fit_spans(spans: Vec<Span<'static>>, width: usize, pad_bg: Color) -> Vec<Span
         ));
     }
     out
+}
+
+/// File extension (no dot) of a path's final component, or `""` if none.
+fn file_extension(path: &str) -> &str {
+    path.rsplit('/')
+        .next()
+        .and_then(|name| name.rsplit_once('.'))
+        .map(|(_, ext)| ext)
+        .unwrap_or("")
+}
+
+/// Push a content segment as spans onto `out`, syntax-highlighting it (per the
+/// file `ext`) when `highlight` is set, else a single `fg`-coloured span. Every
+/// span gets background `bg`.
+fn push_segment(
+    out: &mut Vec<Span<'static>>,
+    text: &str,
+    ext: &str,
+    highlight: bool,
+    fg: Color,
+    bg: Color,
+) {
+    if highlight {
+        for (token, color) in highlight_line(text, ext, fg) {
+            out.push(Span::styled(token, Style::default().fg(color).bg(bg)));
+        }
+    } else {
+        out.push(Span::styled(
+            text.to_string(),
+            Style::default().fg(fg).bg(bg),
+        ));
+    }
 }
 
 /// Apply the reversed (selection-highlight) modifier to every span.
@@ -1281,6 +1322,8 @@ fn review_body_lines_side_by_side(
     state: &DiffReviewState,
     focused: bool,
     pal: &ReviewPalette,
+    ext: &str,
+    highlight: bool,
     width: usize,
 ) -> Vec<Line<'static>> {
     let Some(file) = state.current_file() else {
@@ -1317,10 +1360,7 @@ fn review_body_lines_side_by_side(
         )];
         for (text, emph) in &segs[i] {
             let bg = if *emph { emph_bg } else { line_bg };
-            spans.push(Span::styled(
-                text.clone(),
-                Style::default().fg(pal.text).bg(bg),
-            ));
+            push_segment(&mut spans, text, ext, highlight, pal.text, bg);
         }
         let spans = fit_spans(spans, col, line_bg);
         if focused && i >= sel_lo && i <= sel_hi {
@@ -1579,6 +1619,15 @@ diff --git a/b.rs b/b.rs
         // Clicking outside the body rect leaves the cursor untouched.
         s.click_at(5, 50, body);
         assert_eq!(s.cursor, 2);
+    }
+
+    #[test]
+    fn file_extension_handles_paths_and_dotfiles() {
+        assert_eq!(file_extension("src/git/diff.rs"), "rs");
+        assert_eq!(file_extension("Cargo.toml"), "toml");
+        assert_eq!(file_extension("README.md"), "md");
+        assert_eq!(file_extension("Makefile"), "");
+        assert_eq!(file_extension("dir.with.dot/Justfile"), "");
     }
 
     #[test]

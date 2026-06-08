@@ -100,6 +100,11 @@ against the session's base branch would contain — committed, staged, unstaged,
 and untracked changes — composed from `merge-base(base, HEAD)` through the
 working tree.
 
+The diff is rendered in a `lumen`/`hunk`-style colour scheme: dark green/red
+line fills, a brighter highlight on the changed span within a line, and (on
+true-color terminals) syntax highlighting of the code. It degrades to
+foreground-only colouring on 256- and 16-colour terminals.
+
 - **Navigate**: the changed files are shown as a collapsible **tree** (lazygit
   style — single-child directory chains are compressed). `Tab` switches focus
   between the tree and the diff body; in the tree, `↑↓`/`jk` move and `Enter`

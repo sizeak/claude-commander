@@ -48,6 +48,12 @@ color-eyre = "0.6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Syntax highlighting for the review diff view (fancy-regex backend — pure
+# Rust, no C/oniguruma dependency).
+syntect = { version = "5.2", default-features = false, features = [
+    "default-fancy",
+] }
+
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
