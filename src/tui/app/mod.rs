@@ -5,7 +5,7 @@
 //! - User input handling
 //! - Background state updates
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -829,11 +829,18 @@ impl App {
                         // Attach to session via async PTY bridge (supports Ctrl+Q detach, Ctrl+\ shell toggle)
                         info!("Executing attach command: {}", cmd);
                         let session_name = cmd.split_whitespace().last().unwrap_or("").to_string();
+                        // Track every session viewed during this attach
+                        // (including ones reached via the in-tmux switcher or
+                        // shell toggle) so we can refresh just their agent
+                        // state on the way out — see the post-loop block.
+                        let mut viewed_sessions: HashSet<String> = HashSet::new();
                         if !session_name.is_empty() {
                             let mut current_session = session_name.clone();
                             let mut consecutive_ends: u8 = 0;
 
                             loop {
+                                viewed_sessions.insert(current_session.clone());
+
                                 let editor_triggers =
                                     crate::config::keybindings::editor_trigger_bytes(
                                         &self.config.keybindings,
@@ -888,6 +895,7 @@ impl App {
                                 // necessarily the one we entered with. Trust the outcome.
                                 let switched_via_popup = outcome.final_session != current_session;
                                 current_session = outcome.final_session;
+                                viewed_sessions.insert(current_session.clone());
                                 if switched_via_popup {
                                     // Picking a new session in the popup invalidates the
                                     // shell-toggle pair (which is tied to a specific
@@ -1003,13 +1011,48 @@ impl App {
                         // Flush stdin again after detach to discard any stale input
                         crate::tmux::flush_stdin();
 
-                        // Restart the input reader after detach
+                        // Restart the input reader after detach. This also
+                        // drains the event channel, discarding any
+                        // AgentStatesUpdated events queued while attached.
                         info!("Returned from attach, restarting input reader");
                         self.event_loop.restart_input();
-                        // Discard cached agent states so queued AgentStatesUpdated
-                        // events from during attach can't trigger false
-                        // Working→Idle transitions that re-mark sessions unread.
-                        self.ui_state.agent_states.clear();
+
+                        // Refresh agent state for just the sessions we viewed,
+                        // setting their freshly-observed state directly. We
+                        // deliberately do NOT clear the whole map: clearing
+                        // blanks every spinner in the tree until the next poll
+                        // (~3s) and wipes the unread baseline for background
+                        // sessions, silently dropping genuine Working→Idle
+                        // notifications that occurred while we were attached.
+                        // Setting the viewed sessions directly (bypassing the
+                        // unread diff) avoids re-flagging them as unread, since
+                        // the user was watching them.
+                        if !viewed_sessions.is_empty() {
+                            let targets: Vec<(SessionId, String, String)> = {
+                                let store_state = self.service.store().read().await;
+                                store_state
+                                    .sessions
+                                    .values()
+                                    .filter(|s| s.status == SessionStatus::Running)
+                                    .filter(|s| {
+                                        viewed_sessions.iter().any(|name| s.matches_tmux_name(name))
+                                    })
+                                    .map(|s| (s.id, s.tmux_session_name.clone(), s.program.clone()))
+                                    .collect()
+                            };
+                            if !targets.is_empty() {
+                                let mut detector = AgentStateDetector::new(
+                                    self.service.session_manager().tmux.clone(),
+                                    Duration::from_millis(0),
+                                );
+                                let refreshed = detector.detect_all(&targets).await;
+                                state::apply_viewed_session_refresh(
+                                    &mut self.ui_state.agent_states,
+                                    refreshed,
+                                );
+                                self.refresh_list_items().await;
+                            }
+                        }
                     }
                     None => {
                         // Save selection before quitting
