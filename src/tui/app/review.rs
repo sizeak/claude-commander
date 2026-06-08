@@ -10,7 +10,8 @@ use crossterm::event::KeyEvent;
 
 use crate::annotation::{Annotation, AnnotationSide, AnnotationStatus};
 use crate::api::AnnotationDraft;
-use crate::git::{DiffLine, FileDiff, FileStatus, LineOrigin, ParsedDiff};
+use crate::git::{DiffLine, FileDiff, FileStatus, Hunk, LineOrigin, ParsedDiff};
+use crate::tui::theme::ReviewPalette;
 
 /// Rough viewport height used to keep the cursor visible while scrolling. The
 /// renderer doesn't report its height back to the state, so we approximate
@@ -807,11 +808,11 @@ impl App {
             None => format!(" review — vs {} ", state.base),
         };
 
+        let pal = self.theme.review_palette();
+        let width = area.width.saturating_sub(2) as usize;
         let lines = match state.layout {
-            ReviewLayout::Inline => review_body_lines(state, focused),
-            ReviewLayout::SideBySide => {
-                review_body_lines_side_by_side(state, focused, area.width.saturating_sub(2))
-            }
+            ReviewLayout::Inline => review_body_lines(state, focused, &pal, width),
+            ReviewLayout::SideBySide => review_body_lines_side_by_side(state, focused, &pal, width),
         };
 
         let block = Block::default()
@@ -1009,58 +1010,215 @@ fn file_status_color(status: FileStatus) -> Color {
 }
 
 /// Build the inline-rendered body for the current file: hunk headers plus each
-/// diff line with an annotation marker, old/new line-number gutter, and +/-
-/// colouring. Selected lines (cursor or visual range) are highlighted when the
-/// body is focused.
-fn review_body_lines(state: &DiffReviewState, focused: bool) -> Vec<Line<'static>> {
+/// diff line with a coloured gutter, full-width add/remove background fill,
+/// word-level intra-line highlight, and an annotation marker. Selected lines
+/// (cursor or visual range) are reversed when the body is focused.
+fn review_body_lines(
+    state: &DiffReviewState,
+    focused: bool,
+    pal: &ReviewPalette,
+    width: usize,
+) -> Vec<Line<'static>> {
     let Some(file) = state.current_file() else {
         return Vec::new();
     };
     let (sel_lo, sel_hi) = state.selection();
-    let mut lines: Vec<Line<'static>> = Vec::new();
+    let segs = word_diff_segments(file);
+    let mut out: Vec<Line<'static>> = Vec::new();
     let mut idx = 0; // selectable-line index
 
     for hunk in &file.hunks {
-        let header = format!(
-            "@@ -{},{} +{},{} @@ {}",
-            hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines, hunk.header
-        );
-        lines.push(Line::from(Span::styled(
-            header,
-            Style::default().fg(Color::Cyan),
-        )));
-
+        out.push(hunk_header_line(hunk, pal, width));
         for line in &hunk.lines {
-            let old = line
-                .old_lineno
-                .map(|n| format!("{n:>4}"))
-                .unwrap_or_else(|| "    ".to_string());
-            let new = line
-                .new_lineno
-                .map(|n| format!("{n:>4}"))
-                .unwrap_or_else(|| "    ".to_string());
-            let (marker, color) = match line.origin {
-                LineOrigin::Addition => ('+', Color::Green),
-                LineOrigin::Deletion => ('-', Color::Red),
-                LineOrigin::Context => (' ', Color::Gray),
+            let (line_bg, gutter_bg, emph_bg, sign, sign_fg) = match line.origin {
+                LineOrigin::Addition => (
+                    pal.add_bg,
+                    pal.add_gutter_bg,
+                    pal.add_emph_bg,
+                    '+',
+                    Color::Green,
+                ),
+                LineOrigin::Deletion => (
+                    pal.del_bg,
+                    pal.del_gutter_bg,
+                    pal.del_emph_bg,
+                    '-',
+                    Color::Red,
+                ),
+                LineOrigin::Context => {
+                    (Color::Reset, Color::Reset, Color::Reset, ' ', pal.gutter_fg)
+                }
             };
-            // Annotation gutter: ⚠ drifted, ✎ staged, space otherwise.
             let ann = match state.annotation_marker(idx) {
                 Some(true) => '⚠',
                 Some(false) => '✎',
                 None => ' ',
             };
-            let text = format!("{ann}{old} {new} │{marker}{}", line.content);
+            let old = lineno_str(line.old_lineno);
+            let new = lineno_str(line.new_lineno);
 
-            let mut style = Style::default().fg(color);
-            if focused && idx >= sel_lo && idx <= sel_hi {
-                style = style.add_modifier(Modifier::REVERSED);
+            let mut spans = vec![
+                // Bright left edge bar on changed lines.
+                Span::styled(" ", Style::default().bg(emph_bg)),
+                Span::styled(
+                    format!("{ann}{old} {new} "),
+                    Style::default().fg(pal.gutter_fg).bg(gutter_bg),
+                ),
+                Span::styled(sign.to_string(), Style::default().fg(sign_fg).bg(line_bg)),
+            ];
+            for (text, emph) in &segs[idx] {
+                let bg = if *emph { emph_bg } else { line_bg };
+                spans.push(Span::styled(
+                    text.clone(),
+                    Style::default().fg(pal.text).bg(bg),
+                ));
             }
-            lines.push(Line::from(Span::styled(text, style)));
+            let mut spans = fit_spans(spans, width, line_bg);
+            if focused && idx >= sel_lo && idx <= sel_hi {
+                spans = reverse_spans(spans);
+            }
+            out.push(Line::from(spans));
             idx += 1;
         }
     }
-    lines
+    out
+}
+
+/// Right-aligned 4-wide line number, or blanks when absent.
+fn lineno_str(n: Option<usize>) -> String {
+    n.map(|n| format!("{n:>4}"))
+        .unwrap_or_else(|| "    ".to_string())
+}
+
+/// A full-width hunk-header line.
+fn hunk_header_line(hunk: &Hunk, pal: &ReviewPalette, width: usize) -> Line<'static> {
+    let text = format!(
+        "@@ -{},{} +{},{} @@ {}",
+        hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines, hunk.header
+    );
+    fit_spans(
+        vec![Span::styled(text, Style::default().fg(pal.hunk_header))],
+        width,
+        Color::Reset,
+    )
+    .into()
+}
+
+/// Truncate a styled span list to `width` display columns (cutting the last
+/// span), or right-pad it with a `pad_bg`-filled space span so the row's
+/// background fills the full width.
+fn fit_spans(spans: Vec<Span<'static>>, width: usize, pad_bg: Color) -> Vec<Span<'static>> {
+    let mut out = Vec::new();
+    let mut used = 0usize;
+    for span in spans {
+        if used >= width {
+            break;
+        }
+        let len = span.content.chars().count();
+        if used + len <= width {
+            used += len;
+            out.push(span);
+        } else {
+            let take = width - used;
+            let truncated: String = span.content.chars().take(take).collect();
+            out.push(Span::styled(truncated, span.style));
+            used = width;
+            break;
+        }
+    }
+    if used < width {
+        out.push(Span::styled(
+            " ".repeat(width - used),
+            Style::default().bg(pad_bg),
+        ));
+    }
+    out
+}
+
+/// Apply the reversed (selection-highlight) modifier to every span.
+fn reverse_spans(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
+    spans
+        .into_iter()
+        .map(|s| Span::styled(s.content, s.style.add_modifier(Modifier::REVERSED)))
+        .collect()
+}
+
+/// A line split into runs of text, each tagged changed (`true`) or unchanged
+/// (`false`) by the word-level diff.
+type WordSegs = Vec<(String, bool)>;
+
+/// Split a changed (old, new) line pair into segments tagged changed/unchanged,
+/// using a character-level common-prefix/suffix heuristic — enough to highlight
+/// the edited span within a line without a full intra-line diff.
+fn word_diff(old: &str, new: &str) -> (WordSegs, WordSegs) {
+    let o: Vec<char> = old.chars().collect();
+    let n: Vec<char> = new.chars().collect();
+    let min = o.len().min(n.len());
+
+    let mut pre = 0;
+    while pre < min && o[pre] == n[pre] {
+        pre += 1;
+    }
+    let mut suf = 0;
+    while suf < min - pre && o[o.len() - 1 - suf] == n[n.len() - 1 - suf] {
+        suf += 1;
+    }
+
+    let split = |chars: &[char]| -> Vec<(String, bool)> {
+        let len = chars.len();
+        let mut v = Vec::new();
+        if pre > 0 {
+            v.push((chars[..pre].iter().collect(), false));
+        }
+        if len - suf > pre {
+            v.push((chars[pre..len - suf].iter().collect(), true));
+        }
+        if suf > 0 {
+            v.push((chars[len - suf..].iter().collect(), false));
+        }
+        if v.is_empty() {
+            v.push((String::new(), false));
+        }
+        v
+    };
+    (split(&o), split(&n))
+}
+
+/// Compute per-selectable-line segment lists for the current file, applying a
+/// word-level diff to paired deletion/addition lines within each change block.
+/// Unpaired lines (and context) become a single unchanged segment.
+fn word_diff_segments(file: &FileDiff) -> Vec<WordSegs> {
+    fn flush(
+        segs: &mut [WordSegs],
+        dels: &mut Vec<(usize, String)>,
+        adds: &mut Vec<(usize, String)>,
+    ) {
+        for i in 0..dels.len().min(adds.len()) {
+            let (di, dtext) = &dels[i];
+            let (ai, atext) = &adds[i];
+            let (dsegs, asegs) = word_diff(dtext, atext);
+            segs[*di] = dsegs;
+            segs[*ai] = asegs;
+        }
+        dels.clear();
+        adds.clear();
+    }
+
+    let mut segs: Vec<WordSegs> = Vec::new();
+    for hunk in &file.hunks {
+        let (mut dels, mut adds) = (Vec::new(), Vec::new());
+        for line in &hunk.lines {
+            let idx = segs.len();
+            segs.push(vec![(line.content.clone(), false)]);
+            match line.origin {
+                LineOrigin::Context => flush(&mut segs, &mut dels, &mut adds),
+                LineOrigin::Deletion => dels.push((idx, line.content.clone())),
+                LineOrigin::Addition => adds.push((idx, line.content.clone())),
+            }
+        }
+        flush(&mut segs, &mut dels, &mut adds);
+    }
+    segs
 }
 
 /// A row in the side-by-side layout.
@@ -1116,67 +1274,87 @@ fn side_by_side_rows(file: &FileDiff) -> Vec<SbsRow> {
     rows
 }
 
-/// Render the side-by-side body for the current file.
+/// Render the side-by-side body for the current file: old | new columns with
+/// per-side line-number gutter, add/remove fills, word-level highlight, and a
+/// diagonal-hatch fill for alignment gaps.
 fn review_body_lines_side_by_side(
     state: &DiffReviewState,
     focused: bool,
-    width: u16,
+    pal: &ReviewPalette,
+    width: usize,
 ) -> Vec<Line<'static>> {
     let Some(file) = state.current_file() else {
         return Vec::new();
     };
     let lines = state.selectable_lines();
+    let segs = word_diff_segments(file);
     let (sel_lo, sel_hi) = state.selection();
     // Two columns separated by " │ ".
-    let col = (width.saturating_sub(3) / 2).max(8) as usize;
+    let col = width.saturating_sub(3) / 2;
 
-    let cell = |idx: Option<usize>, is_old: bool| -> Span<'static> {
-        match idx.and_then(|i| lines.get(i).map(|l| (i, *l))) {
-            Some((i, line)) => {
-                let no = if is_old {
-                    line.old_lineno
-                } else {
-                    line.new_lineno
-                };
-                let gutter = no
-                    .map(|n| format!("{n:>4}"))
-                    .unwrap_or_else(|| "    ".into());
-                let color = match line.origin {
-                    LineOrigin::Addition => Color::Green,
-                    LineOrigin::Deletion => Color::Red,
-                    LineOrigin::Context => Color::Gray,
-                };
-                let text = truncate_pad(&format!("{gutter} {}", line.content), col);
-                let mut style = Style::default().fg(color);
-                if focused && i >= sel_lo && i <= sel_hi {
-                    style = style.add_modifier(Modifier::REVERSED);
-                }
-                Span::styled(text, style)
-            }
-            None => Span::raw(" ".repeat(col)),
+    let cell = |idx: Option<usize>, is_old: bool| -> Vec<Span<'static>> {
+        let Some(i) = idx else {
+            // Alignment gap: diagonal hatch fill.
+            return vec![Span::styled(
+                "╱".repeat(col),
+                Style::default().fg(pal.gap_fg),
+            )];
+        };
+        let line = lines[i];
+        let (line_bg, gutter_bg, emph_bg) = match line.origin {
+            LineOrigin::Addition => (pal.add_bg, pal.add_gutter_bg, pal.add_emph_bg),
+            LineOrigin::Deletion => (pal.del_bg, pal.del_gutter_bg, pal.del_emph_bg),
+            LineOrigin::Context => (Color::Reset, Color::Reset, Color::Reset),
+        };
+        let no = if is_old {
+            line.old_lineno
+        } else {
+            line.new_lineno
+        };
+        let mut spans = vec![Span::styled(
+            format!("{} ", lineno_str(no)),
+            Style::default().fg(pal.gutter_fg).bg(gutter_bg),
+        )];
+        for (text, emph) in &segs[i] {
+            let bg = if *emph { emph_bg } else { line_bg };
+            spans.push(Span::styled(
+                text.clone(),
+                Style::default().fg(pal.text).bg(bg),
+            ));
+        }
+        let spans = fit_spans(spans, col, line_bg);
+        if focused && i >= sel_lo && i <= sel_hi {
+            reverse_spans(spans)
+        } else {
+            spans
         }
     };
 
     side_by_side_rows(file)
         .into_iter()
         .map(|row| match row {
-            SbsRow::Header(h) => Line::from(Span::styled(h, Style::default().fg(Color::Cyan))),
-            SbsRow::Cells { left, right } => Line::from(vec![
-                cell(left, true),
-                Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
-                cell(right, false),
-            ]),
+            SbsRow::Header(_) => {
+                // Re-derive the hunk for a full-width styled header.
+                Line::from(Span::styled(
+                    row_header_text(&row),
+                    Style::default().fg(pal.hunk_header),
+                ))
+            }
+            SbsRow::Cells { left, right } => {
+                let mut spans = cell(left, true);
+                spans.push(Span::styled(" │ ", Style::default().fg(pal.gutter_fg)));
+                spans.extend(cell(right, false));
+                Line::from(spans)
+            }
         })
         .collect()
 }
 
-/// Truncate `s` to `width` display chars, or right-pad with spaces to `width`.
-fn truncate_pad(s: &str, width: usize) -> String {
-    let count = s.chars().count();
-    if count > width {
-        s.chars().take(width).collect()
-    } else {
-        format!("{s:<width$}")
+/// The header text for a [`SbsRow::Header`] (empty for non-header rows).
+fn row_header_text(row: &SbsRow) -> String {
+    match row {
+        SbsRow::Header(h) => h.clone(),
+        _ => String::new(),
     }
 }
 
@@ -1401,6 +1579,54 @@ diff --git a/b.rs b/b.rs
         // Clicking outside the body rect leaves the cursor untouched.
         s.click_at(5, 50, body);
         assert_eq!(s.cursor, 2);
+    }
+
+    #[test]
+    fn word_diff_marks_only_the_changed_span() {
+        let (old, new) = word_diff("let y = 2;", "let y = 3;");
+        assert_eq!(
+            old,
+            vec![
+                ("let y = ".to_string(), false),
+                ("2".to_string(), true),
+                (";".to_string(), false),
+            ]
+        );
+        assert_eq!(
+            new,
+            vec![
+                ("let y = ".to_string(), false),
+                ("3".to_string(), true),
+                (";".to_string(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn word_diff_identical_lines_have_no_change() {
+        let (old, new) = word_diff("same", "same");
+        assert_eq!(old, vec![("same".to_string(), false)]);
+        assert_eq!(new, vec![("same".to_string(), false)]);
+    }
+
+    #[test]
+    fn word_diff_segments_pairs_replace_block() {
+        let diff = parse_unified_diff(
+            "\
+diff --git a/x.rs b/x.rs
+--- a/x.rs
++++ b/x.rs
+@@ -1,2 +1,2 @@
+ fn f() {
+-let y = 2;
++let y = 3;
+",
+        );
+        let segs = word_diff_segments(&diff.files[0]);
+        // selectable index 0 = context (unchanged), 1 = deletion, 2 = addition.
+        assert_eq!(segs[0], vec![("fn f() {".to_string(), false)]);
+        assert!(segs[1].iter().any(|(t, emph)| *emph && t == "2"));
+        assert!(segs[2].iter().any(|(t, emph)| *emph && t == "3"));
     }
 
     #[test]

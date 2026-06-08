@@ -120,11 +120,88 @@ pub struct Theme {
     // Status bar
     pub status_bar_bg: Color,
     pub status_bar_fg: Color,
+
+    /// Colour capability this theme was built for. Drives capability-aware
+    /// palettes (e.g. the review diff view) so RGB fills degrade gracefully.
+    pub mode: ColorMode,
 }
 
 impl Default for Theme {
     fn default() -> Self {
         Self::for_color_mode(ColorMode::detect())
+    }
+}
+
+/// Colour palette for the full-screen review diff view, modelled on `lumen`'s
+/// scheme: dark green/red line fills, brighter fills for the intra-line
+/// (word-level) diff, a tinted dim gutter, and a hatch colour for alignment
+/// gaps. Degrades from true-color RGB to indexed/ANSI by capability.
+#[derive(Debug, Clone, Copy)]
+pub struct ReviewPalette {
+    /// Background fill for an added line.
+    pub add_bg: Color,
+    /// Background fill for a removed line.
+    pub del_bg: Color,
+    /// Brighter fill for the changed span within an added line (word diff).
+    pub add_emph_bg: Color,
+    /// Brighter fill for the changed span within a removed line (word diff).
+    pub del_emph_bg: Color,
+    /// Gutter (line-number column) background on added / removed lines.
+    pub add_gutter_bg: Color,
+    pub del_gutter_bg: Color,
+    /// Line-number / gutter foreground (dim).
+    pub gutter_fg: Color,
+    /// Default code foreground.
+    pub text: Color,
+    /// Foreground for the diagonal-hatch fill in alignment gaps.
+    pub gap_fg: Color,
+    /// Hunk header foreground.
+    pub hunk_header: Color,
+}
+
+impl Theme {
+    /// The review-diff palette for this theme's colour capability.
+    pub fn review_palette(&self) -> ReviewPalette {
+        match self.mode {
+            ColorMode::TrueColor => ReviewPalette {
+                add_bg: Color::Rgb(20, 48, 33),
+                del_bg: Color::Rgb(58, 28, 32),
+                add_emph_bg: Color::Rgb(43, 105, 67),
+                del_emph_bg: Color::Rgb(120, 50, 56),
+                add_gutter_bg: Color::Rgb(28, 64, 44),
+                del_gutter_bg: Color::Rgb(74, 36, 40),
+                gutter_fg: Color::Rgb(110, 116, 135),
+                text: Color::Rgb(205, 210, 225),
+                gap_fg: Color::Rgb(58, 62, 78),
+                hunk_header: Color::Rgb(137, 180, 250),
+            },
+            ColorMode::Indexed => ReviewPalette {
+                add_bg: Color::Indexed(22),      // dark green
+                del_bg: Color::Indexed(52),      // dark red
+                add_emph_bg: Color::Indexed(28), // brighter green
+                del_emph_bg: Color::Indexed(88), // brighter red
+                add_gutter_bg: Color::Indexed(22),
+                del_gutter_bg: Color::Indexed(52),
+                gutter_fg: Color::Indexed(244),
+                text: Color::Reset,
+                gap_fg: Color::Indexed(238),
+                hunk_header: Color::Indexed(117),
+            },
+            // 16-colour terminals: skip dark fills (no dark variants); rely on
+            // foreground colour, using bright bg only for the word-level span.
+            ColorMode::Basic => ReviewPalette {
+                add_bg: Color::Reset,
+                del_bg: Color::Reset,
+                add_emph_bg: Color::Green,
+                del_emph_bg: Color::Red,
+                add_gutter_bg: Color::Reset,
+                del_gutter_bg: Color::Reset,
+                gutter_fg: Color::DarkGray,
+                text: Color::Reset,
+                gap_fg: Color::DarkGray,
+                hunk_header: Color::Cyan,
+            },
+        }
     }
 }
 
@@ -141,6 +218,7 @@ impl Theme {
     /// Basic 16-color theme (maximum compatibility)
     pub fn basic() -> Self {
         Self {
+            mode: ColorMode::Basic,
             border_focused: Color::Cyan,
             border_unfocused: Color::DarkGray,
 
@@ -203,6 +281,7 @@ impl Theme {
     /// 256-color theme (good balance of compatibility and aesthetics)
     pub fn indexed() -> Self {
         Self {
+            mode: ColorMode::Indexed,
             border_focused: Color::Indexed(117), // Pastel sky blue
             border_unfocused: Color::Indexed(243),
 
@@ -264,6 +343,7 @@ impl Theme {
     /// True color theme (richest visual experience)
     pub fn truecolor() -> Self {
         Self {
+            mode: ColorMode::TrueColor,
             border_focused: Color::Rgb(137, 180, 250), // Pastel sky blue
             border_unfocused: Color::Rgb(88, 91, 112),
 
@@ -325,6 +405,7 @@ impl Theme {
     /// Monokai Dimmed — a muted/desaturated take on the classic Monokai color scheme
     pub fn monokai_dimmed() -> Self {
         Self {
+            mode: ColorMode::TrueColor,
             border_focused: Color::Rgb(181, 165, 106), // Muted gold/yellow #b5a56a
             border_unfocused: Color::Rgb(85, 85, 85),  // Dark gray #555555
 
@@ -385,6 +466,7 @@ impl Theme {
     /// Zedokai — inspired by the Zed editor's Monokai variant with a filter/spectrum twist
     pub fn zedokai() -> Self {
         Self {
+            mode: ColorMode::TrueColor,
             border_focused: Color::Rgb(249, 38, 114), // Vivid pink #f92672
             border_unfocused: Color::Rgb(73, 72, 62), // Dark gray #49483e
 
@@ -445,6 +527,7 @@ impl Theme {
     /// Rosé Pine — a soft pink/rose aesthetic inspired by Rosé Pine
     pub fn rose_pine() -> Self {
         Self {
+            mode: ColorMode::TrueColor,
             border_focused: Color::Rgb(235, 111, 146), // Rose/pink #eb6f92
             border_unfocused: Color::Rgb(57, 53, 82),  // Muted overlay #393552
 
