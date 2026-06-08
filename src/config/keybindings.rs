@@ -572,6 +572,10 @@ impl Default for KeyBindings {
             BindableAction::OpenPullRequest,
             vec![kb(KeyCode::Char('o'), none)],
         );
+        bindings.insert(
+            BindableAction::MoveToSection,
+            vec![kb(KeyCode::Char('m'), none)],
+        );
 
         // Pane control
         bindings.insert(BindableAction::TogglePane, vec![kb(KeyCode::Tab, none)]);
@@ -903,6 +907,13 @@ mod tests {
         let kb = KeyBindings::default();
         let key = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE);
         assert_eq!(kb.resolve(&key), Some(BindableAction::NewStackedSession));
+    }
+
+    #[test]
+    fn test_default_move_to_section_bound_to_m() {
+        let kb = KeyBindings::default();
+        let key = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&key), Some(BindableAction::MoveToSection));
     }
 
     #[test]
