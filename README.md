@@ -11,6 +11,7 @@ A high-performance terminal UI for managing Claude coding sessions, written in R
 - **Info pane** - Session metadata, PR details, CI status, and AI-generated change summaries
 - **Agent state detection** - Detect if agent is waiting for input, processing, or errored
 - **Persistent state** - Sessions survive restarts
+- **Auto-pull project main** - Periodically fast-forwards each project's main branch from `origin` so it doesn't drift stale
 
 ## Requirements
 
@@ -188,6 +189,16 @@ The info pane shows additional detail when a PR is present, including a CI check
 | `✗` (red) | Checks failing |
 | `◌` (orange) | Checks pending |
 | `—` (grey) | No checks configured |
+
+### Project Badges
+
+When automatic project-branch pulling is enabled (see `project_pull_enabled` under [Configuration](#configuration)), a `⚠` badge appears next to a project name if its main branch could not be fast-forwarded. The badge is derived state — it clears automatically on the next successful or no-op pull. The info pane shows the reason as `⚠ blocked — <reason>`:
+
+| Reason | Meaning |
+|--------|---------|
+| `Working tree dirty` | Main is the active checkout but has uncommitted changes |
+| `Branch diverged from origin` | Local main has commits not on `origin` |
+| `Checked out in another worktree` | Main is checked out in a separate worktree |
 
 ### Keyboard Shortcuts
 
