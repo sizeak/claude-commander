@@ -1340,6 +1340,17 @@ impl App {
             })
             .await;
         self.refresh_list_items().await;
+
+        // The session has moved to a new position in the rebuilt list. Keep it
+        // selected by finding its new index and moving the cursor there, then
+        // refresh the preview pane for the (unchanged) selection.
+        if let Some(idx) = self.ui_state.list_items.iter().position(
+            |item| matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id),
+        ) {
+            self.ui_state.list_state.list_state.select(Some(idx));
+            self.update_selection();
+            self.spawn_preview_update();
+        }
     }
 
     /// Handle rename session - show input modal pre-filled with current title.

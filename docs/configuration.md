@@ -219,7 +219,7 @@ Config order is the pipeline. A session's section is re-evaluated on every PR re
 
 ### Moving sessions manually
 
-Select a session, open the palette (`Space`, or `Shift+Space` for commands-only), run **Move session to section…**, then pick a target. An **Auto** entry clears an existing pin. The override is persisted to `state.json` and survives restarts; auto-moves are suppressed until the pin is released.
+Select a session and press `m` (or open the palette with `Space`, or `Shift+Space` for commands-only, and run **Move session to section…**), then pick a target. An **Auto** entry clears an existing pin. The override is persisted to `state.json` and survives restarts; auto-moves are suppressed until the pin is released.
 
 ### Reordering, adding, or removing sections
 
