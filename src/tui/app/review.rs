@@ -593,7 +593,7 @@ impl App {
         key: KeyEvent,
         mut state: Box<DiffReviewState>,
     ) {
-        use crossterm::event::KeyCode;
+        use crossterm::event::{KeyCode, KeyModifiers};
 
         // Comment box captures all input while open.
         if state.comment.is_some() {
@@ -602,9 +602,14 @@ impl App {
             return;
         }
 
+        // Ctrl+Q closes the view (consistency with the tmux-session shortcut),
+        // alongside Esc. The modal was already replaced with None on extraction.
+        if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            return;
+        }
+
         match key.code {
-            // Esc cancels an in-progress selection first; otherwise closes
-            // (the modal was already replaced with None on extraction).
+            // Esc cancels an in-progress selection first; otherwise closes.
             KeyCode::Esc if state.visual_anchor.is_none() => return,
             KeyCode::Esc => state.visual_anchor = None,
             KeyCode::Tab => state.toggle_focus(),
@@ -648,7 +653,7 @@ impl App {
     }
 
     async fn handle_review_comment_key(&mut self, key: KeyEvent, state: &mut DiffReviewState) {
-        use crossterm::event::KeyCode;
+        use crossterm::event::{KeyCode, KeyModifiers};
         let Some(draft) = state.comment.as_mut() else {
             return;
         };
@@ -674,7 +679,11 @@ impl App {
             KeyCode::Backspace => {
                 draft.text.pop();
             }
-            KeyCode::Char(c) => draft.text.push(c),
+            // Ignore Ctrl-combos (e.g. Ctrl+Q) so they don't insert a literal
+            // character into the comment.
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                draft.text.push(c)
+            }
             _ => {}
         }
     }
@@ -729,9 +738,9 @@ impl App {
         } else if state.visual_anchor.is_some() {
             " ↑↓ extend · Enter/right-click comment · v/Esc cancel selection "
         } else if state.focus == ReviewFocus::FileList {
-            " ↑↓/jk move · Enter expand/collapse · PgUp/Dn scroll diff · [ ] file · Tab to diff · Esc close "
+            " ↑↓/jk move · Enter expand/collapse · PgUp/Dn scroll diff · [ ] file · Tab to diff · ^Q/Esc close "
         } else {
-            " ↑↓/jk move · v select · Enter comment · d delete · a apply · t layout · Tab files · Esc close "
+            " ↑↓/jk move · v select · Enter comment · d delete · a apply · t layout · Tab files · ^Q/Esc close "
         };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
