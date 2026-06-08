@@ -343,6 +343,18 @@ impl DiffReviewState {
             .unwrap_or(0)
     }
 
+    /// Scroll the diff body by a page (lazygit-style PgUp/PgDn). Independent of
+    /// focus, so paging the diff works while the file list is focused.
+    fn page_body(&mut self, down: bool) {
+        let max = self.total_body_rows().saturating_sub(1) as u16;
+        let page = BODY_VIEWPORT as u16;
+        self.scroll = if down {
+            (self.scroll + page).min(max)
+        } else {
+            self.scroll.saturating_sub(page)
+        };
+    }
+
     /// Selectable-line index at body row `body_row` (`None` for a header row or
     /// out of range) — the inverse of [`Self::body_row_of`].
     fn selectable_at_body_row(&self, body_row: usize) -> Option<usize> {
@@ -606,6 +618,10 @@ impl App {
                 ReviewFocus::FileList => state.tree_move(false),
                 ReviewFocus::Body => state.move_cursor(false),
             },
+            // Page the diff regardless of focus (lazygit: scroll the diff while
+            // the file list is focused).
+            KeyCode::PageDown => state.page_body(true),
+            KeyCode::PageUp => state.page_body(false),
             KeyCode::Char('t') => state.toggle_layout(),
             KeyCode::Char('v') if state.focus == ReviewFocus::Body => state.toggle_visual(),
             // Enter: toggle a directory in the tree, or open the comment box in
@@ -702,7 +718,7 @@ impl App {
 
         let cols = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(34), Constraint::Min(0)])
+            .constraints([Constraint::Percentage(20), Constraint::Min(0)])
             .split(rows[0]);
 
         self.render_review_file_list(frame, cols[0], state);
@@ -713,7 +729,7 @@ impl App {
         } else if state.visual_anchor.is_some() {
             " ↑↓ extend · Enter/right-click comment · v/Esc cancel selection "
         } else if state.focus == ReviewFocus::FileList {
-            " ↑↓/jk move · Enter expand/collapse · [ ] file · Tab to diff · a apply · Esc close "
+            " ↑↓/jk move · Enter expand/collapse · PgUp/Dn scroll diff · [ ] file · Tab to diff · Esc close "
         } else {
             " ↑↓/jk move · v select · Enter comment · d delete · a apply · t layout · Tab files · Esc close "
         };
@@ -879,7 +895,7 @@ pub(super) fn review_body_inner_rect(area: Rect) -> Rect {
         .split(area);
     let cols = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(34), Constraint::Min(0)])
+        .constraints([Constraint::Percentage(20), Constraint::Min(0)])
         .split(rows[0]);
     // Inset by the body block's border.
     cols[1].inner(Margin {
@@ -1738,6 +1754,18 @@ diff --git a/x.rs b/x.rs
         assert_eq!(s.layout, ReviewLayout::Inline);
         s.toggle_layout();
         assert_eq!(s.layout, ReviewLayout::SideBySide);
+    }
+
+    #[test]
+    fn page_body_scrolls_a_page_and_clamps() {
+        let mut s = state_with_two_files();
+        // Focused on the file list, paging still scrolls the diff body.
+        assert_eq!(s.focus, ReviewFocus::FileList);
+        s.page_body(true);
+        // a.rs body has 4 rows (1 header + 3 lines) → clamps to max scroll 3.
+        assert_eq!(s.scroll, 3);
+        s.page_body(false);
+        assert_eq!(s.scroll, 0);
     }
 
     #[test]
