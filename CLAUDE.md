@@ -83,7 +83,8 @@ When adding new behavior, add a corresponding unit test that would fail without 
 
 When adding or changing config options, hotkeys, or keybindings:
 
-- **README.md** — Update the Keyboard Shortcuts table and the Configuration TOML block to reflect the change
+- **README.md** — Update the Keyboard Shortcuts table (kept in the README) to reflect the change
+- **docs/configuration.md** — Update the Configuration TOML block (moved here from the README) to reflect the change
 - **Help modal** — Update the help text rendered in `app.rs` (`render_help_modal`) so the in-app `?` help stays in sync with the README
 - **Settings modal** — Add new config options to `build_settings_rows()` in `app.rs` (General tab) and the corresponding `apply_settings_edit()` match arm so they are editable from the in-app settings UI
 - **CLAUDE.md** — No update needed for individual options; the Architecture section points to `Config` struct as the source of truth
@@ -108,5 +109,5 @@ The `cargo fmt` hook auto-fixes formatting. If `cargo clippy` fails, fix the war
 - Precommit hooks may autoformat files while failing the commit; these changes will need to be restaged and the commit reattempted.
 - Before committing, always ensure `cargo clippy` and `cargo build` pass with no warnings or errors. Fix any issues before creating the commit.
 - Bug fixes need a regression test too, not just features: follow the red-green TDD rule under [Testing](#testing) — add a test that fails without the fix and passes with it. If the fix lives somewhere untestable (e.g. `main.rs`), push the logic down into testable library code rather than skipping the test.
-- Cutting a release: `cargo release {patch,minor,major} --execute` (see README). Never bump `Cargo.toml` manually.
+- Cutting a release: `cargo release {patch,minor,major} --execute` (see CONTRIBUTING.md). Never bump `Cargo.toml` manually.
 
