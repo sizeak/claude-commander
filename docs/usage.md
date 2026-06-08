@@ -100,9 +100,12 @@ against the session's base branch would contain — committed, staged, unstaged,
 and untracked changes — composed from `merge-base(base, HEAD)` through the
 working tree.
 
-- **Navigate**: `Tab` switches focus between the file list and the diff body;
-  `[` / `]` move between files; `↑↓`/`jk` move the cursor; the mouse wheel
-  scrolls. `t` toggles between inline and side-by-side layouts.
+- **Navigate**: the changed files are shown as a collapsible **tree** (lazygit
+  style — single-child directory chains are compressed). `Tab` switches focus
+  between the tree and the diff body; in the tree, `↑↓`/`jk` move and `Enter`
+  expands/collapses a directory; `[` / `]` jump between files; in the body,
+  `↑↓`/`jk` move the cursor and the mouse wheel scrolls. `t` toggles between
+  inline and side-by-side layouts.
 - **Annotate**: in the body, press `v` to start a line selection (arrows grow
   or shrink it; mouse drag also selects), then `Enter` to attach a comment.
   Annotations are *staged* — they persist across restarts until applied, and

@@ -63,6 +63,43 @@ pub struct DiffReviewState {
     /// `Some` while the comment box is open.
     pub comment: Option<CommentDraft>,
     pub layout: ReviewLayout,
+    /// File tree built from the diff's paths (single-child directory chains
+    /// compressed, lazygit-style).
+    file_tree: Vec<TreeNode>,
+    /// Paths of directory nodes the user has collapsed.
+    collapsed: HashSet<String>,
+    /// Cursor over the flattened, currently-visible tree rows.
+    tree_cursor: usize,
+    /// First visible tree row (scroll offset for the file pane).
+    tree_scroll: u16,
+}
+
+/// A node in the file tree: either a directory (with children) or a file leaf
+/// (`file_index` into `diff.files`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TreeNode {
+    /// Segment label (compressed directories join with `/`).
+    name: String,
+    /// Full path of this node, used as the collapse-set key.
+    path: String,
+    file_index: Option<usize>,
+    children: Vec<TreeNode>,
+}
+
+/// A flattened, visible tree row for rendering and navigation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TreeRow {
+    Dir {
+        depth: usize,
+        path: String,
+        name: String,
+        collapsed: bool,
+    },
+    File {
+        depth: usize,
+        index: usize,
+        name: String,
+    },
 }
 
 impl DiffReviewState {
@@ -73,19 +110,102 @@ impl DiffReviewState {
         diff: ParsedDiff,
         annotations: Vec<Annotation>,
     ) -> Self {
+        let file_tree = build_file_tree(&diff.files);
+        // Body starts on the first file in tree order so it shows something.
+        let selected_file = first_file_index(&file_tree).unwrap_or(0);
         Self {
             session_id,
             title,
             base,
             diff,
             annotations,
-            selected_file: 0,
+            selected_file,
             scroll: 0,
             focus: ReviewFocus::FileList,
             cursor: 0,
             visual_anchor: None,
             comment: None,
             layout: ReviewLayout::Inline,
+            file_tree,
+            collapsed: HashSet::new(),
+            tree_cursor: 0,
+            tree_scroll: 0,
+        }
+    }
+
+    /// The currently-visible tree rows (respecting collapsed directories).
+    fn visible_rows(&self) -> Vec<TreeRow> {
+        let mut rows = Vec::new();
+        flatten_tree(&self.file_tree, 0, &self.collapsed, &mut rows);
+        rows
+    }
+
+    /// Point the body at `idx`, resetting the body cursor/scroll/selection if
+    /// it actually changed.
+    fn set_body_file(&mut self, idx: usize) {
+        if self.selected_file != idx {
+            self.selected_file = idx;
+            self.scroll = 0;
+            self.cursor = 0;
+            self.visual_anchor = None;
+        }
+    }
+
+    /// Move the tree cursor over visible rows; landing on a file shows it.
+    fn tree_move(&mut self, down: bool) {
+        let rows = self.visible_rows();
+        if rows.is_empty() {
+            return;
+        }
+        self.tree_cursor = if down {
+            (self.tree_cursor + 1).min(rows.len() - 1)
+        } else {
+            self.tree_cursor.saturating_sub(1)
+        };
+        self.follow_tree_cursor(rows.len());
+        if let Some(TreeRow::File { index, .. }) = rows.get(self.tree_cursor) {
+            self.set_body_file(*index);
+        }
+    }
+
+    /// Enter/Space on a directory row toggles its collapsed state.
+    fn tree_activate(&mut self) {
+        let rows = self.visible_rows();
+        if let Some(TreeRow::Dir {
+            path, collapsed, ..
+        }) = rows.get(self.tree_cursor)
+        {
+            if *collapsed {
+                self.collapsed.remove(path);
+            } else {
+                self.collapsed.insert(path.clone());
+            }
+            // The toggled dir keeps its index; clamp just in case.
+            let len = self.visible_rows().len();
+            self.tree_cursor = self.tree_cursor.min(len.saturating_sub(1));
+        }
+    }
+
+    /// Keep the tree cursor within the (approximate) file-pane viewport.
+    fn follow_tree_cursor(&mut self, _len: usize) {
+        let row = self.tree_cursor as u16;
+        let bottom = self.tree_scroll + BODY_VIEWPORT as u16;
+        if row < self.tree_scroll {
+            self.tree_scroll = row;
+        } else if row >= bottom {
+            self.tree_scroll = row.saturating_sub(BODY_VIEWPORT as u16 - 1);
+        }
+    }
+
+    /// Sync the tree cursor onto the visible row for `selected_file`, if shown.
+    fn sync_tree_cursor_to_file(&mut self) {
+        let rows = self.visible_rows();
+        if let Some(pos) = rows
+            .iter()
+            .position(|r| matches!(r, TreeRow::File { index, .. } if *index == self.selected_file))
+        {
+            self.tree_cursor = pos;
+            self.follow_tree_cursor(rows.len());
         }
     }
 
@@ -131,23 +251,19 @@ impl DiffReviewState {
         }
     }
 
+    /// Jump the body to the next file (in diff order), syncing the tree cursor.
     pub fn next_file(&mut self) {
         if self.diff.files.is_empty() {
             return;
         }
-        self.selected_file = (self.selected_file + 1).min(self.diff.files.len() - 1);
-        self.reset_file_view();
+        self.set_body_file((self.selected_file + 1).min(self.diff.files.len() - 1));
+        self.sync_tree_cursor_to_file();
     }
 
+    /// Jump the body to the previous file (in diff order).
     pub fn prev_file(&mut self) {
-        self.selected_file = self.selected_file.saturating_sub(1);
-        self.reset_file_view();
-    }
-
-    fn reset_file_view(&mut self) {
-        self.scroll = 0;
-        self.cursor = 0;
-        self.visual_anchor = None;
+        self.set_body_file(self.selected_file.saturating_sub(1));
+        self.sync_tree_cursor_to_file();
     }
 
     /// Move the body cursor by one line, clamped, keeping it visible.
@@ -481,15 +597,18 @@ impl App {
             KeyCode::Char(']') => state.next_file(),
             KeyCode::Char('[') => state.prev_file(),
             KeyCode::Down | KeyCode::Char('j') => match state.focus {
-                ReviewFocus::FileList => state.next_file(),
+                ReviewFocus::FileList => state.tree_move(true),
                 ReviewFocus::Body => state.move_cursor(true),
             },
             KeyCode::Up | KeyCode::Char('k') => match state.focus {
-                ReviewFocus::FileList => state.prev_file(),
+                ReviewFocus::FileList => state.tree_move(false),
                 ReviewFocus::Body => state.move_cursor(false),
             },
             KeyCode::Char('t') => state.toggle_layout(),
             KeyCode::Char('v') if state.focus == ReviewFocus::Body => state.toggle_visual(),
+            // Enter: toggle a directory in the tree, or open the comment box in
+            // the body.
+            KeyCode::Enter if state.focus == ReviewFocus::FileList => state.tree_activate(),
             KeyCode::Enter if state.focus == ReviewFocus::Body => {
                 state.begin_comment();
             }
@@ -591,8 +710,10 @@ impl App {
             " type comment · Enter save · Esc cancel "
         } else if state.visual_anchor.is_some() {
             " ↑↓ extend · Enter/right-click comment · v/Esc cancel selection "
+        } else if state.focus == ReviewFocus::FileList {
+            " ↑↓/jk move · Enter expand/collapse · [ ] file · Tab to diff · a apply · Esc close "
         } else {
-            " ↑↓/jk move · v select · Enter comment · d delete · a apply · t layout · Tab focus · Esc close "
+            " ↑↓/jk move · v select · Enter comment · d delete · a apply · t layout · Tab files · Esc close "
         };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -615,33 +736,62 @@ impl App {
             Color::DarkGray
         };
 
-        let mut lines: Vec<Line> = Vec::with_capacity(state.diff.files.len());
-        for (i, file) in state.diff.files.iter().enumerate() {
-            let path = file.display_path().to_string();
-            let stat = format!("+{} -{}", file.added, file.removed);
-            let count = state.annotation_count(file.display_path());
-            let badge = if count > 0 {
-                format!(" ✎{count}")
-            } else {
-                String::new()
+        let rows = state.visible_rows();
+        let mut lines: Vec<Line> = Vec::with_capacity(rows.len());
+        for (i, row) in rows.iter().enumerate() {
+            let on_cursor = focused && i == state.tree_cursor;
+            let line = match row {
+                TreeRow::Dir {
+                    depth,
+                    name,
+                    collapsed,
+                    ..
+                } => {
+                    let indent = "  ".repeat(*depth);
+                    let chevron = if *collapsed { '▶' } else { '▼' };
+                    let style = Style::default()
+                        .fg(Color::Blue)
+                        .add_modifier(Modifier::BOLD);
+                    let style = if on_cursor {
+                        style.add_modifier(Modifier::REVERSED)
+                    } else {
+                        style
+                    };
+                    Line::from(Span::styled(format!("{indent}{chevron} {name}"), style))
+                }
+                TreeRow::File { depth, index, name } => {
+                    let file = &state.diff.files[*index];
+                    let indent = "  ".repeat(*depth);
+                    let marker = file_status_marker(file.status);
+                    let count = state.annotation_count(file.display_path());
+                    let badge = if count > 0 {
+                        format!(" ✎{count}")
+                    } else {
+                        String::new()
+                    };
+                    let mut style = Style::default().fg(file_status_color(file.status));
+                    if on_cursor {
+                        style = style.add_modifier(Modifier::REVERSED);
+                    }
+                    Line::from(Span::styled(
+                        format!("{indent}  {marker} {name}{badge}"),
+                        style,
+                    ))
+                }
             };
-            let marker = file_status_marker(file.status);
-            let text = format!("{marker} {path}  {stat}{badge}");
-            let style = if i == state.selected_file {
-                Style::default()
-                    .fg(Color::White)
-                    .add_modifier(Modifier::REVERSED)
-            } else {
-                Style::default()
-            };
-            lines.push(Line::from(Span::styled(text, style)));
+            lines.push(line);
         }
 
         let block = Block::default()
             .borders(Borders::ALL)
             .border_style(Style::default().fg(border))
             .title(format!(" Files ({}) ", state.diff.files.len()));
-        frame.render_widget(Paragraph::new(lines).block(block), area);
+        frame.render_widget(
+            Paragraph::new(lines)
+                .block(block)
+                .scroll((state.tree_scroll, 0)),
+            area,
+        );
     }
 
     fn render_review_body(&self, frame: &mut Frame, area: Rect, state: &DiffReviewState) {
@@ -727,6 +877,117 @@ pub(super) fn review_body_inner_rect(area: Rect) -> Rect {
     })
 }
 
+/// Build a file tree from the diff's files (keyed on each file's display path),
+/// then compress single-child directory chains (lazygit-style).
+fn build_file_tree(files: &[FileDiff]) -> Vec<TreeNode> {
+    let mut roots: Vec<TreeNode> = Vec::new();
+    for (idx, file) in files.iter().enumerate() {
+        let segments: Vec<&str> = file.display_path().split('/').collect();
+        insert_path(&mut roots, &segments, idx, "");
+    }
+    for node in &mut roots {
+        compress(node);
+    }
+    roots
+}
+
+/// Insert a file's path segments into the tree, creating directory nodes.
+fn insert_path(children: &mut Vec<TreeNode>, segments: &[&str], file_index: usize, prefix: &str) {
+    let Some((head, rest)) = segments.split_first() else {
+        return;
+    };
+    let path = if prefix.is_empty() {
+        head.to_string()
+    } else {
+        format!("{prefix}/{head}")
+    };
+    if rest.is_empty() {
+        children.push(TreeNode {
+            name: head.to_string(),
+            path,
+            file_index: Some(file_index),
+            children: Vec::new(),
+        });
+        return;
+    }
+    let pos = children
+        .iter()
+        .position(|n| n.file_index.is_none() && n.name == *head);
+    let idx = match pos {
+        Some(i) => i,
+        None => {
+            children.push(TreeNode {
+                name: head.to_string(),
+                path: path.clone(),
+                file_index: None,
+                children: Vec::new(),
+            });
+            children.len() - 1
+        }
+    };
+    insert_path(&mut children[idx].children, rest, file_index, &path);
+}
+
+/// Merge a directory with its sole child when that child is also a directory,
+/// repeatedly, then recurse. `a` → `b` → files becomes `a/b`.
+fn compress(node: &mut TreeNode) {
+    while node.file_index.is_none()
+        && node.children.len() == 1
+        && node.children[0].file_index.is_none()
+    {
+        let child = node.children.remove(0);
+        node.name = format!("{}/{}", node.name, child.name);
+        node.path = child.path;
+        node.children = child.children;
+    }
+    for child in &mut node.children {
+        compress(child);
+    }
+}
+
+/// Flatten the tree into visible rows, skipping collapsed directories' subtrees.
+fn flatten_tree(
+    nodes: &[TreeNode],
+    depth: usize,
+    collapsed: &HashSet<String>,
+    out: &mut Vec<TreeRow>,
+) {
+    for node in nodes {
+        match node.file_index {
+            Some(index) => out.push(TreeRow::File {
+                depth,
+                index,
+                name: node.name.clone(),
+            }),
+            None => {
+                let is_collapsed = collapsed.contains(&node.path);
+                out.push(TreeRow::Dir {
+                    depth,
+                    path: node.path.clone(),
+                    name: node.name.clone(),
+                    collapsed: is_collapsed,
+                });
+                if !is_collapsed {
+                    flatten_tree(&node.children, depth + 1, collapsed, out);
+                }
+            }
+        }
+    }
+}
+
+/// Index of the first file in tree order (depth-first), if any.
+fn first_file_index(nodes: &[TreeNode]) -> Option<usize> {
+    for node in nodes {
+        if let Some(i) = node.file_index {
+            return Some(i);
+        }
+        if let Some(i) = first_file_index(&node.children) {
+            return Some(i);
+        }
+    }
+    None
+}
+
 /// One-character marker for a file's change status.
 fn file_status_marker(status: FileStatus) -> char {
     match status {
@@ -734,6 +995,16 @@ fn file_status_marker(status: FileStatus) -> char {
         FileStatus::Deleted => 'D',
         FileStatus::Modified => 'M',
         FileStatus::Renamed => 'R',
+    }
+}
+
+/// Colour used for a file row by its change status.
+fn file_status_color(status: FileStatus) -> Color {
+    match status {
+        FileStatus::Added => Color::Green,
+        FileStatus::Deleted => Color::Red,
+        FileStatus::Modified => Color::Yellow,
+        FileStatus::Renamed => Color::Cyan,
     }
 }
 
@@ -1024,6 +1295,80 @@ diff --git a/b.rs b/b.rs
         assert_eq!(s.focus, ReviewFocus::FileList);
         s.toggle_focus();
         assert_eq!(s.focus, ReviewFocus::Body);
+    }
+
+    // --- file tree ---
+
+    fn file(path: &str) -> FileDiff {
+        FileDiff {
+            old_path: path.to_string(),
+            new_path: path.to_string(),
+            status: FileStatus::Modified,
+            added: 1,
+            removed: 0,
+            hunks: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn tree_compresses_single_child_dir_chains() {
+        let files = vec![
+            file("common/src/redux/middleware/a.ts"),
+            file("common/src/redux/middleware/b.ts"),
+            file("notes/src/app/Runner.ts"),
+        ];
+        let tree = build_file_tree(&files);
+        assert_eq!(tree.len(), 2);
+        // Single-child dir chain with two file leaves collapses to one node.
+        assert_eq!(tree[0].name, "common/src/redux/middleware");
+        assert_eq!(tree[0].children.len(), 2);
+        // Chain stops at the directory holding the single file leaf.
+        assert_eq!(tree[1].name, "notes/src/app");
+        assert_eq!(tree[1].children.len(), 1);
+        assert_eq!(tree[1].children[0].name, "Runner.ts");
+        assert_eq!(tree[1].children[0].file_index, Some(2));
+    }
+
+    #[test]
+    fn flatten_respects_collapse() {
+        let tree = build_file_tree(&[file("dir/a.ts"), file("dir/b.ts")]);
+        let mut collapsed = HashSet::new();
+        let mut rows = Vec::new();
+        flatten_tree(&tree, 0, &collapsed, &mut rows);
+        assert_eq!(rows.len(), 3); // dir + two files
+
+        collapsed.insert("dir".to_string());
+        rows.clear();
+        flatten_tree(&tree, 0, &collapsed, &mut rows);
+        assert_eq!(rows.len(), 1); // collapsed dir hides its files
+    }
+
+    #[test]
+    fn tree_move_updates_body_and_activate_collapses() {
+        let diff = ParsedDiff {
+            files: vec![file("dir/a.ts"), file("dir/b.ts")],
+        };
+        let mut s = DiffReviewState::new(
+            SessionId::new(),
+            "t".to_string(),
+            "main".to_string(),
+            diff,
+            Vec::new(),
+        );
+        // rows: Dir(dir) @0, File a @1, File b @2. Body starts on first file.
+        assert_eq!(s.selected_file, 0);
+        s.tree_move(true); // onto file a
+        s.tree_move(true); // onto file b
+        assert_eq!(s.selected_file, 1);
+        // Back to the dir row and collapse it.
+        s.tree_move(false);
+        s.tree_move(false);
+        assert_eq!(s.tree_cursor, 0);
+        s.tree_activate();
+        assert_eq!(s.visible_rows().len(), 1);
+        // Expanding restores the files.
+        s.tree_activate();
+        assert_eq!(s.visible_rows().len(), 3);
     }
 
     #[test]
