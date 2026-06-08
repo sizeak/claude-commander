@@ -4,6 +4,14 @@ use super::*;
 
 impl App {
     pub(super) fn render_modal(&mut self, frame: &mut Frame, area: Rect) {
+        // Record the review body geometry (depends only on `area`) so mouse
+        // events can map a screen position to a diff line. Done before the
+        // borrow below since it mutates `ui_state`.
+        self.ui_state.review_body_rect = match self.ui_state.modal {
+            Modal::ReviewDiff(_) => Some(super::review::review_body_inner_rect(area)),
+            _ => None,
+        };
+
         match &self.ui_state.modal {
             Modal::None => {}
 

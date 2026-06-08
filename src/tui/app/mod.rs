@@ -457,6 +457,10 @@ pub struct AppUiState {
     pub should_quit: bool,
     /// Last known terminal size (updated each render frame)
     pub terminal_size: Rect,
+    /// Inner rect of the review-diff body pane, recorded each render frame so
+    /// mouse events can map a screen position to a diff line. `None` unless the
+    /// review view is open.
+    pub review_body_rect: Option<Rect>,
     /// Currently selected session (for preview/diff)
     pub selected_session_id: Option<SessionId>,
     /// Currently selected project
@@ -532,6 +536,7 @@ impl Default for AppUiState {
             preview_content: String::new(),
             diff_info: Arc::new(DiffInfo::empty()),
             status_message: None, // (message, expiry)
+            review_body_rect: None,
 
             should_quit: false,
             selected_session_id: None,

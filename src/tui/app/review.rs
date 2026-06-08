@@ -185,6 +185,85 @@ impl DiffReviewState {
         };
     }
 
+    /// Total body rows (hunk headers + lines) for the current file.
+    fn total_body_rows(&self) -> usize {
+        self.current_file()
+            .map(|f| f.hunks.iter().map(|h| h.lines.len() + 1).sum())
+            .unwrap_or(0)
+    }
+
+    /// Selectable-line index at body row `body_row` (`None` for a header row or
+    /// out of range) — the inverse of [`Self::body_row_of`].
+    fn selectable_at_body_row(&self, body_row: usize) -> Option<usize> {
+        let file = self.current_file()?;
+        let mut row = 0;
+        let mut sel = 0;
+        for hunk in &file.hunks {
+            if row == body_row {
+                return None; // header row
+            }
+            row += 1;
+            for _ in &hunk.lines {
+                if row == body_row {
+                    return Some(sel);
+                }
+                row += 1;
+                sel += 1;
+            }
+        }
+        None
+    }
+
+    /// Scroll the body by one row (free of the cursor), for mouse wheel.
+    pub fn wheel(&mut self, down: bool) {
+        let max = self.total_body_rows().saturating_sub(1) as u16;
+        self.scroll = if down {
+            (self.scroll + 1).min(max)
+        } else {
+            self.scroll.saturating_sub(1)
+        };
+    }
+
+    /// Left-click at a screen position: focus the body and move the cursor to
+    /// the clicked diff line (clearing any selection).
+    pub fn click_at(&mut self, col: u16, row: u16, body: Rect) {
+        let Some(body_row) = self.body_row_at(col, row, body) else {
+            return;
+        };
+        self.focus = ReviewFocus::Body;
+        self.visual_anchor = None;
+        if let Some(idx) = self.selectable_at_body_row(body_row) {
+            self.cursor = idx;
+        }
+    }
+
+    /// Left-drag to a screen position: begin a selection at the press point (if
+    /// not already selecting) and extend it to the dragged line.
+    pub fn drag_at(&mut self, col: u16, row: u16, body: Rect) {
+        let Some(body_row) = self.body_row_at(col, row, body) else {
+            return;
+        };
+        if let Some(idx) = self.selectable_at_body_row(body_row) {
+            if self.visual_anchor.is_none() {
+                self.visual_anchor = Some(self.cursor);
+            }
+            self.cursor = idx;
+        }
+    }
+
+    /// Map a screen position inside `body` to a body-row index (accounting for
+    /// scroll), or `None` if outside.
+    fn body_row_at(&self, col: u16, row: u16, body: Rect) -> Option<usize> {
+        let inside = col >= body.x
+            && col < body.x + body.width
+            && row >= body.y
+            && row < body.y + body.height;
+        if !inside {
+            return None;
+        }
+        Some((row - body.y) as usize + self.scroll as usize)
+    }
+
     /// Enter visual mode at the cursor, or cancel it if already active.
     fn toggle_visual(&mut self) {
         self.visual_anchor = match self.visual_anchor {
@@ -587,6 +666,24 @@ impl App {
     }
 }
 
+/// Inner rect of the diff body pane for a given modal `area` — the region a
+/// mouse position maps into. Must mirror the layout in `render_review_modal`.
+pub(super) fn review_body_inner_rect(area: Rect) -> Rect {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(0), Constraint::Length(1)])
+        .split(area);
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(34), Constraint::Min(0)])
+        .split(rows[0]);
+    // Inset by the body block's border.
+    cols[1].inner(Margin {
+        vertical: 1,
+        horizontal: 1,
+    })
+}
+
 /// One-character marker for a file's change status.
 fn file_status_marker(status: FileStatus) -> char {
     match status {
@@ -767,5 +864,49 @@ diff --git a/b.rs b/b.rs
         assert_eq!(s.focus, ReviewFocus::FileList);
         s.toggle_focus();
         assert_eq!(s.focus, ReviewFocus::Body);
+    }
+
+    #[test]
+    fn selectable_at_body_row_skips_header() {
+        let s = state_with_two_files();
+        // a.rs body rows: 0 header, 1..=3 the three diff lines.
+        assert_eq!(s.selectable_at_body_row(0), None);
+        assert_eq!(s.selectable_at_body_row(1), Some(0));
+        assert_eq!(s.selectable_at_body_row(3), Some(2));
+        assert_eq!(s.selectable_at_body_row(4), None);
+    }
+
+    #[test]
+    fn click_and_drag_select_a_range() {
+        let mut s = state_with_two_files();
+        let body = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 20,
+        };
+        // Click the first diff line (body row 1).
+        s.click_at(5, 1, body);
+        assert_eq!(s.focus, ReviewFocus::Body);
+        assert_eq!(s.cursor, 0);
+        assert!(s.visual_anchor.is_none());
+        // Drag down to body row 3 (third diff line) → selection 0..=2.
+        s.drag_at(5, 3, body);
+        assert_eq!(s.selection(), (0, 2));
+        // Clicking outside the body rect leaves the cursor untouched.
+        s.click_at(5, 50, body);
+        assert_eq!(s.cursor, 2);
+    }
+
+    #[test]
+    fn wheel_scrolls_within_bounds() {
+        let mut s = state_with_two_files();
+        // a.rs total body rows = 1 header + 3 lines = 4 → max scroll 3.
+        for _ in 0..10 {
+            s.wheel(true);
+        }
+        assert_eq!(s.scroll, 3);
+        s.wheel(false);
+        assert_eq!(s.scroll, 2);
     }
 }

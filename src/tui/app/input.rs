@@ -189,19 +189,43 @@ impl App {
             }
             InputEvent::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::ScrollUp => {
-                    self.scroll_pane_at(mouse.column, ScrollDirection::Up);
+                    if let Modal::ReviewDiff(state) = &mut self.ui_state.modal {
+                        state.wheel(false);
+                    } else {
+                        self.scroll_pane_at(mouse.column, ScrollDirection::Up);
+                    }
                 }
                 MouseEventKind::ScrollDown => {
-                    self.scroll_pane_at(mouse.column, ScrollDirection::Down);
+                    if let Modal::ReviewDiff(state) = &mut self.ui_state.modal {
+                        state.wheel(true);
+                    } else {
+                        self.scroll_pane_at(mouse.column, ScrollDirection::Down);
+                    }
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
-                    // Ignore clicks while a modal is open — modal input is
-                    // keyboard-only and an underlying row select would be
-                    // confusing.
+                    // In the review view, a click positions the diff cursor.
+                    let body = self.ui_state.review_body_rect;
+                    if let Modal::ReviewDiff(state) = &mut self.ui_state.modal {
+                        if let Some(rect) = body {
+                            state.click_at(mouse.column, mouse.row, rect);
+                        }
+                        return;
+                    }
+                    // Other modals are keyboard-only; an underlying row select
+                    // would be confusing.
                     if !matches!(self.ui_state.modal, Modal::None) {
                         return;
                     }
                     self.handle_left_click(mouse.column, mouse.row).await;
+                }
+                MouseEventKind::Drag(MouseButton::Left) => {
+                    // Drag-select a line range in the review view.
+                    let body = self.ui_state.review_body_rect;
+                    if let Modal::ReviewDiff(state) = &mut self.ui_state.modal
+                        && let Some(rect) = body
+                    {
+                        state.drag_at(mouse.column, mouse.row, rect);
+                    }
                 }
                 _ => {}
             },
