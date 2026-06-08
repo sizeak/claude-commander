@@ -203,6 +203,21 @@ impl DiffReviewState {
         };
     }
 
+    /// Open the comment box for the current selection (Enter / right-click).
+    /// No-op (returns false) when the file has no diff lines or a comment is
+    /// already open.
+    pub fn begin_comment(&mut self) -> bool {
+        if self.selectable_count() == 0 || self.comment.is_some() {
+            return false;
+        }
+        self.focus = ReviewFocus::Body;
+        self.comment = Some(CommentDraft {
+            text: String::new(),
+            range: self.selection(),
+        });
+        true
+    }
+
     /// Total body rows (hunk headers + lines) for the current file.
     fn total_body_rows(&self) -> usize {
         self.current_file()
@@ -475,11 +490,8 @@ impl App {
             },
             KeyCode::Char('t') => state.toggle_layout(),
             KeyCode::Char('v') if state.focus == ReviewFocus::Body => state.toggle_visual(),
-            KeyCode::Enter if state.focus == ReviewFocus::Body && state.selectable_count() > 0 => {
-                state.comment = Some(CommentDraft {
-                    text: String::new(),
-                    range: state.selection(),
-                });
+            KeyCode::Enter if state.focus == ReviewFocus::Body => {
+                state.begin_comment();
             }
             KeyCode::Char('d') if state.focus == ReviewFocus::Body => {
                 if let Some(id) = state.annotation_at_cursor() {
@@ -578,7 +590,7 @@ impl App {
         let hint = if state.comment.is_some() {
             " type comment · Enter save · Esc cancel "
         } else if state.visual_anchor.is_some() {
-            " ↑↓ extend · Enter comment · v/Esc cancel selection "
+            " ↑↓ extend · Enter/right-click comment · v/Esc cancel selection "
         } else {
             " ↑↓/jk move · v select · Enter comment · d delete · a apply · t layout · Tab focus · Esc close "
         };
@@ -1084,6 +1096,20 @@ diff --git a/b.rs b/b.rs
                 right: Some(1)
             }
         );
+    }
+
+    #[test]
+    fn begin_comment_opens_box_for_selection() {
+        let mut s = state_with_two_files();
+        s.focus = ReviewFocus::Body;
+        s.cursor = 2;
+        s.toggle_visual(); // anchor at 2
+        s.cursor = 0;
+        assert!(s.begin_comment());
+        let draft = s.comment.as_ref().unwrap();
+        assert_eq!(draft.range, (0, 2));
+        // A second call while a comment is open is a no-op.
+        assert!(!s.begin_comment());
     }
 
     #[test]
