@@ -91,3 +91,31 @@ the summary section shows a placeholder instead.
 | `ai_summary_model` | `claude-haiku-4-5-20251001` | Claude model used for summaries (Haiku recommended for cost efficiency) |
 
 Environment variable overrides: `CC_AI_SUMMARY_ENABLED`, `CC_AI_SUMMARY_MODEL`.
+
+## Reviewing & annotating changes
+
+Open the **command palette** (`Space`) on a selected session and run **"Review
+diff & annotate"** to open a full-screen review view. It shows everything a PR
+against the session's base branch would contain — committed, staged, unstaged,
+and untracked changes — composed from `merge-base(base, HEAD)` through the
+working tree.
+
+- **Navigate**: `Tab` switches focus between the file list and the diff body;
+  `[` / `]` move between files; `↑↓`/`jk` move the cursor; the mouse wheel
+  scrolls. `t` toggles between inline and side-by-side layouts.
+- **Annotate**: in the body, press `v` to start a line selection (arrows grow
+  or shrink it; mouse drag also selects), then `Enter` to attach a comment.
+  Annotations are *staged* — they persist across restarts until applied, and
+  show as `✎` in the gutter (and a per-file badge).
+- **Apply**: press `a` to hand all staged annotations to the session's agent.
+  They're written to a markdown brief and the agent is prompted to address
+  them — sent immediately when idle/working (it queues natively), held until a
+  permission prompt clears, or deferred if the agent is stopped.
+- **Drift**: if the code under an annotation changes before you apply, the view
+  re-anchors it by its captured snippet. If it can't be located unambiguously
+  the annotation is marked `⚠` (drifted) and blocks apply until you review or
+  delete it (`d` removes the annotation under the cursor).
+
+Annotations are stored per session under the data directory (alongside
+`state.json`); the brief handed to the agent is written to a temp file outside
+the worktree, so it's never committed.

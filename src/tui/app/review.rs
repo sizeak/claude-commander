@@ -24,6 +24,15 @@ pub enum ReviewFocus {
     Body,
 }
 
+/// How the diff body is rendered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewLayout {
+    /// GitHub-style unified inline diff (default).
+    Inline,
+    /// Old | new split columns.
+    SideBySide,
+}
+
 /// An in-progress comment, captured against a selectable-line range.
 #[derive(Debug, Clone)]
 pub struct CommentDraft {
@@ -53,6 +62,7 @@ pub struct DiffReviewState {
     pub visual_anchor: Option<usize>,
     /// `Some` while the comment box is open.
     pub comment: Option<CommentDraft>,
+    pub layout: ReviewLayout,
 }
 
 impl DiffReviewState {
@@ -75,7 +85,15 @@ impl DiffReviewState {
             cursor: 0,
             visual_anchor: None,
             comment: None,
+            layout: ReviewLayout::Inline,
         }
+    }
+
+    fn toggle_layout(&mut self) {
+        self.layout = match self.layout {
+            ReviewLayout::Inline => ReviewLayout::SideBySide,
+            ReviewLayout::SideBySide => ReviewLayout::Inline,
+        };
     }
 
     fn current_file(&self) -> Option<&FileDiff> {
@@ -232,7 +250,11 @@ impl DiffReviewState {
         };
         self.focus = ReviewFocus::Body;
         self.visual_anchor = None;
-        if let Some(idx) = self.selectable_at_body_row(body_row) {
+        // Row→line mapping is computed for the inline layout; in side-by-side
+        // the row structure differs, so a click only moves focus there.
+        if self.layout == ReviewLayout::Inline
+            && let Some(idx) = self.selectable_at_body_row(body_row)
+        {
             self.cursor = idx;
         }
     }
@@ -240,6 +262,9 @@ impl DiffReviewState {
     /// Left-drag to a screen position: begin a selection at the press point (if
     /// not already selecting) and extend it to the dragged line.
     pub fn drag_at(&mut self, col: u16, row: u16, body: Rect) {
+        if self.layout != ReviewLayout::Inline {
+            return;
+        }
         let Some(body_row) = self.body_row_at(col, row, body) else {
             return;
         };
@@ -448,6 +473,7 @@ impl App {
                 ReviewFocus::FileList => state.prev_file(),
                 ReviewFocus::Body => state.move_cursor(false),
             },
+            KeyCode::Char('t') => state.toggle_layout(),
             KeyCode::Char('v') if state.focus == ReviewFocus::Body => state.toggle_visual(),
             KeyCode::Enter if state.focus == ReviewFocus::Body && state.selectable_count() > 0 => {
                 state.comment = Some(CommentDraft {
@@ -554,7 +580,7 @@ impl App {
         } else if state.visual_anchor.is_some() {
             " ↑↓ extend · Enter comment · v/Esc cancel selection "
         } else {
-            " ↑↓/jk move · v select · Enter comment · d delete · a apply · Tab focus · Esc close "
+            " ↑↓/jk move · v select · Enter comment · d delete · a apply · t layout · Tab focus · Esc close "
         };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -619,7 +645,12 @@ impl App {
             None => format!(" review — vs {} ", state.base),
         };
 
-        let lines = review_body_lines(state, focused);
+        let lines = match state.layout {
+            ReviewLayout::Inline => review_body_lines(state, focused),
+            ReviewLayout::SideBySide => {
+                review_body_lines_side_by_side(state, focused, area.width.saturating_sub(2))
+            }
+        };
 
         let block = Block::default()
             .borders(Borders::ALL)
@@ -747,6 +778,123 @@ fn review_body_lines(state: &DiffReviewState, focused: bool) -> Vec<Line<'static
         }
     }
     lines
+}
+
+/// A row in the side-by-side layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SbsRow {
+    Header(String),
+    /// Old-side and new-side selectable indices (`None` = blank half).
+    Cells {
+        left: Option<usize>,
+        right: Option<usize>,
+    },
+}
+
+/// Pair a file's diff into side-by-side rows. Context lines occupy both halves;
+/// runs of deletions/additions in a change block are zipped left/right, padding
+/// the shorter side with blanks. Indices are selectable-line indices.
+fn side_by_side_rows(file: &FileDiff) -> Vec<SbsRow> {
+    fn flush(rows: &mut Vec<SbsRow>, dels: &mut Vec<usize>, adds: &mut Vec<usize>) {
+        for i in 0..dels.len().max(adds.len()) {
+            rows.push(SbsRow::Cells {
+                left: dels.get(i).copied(),
+                right: adds.get(i).copied(),
+            });
+        }
+        dels.clear();
+        adds.clear();
+    }
+
+    let mut rows = Vec::new();
+    let mut sel = 0;
+    for hunk in &file.hunks {
+        rows.push(SbsRow::Header(format!(
+            "@@ -{},{} +{},{} @@ {}",
+            hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines, hunk.header
+        )));
+        let (mut dels, mut adds) = (Vec::new(), Vec::new());
+        for line in &hunk.lines {
+            match line.origin {
+                LineOrigin::Context => {
+                    flush(&mut rows, &mut dels, &mut adds);
+                    rows.push(SbsRow::Cells {
+                        left: Some(sel),
+                        right: Some(sel),
+                    });
+                }
+                LineOrigin::Deletion => dels.push(sel),
+                LineOrigin::Addition => adds.push(sel),
+            }
+            sel += 1;
+        }
+        flush(&mut rows, &mut dels, &mut adds);
+    }
+    rows
+}
+
+/// Render the side-by-side body for the current file.
+fn review_body_lines_side_by_side(
+    state: &DiffReviewState,
+    focused: bool,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let Some(file) = state.current_file() else {
+        return Vec::new();
+    };
+    let lines = state.selectable_lines();
+    let (sel_lo, sel_hi) = state.selection();
+    // Two columns separated by " │ ".
+    let col = (width.saturating_sub(3) / 2).max(8) as usize;
+
+    let cell = |idx: Option<usize>, is_old: bool| -> Span<'static> {
+        match idx.and_then(|i| lines.get(i).map(|l| (i, *l))) {
+            Some((i, line)) => {
+                let no = if is_old {
+                    line.old_lineno
+                } else {
+                    line.new_lineno
+                };
+                let gutter = no
+                    .map(|n| format!("{n:>4}"))
+                    .unwrap_or_else(|| "    ".into());
+                let color = match line.origin {
+                    LineOrigin::Addition => Color::Green,
+                    LineOrigin::Deletion => Color::Red,
+                    LineOrigin::Context => Color::Gray,
+                };
+                let text = truncate_pad(&format!("{gutter} {}", line.content), col);
+                let mut style = Style::default().fg(color);
+                if focused && i >= sel_lo && i <= sel_hi {
+                    style = style.add_modifier(Modifier::REVERSED);
+                }
+                Span::styled(text, style)
+            }
+            None => Span::raw(" ".repeat(col)),
+        }
+    };
+
+    side_by_side_rows(file)
+        .into_iter()
+        .map(|row| match row {
+            SbsRow::Header(h) => Line::from(Span::styled(h, Style::default().fg(Color::Cyan))),
+            SbsRow::Cells { left, right } => Line::from(vec![
+                cell(left, true),
+                Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
+                cell(right, false),
+            ]),
+        })
+        .collect()
+}
+
+/// Truncate `s` to `width` display chars, or right-pad with spaces to `width`.
+fn truncate_pad(s: &str, width: usize) -> String {
+    let count = s.chars().count();
+    if count > width {
+        s.chars().take(width).collect()
+    } else {
+        format!("{s:<width$}")
+    }
 }
 
 #[cfg(test)]
@@ -896,6 +1044,54 @@ diff --git a/b.rs b/b.rs
         // Clicking outside the body rect leaves the cursor untouched.
         s.click_at(5, 50, body);
         assert_eq!(s.cursor, 2);
+    }
+
+    #[test]
+    fn side_by_side_pairs_change_blocks() {
+        let s = state_with_two_files();
+        let rows = side_by_side_rows(s.current_file().unwrap());
+        assert!(matches!(rows[0], SbsRow::Header(_)));
+        // context(0,0), then the lone addition paired with a blank left,
+        // then context(2,2).
+        assert_eq!(
+            &rows[1..],
+            &[
+                SbsRow::Cells {
+                    left: Some(0),
+                    right: Some(0)
+                },
+                SbsRow::Cells {
+                    left: None,
+                    right: Some(1)
+                },
+                SbsRow::Cells {
+                    left: Some(2),
+                    right: Some(2)
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn side_by_side_zips_deletion_and_addition() {
+        let mut s = state_with_two_files();
+        s.selected_file = 1; // b.rs: -b / +B
+        let rows = side_by_side_rows(s.current_file().unwrap());
+        assert_eq!(
+            rows[1],
+            SbsRow::Cells {
+                left: Some(0),
+                right: Some(1)
+            }
+        );
+    }
+
+    #[test]
+    fn toggle_layout_flips() {
+        let mut s = state_with_two_files();
+        assert_eq!(s.layout, ReviewLayout::Inline);
+        s.toggle_layout();
+        assert_eq!(s.layout, ReviewLayout::SideBySide);
     }
 
     #[test]
