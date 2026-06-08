@@ -74,6 +74,8 @@ pub struct DiffReviewState {
     tree_cursor: usize,
     /// First visible tree row (scroll offset for the file pane).
     tree_scroll: u16,
+    /// Annotation ids whose inline box is collapsed (absent = expanded).
+    collapsed_annotations: HashSet<uuid::Uuid>,
 }
 
 /// A node in the file tree: either a directory (with children) or a file leaf
@@ -132,6 +134,7 @@ impl DiffReviewState {
             collapsed: HashSet::new(),
             tree_cursor: 0,
             tree_scroll: 0,
+            collapsed_annotations: HashSet::new(),
         }
     }
 
@@ -527,6 +530,52 @@ impl DiffReviewState {
         }
         found.then_some(drifted)
     }
+
+    /// Whether annotation `id`'s inline box is collapsed.
+    fn is_annotation_collapsed(&self, id: uuid::Uuid) -> bool {
+        self.collapsed_annotations.contains(&id)
+    }
+
+    /// Toggle the inline box (expanded/collapsed) of the annotation covering
+    /// the cursor line, if any.
+    fn toggle_annotation_fold(&mut self) {
+        if let Some(id) = self.annotation_at_cursor()
+            && !self.collapsed_annotations.remove(&id)
+        {
+            self.collapsed_annotations.insert(id);
+        }
+    }
+
+    /// Map each selectable-line index to the annotations whose box should be
+    /// drawn just after it — anchored to the last line of the annotation's
+    /// range on its side.
+    fn annotation_anchors(&self) -> std::collections::HashMap<usize, Vec<&Annotation>> {
+        let mut map: std::collections::HashMap<usize, Vec<&Annotation>> =
+            std::collections::HashMap::new();
+        let Some(file) = self.current_file() else {
+            return map;
+        };
+        let display = file.display_path();
+        let lines = self.selectable_lines();
+        for ann in self
+            .annotations
+            .iter()
+            .filter(|a| a.status != AnnotationStatus::Applied && a.file == display)
+        {
+            let end = ann.line_range.1;
+            for (i, line) in lines.iter().enumerate() {
+                let lineno = match ann.side {
+                    AnnotationSide::New => line.new_lineno,
+                    AnnotationSide::Old => line.old_lineno,
+                };
+                if lineno == Some(end) {
+                    map.entry(i).or_default().push(ann);
+                    break;
+                }
+            }
+        }
+        map
+    }
 }
 
 impl App {
@@ -628,6 +677,7 @@ impl App {
             KeyCode::PageDown => state.page_body(true),
             KeyCode::PageUp => state.page_body(false),
             KeyCode::Char('t') => state.toggle_layout(),
+            KeyCode::Char('z') => state.toggle_annotation_fold(),
             KeyCode::Char('v') if state.focus == ReviewFocus::Body => state.toggle_visual(),
             // Enter: toggle a directory in the tree, or open the comment box in
             // the body.
@@ -740,7 +790,7 @@ impl App {
         } else if state.focus == ReviewFocus::FileList {
             " ↑↓/jk move · Enter expand/collapse · PgUp/Dn scroll diff · [ ] file · Tab to diff · ^Q/Esc close "
         } else {
-            " ↑↓/jk move · v select · Enter comment · d delete · a apply · t layout · Tab files · ^Q/Esc close "
+            " ↑↓/jk move · v select · Enter comment · z fold · d delete · a apply · t layout · ^Q/Esc close "
         };
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
@@ -1067,6 +1117,7 @@ fn review_body_lines(
     };
     let (sel_lo, sel_hi) = state.selection();
     let segs = word_diff_segments(file);
+    let anchors = state.annotation_anchors();
     let mut out: Vec<Line<'static>> = Vec::new();
     let mut idx = 0; // selectable-line index
 
@@ -1118,6 +1169,17 @@ fn review_body_lines(
                 spans = reverse_spans(spans);
             }
             out.push(Line::from(spans));
+
+            // Inline annotation box(es) anchored to this line.
+            if let Some(anns) = anchors.get(&idx) {
+                for ann in anns {
+                    out.extend(annotation_box_lines(
+                        ann,
+                        state.is_annotation_collapsed(ann.id),
+                        width,
+                    ));
+                }
+            }
             idx += 1;
         }
     }
@@ -1205,6 +1267,94 @@ fn push_segment(
             Style::default().fg(fg).bg(bg),
         ));
     }
+}
+
+/// Render an annotation as an inline box, visually distinct from the diff.
+/// Collapsed → a single rounded header bar with a preview; expanded → the bar
+/// plus the wrapped comment and a closing border.
+fn annotation_box_lines(ann: &Annotation, collapsed: bool, width: usize) -> Vec<Line<'static>> {
+    const INDENT: &str = "  ";
+    let avail = width.saturating_sub(INDENT.len());
+    if avail < 8 {
+        return Vec::new();
+    }
+    let inner = avail - 2; // text columns between the │ borders
+    let drifted = ann.status == AnnotationStatus::Drifted;
+    let border = Style::default().fg(if drifted { Color::Red } else { Color::Yellow });
+    let icon = if drifted { "⚠" } else { "✎" };
+    let chevron = if collapsed { '▸' } else { '▾' };
+
+    if collapsed {
+        let preview = ann.comment.lines().next().unwrap_or("");
+        let header = hrule(&format!("{chevron} {icon} {preview} "), inner);
+        return vec![Line::from(Span::styled(
+            format!("{INDENT}╭{header}╮"),
+            border,
+        ))];
+    }
+
+    let mut out = Vec::new();
+    let header = hrule(&format!("{chevron} {icon} annotation "), inner);
+    out.push(Line::from(Span::styled(
+        format!("{INDENT}╭{header}╮"),
+        border,
+    )));
+    let text_width = inner.saturating_sub(2);
+    for paragraph in ann.comment.split('\n') {
+        for chunk in wrap_text(paragraph, text_width) {
+            let body: String = chunk.chars().take(text_width).collect();
+            out.push(Line::from(vec![
+                Span::styled(format!("{INDENT}│"), border),
+                Span::raw(format!(" {body:<text_width$} ")),
+                Span::styled("│".to_string(), border),
+            ]));
+        }
+    }
+    out.push(Line::from(Span::styled(
+        format!("{INDENT}╰{}╯", "─".repeat(inner)),
+        border,
+    )));
+    out
+}
+
+/// Build a horizontal-rule string: `head` followed by `─` padding to exactly
+/// `width` chars (truncated if `head` is already too long).
+fn hrule(head: &str, width: usize) -> String {
+    let head = format!("─ {head}");
+    let len = head.chars().count();
+    if len >= width {
+        head.chars().take(width).collect()
+    } else {
+        format!("{head}{}", "─".repeat(width - len))
+    }
+}
+
+/// Word-wrap `s` to `width` columns (falls back to hard cuts via the caller's
+/// truncation for over-long words). Always returns at least one line.
+fn wrap_text(s: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![s.to_string()];
+    }
+    let mut lines = Vec::new();
+    let mut cur = String::new();
+    for word in s.split_whitespace() {
+        if cur.is_empty() {
+            cur = word.to_string();
+        } else if cur.chars().count() + 1 + word.chars().count() <= width {
+            cur.push(' ');
+            cur.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut cur));
+            cur = word.to_string();
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }
 
 /// Apply the reversed (selection-highlight) modifier to every span.
@@ -1401,24 +1551,41 @@ fn review_body_lines_side_by_side(
         }
     };
 
-    side_by_side_rows(file)
-        .into_iter()
-        .map(|row| match row {
-            SbsRow::Header(_) => {
-                // Re-derive the hunk for a full-width styled header.
-                Line::from(Span::styled(
-                    row_header_text(&row),
-                    Style::default().fg(pal.hunk_header),
-                ))
-            }
+    let anchors = state.annotation_anchors();
+    let mut out: Vec<Line<'static>> = Vec::new();
+    for row in side_by_side_rows(file) {
+        match row {
+            SbsRow::Header(_) => out.push(Line::from(Span::styled(
+                row_header_text(&row),
+                Style::default().fg(pal.hunk_header),
+            ))),
             SbsRow::Cells { left, right } => {
                 let mut spans = cell(left, true);
                 spans.push(Span::styled(" │ ", Style::default().fg(pal.gutter_fg)));
                 spans.extend(cell(right, false));
-                Line::from(spans)
+                out.push(Line::from(spans));
+
+                // Inline annotation box(es) anchored to either side's line.
+                // Context rows have left == right, so de-duplicate.
+                let sels: Vec<usize> = match (left, right) {
+                    (Some(l), Some(r)) if l == r => vec![l],
+                    (l, r) => l.into_iter().chain(r).collect(),
+                };
+                for sel in sels {
+                    if let Some(anns) = anchors.get(&sel) {
+                        for ann in anns {
+                            out.extend(annotation_box_lines(
+                                ann,
+                                state.is_annotation_collapsed(ann.id),
+                                width,
+                            ));
+                        }
+                    }
+                }
             }
-        })
-        .collect()
+        }
+    }
+    out
 }
 
 /// The header text for a [`SbsRow::Header`] (empty for non-header rows).
@@ -1650,6 +1817,51 @@ diff --git a/b.rs b/b.rs
         // Clicking outside the body rect leaves the cursor untouched.
         s.click_at(5, 50, body);
         assert_eq!(s.cursor, 2);
+    }
+
+    #[test]
+    fn annotation_anchors_map_to_end_line_selidx() {
+        let mut s = state_with_two_files();
+        // a.rs: ctx(new1,sel0), +let y=3(new2,sel1), ctx(new3,sel2).
+        s.annotations.push(Annotation::new(
+            "a.rs",
+            AnnotationSide::New,
+            (2, 2),
+            "let y = 3;",
+            "note",
+        ));
+        let anchors = s.annotation_anchors();
+        assert_eq!(anchors.get(&1).map(|v| v.len()), Some(1));
+        assert!(!anchors.contains_key(&0));
+    }
+
+    #[test]
+    fn annotation_box_collapsed_single_line_expanded_boxed() {
+        let ann = Annotation::new(
+            "a.rs",
+            AnnotationSide::New,
+            (2, 2),
+            "let y = 3;",
+            "extract helper\nand rename",
+        );
+        assert_eq!(annotation_box_lines(&ann, true, 60).len(), 1);
+        // top border + two comment paragraphs + bottom border.
+        assert_eq!(annotation_box_lines(&ann, false, 60).len(), 4);
+    }
+
+    #[test]
+    fn toggle_annotation_fold_flips_state() {
+        let mut s = state_with_two_files();
+        let ann = Annotation::new("a.rs", AnnotationSide::New, (2, 2), "let y = 3;", "note");
+        let id = ann.id;
+        s.annotations.push(ann);
+        s.focus = ReviewFocus::Body;
+        s.cursor = 1; // the inserted line, covered by the annotation
+        assert!(!s.is_annotation_collapsed(id));
+        s.toggle_annotation_fold();
+        assert!(s.is_annotation_collapsed(id));
+        s.toggle_annotation_fold();
+        assert!(!s.is_annotation_collapsed(id));
     }
 
     #[test]
