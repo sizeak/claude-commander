@@ -555,6 +555,15 @@ impl App {
                 }
             }
 
+            Modal::ReviewDiff(_) => {
+                // Extract the state to avoid a borrow conflict with &mut self.
+                let state = match std::mem::replace(&mut self.ui_state.modal, Modal::None) {
+                    Modal::ReviewDiff(s) => s,
+                    _ => unreachable!(),
+                };
+                self.handle_review_key(key, state).await;
+            }
+
             Modal::None => {}
         }
     }
@@ -686,6 +695,9 @@ impl App {
             }
             UserCommand::OpenPullRequest => {
                 self.handle_open_pull_request().await;
+            }
+            UserCommand::OpenReviewDiff => {
+                self.handle_open_review().await;
             }
             UserCommand::TogglePane => {
                 let on_project = self.ui_state.selected_session_id.is_none()

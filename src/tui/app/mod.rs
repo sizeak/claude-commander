@@ -60,12 +60,15 @@ mod event_loop;
 mod input;
 mod modals;
 mod render;
+mod review;
 mod selection;
 mod settings;
 mod state;
 
 #[cfg(test)]
 mod tests;
+
+pub use review::DiffReviewState;
 
 /// Direction for mouse scroll events
 enum ScrollDirection {
@@ -196,6 +199,8 @@ pub enum Modal {
         /// True while `git fetch origin` is running in the background
         fetching: bool,
     },
+    /// Full-screen review-diff-and-annotate view.
+    ReviewDiff(Box<DiffReviewState>),
 }
 
 /// A session match in the quick-switch modal
@@ -577,6 +582,7 @@ impl AppUiState {
             | BindableAction::RestartSession
             | BindableAction::OpenInEditor
             | BindableAction::OpenPullRequest
+            | BindableAction::OpenReviewDiff
             | BindableAction::MoveToSection => has_session,
             // Cascade merge is only meaningful from a session that's part of
             // a stack. We accept any selected session here; the handler is

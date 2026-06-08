@@ -42,6 +42,7 @@ pub enum BindableAction {
     RemoveProject,
     OpenInEditor,
     OpenPullRequest,
+    OpenReviewDiff,
     TogglePane,
     TogglePaneReverse,
     ShrinkLeftPane,
@@ -82,6 +83,7 @@ impl BindableAction {
         Self::RemoveProject,
         Self::OpenInEditor,
         Self::OpenPullRequest,
+        Self::OpenReviewDiff,
         Self::ScanDirectory,
         Self::MoveToSection,
         Self::ToggleSection,
@@ -122,6 +124,7 @@ impl BindableAction {
             Self::RemoveProject => "remove_project",
             Self::OpenInEditor => "open_in_editor",
             Self::OpenPullRequest => "open_pull_request",
+            Self::OpenReviewDiff => "open_review_diff",
             Self::TogglePane => "toggle_pane",
             Self::TogglePaneReverse => "toggle_pane_reverse",
             Self::ShrinkLeftPane => "shrink_left_pane",
@@ -163,6 +166,7 @@ impl BindableAction {
             Self::RemoveProject => "Remove project",
             Self::OpenInEditor => "Open in editor/IDE",
             Self::OpenPullRequest => "Open PR in browser",
+            Self::OpenReviewDiff => "Review diff & annotate",
             Self::TogglePane => "Toggle preview/diff/shell view",
             Self::TogglePaneReverse => "Toggle view (reverse)",
             Self::ShrinkLeftPane => "Shrink left pane",
@@ -202,6 +206,7 @@ impl BindableAction {
             | Self::RemoveProject
             | Self::OpenInEditor
             | Self::OpenPullRequest
+            | Self::OpenReviewDiff
             | Self::ScanDirectory
             | Self::MoveToSection
             | Self::ToggleSection
@@ -241,6 +246,7 @@ impl FromStr for BindableAction {
             "remove_project" => Ok(Self::RemoveProject),
             "open_in_editor" => Ok(Self::OpenInEditor),
             "open_pull_request" => Ok(Self::OpenPullRequest),
+            "open_review_diff" => Ok(Self::OpenReviewDiff),
             "toggle_pane" => Ok(Self::TogglePane),
             "toggle_pane_reverse" => Ok(Self::TogglePaneReverse),
             "shrink_left_pane" => Ok(Self::ShrinkLeftPane),

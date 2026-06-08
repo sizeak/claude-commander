@@ -7,6 +7,8 @@ impl App {
         match &self.ui_state.modal {
             Modal::None => {}
 
+            Modal::ReviewDiff(state) => self.render_review_modal(frame, area, state),
+
             Modal::Input {
                 title,
                 prompt,
