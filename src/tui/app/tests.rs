@@ -760,8 +760,20 @@ async fn apply_section_move_keeps_moved_session_selected() {
 
     let project = Project::new("proj", PathBuf::from("/tmp/proj"), "main");
     let project_id = project.id;
-    let s1 = WorktreeSession::new(project_id, "one", "br-one", PathBuf::from("/tmp/w1"), "claude");
-    let s2 = WorktreeSession::new(project_id, "two", "br-two", PathBuf::from("/tmp/w2"), "claude");
+    let s1 = WorktreeSession::new(
+        project_id,
+        "one",
+        "br-one",
+        PathBuf::from("/tmp/w1"),
+        "claude",
+    );
+    let s2 = WorktreeSession::new(
+        project_id,
+        "two",
+        "br-two",
+        PathBuf::from("/tmp/w2"),
+        "claude",
+    );
     let s2_id = s2.id;
 
     app.service
@@ -777,7 +789,8 @@ async fn apply_section_move_keeps_moved_session_selected() {
     app.refresh_list_items().await;
 
     // Move session two into "Beta" — it was in the "In Progress" catch-all.
-    app.apply_section_move(s2_id, Some("Beta".to_string())).await;
+    app.apply_section_move(s2_id, Some("Beta".to_string()))
+        .await;
 
     let selected_idx = app
         .ui_state
