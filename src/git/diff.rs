@@ -174,18 +174,13 @@ impl<K> Clone for DiffCache<K> {
 
 /// Compute a diff for the given path (no caching)
 pub async fn compute_diff_for_path(path: &Path) -> Result<DiffInfo> {
-    // Phase 1: Run the three independent git commands in parallel
-    let (diff_output, untracked_output, stat_output) = tokio::join!(
+    // Run the tracked-change commands in parallel; untracked files are handled
+    // by the shared `untracked_patch_and_count` helper (also used by the
+    // review-diff composition) to avoid duplicating the per-file diff loop.
+    let (diff_output, stat_output) = tokio::join!(
         Command::new("git")
             .current_dir(path)
             .args(["diff", "HEAD"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output(),
-        Command::new("git")
-            .current_dir(path)
-            .args(["ls-files", "--others", "--exclude-standard"])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -200,7 +195,6 @@ pub async fn compute_diff_for_path(path: &Path) -> Result<DiffInfo> {
     );
 
     let diff_output = diff_output.map_err(|e| GitError::DiffFailed(e.to_string()))?;
-    let untracked_output = untracked_output.map_err(|e| GitError::DiffFailed(e.to_string()))?;
     let stat_output = stat_output.map_err(|e| GitError::DiffFailed(e.to_string()))?;
 
     let mut diff = if diff_output.status.success() {
@@ -209,52 +203,17 @@ pub async fn compute_diff_for_path(path: &Path) -> Result<DiffInfo> {
         String::new()
     };
 
-    // Phase 2: Run untracked file diffs in parallel
-    if untracked_output.status.success() {
-        let untracked = String::from_utf8_lossy(&untracked_output.stdout);
-        let untracked_files: Vec<&str> = untracked.lines().filter(|l| !l.is_empty()).collect();
-
-        let mut diff_futures = Vec::with_capacity(untracked_files.len());
-        for file in &untracked_files {
-            diff_futures.push(
-                Command::new("git")
-                    .current_dir(path)
-                    .args([
-                        "diff",
-                        "--no-index",
-                        "--src-prefix=a/",
-                        "--dst-prefix=b/",
-                        "--",
-                        "/dev/null",
-                        file,
-                    ])
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::piped())
-                    .output(),
-            );
-        }
-
-        let untracked_diffs: Vec<_> = futures::stream::iter(diff_futures)
-            .buffered(UNTRACKED_DIFF_CONCURRENCY)
-            .collect()
-            .await;
-
-        for output in untracked_diffs.into_iter().flatten() {
-            // git diff --no-index exits with 1 when files differ (expected)
-            let file_diff_str = String::from_utf8_lossy(&output.stdout);
-            if !file_diff_str.is_empty() {
-                // Ensure blank line separator between file diffs
-                if !diff.is_empty() && !diff.ends_with("\n\n") {
-                    if diff.ends_with('\n') {
-                        diff.push('\n');
-                    } else {
-                        diff.push_str("\n\n");
-                    }
-                }
-                diff.push_str(&file_diff_str);
+    let (untracked_diff, untracked_count) = untracked_patch_and_count(path).await;
+    if !untracked_diff.is_empty() {
+        // Ensure a blank-line separator between the tracked and untracked diffs.
+        if !diff.is_empty() && !diff.ends_with("\n\n") {
+            if diff.ends_with('\n') {
+                diff.push('\n');
+            } else {
+                diff.push_str("\n\n");
             }
         }
+        diff.push_str(&untracked_diff);
     }
 
     let (mut files_changed, lines_added, lines_removed) = if stat_output.status.success() {
@@ -262,15 +221,7 @@ pub async fn compute_diff_for_path(path: &Path) -> Result<DiffInfo> {
     } else {
         (0, 0, 0)
     };
-
-    // Count untracked files in the total
-    if untracked_output.status.success() {
-        let untracked_count = String::from_utf8_lossy(&untracked_output.stdout)
-            .lines()
-            .filter(|l| !l.is_empty())
-            .count();
-        files_changed += untracked_count;
-    }
+    files_changed += untracked_count;
 
     let line_count = diff.lines().count();
 
@@ -283,6 +234,77 @@ pub async fn compute_diff_for_path(path: &Path) -> Result<DiffInfo> {
         computed_at: Instant::now(),
         base_commit: "HEAD".to_string(),
     })
+}
+
+/// Render untracked-file patches for the worktree at `path` as a single
+/// unified-diff string, alongside the count of untracked files.
+///
+/// Each untracked file is diffed against `/dev/null` via `git diff --no-index`
+/// (which exits 1 when files differ — expected), capped at
+/// [`UNTRACKED_DIFF_CONCURRENCY`] concurrent subprocesses to avoid EMFILE on
+/// noisy worktrees. Returns `(String::new(), 0)` when there are none or git
+/// cannot be run. Shared by [`compute_diff_for_path`] and the review-diff
+/// composition in [`super::review_diff`].
+pub(crate) async fn untracked_patch_and_count(path: &Path) -> (String, usize) {
+    let ls = match Command::new("git")
+        .current_dir(path)
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+    {
+        Ok(out) if out.status.success() => out,
+        _ => return (String::new(), 0),
+    };
+
+    let stdout = String::from_utf8_lossy(&ls.stdout);
+    let files: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+    let count = files.len();
+    if count == 0 {
+        return (String::new(), 0);
+    }
+
+    let mut diff_futures = Vec::with_capacity(count);
+    for file in &files {
+        diff_futures.push(
+            Command::new("git")
+                .current_dir(path)
+                .args([
+                    "diff",
+                    "--no-index",
+                    "--src-prefix=a/",
+                    "--dst-prefix=b/",
+                    "--",
+                    "/dev/null",
+                    file,
+                ])
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output(),
+        );
+    }
+
+    let outputs: Vec<_> = futures::stream::iter(diff_futures)
+        .buffered(UNTRACKED_DIFF_CONCURRENCY)
+        .collect()
+        .await;
+
+    let mut patch = String::new();
+    for output in outputs.into_iter().flatten() {
+        let file_diff = String::from_utf8_lossy(&output.stdout);
+        if file_diff.is_empty() {
+            continue;
+        }
+        if !patch.is_empty() && !patch.ends_with('\n') {
+            patch.push('\n');
+        }
+        patch.push_str(&file_diff);
+    }
+
+    (patch, count)
 }
 
 /// Parse git diff --stat output to extract statistics
