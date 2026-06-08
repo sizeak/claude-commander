@@ -167,12 +167,7 @@ impl App {
                 self.reconcile_one_section_assignment(session_id).await;
                 self.refresh_list_items().await;
                 // Select the newly created session
-                if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
-                    matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
-                }) {
-                    self.ui_state.list_state.select(Some(idx));
-                }
-                self.update_selection();
+                self.select_session_in_tree(session_id);
                 self.spawn_preview_update();
             }
             StateUpdate::SessionCreateFailed {

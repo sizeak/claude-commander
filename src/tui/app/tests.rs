@@ -1,6 +1,6 @@
 use super::actions::adjust_list_scroll;
 use super::modals::centered_rect;
-use super::selection::session_number_to_list_index;
+use super::selection::{session_number_to_list_index, worktree_list_index};
 use super::*;
 
 #[test]
@@ -36,8 +36,12 @@ fn make_project() -> SessionListItem {
 }
 
 fn make_worktree() -> SessionListItem {
+    make_worktree_with_id(SessionId::new())
+}
+
+fn make_worktree_with_id(id: SessionId) -> SessionListItem {
     SessionListItem::Worktree {
-        id: SessionId::new(),
+        id,
         project_id: ProjectId::new(),
         title: "test".to_string(),
         branch: "feat".to_string(),
@@ -88,6 +92,29 @@ fn test_session_number_to_list_index_empty() {
 fn test_session_number_to_list_index_projects_only() {
     let items = vec![make_project(), make_project()];
     assert_eq!(session_number_to_list_index(&items, 1), None);
+}
+
+#[test]
+fn test_worktree_list_index_finds_session_row() {
+    let target = SessionId::new();
+    // `target` sits at index 2, between other worktrees and a project header.
+    let items = vec![
+        make_project(),
+        make_worktree(),
+        make_worktree_with_id(target),
+        make_project(),
+        make_worktree(),
+    ];
+    assert_eq!(worktree_list_index(&items, target), Some(2));
+}
+
+#[test]
+fn test_worktree_list_index_absent_session_returns_none() {
+    // A session that has no row in the list (e.g. it was deleted, or the
+    // user detached from a session that has since ended) must not select
+    // some other row by accident.
+    let items = vec![make_project(), make_worktree(), make_worktree()];
+    assert_eq!(worktree_list_index(&items, SessionId::new()), None);
 }
 
 // ---------------------------------------------------------------------------

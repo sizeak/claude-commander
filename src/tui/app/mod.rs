@@ -834,6 +834,10 @@ impl App {
                         // shell toggle) so we can refresh just their agent
                         // state on the way out — see the post-loop block.
                         let mut viewed_sessions: HashSet<String> = HashSet::new();
+                        // The session the user ends up on when the attach loop
+                        // exits — possibly reached via the in-session switcher,
+                        // so not necessarily the one they entered with.
+                        let mut final_session: Option<String> = None;
                         if !session_name.is_empty() {
                             let mut current_session = session_name.clone();
                             let mut consecutive_ends: u8 = 0;
@@ -1006,6 +1010,7 @@ impl App {
                                     }
                                 }
                             }
+                            final_session = Some(current_session);
                         }
 
                         // Flush stdin again after detach to discard any stale input
@@ -1052,6 +1057,14 @@ impl App {
                                 );
                                 self.refresh_list_items().await;
                             }
+                        }
+
+                        // Focus the session the user just left so the tree
+                        // lands on it — important after the in-session switcher,
+                        // which may have moved them to a different session than
+                        // the one they entered.
+                        if let Some(name) = final_session {
+                            self.focus_session_in_tree(&name).await;
                         }
                     }
                     None => {

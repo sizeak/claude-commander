@@ -801,12 +801,7 @@ impl App {
 
         // Refresh list and select the new placeholder
         self.refresh_list_items().await;
-        if let Some(idx) = self.ui_state.list_items.iter().position(
-            |item| matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id),
-        ) {
-            self.ui_state.list_state.select(Some(idx));
-        }
-        self.update_selection();
+        self.select_session_in_tree(session_id);
 
         // Spawn background task for heavy work (same pattern as NewSession)
         let session_manager = self.service.session_manager().clone();
@@ -1344,11 +1339,7 @@ impl App {
         // The session has moved to a new position in the rebuilt list. Keep it
         // selected by finding its new index and moving the cursor there, then
         // refresh the preview pane for the (unchanged) selection.
-        if let Some(idx) = self.ui_state.list_items.iter().position(
-            |item| matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id),
-        ) {
-            self.ui_state.list_state.list_state.select(Some(idx));
-            self.update_selection();
+        if self.select_session_in_tree(session_id) {
             self.spawn_preview_update();
         }
     }
@@ -1407,12 +1398,7 @@ impl App {
 
                 // Refresh list and select the new placeholder
                 self.refresh_list_items().await;
-                if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
-                    matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
-                }) {
-                    self.ui_state.list_state.select(Some(idx));
-                }
-                self.update_selection();
+                self.select_session_in_tree(session_id);
 
                 // Spawn background task for heavy work
                 let session_manager = self.service.session_manager().clone();
@@ -1492,12 +1478,7 @@ impl App {
 
                 // Refresh list and select the new placeholder
                 self.refresh_list_items().await;
-                if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
-                    matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
-                }) {
-                    self.ui_state.list_state.select(Some(idx));
-                }
-                self.update_selection();
+                self.select_session_in_tree(session_id);
 
                 // Spawn background task for heavy work
                 let session_manager = self.service.session_manager().clone();
