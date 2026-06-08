@@ -787,14 +787,20 @@ impl App {
                     } else {
                         String::new()
                     };
-                    let mut style = Style::default().fg(file_status_color(file.status));
+                    // Only the status letter is coloured; the file name stays
+                    // the default foreground.
+                    let mut spans = vec![
+                        Span::raw(format!("{indent}  ")),
+                        Span::styled(
+                            marker.to_string(),
+                            Style::default().fg(file_status_color(file.status)),
+                        ),
+                        Span::raw(format!(" {name}{badge}")),
+                    ];
                     if on_cursor {
-                        style = style.add_modifier(Modifier::REVERSED);
+                        spans = reverse_spans(spans);
                     }
-                    Line::from(Span::styled(
-                        format!("{indent}  {marker} {name}{badge}"),
-                        style,
-                    ))
+                    Line::from(spans)
                 }
             };
             lines.push(line);
