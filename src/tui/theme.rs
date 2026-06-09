@@ -190,12 +190,12 @@ impl Theme {
         let (add_bg, del_bg, add_emph_bg, del_emph_bg, add_gutter_bg, del_gutter_bg) =
             match self.mode {
                 ColorMode::TrueColor => (
-                    dim_color(add, 0.36),
-                    dim_color(del, 0.36),
-                    dim_color(add, 0.68),
-                    dim_color(del, 0.68),
-                    dim_color(add, 0.46),
-                    dim_color(del, 0.46),
+                    fill_color(add, 0.30),
+                    fill_color(del, 0.30),
+                    fill_color(add, 0.52),
+                    fill_color(del, 0.52),
+                    fill_color(add, 0.40),
+                    fill_color(del, 0.40),
                 ),
                 ColorMode::Indexed => (
                     Color::Indexed(22),
@@ -741,6 +741,19 @@ impl Theme {
             color_to_tmux(self.status_bar_fg),
         )
     }
+}
+
+/// Build a dark, saturated line fill from a base colour for the review diff
+/// view. Amplifies saturation first (so dimmed pastel theme colours read as
+/// rich green/red rather than washed-out grey), then scales toward black to the
+/// target `brightness`.
+pub fn fill_color(base: Color, brightness: f32) -> Color {
+    const SAT: f32 = 1.9;
+    let (r, g, b) = color_to_approx_rgb(base);
+    let (r, g, b) = (r as f32, g as f32, b as f32);
+    let mean = (r + g + b) / 3.0;
+    let ch = |c: f32| (((mean + (c - mean) * SAT).clamp(0.0, 255.0)) * brightness) as u8;
+    Color::Rgb(ch(r), ch(g), ch(b))
 }
 
 /// Scale a color's brightness toward black by the given factor (0.0 = black, 1.0 = unchanged).
