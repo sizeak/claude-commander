@@ -1495,14 +1495,44 @@ fn coalesce(toks: &[&str], keep: &[bool]) -> WordSegs {
     segs
 }
 
+/// Minimum fraction of the longer line that the two paired lines must share
+/// for intra-line emphasis to be shown. Below this they're treated as a
+/// wholesale replacement (solid line colour, no word highlight), matching how
+/// GitHub suppresses highlighting of coincidental punctuation matches between
+/// unrelated lines.
+const WORD_DIFF_SIMILARITY: f32 = 0.5;
+
 /// Split a changed (old, new) line pair into segments tagged changed/unchanged,
 /// using a token-level diff (identifier/whitespace runs + single punctuation,
 /// matched by longest common subsequence). This emphasises only the genuinely
 /// different tokens, even when changes are separated by unchanged text.
+///
+/// When the two lines share too little to read as an edit of one another
+/// (positionally paired but unrelated lines from a multi-line replace block),
+/// the LCS matches only incidental punctuation, leaving noisy unchanged islands
+/// in a sea of highlight. In that case emphasis is suppressed entirely and each
+/// line is returned as a single unchanged span — solid red/green, like GitHub.
 fn word_diff(old: &str, new: &str) -> (WordSegs, WordSegs) {
     let o = tokenize(old);
     let n = tokenize(new);
     let (o_keep, n_keep) = lcs_keep(&o, &n);
+
+    // Characters shared by the LCS (matched tokens are byte-identical on both
+    // sides, so counting one side suffices) over the longer line's length.
+    let shared: usize = o
+        .iter()
+        .zip(&o_keep)
+        .filter(|(_, keep)| **keep)
+        .map(|(tok, _)| tok.chars().count())
+        .sum();
+    let longest = old.chars().count().max(new.chars().count());
+    if longest == 0 || (shared as f32) / (longest as f32) < WORD_DIFF_SIMILARITY {
+        return (
+            vec![(old.to_string(), false)],
+            vec![(new.to_string(), false)],
+        );
+    }
+
     (coalesce(&o, &o_keep), coalesce(&n, &n_keep))
 }
 
@@ -2029,6 +2059,29 @@ diff --git a/b.rs b/b.rs
         // The shared `; bar = ` between the two changes stays unchanged.
         assert!(old.iter().any(|(t, e)| !e && t.contains("bar")));
         assert!(new.iter().any(|(t, e)| !e && t.contains("bar")));
+    }
+
+    #[test]
+    fn word_diff_suppresses_emphasis_for_dissimilar_lines() {
+        // Two positionally-paired but unrelated lines share only incidental
+        // punctuation. Highlighting those coincidental matches leaves dark
+        // islands in a sea of emphasis (the GitHub "semantic cleanup" case),
+        // so below a similarity threshold there should be no intra-line
+        // emphasis at all — the whole line is one unchanged span.
+        let (old, new) = word_diff(
+            "const result = await remuxBlobRecord(mockRemuxer, inputBlobRecord)",
+            "beforeEach(() => {",
+        );
+        assert!(old.iter().all(|(_, e)| !e), "old: {old:?}");
+        assert!(new.iter().all(|(_, e)| !e), "new: {new:?}");
+        assert_eq!(
+            old.iter().map(|(t, _)| t.as_str()).collect::<String>(),
+            "const result = await remuxBlobRecord(mockRemuxer, inputBlobRecord)"
+        );
+        assert_eq!(
+            new.iter().map(|(t, _)| t.as_str()).collect::<String>(),
+            "beforeEach(() => {"
+        );
     }
 
     #[test]
