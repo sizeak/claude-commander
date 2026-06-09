@@ -1285,10 +1285,12 @@ fn comment_box_lines(ann: &Comment, collapsed: bool, width: usize) -> Vec<Line<'
     let chevron = if collapsed { '▸' } else { '▾' };
 
     if collapsed {
+        // A single capped horizontal rule (not box corners) so a folded comment
+        // reads as one deliberate line rather than the top half of a box.
         let preview = ann.comment.lines().next().unwrap_or("");
         let header = hrule(&format!("{chevron} {icon} {preview} "), inner);
         return vec![Line::from(Span::styled(
-            format!("{INDENT}╭{header}╮"),
+            format!("{INDENT}╶{header}╴"),
             border,
         ))];
     }
