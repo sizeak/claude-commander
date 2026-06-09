@@ -10,8 +10,9 @@ use std::sync::OnceLock;
 
 use ratatui::style::Color;
 use syntect::easy::HighlightLines;
-use syntect::highlighting::{Theme, ThemeSet};
+use syntect::highlighting::Theme;
 use syntect::parsing::SyntaxSet;
+use two_face::theme::EmbeddedThemeName;
 
 struct Assets {
     syntaxes: SyntaxSet,
@@ -25,15 +26,12 @@ fn assets() -> &'static Assets {
         // The extended (bat) syntax set covers far more languages than
         // syntect's bundled defaults — notably TypeScript/TSX/TOML.
         let syntaxes = two_face::syntax::extra_newlines();
-        let themes = ThemeSet::load_defaults();
-        // A dark theme whose foregrounds read well on the diff fills. Fall back
-        // to any bundled theme if the named one is ever absent.
-        let theme = themes
-            .themes
-            .get("base16-mocha.dark")
-            .or_else(|| themes.themes.values().next())
-            .cloned()
-            .expect("syntect ships default themes");
+        // Monokai Extended has vivid, near-white foregrounds that stay legible
+        // on the coloured add/remove fills (base16 themes are tuned for a
+        // near-black background and wash out over the fills).
+        let theme = two_face::theme::extra()
+            .get(EmbeddedThemeName::MonokaiExtended)
+            .clone();
         Assets { syntaxes, theme }
     })
 }
