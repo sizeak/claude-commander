@@ -867,6 +867,7 @@ impl App {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(border))
             .title(format!(" Files ({}) ", state.diff.files.len()));
         frame.render_widget(
@@ -908,6 +909,7 @@ impl App {
 
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(border))
             .title(title);
         frame.render_widget(
@@ -942,6 +944,7 @@ impl App {
         };
         let block = Block::default()
             .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(Color::Yellow))
             .title(format!(" Comment ({loc}) "));
         frame.render_widget(
