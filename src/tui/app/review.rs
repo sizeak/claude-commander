@@ -451,47 +451,75 @@ impl DiffReviewState {
         };
     }
 
-    /// Build an comment draft from a selectable-line range plus comment
-    /// text. Picks the New side unless the selection is purely deletions, and
-    /// captures the snippet/line range from that side's lines only (so it
-    /// re-anchors cleanly).
-    fn build_draft(&self, range: (usize, usize), comment: String) -> Option<NewComment> {
-        let file = self.current_file()?;
+    /// Selectable lines for `range`, clamped to the available lines.
+    fn selected_lines(&self, range: (usize, usize)) -> Vec<&DiffLine> {
         let lines = self.selectable_lines();
         let (lo, hi) = range;
-        let sel = lines.get(lo..=hi.min(lines.len().saturating_sub(1)))?;
-        if sel.is_empty() {
-            return None;
-        }
+        lines
+            .get(lo..=hi.min(lines.len().saturating_sub(1)))
+            .map(<[_]>::to_vec)
+            .unwrap_or_default()
+    }
 
+    /// Pick the comment side for a selected line slice (New unless the
+    /// selection is purely deletions) and collect each contributing line's
+    /// gutter line number + content on that side. Shared by `build_draft`
+    /// (snippet/anchor) and the comment-box title so they can't drift apart.
+    fn side_and_lines(sel: &[&DiffLine]) -> (CommentSide, Vec<(usize, String)>) {
         let any_new = sel.iter().any(|l| l.new_lineno.is_some());
         let side = if any_new {
             CommentSide::New
         } else {
             CommentSide::Old
         };
+        let collected = sel
+            .iter()
+            .filter_map(|l| {
+                let n = match side {
+                    CommentSide::New => l.new_lineno,
+                    CommentSide::Old => l.old_lineno,
+                }?;
+                Some((n, l.content.clone()))
+            })
+            .collect();
+        (side, collected)
+    }
 
-        let mut nums = Vec::new();
-        let mut contents = Vec::new();
-        for line in sel {
-            let lineno = match side {
-                CommentSide::New => line.new_lineno,
-                CommentSide::Old => line.old_lineno,
-            };
-            if let Some(n) = lineno {
-                nums.push(n);
-                contents.push(line.content.clone());
-            }
+    /// Resolve a selectable-line range to the gutter line numbers it covers on
+    /// its comment side — what the user sees, not the raw selectable index.
+    /// Returns `None` if the range contributes no numbered lines.
+    fn resolved_line_range(&self, range: (usize, usize)) -> Option<(usize, usize)> {
+        let sel = self.selected_lines(range);
+        let (_, collected) = Self::side_and_lines(&sel);
+        let nums = collected.iter().map(|(n, _)| *n);
+        Some((nums.clone().min()?, nums.max()?))
+    }
+
+    /// Build an comment draft from a selectable-line range plus comment
+    /// text. Picks the New side unless the selection is purely deletions, and
+    /// captures the snippet/line range from that side's lines only (so it
+    /// re-anchors cleanly).
+    fn build_draft(&self, range: (usize, usize), comment: String) -> Option<NewComment> {
+        let file = self.current_file()?;
+        let sel = self.selected_lines(range);
+        if sel.is_empty() {
+            return None;
         }
-        if nums.is_empty() {
+        let (side, collected) = Self::side_and_lines(&sel);
+        if collected.is_empty() {
             return None;
         }
 
+        let nums = collected.iter().map(|(n, _)| *n);
         Some(NewComment {
             file: file.display_path().to_string(),
             side,
-            line_range: (*nums.iter().min().unwrap(), *nums.iter().max().unwrap()),
-            snippet: contents.join("\n"),
+            line_range: (nums.clone().min().unwrap(), nums.max().unwrap()),
+            snippet: collected
+                .iter()
+                .map(|(_, c)| c.as_str())
+                .collect::<Vec<_>>()
+                .join("\n"),
             comment,
         })
     }
@@ -943,11 +971,13 @@ impl App {
             height,
         };
         frame.render_widget(Clear, area);
-        let (lo, hi) = draft.range;
-        let loc = if lo == hi {
-            format!("line {}", lo + 1)
-        } else {
-            format!("lines {}–{}", lo + 1, hi + 1)
+        // Show the gutter line numbers the selection covers, not the raw
+        // selectable-line indices (which count deletions and so drift from the
+        // displayed numbers).
+        let loc = match state.resolved_line_range(draft.range) {
+            Some((lo, hi)) if lo == hi => format!("line {lo}"),
+            Some((lo, hi)) => format!("lines {lo}–{hi}"),
+            None => "line ?".to_string(),
         };
         let block = Block::default()
             .borders(Borders::ALL)
@@ -1808,6 +1838,39 @@ diff --git a/b.rs b/b.rs
         assert_eq!(draft.line_range, (2, 2));
         assert_eq!(draft.snippet, "    let y = 3;");
         assert_eq!(draft.comment, "extract helper");
+    }
+
+    #[test]
+    fn resolved_line_range_uses_gutter_number_not_selectable_index() {
+        // Two deletions precede the addition, so the addition's selectable
+        // index (2) is well ahead of its new-side gutter number (1). The
+        // comment-box title must show the gutter number.
+        let diff = parse_unified_diff(
+            "\
+diff --git a/x.rs b/x.rs
+--- a/x.rs
++++ b/x.rs
+@@ -1,3 +1,2 @@
+-old a
+-old b
++new
+ tail
+",
+        );
+        let s = DiffReviewState::new(
+            SessionId::new(),
+            "t".to_string(),
+            "main".to_string(),
+            diff,
+            Vec::new(),
+        );
+        // selectable index 2 is the addition; its new-side line number is 1.
+        assert_eq!(s.resolved_line_range((2, 2)), Some((1, 1)));
+        // And build_draft anchors to the same number, so title and storage agree.
+        assert_eq!(
+            s.build_draft((2, 2), "x".into()).unwrap().line_range,
+            (1, 1)
+        );
     }
 
     #[test]
