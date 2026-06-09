@@ -279,6 +279,16 @@ impl DiffReviewState {
             .count()
     }
 
+    /// Pending comments across every file under directory `dir_path`, so a
+    /// collapsed directory still surfaces that its subtree has comments.
+    fn dir_comment_count(&self, dir_path: &str) -> usize {
+        let prefix = format!("{dir_path}/");
+        self.comments
+            .iter()
+            .filter(|a| a.status != CommentStatus::Applied && a.file.starts_with(&prefix))
+            .count()
+    }
+
     /// Inclusive selection range over selectable-line indices: the visual
     /// anchor..cursor when selecting, else the single cursor line.
     fn selection(&self) -> (usize, usize) {
@@ -1003,12 +1013,18 @@ impl App {
                     depth,
                     name,
                     collapsed,
-                    ..
+                    path,
                 } => {
                     let indent = "  ".repeat(*depth);
                     let chevron = if *collapsed { '▶' } else { '▼' };
+                    let count = state.dir_comment_count(path);
+                    let badge = if count > 0 {
+                        format!(" {COMMENT_MARKER}{count}")
+                    } else {
+                        String::new()
+                    };
                     let spans = vec![Span::styled(
-                        format!("{indent}{chevron} {name}"),
+                        format!("{indent}{chevron} {name}{badge}"),
                         Style::default().fg(pal.dir_fg).add_modifier(Modifier::BOLD),
                     )];
                     let spans = if on_cursor {
@@ -2258,6 +2274,35 @@ diff --git a/x.rs b/x.rs
         // The multi-line selection is preserved, not collapsed to the click.
         let draft = s.comment.as_ref().unwrap();
         assert_eq!(draft.range, (0, 2));
+    }
+
+    #[test]
+    fn dir_comment_count_aggregates_subtree_pending_comments() {
+        let mut s = state_with_two_files();
+        s.comments.push(Comment::new(
+            "src/git/diff.rs",
+            CommentSide::New,
+            (1, 1),
+            "x",
+            "note",
+        ));
+        s.comments.push(Comment::new(
+            "src/git/backend.rs",
+            CommentSide::New,
+            (1, 1),
+            "y",
+            "note",
+        ));
+        // Both nested comments roll up to their ancestor directories.
+        assert_eq!(s.dir_comment_count("src"), 2);
+        assert_eq!(s.dir_comment_count("src/git"), 2);
+        // A sibling directory with no comments stays clean, and the prefix
+        // match respects the `/` boundary (no "src" → "srcfoo" leakage).
+        assert_eq!(s.dir_comment_count("other"), 0);
+        assert_eq!(s.dir_comment_count("src/gi"), 0);
+        // Applied comments don't count.
+        s.comments[0].status = CommentStatus::Applied;
+        assert_eq!(s.dir_comment_count("src/git"), 1);
     }
 
     #[test]
