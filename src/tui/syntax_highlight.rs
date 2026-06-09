@@ -22,7 +22,9 @@ static ASSETS: OnceLock<Assets> = OnceLock::new();
 
 fn assets() -> &'static Assets {
     ASSETS.get_or_init(|| {
-        let syntaxes = SyntaxSet::load_defaults_newlines();
+        // The extended (bat) syntax set covers far more languages than
+        // syntect's bundled defaults — notably TypeScript/TSX/TOML.
+        let syntaxes = two_face::syntax::extra_newlines();
         let themes = ThemeSet::load_defaults();
         // A dark theme whose foregrounds read well on the diff fills. Fall back
         // to any bundled theme if the named one is ever absent.
@@ -72,6 +74,21 @@ mod tests {
         assert!(runs.iter().all(|(_, c)| *c != Color::Reset));
         let text: String = runs.iter().map(|(t, _)| t.as_str()).collect();
         assert_eq!(text, "let x = 1;");
+    }
+
+    #[test]
+    fn extended_syntax_set_covers_typescript_and_friends() {
+        // These extensions are absent from syntect's bundled defaults but are
+        // provided by the extended (two-face) set.
+        for ext in ["ts", "tsx", "toml"] {
+            assert!(
+                assets().syntaxes.find_syntax_by_extension(ext).is_some(),
+                "expected syntax for .{ext}"
+            );
+        }
+        // And a multi-run highlight actually happens for TypeScript.
+        let runs = highlight_line("const x: number = 1;", "ts", Color::Reset);
+        assert!(runs.len() > 1, "expected tokenised TS runs, got {runs:?}");
     }
 
     #[test]

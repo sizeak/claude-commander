@@ -49,9 +49,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Syntax highlighting for the review diff view (fancy-regex backend — pure
-# Rust, no C/oniguruma dependency).
+# Rust, no C/oniguruma dependency). `two-face` supplies an extended syntax set
+# (the bat language set, incl. TypeScript/TSX/TOML/…) that syntect's bundled
+# defaults lack.
 syntect = { version = "5.2", default-features = false, features = [
     "default-fancy",
+] }
+two-face = { version = "0.4", default-features = false, features = [
+    "syntect-fancy",
 ] }
 
 # Utilities
