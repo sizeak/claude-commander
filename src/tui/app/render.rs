@@ -103,7 +103,8 @@ impl App {
             .review_labels(&self.config.pr_review_labels)
             .invert_pr_label_color(self.config.invert_pr_label_color)
             .show_session_program(self.config.show_session_program)
-            .pull_blocked_projects(blocked);
+            .pull_blocked_projects(blocked)
+            .comment_sessions(self.ui_state.sessions_with_comments.clone());
 
         frame.render_stateful_widget(
             tree_list,

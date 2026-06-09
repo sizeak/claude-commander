@@ -816,14 +816,35 @@ impl App {
 
     /// Reload the session's comments and re-anchor them against the current
     /// diff (used after create/delete/apply, which don't change the diff).
-    async fn reload_review_comments(&self, state: &mut DiffReviewState) {
+    async fn reload_review_comments(&mut self, state: &mut DiffReviewState) {
         let mut anns = self
             .service
             .list_comments(&state.session_id)
             .await
             .unwrap_or_default();
         crate::comment::reanchor_comments(&mut anns, &state.diff);
+        // Keep the session-list pending-comment marker in sync without a disk
+        // scan: we already have this session's full comment set in hand.
+        let pending = anns.iter().any(|a| a.status != CommentStatus::Applied);
+        if pending {
+            self.ui_state
+                .sessions_with_comments
+                .insert(state.session_id);
+        } else {
+            self.ui_state
+                .sessions_with_comments
+                .remove(&state.session_id);
+        }
         state.comments = anns;
+    }
+
+    /// Rescan the comment store and refresh the set of sessions with pending
+    /// comments (drives the session-list `*` marker). Run at startup to surface
+    /// comments left over from a previous run.
+    pub(super) async fn refresh_comment_indicators(&mut self) {
+        if let Ok(set) = self.service.sessions_with_pending_comments().await {
+            self.ui_state.sessions_with_comments = set;
+        }
     }
 
     /// Handle a key while the review view is open. `state` has been moved out

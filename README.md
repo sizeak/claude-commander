@@ -91,6 +91,8 @@ Each session displays a status indicator to the left of its name:
 
 Indicators are shown in priority order — for example, a running session with unread output shows `◆` rather than `●`.
 
+A `*` after a session's title means it has pending [review comments](docs/usage.md#reviewing--commenting-on-changes) that haven't been applied to the agent yet.
+
 ### PR Badges
 
 When a session has a GitHub PR, a badge appears next to the session name. The badge color indicates the PR state:

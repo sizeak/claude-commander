@@ -319,6 +319,14 @@ impl CommanderService {
         self.comments.load(*session_id)
     }
 
+    /// Session ids that have at least one not-yet-applied comment, for the
+    /// session-list pending-comment indicator.
+    pub async fn sessions_with_pending_comments(
+        &self,
+    ) -> Result<std::collections::HashSet<SessionId>> {
+        self.comments.sessions_with_pending()
+    }
+
     /// Stage a new comment; returns its id.
     pub async fn create_comment(&self, session_id: &SessionId, draft: NewComment) -> Result<Uuid> {
         let ann = Comment::new(

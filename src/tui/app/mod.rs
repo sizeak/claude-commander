@@ -465,6 +465,10 @@ pub struct AppUiState {
     /// so mouse events can map a screen position to a tree row. `None` unless
     /// the review view is open.
     pub review_file_list_rect: Option<Rect>,
+    /// Sessions with at least one pending (not-yet-applied) review comment.
+    /// Drives the `*` marker in the session list; refreshed on startup and
+    /// whenever the review view closes.
+    pub sessions_with_comments: HashSet<SessionId>,
     /// Currently selected session (for preview/diff)
     pub selected_session_id: Option<SessionId>,
     /// Currently selected project
@@ -542,6 +546,7 @@ impl Default for AppUiState {
             status_message: None, // (message, expiry)
             review_body_rect: None,
             review_file_list_rect: None,
+            sessions_with_comments: HashSet::new(),
 
             should_quit: false,
             selected_session_id: None,
@@ -797,6 +802,9 @@ impl App {
         // Restore last selection from persisted state
         self.refresh_list_items().await;
         self.restore_selection().await;
+
+        // Surface any pending review comments left from a previous run.
+        self.refresh_comment_indicators().await;
 
         loop {
             // Setup terminal for TUI

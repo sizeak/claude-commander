@@ -156,6 +156,39 @@ impl CommentStore {
         self.save(sid, &anns)
     }
 
+    /// Session ids with at least one not-yet-applied comment. Scans the store
+    /// directory (a missing directory yields an empty set); unreadable or
+    /// malformed files are skipped rather than failing the whole scan.
+    pub fn sessions_with_pending(&self) -> Result<std::collections::HashSet<SessionId>> {
+        let mut out = std::collections::HashSet::new();
+        let entries = match fs::read_dir(&self.dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
+            Err(e) => return Err(ConfigError::LoadFailed(e.to_string()).into()),
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            let Some(uuid) = path
+                .file_stem()
+                .and_then(|s| s.to_str())
+                .and_then(|s| Uuid::parse_str(s).ok())
+            else {
+                continue;
+            };
+            let sid = SessionId::from_uuid(uuid);
+            if self
+                .load(sid)
+                .is_ok_and(|cs| cs.iter().any(|c| c.status != CommentStatus::Applied))
+            {
+                out.insert(sid);
+            }
+        }
+        Ok(out)
+    }
+
     /// Set the status of one comment.
     pub fn set_status(&self, sid: SessionId, id: Uuid, status: CommentStatus) -> Result<()> {
         let mut anns = self.load(sid)?;
@@ -349,6 +382,32 @@ mod tests {
 
         store.set_status(sid, a.id, CommentStatus::Applied).unwrap();
         assert_eq!(store.load(sid).unwrap()[0].status, CommentStatus::Applied);
+    }
+
+    #[test]
+    fn sessions_with_pending_lists_only_unapplied() {
+        let tmp = TempDir::new().unwrap();
+        let store = CommentStore::new(tmp.path().join("comments"));
+
+        // Empty (missing dir) → empty set.
+        assert!(store.sessions_with_pending().unwrap().is_empty());
+
+        let staged = SessionId::new();
+        store
+            .add(staged, ann("a.rs", CommentSide::New, (1, 1), "a"))
+            .unwrap();
+
+        // A session whose only comment has been applied is not pending.
+        let applied = SessionId::new();
+        let a = ann("b.rs", CommentSide::New, (1, 1), "b");
+        store.add(applied, a.clone()).unwrap();
+        store
+            .set_status(applied, a.id, CommentStatus::Applied)
+            .unwrap();
+
+        let pending = store.sessions_with_pending().unwrap();
+        assert!(pending.contains(&staged));
+        assert!(!pending.contains(&applied));
     }
 
     // --- reanchor ---
