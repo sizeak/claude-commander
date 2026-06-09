@@ -1017,33 +1017,20 @@ impl App {
                 } => {
                     let indent = "  ".repeat(*depth);
                     let chevron = if *collapsed { '▶' } else { '▼' };
-                    let count = state.dir_comment_count(path);
-                    let badge = if count > 0 {
-                        format!(" {COMMENT_MARKER}{count}")
-                    } else {
-                        String::new()
-                    };
-                    let spans = vec![Span::styled(
-                        format!("{indent}{chevron} {name}{badge}"),
+                    let mut spans = vec![Span::styled(
+                        format!("{indent}{chevron} {name}"),
                         Style::default().fg(pal.dir_fg).add_modifier(Modifier::BOLD),
                     )];
-                    let spans = if on_cursor {
-                        select_spans(spans, &pal)
-                    } else {
-                        spans
-                    };
+                    spans.extend(comment_badge_span(state.dir_comment_count(path), &pal));
+                    if on_cursor {
+                        spans = select_spans(spans, &pal);
+                    }
                     Line::from(spans)
                 }
                 TreeRow::File { depth, index, name } => {
                     let file = &state.diff.files[*index];
                     let indent = "  ".repeat(*depth);
                     let marker = file_status_marker(file.status);
-                    let count = state.comment_count(file.display_path());
-                    let badge = if count > 0 {
-                        format!(" {COMMENT_MARKER}{count}")
-                    } else {
-                        String::new()
-                    };
                     // Only the status letter is coloured; the file name stays
                     // the default foreground.
                     let mut spans = vec![
@@ -1052,8 +1039,12 @@ impl App {
                             marker.to_string(),
                             Style::default().fg(file_status_color(file.status, &pal)),
                         ),
-                        Span::raw(format!(" {name}{badge}")),
+                        Span::raw(format!(" {name}")),
                     ];
+                    spans.extend(comment_badge_span(
+                        state.comment_count(file.display_path()),
+                        &pal,
+                    ));
                     if on_cursor {
                         spans = select_spans(spans, &pal);
                     }
@@ -1316,6 +1307,17 @@ fn file_status_color(status: FileStatus, pal: &ReviewPalette) -> Color {
         FileStatus::Modified => pal.modified_fg,
         FileStatus::Renamed => pal.renamed_fg,
     }
+}
+
+/// The ` *N` pending-comment badge for a file-tree row, comment-coloured so it
+/// stands out from the file name, or `None` when there are no pending comments.
+fn comment_badge_span(count: usize, pal: &ReviewPalette) -> Option<Span<'static>> {
+    (count > 0).then(|| {
+        Span::styled(
+            format!(" {COMMENT_MARKER}{count}"),
+            Style::default().fg(pal.comment_border),
+        )
+    })
 }
 
 /// Build the inline-rendered body for the current file: hunk headers plus each
@@ -2274,6 +2276,15 @@ diff --git a/x.rs b/x.rs
         // The multi-line selection is preserved, not collapsed to the click.
         let draft = s.comment.as_ref().unwrap();
         assert_eq!(draft.range, (0, 2));
+    }
+
+    #[test]
+    fn comment_badge_span_is_comment_coloured_and_hidden_when_zero() {
+        let pal = Theme::truecolor().review_palette();
+        assert!(comment_badge_span(0, &pal).is_none());
+        let span = comment_badge_span(3, &pal).expect("badge for non-zero count");
+        assert_eq!(span.content.as_ref(), format!(" {COMMENT_MARKER}3"));
+        assert_eq!(span.style.fg, Some(pal.comment_border));
     }
 
     #[test]
