@@ -175,7 +175,7 @@ pub enum UserCommand {
     OpenInEditor,
     /// Open the selected session's PR URL in a web browser
     OpenPullRequest,
-    /// Open the full-screen review-diff-and-annotate view for the session
+    /// Open the full-screen review-diff-and-comment view for the session
     OpenReviewDiff,
     /// Toggle between preview/diff panes
     TogglePane,

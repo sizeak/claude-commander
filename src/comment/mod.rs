@@ -1,12 +1,12 @@
-//! Local diff-review annotations.
+//! Local diff-review comments.
 //!
-//! An annotation is a comment the user attaches to a line range in a session's
-//! review diff. Annotations are *staged* (persisted across restarts) until the
+//! An comment is a comment the user attaches to a line range in a session's
+//! review diff. Comments are *staged* (persisted across restarts) until the
 //! user applies them, at which point they are composed into a markdown brief
 //! and handed to the agent (see the service layer). The captured `snippet` is
 //! stored so a comment can be re-anchored even after the surrounding code
-//! drifts; if it can no longer be located unambiguously, the annotation is
-//! marked [`AnnotationStatus::Drifted`] and blocks Apply.
+//! drifts; if it can no longer be located unambiguously, the comment is
+//! marked [`CommentStatus::Drifted`] and blocks Apply.
 //!
 //! All logic here is pure or filesystem-only so it is testable without a TUI;
 //! the presentation layer only renders and dispatches.
@@ -31,15 +31,15 @@ use crate::session::SessionId;
 /// Which side of the diff a line range refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AnnotationSide {
+pub enum CommentSide {
     Old,
     New,
 }
 
-/// Lifecycle status of an annotation.
+/// Lifecycle status of an comment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AnnotationStatus {
+pub enum CommentStatus {
     /// Anchored to the current diff, ready to apply.
     Staged,
     /// Its snippet could not be located unambiguously in the current diff;
@@ -49,28 +49,28 @@ pub enum AnnotationStatus {
     Applied,
 }
 
-/// A single review annotation.
+/// A single review comment.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Annotation {
+pub struct Comment {
     pub id: Uuid,
     /// Display path of the file (new path, or old path for deletions).
     pub file: String,
-    pub side: AnnotationSide,
+    pub side: CommentSide,
     /// Inclusive line range on `side` at capture / last successful anchor time.
     pub line_range: (usize, usize),
     /// Captured line contents (joined with `\n`), used to re-anchor.
     pub snippet: String,
     pub comment: String,
-    pub status: AnnotationStatus,
+    pub status: CommentStatus,
     pub created_at: DateTime<Utc>,
 }
 
-impl Annotation {
-    /// Create a freshly staged annotation with a random id and `created_at`
+impl Comment {
+    /// Create a freshly staged comment with a random id and `created_at`
     /// set to now. `snippet` is normalised to drop any trailing newline.
     pub fn new(
         file: impl Into<String>,
-        side: AnnotationSide,
+        side: CommentSide,
         line_range: (usize, usize),
         snippet: impl Into<String>,
         comment: impl Into<String>,
@@ -83,45 +83,45 @@ impl Annotation {
             line_range,
             snippet: snippet.trim_end_matches('\n').to_string(),
             comment: comment.into(),
-            status: AnnotationStatus::Staged,
+            status: CommentStatus::Staged,
             created_at: Utc::now(),
         }
     }
 }
 
-/// Outcome of trying to locate an annotation's snippet in a fresh diff.
+/// Outcome of trying to locate an comment's snippet in a fresh diff.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AnchorResult {
     Located {
-        side: AnnotationSide,
+        side: CommentSide,
         line_range: (usize, usize),
     },
     Drifted,
 }
 
-/// Per-session annotation store, persisted as one JSON array per session under
-/// a directory (typically `<data_dir>/annotations/`).
-pub struct AnnotationStore {
+/// Per-session comment store, persisted as one JSON array per session under
+/// a directory (typically `<data_dir>/comments/`).
+pub struct CommentStore {
     dir: PathBuf,
 }
 
-impl AnnotationStore {
+impl CommentStore {
     /// Construct a store rooted at `dir` (created lazily on first save).
     pub fn new(dir: PathBuf) -> Self {
         Self { dir }
     }
 
-    /// Default store at `<data_dir>/annotations/`.
+    /// Default store at `<data_dir>/comments/`.
     pub fn open_default() -> Result<Self> {
-        Ok(Self::new(Config::data_dir()?.join("annotations")))
+        Ok(Self::new(Config::data_dir()?.join("comments")))
     }
 
     fn path_for(&self, sid: SessionId) -> PathBuf {
         self.dir.join(format!("{}.json", sid.as_uuid()))
     }
 
-    /// Load a session's annotations (an absent file yields an empty list).
-    pub fn load(&self, sid: SessionId) -> Result<Vec<Annotation>> {
+    /// Load a session's comments (an absent file yields an empty list).
+    pub fn load(&self, sid: SessionId) -> Result<Vec<Comment>> {
         match fs::read_to_string(self.path_for(sid)) {
             Ok(s) => {
                 Ok(serde_json::from_str(&s).map_err(|e| ConfigError::LoadFailed(e.to_string()))?)
@@ -131,8 +131,8 @@ impl AnnotationStore {
         }
     }
 
-    /// Persist a session's annotations via a temp-file + rename (atomic).
-    pub fn save(&self, sid: SessionId, anns: &[Annotation]) -> Result<()> {
+    /// Persist a session's comments via a temp-file + rename (atomic).
+    pub fn save(&self, sid: SessionId, anns: &[Comment]) -> Result<()> {
         fs::create_dir_all(&self.dir).map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
         let json = serde_json::to_string_pretty(anns)
             .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
@@ -142,22 +142,22 @@ impl AnnotationStore {
         Ok(())
     }
 
-    /// Append an annotation to a session.
-    pub fn add(&self, sid: SessionId, ann: Annotation) -> Result<()> {
+    /// Append an comment to a session.
+    pub fn add(&self, sid: SessionId, ann: Comment) -> Result<()> {
         let mut anns = self.load(sid)?;
         anns.push(ann);
         self.save(sid, &anns)
     }
 
-    /// Remove the annotation with `id` from a session (no-op if absent).
+    /// Remove the comment with `id` from a session (no-op if absent).
     pub fn delete(&self, sid: SessionId, id: Uuid) -> Result<()> {
         let mut anns = self.load(sid)?;
         anns.retain(|a| a.id != id);
         self.save(sid, &anns)
     }
 
-    /// Set the status of one annotation.
-    pub fn set_status(&self, sid: SessionId, id: Uuid, status: AnnotationStatus) -> Result<()> {
+    /// Set the status of one comment.
+    pub fn set_status(&self, sid: SessionId, id: Uuid, status: CommentStatus) -> Result<()> {
         let mut anns = self.load(sid)?;
         if let Some(a) = anns.iter_mut().find(|a| a.id == id) {
             a.status = status;
@@ -169,16 +169,16 @@ impl AnnotationStore {
 /// Collect the `(lineno, content)` stream for `side` of a file's diff (the
 /// lines that exist on that side: context + additions for New, context +
 /// deletions for Old).
-fn side_lines(file: &FileDiff, side: AnnotationSide) -> Vec<(usize, &str)> {
+fn side_lines(file: &FileDiff, side: CommentSide) -> Vec<(usize, &str)> {
     let mut out = Vec::new();
     for hunk in &file.hunks {
         for line in &hunk.lines {
             let (keep, lineno) = match side {
-                AnnotationSide::New => (
+                CommentSide::New => (
                     matches!(line.origin, LineOrigin::Context | LineOrigin::Addition),
                     line.new_lineno,
                 ),
-                AnnotationSide::Old => (
+                CommentSide::Old => (
                     matches!(line.origin, LineOrigin::Context | LineOrigin::Deletion),
                     line.old_lineno,
                 ),
@@ -191,11 +191,11 @@ fn side_lines(file: &FileDiff, side: AnnotationSide) -> Vec<(usize, &str)> {
     out
 }
 
-/// Try to re-locate an annotation's snippet in `diff`. A single contiguous
+/// Try to re-locate an comment's snippet in `diff`. A single contiguous
 /// match yields [`AnchorResult::Located`]; zero or multiple matches (ambiguous)
 /// both yield [`AnchorResult::Drifted`]. Trailing whitespace is ignored when
 /// comparing.
-pub fn reanchor(ann: &Annotation, diff: &ParsedDiff) -> AnchorResult {
+pub fn reanchor(ann: &Comment, diff: &ParsedDiff) -> AnchorResult {
     let Some(file) = diff
         .files
         .iter()
@@ -235,27 +235,27 @@ pub fn reanchor(ann: &Annotation, diff: &ParsedDiff) -> AnchorResult {
     }
 }
 
-/// Re-anchor every non-applied annotation against `diff` in place: located ones
-/// become [`AnnotationStatus::Staged`] with an updated range; unlocatable ones
-/// become [`AnnotationStatus::Drifted`]. Applied annotations are left untouched.
-pub fn reanchor_annotations(anns: &mut [Annotation], diff: &ParsedDiff) {
+/// Re-anchor every non-applied comment against `diff` in place: located ones
+/// become [`CommentStatus::Staged`] with an updated range; unlocatable ones
+/// become [`CommentStatus::Drifted`]. Applied comments are left untouched.
+pub fn reanchor_comments(anns: &mut [Comment], diff: &ParsedDiff) {
     for ann in anns.iter_mut() {
-        if ann.status == AnnotationStatus::Applied {
+        if ann.status == CommentStatus::Applied {
             continue;
         }
         match reanchor(ann, diff) {
             AnchorResult::Located { line_range, .. } => {
                 ann.line_range = line_range;
-                ann.status = AnnotationStatus::Staged;
+                ann.status = CommentStatus::Staged;
             }
-            AnchorResult::Drifted => ann.status = AnnotationStatus::Drifted,
+            AnchorResult::Drifted => ann.status = CommentStatus::Drifted,
         }
     }
 }
 
-/// Whether any annotation is drifted (and therefore blocks Apply).
-pub fn has_blocking_drift(anns: &[Annotation]) -> bool {
-    anns.iter().any(|a| a.status == AnnotationStatus::Drifted)
+/// Whether any comment is drifted (and therefore blocks Apply).
+pub fn has_blocking_drift(anns: &[Comment]) -> bool {
+    anns.iter().any(|a| a.status == CommentStatus::Drifted)
 }
 
 /// Markdown fence language hint for a path's extension (empty when unknown).
@@ -275,10 +275,10 @@ fn lang_for(path: &str) -> &'static str {
     }
 }
 
-/// Compose a markdown brief from a set of annotations, suitable for handing to
+/// Compose a markdown brief from a set of comments, suitable for handing to
 /// the agent. Deterministic (no ids or timestamps) so it is snapshot-stable.
-pub fn compose_markdown(title: &str, anns: &[Annotation]) -> String {
-    let mut out = format!("# Review annotations: {title}\n");
+pub fn compose_markdown(title: &str, anns: &[Comment]) -> String {
+    let mut out = format!("# Review comments: {title}\n");
     for a in anns {
         let (lo, hi) = a.line_range;
         let loc = if lo == hi {
@@ -299,8 +299,8 @@ mod tests {
     use crate::git::parse_unified_diff;
     use tempfile::TempDir;
 
-    fn ann(file: &str, side: AnnotationSide, range: (usize, usize), snippet: &str) -> Annotation {
-        Annotation::new(file, side, range, snippet, "do the thing")
+    fn ann(file: &str, side: CommentSide, range: (usize, usize), snippet: &str) -> Comment {
+        Comment::new(file, side, range, snippet, "do the thing")
     }
 
     // --- store ---
@@ -308,16 +308,16 @@ mod tests {
     #[test]
     fn load_missing_returns_empty() {
         let tmp = TempDir::new().unwrap();
-        let store = AnnotationStore::new(tmp.path().join("annotations"));
+        let store = CommentStore::new(tmp.path().join("comments"));
         assert!(store.load(SessionId::new()).unwrap().is_empty());
     }
 
     #[test]
     fn add_then_load_round_trips() {
         let tmp = TempDir::new().unwrap();
-        let store = AnnotationStore::new(tmp.path().join("annotations"));
+        let store = CommentStore::new(tmp.path().join("comments"));
         let sid = SessionId::new();
-        let a = ann("src/foo.rs", AnnotationSide::New, (10, 12), "let x = 1;");
+        let a = ann("src/foo.rs", CommentSide::New, (10, 12), "let x = 1;");
         store.add(sid, a.clone()).unwrap();
 
         let loaded = store.load(sid).unwrap();
@@ -327,10 +327,10 @@ mod tests {
     #[test]
     fn delete_removes_only_target() {
         let tmp = TempDir::new().unwrap();
-        let store = AnnotationStore::new(tmp.path().join("annotations"));
+        let store = CommentStore::new(tmp.path().join("comments"));
         let sid = SessionId::new();
-        let a = ann("a.rs", AnnotationSide::New, (1, 1), "a");
-        let b = ann("b.rs", AnnotationSide::New, (2, 2), "b");
+        let a = ann("a.rs", CommentSide::New, (1, 1), "a");
+        let b = ann("b.rs", CommentSide::New, (2, 2), "b");
         store.add(sid, a.clone()).unwrap();
         store.add(sid, b.clone()).unwrap();
 
@@ -342,18 +342,13 @@ mod tests {
     #[test]
     fn set_status_updates_target() {
         let tmp = TempDir::new().unwrap();
-        let store = AnnotationStore::new(tmp.path().join("annotations"));
+        let store = CommentStore::new(tmp.path().join("comments"));
         let sid = SessionId::new();
-        let a = ann("a.rs", AnnotationSide::New, (1, 1), "a");
+        let a = ann("a.rs", CommentSide::New, (1, 1), "a");
         store.add(sid, a.clone()).unwrap();
 
-        store
-            .set_status(sid, a.id, AnnotationStatus::Applied)
-            .unwrap();
-        assert_eq!(
-            store.load(sid).unwrap()[0].status,
-            AnnotationStatus::Applied
-        );
+        store.set_status(sid, a.id, CommentStatus::Applied).unwrap();
+        assert_eq!(store.load(sid).unwrap()[0].status, CommentStatus::Applied);
     }
 
     // --- reanchor ---
@@ -376,11 +371,11 @@ diff --git a/a.rs b/a.rs
     fn reanchor_single_match_relocates_range() {
         let diff = diff_with_inserted_line();
         // Stored range is stale (99); the snippet actually sits at new line 2.
-        let a = ann("a.rs", AnnotationSide::New, (99, 99), "    let y = 3;");
+        let a = ann("a.rs", CommentSide::New, (99, 99), "    let y = 3;");
         assert_eq!(
             reanchor(&a, &diff),
             AnchorResult::Located {
-                side: AnnotationSide::New,
+                side: CommentSide::New,
                 line_range: (2, 2),
             }
         );
@@ -391,14 +386,14 @@ diff --git a/a.rs b/a.rs
         let diff = diff_with_inserted_line();
         let a = ann(
             "a.rs",
-            AnnotationSide::New,
+            CommentSide::New,
             (1, 2),
             "fn main() {\n    let y = 3;",
         );
         assert_eq!(
             reanchor(&a, &diff),
             AnchorResult::Located {
-                side: AnnotationSide::New,
+                side: CommentSide::New,
                 line_range: (1, 2),
             }
         );
@@ -407,7 +402,7 @@ diff --git a/a.rs b/a.rs
     #[test]
     fn reanchor_no_match_is_drifted() {
         let diff = diff_with_inserted_line();
-        let a = ann("a.rs", AnnotationSide::New, (2, 2), "    let z = 9;");
+        let a = ann("a.rs", CommentSide::New, (2, 2), "    let z = 9;");
         assert_eq!(reanchor(&a, &diff), AnchorResult::Drifted);
     }
 
@@ -423,43 +418,43 @@ diff --git a/d.rs b/d.rs
 +dup
 ",
         );
-        let a = ann("d.rs", AnnotationSide::New, (1, 1), "dup");
+        let a = ann("d.rs", CommentSide::New, (1, 1), "dup");
         assert_eq!(reanchor(&a, &diff), AnchorResult::Drifted);
     }
 
     #[test]
     fn reanchor_missing_file_is_drifted() {
         let diff = diff_with_inserted_line();
-        let a = ann("other.rs", AnnotationSide::New, (1, 1), "fn main() {");
+        let a = ann("other.rs", CommentSide::New, (1, 1), "fn main() {");
         assert_eq!(reanchor(&a, &diff), AnchorResult::Drifted);
     }
 
     #[test]
-    fn reanchor_annotations_updates_status_and_skips_applied() {
+    fn reanchor_comments_updates_status_and_skips_applied() {
         let diff = diff_with_inserted_line();
-        let mut located = ann("a.rs", AnnotationSide::New, (99, 99), "    let y = 3;");
-        let mut gone = ann("a.rs", AnnotationSide::New, (1, 1), "    let z = 9;");
-        let mut applied = ann("a.rs", AnnotationSide::New, (1, 1), "    let z = 9;");
-        applied.status = AnnotationStatus::Applied;
+        let mut located = ann("a.rs", CommentSide::New, (99, 99), "    let y = 3;");
+        let mut gone = ann("a.rs", CommentSide::New, (1, 1), "    let z = 9;");
+        let mut applied = ann("a.rs", CommentSide::New, (1, 1), "    let z = 9;");
+        applied.status = CommentStatus::Applied;
 
         let mut all = vec![located.clone(), gone.clone(), applied.clone()];
-        reanchor_annotations(&mut all, &diff);
+        reanchor_comments(&mut all, &diff);
 
         located = all[0].clone();
         gone = all[1].clone();
         applied = all[2].clone();
-        assert_eq!(located.status, AnnotationStatus::Staged);
+        assert_eq!(located.status, CommentStatus::Staged);
         assert_eq!(located.line_range, (2, 2));
-        assert_eq!(gone.status, AnnotationStatus::Drifted);
-        // Applied annotations are not re-evaluated.
-        assert_eq!(applied.status, AnnotationStatus::Applied);
+        assert_eq!(gone.status, CommentStatus::Drifted);
+        // Applied comments are not re-evaluated.
+        assert_eq!(applied.status, CommentStatus::Applied);
     }
 
     #[test]
     fn has_blocking_drift_detects_drifted() {
-        let mut a = ann("a.rs", AnnotationSide::New, (1, 1), "x");
+        let mut a = ann("a.rs", CommentSide::New, (1, 1), "x");
         assert!(!has_blocking_drift(std::slice::from_ref(&a)));
-        a.status = AnnotationStatus::Drifted;
+        a.status = CommentStatus::Drifted;
         assert!(has_blocking_drift(std::slice::from_ref(&a)));
     }
 
@@ -469,17 +464,17 @@ diff --git a/d.rs b/d.rs
     fn compose_markdown_is_deterministic() {
         let mut a = ann(
             "src/foo.rs",
-            AnnotationSide::New,
+            CommentSide::New,
             (10, 12),
             "let x = 1;\nlet y = 2;",
         );
         a.comment = "extract a helper".to_string();
-        let mut b = ann("README.md", AnnotationSide::New, (3, 3), "# Title");
+        let mut b = ann("README.md", CommentSide::New, (3, 3), "# Title");
         b.comment = "fix the heading".to_string();
 
         let md = compose_markdown("my session", &[a, b]);
         let expected = "\
-# Review annotations: my session
+# Review comments: my session
 
 ## src/foo.rs:10-12
 ```rust

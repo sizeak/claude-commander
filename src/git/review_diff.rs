@@ -3,7 +3,7 @@
 //! Unlike [`super::diff`] (which produces only summary stats for the preview
 //! pane), this module parses a unified diff into a `file -> hunk -> line`
 //! structure with per-line old/new line numbers. The diff view uses that to
-//! render gutters, drive line-range selection, and anchor annotations.
+//! render gutters, drive line-range selection, and anchor comments.
 //!
 //! The parser is deliberately tolerant: it skips the metadata lines git emits
 //! (`index`, mode, `similarity`, rename headers, `Binary files`) and copes with

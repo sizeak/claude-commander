@@ -166,7 +166,7 @@ impl BindableAction {
             Self::RemoveProject => "Remove project",
             Self::OpenInEditor => "Open in editor/IDE",
             Self::OpenPullRequest => "Open PR in browser",
-            Self::OpenReviewDiff => "Review diff & annotate",
+            Self::OpenReviewDiff => "Review diff & comment",
             Self::TogglePane => "Toggle preview/diff/shell view",
             Self::TogglePaneReverse => "Toggle view (reverse)",
             Self::ShrinkLeftPane => "Shrink left pane",

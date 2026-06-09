@@ -92,10 +92,10 @@ the summary section shows a placeholder instead.
 
 Environment variable overrides: `CC_AI_SUMMARY_ENABLED`, `CC_AI_SUMMARY_MODEL`.
 
-## Reviewing & annotating changes
+## Reviewing & commenting on changes
 
 Open the **command palette** (`Space`) on a selected session and run **"Review
-diff & annotate"** to open a full-screen review view. It shows everything a PR
+diff & comment"** to open a full-screen review view. It shows everything a PR
 against the session's base branch would contain — committed, staged, unstaged,
 and untracked changes — composed from `merge-base(base, HEAD)` through the
 working tree.
@@ -111,21 +111,21 @@ foreground-only colouring on 256- and 16-colour terminals.
   expands/collapses a directory; `[` / `]` jump between files; in the body,
   `↑↓`/`jk` move the cursor and the mouse wheel scrolls. `t` toggles between
   inline and side-by-side layouts.
-- **Annotate**: in the body, press `v` to start a line selection (arrows grow
+- **Comment**: in the body, press `v` to start a line selection (arrows grow
   or shrink it; mouse drag also selects), then `Enter` to attach a comment.
-  Annotations are *staged* — they persist across restarts until applied, and
-  show as `✎` in the gutter (and a per-file badge). Each annotation also
+  Comments are *staged* — they persist across restarts until applied, and
+  show as `✎` in the gutter (and a per-file badge). Each comment also
   renders as an inline box beneath its line; press `z` to fold it down to a
   single-line header or expand it again.
-- **Apply**: press `a` to hand all staged annotations to the session's agent.
+- **Apply**: press `a` to hand all staged comments to the session's agent.
   They're written to a markdown brief and the agent is prompted to address
   them — sent immediately when idle/working (it queues natively), held until a
   permission prompt clears, or deferred if the agent is stopped.
-- **Drift**: if the code under an annotation changes before you apply, the view
+- **Drift**: if the code under a comment changes before you apply, the view
   re-anchors it by its captured snippet. If it can't be located unambiguously
-  the annotation is marked `⚠` (drifted) and blocks apply until you review or
-  delete it (`d` removes the annotation under the cursor).
+  the comment is marked `⚠` (drifted) and blocks apply until you review or
+  delete it (`d` removes the comment under the cursor).
 
-Annotations are stored per session under the data directory (alongside
+Comments are stored per session under the data directory (alongside
 `state.json`); the brief handed to the agent is written to a temp file outside
 the worktree, so it's never committed.

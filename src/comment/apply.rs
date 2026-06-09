@@ -1,8 +1,8 @@
-//! Applying staged annotations: deciding when it's safe to inject the prompt,
+//! Applying staged comments: deciding when it's safe to inject the prompt,
 //! and the outcome of an apply attempt.
 //!
 //! The effectful orchestration (composing the brief, writing it, polling agent
-//! state, sending keys) lives in `CommanderService::apply_annotations`; the
+//! state, sending keys) lives in `CommanderService::apply_comments`; the
 //! pure decision here is unit-tested in isolation.
 
 use std::path::PathBuf;
@@ -31,15 +31,15 @@ pub fn decide_send(state: AgentState) -> SendDecision {
     }
 }
 
-/// Outcome of applying a session's staged annotations.
+/// Outcome of applying a session's staged comments.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "outcome")]
 pub enum ApplyOutcome {
-    /// No staged annotations to apply.
+    /// No staged comments to apply.
     Nothing,
-    /// One or more annotations are drifted; nothing was sent.
+    /// One or more comments are drifted; nothing was sent.
     Blocked { drifted: Vec<Uuid> },
-    /// Annotations were composed to `path` and the prompt injected.
+    /// Comments were composed to `path` and the prompt injected.
     Applied { path: PathBuf, count: usize },
     /// The brief was written to `path` but couldn't be delivered (agent stopped
     /// or stayed at a prompt past the hold timeout); the user can re-apply.

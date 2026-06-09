@@ -1,15 +1,15 @@
-//! Full-screen review-diff-and-annotate view.
+//! Full-screen review-diff-and-comment view.
 //!
 //! Presentation only: [`DiffReviewState`] holds what's on screen and is opened
 //! via `CommanderService::open_review`. The view is hosted as a maximised
-//! modal (`Modal::ReviewDiff`); all diff composition, parsing, and annotation
+//! modal (`Modal::ReviewDiff`); all diff composition, parsing, and comment
 //! logic lives in the library.
 
 use super::*;
 use crossterm::event::KeyEvent;
 
-use crate::annotation::{Annotation, AnnotationSide, AnnotationStatus};
-use crate::api::AnnotationDraft;
+use crate::api::NewComment;
+use crate::comment::{Comment, CommentSide, CommentStatus};
 use crate::git::{DiffLine, FileDiff, FileStatus, Hunk, LineOrigin, ParsedDiff};
 use crate::tui::syntax_highlight::highlight_line;
 use crate::tui::theme::{ColorMode, ReviewPalette};
@@ -51,7 +51,7 @@ pub struct DiffReviewState {
     /// Base the diff was computed against (branch/sha/HEAD), for the header.
     pub base: String,
     pub diff: ParsedDiff,
-    pub annotations: Vec<Annotation>,
+    pub comments: Vec<Comment>,
     /// Index into `diff.files` of the file shown in the body.
     pub selected_file: usize,
     /// First visible body row (scroll offset).
@@ -74,8 +74,8 @@ pub struct DiffReviewState {
     tree_cursor: usize,
     /// First visible tree row (scroll offset for the file pane).
     tree_scroll: u16,
-    /// Annotation ids whose inline box is collapsed (absent = expanded).
-    collapsed_annotations: HashSet<uuid::Uuid>,
+    /// Comment ids whose inline box is collapsed (absent = expanded).
+    collapsed_comments: HashSet<uuid::Uuid>,
 }
 
 /// A node in the file tree: either a directory (with children) or a file leaf
@@ -112,7 +112,7 @@ impl DiffReviewState {
         title: String,
         base: String,
         diff: ParsedDiff,
-        annotations: Vec<Annotation>,
+        comments: Vec<Comment>,
     ) -> Self {
         let file_tree = build_file_tree(&diff.files);
         // Body starts on the first file in tree order so it shows something.
@@ -122,7 +122,7 @@ impl DiffReviewState {
             title,
             base,
             diff,
-            annotations,
+            comments,
             selected_file,
             scroll: 0,
             focus: ReviewFocus::FileList,
@@ -134,7 +134,7 @@ impl DiffReviewState {
             collapsed: HashSet::new(),
             tree_cursor: 0,
             tree_scroll: 0,
-            collapsed_annotations: HashSet::new(),
+            collapsed_comments: HashSet::new(),
         }
     }
 
@@ -239,11 +239,11 @@ impl DiffReviewState {
             .unwrap_or(0)
     }
 
-    /// Number of not-yet-applied annotations anchored to `file`.
-    fn annotation_count(&self, file: &str) -> usize {
-        self.annotations
+    /// Number of not-yet-applied comments anchored to `file`.
+    fn comment_count(&self, file: &str) -> usize {
+        self.comments
             .iter()
-            .filter(|a| a.status != AnnotationStatus::Applied && a.file == file)
+            .filter(|a| a.status != CommentStatus::Applied && a.file == file)
             .count()
     }
 
@@ -445,11 +445,11 @@ impl DiffReviewState {
         };
     }
 
-    /// Build an annotation draft from a selectable-line range plus comment
+    /// Build an comment draft from a selectable-line range plus comment
     /// text. Picks the New side unless the selection is purely deletions, and
     /// captures the snippet/line range from that side's lines only (so it
     /// re-anchors cleanly).
-    fn build_draft(&self, range: (usize, usize), comment: String) -> Option<AnnotationDraft> {
+    fn build_draft(&self, range: (usize, usize), comment: String) -> Option<NewComment> {
         let file = self.current_file()?;
         let lines = self.selectable_lines();
         let (lo, hi) = range;
@@ -460,17 +460,17 @@ impl DiffReviewState {
 
         let any_new = sel.iter().any(|l| l.new_lineno.is_some());
         let side = if any_new {
-            AnnotationSide::New
+            CommentSide::New
         } else {
-            AnnotationSide::Old
+            CommentSide::Old
         };
 
         let mut nums = Vec::new();
         let mut contents = Vec::new();
         for line in sel {
             let lineno = match side {
-                AnnotationSide::New => line.new_lineno,
-                AnnotationSide::Old => line.old_lineno,
+                CommentSide::New => line.new_lineno,
+                CommentSide::Old => line.old_lineno,
             };
             if let Some(n) = lineno {
                 nums.push(n);
@@ -481,7 +481,7 @@ impl DiffReviewState {
             return None;
         }
 
-        Some(AnnotationDraft {
+        Some(NewComment {
             file: file.display_path().to_string(),
             side,
             line_range: (*nums.iter().min().unwrap(), *nums.iter().max().unwrap()),
@@ -490,67 +490,67 @@ impl DiffReviewState {
         })
     }
 
-    /// Id of a not-yet-applied annotation covering the cursor line, if any.
-    fn annotation_at_cursor(&self) -> Option<uuid::Uuid> {
+    /// Id of a not-yet-applied comment covering the cursor line, if any.
+    fn comment_at_cursor(&self) -> Option<uuid::Uuid> {
         let file = self.current_file()?;
         let line = *self.selectable_lines().get(self.cursor)?;
-        self.annotations
+        self.comments
             .iter()
-            .filter(|a| a.status != AnnotationStatus::Applied && a.file == file.display_path())
+            .filter(|a| a.status != CommentStatus::Applied && a.file == file.display_path())
             .find(|a| {
                 let lineno = match a.side {
-                    AnnotationSide::New => line.new_lineno,
-                    AnnotationSide::Old => line.old_lineno,
+                    CommentSide::New => line.new_lineno,
+                    CommentSide::Old => line.old_lineno,
                 };
                 lineno.is_some_and(|n| a.line_range.0 <= n && n <= a.line_range.1)
             })
             .map(|a| a.id)
     }
 
-    /// Whether selectable line `idx` is covered by a non-applied annotation,
-    /// and whether any such annotation is drifted.
-    fn annotation_marker(&self, idx: usize) -> Option<bool> {
+    /// Whether selectable line `idx` is covered by a non-applied comment,
+    /// and whether any such comment is drifted.
+    fn comment_marker(&self, idx: usize) -> Option<bool> {
         let file = self.current_file()?;
         let line = *self.selectable_lines().get(idx)?;
         let mut drifted = false;
         let mut found = false;
         for a in self
-            .annotations
+            .comments
             .iter()
-            .filter(|a| a.status != AnnotationStatus::Applied && a.file == file.display_path())
+            .filter(|a| a.status != CommentStatus::Applied && a.file == file.display_path())
         {
             let lineno = match a.side {
-                AnnotationSide::New => line.new_lineno,
-                AnnotationSide::Old => line.old_lineno,
+                CommentSide::New => line.new_lineno,
+                CommentSide::Old => line.old_lineno,
             };
             if lineno.is_some_and(|n| a.line_range.0 <= n && n <= a.line_range.1) {
                 found = true;
-                drifted |= a.status == AnnotationStatus::Drifted;
+                drifted |= a.status == CommentStatus::Drifted;
             }
         }
         found.then_some(drifted)
     }
 
-    /// Whether annotation `id`'s inline box is collapsed.
-    fn is_annotation_collapsed(&self, id: uuid::Uuid) -> bool {
-        self.collapsed_annotations.contains(&id)
+    /// Whether comment `id`'s inline box is collapsed.
+    fn is_comment_collapsed(&self, id: uuid::Uuid) -> bool {
+        self.collapsed_comments.contains(&id)
     }
 
-    /// Toggle the inline box (expanded/collapsed) of the annotation covering
+    /// Toggle the inline box (expanded/collapsed) of the comment covering
     /// the cursor line, if any.
-    fn toggle_annotation_fold(&mut self) {
-        if let Some(id) = self.annotation_at_cursor()
-            && !self.collapsed_annotations.remove(&id)
+    fn toggle_comment_fold(&mut self) {
+        if let Some(id) = self.comment_at_cursor()
+            && !self.collapsed_comments.remove(&id)
         {
-            self.collapsed_annotations.insert(id);
+            self.collapsed_comments.insert(id);
         }
     }
 
-    /// Map each selectable-line index to the annotations whose box should be
-    /// drawn just after it — anchored to the last line of the annotation's
+    /// Map each selectable-line index to the comments whose box should be
+    /// drawn just after it — anchored to the last line of the comment's
     /// range on its side.
-    fn annotation_anchors(&self) -> std::collections::HashMap<usize, Vec<&Annotation>> {
-        let mut map: std::collections::HashMap<usize, Vec<&Annotation>> =
+    fn comment_anchors(&self) -> std::collections::HashMap<usize, Vec<&Comment>> {
+        let mut map: std::collections::HashMap<usize, Vec<&Comment>> =
             std::collections::HashMap::new();
         let Some(file) = self.current_file() else {
             return map;
@@ -558,15 +558,15 @@ impl DiffReviewState {
         let display = file.display_path();
         let lines = self.selectable_lines();
         for ann in self
-            .annotations
+            .comments
             .iter()
-            .filter(|a| a.status != AnnotationStatus::Applied && a.file == display)
+            .filter(|a| a.status != CommentStatus::Applied && a.file == display)
         {
             let end = ann.line_range.1;
             for (i, line) in lines.iter().enumerate() {
                 let lineno = match ann.side {
-                    AnnotationSide::New => line.new_lineno,
-                    AnnotationSide::Old => line.old_lineno,
+                    CommentSide::New => line.new_lineno,
+                    CommentSide::Old => line.old_lineno,
                 };
                 if lineno == Some(end) {
                     map.entry(i).or_default().push(ann);
@@ -606,7 +606,7 @@ impl App {
                     title,
                     snapshot.base,
                     snapshot.diff,
-                    snapshot.annotations,
+                    snapshot.comments,
                 );
                 self.ui_state.modal = Modal::ReviewDiff(Box::new(state));
             }
@@ -623,16 +623,16 @@ impl App {
             Some((msg.to_string(), Instant::now() + Duration::from_secs(3)));
     }
 
-    /// Reload the session's annotations and re-anchor them against the current
+    /// Reload the session's comments and re-anchor them against the current
     /// diff (used after create/delete/apply, which don't change the diff).
-    async fn reload_review_annotations(&self, state: &mut DiffReviewState) {
+    async fn reload_review_comments(&self, state: &mut DiffReviewState) {
         let mut anns = self
             .service
-            .list_annotations(&state.session_id)
+            .list_comments(&state.session_id)
             .await
             .unwrap_or_default();
-        crate::annotation::reanchor_annotations(&mut anns, &state.diff);
-        state.annotations = anns;
+        crate::comment::reanchor_comments(&mut anns, &state.diff);
+        state.comments = anns;
     }
 
     /// Handle a key while the review view is open. `state` has been moved out
@@ -677,7 +677,7 @@ impl App {
             KeyCode::PageDown => state.page_body(true),
             KeyCode::PageUp => state.page_body(false),
             KeyCode::Char('t') => state.toggle_layout(),
-            KeyCode::Char('z') => state.toggle_annotation_fold(),
+            KeyCode::Char('z') => state.toggle_comment_fold(),
             KeyCode::Char('v') if state.focus == ReviewFocus::Body => state.toggle_visual(),
             // Enter: toggle a directory in the tree, or open the comment box in
             // the body.
@@ -686,14 +686,14 @@ impl App {
                 state.begin_comment();
             }
             KeyCode::Char('d') if state.focus == ReviewFocus::Body => {
-                if let Some(id) = state.annotation_at_cursor() {
-                    if let Err(e) = self.service.delete_annotation(&state.session_id, id).await {
+                if let Some(id) = state.comment_at_cursor() {
+                    if let Err(e) = self.service.delete_comment(&state.session_id, id).await {
                         self.set_review_status(&format!("Delete failed: {e}"));
                     } else {
-                        self.reload_review_annotations(&mut state).await;
+                        self.reload_review_comments(&mut state).await;
                     }
                 } else {
-                    self.set_review_status("No annotation on this line");
+                    self.set_review_status("No comment on this line");
                 }
             }
             KeyCode::Char('a') => self.apply_review(&mut state).await,
@@ -717,12 +717,12 @@ impl App {
                     return;
                 }
                 if let Some(ann) = state.build_draft(draft.range, draft.text) {
-                    match self.service.create_annotation(&state.session_id, ann).await {
+                    match self.service.create_comment(&state.session_id, ann).await {
                         Ok(_) => {
                             state.visual_anchor = None;
-                            self.reload_review_annotations(state).await;
+                            self.reload_review_comments(state).await;
                         }
-                        Err(e) => self.set_review_status(&format!("Annotation failed: {e}")),
+                        Err(e) => self.set_review_status(&format!("Comment failed: {e}")),
                     }
                 }
             }
@@ -738,23 +738,23 @@ impl App {
         }
     }
 
-    /// Apply staged annotations and report the outcome.
+    /// Apply staged comments and report the outcome.
     async fn apply_review(&mut self, state: &mut DiffReviewState) {
-        use crate::annotation::ApplyOutcome;
-        match self.service.apply_annotations(&state.session_id).await {
-            Ok(ApplyOutcome::Nothing) => self.set_review_status("No staged annotations to apply"),
+        use crate::comment::ApplyOutcome;
+        match self.service.apply_comments(&state.session_id).await {
+            Ok(ApplyOutcome::Nothing) => self.set_review_status("No staged comments to apply"),
             Ok(ApplyOutcome::Blocked { drifted }) => self.set_review_status(&format!(
-                "{} drifted annotation(s) block apply — review or delete them",
+                "{} drifted comment(s) block apply — review or delete them",
                 drifted.len()
             )),
             Ok(ApplyOutcome::Applied { count, .. }) => {
-                self.reload_review_annotations(state).await;
-                self.set_review_status(&format!("Sent {count} annotation(s) to the agent"));
+                self.reload_review_comments(state).await;
+                self.set_review_status(&format!("Sent {count} comment(s) to the agent"));
             }
             Ok(ApplyOutcome::Deferred { count, .. }) => {
-                self.reload_review_annotations(state).await;
+                self.reload_review_comments(state).await;
                 self.set_review_status(&format!(
-                    "{count} annotation(s) queued — agent busy or stopped"
+                    "{count} comment(s) queued — agent busy or stopped"
                 ));
             }
             Err(e) => self.set_review_status(&format!("Apply failed: {e}")),
@@ -840,7 +840,7 @@ impl App {
                     let file = &state.diff.files[*index];
                     let indent = "  ".repeat(*depth);
                     let marker = file_status_marker(file.status);
-                    let count = state.annotation_count(file.display_path());
+                    let count = state.comment_count(file.display_path());
                     let badge = if count > 0 {
                         format!(" ✎{count}")
                     } else {
@@ -1102,7 +1102,7 @@ fn file_status_color(status: FileStatus) -> Color {
 
 /// Build the inline-rendered body for the current file: hunk headers plus each
 /// diff line with a coloured gutter, full-width add/remove background fill,
-/// word-level intra-line highlight, and an annotation marker. Selected lines
+/// word-level intra-line highlight, and an comment marker. Selected lines
 /// (cursor or visual range) are reversed when the body is focused.
 fn review_body_lines(
     state: &DiffReviewState,
@@ -1117,7 +1117,7 @@ fn review_body_lines(
     };
     let (sel_lo, sel_hi) = state.selection();
     let segs = word_diff_segments(file);
-    let anchors = state.annotation_anchors();
+    let anchors = state.comment_anchors();
     let mut out: Vec<Line<'static>> = Vec::new();
     let mut idx = 0; // selectable-line index
 
@@ -1143,7 +1143,7 @@ fn review_body_lines(
                     (Color::Reset, Color::Reset, Color::Reset, ' ', pal.gutter_fg)
                 }
             };
-            let ann = match state.annotation_marker(idx) {
+            let ann = match state.comment_marker(idx) {
                 Some(true) => '⚠',
                 Some(false) => '✎',
                 None => ' ',
@@ -1170,12 +1170,12 @@ fn review_body_lines(
             }
             out.push(Line::from(spans));
 
-            // Inline annotation box(es) anchored to this line.
+            // Inline comment box(es) anchored to this line.
             if let Some(anns) = anchors.get(&idx) {
                 for ann in anns {
-                    out.extend(annotation_box_lines(
+                    out.extend(comment_box_lines(
                         ann,
-                        state.is_annotation_collapsed(ann.id),
+                        state.is_comment_collapsed(ann.id),
                         width,
                     ));
                 }
@@ -1269,17 +1269,17 @@ fn push_segment(
     }
 }
 
-/// Render an annotation as an inline box, visually distinct from the diff.
+/// Render an comment as an inline box, visually distinct from the diff.
 /// Collapsed → a single rounded header bar with a preview; expanded → the bar
 /// plus the wrapped comment and a closing border.
-fn annotation_box_lines(ann: &Annotation, collapsed: bool, width: usize) -> Vec<Line<'static>> {
+fn comment_box_lines(ann: &Comment, collapsed: bool, width: usize) -> Vec<Line<'static>> {
     const INDENT: &str = "  ";
     let avail = width.saturating_sub(INDENT.len());
     if avail < 8 {
         return Vec::new();
     }
     let inner = avail - 2; // text columns between the │ borders
-    let drifted = ann.status == AnnotationStatus::Drifted;
+    let drifted = ann.status == CommentStatus::Drifted;
     let border = Style::default().fg(if drifted { Color::Red } else { Color::Yellow });
     let icon = if drifted { "⚠" } else { "✎" };
     let chevron = if collapsed { '▸' } else { '▾' };
@@ -1294,7 +1294,7 @@ fn annotation_box_lines(ann: &Annotation, collapsed: bool, width: usize) -> Vec<
     }
 
     let mut out = Vec::new();
-    let header = hrule(&format!("{chevron} {icon} annotation "), inner);
+    let header = hrule(&format!("{chevron} {icon} comment "), inner);
     out.push(Line::from(Span::styled(
         format!("{INDENT}╭{header}╮"),
         border,
@@ -1551,7 +1551,7 @@ fn review_body_lines_side_by_side(
         }
     };
 
-    let anchors = state.annotation_anchors();
+    let anchors = state.comment_anchors();
     let mut out: Vec<Line<'static>> = Vec::new();
     for row in side_by_side_rows(file) {
         match row {
@@ -1565,7 +1565,7 @@ fn review_body_lines_side_by_side(
                 spans.extend(cell(right, false));
                 out.push(Line::from(spans));
 
-                // Inline annotation box(es) anchored to either side's line.
+                // Inline comment box(es) anchored to either side's line.
                 // Context rows have left == right, so de-duplicate.
                 let sels: Vec<usize> = match (left, right) {
                     (Some(l), Some(r)) if l == r => vec![l],
@@ -1574,9 +1574,9 @@ fn review_body_lines_side_by_side(
                 for sel in sels {
                     if let Some(anns) = anchors.get(&sel) {
                         for ann in anns {
-                            out.extend(annotation_box_lines(
+                            out.extend(comment_box_lines(
                                 ann,
-                                state.is_annotation_collapsed(ann.id),
+                                state.is_comment_collapsed(ann.id),
                                 width,
                             ));
                         }
@@ -1673,7 +1673,7 @@ diff --git a/b.rs b/b.rs
         s.cursor = 1;
         let draft = s.build_draft((1, 1), "extract helper".to_string()).unwrap();
         assert_eq!(draft.file, "a.rs");
-        assert_eq!(draft.side, AnnotationSide::New);
+        assert_eq!(draft.side, CommentSide::New);
         assert_eq!(draft.line_range, (2, 2));
         assert_eq!(draft.snippet, "    let y = 3;");
         assert_eq!(draft.comment, "extract helper");
@@ -1685,24 +1685,24 @@ diff --git a/b.rs b/b.rs
         s.selected_file = 1; // b.rs: -b / +B
         // selectable index 0 is the deletion "-b".
         let draft = s.build_draft((0, 0), "why?".to_string()).unwrap();
-        assert_eq!(draft.side, AnnotationSide::Old);
+        assert_eq!(draft.side, CommentSide::Old);
         assert_eq!(draft.snippet, "b");
     }
 
     #[test]
-    fn annotation_at_cursor_matches_covering_range() {
+    fn comment_at_cursor_matches_covering_range() {
         let mut s = state_with_two_files();
-        s.annotations.push(Annotation::new(
+        s.comments.push(Comment::new(
             "a.rs",
-            AnnotationSide::New,
+            CommentSide::New,
             (2, 2),
             "    let y = 3;",
             "note",
         ));
         s.cursor = 1; // the inserted line (new lineno 2)
-        assert!(s.annotation_at_cursor().is_some());
+        assert!(s.comment_at_cursor().is_some());
         s.cursor = 0; // context line "fn main() {" (new lineno 1) — not covered
-        assert!(s.annotation_at_cursor().is_none());
+        assert!(s.comment_at_cursor().is_none());
     }
 
     #[test]
@@ -1820,48 +1820,48 @@ diff --git a/b.rs b/b.rs
     }
 
     #[test]
-    fn annotation_anchors_map_to_end_line_selidx() {
+    fn comment_anchors_map_to_end_line_selidx() {
         let mut s = state_with_two_files();
         // a.rs: ctx(new1,sel0), +let y=3(new2,sel1), ctx(new3,sel2).
-        s.annotations.push(Annotation::new(
+        s.comments.push(Comment::new(
             "a.rs",
-            AnnotationSide::New,
+            CommentSide::New,
             (2, 2),
             "let y = 3;",
             "note",
         ));
-        let anchors = s.annotation_anchors();
+        let anchors = s.comment_anchors();
         assert_eq!(anchors.get(&1).map(|v| v.len()), Some(1));
         assert!(!anchors.contains_key(&0));
     }
 
     #[test]
-    fn annotation_box_collapsed_single_line_expanded_boxed() {
-        let ann = Annotation::new(
+    fn comment_box_collapsed_single_line_expanded_boxed() {
+        let ann = Comment::new(
             "a.rs",
-            AnnotationSide::New,
+            CommentSide::New,
             (2, 2),
             "let y = 3;",
             "extract helper\nand rename",
         );
-        assert_eq!(annotation_box_lines(&ann, true, 60).len(), 1);
+        assert_eq!(comment_box_lines(&ann, true, 60).len(), 1);
         // top border + two comment paragraphs + bottom border.
-        assert_eq!(annotation_box_lines(&ann, false, 60).len(), 4);
+        assert_eq!(comment_box_lines(&ann, false, 60).len(), 4);
     }
 
     #[test]
-    fn toggle_annotation_fold_flips_state() {
+    fn toggle_comment_fold_flips_state() {
         let mut s = state_with_two_files();
-        let ann = Annotation::new("a.rs", AnnotationSide::New, (2, 2), "let y = 3;", "note");
+        let ann = Comment::new("a.rs", CommentSide::New, (2, 2), "let y = 3;", "note");
         let id = ann.id;
-        s.annotations.push(ann);
+        s.comments.push(ann);
         s.focus = ReviewFocus::Body;
-        s.cursor = 1; // the inserted line, covered by the annotation
-        assert!(!s.is_annotation_collapsed(id));
-        s.toggle_annotation_fold();
-        assert!(s.is_annotation_collapsed(id));
-        s.toggle_annotation_fold();
-        assert!(!s.is_annotation_collapsed(id));
+        s.cursor = 1; // the inserted line, covered by the comment
+        assert!(!s.is_comment_collapsed(id));
+        s.toggle_comment_fold();
+        assert!(s.is_comment_collapsed(id));
+        s.toggle_comment_fold();
+        assert!(!s.is_comment_collapsed(id));
     }
 
     #[test]

@@ -9,7 +9,7 @@ A high-performance terminal UI for managing Claude coding sessions, written in R
 - **Git worktree isolation** - Each session has its own worktree and branch
 - **Live preview** - Real-time pane content capture with caching
 - **Info pane** - Session metadata, PR details, CI status, and AI-generated change summaries
-- **Review & annotate** - Full-screen diff of a session's changes (vs its PR base) where you select lines, attach comments, and apply them straight to the running agent
+- **Review & comment** - Full-screen diff of a session's changes (vs its PR base) where you select lines, attach comments, and apply them straight to the running agent
 - **Agent state detection** - Detect if agent is waiting for input, processing, or errored
 - **Persistent state** - Sessions survive restarts
 - **Auto-pull project main** - Periodically fast-forwards each project's main branch from `origin` so it doesn't drift stale
@@ -149,7 +149,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `v` | Cycle session list view: Project → Sections → Section Stacks (requires `[[sections]]` config) |
 | palette only | Collapse/expand section (press on any item in the section, or `Enter` on the section header) |
 | `m` | Move session to section (manual override; see [Session List Sections](docs/configuration.md#session-list-sections)) |
-| palette only | Review & annotate a session's diff ("Review diff & annotate") — see [Usage](docs/usage.md#reviewing--annotating-changes) |
+| palette only | Review & comment on a session's diff ("Review diff & comment") — see [Usage](docs/usage.md#reviewing--commenting-on-changes) |
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
 | `<` / `>` | Shrink / grow left pane |
 | `Ctrl-u/d` or `PageUp/Down` | Page up/down in preview |

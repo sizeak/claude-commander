@@ -199,7 +199,7 @@ pub enum Modal {
         /// True while `git fetch origin` is running in the background
         fetching: bool,
     },
-    /// Full-screen review-diff-and-annotate view.
+    /// Full-screen review-diff-and-comment view.
     ReviewDiff(Box<DiffReviewState>),
 }
 

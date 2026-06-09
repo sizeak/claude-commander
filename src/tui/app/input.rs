@@ -228,8 +228,8 @@ impl App {
                     }
                 }
                 MouseEventKind::Down(MouseButton::Right) => {
-                    // Right-click annotates the current selection in the review
-                    // view (the mouse equivalent of Enter).
+                    // Right-click comments on the current selection in the
+                    // review view (the mouse equivalent of Enter).
                     if let Modal::ReviewDiff(state) = &mut self.ui_state.modal {
                         state.begin_comment();
                     }
