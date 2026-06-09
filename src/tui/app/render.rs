@@ -22,6 +22,8 @@ impl App {
         // rather than overlaying the normal UI, so there's only one status bar.
         if matches!(self.ui_state.modal, Modal::ReviewDiff(_)) {
             self.ui_state.review_body_rect = Some(super::review::review_body_inner_rect(size));
+            self.ui_state.review_file_list_rect =
+                Some(super::review::review_file_list_inner_rect(size));
             if let Modal::ReviewDiff(state) = &self.ui_state.modal {
                 self.render_review_modal(frame, size, state);
             }

@@ -109,8 +109,9 @@ foreground-only colouring on 256- and 16-colour terminals.
   style — single-child directory chains are compressed). `Tab` switches focus
   between the tree and the diff body; in the tree, `↑↓`/`jk` move and `Enter`
   expands/collapses a directory; `[` / `]` jump between files; in the body,
-  `↑↓`/`jk` move the cursor and the mouse wheel scrolls. `t` toggles between
-  inline and side-by-side layouts.
+  `↑↓`/`jk` move the cursor and the mouse wheel scrolls. Clicking a file in the
+  tree selects it (clicking a directory expands/collapses it). `t` toggles
+  between inline and side-by-side layouts.
 - **Comment**: in the body, press `v` to start a line selection (arrows grow
   or shrink it; mouse drag also selects), then `Enter` to attach a comment.
   Comments are *staged* — they persist across restarts until applied, and

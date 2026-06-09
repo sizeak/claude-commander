@@ -203,11 +203,19 @@ impl App {
                     }
                 }
                 MouseEventKind::Down(MouseButton::Left) => {
-                    // In the review view, a click positions the diff cursor.
+                    // In the review view, a click selects a file in the tree or
+                    // positions the diff cursor, depending on which pane it hits.
                     let body = self.ui_state.review_body_rect;
+                    let files = self.ui_state.review_file_list_rect;
                     if let Modal::ReviewDiff(state) = &mut self.ui_state.modal {
-                        if let Some(rect) = body {
-                            state.click_at(mouse.column, mouse.row, rect);
+                        let (col, row) = (mouse.column, mouse.row);
+                        let in_files = files.is_some_and(|r| {
+                            col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
+                        });
+                        if let Some(rect) = files.filter(|_| in_files) {
+                            state.click_file_list_at(col, row, rect);
+                        } else if let Some(rect) = body {
+                            state.click_at(col, row, rect);
                         }
                         return;
                     }

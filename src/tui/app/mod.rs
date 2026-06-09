@@ -461,6 +461,10 @@ pub struct AppUiState {
     /// mouse events can map a screen position to a diff line. `None` unless the
     /// review view is open.
     pub review_body_rect: Option<Rect>,
+    /// Inner rect of the review-diff file-list pane, recorded each render frame
+    /// so mouse events can map a screen position to a tree row. `None` unless
+    /// the review view is open.
+    pub review_file_list_rect: Option<Rect>,
     /// Currently selected session (for preview/diff)
     pub selected_session_id: Option<SessionId>,
     /// Currently selected project
@@ -537,6 +541,7 @@ impl Default for AppUiState {
             diff_info: Arc::new(DiffInfo::empty()),
             status_message: None, // (message, expiry)
             review_body_rect: None,
+            review_file_list_rect: None,
 
             should_quit: false,
             selected_session_id: None,

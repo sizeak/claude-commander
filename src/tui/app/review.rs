@@ -413,6 +413,37 @@ impl DiffReviewState {
         }
     }
 
+    /// Map a screen position in the file-list pane to a visible tree-row index
+    /// (accounting for the tree's scroll offset).
+    fn file_row_at(&self, col: u16, row: u16, rect: Rect) -> Option<usize> {
+        let inside = col >= rect.x
+            && col < rect.x + rect.width
+            && row >= rect.y
+            && row < rect.y + rect.height;
+        inside.then(|| (row - rect.y) as usize + self.tree_scroll as usize)
+    }
+
+    /// Left-click in the file-list pane: focus it and move the tree cursor to
+    /// the clicked row. A file row is shown in the body; a directory row is
+    /// expanded/collapsed (the mouse equivalent of Enter).
+    pub fn click_file_list_at(&mut self, col: u16, row: u16, rect: Rect) {
+        let Some(idx) = self.file_row_at(col, row, rect) else {
+            return;
+        };
+        let rows = self.visible_rows();
+        let file_index = match rows.get(idx) {
+            Some(TreeRow::File { index, .. }) => Some(*index),
+            Some(TreeRow::Dir { .. }) => None,
+            None => return,
+        };
+        self.focus = ReviewFocus::FileList;
+        self.tree_cursor = idx;
+        match file_index {
+            Some(index) => self.set_body_file(index),
+            None => self.tree_activate(),
+        }
+    }
+
     /// Right-click at a screen position: open the comment box. With no active
     /// selection, first move the cursor to the clicked line so a bare
     /// right-click comments on the line under the pointer; an in-progress
@@ -1002,9 +1033,10 @@ impl App {
     }
 }
 
-/// Inner rect of the diff body pane for a given modal `area` — the region a
-/// mouse position maps into. Must mirror the layout in `render_review_modal`.
-pub(super) fn review_body_inner_rect(area: Rect) -> Rect {
+/// Inner rects of the (file list, diff body) panes for a given modal `area` —
+/// the regions a mouse position maps into. Must mirror the layout in
+/// `render_review_modal`.
+fn review_inner_rects(area: Rect) -> (Rect, Rect) {
     let rows = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(1)])
@@ -1013,11 +1045,22 @@ pub(super) fn review_body_inner_rect(area: Rect) -> Rect {
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(20), Constraint::Min(0)])
         .split(rows[0]);
-    // Inset by the body block's border.
-    cols[1].inner(Margin {
+    // Inset by each pane block's border.
+    let inset = Margin {
         vertical: 1,
         horizontal: 1,
-    })
+    };
+    (cols[0].inner(inset), cols[1].inner(inset))
+}
+
+/// Inner rect of the diff body pane (see [`review_inner_rects`]).
+pub(super) fn review_body_inner_rect(area: Rect) -> Rect {
+    review_inner_rects(area).1
+}
+
+/// Inner rect of the file-list pane (see [`review_inner_rects`]).
+pub(super) fn review_file_list_inner_rect(area: Rect) -> Rect {
+    review_inner_rects(area).0
 }
 
 /// Build a file tree from the diff's files (keyed on each file's display path),
@@ -2022,6 +2065,28 @@ diff --git a/x.rs b/x.rs
         // Clicking outside the body rect leaves the cursor untouched.
         s.click_at(5, 50, body);
         assert_eq!(s.cursor, 2);
+    }
+
+    #[test]
+    fn click_file_list_selects_file() {
+        let mut s = state_with_two_files();
+        // Start focused on the body looking at the first file.
+        s.focus = ReviewFocus::Body;
+        assert_eq!(s.selected_file, 0);
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            width: 20,
+            height: 20,
+        };
+        // visible tree rows: [a.rs (row 0), b.rs (row 1)]. Click b.rs.
+        s.click_file_list_at(5, 1, rect);
+        assert_eq!(s.focus, ReviewFocus::FileList);
+        assert_eq!(s.tree_cursor, 1);
+        assert_eq!(s.selected_file, 1);
+        // A click below the last row is a no-op (no panic, file unchanged).
+        s.click_file_list_at(5, 10, rect);
+        assert_eq!(s.selected_file, 1);
     }
 
     #[test]
