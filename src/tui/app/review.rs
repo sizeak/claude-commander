@@ -14,6 +14,12 @@ use crate::git::{DiffLine, FileDiff, FileStatus, Hunk, LineOrigin, ParsedDiff};
 use crate::tui::syntax_highlight::highlight_line;
 use crate::tui::theme::{ColorMode, ReviewPalette};
 
+/// Gutter / badge / box marker for a staged comment. An asterisk is the
+/// conventional note/comment marker and stays crisp at one cell.
+const COMMENT_MARKER: char = '*';
+/// Marker for a drifted comment (its snippet could no longer be located).
+const DRIFT_MARKER: char = '⚠';
+
 /// Rough viewport height used to keep the cursor visible while scrolling. The
 /// renderer doesn't report its height back to the state, so we approximate
 /// (same pragmatic approach as the checkout-branch list).
@@ -843,7 +849,7 @@ impl App {
                     let marker = file_status_marker(file.status);
                     let count = state.comment_count(file.display_path());
                     let badge = if count > 0 {
-                        format!(" ✎{count}")
+                        format!(" {COMMENT_MARKER}{count}")
                     } else {
                         String::new()
                     };
@@ -1148,8 +1154,8 @@ fn review_body_lines(
                 }
             };
             let ann = match state.comment_marker(idx) {
-                Some(true) => '⚠',
-                Some(false) => '✎',
+                Some(true) => DRIFT_MARKER,
+                Some(false) => COMMENT_MARKER,
                 None => ' ',
             };
             let old = lineno_str(line.old_lineno);
@@ -1295,7 +1301,11 @@ fn comment_box_lines(
     } else {
         pal.comment_border
     });
-    let icon = if drifted { "⚠" } else { "✎" };
+    let icon = if drifted {
+        DRIFT_MARKER
+    } else {
+        COMMENT_MARKER
+    };
     let chevron = if collapsed { '▸' } else { '▾' };
 
     if collapsed {
