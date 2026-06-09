@@ -69,6 +69,7 @@ mod state;
 mod tests;
 
 pub use review::DiffReviewState;
+pub use review::ReviewPrepared;
 
 /// Direction for mouse scroll events
 enum ScrollDirection {
@@ -156,8 +157,13 @@ pub enum Modal {
         /// First visible row of the completions list.
         scroll: usize,
     },
-    /// Loading spinner modal (non-interactive)
-    Loading { title: String, message: String },
+    /// Loading spinner modal (non-interactive). `hint`, when set, renders as a
+    /// dimmed line beneath the spinner (e.g. how to turn the operation off).
+    Loading {
+        title: String,
+        message: String,
+        hint: Option<String>,
+    },
     /// Help modal. `scroll` is the first visible line of `build_help_lines`.
     /// Clamped against the rendered content height in `render_help_modal`.
     Help { scroll: u16 },

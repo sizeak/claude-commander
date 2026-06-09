@@ -160,7 +160,11 @@ impl App {
                 frame.render_widget(Paragraph::new(hint), chunks[2]);
             }
 
-            Modal::Loading { title, message } => {
+            Modal::Loading {
+                title,
+                message,
+                hint,
+            } => {
                 let modal_area = centered_rect(60, 20, area);
                 frame.render_widget(Clear, modal_area);
 
@@ -172,6 +176,10 @@ impl App {
 
                 let inner = block.inner(modal_area);
                 frame.render_widget(block, modal_area);
+
+                // Spinner on the first row; an optional dimmed hint two rows
+                // below it (a blank gap keeps them visually separate).
+                let throbber_area = Rect { height: 1, ..inner };
 
                 const RAINBOW: &[ratatui::style::Color] = &[
                     ratatui::style::Color::Red,
@@ -186,7 +194,33 @@ impl App {
                     .throbber_set(throbber_widgets_tui::symbols::throbber::BRAILLE_EIGHT)
                     .label(message.as_str())
                     .throbber_style(Style::default().fg(color));
-                frame.render_stateful_widget(throbber, inner, &mut self.ui_state.throbber_state);
+                frame.render_stateful_widget(
+                    throbber,
+                    throbber_area,
+                    &mut self.ui_state.throbber_state,
+                );
+
+                if let Some(hint) = hint
+                    && inner.height >= 3
+                {
+                    // Indent to line up under the spinner's label (the throbber
+                    // glyph + space offsets the message text by two cells).
+                    let hint_area = Rect {
+                        x: inner.x + 2,
+                        y: inner.y + 2,
+                        width: inner.width.saturating_sub(2),
+                        height: 1,
+                    };
+                    frame.render_widget(
+                        Paragraph::new(Line::from(Span::styled(
+                            hint.as_str(),
+                            Style::default()
+                                .fg(ratatui::style::Color::DarkGray)
+                                .add_modifier(Modifier::ITALIC),
+                        ))),
+                        hint_area,
+                    );
+                }
             }
 
             Modal::Confirm { title, message, .. } => {

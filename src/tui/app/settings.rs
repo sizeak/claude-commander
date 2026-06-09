@@ -135,6 +135,12 @@ impl App {
                         color_swatch: None,
                     },
                     SettingsRow {
+                        label: "Precompute Review Caches".into(),
+                        value: c.precompute_review_caches.to_string(),
+                        field_key: "precompute_review_caches".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
                         label: "Number Debounce (ms)".into(),
                         value: c.session_number_debounce_ms.to_string(),
                         field_key: "session_number_debounce_ms".into(),
@@ -833,6 +839,11 @@ impl App {
                 "rounded_borders" => {
                     if let Ok(b) = value.parse::<bool>() {
                         self.config.rounded_borders = b;
+                    }
+                }
+                "precompute_review_caches" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        self.config.precompute_review_caches = b;
                     }
                 }
                 "session_number_debounce_ms" => {

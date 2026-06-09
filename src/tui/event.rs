@@ -132,6 +132,12 @@ pub enum StateUpdate {
         project_id: ProjectId,
         outcome: crate::git::PullOutcome,
     },
+    /// Review diff prepared off-thread: the parsed diff plus its warmed render
+    /// caches (word-diff segments + syntax highlighting), ready to replace the
+    /// loading spinner with the full review view. Boxed — the payload is large.
+    ReviewPrepared {
+        prepared: Box<super::app::ReviewPrepared>,
+    },
 }
 
 /// User commands triggered by input

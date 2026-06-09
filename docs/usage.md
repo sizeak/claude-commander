@@ -132,3 +132,10 @@ foreground-only colouring on 256- and 16-colour terminals.
 Comments are stored per session under the data directory (alongside
 `state.json`); the brief handed to the agent is written to a temp file outside
 the worktree, so it's never committed.
+
+By default each file's render caches (word-diff segments + syntax highlighting)
+are built up front behind a brief loading spinner when you open the review, so
+file switching is instant afterwards. Set `precompute_review_caches = false`
+(see [Configuration](configuration.md)) for lazy behaviour instead — the view
+opens instantly and each file's cache is built the first time you navigate to
+it, at the cost of a brief jank on the first scroll through a large file.

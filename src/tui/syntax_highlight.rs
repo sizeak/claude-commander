@@ -6,9 +6,8 @@
 //! comments aren't carried across hunk gaps). Only the foreground colour is
 //! used; the review view supplies its own add/remove backgrounds.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use ratatui::style::Color;
 use syntect::easy::HighlightLines;
@@ -38,18 +37,24 @@ fn assets() -> &'static Assets {
     })
 }
 
-/// Per-thread memo of highlight results, keyed by `(ext, content)`.
+/// Process-global memo of highlight results, keyed by `(ext, content)`.
 ///
 /// The review body is rebuilt on every render frame (every tick and keystroke),
 /// and `highlight_line` constructs a fresh syntect `HighlightLines` per call —
 /// the dominant per-frame cost. Diff content is immutable, so memoizing makes
 /// scrolling and file-switching O(unique fragments) instead of re-highlighting
-/// the whole file each frame. Rendering is single-threaded, so a thread-local
-/// `RefCell` suffices and avoids lock contention.
+/// the whole file each frame.
+///
+/// The cache is a shared `Mutex` rather than a thread-local so the open-review
+/// background task can warm it from a worker thread (see
+/// `precompute_review_caches`) and have the render thread hit those entries.
+/// After warming, every render is a cache read, so lock contention is a brief
+/// lock/clone with no real waiting.
 type HlKey = (String, String);
-thread_local! {
-    static HL_CACHE: RefCell<HashMap<HlKey, Vec<(String, Color)>>> =
-        RefCell::new(HashMap::new());
+type HlCache = HashMap<HlKey, Vec<(String, Color)>>;
+fn hl_cache() -> &'static Mutex<HlCache> {
+    static HL_CACHE: OnceLock<Mutex<HlCache>> = OnceLock::new();
+    HL_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Soft cap on cached fragments; cleared wholesale if exceeded so a marathon
@@ -65,17 +70,15 @@ const HL_CACHE_CAP: usize = 100_000;
 /// sites, so it is not part of the key.
 pub(crate) fn highlight_line(content: &str, ext: &str, fallback: Color) -> Vec<(String, Color)> {
     let key = (ext.to_string(), content.to_string());
-    if let Some(hit) = HL_CACHE.with(|c| c.borrow().get(&key).cloned()) {
-        return hit;
+    if let Some(hit) = hl_cache().lock().unwrap().get(&key) {
+        return hit.clone();
     }
     let runs = highlight_line_uncached(content, ext, fallback);
-    HL_CACHE.with(|c| {
-        let mut cache = c.borrow_mut();
-        if cache.len() >= HL_CACHE_CAP {
-            cache.clear();
-        }
-        cache.insert(key, runs.clone());
-    });
+    let mut cache = hl_cache().lock().unwrap();
+    if cache.len() >= HL_CACHE_CAP {
+        cache.clear();
+    }
+    cache.insert(key, runs.clone());
     runs
 }
 

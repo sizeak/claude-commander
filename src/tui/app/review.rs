@@ -83,10 +83,12 @@ pub struct DiffReviewState {
     tree_scroll: u16,
     /// Comment ids whose inline box is collapsed (absent = expanded).
     collapsed_comments: HashSet<uuid::Uuid>,
-    /// Memoized word-diff segments for the current file (`selected_file`, segs).
-    /// Recomputed only when the body file changes — the LCS pass is O(file) and
-    /// would otherwise re-run on every render frame. See [`Self::word_segments`].
-    seg_cache: RefCell<Option<(usize, Vec<WordSegs>)>>,
+    /// Memoized word-diff segments, one slot per file in `diff.files` order
+    /// (`None` until first computed). The LCS pass is O(file) and would
+    /// otherwise re-run on every render frame; slots are filled lazily by
+    /// [`Self::word_segments`] or eagerly by [`Self::prime_segments`] when the
+    /// open-review background task precomputes them all up front.
+    seg_cache: RefCell<Vec<Option<Vec<WordSegs>>>>,
 }
 
 /// A node in the file tree: either a directory (with children) or a file leaf
@@ -128,6 +130,9 @@ impl DiffReviewState {
         let file_tree = build_file_tree(&diff.files);
         // Body starts on the first file in tree order so it shows something.
         let selected_file = first_file_index(&file_tree).unwrap_or(0);
+        // One memo slot per file (at least one, so `selected_file` always
+        // indexes a slot even for an empty diff).
+        let seg_slots = diff.files.len().max(1);
         Self {
             session_id,
             title,
@@ -146,28 +151,48 @@ impl DiffReviewState {
             tree_cursor: 0,
             tree_scroll: 0,
             collapsed_comments: HashSet::new(),
-            seg_cache: RefCell::new(None),
+            seg_cache: RefCell::new(vec![None; seg_slots]),
         }
     }
 
-    /// Word-diff segments for the current file, memoized by `selected_file`.
-    /// Rebuilt only when the body file changes, so scrolling within a file
-    /// reuses the cached LCS result rather than recomputing it each frame.
+    /// Word-diff segments for the current file, memoized per file. The slot is
+    /// filled on first access (or already populated by [`Self::prime_segments`]),
+    /// so scrolling within a file reuses the cached LCS result rather than
+    /// recomputing it each frame.
     fn word_segments(&self) -> Ref<'_, Vec<WordSegs>> {
-        let stale = self
+        let idx = self.selected_file;
+        let needs = self
             .seg_cache
             .borrow()
-            .as_ref()
-            .map(|(file, _)| *file != self.selected_file)
+            .get(idx)
+            .map(|slot| slot.is_none())
             .unwrap_or(true);
-        if stale {
+        if needs {
             let segs = self
                 .current_file()
                 .map(word_diff_segments)
                 .unwrap_or_default();
-            *self.seg_cache.borrow_mut() = Some((self.selected_file, segs));
+            if let Some(slot) = self.seg_cache.borrow_mut().get_mut(idx) {
+                *slot = Some(segs);
+            }
         }
-        Ref::map(self.seg_cache.borrow(), |c| &c.as_ref().unwrap().1)
+        Ref::map(self.seg_cache.borrow(), |c| {
+            c.get(idx).and_then(|s| s.as_ref()).unwrap_or(empty_segs())
+        })
+    }
+
+    /// Install fully-precomputed word-diff segments (one entry per file in
+    /// `diff.files` order). Called once after the open-review background task
+    /// builds every file's segments off-thread, so the first navigation to each
+    /// file is instant. Uses interior mutability so it can run on the freshly
+    /// built (immutable) state before it's boxed into the modal.
+    pub(super) fn prime_segments(&self, segments: Vec<Vec<WordSegs>>) {
+        let mut cache = self.seg_cache.borrow_mut();
+        for (i, segs) in segments.into_iter().enumerate() {
+            if let Some(slot) = cache.get_mut(i) {
+                *slot = Some(segs);
+            }
+        }
     }
 
     /// The currently-visible tree rows (respecting collapsed directories).
@@ -792,14 +817,64 @@ impl App {
                     self.set_review_status("No changes to review");
                     return;
                 }
-                let state = DiffReviewState::new(
-                    session_id,
-                    title,
-                    snapshot.base,
-                    snapshot.diff,
-                    snapshot.comments,
-                );
-                self.ui_state.modal = Modal::ReviewDiff(Box::new(state));
+                // Opt-out: build each file's render caches lazily on first
+                // navigation instead. Opens instantly; the first view of a large
+                // file can be briefly janky.
+                if !self.config.precompute_review_caches {
+                    let state = DiffReviewState::new(
+                        session_id,
+                        title,
+                        snapshot.base,
+                        snapshot.diff,
+                        snapshot.comments,
+                    );
+                    self.ui_state.modal = Modal::ReviewDiff(Box::new(state));
+                    return;
+                }
+                // Default: precompute every file's render caches (word-diff
+                // segments + syntax highlighting) up front on a worker thread
+                // while a spinner shows, then swap in the ready-to-render view —
+                // trading the open-time wait for instant file switching.
+                let file_count = snapshot.diff.files.len();
+                self.ui_state.modal = Modal::Loading {
+                    title: "Preparing review".to_string(),
+                    message: format!(
+                        "Highlighting {file_count} file{}…",
+                        if file_count == 1 { "" } else { "s" }
+                    ),
+                    hint: Some(
+                        "Disable \"Precompute Review Caches\" in settings to skip this".to_string(),
+                    ),
+                };
+                let highlight = self.theme.mode == ColorMode::TrueColor;
+                let text_fg = self.theme.review_palette().text;
+                let tx = self.event_loop.sender();
+                let base = snapshot.base;
+                let diff = snapshot.diff;
+                let comments = snapshot.comments;
+                tokio::spawn(async move {
+                    // The precompute is CPU-bound and synchronous, so keep it off
+                    // the async worker pool; hand the diff back out with its
+                    // segments rather than cloning it.
+                    let (diff, segments) = tokio::task::spawn_blocking(move || {
+                        let segments = precompute_review_caches(&diff, highlight, text_fg);
+                        (diff, segments)
+                    })
+                    .await
+                    .expect("review precompute task panicked");
+                    let _ = tx
+                        .send(AppEvent::StateUpdate(StateUpdate::ReviewPrepared {
+                            prepared: Box::new(ReviewPrepared {
+                                session_id,
+                                title,
+                                base,
+                                diff,
+                                comments,
+                                segments,
+                            }),
+                        }))
+                        .await;
+                });
             }
             Err(e) => {
                 self.ui_state.modal = Modal::Error {
@@ -1658,7 +1733,58 @@ fn select_spans(spans: Vec<Span<'static>>, pal: &ReviewPalette) -> Vec<Span<'sta
 
 /// A line split into runs of text, each tagged changed (`true`) or unchanged
 /// (`false`) by the word-level diff.
-type WordSegs = Vec<(String, bool)>;
+pub(crate) type WordSegs = Vec<(String, bool)>;
+
+/// Shared empty segment list, returned by [`DiffReviewState::word_segments`]
+/// when the current file index is out of range (only possible for an empty
+/// diff) so the `Ref::map` closure always has something to borrow.
+fn empty_segs() -> &'static Vec<WordSegs> {
+    static EMPTY: std::sync::OnceLock<Vec<WordSegs>> = std::sync::OnceLock::new();
+    EMPTY.get_or_init(Vec::new)
+}
+
+/// Precompute every file's word-diff segments and (on true-color terminals) warm
+/// the shared syntax-highlight cache for every content line. This is the heavy,
+/// per-file work the review body would otherwise do lazily on first navigation —
+/// the LCS pass per file plus a fresh syntect highlighter per line. It's pure
+/// (reads the parsed diff, writes only the process-global highlight cache) so the
+/// open-review flow runs it on a blocking worker thread while a spinner shows,
+/// making the first view of each file instant. Returns the per-file segments in
+/// `diff.files` order, ready for [`DiffReviewState::prime_segments`].
+pub(crate) fn precompute_review_caches(
+    diff: &ParsedDiff,
+    highlight: bool,
+    text_fg: Color,
+) -> Vec<Vec<WordSegs>> {
+    diff.files
+        .iter()
+        .map(|file| {
+            if highlight {
+                let ext = file_extension(file.display_path());
+                for hunk in &file.hunks {
+                    for line in &hunk.lines {
+                        let _ = highlight_line(&line.content, ext, text_fg);
+                    }
+                }
+            }
+            word_diff_segments(file)
+        })
+        .collect()
+}
+
+/// Review payload prepared off the render thread: the parsed diff plus its warmed
+/// render caches, ready to construct a [`DiffReviewState`]. Built by the
+/// open-review background task (see `handle_open_review`) and consumed by
+/// `handle_state_update` once the loading spinner can be replaced with the view.
+#[derive(Debug, Clone)]
+pub struct ReviewPrepared {
+    pub(super) session_id: SessionId,
+    pub(super) title: String,
+    pub(super) base: String,
+    pub(super) diff: ParsedDiff,
+    pub(super) comments: Vec<Comment>,
+    pub(super) segments: Vec<Vec<WordSegs>>,
+}
 
 /// Token class for intra-line diffing: identifier runs and whitespace runs are
 /// each coalesced into a single token; every other character stands alone.
@@ -2611,6 +2737,56 @@ diff --git a/x.rs b/x.rs
         let fresh1 = word_diff_segments(&s.diff.files[1]);
         assert_eq!(*s.word_segments(), fresh1);
         assert_ne!(fresh0, fresh1, "the two files must differ for a real test");
+    }
+
+    #[test]
+    fn precompute_matches_per_file_word_diff_segments() {
+        let s = state_with_two_files();
+        // Highlighting on exercises the cache-warming branch too (the returned
+        // segments must be identical regardless).
+        let pre = precompute_review_caches(&s.diff, true, Color::Reset);
+        assert_eq!(pre.len(), s.diff.files.len());
+        for (i, file) in s.diff.files.iter().enumerate() {
+            assert_eq!(pre[i], word_diff_segments(file), "file {i} segments differ");
+        }
+    }
+
+    #[test]
+    fn primed_segments_are_returned_without_recompute() {
+        let mut s = state_with_two_files();
+        // Prime with sentinel data distinct from any real computation: if
+        // word_segments recomputed, it would not match these.
+        let sentinel: Vec<Vec<WordSegs>> = (0..s.diff.files.len())
+            .map(|i| vec![vec![(format!("PRIMED-{i}"), false)]])
+            .collect();
+        s.prime_segments(sentinel.clone());
+        s.selected_file = 0;
+        assert_eq!(*s.word_segments(), sentinel[0]);
+        s.selected_file = 1;
+        assert_eq!(*s.word_segments(), sentinel[1]);
+    }
+
+    #[test]
+    fn priming_with_real_precompute_matches_lazy_path() {
+        let mut s = state_with_two_files();
+        let pre = precompute_review_caches(&s.diff, false, Color::Reset);
+        s.prime_segments(pre);
+        for i in 0..s.diff.files.len() {
+            s.selected_file = i;
+            assert_eq!(*s.word_segments(), word_diff_segments(&s.diff.files[i]));
+        }
+    }
+
+    #[test]
+    fn word_segments_on_empty_diff_is_empty_without_panic() {
+        let s = DiffReviewState::new(
+            SessionId::new(),
+            "test".to_string(),
+            "HEAD".to_string(),
+            parse_unified_diff(""),
+            Vec::new(),
+        );
+        assert!(s.word_segments().is_empty());
     }
 
     #[test]
