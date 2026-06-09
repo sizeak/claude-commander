@@ -413,6 +413,17 @@ impl DiffReviewState {
         }
     }
 
+    /// Right-click at a screen position: open the comment box. With no active
+    /// selection, first move the cursor to the clicked line so a bare
+    /// right-click comments on the line under the pointer; an in-progress
+    /// drag-selection is preserved and commented on as-is.
+    pub fn right_click_comment(&mut self, col: u16, row: u16, body: Rect) -> bool {
+        if self.visual_anchor.is_none() {
+            self.click_at(col, row, body);
+        }
+        self.begin_comment()
+    }
+
     /// Left-drag to a screen position: begin a selection at the press point (if
     /// not already selecting) and extend it to the dragged line.
     pub fn drag_at(&mut self, col: u16, row: u16, body: Rect) {
@@ -2011,6 +2022,42 @@ diff --git a/x.rs b/x.rs
         // Clicking outside the body rect leaves the cursor untouched.
         s.click_at(5, 50, body);
         assert_eq!(s.cursor, 2);
+    }
+
+    #[test]
+    fn right_click_selects_line_then_opens_comment() {
+        let mut s = state_with_two_files();
+        let body = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 20,
+        };
+        // No selection yet; cursor at 0. Right-click body row 2 (selectable
+        // index 1, the inserted line) should move the cursor there first.
+        assert!(s.right_click_comment(5, 2, body));
+        assert_eq!(s.cursor, 1);
+        let draft = s.comment.as_ref().unwrap();
+        assert_eq!(draft.range, (1, 1));
+    }
+
+    #[test]
+    fn right_click_keeps_active_selection() {
+        let mut s = state_with_two_files();
+        let body = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 20,
+        };
+        // Drag-select rows 1..=3 (selectable 0..=2), then right-click row 2.
+        s.click_at(5, 1, body);
+        s.drag_at(5, 3, body);
+        assert_eq!(s.selection(), (0, 2));
+        assert!(s.right_click_comment(5, 2, body));
+        // The multi-line selection is preserved, not collapsed to the click.
+        let draft = s.comment.as_ref().unwrap();
+        assert_eq!(draft.range, (0, 2));
     }
 
     #[test]

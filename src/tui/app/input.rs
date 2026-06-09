@@ -228,10 +228,14 @@ impl App {
                     }
                 }
                 MouseEventKind::Down(MouseButton::Right) => {
-                    // Right-click comments on the current selection in the
-                    // review view (the mouse equivalent of Enter).
-                    if let Modal::ReviewDiff(state) = &mut self.ui_state.modal {
-                        state.begin_comment();
+                    // Right-click comments in the review view: with no active
+                    // selection it first selects the clicked line, otherwise it
+                    // comments on the current selection (mouse equivalent of v+Enter).
+                    let body = self.ui_state.review_body_rect;
+                    if let Modal::ReviewDiff(state) = &mut self.ui_state.modal
+                        && let Some(rect) = body
+                    {
+                        state.right_click_comment(mouse.column, mouse.row, rect);
                     }
                 }
                 _ => {}
