@@ -792,11 +792,10 @@ impl App {
         } else {
             " ↑↓/jk move · v select · Enter comment · z fold · d delete · a apply · t layout · ^Q/Esc close "
         };
+        // The footer doubles as this view's status bar — styled like the app
+        // status bar so it reads as a replacement, not a second bar.
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                hint,
-                Style::default().fg(Color::DarkGray),
-            ))),
+            Paragraph::new(Line::from(hint)).style(self.theme.status_bar()),
             rows[1],
         );
 

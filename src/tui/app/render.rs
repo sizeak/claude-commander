@@ -17,6 +17,17 @@ impl App {
         let size = frame.area();
         self.ui_state.terminal_size = size;
 
+        // The review-diff view is a full-screen takeover: it owns the whole
+        // frame (including the bottom row, where it draws its own status bar)
+        // rather than overlaying the normal UI, so there's only one status bar.
+        if matches!(self.ui_state.modal, Modal::ReviewDiff(_)) {
+            self.ui_state.review_body_rect = Some(super::review::review_body_inner_rect(size));
+            if let Modal::ReviewDiff(state) = &self.ui_state.modal {
+                self.render_review_modal(frame, size, state);
+            }
+            return;
+        }
+
         // Content area with margin on top, left, right, and space for status bar at bottom
         let content_area = Rect {
             x: size.x + 1,
