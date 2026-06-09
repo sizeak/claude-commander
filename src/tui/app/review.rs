@@ -807,10 +807,11 @@ impl App {
 
     fn render_review_file_list(&self, frame: &mut Frame, area: Rect, state: &DiffReviewState) {
         let focused = state.focus == ReviewFocus::FileList;
+        let pal = self.theme.review_palette();
         let border = if focused {
-            Color::Cyan
+            pal.border_focused
         } else {
-            Color::DarkGray
+            pal.border_unfocused
         };
 
         let rows = state.visible_rows();
@@ -826,9 +827,7 @@ impl App {
                 } => {
                     let indent = "  ".repeat(*depth);
                     let chevron = if *collapsed { '▶' } else { '▼' };
-                    let style = Style::default()
-                        .fg(Color::Blue)
-                        .add_modifier(Modifier::BOLD);
+                    let style = Style::default().fg(pal.dir_fg).add_modifier(Modifier::BOLD);
                     let style = if on_cursor {
                         style.add_modifier(Modifier::REVERSED)
                     } else {
@@ -852,7 +851,7 @@ impl App {
                         Span::raw(format!("{indent}  ")),
                         Span::styled(
                             marker.to_string(),
-                            Style::default().fg(file_status_color(file.status)),
+                            Style::default().fg(file_status_color(file.status, &pal)),
                         ),
                         Span::raw(format!(" {name}{badge}")),
                     ];
@@ -880,10 +879,11 @@ impl App {
 
     fn render_review_body(&self, frame: &mut Frame, area: Rect, state: &DiffReviewState) {
         let focused = state.focus == ReviewFocus::Body;
+        let pal = self.theme.review_palette();
         let border = if focused {
-            Color::Cyan
+            pal.border_focused
         } else {
-            Color::DarkGray
+            pal.border_unfocused
         };
 
         let title = match state.current_file() {
@@ -891,7 +891,6 @@ impl App {
             None => format!(" review — vs {} ", state.base),
         };
 
-        let pal = self.theme.review_palette();
         // Syntax highlighting emits RGB foregrounds, so only apply it on
         // true-color terminals; otherwise fall back to the palette text colour.
         let highlight = self.theme.mode == ColorMode::TrueColor;
@@ -1093,13 +1092,13 @@ fn file_status_marker(status: FileStatus) -> char {
     }
 }
 
-/// Colour used for a file row by its change status.
-fn file_status_color(status: FileStatus) -> Color {
+/// Colour used for a file row by its change status, from the theme palette.
+fn file_status_color(status: FileStatus, pal: &ReviewPalette) -> Color {
     match status {
-        FileStatus::Added => Color::Green,
-        FileStatus::Deleted => Color::Red,
-        FileStatus::Modified => Color::Yellow,
-        FileStatus::Renamed => Color::Cyan,
+        FileStatus::Added => pal.add_fg,
+        FileStatus::Deleted => pal.del_fg,
+        FileStatus::Modified => pal.modified_fg,
+        FileStatus::Renamed => pal.renamed_fg,
     }
 }
 
@@ -1133,14 +1132,14 @@ fn review_body_lines(
                     pal.add_gutter_bg,
                     pal.add_emph_bg,
                     '+',
-                    Color::Green,
+                    pal.add_fg,
                 ),
                 LineOrigin::Deletion => (
                     pal.del_bg,
                     pal.del_gutter_bg,
                     pal.del_emph_bg,
                     '-',
-                    Color::Red,
+                    pal.del_fg,
                 ),
                 LineOrigin::Context => {
                     (Color::Reset, Color::Reset, Color::Reset, ' ', pal.gutter_fg)
@@ -1180,6 +1179,7 @@ fn review_body_lines(
                         ann,
                         state.is_comment_collapsed(ann.id),
                         width,
+                        pal,
                     ));
                 }
             }
@@ -1275,7 +1275,12 @@ fn push_segment(
 /// Render an comment as an inline box, visually distinct from the diff.
 /// Collapsed → a single rounded header bar with a preview; expanded → the bar
 /// plus the wrapped comment and a closing border.
-fn comment_box_lines(ann: &Comment, collapsed: bool, width: usize) -> Vec<Line<'static>> {
+fn comment_box_lines(
+    ann: &Comment,
+    collapsed: bool,
+    width: usize,
+    pal: &ReviewPalette,
+) -> Vec<Line<'static>> {
     const INDENT: &str = "  ";
     let avail = width.saturating_sub(INDENT.len());
     if avail < 8 {
@@ -1283,7 +1288,11 @@ fn comment_box_lines(ann: &Comment, collapsed: bool, width: usize) -> Vec<Line<'
     }
     let inner = avail - 2; // text columns between the │ borders
     let drifted = ann.status == CommentStatus::Drifted;
-    let border = Style::default().fg(if drifted { Color::Red } else { Color::Yellow });
+    let border = Style::default().fg(if drifted {
+        pal.drift_border
+    } else {
+        pal.comment_border
+    });
     let icon = if drifted { "⚠" } else { "✎" };
     let chevron = if collapsed { '▸' } else { '▾' };
 
@@ -1583,6 +1592,7 @@ fn review_body_lines_side_by_side(
                                 ann,
                                 state.is_comment_collapsed(ann.id),
                                 width,
+                                pal,
                             ));
                         }
                     }
@@ -1849,9 +1859,10 @@ diff --git a/b.rs b/b.rs
             "let y = 3;",
             "extract helper\nand rename",
         );
-        assert_eq!(comment_box_lines(&ann, true, 60).len(), 1);
+        let pal = Theme::truecolor().review_palette();
+        assert_eq!(comment_box_lines(&ann, true, 60, &pal).len(), 1);
         // top border + two comment paragraphs + bottom border.
-        assert_eq!(comment_box_lines(&ann, false, 60).len(), 4);
+        assert_eq!(comment_box_lines(&ann, false, 60, &pal).len(), 4);
     }
 
     #[test]

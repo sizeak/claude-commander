@@ -132,10 +132,12 @@ impl Default for Theme {
     }
 }
 
-/// Colour palette for the full-screen review diff view, modelled on `lumen`'s
-/// scheme: dark green/red line fills, brighter fills for the intra-line
-/// (word-level) diff, a tinted dim gutter, and a hatch colour for alignment
-/// gaps. Degrades from true-color RGB to indexed/ANSI by capability.
+/// Colour palette for the full-screen review diff view, derived entirely from
+/// the active [`Theme`] so it follows the user's chosen preset. Foregrounds use
+/// the theme's diff/text/border colours directly; the add/remove line *fills*
+/// are dimmed from the theme's diff colours on true-color terminals, fall back
+/// to fixed dark indexed fills on 256-colour, and to foreground-only on
+/// 16-colour.
 #[derive(Debug, Clone, Copy)]
 pub struct ReviewPalette {
     /// Background fill for an added line.
@@ -157,50 +159,78 @@ pub struct ReviewPalette {
     pub gap_fg: Color,
     /// Hunk header foreground.
     pub hunk_header: Color,
+    /// Foreground for added lines' `+` sign and added-file rows.
+    pub add_fg: Color,
+    /// Foreground for removed lines' `-` sign and deleted-file rows.
+    pub del_fg: Color,
+    /// File-tree row colours for modified / renamed files.
+    pub modified_fg: Color,
+    pub renamed_fg: Color,
+    /// File-tree directory colour.
+    pub dir_fg: Color,
+    /// Border colour for a staged comment box.
+    pub comment_border: Color,
+    /// Border colour for a drifted comment box.
+    pub drift_border: Color,
+    /// Pane border colours (focused / unfocused), matching the rest of the UI.
+    pub border_focused: Color,
+    pub border_unfocused: Color,
 }
 
 impl Theme {
-    /// The review-diff palette for this theme's colour capability.
+    /// The review-diff palette, derived from this theme.
     pub fn review_palette(&self) -> ReviewPalette {
-        match self.mode {
-            ColorMode::TrueColor => ReviewPalette {
-                add_bg: Color::Rgb(20, 48, 33),
-                del_bg: Color::Rgb(58, 28, 32),
-                add_emph_bg: Color::Rgb(43, 105, 67),
-                del_emph_bg: Color::Rgb(120, 50, 56),
-                add_gutter_bg: Color::Rgb(28, 64, 44),
-                del_gutter_bg: Color::Rgb(74, 36, 40),
-                gutter_fg: Color::Rgb(110, 116, 135),
-                text: Color::Rgb(205, 210, 225),
-                gap_fg: Color::Rgb(58, 62, 78),
-                hunk_header: Color::Rgb(137, 180, 250),
-            },
-            ColorMode::Indexed => ReviewPalette {
-                add_bg: Color::Indexed(22),      // dark green
-                del_bg: Color::Indexed(52),      // dark red
-                add_emph_bg: Color::Indexed(28), // brighter green
-                del_emph_bg: Color::Indexed(88), // brighter red
-                add_gutter_bg: Color::Indexed(22),
-                del_gutter_bg: Color::Indexed(52),
-                gutter_fg: Color::Indexed(244),
-                text: Color::Reset,
-                gap_fg: Color::Indexed(238),
-                hunk_header: Color::Indexed(117),
-            },
-            // 16-colour terminals: skip dark fills (no dark variants); rely on
-            // foreground colour, using bright bg only for the word-level span.
-            ColorMode::Basic => ReviewPalette {
-                add_bg: Color::Reset,
-                del_bg: Color::Reset,
-                add_emph_bg: Color::Green,
-                del_emph_bg: Color::Red,
-                add_gutter_bg: Color::Reset,
-                del_gutter_bg: Color::Reset,
-                gutter_fg: Color::DarkGray,
-                text: Color::Reset,
-                gap_fg: Color::DarkGray,
-                hunk_header: Color::Cyan,
-            },
+        let add = self.diff_added;
+        let del = self.diff_removed;
+        // Line fills: dimmed theme colours on true-color; fixed indexed darks
+        // on 256-colour; none (foreground-only) on 16-colour.
+        let (add_bg, del_bg, add_emph_bg, del_emph_bg, add_gutter_bg, del_gutter_bg) =
+            match self.mode {
+                ColorMode::TrueColor => (
+                    dim_color(add, 0.16),
+                    dim_color(del, 0.16),
+                    dim_color(add, 0.40),
+                    dim_color(del, 0.40),
+                    dim_color(add, 0.22),
+                    dim_color(del, 0.22),
+                ),
+                ColorMode::Indexed => (
+                    Color::Indexed(22),
+                    Color::Indexed(52),
+                    Color::Indexed(28),
+                    Color::Indexed(88),
+                    Color::Indexed(22),
+                    Color::Indexed(52),
+                ),
+                ColorMode::Basic => (
+                    Color::Reset,
+                    Color::Reset,
+                    Color::Green,
+                    Color::Red,
+                    Color::Reset,
+                    Color::Reset,
+                ),
+            };
+        ReviewPalette {
+            add_bg,
+            del_bg,
+            add_emph_bg,
+            del_emph_bg,
+            add_gutter_bg,
+            del_gutter_bg,
+            gutter_fg: self.text_secondary,
+            text: self.text_primary,
+            gap_fg: self.border_unfocused,
+            hunk_header: self.diff_hunk_header,
+            add_fg: add,
+            del_fg: del,
+            modified_fg: self.diff_file_header,
+            renamed_fg: self.text_accent,
+            dir_fg: self.text_accent,
+            comment_border: self.diff_file_header,
+            drift_border: del,
+            border_focused: self.border_focused,
+            border_unfocused: self.border_unfocused,
         }
     }
 }
