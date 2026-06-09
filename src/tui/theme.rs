@@ -175,6 +175,9 @@ pub struct ReviewPalette {
     /// Pane border colours (focused / unfocused), matching the rest of the UI.
     pub border_focused: Color,
     pub border_unfocused: Color,
+    /// Selection highlight, matching the session list.
+    pub selection_bg: Color,
+    pub selection_fg: Option<Color>,
 }
 
 impl Theme {
@@ -231,6 +234,8 @@ impl Theme {
             drift_border: del,
             border_focused: self.border_focused,
             border_unfocused: self.border_unfocused,
+            selection_bg: self.selection_bg,
+            selection_fg: self.selection_fg,
         }
     }
 }

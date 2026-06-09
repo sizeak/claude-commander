@@ -827,13 +827,16 @@ impl App {
                 } => {
                     let indent = "  ".repeat(*depth);
                     let chevron = if *collapsed { '▶' } else { '▼' };
-                    let style = Style::default().fg(pal.dir_fg).add_modifier(Modifier::BOLD);
-                    let style = if on_cursor {
-                        style.add_modifier(Modifier::REVERSED)
+                    let spans = vec![Span::styled(
+                        format!("{indent}{chevron} {name}"),
+                        Style::default().fg(pal.dir_fg).add_modifier(Modifier::BOLD),
+                    )];
+                    let spans = if on_cursor {
+                        select_spans(spans, &pal)
                     } else {
-                        style
+                        spans
                     };
-                    Line::from(Span::styled(format!("{indent}{chevron} {name}"), style))
+                    Line::from(spans)
                 }
                 TreeRow::File { depth, index, name } => {
                     let file = &state.diff.files[*index];
@@ -856,7 +859,7 @@ impl App {
                         Span::raw(format!(" {name}{badge}")),
                     ];
                     if on_cursor {
-                        spans = reverse_spans(spans);
+                        spans = select_spans(spans, &pal);
                     }
                     Line::from(spans)
                 }
@@ -1168,7 +1171,7 @@ fn review_body_lines(
             }
             let mut spans = fit_spans(spans, width, line_bg);
             if focused && idx >= sel_lo && idx <= sel_hi {
-                spans = reverse_spans(spans);
+                spans = select_spans(spans, pal);
             }
             out.push(Line::from(spans));
 
@@ -1371,11 +1374,18 @@ fn wrap_text(s: &str, width: usize) -> Vec<String> {
     lines
 }
 
-/// Apply the reversed (selection-highlight) modifier to every span.
-fn reverse_spans(spans: Vec<Span<'static>>) -> Vec<Span<'static>> {
+/// Apply the theme's selection highlight to every span (background, and
+/// foreground when the theme sets one), matching the session list.
+fn select_spans(spans: Vec<Span<'static>>, pal: &ReviewPalette) -> Vec<Span<'static>> {
     spans
         .into_iter()
-        .map(|s| Span::styled(s.content, s.style.add_modifier(Modifier::REVERSED)))
+        .map(|s| {
+            let mut style = s.style.bg(pal.selection_bg);
+            if let Some(fg) = pal.selection_fg {
+                style = style.fg(fg);
+            }
+            Span::styled(s.content, style)
+        })
         .collect()
 }
 
@@ -1559,7 +1569,7 @@ fn review_body_lines_side_by_side(
         }
         let spans = fit_spans(spans, col, line_bg);
         if focused && i >= sel_lo && i <= sel_hi {
-            reverse_spans(spans)
+            select_spans(spans, pal)
         } else {
             spans
         }
