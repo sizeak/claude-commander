@@ -1402,41 +1402,108 @@ fn select_spans(spans: Vec<Span<'static>>, pal: &ReviewPalette) -> Vec<Span<'sta
 /// (`false`) by the word-level diff.
 type WordSegs = Vec<(String, bool)>;
 
+/// Token class for intra-line diffing: identifier runs and whitespace runs are
+/// each coalesced into a single token; every other character stands alone.
+#[derive(PartialEq, Eq)]
+enum TokClass {
+    Word,
+    Space,
+    Other,
+}
+
+fn tok_class(c: char) -> TokClass {
+    if c.is_alphanumeric() || c == '_' {
+        TokClass::Word
+    } else if c.is_whitespace() {
+        TokClass::Space
+    } else {
+        TokClass::Other
+    }
+}
+
+/// Split a line into tokens: maximal identifier/whitespace runs plus
+/// single-character punctuation. The concatenation of the tokens is `s`.
+fn tokenize(s: &str) -> Vec<&str> {
+    let mut toks = Vec::new();
+    let mut iter = s.char_indices().peekable();
+    while let Some((start, c)) = iter.next() {
+        let class = tok_class(c);
+        let mut end = start + c.len_utf8();
+        // `Other` chars never coalesce; word/space runs absorb their kind.
+        if class != TokClass::Other {
+            while let Some(&(j, nc)) = iter.peek() {
+                if tok_class(nc) == class {
+                    end = j + nc.len_utf8();
+                    iter.next();
+                } else {
+                    break;
+                }
+            }
+        }
+        toks.push(&s[start..end]);
+    }
+    toks
+}
+
+/// LCS over two token sequences. Returns, for each side, a `keep` flag per
+/// token: `true` where the token is part of the longest common subsequence
+/// (unchanged), `false` where it was inserted/deleted (changed).
+fn lcs_keep(a: &[&str], b: &[&str]) -> (Vec<bool>, Vec<bool>) {
+    let (n, m) = (a.len(), b.len());
+    // dp[i][j] = LCS length of a[i..] and b[j..].
+    let mut dp = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            dp[i][j] = if a[i] == b[j] {
+                dp[i + 1][j + 1] + 1
+            } else {
+                dp[i + 1][j].max(dp[i][j + 1])
+            };
+        }
+    }
+    let mut a_keep = vec![false; n];
+    let mut b_keep = vec![false; m];
+    let (mut i, mut j) = (0, 0);
+    while i < n && j < m {
+        if a[i] == b[j] {
+            a_keep[i] = true;
+            b_keep[j] = true;
+            i += 1;
+            j += 1;
+        } else if dp[i + 1][j] >= dp[i][j + 1] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    (a_keep, b_keep)
+}
+
+/// Coalesce tokens into runs of equal changed/unchanged flag.
+fn coalesce(toks: &[&str], keep: &[bool]) -> WordSegs {
+    let mut segs: WordSegs = Vec::new();
+    for (tok, kept) in toks.iter().zip(keep) {
+        let changed = !kept;
+        match segs.last_mut() {
+            Some(last) if last.1 == changed => last.0.push_str(tok),
+            _ => segs.push((tok.to_string(), changed)),
+        }
+    }
+    if segs.is_empty() {
+        segs.push((String::new(), false));
+    }
+    segs
+}
+
 /// Split a changed (old, new) line pair into segments tagged changed/unchanged,
-/// using a character-level common-prefix/suffix heuristic — enough to highlight
-/// the edited span within a line without a full intra-line diff.
+/// using a token-level diff (identifier/whitespace runs + single punctuation,
+/// matched by longest common subsequence). This emphasises only the genuinely
+/// different tokens, even when changes are separated by unchanged text.
 fn word_diff(old: &str, new: &str) -> (WordSegs, WordSegs) {
-    let o: Vec<char> = old.chars().collect();
-    let n: Vec<char> = new.chars().collect();
-    let min = o.len().min(n.len());
-
-    let mut pre = 0;
-    while pre < min && o[pre] == n[pre] {
-        pre += 1;
-    }
-    let mut suf = 0;
-    while suf < min - pre && o[o.len() - 1 - suf] == n[n.len() - 1 - suf] {
-        suf += 1;
-    }
-
-    let split = |chars: &[char]| -> Vec<(String, bool)> {
-        let len = chars.len();
-        let mut v = Vec::new();
-        if pre > 0 {
-            v.push((chars[..pre].iter().collect(), false));
-        }
-        if len - suf > pre {
-            v.push((chars[pre..len - suf].iter().collect(), true));
-        }
-        if suf > 0 {
-            v.push((chars[len - suf..].iter().collect(), false));
-        }
-        if v.is_empty() {
-            v.push((String::new(), false));
-        }
-        v
-    };
-    (split(&o), split(&n))
+    let o = tokenize(old);
+    let n = tokenize(new);
+    let (o_keep, n_keep) = lcs_keep(&o, &n);
+    (coalesce(&o, &o_keep), coalesce(&n, &n_keep))
 }
 
 /// Compute per-selectable-line segment lists for the current file, applying a
@@ -1934,6 +2001,34 @@ diff --git a/b.rs b/b.rs
         let (old, new) = word_diff("same", "same");
         assert_eq!(old, vec![("same".to_string(), false)]);
         assert_eq!(new, vec![("same".to_string(), false)]);
+    }
+
+    #[test]
+    fn word_diff_highlights_only_changed_tokens() {
+        // Two separated changes on one line (`1`→`9` and `2`→`8`). A
+        // char-level common-prefix/suffix heuristic collapses everything
+        // between the first and last change into one big emphasised span
+        // (highlighting the unchanged `; bar = ` middle). A token-level diff
+        // must emphasise *only* the changed numbers.
+        let (old, new) = word_diff("foo = 1; bar = 2;", "foo = 9; bar = 8;");
+
+        let old_changed: Vec<&str> = old
+            .iter()
+            .filter(|(_, e)| *e)
+            .map(|(t, _)| t.as_str())
+            .collect();
+        assert_eq!(old_changed, vec!["1", "2"]);
+
+        let new_changed: Vec<&str> = new
+            .iter()
+            .filter(|(_, e)| *e)
+            .map(|(t, _)| t.as_str())
+            .collect();
+        assert_eq!(new_changed, vec!["9", "8"]);
+
+        // The shared `; bar = ` between the two changes stays unchanged.
+        assert!(old.iter().any(|(t, e)| !e && t.contains("bar")));
+        assert!(new.iter().any(|(t, e)| !e && t.contains("bar")));
     }
 
     #[test]
