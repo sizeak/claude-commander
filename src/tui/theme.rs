@@ -190,12 +190,12 @@ impl Theme {
         let (add_bg, del_bg, add_emph_bg, del_emph_bg, add_gutter_bg, del_gutter_bg) =
             match self.mode {
                 ColorMode::TrueColor => (
-                    fill_color(add, 0.22),
-                    fill_color(del, 0.22),
-                    fill_color(add, 0.40),
-                    fill_color(del, 0.40),
-                    fill_color(add, 0.30),
-                    fill_color(del, 0.30),
+                    fill_color(add, 0.19),
+                    fill_color(del, 0.19),
+                    fill_color(add, 0.36),
+                    fill_color(del, 0.36),
+                    fill_color(add, 0.26),
+                    fill_color(del, 0.26),
                 ),
                 ColorMode::Indexed => (
                     Color::Indexed(22),
@@ -748,7 +748,7 @@ impl Theme {
 /// rich green/red rather than washed-out grey), then scales toward black to the
 /// target `brightness`.
 pub fn fill_color(base: Color, brightness: f32) -> Color {
-    const SAT: f32 = 1.65;
+    const SAT: f32 = 1.75;
     let (r, g, b) = color_to_approx_rgb(base);
     let (r, g, b) = (r as f32, g as f32, b as f32);
     let mean = (r + g + b) / 3.0;
