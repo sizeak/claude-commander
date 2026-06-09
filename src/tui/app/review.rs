@@ -13,7 +13,7 @@ use crate::comment::{Comment, CommentSide, CommentStatus};
 use crate::git::{DiffLine, FileDiff, FileStatus, Hunk, LineOrigin, ParsedDiff};
 use crate::tui::syntax_highlight::highlight_line;
 use crate::tui::theme::{ColorMode, ReviewPalette};
-use std::cell::{Ref, RefCell};
+use std::cell::{Cell, Ref, RefCell};
 
 /// Gutter / badge / box marker for a staged comment. An asterisk is the
 /// conventional note/comment marker and stays crisp at one cell.
@@ -40,6 +40,100 @@ pub enum ReviewLayout {
     Inline,
     /// Old | new split columns.
     SideBySide,
+}
+
+/// Columns the inline gutter occupies before the code content, summing to 14:
+/// left edge bar (1), comment marker (1), old lineno (4), gap (1), new lineno
+/// (4), gap (1), sign (1), and a gap (1) after the sign so code doesn't butt
+/// against the +/-. Long content soft-wraps within [`inline_content_width`].
+const INLINE_GUTTER_COLS: usize = 14;
+
+/// A small right margin kept clear when soft-wrapping, so wrapped text doesn't
+/// butt directly against the body border (the background fill still extends to
+/// the edge; only the wrap point is pulled in).
+const INLINE_WRAP_RIGHT_MARGIN: usize = 2;
+
+/// Columns available for code content on an inline row — i.e. the soft-wrap
+/// width: the body width minus the fixed gutter and a small right margin. Used
+/// by both the renderer and the row-layout mapping so they wrap identically.
+fn inline_content_width(body_width: usize) -> usize {
+    body_width.saturating_sub(INLINE_GUTTER_COLS + INLINE_WRAP_RIGHT_MARGIN)
+}
+
+/// One physical (rendered) row of the inline body. Long diff lines soft-wrap to
+/// several `Line { cont: true }` rows, and comment boxes interleave as `Comment`
+/// rows, so this is the single source of truth that the renderer and every
+/// row↔line mapping (cursor, scroll, click) derive from — keeping them in lock
+/// step regardless of wrapping or interleaved boxes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BodyRow {
+    /// A hunk header (`@@ … @@`).
+    Header,
+    /// A diff line (`sel` = selectable-line index); `cont` is true for the
+    /// soft-wrap continuation rows after the first.
+    Line { sel: usize, cont: bool },
+    /// A row belonging to an interleaved comment box.
+    Comment { id: uuid::Uuid },
+}
+
+/// Greedy word-wrap of `text` into rows at most `width` columns wide, returning
+/// each row's length in characters. Breaks at whitespace; a single word longer
+/// than `width` is hard-split. Every character is preserved (no collapsing) and
+/// the lengths sum to `text.chars().count()`, so a styled span stream can be
+/// re-sliced by these lengths without losing any content or styling. Always
+/// returns at least one row.
+fn wrap_row_lens(text: &str, width: usize) -> Vec<usize> {
+    let total = text.chars().count();
+    if width == 0 || total == 0 {
+        return vec![total];
+    }
+    // Runs of whitespace / non-whitespace, as (length, is_whitespace).
+    let mut tokens: Vec<(usize, bool)> = Vec::new();
+    for ch in text.chars() {
+        let ws = ch.is_whitespace();
+        match tokens.last_mut() {
+            Some((len, last_ws)) if *last_ws == ws => *len += 1,
+            _ => tokens.push((1, ws)),
+        }
+    }
+
+    let mut lens = Vec::new();
+    let mut row = 0usize; // chars on the current row
+    for &(mut remaining, is_ws) in &tokens {
+        while remaining > 0 {
+            if row == width {
+                lens.push(row);
+                row = 0;
+            }
+            let space = width - row;
+            if remaining <= space {
+                row += remaining;
+                remaining = 0;
+            } else if row > 0 && !is_ws && remaining <= width {
+                // A whole word that doesn't fit here but fits on its own row:
+                // wrap to a fresh row rather than splitting it.
+                lens.push(row);
+                row = 0;
+            } else {
+                // Fills the row exactly (over-long word or whitespace run).
+                row += space;
+                remaining -= space;
+                lens.push(row);
+                row = 0;
+            }
+        }
+    }
+    if row > 0 || lens.is_empty() {
+        lens.push(row);
+    }
+    lens
+}
+
+/// Number of physical rows a diff line's `content` occupies when word-wrapped
+/// into `content_width`-wide rows. Defers to [`wrap_row_lens`] so it matches the
+/// renderer exactly (guarded by a test).
+fn line_wrap_rows(content: &str, content_width: usize) -> usize {
+    wrap_row_lens(content, content_width).len()
 }
 
 /// An in-progress comment, captured against a selectable-line range.
@@ -89,6 +183,10 @@ pub struct DiffReviewState {
     /// [`Self::word_segments`] or eagerly by [`Self::prime_segments`] when the
     /// open-review background task precomputes them all up front.
     seg_cache: RefCell<Vec<Option<Vec<WordSegs>>>>,
+    /// Body content width (pane inner width) from the most recent render, so the
+    /// keypress-time cursor/scroll math wraps lines the same way the renderer
+    /// does. Interior-mutable: the renderer holds `&self`.
+    body_width: Cell<usize>,
 }
 
 /// A node in the file tree: either a directory (with children) or a file leaf
@@ -152,6 +250,9 @@ impl DiffReviewState {
             tree_scroll: 0,
             collapsed_comments: HashSet::new(),
             seg_cache: RefCell::new(vec![None; seg_slots]),
+            // A reasonable default until the first render reports the real width
+            // (keypress math before any render is then close enough to self-heal).
+            body_width: Cell::new(120),
         }
     }
 
@@ -364,8 +465,53 @@ impl DiffReviewState {
         }
     }
 
-    /// Body row index (counting hunk headers) of selectable line `idx`.
+    /// The inline body's physical rows, in render order: a hunk header, then
+    /// each diff line (one row, plus continuation rows when its content
+    /// soft-wraps past `content_width = body_width - INLINE_GUTTER_COLS`), then
+    /// any comment boxes anchored to that line. The single layout used by the
+    /// inline renderer and by every row↔line mapping below.
+    fn inline_physical_rows(&self) -> Vec<BodyRow> {
+        let mut rows = Vec::new();
+        let Some(file) = self.current_file() else {
+            return rows;
+        };
+        let body_width = self.body_width.get();
+        let content_width = inline_content_width(body_width);
+        let anchors = self.comment_anchors();
+        let mut sel = 0;
+        for hunk in &file.hunks {
+            rows.push(BodyRow::Header);
+            for line in &hunk.lines {
+                let h = line_wrap_rows(&line.content, content_width);
+                for c in 0..h {
+                    rows.push(BodyRow::Line { sel, cont: c > 0 });
+                }
+                if let Some(anns) = anchors.get(&sel) {
+                    for ann in anns {
+                        let bh =
+                            comment_box_height(ann, self.is_comment_collapsed(ann.id), body_width);
+                        for _ in 0..bh {
+                            rows.push(BodyRow::Comment { id: ann.id });
+                        }
+                    }
+                }
+                sel += 1;
+            }
+        }
+        rows
+    }
+
+    /// Physical body row of selectable line `idx`'s first (non-continuation)
+    /// row. In side-by-side the row structure differs, so a simpler linear walk
+    /// is used (it never wraps).
     fn body_row_of(&self, idx: usize) -> usize {
+        if self.layout == ReviewLayout::Inline {
+            return self
+                .inline_physical_rows()
+                .iter()
+                .position(|r| matches!(r, BodyRow::Line { sel, cont: false } if *sel == idx))
+                .unwrap_or(0);
+        }
         let Some(file) = self.current_file() else {
             return 0;
         };
@@ -406,8 +552,12 @@ impl DiffReviewState {
         true
     }
 
-    /// Total body rows (hunk headers + lines) for the current file.
+    /// Total physical body rows for the current file (hunk headers, diff lines
+    /// incl. soft-wrap continuations, and interleaved comment boxes).
     fn total_body_rows(&self) -> usize {
+        if self.layout == ReviewLayout::Inline {
+            return self.inline_physical_rows().len();
+        }
         self.current_file()
             .map(|f| f.hunks.iter().map(|h| h.lines.len() + 1).sum())
             .unwrap_or(0)
@@ -425,26 +575,15 @@ impl DiffReviewState {
         };
     }
 
-    /// Selectable-line index at body row `body_row` (`None` for a header row or
-    /// out of range) — the inverse of [`Self::body_row_of`].
+    /// Selectable-line index at body row `body_row` (`None` for a header,
+    /// comment-box, or out-of-range row). A click on a soft-wrap continuation
+    /// row maps to its diff line. Inline only — the inverse of
+    /// [`Self::body_row_of`]; callers gate side-by-side out.
     fn selectable_at_body_row(&self, body_row: usize) -> Option<usize> {
-        let file = self.current_file()?;
-        let mut row = 0;
-        let mut sel = 0;
-        for hunk in &file.hunks {
-            if row == body_row {
-                return None; // header row
-            }
-            row += 1;
-            for _ in &hunk.lines {
-                if row == body_row {
-                    return Some(sel);
-                }
-                row += 1;
-                sel += 1;
-            }
+        match self.inline_physical_rows().get(body_row) {
+            Some(BodyRow::Line { sel, .. }) => Some(*sel),
+            _ => None,
         }
-        None
     }
 
     /// Scroll the body by one row (free of the cursor), for mouse wheel.
@@ -718,16 +857,10 @@ impl DiffReviewState {
 
         match self.layout {
             ReviewLayout::Inline => {
-                let mut sel = 0usize;
-                for hunk in &file.hunks {
-                    row += 1; // hunk header
-                    for _ in &hunk.lines {
-                        row += 1; // the diff line itself
-                        if let Some(id) = box_hit(&mut row, sel) {
-                            return Some(id);
-                        }
-                        sel += 1;
-                    }
+                // Inline shares the renderer's exact physical layout (wrapping
+                // and boxes), so a direct row lookup is correct.
+                if let Some(BodyRow::Comment { id }) = self.inline_physical_rows().get(body_row) {
+                    return Some(*id);
                 }
             }
             ReviewLayout::SideBySide => {
@@ -1185,6 +1318,9 @@ impl App {
             .map(|f| file_extension(f.display_path()).to_string())
             .unwrap_or_default();
         let width = area.width.saturating_sub(2) as usize;
+        // Record the content width so keypress-time cursor/scroll math wraps
+        // lines exactly as we render them here.
+        state.body_width.set(width);
         let segs = state.word_segments();
         let lines = match state.layout {
             ReviewLayout::Inline => {
@@ -1467,24 +1603,48 @@ fn review_body_lines(
             let old = lineno_str(line.old_lineno);
             let new = lineno_str(line.new_lineno);
 
-            let mut spans = vec![
-                // Bright left edge bar on changed lines.
-                Span::styled(" ", Style::default().bg(emph_bg)),
-                Span::styled(
-                    format!("{ann}{old} {new} "),
-                    Style::default().fg(pal.gutter_fg).bg(gutter_bg),
-                ),
-                Span::styled(sign.to_string(), Style::default().fg(sign_fg).bg(line_bg)),
-            ];
+            // Code content as its own span list, so it can soft-wrap independent
+            // of the fixed-width gutter.
+            let mut content_spans = Vec::new();
             for (text, emph) in &segs[idx] {
                 let bg = if *emph { emph_bg } else { line_bg };
-                push_segment(&mut spans, text, ext, highlight, pal.text, bg);
+                push_segment(&mut content_spans, text, ext, highlight, pal.text, bg);
             }
-            let mut spans = fit_spans(spans, width, line_bg);
-            if focused && idx >= sel_lo && idx <= sel_hi {
-                spans = select_spans(spans, pal);
+
+            // First row carries the line numbers + sign; wrap continuations get a
+            // blank gutter of the same width so the coloured fill stays aligned.
+            let gutter = |first: bool| -> Vec<Span<'static>> {
+                vec![
+                    Span::styled(" ", Style::default().bg(emph_bg)),
+                    if first {
+                        Span::styled(
+                            format!("{ann}{old} {new} "),
+                            Style::default().fg(pal.gutter_fg).bg(gutter_bg),
+                        )
+                    } else {
+                        Span::styled(" ".repeat(11), Style::default().bg(gutter_bg))
+                    },
+                    // Sign + a space so the code doesn't butt against the +/-.
+                    if first {
+                        Span::styled(format!("{sign} "), Style::default().fg(sign_fg).bg(line_bg))
+                    } else {
+                        Span::styled("  ", Style::default().bg(line_bg))
+                    },
+                ]
+            };
+
+            let content_width = inline_content_width(width);
+            let wrapped = wrap_spans(content_spans, content_width);
+            let selected = focused && idx >= sel_lo && idx <= sel_hi;
+            for (c, content_row) in wrapped.into_iter().enumerate() {
+                let mut spans = gutter(c == 0);
+                spans.extend(content_row);
+                let mut spans = fit_spans(spans, width, line_bg);
+                if selected {
+                    spans = select_spans(spans, pal);
+                }
+                out.push(Line::from(spans));
             }
-            out.push(Line::from(spans));
 
             // Inline comment box(es) anchored to this line.
             if let Some(anns) = anchors.get(&idx) {
@@ -1552,6 +1712,44 @@ fn fit_spans(spans: Vec<Span<'static>>, width: usize, pad_bg: Color) -> Vec<Span
         ));
     }
     out
+}
+
+/// Word-wrap styled content `spans` into rows of at most `width` display
+/// columns. The break points come from [`wrap_row_lens`] (whitespace-aware,
+/// hard-splitting only over-long words), and the span stream is re-sliced by
+/// those row lengths — so styling is preserved across a break, even when it
+/// falls inside a span. Always returns at least one row.
+fn wrap_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> {
+    let text: String = spans.iter().flat_map(|s| s.content.chars()).collect();
+    let lens = wrap_row_lens(&text, width);
+    if lens.len() <= 1 {
+        return vec![spans];
+    }
+    let mut rows: Vec<Vec<Span<'static>>> = Vec::with_capacity(lens.len());
+    let mut row: Vec<Span<'static>> = Vec::new();
+    let mut row_idx = 0;
+    let mut row_remaining = lens[0];
+    for span in spans {
+        let style = span.style;
+        let mut buf = String::new();
+        for ch in span.content.chars() {
+            while row_remaining == 0 {
+                if !buf.is_empty() {
+                    row.push(Span::styled(std::mem::take(&mut buf), style));
+                }
+                rows.push(std::mem::take(&mut row));
+                row_idx += 1;
+                row_remaining = lens.get(row_idx).copied().unwrap_or(usize::MAX);
+            }
+            buf.push(ch);
+            row_remaining -= 1;
+        }
+        if !buf.is_empty() {
+            row.push(Span::styled(buf, style));
+        }
+    }
+    rows.push(row);
+    rows
 }
 
 /// File extension (no dot) of a path's final component, or `""` if none.
@@ -2787,6 +2985,122 @@ diff --git a/x.rs b/x.rs
             Vec::new(),
         );
         assert!(s.word_segments().is_empty());
+    }
+
+    fn state_with_long_line() -> DiffReviewState {
+        // One short context line and one long addition (16 content columns).
+        let diff = parse_unified_diff(
+            "\
+diff --git a/x.rs b/x.rs
+--- a/x.rs
++++ b/x.rs
+@@ -1 +1,2 @@
+ ctx
++0123456789ABCDEF
+",
+        );
+        DiffReviewState::new(
+            SessionId::new(),
+            "test".to_string(),
+            "main".to_string(),
+            diff,
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn wrap_row_lens_breaks_at_whole_words() {
+        // "hello world foo" at width 8 → "hello " / "world " / "foo".
+        assert_eq!(wrap_row_lens("hello world foo", 8), vec![6, 6, 3]);
+    }
+
+    #[test]
+    fn wrap_row_lens_hard_splits_overlong_words() {
+        // No whitespace to break on, so fall back to filling each row.
+        assert_eq!(wrap_row_lens("abcdefghij", 4), vec![4, 4, 2]);
+    }
+
+    #[test]
+    fn wrap_spans_word_wraps_and_preserves_text() {
+        // Break falls inside the second span; styling and all characters are
+        // preserved, and it wraps at the space (whole words).
+        let rows = wrap_spans(
+            vec![
+                Span::raw("hello ".to_string()),
+                Span::raw("world foo".to_string()),
+            ],
+            8,
+        );
+        let texts: Vec<String> = rows
+            .iter()
+            .map(|r| r.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert_eq!(texts, vec!["hello ", "world ", "foo"]);
+    }
+
+    #[test]
+    fn line_wrap_rows_matches_wrap_spans_count() {
+        for text in ["", "x", "abc", "hello world foo", "abcdefghij", "a b c d e"] {
+            let spans = vec![Span::raw(text.to_string())];
+            assert_eq!(
+                wrap_spans(spans, 4).len(),
+                line_wrap_rows(text, 4),
+                "text {text:?}"
+            );
+        }
+        // Degenerate zero width is one (clipped) row, not an infinite wrap.
+        assert_eq!(line_wrap_rows("0123456789", 0), 1);
+        assert_eq!(
+            wrap_spans(vec![Span::raw("0123456789".to_string())], 0).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn long_line_wraps_and_mappings_stay_consistent() {
+        let s = state_with_long_line();
+        // Body width chosen so the content (wrap) width is exactly 8 columns.
+        s.body_width
+            .set(INLINE_GUTTER_COLS + INLINE_WRAP_RIGHT_MARGIN + 8);
+        assert_eq!(inline_content_width(s.body_width.get()), 8);
+        let rows = s.inline_physical_rows();
+        // header + ctx(1 row) + long(16 cols → 2 rows).
+        assert_eq!(
+            rows,
+            vec![
+                BodyRow::Header,
+                BodyRow::Line {
+                    sel: 0,
+                    cont: false
+                },
+                BodyRow::Line {
+                    sel: 1,
+                    cont: false
+                },
+                BodyRow::Line { sel: 1, cont: true },
+            ]
+        );
+        assert_eq!(s.total_body_rows(), 4);
+        // First (non-continuation) physical row of the wrapped line.
+        assert_eq!(s.body_row_of(1), 2);
+        // A click anywhere on the wrapped line — including its continuation
+        // row — selects that diff line; the header row selects nothing.
+        assert_eq!(s.selectable_at_body_row(2), Some(1));
+        assert_eq!(s.selectable_at_body_row(3), Some(1));
+        assert_eq!(s.selectable_at_body_row(0), None);
+    }
+
+    #[test]
+    fn rendered_inline_rows_match_physical_layout() {
+        // The renderer and the row↔line mapping must produce the same number of
+        // physical rows, or cursor/scroll/click drift once a line wraps.
+        let s = state_with_long_line();
+        let width = INLINE_GUTTER_COLS + INLINE_WRAP_RIGHT_MARGIN + 8;
+        s.body_width.set(width);
+        let pal = Theme::truecolor().review_palette();
+        let segs = s.word_segments();
+        let lines = review_body_lines(&s, false, &pal, "rs", true, width, &segs);
+        assert_eq!(lines.len(), s.inline_physical_rows().len());
     }
 
     #[test]

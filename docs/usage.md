@@ -111,7 +111,9 @@ foreground-only colouring on 256- and 16-colour terminals.
   expands/collapses a directory; `[` / `]` jump between files; in the body,
   `↑↓`/`jk` move the cursor and the mouse wheel scrolls. Clicking a file in the
   tree selects it (clicking a directory expands/collapses it). `t` toggles
-  between inline and side-by-side layouts.
+  between inline and side-by-side layouts. In the inline layout, lines longer
+  than the pane soft-wrap onto continuation rows (GitHub-style) so nothing runs
+  off-screen; side-by-side truncates to keep its columns aligned.
 - **Comment**: in the body, press `v` to start a line selection (arrows grow
   or shrink it; mouse drag also selects), then `Enter` to attach a comment.
   Comments are *staged* — they persist across restarts until applied, and
