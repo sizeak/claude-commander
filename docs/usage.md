@@ -116,8 +116,8 @@ foreground-only colouring on 256- and 16-colour terminals.
   or shrink it; mouse drag also selects), then `Enter` to attach a comment.
   Comments are *staged* — they persist across restarts until applied, and
   show as `*` in the gutter (and a per-file badge). Each comment also
-  renders as an inline box beneath its line; press `z` to fold it down to a
-  single-line header or expand it again.
+  renders as an inline box beneath its line; press `z` (or click the box) to
+  fold it down to a single-line header or expand it again.
 - **Apply**: press `a` to hand all staged comments to the session's agent.
   They're written to a markdown brief and the agent is prompted to address
   them — sent immediately when idle/working (it queues natively), held until a

@@ -422,16 +422,26 @@ impl DiffReviewState {
         };
     }
 
-    /// Left-click at a screen position: focus the body and move the cursor to
-    /// the clicked diff line (clearing any selection).
+    /// Left-click at a screen position. Clicking a comment box folds or unfolds
+    /// it; clicking a diff line focuses the body and moves the cursor there
+    /// (clearing any selection).
     pub fn click_at(&mut self, col: u16, row: u16, body: Rect) {
         let Some(body_row) = self.body_row_at(col, row, body) else {
             return;
         };
+        if let Some(id) = self.comment_box_at_body_row(body_row, body.width as usize) {
+            self.toggle_comment_collapsed(id);
+            return;
+        }
+        self.place_cursor_at_row(body_row);
+    }
+
+    /// Focus the body and move the cursor to the diff line at `body_row`,
+    /// clearing any active selection. Inline only: in side-by-side the row
+    /// structure differs, so this just focuses the body.
+    fn place_cursor_at_row(&mut self, body_row: usize) {
         self.focus = ReviewFocus::Body;
         self.visual_anchor = None;
-        // Row→line mapping is computed for the inline layout; in side-by-side
-        // the row structure differs, so a click only moves focus there.
         if self.layout == ReviewLayout::Inline
             && let Some(idx) = self.selectable_at_body_row(body_row)
         {
@@ -475,8 +485,12 @@ impl DiffReviewState {
     /// right-click comments on the line under the pointer; an in-progress
     /// drag-selection is preserved and commented on as-is.
     pub fn right_click_comment(&mut self, col: u16, row: u16, body: Rect) -> bool {
-        if self.visual_anchor.is_none() {
-            self.click_at(col, row, body);
+        // Position the cursor on the clicked line (not via `click_at`, which
+        // would toggle a comment box rather than comment on it).
+        if self.visual_anchor.is_none()
+            && let Some(body_row) = self.body_row_at(col, row, body)
+        {
+            self.place_cursor_at_row(body_row);
         }
         self.begin_comment()
     }
@@ -636,6 +650,71 @@ impl DiffReviewState {
     /// Whether comment `id`'s inline box is collapsed.
     fn is_comment_collapsed(&self, id: uuid::Uuid) -> bool {
         self.collapsed_comments.contains(&id)
+    }
+
+    /// Fold an expanded comment box, or unfold a collapsed one.
+    fn toggle_comment_collapsed(&mut self, id: uuid::Uuid) {
+        if !self.collapsed_comments.remove(&id) {
+            self.collapsed_comments.insert(id);
+        }
+    }
+
+    /// If body row `body_row` falls within a rendered comment box, the id of
+    /// that comment. Walks the body in the same row order as the renderer
+    /// (hunk header, diff line, then any comment boxes anchored to it), so the
+    /// interleaved boxes are accounted for. `width` is the body content width
+    /// (used to size wrapped boxes), matching the value passed to the renderer.
+    fn comment_box_at_body_row(&self, body_row: usize, width: usize) -> Option<uuid::Uuid> {
+        let file = self.current_file()?;
+        let anchors = self.comment_anchors();
+        let mut row = 0usize;
+        // Test each comment box anchored after `sel`, advancing `row` past it;
+        // returns the comment id when `body_row` lands inside the box.
+        let box_hit = |row: &mut usize, sel: usize| -> Option<uuid::Uuid> {
+            for ann in anchors.get(&sel)?.iter() {
+                let h = comment_box_height(ann, self.is_comment_collapsed(ann.id), width);
+                if (*row..*row + h).contains(&body_row) {
+                    return Some(ann.id);
+                }
+                *row += h;
+            }
+            None
+        };
+
+        match self.layout {
+            ReviewLayout::Inline => {
+                let mut sel = 0usize;
+                for hunk in &file.hunks {
+                    row += 1; // hunk header
+                    for _ in &hunk.lines {
+                        row += 1; // the diff line itself
+                        if let Some(id) = box_hit(&mut row, sel) {
+                            return Some(id);
+                        }
+                        sel += 1;
+                    }
+                }
+            }
+            ReviewLayout::SideBySide => {
+                for sbs in side_by_side_rows(file) {
+                    row += 1; // header or paired cells
+                    if let SbsRow::Cells { left, right } = sbs {
+                        // Context rows have left == right; de-dup so a box isn't
+                        // counted twice (mirrors the renderer).
+                        let sels: Vec<usize> = match (left, right) {
+                            (Some(l), Some(r)) if l == r => vec![l],
+                            (l, r) => l.into_iter().chain(r).collect(),
+                        };
+                        for sel in sels {
+                            if let Some(id) = box_hit(&mut row, sel) {
+                                return Some(id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// Toggle the inline box (expanded/collapsed) of the comment covering
@@ -1396,6 +1475,30 @@ fn push_segment(
 /// Render an comment as an inline box, visually distinct from the diff.
 /// Collapsed → a single rounded header bar with a preview; expanded → the bar
 /// plus the wrapped comment and a closing border.
+/// Number of rendered rows [`comment_box_lines`] produces for the same inputs,
+/// without building the styled lines. Used by the click hit-test to walk the
+/// body's row layout. Must track `comment_box_lines`'s structure (guarded by a
+/// test).
+fn comment_box_height(ann: &Comment, collapsed: bool, width: usize) -> usize {
+    const INDENT_LEN: usize = 2; // "  "
+    let avail = width.saturating_sub(INDENT_LEN);
+    if avail < 8 {
+        return 0;
+    }
+    if collapsed {
+        return 1;
+    }
+    let inner = avail - 2;
+    let text_width = inner.saturating_sub(2);
+    // Top border + wrapped body lines + bottom border.
+    let body: usize = ann
+        .comment
+        .split('\n')
+        .map(|paragraph| wrap_text(paragraph, text_width).len())
+        .sum();
+    body + 2
+}
+
 fn comment_box_lines(
     ann: &Comment,
     collapsed: bool,
@@ -2198,6 +2301,91 @@ diff --git a/x.rs b/x.rs
         assert!(s.is_comment_collapsed(id));
         s.toggle_comment_fold();
         assert!(!s.is_comment_collapsed(id));
+    }
+
+    #[test]
+    fn comment_box_height_matches_rendered() {
+        let pal = Theme::truecolor().review_palette();
+        for comment in ["short", "one\ntwo\nthree", &"word ".repeat(40)] {
+            let ann = Comment::new("a.rs", CommentSide::New, (2, 2), "snip", comment);
+            for width in [12usize, 40, 80, 6 /* below the 8-col floor */] {
+                for collapsed in [true, false] {
+                    assert_eq!(
+                        comment_box_height(&ann, collapsed, width),
+                        comment_box_lines(&ann, collapsed, width, &pal).len(),
+                        "height mismatch (collapsed={collapsed}, width={width})"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn click_on_comment_box_toggles_fold() {
+        let mut s = state_with_two_files();
+        let ann = Comment::new("a.rs", CommentSide::New, (2, 2), "let y = 3;", "note");
+        let id = ann.id;
+        s.comments.push(ann);
+        let body = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 20,
+        };
+        // Rows: 0 header, 1 ctx, 2 +addition, 3.. comment box. The box is
+        // anchored to selectable index 1 (the addition), so it renders after
+        // body row 2.
+        assert!(!s.is_comment_collapsed(id));
+        s.click_at(5, 3, body);
+        assert!(
+            s.is_comment_collapsed(id),
+            "clicking the box should fold it"
+        );
+        // Collapsed, the box is a single row still at body row 3 — click again
+        // to unfold.
+        s.click_at(5, 3, body);
+        assert!(
+            !s.is_comment_collapsed(id),
+            "clicking again should unfold it"
+        );
+    }
+
+    #[test]
+    fn click_on_diff_line_does_not_toggle_comment() {
+        let mut s = state_with_two_files();
+        let ann = Comment::new("a.rs", CommentSide::New, (2, 2), "let y = 3;", "note");
+        let id = ann.id;
+        s.comments.push(ann);
+        let body = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 20,
+        };
+        // Clicking the addition line (body row 2) moves the cursor and leaves
+        // the comment expanded.
+        s.click_at(5, 2, body);
+        assert_eq!(s.cursor, 1);
+        assert!(!s.is_comment_collapsed(id));
+    }
+
+    #[test]
+    fn click_toggles_comment_box_in_side_by_side() {
+        let mut s = state_with_two_files();
+        s.layout = ReviewLayout::SideBySide;
+        let ann = Comment::new("a.rs", CommentSide::New, (2, 2), "let y = 3;", "note");
+        let id = ann.id;
+        s.comments.push(ann);
+        let body = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 20,
+        };
+        // side-by-side rows: 0 header, 1 ctx(1,1), 2 (gap|+addition), then the
+        // box anchored to the addition (selectable index 1) at body row 3.
+        s.click_at(5, 3, body);
+        assert!(s.is_comment_collapsed(id));
     }
 
     #[test]
