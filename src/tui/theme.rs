@@ -190,12 +190,12 @@ impl Theme {
         let (add_bg, del_bg, add_emph_bg, del_emph_bg, add_gutter_bg, del_gutter_bg) =
             match self.mode {
                 ColorMode::TrueColor => (
-                    fill_color(add, 0.19),
-                    fill_color(del, 0.19),
-                    fill_color(add, 0.36),
-                    fill_color(del, 0.36),
-                    fill_color(add, 0.26),
-                    fill_color(del, 0.26),
+                    fill_color(add, 0.25),
+                    fill_color(del, 0.25),
+                    fill_color(add, 0.44),
+                    fill_color(del, 0.44),
+                    fill_color(add, 0.33),
+                    fill_color(del, 0.33),
                 ),
                 ColorMode::Indexed => (
                     Color::Indexed(22),
