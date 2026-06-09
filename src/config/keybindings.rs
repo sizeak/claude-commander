@@ -579,6 +579,10 @@ impl Default for KeyBindings {
             vec![kb(KeyCode::Char('o'), none)],
         );
         bindings.insert(
+            BindableAction::OpenReviewDiff,
+            vec![kb(KeyCode::Char('i'), none)],
+        );
+        bindings.insert(
             BindableAction::MoveToSection,
             vec![kb(KeyCode::Char('m'), none)],
         );

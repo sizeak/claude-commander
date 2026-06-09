@@ -149,7 +149,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `v` | Cycle session list view: Project → Sections → Section Stacks (requires `[[sections]]` config) |
 | palette only | Collapse/expand section (press on any item in the section, or `Enter` on the section header) |
 | `m` | Move session to section (manual override; see [Session List Sections](docs/configuration.md#session-list-sections)) |
-| palette only | Review & comment on a session's diff ("Review diff & comment") — see [Usage](docs/usage.md#reviewing--commenting-on-changes) |
+| `i` | Review & comment on a session's diff — see [Usage](docs/usage.md#reviewing--commenting-on-changes) |
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
 | `<` / `>` | Shrink / grow left pane |
 | `Ctrl-u/d` or `PageUp/Down` | Page up/down in preview |

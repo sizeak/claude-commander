@@ -94,8 +94,8 @@ Environment variable overrides: `CC_AI_SUMMARY_ENABLED`, `CC_AI_SUMMARY_MODEL`.
 
 ## Reviewing & commenting on changes
 
-Open the **command palette** (`Space`) on a selected session and run **"Review
-diff & comment"** to open a full-screen review view. It shows everything a PR
+Press **`i`** on a selected session (or open the **command palette** with
+`Space` and run **"Review diff & comment"**) to open a full-screen review view. It shows everything a PR
 against the session's base branch would contain — committed, staged, unstaged,
 and untracked changes — composed from `merge-base(base, HEAD)` through the
 working tree.

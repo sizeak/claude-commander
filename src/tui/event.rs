@@ -642,6 +642,11 @@ mod tests {
                 UserCommand::OpenPullRequest,
             ),
             (
+                KeyCode::Char('i'),
+                KeyModifiers::NONE,
+                UserCommand::OpenReviewDiff,
+            ),
+            (
                 KeyCode::Char('S'),
                 KeyModifiers::SHIFT,
                 UserCommand::ScanDirectory,
