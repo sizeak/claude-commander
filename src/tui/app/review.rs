@@ -1517,10 +1517,13 @@ fn comment_box_lines(
     } else {
         pal.comment_border
     });
-    let icon = if drifted {
-        DRIFT_MARKER
+    // A plain comment needs no marker inside its own box — the border already
+    // reads as a comment (the gutter still carries the `*`). Drifted comments
+    // keep the ⚠ so the drift stays obvious.
+    let marker = if drifted {
+        format!("{DRIFT_MARKER} ")
     } else {
-        COMMENT_MARKER
+        String::new()
     };
     let chevron = if collapsed { '▸' } else { '▾' };
 
@@ -1528,7 +1531,7 @@ fn comment_box_lines(
         // A single capped horizontal rule (not box corners) so a folded comment
         // reads as one deliberate line rather than the top half of a box.
         let preview = ann.comment.lines().next().unwrap_or("");
-        let header = hrule(&format!("{chevron} {icon} {preview} "), inner);
+        let header = hrule(&format!("{chevron} {marker}{preview} "), inner);
         return vec![Line::from(Span::styled(
             format!("{INDENT}╶{header}╴"),
             border,
@@ -1536,7 +1539,7 @@ fn comment_box_lines(
     }
 
     let mut out = Vec::new();
-    let header = hrule(&format!("{chevron} {icon} comment "), inner);
+    let header = hrule(&format!("{chevron} {marker}comment "), inner);
     out.push(Line::from(Span::styled(
         format!("{INDENT}╭{header}╮"),
         border,
@@ -2286,6 +2289,27 @@ diff --git a/x.rs b/x.rs
         assert_eq!(comment_box_lines(&ann, true, 60, &pal).len(), 1);
         // top border + two comment paragraphs + bottom border.
         assert_eq!(comment_box_lines(&ann, false, 60, &pal).len(), 4);
+    }
+
+    #[test]
+    fn comment_box_header_drops_asterisk_keeps_drift_marker() {
+        let pal = Theme::truecolor().review_palette();
+        let text_of = |lines: &[Line]| -> String {
+            lines[0].spans.iter().map(|s| s.content.as_ref()).collect()
+        };
+
+        // A staged comment's box header has no asterisk (the gutter keeps it).
+        let mut ann = Comment::new("a.rs", CommentSide::New, (2, 2), "let y = 3;", "note");
+        let expanded = text_of(&comment_box_lines(&ann, false, 60, &pal));
+        let collapsed = text_of(&comment_box_lines(&ann, true, 60, &pal));
+        assert!(expanded.contains("comment"));
+        assert!(!expanded.contains(COMMENT_MARKER));
+        assert!(!collapsed.contains(COMMENT_MARKER));
+
+        // A drifted comment still surfaces the ⚠ in its box header.
+        ann.status = CommentStatus::Drifted;
+        let drifted = text_of(&comment_box_lines(&ann, false, 60, &pal));
+        assert!(drifted.contains(DRIFT_MARKER));
     }
 
     #[test]
