@@ -6,6 +6,8 @@
 //! comments aren't carried across hunk gaps). Only the foreground colour is
 //! used; the review view supplies its own add/remove backgrounds.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 use ratatui::style::Color;
@@ -36,12 +38,49 @@ fn assets() -> &'static Assets {
     })
 }
 
+/// Per-thread memo of highlight results, keyed by `(ext, content)`.
+///
+/// The review body is rebuilt on every render frame (every tick and keystroke),
+/// and `highlight_line` constructs a fresh syntect `HighlightLines` per call —
+/// the dominant per-frame cost. Diff content is immutable, so memoizing makes
+/// scrolling and file-switching O(unique fragments) instead of re-highlighting
+/// the whole file each frame. Rendering is single-threaded, so a thread-local
+/// `RefCell` suffices and avoids lock contention.
+type HlKey = (String, String);
+thread_local! {
+    static HL_CACHE: RefCell<HashMap<HlKey, Vec<(String, Color)>>> =
+        RefCell::new(HashMap::new());
+}
+
+/// Soft cap on cached fragments; cleared wholesale if exceeded so a marathon
+/// review session can't grow the map without bound. Far above any real diff.
+const HL_CACHE_CAP: usize = 100_000;
+
 /// Syntax-highlight one line of code into `(text, foreground)` runs.
 ///
 /// `ext` is the file extension (no dot). When the extension isn't recognised,
 /// or highlighting fails, the whole line is returned as a single `fallback` run
-/// so callers always get usable spans.
+/// so callers always get usable spans. Results are memoized per `(ext, content)`
+/// (see [`HL_CACHE`]); `fallback` is the stable palette text colour at all call
+/// sites, so it is not part of the key.
 pub(crate) fn highlight_line(content: &str, ext: &str, fallback: Color) -> Vec<(String, Color)> {
+    let key = (ext.to_string(), content.to_string());
+    if let Some(hit) = HL_CACHE.with(|c| c.borrow().get(&key).cloned()) {
+        return hit;
+    }
+    let runs = highlight_line_uncached(content, ext, fallback);
+    HL_CACHE.with(|c| {
+        let mut cache = c.borrow_mut();
+        if cache.len() >= HL_CACHE_CAP {
+            cache.clear();
+        }
+        cache.insert(key, runs.clone());
+    });
+    runs
+}
+
+/// The actual syntect highlight, without memoization (see [`highlight_line`]).
+fn highlight_line_uncached(content: &str, ext: &str, fallback: Color) -> Vec<(String, Color)> {
     let assets = assets();
     let Some(syntax) = assets.syntaxes.find_syntax_by_extension(ext) else {
         return vec![(content.to_string(), fallback)];
@@ -93,5 +132,39 @@ mod tests {
     fn unknown_extension_falls_back_to_single_run() {
         let runs = highlight_line("some text", "no-such-ext", Color::Reset);
         assert_eq!(runs, vec![("some text".to_string(), Color::Reset)]);
+    }
+
+    #[test]
+    fn memoized_result_matches_uncached() {
+        // The cache must be transparent: a (cold then warm) memoized call has to
+        // equal a fresh syntect highlight for the same input.
+        for (content, ext) in [
+            ("let x = 1;", "rs"),
+            ("const y: number = 2;", "ts"),
+            ("plain text", "no-such-ext"),
+        ] {
+            let want = highlight_line_uncached(content, ext, Color::Reset);
+            let cold = highlight_line(content, ext, Color::Reset);
+            let warm = highlight_line(content, ext, Color::Reset);
+            assert_eq!(cold, want, "cold cache must match uncached for .{ext}");
+            assert_eq!(warm, want, "warm cache must match uncached for .{ext}");
+        }
+    }
+
+    #[test]
+    fn cache_does_not_cross_contaminate_extensions() {
+        // Identical text under two languages must not collide in the cache: the
+        // key includes the extension, so each keeps its own highlight.
+        let content = "class Foo {}";
+        let rust = highlight_line(content, "rs", Color::Reset);
+        let ts = highlight_line(content, "ts", Color::Reset);
+        // Reconstructed text is the same...
+        let rust_text: String = rust.iter().map(|(t, _)| t.as_str()).collect();
+        let ts_text: String = ts.iter().map(|(t, _)| t.as_str()).collect();
+        assert_eq!(rust_text, content);
+        assert_eq!(ts_text, content);
+        // ...and each equals its own uncached highlight (no key collision).
+        assert_eq!(rust, highlight_line_uncached(content, "rs", Color::Reset));
+        assert_eq!(ts, highlight_line_uncached(content, "ts", Color::Reset));
     }
 }

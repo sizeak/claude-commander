@@ -13,6 +13,7 @@ use crate::comment::{Comment, CommentSide, CommentStatus};
 use crate::git::{DiffLine, FileDiff, FileStatus, Hunk, LineOrigin, ParsedDiff};
 use crate::tui::syntax_highlight::highlight_line;
 use crate::tui::theme::{ColorMode, ReviewPalette};
+use std::cell::{Ref, RefCell};
 
 /// Gutter / badge / box marker for a staged comment. An asterisk is the
 /// conventional note/comment marker and stays crisp at one cell.
@@ -82,6 +83,10 @@ pub struct DiffReviewState {
     tree_scroll: u16,
     /// Comment ids whose inline box is collapsed (absent = expanded).
     collapsed_comments: HashSet<uuid::Uuid>,
+    /// Memoized word-diff segments for the current file (`selected_file`, segs).
+    /// Recomputed only when the body file changes — the LCS pass is O(file) and
+    /// would otherwise re-run on every render frame. See [`Self::word_segments`].
+    seg_cache: RefCell<Option<(usize, Vec<WordSegs>)>>,
 }
 
 /// A node in the file tree: either a directory (with children) or a file leaf
@@ -141,7 +146,28 @@ impl DiffReviewState {
             tree_cursor: 0,
             tree_scroll: 0,
             collapsed_comments: HashSet::new(),
+            seg_cache: RefCell::new(None),
         }
+    }
+
+    /// Word-diff segments for the current file, memoized by `selected_file`.
+    /// Rebuilt only when the body file changes, so scrolling within a file
+    /// reuses the cached LCS result rather than recomputing it each frame.
+    fn word_segments(&self) -> Ref<'_, Vec<WordSegs>> {
+        let stale = self
+            .seg_cache
+            .borrow()
+            .as_ref()
+            .map(|(file, _)| *file != self.selected_file)
+            .unwrap_or(true);
+        if stale {
+            let segs = self
+                .current_file()
+                .map(word_diff_segments)
+                .unwrap_or_default();
+            *self.seg_cache.borrow_mut() = Some((self.selected_file, segs));
+        }
+        Ref::map(self.seg_cache.borrow(), |c| &c.as_ref().unwrap().1)
     }
 
     /// The currently-visible tree rows (respecting collapsed directories).
@@ -977,10 +1003,13 @@ impl App {
             .map(|f| file_extension(f.display_path()).to_string())
             .unwrap_or_default();
         let width = area.width.saturating_sub(2) as usize;
+        let segs = state.word_segments();
         let lines = match state.layout {
-            ReviewLayout::Inline => review_body_lines(state, focused, &pal, &ext, highlight, width),
+            ReviewLayout::Inline => {
+                review_body_lines(state, focused, &pal, &ext, highlight, width, &segs)
+            }
             ReviewLayout::SideBySide => {
-                review_body_lines_side_by_side(state, focused, &pal, &ext, highlight, width)
+                review_body_lines_side_by_side(state, focused, &pal, &ext, highlight, width, &segs)
             }
         };
 
@@ -1205,12 +1234,12 @@ fn review_body_lines(
     ext: &str,
     highlight: bool,
     width: usize,
+    segs: &[WordSegs],
 ) -> Vec<Line<'static>> {
     let Some(file) = state.current_file() else {
         return Vec::new();
     };
     let (sel_lo, sel_hi) = state.selection();
-    let segs = word_diff_segments(file);
     let anchors = state.comment_anchors();
     let mut out: Vec<Line<'static>> = Vec::new();
     let mut idx = 0; // selectable-line index
@@ -1720,12 +1749,12 @@ fn review_body_lines_side_by_side(
     ext: &str,
     highlight: bool,
     width: usize,
+    segs: &[WordSegs],
 ) -> Vec<Line<'static>> {
     let Some(file) = state.current_file() else {
         return Vec::new();
     };
     let lines = state.selectable_lines();
-    let segs = word_diff_segments(file);
     let (sel_lo, sel_hi) = state.selection();
     // Two columns separated by " │ ".
     let col = width.saturating_sub(3) / 2;
@@ -2277,6 +2306,22 @@ diff --git a/x.rs b/x.rs
         assert_eq!(segs[0], vec![("fn f() {".to_string(), false)]);
         assert!(segs[1].iter().any(|(t, emph)| *emph && t == "2"));
         assert!(segs[2].iter().any(|(t, emph)| *emph && t == "3"));
+    }
+
+    #[test]
+    fn word_segments_cache_matches_fresh_and_invalidates_on_file_switch() {
+        let mut s = state_with_two_files();
+        s.selected_file = 0;
+        // Cached result must equal a fresh computation for the current file...
+        let fresh0 = word_diff_segments(&s.diff.files[0]);
+        assert_eq!(*s.word_segments(), fresh0);
+        // ...and a second call (warm cache) returns the same data.
+        assert_eq!(*s.word_segments(), fresh0);
+        // Switching the body file invalidates the memo (keyed on selected_file).
+        s.selected_file = 1;
+        let fresh1 = word_diff_segments(&s.diff.files[1]);
+        assert_eq!(*s.word_segments(), fresh1);
+        assert_ne!(fresh0, fresh1, "the two files must differ for a real test");
     }
 
     #[test]
