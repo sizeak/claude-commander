@@ -995,6 +995,27 @@ impl App {
         let eff_mode = Self::effective_palette_mode(mode, &query);
         let eff_query = Self::palette_filter_query(eff_mode, &query);
 
+        // Section picker: re-filter the section rows and stop — falling
+        // through would replace them with command entries.
+        if let PaletteMode::SectionPicker { session_id } = eff_mode {
+            let section_items = self.gather_section_picker_items(session_id, eff_query);
+            if let Modal::QuickSwitch {
+                matches,
+                selected_idx,
+                scroll,
+                ..
+            } = &mut self.ui_state.modal
+            {
+                *matches = section_items;
+                if *selected_idx >= matches.len() {
+                    *selected_idx = matches.len().saturating_sub(1);
+                }
+                *scroll = 0;
+                *scroll = adjust_list_scroll(*selected_idx, *scroll, LIST_MAX_VISIBLE);
+            }
+            return;
+        }
+
         // Build the session rows synchronously from list_items so the refilter
         // can run without awaiting the store lock on every keystroke.
         let mut scored_sessions: Vec<(i64, QuickSwitchMatch)> = Vec::new();
