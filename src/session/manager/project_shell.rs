@@ -52,6 +52,7 @@ impl SessionManager {
         }
 
         let shell_program = self.config_store.read().shell_program.clone();
+        let shell_program = self.maybe_wrap_nix_develop(&shell_program, &repo_path);
         self.tmux
             .create_session(&shell_name, &repo_path, Some(&shell_program))
             .await?;

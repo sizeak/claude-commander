@@ -75,6 +75,12 @@ impl App {
                         color_swatch: None,
                     },
                     SettingsRow {
+                        label: "Nix Develop".into(),
+                        value: c.nix_develop.to_string(),
+                        field_key: "nix_develop".into(),
+                        color_swatch: None,
+                    },
+                    SettingsRow {
                         label: "UI Refresh FPS".into(),
                         value: c.ui_refresh_fps.to_string(),
                         field_key: "ui_refresh_fps".into(),
@@ -776,6 +782,11 @@ impl App {
                 "resume_session" => {
                     if let Ok(b) = value.parse::<bool>() {
                         self.config.resume_session = b;
+                    }
+                }
+                "nix_develop" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        self.config.nix_develop = b;
                     }
                 }
                 "ui_refresh_fps" => {

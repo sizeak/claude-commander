@@ -25,6 +25,12 @@ fetch_before_create = true
 # where it left off. Set to false to start the program fresh each time.
 resume_session = true
 
+# Launch sessions inside `nix develop` when the project has a `flake.nix` at
+# its root and `nix` is on PATH, so the agent and shell get the project's dev
+# environment. Applies to Claude sessions and shell sessions. Projects without
+# a flake are unaffected.
+nix_develop = true
+
 # Maximum concurrent tmux commands
 max_concurrent_tmux = 16
 

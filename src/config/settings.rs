@@ -80,6 +80,12 @@ pub struct Config {
     /// started fresh.
     pub resume_session: bool,
 
+    /// Launch sessions inside `nix develop` when the project has a `flake.nix`
+    /// at its root and `nix` is on PATH. Applies to Claude sessions and shell
+    /// sessions alike. Default true; projects without a flake are unaffected.
+    #[serde(default = "default_true")]
+    pub nix_develop: bool,
+
     /// Interval in milliseconds for checking state file changes from other instances (0 = disabled)
     pub state_sync_interval_ms: u64,
 
@@ -163,6 +169,7 @@ impl Default for Config {
             pr_review_labels: default_pr_review_labels(),
             fetch_before_create: true,
             resume_session: true,
+            nix_develop: true,
             state_sync_interval_ms: 2000,
             agent_state_poll_interval_ms: 3000,
             invert_pr_label_color: false,
