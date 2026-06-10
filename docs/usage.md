@@ -25,7 +25,9 @@ claude-commander new "fix-auth" --initial-prompt "Fix the auth bypass in login.r
 # Create a session in plan mode, forking from a specific branch
 claude-commander new "feature-api" --base-branch develop --mode plan
 
-# Create a session placed directly in a specific section
+# Create a session placed directly in a specific section (pinned for
+# manual-only sections, soft placement for predicate-bearing ones — see
+# "Creating sessions inside a section" in configuration.md)
 claude-commander new "feature-ui" --section "Needs Review"
 
 # Attach to a session
