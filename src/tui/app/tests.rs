@@ -43,6 +43,45 @@ fn test_should_not_auto_restart_commander() {
     ));
 }
 
+// --- agent-state poll tick decisions ----------------------------------------
+
+#[test]
+fn poll_skips_when_idle_and_commander_unchanged() {
+    // No sessions, commander not running, was not running → nothing to do.
+    assert!(poll_tick_can_skip(true, false, false));
+}
+
+#[test]
+fn poll_never_skips_while_commander_is_running() {
+    // A running commander always has agent state worth forwarding, so the gate
+    // must not skip even if the running flag is unchanged — the pure contract
+    // matches the docstring regardless of what the call site can reach today.
+    assert!(!poll_tick_can_skip(true, true, true));
+    assert!(!poll_tick_can_skip(false, true, true));
+}
+
+#[test]
+fn poll_does_not_skip_when_commander_flips() {
+    // Commander just stopped (true → false) with no other sessions: must NOT
+    // skip, so the trailing-edge "turn off" update is emitted.
+    assert!(!poll_tick_can_skip(true, false, true));
+    // Commander just started (false → true).
+    assert!(!poll_tick_can_skip(true, true, false));
+}
+
+#[test]
+fn poll_sends_on_fresh_states_or_commander_flip() {
+    // Fresh states → always send.
+    assert!(poll_tick_should_send(false, false, false));
+    // No states but commander flipped on → send (chip turns on).
+    assert!(poll_tick_should_send(true, true, false));
+    // No states but commander flipped off → send (chip turns off).
+    assert!(poll_tick_should_send(true, false, true));
+    // No states, commander unchanged → nothing to send.
+    assert!(!poll_tick_should_send(true, true, true));
+    assert!(!poll_tick_should_send(true, false, false));
+}
+
 #[test]
 fn test_app_ui_state_default() {
     let state = AppUiState::default();
@@ -831,5 +870,47 @@ fn test_apply_project_pull_interval_rejects_below_60() {
     assert!(
         app.ui_state.status_message.is_some(),
         "rejection should surface a status message"
+    );
+}
+
+// --- commander modal surfacing ----------------------------------------------
+
+/// Build a test app with the commander enabled at init (the modal flow keys off
+/// the frozen `commander_enabled_at_init`, not the live config).
+fn make_test_app_commander_enabled() -> App {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_path = tmp.path().join("config.toml");
+    let state_path = tmp.path().join("state.json");
+    let config = Config {
+        commander_enabled: true,
+        ..Config::default()
+    };
+    let config_store = Arc::new(ConfigStore::with_path(config, config_path));
+    let store = Arc::new(StateStore::with_path(AppState::new(), state_path));
+    std::mem::forget(tmp);
+    App::new(config_store, store)
+}
+
+#[tokio::test]
+async fn open_commander_opens_modal_when_enabled() {
+    let mut app = make_test_app_commander_enabled();
+    app.handle_open_commander().await;
+    assert!(
+        matches!(app.ui_state.modal, Modal::Commander),
+        "C should open the commander status modal when enabled"
+    );
+}
+
+#[tokio::test]
+async fn open_commander_shows_disabled_message_when_disabled() {
+    let mut app = make_test_app(); // commander_enabled defaults to false
+    app.handle_open_commander().await;
+    assert!(
+        matches!(app.ui_state.modal, Modal::None),
+        "a disabled commander must not open the modal"
+    );
+    assert!(
+        app.ui_state.status_message.is_some(),
+        "a disabled commander should surface the enable-in-settings hint"
     );
 }

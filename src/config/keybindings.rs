@@ -166,7 +166,7 @@ impl BindableAction {
             Self::RemoveProject => "Remove project",
             Self::OpenInEditor => "Open in editor/IDE",
             Self::OpenPullRequest => "Open PR in browser",
-            Self::OpenCommander => "Open commander session",
+            Self::OpenCommander => "Open commander status modal",
             Self::TogglePane => "Toggle preview/diff/shell view",
             Self::TogglePaneReverse => "Toggle view (reverse)",
             Self::ShrinkLeftPane => "Shrink left pane",

@@ -86,6 +86,35 @@ fn should_auto_restart_ended(session_name: &str, consecutive_ends: u8) -> bool {
         && consecutive_ends < 3
 }
 
+/// Whether the agent-state poll tick can skip entirely: there is nothing to
+/// detect (no regular sessions and the commander isn't running) AND the
+/// commander's running state has not changed since the last emitted update.
+/// Skipping keeps the no-sessions path quiet — no event, no list rebuild.
+///
+/// The `!commander_running` term is what the docstring promises: a *running*
+/// commander always has agent state worth forwarding, so we never skip then.
+/// At the current call site `sessions_empty` already implies `!commander_running`
+/// (a running commander pushes its sentinel), so the term is belt-and-braces —
+/// but it keeps the predicate honest if the call site ever changes.
+fn poll_tick_can_skip(
+    sessions_empty: bool,
+    commander_running: bool,
+    last_commander_running: bool,
+) -> bool {
+    sessions_empty && !commander_running && !last_commander_running
+}
+
+/// Whether a poll tick (that wasn't skipped) should emit an update: when there
+/// are fresh agent states, or the commander's running state flipped — the
+/// latter is what lets the chip/row turn *off* on the trailing edge.
+fn poll_tick_should_send(
+    states_empty: bool,
+    commander_running: bool,
+    last_commander_running: bool,
+) -> bool {
+    !states_empty || commander_running != last_commander_running
+}
+
 /// Minimum left pane width as a percentage of the content area
 const MIN_LEFT_PANE_PCT: u16 = 15;
 /// Maximum left pane width as a percentage of the content area
@@ -171,6 +200,9 @@ pub enum Modal {
     /// Help modal. `scroll` is the first visible line of `build_help_lines`.
     /// Clamped against the rendered content height in `render_help_modal`.
     Help { scroll: u16 },
+    /// Commander status modal — shows the live running/stopped + agent state of
+    /// the singleton `cc-commander` session. Enter attaches; Esc closes.
+    Commander,
     /// Error modal
     Error { message: String },
     /// Settings modal
@@ -469,6 +501,10 @@ pub struct AppUiState {
     pub selected_session_id: Option<SessionId>,
     /// Currently selected project
     pub selected_project_id: Option<ProjectId>,
+    /// Whether the `cc-commander` tmux session is currently running. Cached from
+    /// the background agent-state poll so the (sync) renderers — the footer chip
+    /// and the commander hint pane — can read it without awaiting tmux.
+    pub commander_running: bool,
     /// Attach command to run after exiting TUI
     pub attach_command: Option<String>,
     /// Editor command + path to open after exiting TUI
@@ -544,6 +580,7 @@ impl Default for AppUiState {
             should_quit: false,
             selected_session_id: None,
             selected_project_id: None,
+            commander_running: false,
             attach_command: None,
             editor_command: None,
             shell_toggle_pair: None,
@@ -655,6 +692,13 @@ impl AppUiState {
 pub struct App {
     /// Local config cache — refreshed from config_store on tick when file changes
     config: Config,
+    /// Frozen snapshot of `commander_enabled`, captured at startup. The
+    /// commander's enablement is restart-required: the agent-state poll task
+    /// captures it at spawn, so the footer chip and modal read this same
+    /// frozen value rather than the hot-reloaded `config.commander_enabled`.
+    /// Toggling it at runtime only surfaces the restart warning; the commander
+    /// UI doesn't move until the next launch.
+    commander_enabled_at_init: bool,
     /// Unified service layer — owns SessionManager, StateStore, and ConfigStore
     service: CommanderService,
     /// UI state
@@ -684,9 +728,11 @@ impl App {
             .unwrap_or_default();
         let theme = base.with_overrides(&config.theme);
         let debounce = Duration::from_millis(config.session_number_debounce_ms);
+        let commander_enabled_at_init = config.commander_enabled;
 
         Self {
             config,
+            commander_enabled_at_init,
             service,
             ui_state: AppUiState::default(),
             event_loop: EventLoop::new(),
@@ -748,13 +794,21 @@ impl App {
             let tx = self.event_loop.sender();
             let interval_ms = self.config.agent_state_poll_interval_ms;
             let tmux = self.service.session_manager().tmux.clone();
+            // The commander is project-less and absent from `state.sessions`, so
+            // it is polled separately. Enablement is restart-required: the poll
+            // task and the footer chip share `commander_enabled_at_init` so the
+            // chip and modal can't disagree when the live config is toggled.
+            let commander_enabled = self.commander_enabled_at_init;
+            let commander_program = self.config.commander_program();
+            let commander_tmux = tmux.clone();
             tokio::spawn(async move {
                 let cache_ttl = Duration::from_millis(interval_ms.saturating_sub(500).max(500));
                 let mut detector = AgentStateDetector::new(tmux, cache_ttl);
                 let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+                let mut last_commander_running = false;
                 loop {
                     interval.tick().await;
-                    let sessions: Vec<(SessionId, String, String)> = {
+                    let mut sessions: Vec<(SessionId, String, String)> = {
                         let state = store.read().await;
                         state
                             .sessions
@@ -763,15 +817,41 @@ impl App {
                             .map(|s| (s.id, s.tmux_session_name.clone(), s.program.clone()))
                             .collect()
                     };
-                    if sessions.is_empty() {
+                    let commander_running =
+                        commander_enabled && crate::commander::is_running(&commander_tmux).await;
+                    if commander_running {
+                        sessions.push((
+                            crate::commander::commander_sentinel_id(),
+                            crate::commander::COMMANDER_TMUX_NAME.to_string(),
+                            commander_program.clone(),
+                        ));
+                    }
+                    // Quiet path: nothing to detect and the commander's running
+                    // state is unchanged — skip the tick (no list rebuild).
+                    if poll_tick_can_skip(
+                        sessions.is_empty(),
+                        commander_running,
+                        last_commander_running,
+                    ) {
                         continue;
                     }
-                    let states: HashMap<SessionId, AgentState> =
-                        detector.detect_all(&sessions).await;
-                    if !states.is_empty() {
+                    let states: HashMap<SessionId, AgentState> = if sessions.is_empty() {
+                        HashMap::new()
+                    } else {
+                        detector.detect_all(&sessions).await
+                    };
+                    // Send on any real change: fresh states, or the commander
+                    // flipped (so its chip/modal can turn on *and* off).
+                    if poll_tick_should_send(
+                        states.is_empty(),
+                        commander_running,
+                        last_commander_running,
+                    ) {
+                        last_commander_running = commander_running;
                         let _ = tx
                             .send(AppEvent::StateUpdate(StateUpdate::AgentStatesUpdated {
                                 states,
+                                commander_running,
                             }))
                             .await;
                     }

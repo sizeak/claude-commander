@@ -387,17 +387,24 @@ impl App {
         }
     }
 
-    /// Open (creating or reviving if needed) the persistent commander session,
-    /// then hand off to the attach loop the same way `handle_select` does.
+    /// Open the commander status modal, or show the disabled hint when the
+    /// commander is turned off. The modal surfaces the live running/agent state;
+    /// pressing Enter inside it calls [`attach_commander`](Self::attach_commander).
     pub(super) async fn handle_open_commander(&mut self) {
-        if !self.config.commander_enabled {
+        // Restart-required: match the poll, which keys off the init snapshot.
+        if !self.commander_enabled_at_init {
             self.ui_state.status_message = Some((
                 "Commander session is disabled — enable it in settings".to_string(),
                 Instant::now() + Duration::from_secs(3),
             ));
             return;
         }
+        self.ui_state.modal = Modal::Commander;
+    }
 
+    /// Open (creating or reviving if needed) the persistent commander session,
+    /// then hand off to the attach loop the same way `handle_select` does.
+    pub(super) async fn attach_commander(&mut self) {
         // Reuse the TUI's existing tmux executor (shared semaphore) rather than
         // constructing a second one.
         let cmd = crate::cli_args::cli_command();

@@ -223,6 +223,44 @@ impl App {
                 }
             }
 
+            Modal::Commander => {
+                let modal_area = centered_rect(50, 25, area);
+                frame.render_widget(Clear, modal_area);
+
+                let block = Block::default()
+                    .title(" Commander ")
+                    .borders(Borders::ALL)
+                    .border_type(self.border_type())
+                    .border_style(Style::default().fg(self.theme.modal_warning));
+
+                let inner = block.inner(modal_area);
+                frame.render_widget(block, modal_area);
+
+                let running = self.ui_state.commander_running;
+                let status_color = if running {
+                    self.theme.status_running
+                } else {
+                    self.theme.status_stopped
+                };
+                let agent_state = self
+                    .ui_state
+                    .agent_states
+                    .get(&crate::commander::commander_sentinel_id())
+                    .copied();
+                let status_text = commander_modal_status_line(running, agent_state);
+
+                let lines = vec![
+                    Line::from(""),
+                    Line::from(Span::styled(status_text, Style::default().fg(status_color))),
+                    Line::from(""),
+                    Line::from(Span::styled(
+                        "Enter: attach   Esc: close",
+                        Style::default().fg(self.theme.text_secondary),
+                    )),
+                ];
+                frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
+            }
+
             Modal::Settings(state) => {
                 self.render_settings_modal(frame, area, state);
             }
@@ -690,4 +728,53 @@ pub(super) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect 
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+/// The commander modal's status line text. Pure so the running/stopped and
+/// per-agent-state wording can be unit-tested without rendering.
+///
+/// A stopped commander shows only `○ stopped` (its agent state is meaningless
+/// when nothing is running). A running commander shows `● running` and, when
+/// the poll has reported a live agent state, appends it (e.g. `● running —
+/// working`).
+fn commander_modal_status_line(running: bool, agent_state: Option<AgentState>) -> String {
+    if !running {
+        return "\u{25cb} stopped".to_string();
+    }
+    match agent_state {
+        Some(state) => format!("\u{25cf} running \u{2014} {state}"),
+        None => "\u{25cf} running".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod commander_modal_tests {
+    use super::*;
+
+    #[test]
+    fn stopped_ignores_agent_state() {
+        assert_eq!(commander_modal_status_line(false, None), "\u{25cb} stopped");
+        // Agent state is meaningless when stopped — never leak it.
+        assert_eq!(
+            commander_modal_status_line(false, Some(AgentState::Working)),
+            "\u{25cb} stopped"
+        );
+    }
+
+    #[test]
+    fn running_without_agent_state() {
+        assert_eq!(commander_modal_status_line(true, None), "\u{25cf} running");
+    }
+
+    #[test]
+    fn running_appends_agent_state() {
+        assert_eq!(
+            commander_modal_status_line(true, Some(AgentState::Working)),
+            "\u{25cf} running \u{2014} working"
+        );
+        assert_eq!(
+            commander_modal_status_line(true, Some(AgentState::WaitingForInput)),
+            "\u{25cf} running \u{2014} waiting"
+        );
+    }
 }

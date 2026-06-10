@@ -333,6 +333,17 @@ impl App {
                 _ => {}
             },
 
+            Modal::Commander => match key.code {
+                KeyCode::Enter => {
+                    self.ui_state.modal = Modal::None;
+                    self.attach_commander().await;
+                }
+                KeyCode::Esc | KeyCode::Char('q') => {
+                    self.ui_state.modal = Modal::None;
+                }
+                _ => {}
+            },
+
             Modal::Loading { .. } => {
                 // Non-interactive — swallow all keys while loading
             }

@@ -407,7 +407,7 @@ impl App {
         let help_hint = Span::styled("? help ", base_style);
 
         // Build left-side spans and right-side help hint based on state
-        let left_spans = if let Some(msg) = toast {
+        let mut left_spans = if let Some(msg) = toast {
             let mut spans = vec![sessions_span, sep.clone(), Span::styled(msg, base_style)];
             if restart_needed {
                 spans.push(sep);
@@ -431,6 +431,22 @@ impl App {
                 Span::styled(": add project", base_style),
             ]
         };
+
+        // The commander chip reflects live system state, so it shows in every
+        // branch (toast / restart / default) — spliced right after the session
+        // count rather than added to one branch.
+        if self.ui_state.commander_running {
+            left_spans.splice(
+                1..1,
+                [
+                    Span::styled(" \u{2502} ", base_style),
+                    Span::styled(
+                        "\u{25cf} Commander",
+                        base_style.fg(self.theme.status_running),
+                    ),
+                ],
+            );
+        }
 
         // Split the status area into left (fill) and right (fixed width for help hint)
         let help_width = 8u16; // "? help " + padding
