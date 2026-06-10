@@ -740,6 +740,26 @@ fn test_project_pull_rows_present_in_general_tab() {
 }
 
 #[test]
+fn test_nix_develop_row_present_in_general_tab() {
+    let app = make_test_app();
+    let rows = app.build_settings_rows(SettingsTab::General);
+    let row = rows
+        .iter()
+        .find(|r| r.field_key == "nix_develop")
+        .expect("nix_develop row missing");
+    assert_eq!(row.value, "true");
+}
+
+#[test]
+fn test_apply_nix_develop_round_trip() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(SettingsTab::General, "nix_develop", "false");
+    assert!(!app.config.nix_develop);
+    app.apply_settings_edit(SettingsTab::General, "nix_develop", "true");
+    assert!(app.config.nix_develop);
+}
+
+#[test]
 fn test_apply_project_pull_enabled_round_trip() {
     let mut app = make_test_app();
     app.apply_settings_edit(SettingsTab::General, "project_pull_enabled", "true");
