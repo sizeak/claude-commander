@@ -759,9 +759,9 @@ fn test_refilter_section_picker_keeps_section_rows() {
         "section picker must only show section rows after typing, got {matches:?}"
     );
     assert!(
-        matches.iter().any(
-            |m| matches!(m, QuickSwitchItem::SectionMove { label, .. } if label == "Review")
-        ),
+        matches
+            .iter()
+            .any(|m| matches!(m, QuickSwitchItem::SectionMove { label, .. } if label == "Review")),
         "query 're' should match the Review section, got {matches:?}"
     );
 }
