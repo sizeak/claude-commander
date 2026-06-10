@@ -396,6 +396,9 @@ pub enum SettingsEditing {
 pub enum InputAction {
     CreateSession {
         project_id: ProjectId,
+        /// Section the tree cursor was in when the modal opened; the new
+        /// session is placed there (`None` = default "In Progress").
+        section: Option<String>,
     },
     CreateStackedSession {
         project_id: ProjectId,

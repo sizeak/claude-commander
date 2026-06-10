@@ -239,6 +239,22 @@ pub(super) fn list_index_at(
     Some(idx)
 }
 
+/// Name of the section containing the list row at `idx` — the nearest
+/// `SectionHeader` at or above it. Returns `None` when the row sits above any
+/// header (non-sectioned view modes render no headers) or under the implicit
+/// "In Progress" catch-all, where new sessions land by default anyway.
+pub(super) fn section_at(items: &[SessionListItem], idx: usize) -> Option<String> {
+    items
+        .get(..=idx)?
+        .iter()
+        .rev()
+        .find_map(|item| match item {
+            SessionListItem::SectionHeader { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .filter(|name| name != crate::session::IN_PROGRESS)
+}
+
 /// Map a 1-based session number to its index in the flat list_items vec.
 /// Returns None if the number is out of range.
 pub(super) fn session_number_to_list_index(
@@ -283,6 +299,66 @@ mod tests {
             .split(content_area);
         let left = chunks[0];
         Rect::new(left.x, left.y + 1, left.width, left.height - 1)
+    }
+
+    fn header(name: &str) -> SessionListItem {
+        SessionListItem::SectionHeader {
+            name: name.to_string(),
+            count: 1,
+            collapsed: false,
+        }
+    }
+
+    fn project_row() -> SessionListItem {
+        SessionListItem::Project {
+            id: crate::session::ProjectId::new(),
+            name: "proj".into(),
+            repo_path: std::path::PathBuf::from("/dev/null/unused"),
+            main_branch: "main".into(),
+            worktree_count: 1,
+            nested: true,
+        }
+    }
+
+    #[test]
+    fn section_at_finds_nearest_header_above() {
+        let items = vec![
+            header("Awaiting Review"),
+            project_row(),
+            SessionListItem::Spacer,
+            header("Self Review"),
+            project_row(),
+        ];
+        assert_eq!(section_at(&items, 4).as_deref(), Some("Self Review"));
+        assert_eq!(section_at(&items, 1).as_deref(), Some("Awaiting Review"));
+    }
+
+    #[test]
+    fn section_at_on_header_row_returns_that_section() {
+        let items = vec![header("Self Review"), project_row()];
+        assert_eq!(section_at(&items, 0).as_deref(), Some("Self Review"));
+    }
+
+    #[test]
+    fn section_at_in_progress_catchall_is_none() {
+        let items = vec![crate::session::IN_PROGRESS, "Self Review"]
+            .into_iter()
+            .map(header)
+            .collect::<Vec<_>>();
+        assert_eq!(section_at(&items, 0), None);
+    }
+
+    #[test]
+    fn section_at_without_headers_is_none() {
+        // Non-sectioned view modes render no SectionHeader rows at all.
+        let items = vec![project_row(), project_row()];
+        assert_eq!(section_at(&items, 1), None);
+    }
+
+    #[test]
+    fn section_at_out_of_bounds_is_none() {
+        let items = vec![header("Self Review")];
+        assert_eq!(section_at(&items, 5), None);
     }
 
     #[test]

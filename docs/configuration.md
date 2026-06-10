@@ -221,6 +221,10 @@ Config order is the pipeline. A session's section is re-evaluated on every PR re
 
 Select a session and press `m` (or open the palette with `Space`, or `Shift+Space` for commands-only, and run **Move session to section…**), then pick a target. An **Auto** entry clears an existing pin. The override is persisted to `state.json` and survives restarts; auto-moves are suppressed until the pin is released.
 
+### Creating sessions inside a section
+
+In the section-grouped views, a session created with `n` lands in the section the cursor was in, not the "In Progress" catch-all. For a manual-only waypoint (no predicates) this sets the same pin as a manual move; for a predicate-bearing section it's a soft placement — the session starts there but still auto-advances through the pipeline as its PR progresses. Creating from "In Progress" keeps the default behaviour. The CLI's `claude-commander new --section` flag follows the same rules.
+
 ### Reordering, adding, or removing sections
 
 These are edit-`config.toml`-and-restart actions — there's no hot reload. The cached `current_section` on each session is reconciled against the new config on next startup; if the referenced section no longer exists, the session falls back to `"In Progress"` and continues forward-only from there.
