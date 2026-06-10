@@ -2,6 +2,26 @@
 
 use super::*;
 
+/// Build the footer commander chip label, or `None` when the commander is not
+/// running (the chip is hidden then). When running, the label is `● Commander`,
+/// refined with the live agent state (`· working` / `· waiting` / `· idle`) once
+/// the background poll reports it. `Unknown`/unpolled states show the bare chip.
+pub(super) fn commander_chip_label(
+    running: bool,
+    agent_state: Option<AgentState>,
+) -> Option<String> {
+    if !running {
+        return None;
+    }
+    let suffix = match agent_state {
+        Some(AgentState::Working) => " \u{00b7} working",
+        Some(AgentState::WaitingForInput) => " \u{00b7} waiting",
+        Some(AgentState::Idle) => " \u{00b7} idle",
+        Some(AgentState::Unknown) | None => "",
+    };
+    Some(format!("\u{25cf} Commander{suffix}"))
+}
+
 impl App {
     /// Return the border type based on config: rounded or plain (square).
     pub(super) fn border_type(&self) -> BorderType {
@@ -407,7 +427,7 @@ impl App {
         let help_hint = Span::styled("? help ", base_style);
 
         // Build left-side spans and right-side help hint based on state
-        let left_spans = if let Some(msg) = toast {
+        let mut left_spans = if let Some(msg) = toast {
             let mut spans = vec![sessions_span, sep.clone(), Span::styled(msg, base_style)];
             if restart_needed {
                 spans.push(sep);
@@ -431,6 +451,27 @@ impl App {
                 Span::styled(": add project", base_style),
             ]
         };
+
+        // The commander chip reflects live system state, so it shows in every
+        // branch (toast / restart / default) — spliced right after the session
+        // count rather than added to one branch. The label folds in the live
+        // agent state; absence of the chip means the commander isn't running.
+        let commander_agent_state = self
+            .ui_state
+            .agent_states
+            .get(&crate::commander::commander_sentinel_id())
+            .copied();
+        if let Some(label) =
+            commander_chip_label(self.ui_state.commander_running, commander_agent_state)
+        {
+            left_spans.splice(
+                1..1,
+                [
+                    Span::styled(" \u{2502} ", base_style),
+                    Span::styled(label, base_style.fg(self.theme.status_running)),
+                ],
+            );
+        }
 
         // Split the status area into left (fill) and right (fixed width for help hint)
         let help_width = 8u16; // "? help " + padding

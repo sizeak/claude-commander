@@ -1,5 +1,6 @@
 use super::actions::adjust_list_scroll;
 use super::modals::centered_rect;
+use super::render::commander_chip_label;
 use super::selection::session_number_to_list_index;
 use super::*;
 
@@ -41,6 +42,84 @@ fn test_should_not_auto_restart_commander() {
         crate::commander::COMMANDER_TMUX_NAME,
         0
     ));
+}
+
+// --- agent-state poll tick decisions ----------------------------------------
+
+#[test]
+fn poll_skips_when_idle_and_commander_unchanged() {
+    // No sessions, commander not running, was not running → nothing to do.
+    assert!(poll_tick_can_skip(true, false, false));
+}
+
+#[test]
+fn poll_never_skips_while_commander_is_running() {
+    // A running commander always has agent state worth forwarding, so the gate
+    // must not skip even if the running flag is unchanged — the pure contract
+    // matches the docstring regardless of what the call site can reach today.
+    assert!(!poll_tick_can_skip(true, true, true));
+    assert!(!poll_tick_can_skip(false, true, true));
+}
+
+#[test]
+fn poll_does_not_skip_when_commander_flips() {
+    // Commander just stopped (true → false) with no other sessions: must NOT
+    // skip, so the trailing-edge "turn off" update is emitted.
+    assert!(!poll_tick_can_skip(true, false, true));
+    // Commander just started (false → true).
+    assert!(!poll_tick_can_skip(true, true, false));
+}
+
+#[test]
+fn poll_sends_on_fresh_states_or_commander_flip() {
+    // Fresh states → always send.
+    assert!(poll_tick_should_send(false, false, false));
+    // No states but commander flipped on → send (chip turns on).
+    assert!(poll_tick_should_send(true, true, false));
+    // No states but commander flipped off → send (chip turns off).
+    assert!(poll_tick_should_send(true, false, true));
+    // No states, commander unchanged → nothing to send.
+    assert!(!poll_tick_should_send(true, true, true));
+    assert!(!poll_tick_should_send(true, false, false));
+}
+
+// --- commander status-bar chip label ---------------------------------------
+
+#[test]
+fn commander_chip_hidden_when_stopped() {
+    // Not running → no chip, regardless of any stale agent state.
+    assert_eq!(commander_chip_label(false, None), None);
+    assert_eq!(commander_chip_label(false, Some(AgentState::Working)), None);
+}
+
+#[test]
+fn commander_chip_label_per_agent_state() {
+    // Running with a known state appends the state suffix.
+    assert_eq!(
+        commander_chip_label(true, Some(AgentState::Working)),
+        Some("\u{25cf} Commander \u{00b7} working".to_string())
+    );
+    assert_eq!(
+        commander_chip_label(true, Some(AgentState::WaitingForInput)),
+        Some("\u{25cf} Commander \u{00b7} waiting".to_string())
+    );
+    assert_eq!(
+        commander_chip_label(true, Some(AgentState::Idle)),
+        Some("\u{25cf} Commander \u{00b7} idle".to_string())
+    );
+}
+
+#[test]
+fn commander_chip_label_running_without_state() {
+    // Running but state not yet polled (or Unknown) → bare chip, no suffix.
+    assert_eq!(
+        commander_chip_label(true, None),
+        Some("\u{25cf} Commander".to_string())
+    );
+    assert_eq!(
+        commander_chip_label(true, Some(AgentState::Unknown)),
+        Some("\u{25cf} Commander".to_string())
+    );
 }
 
 #[test]
