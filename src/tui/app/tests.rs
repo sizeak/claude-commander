@@ -724,6 +724,49 @@ async fn ctrl_space_opens_quick_switch_in_tree() {
 }
 
 #[test]
+fn test_refilter_section_picker_keeps_section_rows() {
+    use crate::session::SectionConfig;
+
+    let mut app = make_test_app();
+    app.config.sections = vec![
+        SectionConfig {
+            name: "Review".to_string(),
+            ..Default::default()
+        },
+        SectionConfig {
+            name: "Done".to_string(),
+            ..Default::default()
+        },
+    ];
+    let session_id = SessionId::new();
+    app.ui_state.modal = Modal::QuickSwitch {
+        mode: PaletteMode::SectionPicker { session_id },
+        query: "re".to_string(),
+        matches: Vec::new(),
+        selected_idx: 0,
+        scroll: 0,
+    };
+
+    app.refilter_quick_switch();
+
+    let Modal::QuickSwitch { matches, .. } = &app.ui_state.modal else {
+        panic!("modal should still be QuickSwitch");
+    };
+    assert!(
+        matches
+            .iter()
+            .all(|m| matches!(m, QuickSwitchItem::SectionMove { .. })),
+        "section picker must only show section rows after typing, got {matches:?}"
+    );
+    assert!(
+        matches.iter().any(
+            |m| matches!(m, QuickSwitchItem::SectionMove { label, .. } if label == "Review")
+        ),
+        "query 're' should match the Review section, got {matches:?}"
+    );
+}
+
+#[test]
 fn test_project_pull_rows_present_in_general_tab() {
     let app = make_test_app();
     let rows = app.build_settings_rows(SettingsTab::General);
