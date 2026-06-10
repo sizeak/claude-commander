@@ -390,7 +390,7 @@ impl App {
     /// Open (creating or reviving if needed) the persistent commander session,
     /// then hand off to the attach loop the same way `handle_select` does.
     pub(super) async fn handle_open_commander(&mut self) {
-        if !self.config.commander_enabled {
+        if !self.commander_enabled_at_init {
             self.ui_state.status_message = Some((
                 "Commander session is disabled — enable it in settings".to_string(),
                 Instant::now() + Duration::from_secs(3),

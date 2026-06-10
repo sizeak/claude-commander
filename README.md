@@ -211,7 +211,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `D` | Remove project |
 | `.` or `Ctrl-.` | Open in editor/IDE |
 | `o` | Open PR in browser (when the session has a PR) |
-| `C` | Open the commander session (a persistent, project-less Claude session that coordinates others; requires `commander_enabled = true`) |
+| `C` | Open the commander session (a persistent, project-less Claude session that coordinates others; requires `commander_enabled = true`). While enabled, a status panel under the preview shows the commander's live running/agent state. |
 | `S` | Scan directory for git repos and add them as projects |
 | `s` | Open shell in worktree |
 | `v` | Cycle session list view: Project → Sections → Section Stacks (requires `[[sections]]` config) |
@@ -348,7 +348,8 @@ state_sync_interval_ms = 2000
 
 # Persistent "commander" session — a project-less Claude session (opened with
 # `C` or `claude-commander commander`) that coordinates other sessions via the
-# CLI. Disabled by default.
+# CLI. Disabled by default. When enabled, a status panel under the preview pane
+# shows the commander's live running/agent state.
 # commander_enabled = false
 # Program (with flags) for the commander; defaults to `default_program`.
 # commander_program = "claude --model opus-4-7"

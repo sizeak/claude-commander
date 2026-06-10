@@ -22,6 +22,7 @@ struct InitSnapshot {
     diff_cache_ttl_ms: u64,
     ui_refresh_fps: u32,
     state_sync_interval_ms: u64,
+    commander_enabled: bool,
 }
 
 impl InitSnapshot {
@@ -32,6 +33,7 @@ impl InitSnapshot {
             diff_cache_ttl_ms: config.diff_cache_ttl_ms,
             ui_refresh_fps: config.ui_refresh_fps,
             state_sync_interval_ms: config.state_sync_interval_ms,
+            commander_enabled: config.commander_enabled,
         }
     }
 
@@ -41,6 +43,7 @@ impl InitSnapshot {
             && self.diff_cache_ttl_ms == config.diff_cache_ttl_ms
             && self.ui_refresh_fps == config.ui_refresh_fps
             && self.state_sync_interval_ms == config.state_sync_interval_ms
+            && self.commander_enabled == config.commander_enabled
     }
 }
 
@@ -57,6 +60,7 @@ impl InitSnapshot {
 /// - `capture_cache_ttl_ms` / `diff_cache_ttl_ms` (cache durations)
 /// - `ui_refresh_fps` (event loop tick rate)
 /// - `state_sync_interval_ms` (state sync background task interval)
+/// - `commander_enabled` (captured by the agent-state poll task at spawn)
 ///
 /// Call [`restart_required`](Self::restart_required) to check whether any of
 /// those init-time values have diverged from the running config. The flag
@@ -294,6 +298,28 @@ mod tests {
         store
             .mutate(|c| {
                 c.ui_refresh_fps = 60;
+            })
+            .unwrap();
+
+        assert!(store.restart_required());
+    }
+
+    #[test]
+    fn test_restart_required_true_when_commander_enabled_changes() {
+        // The agent-state poll task captures `commander_enabled` at spawn, so
+        // toggling it at runtime must surface the restart-required warning
+        // (otherwise the chip/row would silently never update).
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+
+        let config = Config::default();
+        write_config(&config_path, &config);
+
+        let store = ConfigStore::with_path(config, config_path);
+
+        store
+            .mutate(|c| {
+                c.commander_enabled = true;
             })
             .unwrap();
 

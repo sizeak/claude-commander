@@ -37,6 +37,22 @@ impl App {
         // Render session list
         self.render_session_list(frame, main_chunks[0]);
 
+        // When the commander is enabled, reserve a fixed-height panel beneath
+        // the right pane for its live status. When disabled, the right pane
+        // fills its column exactly as before (no behavior change).
+        let (view_area, commander_area) = if self.commander_enabled_at_init {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Min(0),
+                    Constraint::Length(COMMANDER_PANEL_HEIGHT),
+                ])
+                .split(main_chunks[1]);
+            (chunks[0], Some(chunks[1]))
+        } else {
+            (main_chunks[1], None)
+        };
+
         // Render either preview, diff, or shell based on current view
         // Defensive: if a project is selected and view is Preview, render Shell instead
         let view = if self.is_project_selected()
@@ -47,9 +63,13 @@ impl App {
             self.ui_state.right_pane_view
         };
         match view {
-            RightPaneView::Preview => self.render_preview(frame, main_chunks[1]),
-            RightPaneView::Info => self.render_info(frame, main_chunks[1]),
-            RightPaneView::Shell => self.render_shell(frame, main_chunks[1]),
+            RightPaneView::Preview => self.render_preview(frame, view_area),
+            RightPaneView::Info => self.render_info(frame, view_area),
+            RightPaneView::Shell => self.render_shell(frame, view_area),
+        }
+
+        if let Some(commander_area) = commander_area {
+            self.render_commander_panel(frame, commander_area);
         }
 
         // Render modal if open
@@ -357,6 +377,41 @@ impl App {
         frame.render_widget(preview, area);
     }
 
+    /// Render the persistent commander status panel beneath the right pane.
+    ///
+    /// Shows the live `cc-commander` liveness (● running / ○ stopped), the
+    /// commander's agent state while running, and the attach hint. Only called
+    /// when the commander is enabled (the panel area is otherwise `None`).
+    pub(super) fn render_commander_panel(&self, frame: &mut Frame, area: Rect) {
+        let block = self.pane_block(&["Commander"], 0);
+
+        let running = self.ui_state.commander_running;
+        let agent_state = self
+            .ui_state
+            .agent_states
+            .get(&crate::commander::commander_sentinel_id())
+            .copied();
+
+        let (glyph, glyph_color) = if running {
+            ("\u{25cf}", self.theme.status_running)
+        } else {
+            ("\u{25cb}", self.theme.status_stopped)
+        };
+
+        let status_line = Line::from(vec![
+            Span::styled(glyph, Style::default().fg(glyph_color)),
+            Span::raw(" "),
+            Span::raw(commander_panel_status_line(running, agent_state)),
+        ]);
+        let hint_line = Line::from(Span::styled(
+            "Shift+C: attach",
+            Style::default().fg(self.theme.status_stopped),
+        ));
+
+        let paragraph = Paragraph::new(vec![status_line, hint_line]).block(block);
+        frame.render_widget(paragraph, area);
+    }
+
     /// Render status bar
     pub(super) fn render_status_bar(&self, frame: &mut Frame, area: Rect) {
         if area.height < 2 {
@@ -444,5 +499,57 @@ impl App {
 
         let right_line = Line::from(vec![help_hint]).alignment(Alignment::Right);
         frame.render_widget(Paragraph::new(right_line).style(base_style), chunks[1]);
+    }
+}
+
+/// Number of rows the commander panel occupies beneath the right pane, borders
+/// included. Two body lines (status + hint) plus top/bottom borders.
+const COMMANDER_PANEL_HEIGHT: u16 = 4;
+
+/// Pure text for the commander panel's status line. Keeps the
+/// running/stopped/agent-state wording testable without a `Frame`.
+///
+/// `running` is the cached `cc-commander` tmux liveness; `agent_state` is the
+/// commander's live agent state (only meaningful while running, `None` until
+/// the first poll). Stopped wins over any stale agent state.
+fn commander_panel_status_line(running: bool, agent_state: Option<AgentState>) -> String {
+    if !running {
+        return "stopped".to_string();
+    }
+    match agent_state {
+        Some(state) => format!("running · {state}"),
+        None => "running".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod commander_panel_tests {
+    use super::*;
+
+    #[test]
+    fn stopped_when_not_running() {
+        assert_eq!(commander_panel_status_line(false, None), "stopped");
+        // A stale agent state must not leak through once stopped.
+        assert_eq!(
+            commander_panel_status_line(false, Some(AgentState::Working)),
+            "stopped"
+        );
+    }
+
+    #[test]
+    fn running_without_agent_state() {
+        assert_eq!(commander_panel_status_line(true, None), "running");
+    }
+
+    #[test]
+    fn running_with_agent_state_appends_it() {
+        assert_eq!(
+            commander_panel_status_line(true, Some(AgentState::Working)),
+            "running · working"
+        );
+        assert_eq!(
+            commander_panel_status_line(true, Some(AgentState::WaitingForInput)),
+            "running · waiting"
+        );
     }
 }
