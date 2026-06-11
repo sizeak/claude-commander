@@ -1964,7 +1964,8 @@ fn comment_draft_box_height(text: &str, width: usize) -> usize {
 /// Render the in-progress comment as an inline edit box, anchored where the
 /// saved comment will appear. Same geometry as [`comment_box_lines`]'s expanded
 /// form (so the layout model can share width math) but with the draft border
-/// colour, a `✎` title carrying the line range, and a caret after the text.
+/// colour, a `*`-marked title carrying the line range, and a caret after the
+/// text.
 fn comment_draft_box_lines(
     text: &str,
     loc: &str,
@@ -1986,7 +1987,7 @@ fn comment_draft_box_lines(
     };
 
     let mut out = Vec::new();
-    let header = hrule(&format!("✎ comment · {loc} "), inner);
+    let header = hrule(&format!("{COMMENT_MARKER} comment · {loc} "), inner);
     out.push(Line::from(Span::styled(
         format!("{INDENT}{tl}{header}{tr}"),
         border,
