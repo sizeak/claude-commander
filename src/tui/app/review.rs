@@ -74,6 +74,8 @@ enum BodyRow {
     Line { sel: usize, cont: bool },
     /// A row belonging to an interleaved comment box.
     Comment { id: uuid::Uuid },
+    /// A row belonging to the in-progress comment edit box.
+    Draft,
 }
 
 /// Greedy word-wrap of `text` into rows at most `width` columns wide, returning
@@ -478,6 +480,7 @@ impl DiffReviewState {
         let body_width = self.body_width.get();
         let content_width = inline_content_width(body_width);
         let anchors = self.comment_anchors();
+        let draft_anchor = self.draft_anchor();
         let mut sel = 0;
         for hunk in &file.hunks {
             rows.push(BodyRow::Header);
@@ -495,10 +498,45 @@ impl DiffReviewState {
                         }
                     }
                 }
+                if draft_anchor == Some(sel)
+                    && let Some(draft) = self.comment.as_ref()
+                {
+                    for _ in 0..comment_draft_box_height(&draft.text, body_width) {
+                        rows.push(BodyRow::Draft);
+                    }
+                }
                 sel += 1;
             }
         }
         rows
+    }
+
+    /// The selectable-line index the in-progress comment edit box anchors to
+    /// (the last line of its range), or `None` when no comment is being edited.
+    /// The edit box renders just after this line, where the saved comment will.
+    fn draft_anchor(&self) -> Option<usize> {
+        self.comment.as_ref().map(|d| d.range.1)
+    }
+
+    /// Adjust `scroll` so the in-progress comment edit box stays visible (inline
+    /// only). Keeps the box's last row in view as it grows with typed text, and
+    /// pulls the top into view if the box starts above the viewport.
+    fn follow_draft(&mut self) {
+        if self.layout != ReviewLayout::Inline || self.comment.is_none() {
+            return;
+        }
+        let rows = self.inline_physical_rows();
+        let first = rows.iter().position(|r| matches!(r, BodyRow::Draft));
+        let last = rows.iter().rposition(|r| matches!(r, BodyRow::Draft));
+        if let (Some(first), Some(last)) = (first, last) {
+            let bottom = self.scroll as usize + BODY_VIEWPORT;
+            if last >= bottom {
+                self.scroll = (last + 1).saturating_sub(BODY_VIEWPORT) as u16;
+            }
+            if (first as u16) < self.scroll {
+                self.scroll = first as u16;
+            }
+        }
     }
 
     /// Physical body row of selectable line `idx`'s first (non-continuation)
@@ -549,6 +587,7 @@ impl DiffReviewState {
             text: String::new(),
             range: self.selection(),
         });
+        self.follow_draft();
         true
     }
 
@@ -893,6 +932,13 @@ impl DiffReviewState {
                             if let Some(id) = box_hit(&mut row, sel) {
                                 return Some(id);
                             }
+                            // Advance past the in-progress edit box (not a
+                            // toggle target) so boxes below it stay aligned.
+                            if self.draft_anchor() == Some(sel)
+                                && let Some(draft) = self.comment.as_ref()
+                            {
+                                row += comment_draft_box_height(&draft.text, width);
+                            }
                         }
                     }
                 }
@@ -1174,11 +1220,13 @@ impl App {
             }
             KeyCode::Backspace => {
                 draft.text.pop();
+                state.follow_draft();
             }
             // Ignore Ctrl-combos (e.g. Ctrl+Q) so they don't insert a literal
             // character into the comment.
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                draft.text.push(c)
+                draft.text.push(c);
+                state.follow_draft();
             }
             _ => {}
         }
@@ -1244,10 +1292,6 @@ impl App {
             Paragraph::new(Line::from(hint)).style(self.theme.status_bar()),
             rows[1],
         );
-
-        if state.comment.is_some() {
-            self.render_review_comment_box(frame, cols[1], state);
-        }
     }
 
     fn render_review_file_list(&self, frame: &mut Frame, area: Rect, state: &DiffReviewState) {
@@ -1365,43 +1409,6 @@ impl App {
             .title(title);
         frame.render_widget(
             Paragraph::new(lines).block(block).scroll((state.scroll, 0)),
-            area,
-        );
-    }
-
-    /// Small input box for the in-progress comment, drawn over the body.
-    fn render_review_comment_box(
-        &self,
-        frame: &mut Frame,
-        body_area: Rect,
-        state: &DiffReviewState,
-    ) {
-        let Some(draft) = state.comment.as_ref() else {
-            return;
-        };
-        let height = 3;
-        let area = Rect {
-            x: body_area.x + 2,
-            y: body_area.y + body_area.height.saturating_sub(height + 1),
-            width: body_area.width.saturating_sub(4),
-            height,
-        };
-        frame.render_widget(Clear, area);
-        // Show the gutter line numbers the selection covers, not the raw
-        // selectable-line indices (which count deletions and so drift from the
-        // displayed numbers).
-        let loc = match state.resolved_line_range(draft.range) {
-            Some((lo, hi)) if lo == hi => format!("line {lo}"),
-            Some((lo, hi)) => format!("lines {lo}–{hi}"),
-            None => "line ?".to_string(),
-        };
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(self.border_type())
-            .border_style(Style::default().fg(Color::Yellow))
-            .title(format!(" Comment ({loc}) "));
-        frame.render_widget(
-            Paragraph::new(Line::from(format!("{}▏", draft.text))).block(block),
             area,
         );
     }
@@ -1687,6 +1694,18 @@ fn review_body_lines(
                     ));
                 }
             }
+            // The in-progress edit box renders where the saved comment will.
+            if state.draft_anchor() == Some(idx)
+                && let Some(draft) = state.comment.as_ref()
+            {
+                out.extend(comment_draft_box_lines(
+                    &draft.text,
+                    &draft_loc_label(state, draft.range),
+                    width,
+                    pal,
+                    rounded,
+                ));
+            }
             idx += 1;
         }
     }
@@ -1904,6 +1923,82 @@ fn comment_box_lines(
                 Span::styled("│".to_string(), border),
             ]));
         }
+    }
+    out.push(Line::from(Span::styled(
+        format!("{INDENT}{bl}{}{br}", "─".repeat(inner)),
+        border,
+    )));
+    out
+}
+
+/// Caret glyph shown at the end of the in-progress comment text.
+const DRAFT_CARET: char = '▏';
+
+/// A short label for the line(s) the in-progress comment covers, using the
+/// displayed gutter numbers (e.g. `line 5` / `lines 5–8`), for the edit box
+/// title. Mirrors the label the old bottom overlay showed.
+fn draft_loc_label(state: &DiffReviewState, range: (usize, usize)) -> String {
+    match state.resolved_line_range(range) {
+        Some((lo, hi)) if lo == hi => format!("line {lo}"),
+        Some((lo, hi)) => format!("lines {lo}–{hi}"),
+        None => "line ?".to_string(),
+    }
+}
+
+/// Number of rendered rows [`comment_draft_box_lines`] produces for the same
+/// `text`/`width`. Drives the inline layout model so cursor/scroll/click stay
+/// in step with the rendered edit box (guarded by a test).
+fn comment_draft_box_height(text: &str, width: usize) -> usize {
+    const INDENT_LEN: usize = 2; // "  "
+    let avail = width.saturating_sub(INDENT_LEN);
+    if avail < 8 {
+        return 0;
+    }
+    let inner = avail - 2;
+    let text_width = inner.saturating_sub(2);
+    let body = wrap_text(&format!("{text}{DRAFT_CARET}"), text_width).len();
+    // Top border + wrapped body lines + bottom border.
+    body + 2
+}
+
+/// Render the in-progress comment as an inline edit box, anchored where the
+/// saved comment will appear. Same geometry as [`comment_box_lines`]'s expanded
+/// form (so the layout model can share width math) but with the draft border
+/// colour, a `✎` title carrying the line range, and a caret after the text.
+fn comment_draft_box_lines(
+    text: &str,
+    loc: &str,
+    width: usize,
+    pal: &ReviewPalette,
+    rounded: bool,
+) -> Vec<Line<'static>> {
+    const INDENT: &str = "  ";
+    let avail = width.saturating_sub(INDENT.len());
+    if avail < 8 {
+        return Vec::new();
+    }
+    let inner = avail - 2;
+    let border = Style::default().fg(pal.draft_border);
+    let (tl, tr, bl, br) = if rounded {
+        ('╭', '╮', '╰', '╯')
+    } else {
+        ('┌', '┐', '└', '┘')
+    };
+
+    let mut out = Vec::new();
+    let header = hrule(&format!("✎ comment · {loc} "), inner);
+    out.push(Line::from(Span::styled(
+        format!("{INDENT}{tl}{header}{tr}"),
+        border,
+    )));
+    let text_width = inner.saturating_sub(2);
+    for chunk in wrap_text(&format!("{text}{DRAFT_CARET}"), text_width) {
+        let body: String = chunk.chars().take(text_width).collect();
+        out.push(Line::from(vec![
+            Span::styled(format!("{INDENT}│"), border),
+            Span::raw(format!(" {body:<text_width$} ")),
+            Span::styled("│".to_string(), border),
+        ]));
     }
     out.push(Line::from(Span::styled(
         format!("{INDENT}{bl}{}{br}", "─".repeat(inner)),
@@ -2334,6 +2429,18 @@ fn review_body_lines_side_by_side(
                                 rounded,
                             ));
                         }
+                    }
+                    // The in-progress edit box renders where the comment will.
+                    if state.draft_anchor() == Some(sel)
+                        && let Some(draft) = state.comment.as_ref()
+                    {
+                        out.extend(comment_draft_box_lines(
+                            &draft.text,
+                            &draft_loc_label(state, draft.range),
+                            width,
+                            pal,
+                            rounded,
+                        ));
                     }
                 }
             }
@@ -2841,6 +2948,49 @@ diff --git a/x.rs b/x.rs
                 }
             }
         }
+    }
+
+    #[test]
+    fn comment_draft_box_height_matches_rendered() {
+        let pal = Theme::truecolor().review_palette();
+        for text in ["", "short", &"word ".repeat(40)] {
+            for width in [12usize, 40, 80, 6 /* below the 8-col floor */] {
+                assert_eq!(
+                    comment_draft_box_height(text, width),
+                    comment_draft_box_lines(text, "line 1", width, &pal, true).len(),
+                    "height mismatch (width={width}, text={text:?})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn draft_box_renders_inline_at_its_anchor() {
+        // Opening a comment box must add rows to the inline body, anchored after
+        // the selected line — and the renderer and layout model must still agree.
+        let mut s = state_with_two_files();
+        s.body_width.set(80);
+        s.focus = ReviewFocus::Body;
+        s.cursor = 1; // the inserted line
+        assert!(s.begin_comment());
+
+        let rows = s.inline_physical_rows();
+        let draft_rows: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| matches!(r, BodyRow::Draft))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(!draft_rows.is_empty(), "draft box should occupy body rows");
+        // The draft rows sit immediately after selectable line 1's row.
+        let line_row = s.body_row_of(1);
+        assert_eq!(draft_rows[0], line_row + 1);
+
+        // Renderer row count matches the layout model (cursor/scroll/click).
+        let pal = Theme::truecolor().review_palette();
+        let segs = s.word_segments();
+        let lines = review_body_lines(&s, true, &pal, "rs", true, 80, &segs, true);
+        assert_eq!(lines.len(), rows.len());
     }
 
     #[test]

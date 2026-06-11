@@ -172,6 +172,8 @@ pub struct ReviewPalette {
     pub comment_border: Color,
     /// Border colour for a drifted comment box.
     pub drift_border: Color,
+    /// Border colour for the in-progress comment edit box.
+    pub draft_border: Color,
     /// Pane border colours (focused / unfocused), matching the rest of the UI.
     pub border_focused: Color,
     pub border_unfocused: Color,
@@ -232,6 +234,7 @@ impl Theme {
             dir_fg: self.text_accent,
             comment_border: self.diff_file_header,
             drift_border: del,
+            draft_border: self.modal_warning,
             border_focused: self.border_focused,
             border_unfocused: self.border_unfocused,
             selection_bg: self.selection_bg,
