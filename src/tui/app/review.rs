@@ -1077,6 +1077,16 @@ impl App {
             return;
         }
 
+        // Ctrl+R re-attaches to the session — the mirror of pressing Ctrl-r in
+        // the attached session to reach the review, so the pair toggles back
+        // and forth. The modal is already None; `handle_select` queues the
+        // attach and quits the TUI loop, which `run()` then picks up.
+        if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL) {
+            self.ui_state.selected_session_id = Some(state.session_id);
+            self.handle_select().await;
+            return;
+        }
+
         match key.code {
             // Esc cancels an in-progress selection first; otherwise closes.
             KeyCode::Esc if state.visual_anchor.is_none() => return,
@@ -1208,9 +1218,9 @@ impl App {
         } else if state.visual_anchor.is_some() {
             " ↑↓ extend · Enter/right-click comment · v/Esc cancel selection "
         } else if state.focus == ReviewFocus::FileList {
-            " ↑↓/jk move · Enter expand/collapse · PgUp/Dn scroll diff · [ ] file · Tab to diff · ^Q/Esc close "
+            " ↑↓/jk move · Enter expand/collapse · [ ] file · Tab to diff · ^R session · ^Q/Esc close "
         } else {
-            " ↑↓/jk move · v select · Enter comment · z fold · d delete · a apply · t layout · ^Q/Esc close "
+            " ↑↓/jk move · v select · Enter comment · z fold · d delete · a apply · t layout · ^R session · ^Q/Esc close "
         };
         // The footer doubles as this view's status bar — styled like the app
         // status bar so it reads as a replacement, not a second bar.
@@ -1285,7 +1295,7 @@ impl App {
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
+            .border_type(self.border_type())
             .border_style(Style::default().fg(border))
             .title(format!(" Files ({}) ", state.diff.files.len()));
         frame.render_widget(
@@ -1322,18 +1332,19 @@ impl App {
         // lines exactly as we render them here.
         state.body_width.set(width);
         let segs = state.word_segments();
+        let rounded = self.config.rounded_borders;
         let lines = match state.layout {
             ReviewLayout::Inline => {
-                review_body_lines(state, focused, &pal, &ext, highlight, width, &segs)
+                review_body_lines(state, focused, &pal, &ext, highlight, width, &segs, rounded)
             }
-            ReviewLayout::SideBySide => {
-                review_body_lines_side_by_side(state, focused, &pal, &ext, highlight, width, &segs)
-            }
+            ReviewLayout::SideBySide => review_body_lines_side_by_side(
+                state, focused, &pal, &ext, highlight, width, &segs, rounded,
+            ),
         };
 
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
+            .border_type(self.border_type())
             .border_style(Style::default().fg(border))
             .title(title);
         frame.render_widget(
@@ -1370,7 +1381,7 @@ impl App {
         };
         let block = Block::default()
             .borders(Borders::ALL)
-            .border_type(BorderType::Rounded)
+            .border_type(self.border_type())
             .border_style(Style::default().fg(Color::Yellow))
             .title(format!(" Comment ({loc}) "));
         frame.render_widget(
@@ -1556,6 +1567,7 @@ fn comment_badge_span(count: usize, pal: &ReviewPalette) -> Option<Span<'static>
 /// diff line with a coloured gutter, full-width add/remove background fill,
 /// word-level intra-line highlight, and an comment marker. Selected lines
 /// (cursor or visual range) are reversed when the body is focused.
+#[allow(clippy::too_many_arguments)]
 fn review_body_lines(
     state: &DiffReviewState,
     focused: bool,
@@ -1564,6 +1576,7 @@ fn review_body_lines(
     highlight: bool,
     width: usize,
     segs: &[WordSegs],
+    rounded: bool,
 ) -> Vec<Line<'static>> {
     let Some(file) = state.current_file() else {
         return Vec::new();
@@ -1654,6 +1667,7 @@ fn review_body_lines(
                         state.is_comment_collapsed(ann.id),
                         width,
                         pal,
+                        rounded,
                     ));
                 }
             }
@@ -1816,6 +1830,7 @@ fn comment_box_lines(
     collapsed: bool,
     width: usize,
     pal: &ReviewPalette,
+    rounded: bool,
 ) -> Vec<Line<'static>> {
     const INDENT: &str = "  ";
     let avail = width.saturating_sub(INDENT.len());
@@ -1850,10 +1865,17 @@ fn comment_box_lines(
         ))];
     }
 
+    // Corners follow the user's rounded-borders setting, matching the panes.
+    let (tl, tr, bl, br) = if rounded {
+        ('╭', '╮', '╰', '╯')
+    } else {
+        ('┌', '┐', '└', '┘')
+    };
+
     let mut out = Vec::new();
     let header = hrule(&format!("{chevron} {marker}comment "), inner);
     out.push(Line::from(Span::styled(
-        format!("{INDENT}╭{header}╮"),
+        format!("{INDENT}{tl}{header}{tr}"),
         border,
     )));
     let text_width = inner.saturating_sub(2);
@@ -1868,7 +1890,7 @@ fn comment_box_lines(
         }
     }
     out.push(Line::from(Span::styled(
-        format!("{INDENT}╰{}╯", "─".repeat(inner)),
+        format!("{INDENT}{bl}{}{br}", "─".repeat(inner)),
         border,
     )));
     out
@@ -2211,6 +2233,7 @@ fn side_by_side_rows(file: &FileDiff) -> Vec<SbsRow> {
 /// Render the side-by-side body for the current file: old | new columns with
 /// per-side line-number gutter, add/remove fills, word-level highlight, and a
 /// diagonal-hatch fill for alignment gaps.
+#[allow(clippy::too_many_arguments)]
 fn review_body_lines_side_by_side(
     state: &DiffReviewState,
     focused: bool,
@@ -2219,6 +2242,7 @@ fn review_body_lines_side_by_side(
     highlight: bool,
     width: usize,
     segs: &[WordSegs],
+    rounded: bool,
 ) -> Vec<Line<'static>> {
     let Some(file) = state.current_file() else {
         return Vec::new();
@@ -2291,6 +2315,7 @@ fn review_body_lines_side_by_side(
                                 state.is_comment_collapsed(ann.id),
                                 width,
                                 pal,
+                                rounded,
                             ));
                         }
                     }
@@ -2687,9 +2712,34 @@ diff --git a/x.rs b/x.rs
             "extract helper\nand rename",
         );
         let pal = Theme::truecolor().review_palette();
-        assert_eq!(comment_box_lines(&ann, true, 60, &pal).len(), 1);
+        assert_eq!(comment_box_lines(&ann, true, 60, &pal, true).len(), 1);
         // top border + two comment paragraphs + bottom border.
-        assert_eq!(comment_box_lines(&ann, false, 60, &pal).len(), 4);
+        assert_eq!(comment_box_lines(&ann, false, 60, &pal, true).len(), 4);
+    }
+
+    #[test]
+    fn comment_box_corners_follow_rounded_setting() {
+        let pal = Theme::truecolor().review_palette();
+        let ann = Comment::new("a.rs", CommentSide::New, (2, 2), "let y = 3;", "note");
+        let corners = |rounded: bool| -> String {
+            let lines = comment_box_lines(&ann, false, 60, &pal, rounded);
+            let top: String = lines[0].spans.iter().map(|s| s.content.as_ref()).collect();
+            let bot: String = lines
+                .last()
+                .unwrap()
+                .spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect();
+            format!("{top}{bot}")
+        };
+        let round = corners(true);
+        assert!(round.contains('╭') && round.contains('╮'));
+        assert!(round.contains('╰') && round.contains('╯'));
+        let square = corners(false);
+        assert!(square.contains('┌') && square.contains('┐'));
+        assert!(square.contains('└') && square.contains('┘'));
+        assert!(!square.contains('╭') && !square.contains('╯'));
     }
 
     #[test]
@@ -2701,15 +2751,15 @@ diff --git a/x.rs b/x.rs
 
         // A staged comment's box header has no asterisk (the gutter keeps it).
         let mut ann = Comment::new("a.rs", CommentSide::New, (2, 2), "let y = 3;", "note");
-        let expanded = text_of(&comment_box_lines(&ann, false, 60, &pal));
-        let collapsed = text_of(&comment_box_lines(&ann, true, 60, &pal));
+        let expanded = text_of(&comment_box_lines(&ann, false, 60, &pal, true));
+        let collapsed = text_of(&comment_box_lines(&ann, true, 60, &pal, true));
         assert!(expanded.contains("comment"));
         assert!(!expanded.contains(COMMENT_MARKER));
         assert!(!collapsed.contains(COMMENT_MARKER));
 
         // A drifted comment still surfaces the ⚠ in its box header.
         ann.status = CommentStatus::Drifted;
-        let drifted = text_of(&comment_box_lines(&ann, false, 60, &pal));
+        let drifted = text_of(&comment_box_lines(&ann, false, 60, &pal, true));
         assert!(drifted.contains(DRIFT_MARKER));
     }
 
@@ -2737,7 +2787,7 @@ diff --git a/x.rs b/x.rs
                 for collapsed in [true, false] {
                     assert_eq!(
                         comment_box_height(&ann, collapsed, width),
-                        comment_box_lines(&ann, collapsed, width, &pal).len(),
+                        comment_box_lines(&ann, collapsed, width, &pal, true).len(),
                         "height mismatch (collapsed={collapsed}, width={width})"
                     );
                 }
@@ -3099,7 +3149,7 @@ diff --git a/x.rs b/x.rs
         s.body_width.set(width);
         let pal = Theme::truecolor().review_palette();
         let segs = s.word_segments();
-        let lines = review_body_lines(&s, false, &pal, "rs", true, width, &segs);
+        let lines = review_body_lines(&s, false, &pal, "rs", true, width, &segs, true);
         assert_eq!(lines.len(), s.inline_physical_rows().len());
     }
 

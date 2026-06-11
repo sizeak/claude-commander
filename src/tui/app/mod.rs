@@ -481,6 +481,9 @@ pub struct AppUiState {
     pub selected_project_id: Option<ProjectId>,
     /// Attach command to run after exiting TUI
     pub attach_command: Option<String>,
+    /// Session whose review diff should be opened on returning to the TUI —
+    /// set when the user pressed Ctrl-r inside an attached session.
+    pub pending_open_review: Option<SessionId>,
     /// Editor command + path to open after exiting TUI
     pub editor_command: Option<(String, PathBuf)>,
     /// When attached via shell toggle (Ctrl+\), stores the session name to switch back to.
@@ -558,6 +561,7 @@ impl Default for AppUiState {
             selected_session_id: None,
             selected_project_id: None,
             attach_command: None,
+            pending_open_review: None,
             editor_command: None,
             shell_toggle_pair: None,
             clear_right_pane: false,
@@ -885,6 +889,16 @@ impl App {
                                 // sessions, where SIGTSTP would freeze the
                                 // pane with no shell to recover from.
                                 let intercept_ctrl_z = !current_session.ends_with("-sh");
+                                // The Ctrl-r review toggle is intercepted only
+                                // for Claude sessions; in a shell Ctrl-r is
+                                // reverse-history-search, which we leave intact.
+                                let review_triggers = if intercept_ctrl_z {
+                                    crate::config::keybindings::review_trigger_bytes(
+                                        &self.config.keybindings,
+                                    )
+                                } else {
+                                    Vec::new()
+                                };
 
                                 // Stamp last_attached_at so the in-tmux
                                 // switcher can sort Alt+Tab-style by MRU.
@@ -909,6 +923,7 @@ impl App {
                                 let outcome = match crate::tmux::attach_to_session(
                                     &current_session,
                                     editor_triggers,
+                                    review_triggers,
                                     intercept_ctrl_z,
                                 )
                                 .await
@@ -981,6 +996,26 @@ impl App {
                                         consecutive_ends = 0;
                                         info!("Switching to session: {}", current_session);
                                         continue;
+                                    }
+                                    crate::tmux::AttachResult::SwitchToReview => {
+                                        info!(
+                                            "Review toggle requested from session: {}",
+                                            current_session
+                                        );
+                                        // Resolve the tmux session to its id and
+                                        // queue the review view; the post-loop
+                                        // code opens it once we're back in the
+                                        // TUI. Ctrl-r inside the review
+                                        // re-attaches (see handle_review_key).
+                                        self.ui_state.pending_open_review = {
+                                            let st = self.service.store().read().await;
+                                            st.sessions
+                                                .values()
+                                                .find(|s| s.matches_tmux_name(&current_session))
+                                                .map(|s| s.id)
+                                        };
+                                        self.ui_state.shell_toggle_pair = None;
+                                        break;
                                     }
                                     crate::tmux::AttachResult::OpenEditor => {
                                         info!(
@@ -1095,6 +1130,14 @@ impl App {
                         // the one they entered.
                         if let Some(name) = final_session {
                             self.focus_session_in_tree(&name).await;
+                        }
+
+                        // Ctrl-r inside the attached session queued its review
+                        // diff — open it now so the next TUI frame shows it
+                        // (rather than the session list).
+                        if let Some(sid) = self.ui_state.pending_open_review.take() {
+                            self.ui_state.selected_session_id = Some(sid);
+                            self.handle_open_review().await;
                         }
                     }
                     None => {

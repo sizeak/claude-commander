@@ -141,7 +141,6 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `N` | Add new project |
 | `c` | Checkout existing branch into a new worktree session (fetches `origin` in the background, filterable list) |
 | `d` | Delete session |
-| `r` | Rename session (UI title only; underlying worktree, branch, and tmux session are unchanged) |
 | `R` | Restart session (kill tmux + recreate; adds `--resume` when `resume_session = true`) |
 | `D` | Remove project |
 | `.` or `Ctrl-.` | Open in editor/IDE |
@@ -151,7 +150,8 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `v` | Cycle session list view: Project → Sections → Section Stacks (requires `[[sections]]` config) |
 | palette only | Collapse/expand section (press on any item in the section, or `Enter` on the section header) |
 | `m` | Move session to section (manual override; see [Session List Sections](docs/configuration.md#session-list-sections)) |
-| `i` | Review & comment on a session's diff — see [Usage](docs/usage.md#reviewing--commenting-on-changes) |
+| `r` or `Ctrl-r` | Review & comment on a session's diff — see [Usage](docs/usage.md#reviewing--commenting-on-changes) |
+| palette only | Rename session (UI title only; underlying worktree, branch, and tmux session are unchanged) |
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
 | `<` / `>` | Shrink / grow left pane |
 | `Ctrl-u/d` or `PageUp/Down` | Page up/down in preview |
@@ -169,6 +169,7 @@ When attached to a session (via `Enter` or `claude-commander attach`):
 |-----|--------|
 | `Ctrl-q` | Detach and return to session list |
 | `Ctrl-\` | Switch between Claude and shell pane |
+| `Ctrl-r` | Switch to this session's review diff (and `Ctrl-r` in the diff switches back) — Claude sessions only; in a shell `Ctrl-r` stays reverse-history-search |
 | `Ctrl-Space` | Open the in-session switcher popup to jump to another claude-commander session without detaching |
 | `Ctrl-.` | Open the session worktree in your editor (requires a terminal that emits CSI-u or xterm modifyOtherKeys sequences for Ctrl-.) |
 

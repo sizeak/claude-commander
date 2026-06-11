@@ -618,11 +618,6 @@ mod tests {
                 UserCommand::DeleteSession,
             ),
             (
-                KeyCode::Char('r'),
-                KeyModifiers::NONE,
-                UserCommand::RenameSession,
-            ),
-            (
                 KeyCode::Char('R'),
                 KeyModifiers::SHIFT,
                 UserCommand::RestartSession,
@@ -648,8 +643,13 @@ mod tests {
                 UserCommand::OpenPullRequest,
             ),
             (
-                KeyCode::Char('i'),
+                KeyCode::Char('r'),
                 KeyModifiers::NONE,
+                UserCommand::OpenReviewDiff,
+            ),
+            (
+                KeyCode::Char('r'),
+                KeyModifiers::CONTROL,
                 UserCommand::OpenReviewDiff,
             ),
             (

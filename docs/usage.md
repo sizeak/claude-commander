@@ -94,11 +94,17 @@ Environment variable overrides: `CC_AI_SUMMARY_ENABLED`, `CC_AI_SUMMARY_MODEL`.
 
 ## Reviewing & commenting on changes
 
-Press **`i`** on a selected session (or open the **command palette** with
+Press **`r`** on a selected session (or open the **command palette** with
 `Space` and run **"Review diff & comment"**) to open a full-screen review view. It shows everything a PR
 against the session's base branch would contain — committed, staged, unstaged,
 and untracked changes — composed from `merge-base(base, HEAD)` through the
 working tree.
+
+While attached to a Claude session you can jump straight to its review diff
+with **`Ctrl-r`**, and **`Ctrl-r`** again from inside the diff switches back to
+the session — the same direct toggle the shell pane has with `Ctrl-\`, without
+detaching to the session list. (In a shell session `Ctrl-r` is left alone so it
+keeps working as reverse-history-search.)
 
 The diff is rendered in a `lumen`/`hunk`-style colour scheme: dark green/red
 line fills, a brighter highlight on the changed span within a line, and (on
