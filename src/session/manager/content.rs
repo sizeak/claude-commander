@@ -64,6 +64,7 @@ impl SessionManager {
             };
             let resume_program =
                 super::lifecycle::program_with_session_name(&resume_program, &title);
+            let resume_program = self.maybe_wrap_nix_develop(&resume_program, &worktree_path);
             info!("Recreating tmux session with: {}", resume_program);
             self.tmux
                 .create_session(&tmux_name, &worktree_path, Some(&resume_program))

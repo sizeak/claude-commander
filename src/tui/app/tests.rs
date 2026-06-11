@@ -659,7 +659,7 @@ fn test_worktrees_dir_row_shows_default_when_none() {
         .iter()
         .find(|r| r.field_key == "worktrees_dir")
         .unwrap();
-    assert_eq!(row.value, "(default)");
+    assert_eq!(row.text_value(), "(default)");
 }
 
 #[test]
@@ -671,7 +671,7 @@ fn test_worktrees_dir_row_shows_custom_path() {
         .iter()
         .find(|r| r.field_key == "worktrees_dir")
         .unwrap();
-    assert_eq!(row.value, "/custom/path");
+    assert_eq!(row.text_value(), "/custom/path");
 }
 
 #[test]
@@ -700,6 +700,51 @@ fn test_apply_worktrees_dir_default_sentinel_clears_to_none() {
     assert_eq!(app.config.worktrees_dir, None);
 }
 
+#[test]
+fn test_boolean_rows_are_toggle_kind() {
+    let app = make_test_app();
+    let rows = app.build_settings_rows(SettingsTab::General);
+
+    let kind_of = |key: &str| {
+        rows.iter()
+            .find(|r| r.field_key == key)
+            .unwrap_or_else(|| panic!("missing row {key}"))
+            .kind
+            .clone()
+    };
+
+    // Two-state booleans render as toggles carrying the live config value.
+    assert_eq!(
+        kind_of("fetch_before_create"),
+        SettingsRowKind::Toggle(app.config.fetch_before_create)
+    );
+    assert_eq!(
+        kind_of("rounded_borders"),
+        SettingsRowKind::Toggle(app.config.rounded_borders)
+    );
+    // Tri-state and free-text fields stay on the text-input flow.
+    assert!(matches!(kind_of("editor_gui"), SettingsRowKind::Text(_)));
+    assert!(matches!(kind_of("branch_prefix"), SettingsRowKind::Text(_)));
+}
+
+#[test]
+fn test_toggle_row_flips() {
+    assert_eq!(SettingsRow::toggle("L", false, "k").toggled(), Some(true));
+    assert_eq!(SettingsRow::toggle("L", true, "k").toggled(), Some(false));
+    // Non-toggle rows have no toggled value.
+    assert_eq!(SettingsRow::text("L", "v", "k").toggled(), None);
+}
+
+#[test]
+fn test_apply_bool_setting_flips_config() {
+    let mut app = make_test_app();
+    app.config.fetch_before_create = false;
+    app.apply_bool_setting("fetch_before_create", true);
+    assert!(app.config.fetch_before_create);
+    app.apply_bool_setting("fetch_before_create", false);
+    assert!(!app.config.fetch_before_create);
+}
+
 #[tokio::test]
 async fn ctrl_space_opens_quick_switch_in_tree() {
     use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -724,6 +769,49 @@ async fn ctrl_space_opens_quick_switch_in_tree() {
 }
 
 #[test]
+fn test_refilter_section_picker_keeps_section_rows() {
+    use crate::session::SectionConfig;
+
+    let mut app = make_test_app();
+    app.config.sections = vec![
+        SectionConfig {
+            name: "Review".to_string(),
+            ..Default::default()
+        },
+        SectionConfig {
+            name: "Done".to_string(),
+            ..Default::default()
+        },
+    ];
+    let session_id = SessionId::new();
+    app.ui_state.modal = Modal::QuickSwitch {
+        mode: PaletteMode::SectionPicker { session_id },
+        query: "re".to_string(),
+        matches: Vec::new(),
+        selected_idx: 0,
+        scroll: 0,
+    };
+
+    app.refilter_quick_switch();
+
+    let Modal::QuickSwitch { matches, .. } = &app.ui_state.modal else {
+        panic!("modal should still be QuickSwitch");
+    };
+    assert!(
+        matches
+            .iter()
+            .all(|m| matches!(m, QuickSwitchItem::SectionMove { .. })),
+        "section picker must only show section rows after typing, got {matches:?}"
+    );
+    assert!(
+        matches
+            .iter()
+            .any(|m| matches!(m, QuickSwitchItem::SectionMove { label, .. } if label == "Review")),
+        "query 're' should match the Review section, got {matches:?}"
+    );
+}
+
+#[test]
 fn test_project_pull_rows_present_in_general_tab() {
     let app = make_test_app();
     let rows = app.build_settings_rows(SettingsTab::General);
@@ -731,20 +819,40 @@ fn test_project_pull_rows_present_in_general_tab() {
         .iter()
         .find(|r| r.field_key == "project_pull_enabled")
         .expect("project_pull_enabled row missing");
-    assert_eq!(enabled.value, "true");
+    assert_eq!(enabled.kind, SettingsRowKind::Toggle(true));
     let interval = rows
         .iter()
         .find(|r| r.field_key == "project_pull_interval_secs")
         .expect("project_pull_interval_secs row missing");
-    assert_eq!(interval.value, "3600");
+    assert_eq!(interval.text_value(), "3600");
+}
+
+#[test]
+fn test_nix_develop_row_present_in_general_tab() {
+    let app = make_test_app();
+    let rows = app.build_settings_rows(SettingsTab::General);
+    let row = rows
+        .iter()
+        .find(|r| r.field_key == "nix_develop")
+        .expect("nix_develop row missing");
+    assert_eq!(row.kind, SettingsRowKind::Toggle(true));
+}
+
+#[test]
+fn test_apply_nix_develop_round_trip() {
+    let mut app = make_test_app();
+    app.apply_bool_setting("nix_develop", false);
+    assert!(!app.config.nix_develop);
+    app.apply_bool_setting("nix_develop", true);
+    assert!(app.config.nix_develop);
 }
 
 #[test]
 fn test_apply_project_pull_enabled_round_trip() {
     let mut app = make_test_app();
-    app.apply_settings_edit(SettingsTab::General, "project_pull_enabled", "true");
+    app.apply_bool_setting("project_pull_enabled", true);
     assert!(app.config.project_pull_enabled);
-    app.apply_settings_edit(SettingsTab::General, "project_pull_enabled", "false");
+    app.apply_bool_setting("project_pull_enabled", false);
     assert!(!app.config.project_pull_enabled);
 }
 

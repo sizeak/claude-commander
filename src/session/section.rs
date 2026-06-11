@@ -296,6 +296,42 @@ pub fn clear_override_and_reassign(
     changed
 }
 
+/// Place a freshly created session into the section the user's cursor was in
+/// when they triggered "new session".
+///
+/// The attachment strength depends on the kind of section:
+/// - **Predicate-less** (manual-only waypoint): set `section_override`, exactly
+///   as if the user had created the session and then moved it via the section
+///   picker. Nothing can auto-match such a section, so the override is the
+///   only durable way to keep the session there.
+/// - **Predicate-bearing**: set only `current_section` (soft placement). The
+///   forward-only rule in [`assign_section`] keeps the session there until a
+///   *later* section's predicate matches, so it still flows through the
+///   user's PR pipeline like any other session.
+/// - The reserved [`IN_PROGRESS`] catch-all or an unknown name: no-op —
+///   landing in "In Progress" is already the default for new sessions.
+///
+/// Returns `true` when the session was placed.
+pub fn place_created_session(
+    session: &mut WorktreeSession,
+    name: &str,
+    sections: &[SectionConfig],
+    now: DateTime<Utc>,
+) -> bool {
+    if name == IN_PROGRESS {
+        return false;
+    }
+    let Some(section) = sections.iter().find(|s| s.name == name) else {
+        return false;
+    };
+    if !has_predicates(section) {
+        session.section_override = Some(name.to_string());
+    }
+    session.current_section = Some(name.to_string());
+    session.entered_section_at = now;
+    true
+}
+
 fn section_matches(session: &WorktreeSession, section: &SectionConfig) -> bool {
     if let Some(state_pred) = &section.pr_state
         && !state_pred.matches(session.pr_state)
@@ -1279,6 +1315,112 @@ mod tests {
             assign_section(&session, &sections),
             SectionAssignment::Matched("Team".into())
         );
+    }
+
+    #[test]
+    fn place_created_session_pins_predicate_less_section() {
+        // Creating a session while the cursor is in a manual-only section
+        // must behave like a manual move: override set so the background
+        // poller can never relocate it.
+        let sections = vec![SectionConfig {
+            name: "Self Review".into(),
+            ..Default::default()
+        }];
+        let mut session = make_session();
+        let now = session.entered_section_at + Duration::minutes(1);
+
+        let placed = place_created_session(&mut session, "Self Review", &sections, now);
+
+        assert!(placed);
+        assert_eq!(session.section_override.as_deref(), Some("Self Review"));
+        assert_eq!(session.current_section.as_deref(), Some("Self Review"));
+        assert_eq!(session.entered_section_at, now);
+    }
+
+    #[test]
+    fn place_created_session_soft_places_predicate_section() {
+        // Predicate-bearing sections get a soft placement: the session shows
+        // up there immediately but no override is set, so it can still
+        // auto-advance to later sections as its PR progresses.
+        let sections = vec![
+            SectionConfig {
+                name: "Drafts".into(),
+                is_draft: Some(true),
+                ..Default::default()
+            },
+            SectionConfig {
+                name: "In Review".into(),
+                has_reviewer: Some(ReviewerPredicate::Bool(true)),
+                ..Default::default()
+            },
+        ];
+        let mut session = make_session();
+        let now = session.entered_section_at + Duration::minutes(1);
+
+        let placed = place_created_session(&mut session, "Drafts", &sections, now);
+
+        assert!(placed);
+        assert_eq!(session.section_override, None);
+        assert_eq!(session.current_section.as_deref(), Some("Drafts"));
+        assert_eq!(session.entered_section_at, now);
+
+        // Forward-only scan keeps it in Drafts while nothing later matches...
+        let later = now + Duration::minutes(1);
+        assert!(!apply_assignment(&mut session, &sections, later));
+        assert_eq!(session.current_section.as_deref(), Some("Drafts"));
+
+        // ...but it still advances once a later section's predicate matches.
+        session.pr_reviewers = vec!["alice".into()];
+        assert!(apply_assignment(&mut session, &sections, later));
+        assert_eq!(session.current_section.as_deref(), Some("In Review"));
+    }
+
+    #[test]
+    fn place_created_session_soft_placement_survives_poller_pass() {
+        // A brand-new session has no PR, so the placed section's own
+        // predicate doesn't match it. The very next poller pass must not
+        // bounce it out.
+        let sections = vec![SectionConfig {
+            name: "Drafts".into(),
+            is_draft: Some(true),
+            ..Default::default()
+        }];
+        let mut session = make_session(); // no PR at all
+        let now = session.entered_section_at + Duration::minutes(1);
+
+        place_created_session(&mut session, "Drafts", &sections, now);
+        let changed = apply_assignment(&mut session, &sections, now + Duration::minutes(1));
+
+        assert!(!changed);
+        assert_eq!(session.current_section.as_deref(), Some("Drafts"));
+    }
+
+    #[test]
+    fn place_created_session_ignores_in_progress_and_unknown_names() {
+        let sections = vec![SectionConfig {
+            name: "Open".into(),
+            pr_state: Some(StatePredicate::One(PrState::Open)),
+            ..Default::default()
+        }];
+        let mut session = make_session();
+        let original = session.entered_section_at;
+        let now = original + Duration::minutes(1);
+
+        assert!(!place_created_session(
+            &mut session,
+            IN_PROGRESS,
+            &sections,
+            now
+        ));
+        assert!(!place_created_session(
+            &mut session,
+            "Removed Section",
+            &sections,
+            now
+        ));
+        assert_eq!(session.section_override, None);
+        assert_eq!(session.current_section, None);
+        assert_eq!(session.entered_section_at, original);
     }
 
     #[test]

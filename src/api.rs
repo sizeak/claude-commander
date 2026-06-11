@@ -229,10 +229,12 @@ impl CommanderService {
 
         if let Some(section) = &opts.section {
             let section = section.clone();
+            let sections = self.config_store.read().sections.clone();
+            let now = chrono::Utc::now();
             self.store
                 .mutate(move |state| {
                     if let Some(session) = state.sessions.get_mut(&session_id) {
-                        session.section_override = Some(section);
+                        crate::session::place_created_session(session, &section, &sections, now);
                     }
                 })
                 .await?;

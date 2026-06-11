@@ -25,6 +25,12 @@ fetch_before_create = true
 # where it left off. Set to false to start the program fresh each time.
 resume_session = true
 
+# Launch sessions inside `nix develop` when the project has a `flake.nix` at
+# its root and `nix` is on PATH, so the agent and shell get the project's dev
+# environment. Applies to Claude sessions and shell sessions. Projects without
+# a flake are unaffected.
+nix_develop = true
+
 # Maximum concurrent tmux commands
 max_concurrent_tmux = 16
 
@@ -227,6 +233,10 @@ Config order is the pipeline. A session's section is re-evaluated on every PR re
 ### Moving sessions manually
 
 Select a session and press `m` (or open the palette with `Space`, or `Shift+Space` for commands-only, and run **Move session to section…**), then pick a target. An **Auto** entry clears an existing pin. The override is persisted to `state.json` and survives restarts; auto-moves are suppressed until the pin is released.
+
+### Creating sessions inside a section
+
+In the section-grouped views, a session created with `n` lands in the section the cursor was in, not the "In Progress" catch-all. For a manual-only waypoint (no predicates) this sets the same pin as a manual move; for a predicate-bearing section it's a soft placement — the session starts there but still auto-advances through the pipeline as its PR progresses. Creating from "In Progress" keeps the default behaviour. The CLI's `claude-commander new --section` flag follows the same rules.
 
 ### Reordering, adding, or removing sections
 

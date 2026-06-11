@@ -8,156 +8,121 @@ impl App {
             SettingsTab::General => {
                 let c = &self.config;
                 vec![
-                    SettingsRow {
-                        label: "Default Program".into(),
-                        value: c.default_program.clone(),
-                        field_key: "default_program".into(),
-                        color_swatch: None,
-                    },
-                    SettingsRow {
-                        label: "Branch Prefix".into(),
-                        value: if c.branch_prefix.is_empty() {
-                            "(none)".into()
+                    SettingsRow::text(
+                        "Default Program",
+                        c.default_program.clone(),
+                        "default_program",
+                    ),
+                    SettingsRow::text(
+                        "Branch Prefix",
+                        if c.branch_prefix.is_empty() {
+                            "(none)".to_string()
                         } else {
                             c.branch_prefix.clone()
                         },
-                        field_key: "branch_prefix".into(),
-                        color_swatch: None,
-                    },
-                    SettingsRow {
-                        label: "Shell Program".into(),
-                        value: c.shell_program.clone(),
-                        field_key: "shell_program".into(),
-                        color_swatch: None,
-                    },
-                    SettingsRow {
-                        label: "Worktrees Directory".into(),
-                        value: c
-                            .worktrees_dir
+                        "branch_prefix",
+                    ),
+                    SettingsRow::text("Shell Program", c.shell_program.clone(), "shell_program"),
+                    SettingsRow::text(
+                        "Worktrees Directory",
+                        c.worktrees_dir
                             .as_ref()
                             .map(|p| p.display().to_string())
                             .unwrap_or_else(|| "(default)".into()),
-                        field_key: "worktrees_dir".into(),
-                        color_swatch: None,
-                    },
-                    SettingsRow {
-                        label: "Per-Repo Worktree Dirs".into(),
-                        value: c.per_repo_worktree_dirs.to_string(),
-                        field_key: "per_repo_worktree_dirs".into(),
-                        color_swatch: None,
-                    },
-                    SettingsRow {
-                        label: "Editor".into(),
-                        value: c.editor.clone().unwrap_or_else(|| "(auto)".into()),
-                        field_key: "editor".into(),
-                        color_swatch: None,
-                    },
-                    SettingsRow {
-                        label: "Editor is GUI".into(),
-                        value: match c.editor_gui {
-                            Some(true) => "true".into(),
-                            Some(false) => "false".into(),
-                            None => "(auto)".into(),
+                        "worktrees_dir",
+                    ),
+                    SettingsRow::toggle(
+                        "Per-Repo Worktree Dirs",
+                        c.per_repo_worktree_dirs,
+                        "per_repo_worktree_dirs",
+                    ),
+                    SettingsRow::text(
+                        "Editor",
+                        c.editor.clone().unwrap_or_else(|| "(auto)".into()),
+                        "editor",
+                    ),
+                    SettingsRow::text(
+                        "Editor is GUI",
+                        match c.editor_gui {
+                            Some(true) => "true",
+                            Some(false) => "false",
+                            None => "(auto)",
                         },
-                        field_key: "editor_gui".into(),
-                        color_swatch: None,
-                    },
-                    SettingsRow {
-                        label: "Fetch Before Create".into(),
-                        value: c.fetch_before_create.to_string(),
-                        field_key: "fetch_before_create".into(),
-                        color_swatch: None,
-                    },
-                    SettingsRow {
-                        label: "Resume Session".into(),
-                        value: c.resume_session.to_string(),
-                        field_key: "resume_session".into(),
-                        color_swatch: None,
-                    },
-                    SettingsRow {
-                        label: "UI Refresh FPS".into(),
-                        value: c.ui_refresh_fps.to_string(),
-                        field_key: "ui_refresh_fps".into(),
-                        color_swatch: None,
-                    },
-                    SettingsRow {
-                        label: "PR Check Interval (s)".into(),
-                        value: c.pr_check_interval_secs.to_string(),
-                        field_key: "pr_check_interval_secs".into(),
-                        color_swatch: None,
-                    },
-                    SettingsRow {
-                        label: "Project Pull Enabled".into(),
-                        value: c.project_pull_enabled.to_string(),
-                        field_key: "project_pull_enabled".into(),
-                        color_swatch: None,
-                    },
-                    SettingsRow {
-                        label: "Project Pull Interval (s)".into(),
-                        value: c.project_pull_interval_secs.to_string(),
-                        field_key: "project_pull_interval_secs".into(),
-                        color_swatch: None,
-                    },
-                    SettingsRow {
-                        label: "Max Concurrent Tmux".into(),
-                        value: c.max_concurrent_tmux.to_string(),
-                        field_key: "max_concurrent_tmux".into(),
-                        color_swatch: None,
-                    },
-                    SettingsRow {
-                        label: "Dim Unfocused Preview".into(),
-                        value: c.dim_unfocused_preview.to_string(),
-                        field_key: "dim_unfocused_preview".into(),
-                        color_swatch: None,
-                    },
-                    SettingsRow {
-                        label: "Dim Opacity".into(),
-                        value: format!("{:.2}", c.dim_unfocused_opacity),
-                        field_key: "dim_unfocused_opacity".into(),
-                        color_swatch: None,
-                    },
-                    SettingsRow {
-                        label: "Invert PR Label Color".into(),
-                        value: c.invert_pr_label_color.to_string(),
-                        field_key: "invert_pr_label_color".into(),
-                        color_swatch: None,
-                    },
-                    SettingsRow {
-                        label: "Show Session Program".into(),
-                        value: c.show_session_program.to_string(),
-                        field_key: "show_session_program".into(),
-                        color_swatch: None,
-                    },
-                    SettingsRow {
-                        label: "Rounded Borders".into(),
-                        value: c.rounded_borders.to_string(),
-                        field_key: "rounded_borders".into(),
-                        color_swatch: None,
-                    },
-                    SettingsRow {
-                        label: "Precompute Review Caches".into(),
-                        value: c.precompute_review_caches.to_string(),
-                        field_key: "precompute_review_caches".into(),
-                        color_swatch: None,
-                    },
-                    SettingsRow {
-                        label: "Number Debounce (ms)".into(),
-                        value: c.session_number_debounce_ms.to_string(),
-                        field_key: "session_number_debounce_ms".into(),
-                        color_swatch: None,
-                    },
-                    SettingsRow {
-                        label: "AI Summary Enabled".into(),
-                        value: c.ai_summary_enabled.to_string(),
-                        field_key: "ai_summary_enabled".into(),
-                        color_swatch: None,
-                    },
-                    SettingsRow {
-                        label: "AI Summary Model".into(),
-                        value: c.ai_summary_model.clone(),
-                        field_key: "ai_summary_model".into(),
-                        color_swatch: None,
-                    },
+                        "editor_gui",
+                    ),
+                    SettingsRow::toggle(
+                        "Fetch Before Create",
+                        c.fetch_before_create,
+                        "fetch_before_create",
+                    ),
+                    SettingsRow::toggle("Resume Session", c.resume_session, "resume_session"),
+                    SettingsRow::toggle("Nix Develop", c.nix_develop, "nix_develop"),
+                    SettingsRow::text(
+                        "UI Refresh FPS",
+                        c.ui_refresh_fps.to_string(),
+                        "ui_refresh_fps",
+                    ),
+                    SettingsRow::text(
+                        "PR Check Interval (s)",
+                        c.pr_check_interval_secs.to_string(),
+                        "pr_check_interval_secs",
+                    ),
+                    SettingsRow::toggle(
+                        "Project Pull Enabled",
+                        c.project_pull_enabled,
+                        "project_pull_enabled",
+                    ),
+                    SettingsRow::text(
+                        "Project Pull Interval (s)",
+                        c.project_pull_interval_secs.to_string(),
+                        "project_pull_interval_secs",
+                    ),
+                    SettingsRow::text(
+                        "Max Concurrent Tmux",
+                        c.max_concurrent_tmux.to_string(),
+                        "max_concurrent_tmux",
+                    ),
+                    SettingsRow::toggle(
+                        "Dim Unfocused Preview",
+                        c.dim_unfocused_preview,
+                        "dim_unfocused_preview",
+                    ),
+                    SettingsRow::text(
+                        "Dim Opacity",
+                        format!("{:.2}", c.dim_unfocused_opacity),
+                        "dim_unfocused_opacity",
+                    ),
+                    SettingsRow::toggle(
+                        "Invert PR Label Color",
+                        c.invert_pr_label_color,
+                        "invert_pr_label_color",
+                    ),
+                    SettingsRow::toggle(
+                        "Show Session Program",
+                        c.show_session_program,
+                        "show_session_program",
+                    ),
+                    SettingsRow::toggle("Rounded Borders", c.rounded_borders, "rounded_borders"),
+                    SettingsRow::toggle(
+                        "Precompute Review Caches",
+                        c.precompute_review_caches,
+                        "precompute_review_caches",
+                    ),
+                    SettingsRow::text(
+                        "Number Debounce (ms)",
+                        c.session_number_debounce_ms.to_string(),
+                        "session_number_debounce_ms",
+                    ),
+                    SettingsRow::toggle(
+                        "AI Summary Enabled",
+                        c.ai_summary_enabled,
+                        "ai_summary_enabled",
+                    ),
+                    SettingsRow::text(
+                        "AI Summary Model",
+                        c.ai_summary_model.clone(),
+                        "ai_summary_model",
+                    ),
                 ]
             }
             SettingsTab::Sections => {
@@ -167,11 +132,12 @@ impl App {
                 let kb = &self.config.keybindings;
                 BindableAction::ALL
                     .iter()
-                    .map(|&action| SettingsRow {
-                        label: action.description().to_string(),
-                        value: kb.keys_display(action),
-                        field_key: action.config_name().to_string(),
-                        color_swatch: None,
+                    .map(|&action| {
+                        SettingsRow::text(
+                            action.description(),
+                            kb.keys_display(action),
+                            action.config_name(),
+                        )
                     })
                     .collect()
             }
@@ -183,28 +149,26 @@ impl App {
 
                 macro_rules! theme_row {
                     ($label:expr, $field:ident) => {
-                        SettingsRow {
-                            label: $label.into(),
-                            value: o
-                                .$field
+                        SettingsRow::swatch(
+                            $label,
+                            o.$field
                                 .map(|cv| {
                                     let s = toml::to_string(&cv).unwrap_or_default();
                                     s.trim().trim_matches('"').to_string()
                                 })
                                 .unwrap_or_else(|| format_color(t.$field)),
-                            field_key: stringify!($field).into(),
-                            color_swatch: Some(t.$field),
-                        }
+                            stringify!($field),
+                            t.$field,
+                        )
                     };
                 }
 
                 vec![
-                    SettingsRow {
-                        label: "Preset".into(),
-                        value: o.preset.clone().unwrap_or_else(|| "(auto)".into()),
-                        field_key: "preset".into(),
-                        color_swatch: None,
-                    },
+                    SettingsRow::text(
+                        "Preset",
+                        o.preset.clone().unwrap_or_else(|| "(auto)".into()),
+                        "preset",
+                    ),
                     theme_row!("Border Focused", border_focused),
                     theme_row!("Border Unfocused", border_unfocused),
                     theme_row!("Selection BG", selection_bg),
@@ -422,22 +386,34 @@ impl App {
                     height: 1,
                 };
 
-                let display_val = if is_selected {
-                    if let Some(SettingsEditing::TextInput { value }) = &state.editing {
-                        format!("{value}▏")
-                    } else if let Some(SettingsEditing::OptionPicker { options, selected }) =
-                        &state.editing
-                    {
-                        // Show the currently highlighted option on the selected row
-                        format!("▸ {}", options[*selected])
-                    } else {
-                        row.value.clone()
+                let display_val = match &row.kind {
+                    // Toggles never enter an editing state; render as a checkbox.
+                    SettingsRowKind::Toggle(on) => {
+                        if *on {
+                            "[x]".to_string()
+                        } else {
+                            "[ ]".to_string()
+                        }
                     }
-                } else {
-                    row.value.clone()
+                    SettingsRowKind::Text(text) if is_selected => {
+                        if let Some(SettingsEditing::TextInput { value }) = &state.editing {
+                            format!("{value}▏")
+                        } else if let Some(SettingsEditing::OptionPicker { options, selected }) =
+                            &state.editing
+                        {
+                            // Show the currently highlighted option on the selected row
+                            format!("▸ {}", options[*selected])
+                        } else {
+                            text.clone()
+                        }
+                    }
+                    SettingsRowKind::Text(text) => text.clone(),
                 };
 
-                let val_style = if is_selected && state.editing.is_some() {
+                let val_style = if !matches!(row.kind, SettingsRowKind::Toggle(_))
+                    && is_selected
+                    && state.editing.is_some()
+                {
                     row_style.add_modifier(Modifier::UNDERLINED)
                 } else {
                     row_style.fg(self.theme.text_accent)
@@ -495,6 +471,10 @@ impl App {
             }
         }
 
+        let selected_is_toggle = state
+            .rows
+            .get(state.selected_row)
+            .is_some_and(|r| matches!(r.kind, SettingsRowKind::Toggle(_)));
         let footer_text = if state.editing.is_some() {
             match &state.editing {
                 Some(SettingsEditing::OptionPicker { .. }) => {
@@ -502,6 +482,8 @@ impl App {
                 }
                 _ => "Enter: save  Esc: cancel",
             }
+        } else if selected_is_toggle {
+            "Tab: switch tab  j/k: navigate  Space/Enter: toggle  Esc: close"
         } else {
             "Tab: switch tab  j/k: navigate  Enter: edit  Esc: close"
         };
@@ -755,11 +737,6 @@ impl App {
                         Some(PathBuf::from(value))
                     };
                 }
-                "per_repo_worktree_dirs" => {
-                    if let Ok(b) = value.parse::<bool>() {
-                        self.config.per_repo_worktree_dirs = b;
-                    }
-                }
                 "editor" => {
                     self.config.editor = if value.is_empty() || value == "(auto)" {
                         None
@@ -774,16 +751,6 @@ impl App {
                         _ => None,
                     };
                 }
-                "fetch_before_create" => {
-                    if let Ok(b) = value.parse::<bool>() {
-                        self.config.fetch_before_create = b;
-                    }
-                }
-                "resume_session" => {
-                    if let Ok(b) = value.parse::<bool>() {
-                        self.config.resume_session = b;
-                    }
-                }
                 "ui_refresh_fps" => {
                     if let Ok(v) = value.parse::<u32>() {
                         self.config.ui_refresh_fps = v;
@@ -792,11 +759,6 @@ impl App {
                 "pr_check_interval_secs" => {
                     if let Ok(v) = value.parse::<u64>() {
                         self.config.pr_check_interval_secs = v;
-                    }
-                }
-                "project_pull_enabled" => {
-                    if let Ok(b) = value.parse::<bool>() {
-                        self.config.project_pull_enabled = b;
                     }
                 }
                 "project_pull_interval_secs" => match value.parse::<u64>() {
@@ -816,44 +778,14 @@ impl App {
                         self.config.max_concurrent_tmux = v;
                     }
                 }
-                "dim_unfocused_preview" => {
-                    if let Ok(b) = value.parse::<bool>() {
-                        self.config.dim_unfocused_preview = b;
-                    }
-                }
                 "dim_unfocused_opacity" => {
                     if let Ok(v) = value.parse::<f32>() {
                         self.config.dim_unfocused_opacity = v.clamp(0.0, 1.0);
                     }
                 }
-                "invert_pr_label_color" => {
-                    if let Ok(b) = value.parse::<bool>() {
-                        self.config.invert_pr_label_color = b;
-                    }
-                }
-                "show_session_program" => {
-                    if let Ok(b) = value.parse::<bool>() {
-                        self.config.show_session_program = b;
-                    }
-                }
-                "rounded_borders" => {
-                    if let Ok(b) = value.parse::<bool>() {
-                        self.config.rounded_borders = b;
-                    }
-                }
-                "precompute_review_caches" => {
-                    if let Ok(b) = value.parse::<bool>() {
-                        self.config.precompute_review_caches = b;
-                    }
-                }
                 "session_number_debounce_ms" => {
                     if let Ok(v) = value.parse::<u64>() {
                         self.config.session_number_debounce_ms = v;
-                    }
-                }
-                "ai_summary_enabled" => {
-                    if let Ok(b) = value.parse::<bool>() {
-                        self.config.ai_summary_enabled = b;
                     }
                 }
                 "ai_summary_model" => {
@@ -986,7 +918,37 @@ impl App {
             }
         }
 
-        // Persist config via the store (updates mtime so hot-reload won't re-read our own write)
+        self.persist_config();
+    }
+
+    /// Set a boolean General-tab setting to a typed value and persist.
+    ///
+    /// Booleans are stored as real `bool`s on [`Config`]; this avoids the
+    /// stringify/parse round-trip used by the text-input edit path.
+    pub(super) fn apply_bool_setting(&mut self, field_key: &str, value: bool) {
+        match field_key {
+            "per_repo_worktree_dirs" => self.config.per_repo_worktree_dirs = value,
+            "fetch_before_create" => self.config.fetch_before_create = value,
+            "resume_session" => self.config.resume_session = value,
+            "nix_develop" => self.config.nix_develop = value,
+            "project_pull_enabled" => self.config.project_pull_enabled = value,
+            "dim_unfocused_preview" => self.config.dim_unfocused_preview = value,
+            "invert_pr_label_color" => self.config.invert_pr_label_color = value,
+            "show_session_program" => self.config.show_session_program = value,
+            "rounded_borders" => self.config.rounded_borders = value,
+            "precompute_review_caches" => self.config.precompute_review_caches = value,
+            "ai_summary_enabled" => self.config.ai_summary_enabled = value,
+            _ => {
+                warn!("Unknown boolean setting: {}", field_key);
+                return;
+            }
+        }
+        self.persist_config();
+    }
+
+    /// Persist the current config via the store (updates mtime so hot-reload
+    /// won't re-read our own write).
+    fn persist_config(&mut self) {
         let updated = self.config.clone();
         if let Err(e) = self.service.update_config(updated) {
             warn!("Failed to save config: {}", e);
@@ -1090,6 +1052,28 @@ impl App {
             // Not editing — navigation mode: resolve via configurable keybindings
             use crate::config::keybindings::BindableAction;
 
+            // Boolean rows flip in place on Enter/Space/Left/Right without
+            // opening an editor.
+            let toggle_key = matches!(
+                key.code,
+                KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Left | KeyCode::Right
+            );
+            let new_val = toggle_key
+                .then(|| {
+                    state
+                        .rows
+                        .get(state.selected_row)
+                        .and_then(SettingsRow::toggled)
+                })
+                .flatten();
+            if let Some(new_val) = new_val {
+                let field_key = state.rows[state.selected_row].field_key.clone();
+                self.apply_bool_setting(&field_key, new_val);
+                state.rows = self.build_settings_rows(state.tab);
+                self.ui_state.modal = Modal::Settings(state);
+                return;
+            }
+
             match self.config.keybindings.resolve(&key) {
                 Some(BindableAction::NavigateDown) => {
                     if !state.rows.is_empty() {
@@ -1134,18 +1118,18 @@ impl App {
                                 use crate::tui::theme::PRESET_NAMES;
                                 let options: Vec<String> =
                                     PRESET_NAMES.iter().map(|s| (*s).to_string()).collect();
-                                let current_value = &state.rows[state.selected_row].value;
+                                let current_value = state.rows[state.selected_row].text_value();
                                 let selected =
                                     options.iter().position(|o| o == current_value).unwrap_or(0);
                                 state.editing =
                                     Some(SettingsEditing::OptionPicker { options, selected });
                             } else {
-                                let current_value = state.rows[state.selected_row].value.clone();
+                                let current_value = state.rows[state.selected_row].text_value();
                                 let initial =
                                     if current_value == "(auto)" || current_value == "(none)" {
                                         String::new()
                                     } else {
-                                        current_value
+                                        current_value.to_string()
                                     };
                                 state.editing = Some(SettingsEditing::TextInput { value: initial });
                             }
