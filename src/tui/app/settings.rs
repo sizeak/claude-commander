@@ -751,11 +751,18 @@ impl App {
                         _ => None,
                     };
                 }
-                "ui_refresh_fps" => {
-                    if let Ok(v) = value.parse::<u32>() {
+                "ui_refresh_fps" => match value.parse::<u32>() {
+                    Ok(v) if v >= 1 => {
                         self.config.ui_refresh_fps = v;
                     }
-                }
+                    Ok(_) => {
+                        self.ui_state.status_message = Some((
+                            "UI Refresh FPS must be at least 1".into(),
+                            std::time::Instant::now() + std::time::Duration::from_secs(4),
+                        ));
+                    }
+                    Err(_) => {}
+                },
                 "pr_check_interval_secs" => {
                     if let Ok(v) = value.parse::<u64>() {
                         self.config.pr_check_interval_secs = v;
@@ -773,11 +780,18 @@ impl App {
                     }
                     Err(_) => {}
                 },
-                "max_concurrent_tmux" => {
-                    if let Ok(v) = value.parse::<usize>() {
+                "max_concurrent_tmux" => match value.parse::<usize>() {
+                    Ok(v) if v >= 1 => {
                         self.config.max_concurrent_tmux = v;
                     }
-                }
+                    Ok(_) => {
+                        self.ui_state.status_message = Some((
+                            "Max Concurrent Tmux must be at least 1".into(),
+                            std::time::Instant::now() + std::time::Duration::from_secs(4),
+                        ));
+                    }
+                    Err(_) => {}
+                },
                 "dim_unfocused_opacity" => {
                     if let Ok(v) = value.parse::<f32>() {
                         self.config.dim_unfocused_opacity = v.clamp(0.0, 1.0);

@@ -812,7 +812,8 @@ impl App {
             }
         }
 
-        let tick_rate = Duration::from_millis(1000 / self.config.ui_refresh_fps as u64);
+        // Floor at 1: a hand-edited config with fps 0 must not divide by zero.
+        let tick_rate = Duration::from_millis(1000 / self.config.ui_refresh_fps.max(1) as u64);
         self.event_loop.start(tick_rate);
 
         // Warm the syntax-highlight assets in the background so the first review
