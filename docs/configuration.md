@@ -126,8 +126,9 @@ state_sync_interval_ms = 2000
 
 # Persistent "commander" session — a project-less Claude session (opened with
 # `C` or `claude-commander commander`) that coordinates other sessions via the
-# CLI. Disabled by default. Editing `config.toml` takes effect on the next
-# launch; the in-app settings toggle applies immediately.
+# CLI. Disabled by default; enabling it is restart-required (the open path and
+# the footer chip both key off the value read at launch). While running, a
+# `● Commander` chip in the footer status bar shows its live state.
 # commander_enabled = false
 # Program (with flags) for the commander; defaults to `default_program`.
 # commander_program = "claude --model opus-4-7"
