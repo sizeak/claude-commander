@@ -369,7 +369,15 @@ impl Default for TmuxExecutor {
 /// state reconciler will wrongly mark a live session as Stopped.
 fn stderr_means_session_absent(stderr: &str) -> bool {
     let s = stderr.to_ascii_lowercase();
-    s.contains("can't find session") || s.contains("no server running")
+    if s.contains("can't find session") || s.contains("no server running") {
+        return true;
+    }
+    // No tmux server has started at all: the socket file is missing, so
+    // `has-session` fails with `error connecting to <socket> (No such file or
+    // directory)`. No server means no session can exist — distinct from a
+    // transient connection failure (e.g. "connection refused"), which we still
+    // propagate rather than mistake for absence.
+    s.contains("error connecting to") && s.contains("no such file")
 }
 
 #[cfg(test)]
@@ -387,6 +395,29 @@ mod tests {
         let executor = TmuxExecutor::with_max_concurrent(8).with_timeout(Duration::from_secs(10));
 
         assert_eq!(executor.timeout, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn stderr_no_running_server_reads_as_session_absent() {
+        // tmux's explicit phrasings.
+        assert!(stderr_means_session_absent(
+            "can't find session: cc-commander"
+        ));
+        assert!(stderr_means_session_absent(
+            "no server running on /tmp/tmux-1001/default"
+        ));
+        // No server socket at all (fresh CI runner with no tmux server): this
+        // must read as absent so `session_exists` returns Ok(false) and
+        // `ensure_session` can create the session instead of erroring.
+        assert!(stderr_means_session_absent(
+            "error connecting to /tmp/tmux-1001/default (No such file or directory)"
+        ));
+        // A transient connection failure tells us nothing about existence —
+        // never mistake it for absence.
+        assert!(!stderr_means_session_absent(
+            "error connecting to /tmp/tmux-1001/default (Connection refused)"
+        ));
+        assert!(!stderr_means_session_absent("some unrelated tmux error"));
     }
 
     // Integration tests would require tmux to be installed
