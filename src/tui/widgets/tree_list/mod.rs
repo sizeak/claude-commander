@@ -7,9 +7,9 @@ use ratatui::{
     widgets::{Block, ListItem},
 };
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use crate::session::{AgentState, ProjectId, SessionListItem, SessionStatus};
+use crate::session::{AgentState, ProjectId, SessionId, SessionListItem, SessionStatus};
 use crate::tui::theme::Theme;
 
 pub(crate) mod pr_colors;
@@ -31,6 +31,10 @@ const STACK_INDENT: &str = "   ";
 
 /// Braille spinner frames for the Creating status indicator
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Marker shown on a session row that has pending review comments. Matches the
+/// review view's comment marker.
+const COMMENT_MARKER: char = '*';
 
 /// Tree list widget for displaying hierarchical sessions
 pub struct TreeList<'a> {
@@ -55,6 +59,9 @@ pub struct TreeList<'a> {
     /// Projects whose most recent auto-pull was held back, with a short
     /// reason string. A small ⚠ badge is rendered on each blocked row.
     pull_blocked_projects: HashMap<ProjectId, &'a str>,
+    /// Sessions with at least one pending review comment. A `*` marker is
+    /// rendered on each matching session row.
+    comment_sessions: HashSet<SessionId>,
 }
 
 impl<'a> TreeList<'a> {
@@ -70,7 +77,20 @@ impl<'a> TreeList<'a> {
             invert_pr_label_color: false,
             show_session_program: true,
             pull_blocked_projects: HashMap::new(),
+            comment_sessions: HashSet::new(),
         }
+    }
+
+    /// Mark a set of sessions as having pending review comments. Renders a `*`
+    /// marker on each matching session row.
+    pub fn comment_sessions(mut self, sessions: HashSet<SessionId>) -> Self {
+        self.comment_sessions = sessions;
+        self
+    }
+
+    /// Whether a session row should display the pending-comment marker.
+    pub(crate) fn session_has_comments(&self, id: &SessionId) -> bool {
+        self.comment_sessions.contains(id)
     }
 
     /// Mark a set of projects as having a held-back background pull.

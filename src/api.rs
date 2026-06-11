@@ -7,9 +7,18 @@ use std::time::Duration;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 
+use uuid::Uuid;
+
+use crate::comment::{
+    ApplyOutcome, Comment, CommentSide, CommentStatus, CommentStore, SendDecision,
+    compose_markdown, decide_send, reanchor_comments,
+};
 use crate::config::{AppState, Config, ConfigStore, StateStore};
 use crate::error::{Result, SessionError};
-use crate::git::{GitBackend, PrState, ReviewDecision, diff_stat_summary, effective_pr_state};
+use crate::git::{
+    GitBackend, ParsedDiff, PrState, ReviewDecision, compose_review_diff, diff_stat_summary,
+    effective_pr_state, parse_unified_diff,
+};
 use crate::session::{
     AgentState, ProjectId, ScanResult, SessionId, SessionManager, SessionStatus, WorktreeSession,
     program_is_claude, program_with_claude_flags,
@@ -24,6 +33,7 @@ pub struct CommanderService {
     manager: SessionManager,
     store: Arc<StateStore>,
     config_store: Arc<ConfigStore>,
+    comments: Arc<CommentStore>,
 }
 
 impl CommanderService {
@@ -33,10 +43,20 @@ impl CommanderService {
             store.clone(),
             Theme::default().tmux_status_style(),
         );
+        // Comments live beside state.json under the data dir. `data_dir()`
+        // only fails when no home directory can be resolved (effectively never
+        // on supported platforms); fall back to a relative dir to keep `new`
+        // infallible, mirroring `for_cli`'s tolerant state load.
+        let comments = Arc::new(CommentStore::new(
+            Config::data_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join("comments"),
+        ));
         Self {
             manager,
             store,
             config_store,
+            comments,
         }
     }
 
@@ -265,6 +285,190 @@ impl CommanderService {
     pub async fn delete_session(&self, id: &SessionId) -> Result<()> {
         self.manager.delete_session(id).await
     }
+
+    // -- Review / comments --
+
+    /// Open the review diff for a session: compose the base→working-tree diff,
+    /// parse it, and re-anchor the session's stored comments against it
+    /// (persisting any status changes). Returns the parsed diff plus the
+    /// re-anchored comments.
+    pub async fn open_review(&self, session_id: &SessionId) -> Result<ReviewSnapshot> {
+        let (worktree_path, base) = {
+            let state = self.store.read().await;
+            let session = state
+                .sessions
+                .get(session_id)
+                .ok_or(SessionError::NotFound(*session_id))?;
+            (session.worktree_path.clone(), resolve_review_base(session))
+        };
+
+        let raw = compose_review_diff(&worktree_path, &base).await?;
+        let diff = parse_unified_diff(&raw);
+
+        let mut comments = self.comments.load(*session_id)?;
+        reanchor_comments(&mut comments, &diff);
+        self.comments.save(*session_id, &comments)?;
+
+        Ok(ReviewSnapshot {
+            base,
+            diff,
+            comments,
+        })
+    }
+
+    /// List a session's stored comments (without re-anchoring).
+    pub async fn list_comments(&self, session_id: &SessionId) -> Result<Vec<Comment>> {
+        self.comments.load(*session_id)
+    }
+
+    /// Session ids that have at least one not-yet-applied comment, for the
+    /// session-list pending-comment indicator.
+    pub async fn sessions_with_pending_comments(
+        &self,
+    ) -> Result<std::collections::HashSet<SessionId>> {
+        self.comments.sessions_with_pending()
+    }
+
+    /// Stage a new comment; returns its id.
+    pub async fn create_comment(&self, session_id: &SessionId, draft: NewComment) -> Result<Uuid> {
+        let ann = Comment::new(
+            draft.file,
+            draft.side,
+            draft.line_range,
+            draft.snippet,
+            draft.comment,
+        );
+        let id = ann.id;
+        self.comments.add(*session_id, ann)?;
+        Ok(id)
+    }
+
+    /// Delete a staged comment by id (no-op if absent).
+    pub async fn delete_comment(&self, session_id: &SessionId, id: Uuid) -> Result<()> {
+        self.comments.delete(*session_id, id)
+    }
+
+    /// Apply a session's staged comments: re-anchor them, and if none are
+    /// drifted, compose a markdown brief to a temp file and inject a pointer
+    /// prompt into the session's tmux pane for the agent to act on.
+    ///
+    /// Delivery is gated on agent state: sent immediately when idle/working
+    /// (Claude queues natively), held until a permission prompt clears, and
+    /// deferred if the agent is stopped or never becomes ready. Applied
+    /// comments are marked [`CommentStatus::Applied`].
+    pub async fn apply_comments(&self, session_id: &SessionId) -> Result<ApplyOutcome> {
+        let (worktree_path, base, title, tmux_name, is_active) = {
+            let state = self.store.read().await;
+            let s = state
+                .sessions
+                .get(session_id)
+                .ok_or(SessionError::NotFound(*session_id))?;
+            (
+                s.worktree_path.clone(),
+                resolve_review_base(s),
+                s.title.clone(),
+                s.tmux_session_name.clone(),
+                s.status.is_active(),
+            )
+        };
+
+        // Re-anchor against a fresh diff so drift status is current.
+        let raw = compose_review_diff(&worktree_path, &base).await?;
+        let parsed = parse_unified_diff(&raw);
+        let mut comments = self.comments.load(*session_id)?;
+        reanchor_comments(&mut comments, &parsed);
+        self.comments.save(*session_id, &comments)?;
+
+        // Only not-yet-applied comments participate.
+        let staged: Vec<Comment> = comments
+            .iter()
+            .filter(|a| a.status != CommentStatus::Applied)
+            .cloned()
+            .collect();
+        if staged.is_empty() {
+            return Ok(ApplyOutcome::Nothing);
+        }
+        let drifted: Vec<Uuid> = staged
+            .iter()
+            .filter(|a| a.status == CommentStatus::Drifted)
+            .map(|a| a.id)
+            .collect();
+        if !drifted.is_empty() {
+            return Ok(ApplyOutcome::Blocked { drifted });
+        }
+
+        // Compose the brief to an absolute temp path outside the worktree.
+        let path = write_apply_brief(*session_id, &compose_markdown(&title, &staged))?;
+        let count = staged.len();
+
+        if !is_active {
+            return Ok(ApplyOutcome::Deferred { path, count });
+        }
+
+        // Gate delivery on agent state.
+        let mut detector = AgentStateDetector::new(self.manager.tmux.clone(), Duration::ZERO);
+        let ready = match decide_send(detector.detect(&tmux_name).await) {
+            SendDecision::Now => true,
+            SendDecision::HoldUntilClear => wait_until_ready(&mut detector, &tmux_name).await,
+        };
+        if !ready {
+            return Ok(ApplyOutcome::Deferred { path, count });
+        }
+
+        // Inject the pointer prompt (literal text, then Enter to submit).
+        let prompt = format!(
+            "Review the comments in {} and address them.",
+            path.display()
+        );
+        self.manager.tmux.send_keys(&tmux_name, &prompt).await?;
+        self.manager.tmux.send_keys(&tmux_name, "Enter").await?;
+
+        // Mark the delivered comments applied.
+        for ann in comments
+            .iter_mut()
+            .filter(|a| a.status != CommentStatus::Applied)
+        {
+            ann.status = CommentStatus::Applied;
+        }
+        self.comments.save(*session_id, &comments)?;
+
+        Ok(ApplyOutcome::Applied { path, count })
+    }
+}
+
+/// Write the apply brief to a stable absolute path in the system temp dir
+/// (outside the worktree, so it's never committed). One file per session,
+/// overwritten on re-apply.
+fn write_apply_brief(session_id: SessionId, markdown: &str) -> Result<PathBuf> {
+    let path = std::env::temp_dir().join(format!("cc-comments-{}.md", session_id.as_uuid()));
+    std::fs::write(&path, markdown)
+        .map_err(|e| crate::error::ConfigError::SaveFailed(e.to_string()))?;
+    Ok(path)
+}
+
+/// Poll the agent state, returning `true` once it leaves `WaitingForInput`, or
+/// `false` if it stays at a prompt past the bounded timeout.
+async fn wait_until_ready(detector: &mut AgentStateDetector, tmux_name: &str) -> bool {
+    const ATTEMPTS: u32 = 20;
+    const INTERVAL: Duration = Duration::from_millis(250);
+    for _ in 0..ATTEMPTS {
+        if detector.detect(tmux_name).await != AgentState::WaitingForInput {
+            return true;
+        }
+        tokio::time::sleep(INTERVAL).await;
+    }
+    false
+}
+
+/// Resolve the base a session's review diff is computed against: the PR's
+/// target branch if known, else the fork-point commit captured at creation,
+/// else `HEAD`.
+fn resolve_review_base(session: &WorktreeSession) -> String {
+    session
+        .pr_base_branch
+        .clone()
+        .or_else(|| session.base_commit.clone())
+        .unwrap_or_else(|| "HEAD".to_string())
 }
 
 pub struct CreateSessionOpts {
@@ -346,6 +550,25 @@ pub struct SessionDetail {
     pub agent_state: AgentState,
     pub diff_stat: Option<String>,
     pub pane_content: Option<String>,
+}
+
+/// Request to stage a new comment on a session's review diff.
+#[derive(Debug, Clone)]
+pub struct NewComment {
+    pub file: String,
+    pub side: CommentSide,
+    pub line_range: (usize, usize),
+    pub snippet: String,
+    pub comment: String,
+}
+
+/// Result of opening the review view: the parsed diff plus the session's
+/// (re-anchored) comments and the base they were computed against.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReviewSnapshot {
+    pub base: String,
+    pub diff: ParsedDiff,
+    pub comments: Vec<Comment>,
 }
 
 // -- Internal helpers --
@@ -568,6 +791,19 @@ mod tests {
             section: None,
         };
         opts.validate_program_flags("claude").unwrap();
+    }
+
+    #[test]
+    fn resolve_review_base_prefers_pr_base_then_fork_then_head() {
+        let mut s = make_session_for_project("t", ProjectId::new());
+        // No PR base or fork point recorded yet → HEAD.
+        assert_eq!(resolve_review_base(&s), "HEAD");
+        // Fork-point commit captured at creation.
+        s.base_commit = Some("abc123".to_string());
+        assert_eq!(resolve_review_base(&s), "abc123");
+        // PR's target branch takes precedence once known.
+        s.pr_base_branch = Some("main".to_string());
+        assert_eq!(resolve_review_base(&s), "main");
     }
 
     #[test]

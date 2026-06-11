@@ -116,6 +116,7 @@ impl<'a> TreeList<'a> {
                 }
 
                 SessionListItem::Worktree {
+                    id,
                     title,
                     branch,
                     status,
@@ -164,6 +165,12 @@ impl<'a> TreeList<'a> {
                         Style::default().fg(current_session_color)
                     };
                     spans.push(Span::styled(title.clone(), title_style));
+                    if self.session_has_comments(id) {
+                        spans.push(Span::styled(
+                            format!(" {COMMENT_MARKER}"),
+                            Style::default().fg(self.theme.diff_file_header),
+                        ));
+                    }
                     if let Some(shown_branch) = crate::session::display_branch(title, branch) {
                         spans.push(Span::styled(
                             format!(" [{}]", shown_branch),

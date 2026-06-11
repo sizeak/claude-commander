@@ -262,6 +262,24 @@ impl App {
             StateUpdate::Error { message } => {
                 self.ui_state.modal = Modal::Error { message };
             }
+            StateUpdate::ReviewPrepared { prepared } => {
+                // Only swap in the view if the loading spinner is still up. The
+                // user can't navigate while it's shown, but another background
+                // event could have replaced the modal (e.g. an error).
+                if matches!(self.ui_state.modal, Modal::Loading { .. }) {
+                    let ReviewPrepared {
+                        session_id,
+                        title,
+                        base,
+                        diff,
+                        comments,
+                        segments,
+                    } = *prepared;
+                    let state = DiffReviewState::new(session_id, title, base, diff, comments);
+                    state.prime_segments(segments);
+                    self.ui_state.modal = Modal::ReviewDiff(Box::new(state));
+                }
+            }
             StateUpdate::CascadeFinished { result } => {
                 self.handle_cascade_finished(result).await;
             }

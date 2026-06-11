@@ -85,6 +85,32 @@ fn make_worktree_with_program(title: &str, program: &str) -> SessionListItem {
 }
 
 #[test]
+fn worktree_shows_pending_comment_marker() {
+    let wt = make_worktree("Feature");
+    let id = match &wt {
+        SessionListItem::Worktree { id, .. } => *id,
+        _ => unreachable!(),
+    };
+    let items = vec![make_project("proj", 1), wt];
+
+    // No marker when the session has no pending comments.
+    let plain = render_tree(&items, 40, 4).join("\n");
+    assert!(
+        !plain.contains(COMMENT_MARKER),
+        "unexpected marker:\n{plain}"
+    );
+
+    // The `*` marker appears once the session is flagged.
+    let flagged: HashSet<SessionId> = [id].into_iter().collect();
+    let marked =
+        render_tree_with(&items, 40, 4, |t| t.comment_sessions(flagged.clone())).join("\n");
+    assert!(
+        marked.contains(COMMENT_MARKER),
+        "expected pending-comment marker:\n{marked}"
+    );
+}
+
+#[test]
 fn test_worktree_rows_use_number_prefix() {
     let items = vec![
         make_project("proj", 2),

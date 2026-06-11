@@ -81,6 +81,13 @@ project_pull_interval_secs = 3600
 # Use rounded border corners (╭╮╰╯) instead of square (┌┐└┘)
 rounded_borders = false
 
+# When opening the review view, precompute every file's render caches
+# (word-diff segments + syntax highlighting) up front behind a loading spinner,
+# instead of building each file's cache lazily on first navigation. Trades a
+# one-off wait when opening for instant file switching afterwards. Default true;
+# set to false for lazy, instant-open behaviour.
+# precompute_review_caches = true
+
 # Dim the right pane (preview/diff/shell) when the session list is focused
 dim_unfocused_preview = true
 

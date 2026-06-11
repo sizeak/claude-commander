@@ -1656,6 +1656,7 @@ impl App {
                 self.ui_state.modal = Modal::Loading {
                     title: "Scanning".to_string(),
                     message: format!("Scanning {} for git repos…", path.display()),
+                    hint: None,
                 };
 
                 match self.service.scan_directory(&path).await {

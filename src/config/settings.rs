@@ -142,6 +142,14 @@ pub struct Config {
     #[serde(default)]
     pub rounded_borders: bool,
 
+    /// When opening the review view, precompute every file's render caches
+    /// (word-diff segments + syntax highlighting) up front behind a loading
+    /// spinner, instead of building each file's cache lazily on first
+    /// navigation. Trades a one-off wait when opening for instant file
+    /// switching afterwards. Default true.
+    #[serde(default = "default_true")]
+    pub precompute_review_caches: bool,
+
     /// Section definitions for grouping sessions in the TUI list.
     /// First-match-wins in declared order; unmatched sessions fall into a
     /// built-in "Other" catch-all.
@@ -185,6 +193,7 @@ impl Default for Config {
             keybindings: KeyBindings::default(),
             theme: ThemeOverrides::default(),
             rounded_borders: false,
+            precompute_review_caches: true,
             sections: Vec::new(),
         }
     }
@@ -581,6 +590,8 @@ has_label = ["blocked", "waiting-on-author"]
         assert!(config.ai_summary_enabled);
         assert_eq!(config.ai_summary_model, "claude-haiku-4-5-20251001");
         assert!(config.show_session_program);
+        // Review cache precompute is on by default.
+        assert!(config.precompute_review_caches);
     }
 
     #[test]
