@@ -288,7 +288,7 @@ impl App {
         footer_area: Rect,
         state: &SettingsState,
     ) {
-        let label_width = 24_u16;
+        let label_width = settings_label_width(&state.rows, rows_area.width);
         let value_width = rows_area.width.saturating_sub(label_width + 3);
 
         let visible_rows = rows_area.height as usize;
@@ -1642,6 +1642,31 @@ fn parse_review_decision(s: &str) -> Option<crate::git::ReviewDecision> {
     }
 }
 
+/// Width of the label column for the settings rows.
+///
+/// Sized to fit the longest label (plus a trailing space) so descriptions are
+/// not clipped — the Keybindings tab has labels well over 24 columns — while
+/// keeping at least a usable minimum value column on narrow terminals and a
+/// sensible floor so short-labelled tabs still align tidily.
+fn settings_label_width(rows: &[SettingsRow], area_width: u16) -> u16 {
+    const MIN_LABEL: u16 = 24;
+    const MIN_VALUE: u16 = 16;
+    // 2-column gap between the label and value columns (see `val_x`).
+    const GAP: u16 = 2;
+
+    let longest = rows
+        .iter()
+        .map(|r| r.label.chars().count())
+        .max()
+        .unwrap_or(0) as u16;
+    let desired = longest.saturating_add(1).max(MIN_LABEL);
+
+    // Cap so the value column keeps at least MIN_VALUE columns, but never force
+    // the label below its floor (on a very narrow terminal labels truncate).
+    let cap = area_width.saturating_sub(MIN_VALUE + GAP).max(MIN_LABEL);
+    desired.min(cap)
+}
+
 fn truncate_str(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
@@ -1675,5 +1700,50 @@ fn format_color(color: ratatui::style::Color) -> String {
         Color::White => "white".into(),
         Color::Indexed(i) => format!("{i}"),
         Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rows_with_labels(labels: &[&str]) -> Vec<SettingsRow> {
+        labels
+            .iter()
+            .map(|l| SettingsRow::text(*l, "", "key"))
+            .collect()
+    }
+
+    #[test]
+    fn label_width_grows_to_fit_long_labels() {
+        // A long keybinding-style description must not be clipped to the old
+        // fixed 24-column label width.
+        let rows = rows_with_labels(&["Cascade merge main through stack"]); // 32 chars
+        let w = settings_label_width(&rows, 120);
+        assert_eq!(
+            w, 33,
+            "label column should fit the longest label plus a space"
+        );
+    }
+
+    #[test]
+    fn label_width_has_a_floor_for_short_labels() {
+        let rows = rows_with_labels(&["Quit", "Editor"]);
+        assert_eq!(settings_label_width(&rows, 120), 24);
+    }
+
+    #[test]
+    fn label_width_caps_to_keep_value_column_usable() {
+        // On a narrow terminal a very long label must not starve the value column.
+        let rows = rows_with_labels(&["A really really really long label here"]);
+        let w = settings_label_width(&rows, 50);
+        assert_eq!(w, 50 - (16 + 2), "value column keeps its minimum width");
+    }
+
+    #[test]
+    fn label_width_never_below_floor_even_when_very_narrow() {
+        let rows = rows_with_labels(&["Some long label that won't fit"]);
+        // Cap would be negative; floor wins and labels simply truncate.
+        assert_eq!(settings_label_width(&rows, 10), 24);
     }
 }
