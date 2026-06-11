@@ -71,6 +71,34 @@ pub async fn compose_review_diff(worktree: &Path, base: &str) -> Result<String> 
     Ok(diff)
 }
 
+/// Resolve the diff base for a PR target branch, preferring the
+/// `origin/<branch>` remote-tracking ref when it exists so the review diff
+/// reflects the pushed upstream rather than a possibly-stale local branch.
+/// Falls back to the bare (local) branch name when no remote-tracking ref is
+/// present.
+pub async fn prefer_remote_branch(worktree: &Path, branch: &str) -> String {
+    let remote = format!("origin/{branch}");
+    if ref_exists(worktree, &remote).await {
+        remote
+    } else {
+        branch.to_string()
+    }
+}
+
+/// Whether `refname` resolves to a commit in `worktree`.
+async fn ref_exists(worktree: &Path, refname: &str) -> bool {
+    Command::new("git")
+        .current_dir(worktree)
+        .args(["rev-parse", "--verify", "--quiet", refname])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// Resolve `git merge-base <base> HEAD`, returning `None` if it cannot be
 /// computed (so the caller can fall back).
 async fn merge_base(worktree: &Path, base: &str) -> Option<String> {
@@ -690,5 +718,33 @@ diff --git a/f b/f
             diff.contains("+v2"),
             "fallback diff missing change:\n{diff}"
         );
+    }
+
+    #[tokio::test]
+    async fn prefers_origin_branch_when_remote_ref_exists() {
+        let tmp = init_repo().await;
+        let p = tmp.path();
+        fs::write(p.join("file.txt"), "v1\n").unwrap();
+        git(p, &["add", "."]).await;
+        git(p, &["commit", "-q", "-m", "A"]).await;
+        let sha = git_capture(p, &["rev-parse", "HEAD"]).await;
+
+        // Simulate a pushed upstream by creating the remote-tracking ref
+        // directly (no real remote needed).
+        git(p, &["update-ref", "refs/remotes/origin/main", &sha]).await;
+
+        assert_eq!(prefer_remote_branch(p, "main").await, "origin/main");
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_local_branch_when_no_remote_ref() {
+        let tmp = init_repo().await;
+        let p = tmp.path();
+        fs::write(p.join("file.txt"), "v1\n").unwrap();
+        git(p, &["add", "."]).await;
+        git(p, &["commit", "-q", "-m", "A"]).await;
+
+        // No `origin/main` remote-tracking ref → bare (local) branch name.
+        assert_eq!(prefer_remote_branch(p, "main").await, "main");
     }
 }

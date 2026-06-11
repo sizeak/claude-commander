@@ -17,7 +17,7 @@ use crate::config::{AppState, Config, ConfigStore, StateStore};
 use crate::error::{Result, SessionError};
 use crate::git::{
     GitBackend, ParsedDiff, PrState, ReviewDecision, compose_review_diff, diff_stat_summary,
-    effective_pr_state, parse_unified_diff,
+    effective_pr_state, parse_unified_diff, prefer_remote_branch,
 };
 use crate::session::{
     AgentState, ProjectId, ScanResult, SessionId, SessionManager, SessionStatus, WorktreeSession,
@@ -293,15 +293,16 @@ impl CommanderService {
     /// (persisting any status changes). Returns the parsed diff plus the
     /// re-anchored comments.
     pub async fn open_review(&self, session_id: &SessionId) -> Result<ReviewSnapshot> {
-        let (worktree_path, base) = {
+        let (worktree_path, review_base) = {
             let state = self.store.read().await;
             let session = state
                 .sessions
                 .get(session_id)
                 .ok_or(SessionError::NotFound(*session_id))?;
-            (session.worktree_path.clone(), resolve_review_base(session))
+            (session.worktree_path.clone(), ReviewBase::of(session))
         };
 
+        let base = review_base.git_ref(&worktree_path).await;
         let raw = compose_review_diff(&worktree_path, &base).await?;
         let diff = parse_unified_diff(&raw);
 
@@ -357,7 +358,7 @@ impl CommanderService {
     /// deferred if the agent is stopped or never becomes ready. Applied
     /// comments are marked [`CommentStatus::Applied`].
     pub async fn apply_comments(&self, session_id: &SessionId) -> Result<ApplyOutcome> {
-        let (worktree_path, base, title, tmux_name, is_active) = {
+        let (worktree_path, review_base, title, tmux_name, is_active) = {
             let state = self.store.read().await;
             let s = state
                 .sessions
@@ -365,7 +366,7 @@ impl CommanderService {
                 .ok_or(SessionError::NotFound(*session_id))?;
             (
                 s.worktree_path.clone(),
-                resolve_review_base(s),
+                ReviewBase::of(s),
                 s.title.clone(),
                 s.tmux_session_name.clone(),
                 s.status.is_active(),
@@ -373,6 +374,7 @@ impl CommanderService {
         };
 
         // Re-anchor against a fresh diff so drift status is current.
+        let base = review_base.git_ref(&worktree_path).await;
         let raw = compose_review_diff(&worktree_path, &base).await?;
         let parsed = parse_unified_diff(&raw);
         let mut comments = self.comments.load(*session_id)?;
@@ -460,15 +462,41 @@ async fn wait_until_ready(detector: &mut AgentStateDetector, tmux_name: &str) ->
     false
 }
 
-/// Resolve the base a session's review diff is computed against: the PR's
-/// target branch if known, else the fork-point commit captured at creation,
-/// else `HEAD`.
-fn resolve_review_base(session: &WorktreeSession) -> String {
-    session
-        .pr_base_branch
-        .clone()
-        .or_else(|| session.base_commit.clone())
-        .unwrap_or_else(|| "HEAD".to_string())
+/// The logical base a session's review diff is computed against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReviewBase {
+    /// The PR's target branch. Resolved to its `origin/<branch>` remote-tracking
+    /// ref when present, so the diff reflects the pushed upstream rather than a
+    /// possibly-stale local branch; falls back to the local branch otherwise.
+    Branch(String),
+    /// The fork-point commit captured at session creation (a fixed SHA).
+    Commit(String),
+    /// No base known; diff the working tree against `HEAD`.
+    Head,
+}
+
+impl ReviewBase {
+    /// Classify a session's base: the PR target branch if known, else the
+    /// fork-point commit captured at creation, else `HEAD`.
+    fn of(session: &WorktreeSession) -> Self {
+        if let Some(branch) = session.pr_base_branch.clone() {
+            ReviewBase::Branch(branch)
+        } else if let Some(commit) = session.base_commit.clone() {
+            ReviewBase::Commit(commit)
+        } else {
+            ReviewBase::Head
+        }
+    }
+
+    /// The git commit-ish to diff against. Only a branch base prefers its
+    /// remote-tracking ref; a commit SHA and `HEAD` are used verbatim.
+    async fn git_ref(self, worktree: &Path) -> String {
+        match self {
+            ReviewBase::Branch(branch) => prefer_remote_branch(worktree, &branch).await,
+            ReviewBase::Commit(commit) => commit,
+            ReviewBase::Head => "HEAD".to_string(),
+        }
+    }
 }
 
 pub struct CreateSessionOpts {
@@ -794,16 +822,16 @@ mod tests {
     }
 
     #[test]
-    fn resolve_review_base_prefers_pr_base_then_fork_then_head() {
+    fn review_base_classifies_pr_base_then_fork_then_head() {
         let mut s = make_session_for_project("t", ProjectId::new());
         // No PR base or fork point recorded yet → HEAD.
-        assert_eq!(resolve_review_base(&s), "HEAD");
+        assert_eq!(ReviewBase::of(&s), ReviewBase::Head);
         // Fork-point commit captured at creation.
         s.base_commit = Some("abc123".to_string());
-        assert_eq!(resolve_review_base(&s), "abc123");
+        assert_eq!(ReviewBase::of(&s), ReviewBase::Commit("abc123".to_string()));
         // PR's target branch takes precedence once known.
         s.pr_base_branch = Some("main".to_string());
-        assert_eq!(resolve_review_base(&s), "main");
+        assert_eq!(ReviewBase::of(&s), ReviewBase::Branch("main".to_string()));
     }
 
     #[test]
