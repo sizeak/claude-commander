@@ -393,7 +393,7 @@ impl App {
         // Restart-required: match the poll, which keys off the init snapshot.
         if !self.commander_enabled_at_init {
             self.ui_state.status_message = Some((
-                "Commander session is disabled — enable it in settings".to_string(),
+                "Commander session is disabled — enable it in settings, then restart".to_string(),
                 Instant::now() + Duration::from_secs(3),
             ));
             return;

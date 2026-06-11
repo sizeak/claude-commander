@@ -96,8 +96,8 @@ pub enum StateUpdate {
     AgentStatesUpdated {
         states: HashMap<SessionId, AgentState>,
         /// Whether the project-less commander session is currently running.
-        /// Polled alongside the regular sessions; feeds the footer chip and the
-        /// commander hint pane (both synchronous renderers).
+        /// Polled alongside the regular sessions; feeds the footer status chip
+        /// (a synchronous renderer).
         commander_running: bool,
     },
     /// Background `git fetch origin` kicked off by the Checkout modal

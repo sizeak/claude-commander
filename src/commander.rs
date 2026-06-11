@@ -25,7 +25,7 @@ pub const COMMANDER_TMUX_NAME: &str = "cc-commander";
 /// The commander is never stored in `state.sessions`, so it has no real
 /// [`SessionId`]. This sentinel is used **only** as the key into the in-memory
 /// agent-state map (`UiState::agent_states`) so the existing agent-state
-/// detector can carry the commander's live state to its synthetic list row.
+/// detector can carry the commander's live state to the footer status chip.
 /// It is never persisted and never placed in `selected_session_id`, so it can
 /// never reach a mutation handler (kill/delete/restart/diff/PR).
 pub fn commander_sentinel_id() -> SessionId {

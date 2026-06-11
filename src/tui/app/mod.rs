@@ -106,7 +106,7 @@ fn poll_tick_can_skip(
 
 /// Whether a poll tick (that wasn't skipped) should emit an update: when there
 /// are fresh agent states, or the commander's running state flipped — the
-/// latter is what lets the chip/row turn *off* on the trailing edge.
+/// latter is what lets the chip turn *off* on the trailing edge.
 fn poll_tick_should_send(
     states_empty: bool,
     commander_running: bool,
