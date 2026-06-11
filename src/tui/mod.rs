@@ -10,6 +10,7 @@ mod app;
 mod digit_accumulator;
 mod event;
 mod path_completer;
+mod syntax_highlight;
 pub mod theme;
 mod widgets;
 

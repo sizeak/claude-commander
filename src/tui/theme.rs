@@ -120,11 +120,126 @@ pub struct Theme {
     // Status bar
     pub status_bar_bg: Color,
     pub status_bar_fg: Color,
+
+    /// Colour capability this theme was built for. Drives capability-aware
+    /// palettes (e.g. the review diff view) so RGB fills degrade gracefully.
+    pub mode: ColorMode,
 }
 
 impl Default for Theme {
     fn default() -> Self {
         Self::for_color_mode(ColorMode::detect())
+    }
+}
+
+/// Colour palette for the full-screen review diff view, derived entirely from
+/// the active [`Theme`] so it follows the user's chosen preset. Foregrounds use
+/// the theme's diff/text/border colours directly; the add/remove line *fills*
+/// are dimmed from the theme's diff colours on true-color terminals, fall back
+/// to fixed dark indexed fills on 256-colour, and to foreground-only on
+/// 16-colour.
+#[derive(Debug, Clone, Copy)]
+pub struct ReviewPalette {
+    /// Background fill for an added line.
+    pub add_bg: Color,
+    /// Background fill for a removed line.
+    pub del_bg: Color,
+    /// Brighter fill for the changed span within an added line (word diff).
+    pub add_emph_bg: Color,
+    /// Brighter fill for the changed span within a removed line (word diff).
+    pub del_emph_bg: Color,
+    /// Gutter (line-number column) background on added / removed lines.
+    pub add_gutter_bg: Color,
+    pub del_gutter_bg: Color,
+    /// Line-number / gutter foreground (dim).
+    pub gutter_fg: Color,
+    /// Default code foreground.
+    pub text: Color,
+    /// Foreground for the diagonal-hatch fill in alignment gaps.
+    pub gap_fg: Color,
+    /// Hunk header foreground.
+    pub hunk_header: Color,
+    /// Foreground for added lines' `+` sign and added-file rows.
+    pub add_fg: Color,
+    /// Foreground for removed lines' `-` sign and deleted-file rows.
+    pub del_fg: Color,
+    /// File-tree row colours for modified / renamed files.
+    pub modified_fg: Color,
+    pub renamed_fg: Color,
+    /// File-tree directory colour.
+    pub dir_fg: Color,
+    /// Border colour for a staged comment box.
+    pub comment_border: Color,
+    /// Border colour for a drifted comment box.
+    pub drift_border: Color,
+    /// Border colour for the in-progress comment edit box.
+    pub draft_border: Color,
+    /// Pane border colours (focused / unfocused), matching the rest of the UI.
+    pub border_focused: Color,
+    pub border_unfocused: Color,
+    /// Selection highlight, matching the session list.
+    pub selection_bg: Color,
+    pub selection_fg: Option<Color>,
+}
+
+impl Theme {
+    /// The review-diff palette, derived from this theme.
+    pub fn review_palette(&self) -> ReviewPalette {
+        let add = self.diff_added;
+        let del = self.diff_removed;
+        // Line fills: dimmed theme colours on true-color; fixed indexed darks
+        // on 256-colour; none (foreground-only) on 16-colour.
+        let (add_bg, del_bg, add_emph_bg, del_emph_bg, add_gutter_bg, del_gutter_bg) =
+            match self.mode {
+                ColorMode::TrueColor => (
+                    fill_color(add, 0.26),
+                    fill_color(del, 0.26),
+                    fill_color(add, 0.40),
+                    fill_color(del, 0.40),
+                    fill_color(add, 0.34),
+                    fill_color(del, 0.34),
+                ),
+                ColorMode::Indexed => (
+                    Color::Indexed(22),
+                    Color::Indexed(52),
+                    Color::Indexed(28),
+                    Color::Indexed(88),
+                    Color::Indexed(22),
+                    Color::Indexed(52),
+                ),
+                ColorMode::Basic => (
+                    Color::Reset,
+                    Color::Reset,
+                    Color::Green,
+                    Color::Red,
+                    Color::Reset,
+                    Color::Reset,
+                ),
+            };
+        ReviewPalette {
+            add_bg,
+            del_bg,
+            add_emph_bg,
+            del_emph_bg,
+            add_gutter_bg,
+            del_gutter_bg,
+            gutter_fg: self.text_secondary,
+            text: self.text_primary,
+            gap_fg: self.border_unfocused,
+            hunk_header: self.diff_hunk_header,
+            add_fg: add,
+            del_fg: del,
+            modified_fg: self.diff_file_header,
+            renamed_fg: self.text_accent,
+            dir_fg: self.text_accent,
+            comment_border: self.diff_file_header,
+            drift_border: del,
+            draft_border: self.modal_warning,
+            border_focused: self.border_focused,
+            border_unfocused: self.border_unfocused,
+            selection_bg: self.selection_bg,
+            selection_fg: self.selection_fg,
+        }
     }
 }
 
@@ -141,6 +256,7 @@ impl Theme {
     /// Basic 16-color theme (maximum compatibility)
     pub fn basic() -> Self {
         Self {
+            mode: ColorMode::Basic,
             border_focused: Color::Cyan,
             border_unfocused: Color::DarkGray,
 
@@ -203,6 +319,7 @@ impl Theme {
     /// 256-color theme (good balance of compatibility and aesthetics)
     pub fn indexed() -> Self {
         Self {
+            mode: ColorMode::Indexed,
             border_focused: Color::Indexed(117), // Pastel sky blue
             border_unfocused: Color::Indexed(243),
 
@@ -264,6 +381,7 @@ impl Theme {
     /// True color theme (richest visual experience)
     pub fn truecolor() -> Self {
         Self {
+            mode: ColorMode::TrueColor,
             border_focused: Color::Rgb(137, 180, 250), // Pastel sky blue
             border_unfocused: Color::Rgb(88, 91, 112),
 
@@ -325,6 +443,7 @@ impl Theme {
     /// Monokai Dimmed — a muted/desaturated take on the classic Monokai color scheme
     pub fn monokai_dimmed() -> Self {
         Self {
+            mode: ColorMode::TrueColor,
             border_focused: Color::Rgb(181, 165, 106), // Muted gold/yellow #b5a56a
             border_unfocused: Color::Rgb(85, 85, 85),  // Dark gray #555555
 
@@ -385,6 +504,7 @@ impl Theme {
     /// Zedokai — inspired by the Zed editor's Monokai variant with a filter/spectrum twist
     pub fn zedokai() -> Self {
         Self {
+            mode: ColorMode::TrueColor,
             border_focused: Color::Rgb(249, 38, 114), // Vivid pink #f92672
             border_unfocused: Color::Rgb(73, 72, 62), // Dark gray #49483e
 
@@ -445,6 +565,7 @@ impl Theme {
     /// Rosé Pine — a soft pink/rose aesthetic inspired by Rosé Pine
     pub fn rose_pine() -> Self {
         Self {
+            mode: ColorMode::TrueColor,
             border_focused: Color::Rgb(235, 111, 146), // Rose/pink #eb6f92
             border_unfocused: Color::Rgb(57, 53, 82),  // Muted overlay #393552
 
@@ -623,6 +744,19 @@ impl Theme {
             color_to_tmux(self.status_bar_fg),
         )
     }
+}
+
+/// Build a dark, saturated line fill from a base colour for the review diff
+/// view. Amplifies saturation first (so dimmed pastel theme colours read as
+/// rich green/red rather than washed-out grey), then scales toward black to the
+/// target `brightness`.
+pub fn fill_color(base: Color, brightness: f32) -> Color {
+    const SAT: f32 = 1.75;
+    let (r, g, b) = color_to_approx_rgb(base);
+    let (r, g, b) = (r as f32, g as f32, b as f32);
+    let mean = (r + g + b) / 3.0;
+    let ch = |c: f32| (((mean + (c - mean) * SAT).clamp(0.0, 255.0)) * brightness) as u8;
+    Color::Rgb(ch(r), ch(g), ch(b))
 }
 
 /// Scale a color's brightness toward black by the given factor (0.0 = black, 1.0 = unchanged).

@@ -43,6 +43,7 @@ pub enum BindableAction {
     OpenInEditor,
     OpenPullRequest,
     OpenCommander,
+    OpenReviewDiff,
     TogglePane,
     TogglePaneReverse,
     ShrinkLeftPane,
@@ -84,6 +85,7 @@ impl BindableAction {
         Self::OpenInEditor,
         Self::OpenPullRequest,
         Self::OpenCommander,
+        Self::OpenReviewDiff,
         Self::ScanDirectory,
         Self::MoveToSection,
         Self::ToggleSection,
@@ -125,6 +127,7 @@ impl BindableAction {
             Self::OpenInEditor => "open_in_editor",
             Self::OpenPullRequest => "open_pull_request",
             Self::OpenCommander => "open_commander",
+            Self::OpenReviewDiff => "open_review_diff",
             Self::TogglePane => "toggle_pane",
             Self::TogglePaneReverse => "toggle_pane_reverse",
             Self::ShrinkLeftPane => "shrink_left_pane",
@@ -167,6 +170,7 @@ impl BindableAction {
             Self::OpenInEditor => "Open in editor/IDE",
             Self::OpenPullRequest => "Open PR in browser",
             Self::OpenCommander => "Open commander session",
+            Self::OpenReviewDiff => "Review diff & comment",
             Self::TogglePane => "Toggle preview/diff/shell view",
             Self::TogglePaneReverse => "Toggle view (reverse)",
             Self::ShrinkLeftPane => "Shrink left pane",
@@ -207,6 +211,7 @@ impl BindableAction {
             | Self::OpenInEditor
             | Self::OpenPullRequest
             | Self::OpenCommander
+            | Self::OpenReviewDiff
             | Self::ScanDirectory
             | Self::MoveToSection
             | Self::ToggleSection
@@ -247,6 +252,7 @@ impl FromStr for BindableAction {
             "open_in_editor" => Ok(Self::OpenInEditor),
             "open_pull_request" => Ok(Self::OpenPullRequest),
             "open_commander" => Ok(Self::OpenCommander),
+            "open_review_diff" => Ok(Self::OpenReviewDiff),
             "toggle_pane" => Ok(Self::TogglePane),
             "toggle_pane_reverse" => Ok(Self::TogglePaneReverse),
             "shrink_left_pane" => Ok(Self::ShrinkLeftPane),
@@ -558,10 +564,9 @@ impl Default for KeyBindings {
             BindableAction::DeleteSession,
             vec![kb(KeyCode::Char('d'), none)],
         );
-        bindings.insert(
-            BindableAction::RenameSession,
-            vec![kb(KeyCode::Char('r'), none)],
-        );
+        // RenameSession has no default key — it's reachable via the command
+        // palette. `r` is given to OpenReviewDiff so it pairs with the
+        // attached-session Ctrl-r review toggle.
         bindings.insert(
             BindableAction::RestartSession,
             vec![kb(KeyCode::Char('R'), shift)],
@@ -581,6 +586,14 @@ impl Default for KeyBindings {
         bindings.insert(
             BindableAction::OpenCommander,
             vec![kb(KeyCode::Char('C'), shift)],
+        );
+        bindings.insert(
+            BindableAction::OpenReviewDiff,
+            vec![kb(KeyCode::Char('r'), none), kb(KeyCode::Char('r'), ctrl)],
+        );
+        bindings.insert(
+            BindableAction::MoveToSection,
+            vec![kb(KeyCode::Char('m'), none)],
         );
 
         // Pane control
@@ -745,8 +758,8 @@ impl<'de> Visitor<'de> for OneOrManyVisitor {
 // Raw-byte encoding for detecting bindings inside a raw tmux attach session
 // ---------------------------------------------------------------------------
 
-/// Compute the raw byte sequences that should trigger [`OpenInEditor`] while
-/// forwarding stdin to a tmux PTY.
+/// Compute the raw byte sequences that should trigger `action` while forwarding
+/// stdin to a tmux PTY.
 ///
 /// Inside a tmux attach we read raw bytes rather than decoded key events, so
 /// only bindings with a well-defined encoding are detectable:
@@ -761,11 +774,9 @@ impl<'de> Visitor<'de> for OneOrManyVisitor {
 /// Bare bindings (no modifiers) are intentionally skipped — they are
 /// indistinguishable from ordinary keystrokes being typed into the attached
 /// program, so intercepting them would prevent the user from typing that key.
-///
-/// [`OpenInEditor`]: BindableAction::OpenInEditor
-pub fn editor_trigger_bytes(bindings: &KeyBindings) -> Vec<Vec<u8>> {
+fn trigger_bytes_for(bindings: &KeyBindings, action: BindableAction) -> Vec<Vec<u8>> {
     let mut triggers = Vec::new();
-    for kb in bindings.keys_for(BindableAction::OpenInEditor) {
+    for kb in bindings.keys_for(action) {
         if kb.modifiers != KeyModifiers::CONTROL {
             continue;
         }
@@ -784,6 +795,20 @@ pub fn editor_trigger_bytes(bindings: &KeyBindings) -> Vec<Vec<u8>> {
         }
     }
     triggers
+}
+
+/// Raw stdin byte patterns that open the editor mid-attach (from the
+/// [`OpenInEditor`](BindableAction::OpenInEditor) binding). See
+/// [`trigger_bytes_for`].
+pub fn editor_trigger_bytes(bindings: &KeyBindings) -> Vec<Vec<u8>> {
+    trigger_bytes_for(bindings, BindableAction::OpenInEditor)
+}
+
+/// Raw stdin byte patterns that switch from an attached session to its review
+/// diff (from the [`OpenReviewDiff`](BindableAction::OpenReviewDiff) binding —
+/// `Ctrl-r` by default). See [`trigger_bytes_for`].
+pub fn review_trigger_bytes(bindings: &KeyBindings) -> Vec<Vec<u8>> {
+    trigger_bytes_for(bindings, BindableAction::OpenReviewDiff)
 }
 
 // ---------------------------------------------------------------------------
@@ -913,6 +938,13 @@ mod tests {
         let kb = KeyBindings::default();
         let key = KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE);
         assert_eq!(kb.resolve(&key), Some(BindableAction::NewStackedSession));
+    }
+
+    #[test]
+    fn test_default_move_to_section_bound_to_m() {
+        let kb = KeyBindings::default();
+        let key = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&key), Some(BindableAction::MoveToSection));
     }
 
     #[test]
@@ -1142,6 +1174,25 @@ mod tests {
             vec![KeyBinding::new(KeyCode::Char('e'), KeyModifiers::NONE)],
         );
         assert!(editor_trigger_bytes(&kb).is_empty());
+    }
+
+    #[test]
+    fn test_review_trigger_bytes_default_is_ctrl_r() {
+        // Default OpenReviewDiff is `r` + Ctrl-r; only the Ctrl binding is
+        // interceptable in a raw attach (Ctrl-r → 0x12), and bare `r` is
+        // skipped so typing `r` in the pane isn't swallowed.
+        let kb = KeyBindings::default();
+        assert_eq!(review_trigger_bytes(&kb), vec![vec![0x12]]);
+    }
+
+    #[test]
+    fn test_rename_session_unbound_by_default() {
+        // Rename dropped its default key (palette-only) so `r` could go to
+        // OpenReviewDiff, pairing with the attached-session Ctrl-r toggle.
+        let kb = KeyBindings::default();
+        assert!(kb.keys_for(BindableAction::RenameSession).is_empty());
+        let r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&r), Some(BindableAction::OpenReviewDiff));
     }
 
     #[test]

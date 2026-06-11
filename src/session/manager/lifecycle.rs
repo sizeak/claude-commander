@@ -281,6 +281,7 @@ impl SessionManager {
             }
         };
         let launch_cmd = program_with_session_name(&launch_cmd, &title);
+        let launch_cmd = self.maybe_wrap_nix_develop(&launch_cmd, &worktree_info.path);
 
         // Create tmux session in the worktree directory
         let tmux_start = std::time::Instant::now();
@@ -380,6 +381,7 @@ impl SessionManager {
             program.clone()
         };
         let resume_program = program_with_session_name(&resume_program, &title);
+        let resume_program = self.maybe_wrap_nix_develop(&resume_program, &worktree_path);
         let create_result = self
             .tmux
             .create_session(&tmux_session_name, &worktree_path, Some(&resume_program))
@@ -442,6 +444,7 @@ impl SessionManager {
         let _ = self.tmux.kill_session(tmux_name).await;
 
         let launch_cmd = program_with_session_name(&program, &title);
+        let launch_cmd = self.maybe_wrap_nix_develop(&launch_cmd, &worktree_path);
         let create_result = self
             .tmux
             .create_session(tmux_name, &worktree_path, Some(&launch_cmd))
@@ -623,7 +626,7 @@ pub(super) fn program_with_session_name(program: &str, session_title: &str) -> S
     }
 }
 
-fn shell_escape_single_quote(s: &str) -> String {
+pub(super) fn shell_escape_single_quote(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 

@@ -136,6 +136,12 @@ pub enum StateUpdate {
         project_id: ProjectId,
         outcome: crate::git::PullOutcome,
     },
+    /// Review diff prepared off-thread: the parsed diff plus its warmed render
+    /// caches (word-diff segments + syntax highlighting), ready to replace the
+    /// loading spinner with the full review view. Boxed — the payload is large.
+    ReviewPrepared {
+        prepared: Box<super::app::ReviewPrepared>,
+    },
 }
 
 /// User commands triggered by input
@@ -181,6 +187,8 @@ pub enum UserCommand {
     OpenPullRequest,
     /// Open (creating if needed) the persistent commander session
     OpenCommander,
+    /// Open the full-screen review-diff-and-comment view for the session
+    OpenReviewDiff,
     /// Toggle between preview/diff panes
     TogglePane,
     /// Toggle between preview/diff panes (reverse)
@@ -278,6 +286,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::OpenInEditor => Self::OpenInEditor,
             BindableAction::OpenPullRequest => Self::OpenPullRequest,
             BindableAction::OpenCommander => Self::OpenCommander,
+            BindableAction::OpenReviewDiff => Self::OpenReviewDiff,
             BindableAction::TogglePane => Self::TogglePane,
             BindableAction::TogglePaneReverse => Self::TogglePaneReverse,
             BindableAction::ShrinkLeftPane => Self::ShrinkLeftPane,
@@ -616,11 +625,6 @@ mod tests {
                 UserCommand::DeleteSession,
             ),
             (
-                KeyCode::Char('r'),
-                KeyModifiers::NONE,
-                UserCommand::RenameSession,
-            ),
-            (
                 KeyCode::Char('R'),
                 KeyModifiers::SHIFT,
                 UserCommand::RestartSession,
@@ -644,6 +648,16 @@ mod tests {
                 KeyCode::Char('o'),
                 KeyModifiers::NONE,
                 UserCommand::OpenPullRequest,
+            ),
+            (
+                KeyCode::Char('r'),
+                KeyModifiers::NONE,
+                UserCommand::OpenReviewDiff,
+            ),
+            (
+                KeyCode::Char('r'),
+                KeyModifiers::CONTROL,
+                UserCommand::OpenReviewDiff,
             ),
             (
                 KeyCode::Char('S'),
