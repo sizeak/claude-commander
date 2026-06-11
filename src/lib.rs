@@ -22,6 +22,8 @@
 
 pub mod api;
 pub mod cli;
+pub mod cli_args;
+pub mod commander;
 pub mod comment;
 pub mod config;
 pub mod error;

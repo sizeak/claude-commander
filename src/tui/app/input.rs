@@ -759,6 +759,9 @@ impl App {
             UserCommand::OpenPullRequest => {
                 self.handle_open_pull_request().await;
             }
+            UserCommand::OpenCommander => {
+                self.handle_open_commander().await;
+            }
             UserCommand::OpenReviewDiff => {
                 self.handle_open_review().await;
             }

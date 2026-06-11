@@ -124,6 +124,16 @@ state_sync_interval_ms = 2000
 # Claude model used for AI summaries (default: Haiku for cost efficiency)
 # ai_summary_model = "claude-haiku-4-5-20251001"
 
+# Persistent "commander" session — a project-less Claude session (opened with
+# `C` or `claude-commander commander`) that coordinates other sessions via the
+# CLI. Disabled by default. Editing `config.toml` takes effect on the next
+# launch; the in-app settings toggle applies immediately.
+# commander_enabled = false
+# Program (with flags) for the commander; defaults to `default_program`.
+# commander_program = "claude --model opus-4-7"
+# Working directory for the commander; defaults to <data dir>/commander.
+# commander_dir = "/path/to/commander"
+
 # Custom key bindings — override any default key with one or more alternatives
 # [keybindings]
 # navigate_up = ["k", "Up"]

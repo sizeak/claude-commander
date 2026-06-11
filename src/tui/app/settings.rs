@@ -123,6 +123,26 @@ impl App {
                         c.ai_summary_model.clone(),
                         "ai_summary_model",
                     ),
+                    SettingsRow::toggle(
+                        "Commander Enabled",
+                        c.commander_enabled,
+                        "commander_enabled",
+                    ),
+                    SettingsRow::text(
+                        "Commander Program",
+                        c.commander_program
+                            .clone()
+                            .unwrap_or_else(|| "(default)".into()),
+                        "commander_program",
+                    ),
+                    SettingsRow::text(
+                        "Commander Directory",
+                        c.commander_dir
+                            .as_ref()
+                            .map(|p| p.display().to_string())
+                            .unwrap_or_else(|| "(default)".into()),
+                        "commander_dir",
+                    ),
                 ]
             }
             SettingsTab::Sections => {
@@ -790,6 +810,25 @@ impl App {
                 }
                 "ai_summary_model" => {
                     self.config.ai_summary_model = value.to_string();
+                }
+                "commander_enabled" => {
+                    if let Ok(b) = value.parse::<bool>() {
+                        self.config.commander_enabled = b;
+                    }
+                }
+                "commander_program" => {
+                    self.config.commander_program = if value.is_empty() || value == "(default)" {
+                        None
+                    } else {
+                        Some(value.to_string())
+                    };
+                }
+                "commander_dir" => {
+                    self.config.commander_dir = if value.is_empty() || value == "(default)" {
+                        None
+                    } else {
+                        Some(PathBuf::from(value))
+                    };
                 }
                 _ => {}
             },

@@ -16,6 +16,34 @@ fn test_centered_rect() {
 }
 
 #[test]
+fn test_should_auto_restart_regular_claude_session() {
+    // A normal Claude session that just ended should be auto-restarted.
+    assert!(should_auto_restart_ended("my-feature", 0));
+}
+
+#[test]
+fn test_should_not_auto_restart_after_repeated_ends() {
+    // Crash-loop guard: stop after 3 consecutive ends.
+    assert!(!should_auto_restart_ended("my-feature", 3));
+}
+
+#[test]
+fn test_should_not_auto_restart_shell_session() {
+    // Shell sessions (suffix `-sh`) are not Claude sessions.
+    assert!(!should_auto_restart_ended("my-feature-sh", 0));
+}
+
+#[test]
+fn test_should_not_auto_restart_commander() {
+    // The commander is project-less and absent from `state.sessions`, so a
+    // restart-by-name would fail; it is revived lazily on next open instead.
+    assert!(!should_auto_restart_ended(
+        crate::commander::COMMANDER_TMUX_NAME,
+        0
+    ));
+}
+
+#[test]
 fn test_app_ui_state_default() {
     let state = AppUiState::default();
     assert!(state.list_items.is_empty());
@@ -698,6 +726,97 @@ fn test_apply_worktrees_dir_default_sentinel_clears_to_none() {
     app.config.worktrees_dir = Some(std::path::PathBuf::from("/custom"));
     app.apply_settings_edit(SettingsTab::General, "worktrees_dir", "(default)");
     assert_eq!(app.config.worktrees_dir, None);
+}
+
+#[test]
+fn test_commander_rows_present_with_defaults() {
+    let app = make_test_app();
+    let rows = app.build_settings_rows(SettingsTab::General);
+
+    let kind_of = |key: &str| {
+        rows.iter()
+            .find(|r| r.field_key == key)
+            .unwrap_or_else(|| panic!("missing row {key}"))
+            .kind
+            .clone()
+    };
+
+    // Disabled by default → toggle carrying false.
+    assert_eq!(kind_of("commander_enabled"), SettingsRowKind::Toggle(false));
+    // Program/dir fall back to "(default)" free-text when unset.
+    assert_eq!(
+        kind_of("commander_program"),
+        SettingsRowKind::Text("(default)".to_string())
+    );
+    assert_eq!(
+        kind_of("commander_dir"),
+        SettingsRowKind::Text("(default)".to_string())
+    );
+}
+
+#[test]
+fn test_apply_commander_enabled_toggles_bool() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(SettingsTab::General, "commander_enabled", "true");
+    assert!(app.config.commander_enabled);
+    app.apply_settings_edit(SettingsTab::General, "commander_enabled", "false");
+    assert!(!app.config.commander_enabled);
+}
+
+#[test]
+fn test_apply_commander_program_sets_and_clears() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(
+        SettingsTab::General,
+        "commander_program",
+        "claude --model opus",
+    );
+    assert_eq!(
+        app.config.commander_program.as_deref(),
+        Some("claude --model opus")
+    );
+    app.apply_settings_edit(SettingsTab::General, "commander_program", "");
+    assert_eq!(app.config.commander_program, None);
+}
+
+#[test]
+fn test_apply_commander_dir_sets_and_clears() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(SettingsTab::General, "commander_dir", "/my/commander");
+    assert_eq!(
+        app.config.commander_dir,
+        Some(std::path::PathBuf::from("/my/commander"))
+    );
+    app.apply_settings_edit(SettingsTab::General, "commander_dir", "(default)");
+    assert_eq!(app.config.commander_dir, None);
+}
+
+#[tokio::test]
+async fn open_commander_when_disabled_toasts_without_quitting() {
+    // Default config has commander disabled. The guard in `ensure_session`
+    // short-circuits before any tmux work, so this path is reachable in a unit
+    // test with no tmux server.
+    let mut app = make_test_app();
+    assert!(!app.config.commander_enabled);
+
+    app.handle_open_commander().await;
+
+    assert!(
+        app.ui_state.status_message.is_some(),
+        "disabled commander should surface a status message"
+    );
+    assert!(
+        !app.ui_state.should_quit,
+        "disabled commander must not quit the TUI to attach"
+    );
+    assert!(
+        app.ui_state.attach_command.is_none(),
+        "disabled commander must not queue an attach command"
+    );
+    assert!(
+        !matches!(app.ui_state.modal, Modal::Error { .. }),
+        "disabled commander is expected, not an error modal"
+    );
 }
 
 #[test]

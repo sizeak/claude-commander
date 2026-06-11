@@ -181,6 +181,8 @@ pub enum UserCommand {
     OpenInEditor,
     /// Open the selected session's PR URL in a web browser
     OpenPullRequest,
+    /// Open (creating if needed) the persistent commander session
+    OpenCommander,
     /// Open the full-screen review-diff-and-comment view for the session
     OpenReviewDiff,
     /// Toggle between preview/diff panes
@@ -279,6 +281,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::RemoveProject => Self::RemoveProject,
             BindableAction::OpenInEditor => Self::OpenInEditor,
             BindableAction::OpenPullRequest => Self::OpenPullRequest,
+            BindableAction::OpenCommander => Self::OpenCommander,
             BindableAction::OpenReviewDiff => Self::OpenReviewDiff,
             BindableAction::TogglePane => Self::TogglePane,
             BindableAction::TogglePaneReverse => Self::TogglePaneReverse,

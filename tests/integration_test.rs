@@ -9,9 +9,12 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use claude_commander::SessionStatus;
+use claude_commander::cli_args::cli_command;
+use claude_commander::commander::{self, COMMANDER_TMUX_NAME};
 use claude_commander::config::{AppState, Config, ConfigStore, StateStore};
 use claude_commander::git::GitBackend;
 use claude_commander::session::SessionManager;
+use claude_commander::tmux::TmuxExecutor;
 
 /// Helper to create an isolated StateStore that won't pollute user data
 fn create_isolated_store(temp_dir: &TempDir) -> Arc<StateStore> {
@@ -925,4 +928,111 @@ async fn test_stacked_session_gets_own_branch_not_parents() {
     drop(repo_temp_dir);
     drop(state_temp_dir);
     drop(worktrees_dir);
+}
+
+/// Full commander session lifecycle in one test so the scenarios run
+/// sequentially against the single global `cc-commander` tmux session (Rust
+/// runs separate test fns concurrently, which would collide on the name).
+#[tokio::test]
+async fn test_commander_session_lifecycle() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let tmux = TmuxExecutor::new();
+    // Never touch a real commander the developer may be running.
+    if tmux
+        .session_exists(COMMANDER_TMUX_NAME)
+        .await
+        .unwrap_or(false)
+    {
+        eprintln!("Skipping test: a `{COMMANDER_TMUX_NAME}` session already exists");
+        return;
+    }
+
+    // Best-effort cleanup so a panicking assertion can't leak the global
+    // `cc-commander` session into later tests or the developer's tmux. Drop
+    // can't await, so shell out to tmux synchronously. Instantiated only after
+    // the "already exists" guard, so it never kills a session we didn't create.
+    struct KillOnDrop;
+    impl Drop for KillOnDrop {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new("tmux")
+                .args(["kill-session", "-t", COMMANDER_TMUX_NAME])
+                .status();
+        }
+    }
+    let _cleanup = KillOnDrop;
+
+    let dir = TempDir::new().unwrap();
+    let cmd = cli_command();
+    let live_config = Config {
+        commander_enabled: true,
+        commander_dir: Some(dir.path().to_path_buf()),
+        commander_program: Some("sleep 60".to_string()),
+        ..Config::default()
+    };
+
+    // --- Create + priming files ---
+    let name = commander::ensure_session(&live_config, &tmux, &cmd)
+        .await
+        .unwrap();
+    assert_eq!(name, COMMANDER_TMUX_NAME);
+    assert!(dir.path().join("CLAUDE.md").exists(), "CLAUDE.md written");
+    assert!(dir.path().join("NOTES.md").exists(), "NOTES.md seeded");
+    assert!(commander::is_running(&tmux).await, "live session runs");
+
+    // --- Idempotent reuse: second call must not error or double-create ---
+    commander::ensure_session(&live_config, &tmux, &cmd)
+        .await
+        .unwrap();
+    assert!(
+        commander::is_running(&tmux).await,
+        "session still running after idempotent second call"
+    );
+
+    tmux.kill_session(COMMANDER_TMUX_NAME).await.unwrap();
+
+    // --- Dead-pane revival: the corpse-reattach regression ---
+    // A program that exits immediately leaves a dead-but-existing pane
+    // (remain-on-exit is on globally).
+    let dead_config = Config {
+        commander_program: Some("true".to_string()),
+        ..live_config.clone()
+    };
+    commander::ensure_session(&dead_config, &tmux, &cmd)
+        .await
+        .unwrap();
+
+    let mut dead = false;
+    for _ in 0..100 {
+        if tmux
+            .is_pane_dead(COMMANDER_TMUX_NAME)
+            .await
+            .unwrap_or(false)
+        {
+            dead = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(dead, "commander pane should die after `true` exits");
+    assert!(
+        !commander::is_running(&tmux).await,
+        "a dead pane must not report as running"
+    );
+
+    // ensure_session must KILL the corpse and recreate a live session.
+    commander::ensure_session(&live_config, &tmux, &cmd)
+        .await
+        .unwrap();
+    assert!(
+        commander::is_running(&tmux).await,
+        "ensure_session must revive a dead commander into a running one"
+    );
+
+    // `_cleanup` (KillOnDrop) tears down the session as the scope unwinds —
+    // on success here and on a panic at any assertion above.
+    drop(dir);
 }

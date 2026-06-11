@@ -145,6 +145,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `D` | Remove project |
 | `.` or `Ctrl-.` | Open in editor/IDE |
 | `o` | Open PR in browser (when the session has a PR) |
+| `C` | Open the commander session (a persistent, project-less Claude session that coordinates others; requires `commander_enabled = true`) |
 | `S` | Scan directory for git repos and add them as projects |
 | `s` | Open shell in worktree |
 | `v` | Cycle session list view: Project → Sections → Section Stacks (requires `[[sections]]` config) |
