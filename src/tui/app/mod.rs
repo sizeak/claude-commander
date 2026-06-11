@@ -364,14 +364,85 @@ pub struct SettingsState {
     pub sections_state: SectionsState,
 }
 
+/// Kind of a settings row, carrying its typed value.
+///
+/// Each variant holds its own value — a display/edit string for `Text`, a live
+/// `bool` for `Toggle` — so the row model is fully typed rather than stuffing
+/// everything into a string. String conversion only happens at the
+/// preferences-file boundary (serde) and the text-input edit path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsRowKind {
+    /// Free-text field edited via a text-input box.
+    Text(String),
+    /// Two-state boolean rendered as a checkbox and flipped in place.
+    Toggle(bool),
+}
+
 /// A single row in the settings list
 #[derive(Debug, Clone)]
 pub struct SettingsRow {
     pub label: String,
-    pub value: String,
     pub field_key: String,
+    pub kind: SettingsRowKind,
     /// Optional color for displaying a swatch next to the value (Theme tab only)
     pub color_swatch: Option<Color>,
+}
+
+impl SettingsRow {
+    /// A free-text settings row.
+    pub fn text(
+        label: impl Into<String>,
+        value: impl Into<String>,
+        field_key: impl Into<String>,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            field_key: field_key.into(),
+            kind: SettingsRowKind::Text(value.into()),
+            color_swatch: None,
+        }
+    }
+
+    /// A two-state boolean toggle row.
+    pub fn toggle(label: impl Into<String>, on: bool, field_key: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            field_key: field_key.into(),
+            kind: SettingsRowKind::Toggle(on),
+            color_swatch: None,
+        }
+    }
+
+    /// A text row that also displays a color swatch (Theme tab).
+    pub fn swatch(
+        label: impl Into<String>,
+        value: impl Into<String>,
+        field_key: impl Into<String>,
+        color: Color,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            field_key: field_key.into(),
+            kind: SettingsRowKind::Text(value.into()),
+            color_swatch: Some(color),
+        }
+    }
+
+    /// The display/edit string for a `Text` row; `""` for a `Toggle` row.
+    pub fn text_value(&self) -> &str {
+        match &self.kind {
+            SettingsRowKind::Text(v) => v,
+            SettingsRowKind::Toggle(_) => "",
+        }
+    }
+
+    /// For a Toggle row, the flipped boolean; `None` for other kinds.
+    pub fn toggled(&self) -> Option<bool> {
+        match self.kind {
+            SettingsRowKind::Toggle(on) => Some(!on),
+            SettingsRowKind::Text(_) => None,
+        }
+    }
 }
 
 /// Editing state within the settings modal
