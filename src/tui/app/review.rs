@@ -669,6 +669,22 @@ impl DiffReviewState {
         self.begin_comment()
     }
 
+    /// Double-click at a screen position: select the single diff line under the
+    /// pointer and open its comment box (the mouse equivalent of right-click on
+    /// a fresh line). Returns `false` — leaving the caller to fall back to a
+    /// plain click — when the row is a header or comment box rather than a
+    /// selectable diff line.
+    pub fn double_click_comment(&mut self, col: u16, row: u16, body: Rect) -> bool {
+        let Some(body_row) = self.body_row_at(col, row, body) else {
+            return false;
+        };
+        if self.selectable_at_body_row(body_row).is_none() {
+            return false;
+        }
+        self.place_cursor_at_row(body_row);
+        self.begin_comment()
+    }
+
     /// Left-drag to a screen position: begin a selection at the press point (if
     /// not already selecting) and extend it to the dragged line.
     pub fn drag_at(&mut self, col: u16, row: u16, body: Rect) {
@@ -2627,6 +2643,38 @@ diff --git a/x.rs b/x.rs
         assert_eq!(s.cursor, 1);
         let draft = s.comment.as_ref().unwrap();
         assert_eq!(draft.range, (1, 1));
+    }
+
+    #[test]
+    fn double_click_selects_line_then_opens_comment() {
+        let mut s = state_with_two_files();
+        let body = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 20,
+        };
+        // Double-click body row 2 (selectable index 1): selects just that line
+        // and opens its comment box, like a right-click on a fresh line.
+        assert!(s.double_click_comment(5, 2, body));
+        assert_eq!(s.cursor, 1);
+        assert!(s.visual_anchor.is_none());
+        let draft = s.comment.as_ref().unwrap();
+        assert_eq!(draft.range, (1, 1));
+    }
+
+    #[test]
+    fn double_click_on_header_row_is_no_op() {
+        let mut s = state_with_two_files();
+        let body = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 20,
+        };
+        // Body row 0 is the hunk header — not a selectable diff line.
+        assert!(!s.double_click_comment(5, 0, body));
+        assert!(s.comment.is_none());
     }
 
     #[test]

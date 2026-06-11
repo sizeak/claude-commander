@@ -122,6 +122,8 @@ foreground-only colouring on 256- and 16-colour terminals.
   off-screen; side-by-side truncates to keep its columns aligned.
 - **Comment**: in the body, press `v` to start a line selection (arrows grow
   or shrink it; mouse drag also selects), then `Enter` to attach a comment.
+  Right-clicking or double-clicking a line is a mouse shortcut for the same
+  thing — it selects that line and opens the comment box directly.
   Comments are *staged* — they persist across restarts until applied, and
   show as `*` in the gutter and a coloured `*N` count on the file (and its
   parent directories) in the tree. A session with pending comments is also

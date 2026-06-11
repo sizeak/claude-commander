@@ -213,9 +213,29 @@ impl App {
                             col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
                         });
                         if let Some(rect) = files.filter(|_| in_files) {
+                            self.ui_state.review_last_click = None;
                             state.click_file_list_at(col, row, rect);
                         } else if let Some(rect) = body {
-                            state.click_at(col, row, rect);
+                            // A double-click on the same body row selects that
+                            // line and opens its comment box (like right-click);
+                            // a single click just positions the cursor.
+                            use super::selection::DOUBLE_CLICK_WINDOW;
+                            let now = Instant::now();
+                            let is_double = matches!(
+                                self.ui_state.review_last_click,
+                                Some((prev_row, prev_at))
+                                    if prev_row == row
+                                        && now.duration_since(prev_at) <= DOUBLE_CLICK_WINDOW
+                            );
+                            if is_double {
+                                self.ui_state.review_last_click = None;
+                                if !state.double_click_comment(col, row, rect) {
+                                    state.click_at(col, row, rect);
+                                }
+                            } else {
+                                state.click_at(col, row, rect);
+                                self.ui_state.review_last_click = Some((row, now));
+                            }
                         }
                         return;
                     }

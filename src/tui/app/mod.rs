@@ -515,6 +515,10 @@ pub struct AppUiState {
     /// Last left-mouse click on a session-list row: (list index, timestamp).
     /// Used to detect double-click on the same row within `DOUBLE_CLICK_WINDOW`.
     pub last_left_click: Option<(usize, Instant)>,
+    /// Last left-mouse click in the review diff body: (screen row, timestamp).
+    /// Used to detect a double-click on the same row within `DOUBLE_CLICK_WINDOW`,
+    /// which opens a comment box like a right-click.
+    pub review_last_click: Option<(u16, Instant)>,
     /// Current list view mode (project-grouped vs section-grouped).
     pub view_mode: ViewMode,
     /// Pre-computed stack chain for the selected session (empty if not stacked).
@@ -576,6 +580,7 @@ impl Default for AppUiState {
             cascade_paused: false,
             collapsed_sections: std::collections::HashSet::new(),
             last_left_click: None,
+            review_last_click: None,
             view_mode: ViewMode::default(),
             stack_chain: Vec::new(),
             last_project_pull: HashMap::new(),
