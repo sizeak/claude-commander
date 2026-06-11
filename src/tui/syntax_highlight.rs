@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 use ratatui::style::Color;
+use rayon::prelude::*;
 use syntect::easy::HighlightLines;
 use syntect::highlighting::Theme;
 use syntect::parsing::SyntaxSet;
@@ -21,6 +22,14 @@ struct Assets {
 }
 
 static ASSETS: OnceLock<Assets> = OnceLock::new();
+
+/// Force the one-time load of the syntax/theme assets. Loading the extended
+/// two-face syntax set is tens of milliseconds the first highlight would
+/// otherwise pay; calling this at startup moves it off the first review-open's
+/// critical path. Idempotent (the `OnceLock` only initialises once).
+pub(crate) fn warm_assets() {
+    let _ = assets();
+}
 
 fn assets() -> &'static Assets {
     ASSETS.get_or_init(|| {
@@ -80,6 +89,50 @@ pub(crate) fn highlight_line(content: &str, ext: &str, fallback: Color) -> Vec<(
     }
     cache.insert(key, runs.clone());
     runs
+}
+
+/// Warm the cache for many `(ext, content)` lines at once, computing the
+/// uncached highlights **in parallel with no lock held** and inserting them
+/// under a single lock at the end.
+///
+/// Calling [`highlight_line`] per line from N threads would serialise on the
+/// cache mutex twice per line; the review precompute warms a whole diff's worth
+/// of lines, so doing the heavy syntect work lock-free and batching the write is
+/// what actually buys the parallel speedup. Lines already cached, and duplicate
+/// lines within the batch, are computed at most once. After this returns, a
+/// later `highlight_line` for any warmed line is a pure cache read.
+pub(crate) fn warm_highlight_cache(lines: &[(&str, &str)], fallback: Color) {
+    // De-dup, and skip lines already cached, so each unique fragment is
+    // highlighted at most once. One short lock to read membership.
+    let unique: Vec<(&str, &str)> = {
+        let cache = hl_cache().lock().unwrap();
+        let mut seen = std::collections::HashSet::new();
+        lines
+            .iter()
+            .copied()
+            .filter(|(ext, content)| seen.insert((*ext, *content)))
+            .filter(|(ext, content)| {
+                !cache.contains_key(&((*ext).to_string(), (*content).to_string()))
+            })
+            .collect()
+    };
+    if unique.is_empty() {
+        return;
+    }
+    let computed: Vec<(HlKey, Vec<(String, Color)>)> = unique
+        .par_iter()
+        .map(|(ext, content)| {
+            (
+                ((*ext).to_string(), (*content).to_string()),
+                highlight_line_uncached(content, ext, fallback),
+            )
+        })
+        .collect();
+    let mut cache = hl_cache().lock().unwrap();
+    if cache.len() + computed.len() >= HL_CACHE_CAP {
+        cache.clear();
+    }
+    cache.extend(computed);
 }
 
 /// The actual syntect highlight, without memoization (see [`highlight_line`]).
@@ -152,6 +205,34 @@ mod tests {
             assert_eq!(cold, want, "cold cache must match uncached for .{ext}");
             assert_eq!(warm, want, "warm cache must match uncached for .{ext}");
         }
+    }
+
+    #[test]
+    fn warm_cache_makes_highlight_line_match_uncached() {
+        // After warming, a `highlight_line` for each warmed line must equal a
+        // fresh uncached highlight. Includes a duplicate (de-dup path) and an
+        // unknown extension (fallback path). Use extensions unlikely to be
+        // pre-warmed by other tests in this process so the warm path is taken.
+        let lines = [
+            ("rs", "fn warmed() {}"),
+            ("rs", "fn warmed() {}"), // duplicate → highlighted at most once
+            ("toml", "warmed = true"),
+            ("no-such-ext", "warm plain"),
+        ];
+        warm_highlight_cache(&lines, Color::Reset);
+        for (ext, content) in lines {
+            assert_eq!(
+                highlight_line(content, ext, Color::Reset),
+                highlight_line_uncached(content, ext, Color::Reset),
+                "warmed entry must match uncached for .{ext}"
+            );
+        }
+    }
+
+    #[test]
+    fn warm_cache_empty_input_is_a_noop() {
+        // Must not panic or clear anything for an empty batch.
+        warm_highlight_cache(&[], Color::Reset);
     }
 
     #[test]

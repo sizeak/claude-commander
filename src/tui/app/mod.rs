@@ -741,6 +741,12 @@ impl App {
         let tick_rate = Duration::from_millis(1000 / self.config.ui_refresh_fps as u64);
         self.event_loop.start(tick_rate);
 
+        // Warm the syntax-highlight assets in the background so the first review
+        // open doesn't pay the one-time syntax-set load on its critical path.
+        tokio::spawn(async {
+            let _ = tokio::task::spawn_blocking(crate::tui::syntax_highlight::warm_assets).await;
+        });
+
         // Start background state sync for cross-instance changes
         if self.config.state_sync_interval_ms > 0 {
             let store = self.service.store().clone();

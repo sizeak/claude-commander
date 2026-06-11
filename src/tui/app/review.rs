@@ -11,8 +11,9 @@ use crossterm::event::KeyEvent;
 use crate::api::NewComment;
 use crate::comment::{Comment, CommentSide, CommentStatus};
 use crate::git::{DiffLine, FileDiff, FileStatus, Hunk, LineOrigin, ParsedDiff};
-use crate::tui::syntax_highlight::highlight_line;
+use crate::tui::syntax_highlight::{highlight_line, warm_highlight_cache};
 use crate::tui::theme::{ColorMode, ReviewPalette};
+use rayon::prelude::*;
 use std::cell::{Cell, Ref, RefCell};
 
 /// Gutter / badge / box marker for a staged comment. An asterisk is the
@@ -2088,20 +2089,26 @@ pub(crate) fn precompute_review_caches(
     highlight: bool,
     text_fg: Color,
 ) -> Vec<Vec<WordSegs>> {
-    diff.files
-        .iter()
-        .map(|file| {
-            if highlight {
+    if highlight {
+        // Warm every content line across all files in one parallel pass. The
+        // flattened line list spreads a single large file across cores too, not
+        // just many files. `ext` borrows from each file's `display_path` (both
+        // `&str`), which lives as long as `diff`.
+        let lines: Vec<(&str, &str)> = diff
+            .files
+            .iter()
+            .flat_map(|file| {
                 let ext = file_extension(file.display_path());
-                for hunk in &file.hunks {
-                    for line in &hunk.lines {
-                        let _ = highlight_line(&line.content, ext, text_fg);
-                    }
-                }
-            }
-            word_diff_segments(file)
-        })
-        .collect()
+                file.hunks
+                    .iter()
+                    .flat_map(move |hunk| hunk.lines.iter().map(move |l| (ext, l.content.as_str())))
+            })
+            .collect();
+        warm_highlight_cache(&lines, text_fg);
+    }
+    // `par_iter().collect()` preserves order, so the result still lines up with
+    // `diff.files` for `prime_segments`.
+    diff.files.par_iter().map(word_diff_segments).collect()
 }
 
 /// Review payload prepared off the render thread: the parsed diff plus its warmed
