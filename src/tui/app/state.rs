@@ -167,12 +167,7 @@ impl App {
                 self.reconcile_one_section_assignment(session_id).await;
                 self.refresh_list_items().await;
                 // Select the newly created session
-                if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
-                    matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
-                }) {
-                    self.ui_state.list_state.select(Some(idx));
-                }
-                self.update_selection();
+                self.select_session_in_tree(session_id);
                 self.spawn_preview_update();
             }
             StateUpdate::SessionCreateFailed {
@@ -266,6 +261,24 @@ impl App {
             }
             StateUpdate::Error { message } => {
                 self.ui_state.modal = Modal::Error { message };
+            }
+            StateUpdate::ReviewPrepared { prepared } => {
+                // Only swap in the view if the loading spinner is still up. The
+                // user can't navigate while it's shown, but another background
+                // event could have replaced the modal (e.g. an error).
+                if matches!(self.ui_state.modal, Modal::Loading { .. }) {
+                    let ReviewPrepared {
+                        session_id,
+                        title,
+                        base,
+                        diff,
+                        comments,
+                        segments,
+                    } = *prepared;
+                    let state = DiffReviewState::new(session_id, title, base, diff, comments);
+                    state.prime_segments(segments);
+                    self.ui_state.modal = Modal::ReviewDiff(Box::new(state));
+                }
             }
             StateUpdate::CascadeFinished { result } => {
                 self.handle_cascade_finished(result).await;
@@ -1014,6 +1027,23 @@ fn detect_unread_transitions(
     ids
 }
 
+/// Apply freshly-detected agent states for the sessions just viewed during an
+/// attach, leaving every other session's entry untouched.
+///
+/// Returning from an attach must not blank the whole tree (which happens if the
+/// agent-state map is cleared wholesale) nor drop genuine background
+/// `Working → Idle` notifications. Only the sessions the user actually saw get
+/// their state overwritten here; because the user was watching them, the
+/// refreshed state is applied directly without running unread detection, so
+/// their own transitions are never re-flagged as unread. Every other session
+/// keeps its prior state, preserving the baseline a later poll diffs against.
+pub(super) fn apply_viewed_session_refresh(
+    agent_states: &mut HashMap<SessionId, AgentState>,
+    refreshed: HashMap<SessionId, AgentState>,
+) {
+    agent_states.extend(refreshed);
+}
+
 #[cfg(test)]
 mod unread_transition_tests {
     use super::*;
@@ -1053,6 +1083,34 @@ mod unread_transition_tests {
         let prev = HashMap::new();
         let new = HashMap::from([(sid, AgentState::Working)]);
         assert!(detect_unread_transitions(&prev, &new).is_empty());
+    }
+
+    #[test]
+    fn viewed_refresh_preserves_background_unread() {
+        // Scenario: attached to session A while a background session B is also
+        // running. Both finish (Working → Idle) during the attach. On detach we
+        // refresh only the viewed session (A). A subsequent poll must still flag
+        // B as unread (we never saw it finish) while leaving A alone.
+        let a = SessionId::new();
+        let b = SessionId::new();
+
+        // Pre-attach baseline: both working.
+        let mut agent_states = HashMap::from([(a, AgentState::Working), (b, AgentState::Working)]);
+
+        // Detach refreshes only the viewed session, now observed idle.
+        apply_viewed_session_refresh(&mut agent_states, HashMap::from([(a, AgentState::Idle)]));
+
+        // A reflects its observed state; B's baseline is untouched (not wiped).
+        assert_eq!(agent_states.get(&a), Some(&AgentState::Idle));
+        assert_eq!(agent_states.get(&b), Some(&AgentState::Working));
+
+        // Next background poll reports both idle.
+        let poll = HashMap::from([(a, AgentState::Idle), (b, AgentState::Idle)]);
+        let unread = detect_unread_transitions(&agent_states, &poll);
+
+        // Only B is flagged: A's finish was watched, B's was not. A wholesale
+        // clear() on detach would have dropped B's notification entirely.
+        assert_eq!(unread, vec![b]);
     }
 }
 

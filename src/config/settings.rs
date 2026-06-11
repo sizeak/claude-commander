@@ -80,6 +80,12 @@ pub struct Config {
     /// started fresh.
     pub resume_session: bool,
 
+    /// Launch sessions inside `nix develop` when the project has a `flake.nix`
+    /// at its root and `nix` is on PATH. Applies to Claude sessions and shell
+    /// sessions alike. Default true; projects without a flake are unaffected.
+    #[serde(default = "default_true")]
+    pub nix_develop: bool,
+
     /// Interval in milliseconds for checking state file changes from other instances (0 = disabled)
     pub state_sync_interval_ms: u64,
 
@@ -136,6 +142,14 @@ pub struct Config {
     #[serde(default)]
     pub rounded_borders: bool,
 
+    /// When opening the review view, precompute every file's render caches
+    /// (word-diff segments + syntax highlighting) up front behind a loading
+    /// spinner, instead of building each file's cache lazily on first
+    /// navigation. Trades a one-off wait when opening for instant file
+    /// switching afterwards. Default true.
+    #[serde(default = "default_true")]
+    pub precompute_review_caches: bool,
+
     /// Section definitions for grouping sessions in the TUI list.
     /// First-match-wins in declared order; unmatched sessions fall into a
     /// built-in "Other" catch-all.
@@ -180,6 +194,7 @@ impl Default for Config {
             pr_review_labels: default_pr_review_labels(),
             fetch_before_create: true,
             resume_session: true,
+            nix_develop: true,
             state_sync_interval_ms: 2000,
             agent_state_poll_interval_ms: 3000,
             invert_pr_label_color: false,
@@ -195,6 +210,7 @@ impl Default for Config {
             keybindings: KeyBindings::default(),
             theme: ThemeOverrides::default(),
             rounded_borders: false,
+            precompute_review_caches: true,
             sections: Vec::new(),
             commander_enabled: false,
             commander_program: None,
@@ -612,6 +628,8 @@ has_label = ["blocked", "waiting-on-author"]
         assert!(config.ai_summary_enabled);
         assert_eq!(config.ai_summary_model, "claude-haiku-4-5-20251001");
         assert!(config.show_session_program);
+        // Review cache precompute is on by default.
+        assert!(config.precompute_review_caches);
     }
 
     #[test]

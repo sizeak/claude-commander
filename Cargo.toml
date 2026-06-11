@@ -1,6 +1,6 @@
 [package]
 name = "claude-commander"
-version = "0.10.0"
+version = "0.12.1"
 edition = "2024"
 authors = ["Claude Commander Contributors"]
 description = "A high-performance terminal UI for managing Claude coding sessions"
@@ -48,6 +48,17 @@ color-eyre = "0.6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Syntax highlighting for the review diff view (fancy-regex backend — pure
+# Rust, no C/oniguruma dependency). `two-face` supplies an extended syntax set
+# (the bat language set, incl. TypeScript/TSX/TOML/…) that syntect's bundled
+# defaults lack.
+syntect = { version = "5.2", default-features = false, features = [
+    "default-fancy",
+] }
+two-face = { version = "0.4", default-features = false, features = [
+    "syntect-fancy",
+] }
+
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
@@ -69,6 +80,7 @@ throbber-widgets-tui = "0.8"
 
 # Fuzzy matching for the quick-select palette
 fuzzy-matcher = "0.3"
+rayon = "1.12.0"
 
 [dev-dependencies]
 # Property-based testing

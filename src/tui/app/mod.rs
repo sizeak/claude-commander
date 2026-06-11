@@ -5,7 +5,7 @@
 //! - User input handling
 //! - Background state updates
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -60,12 +60,16 @@ mod event_loop;
 mod input;
 mod modals;
 mod render;
+mod review;
 mod selection;
 mod settings;
 mod state;
 
 #[cfg(test)]
 mod tests;
+
+pub use review::DiffReviewState;
+pub use review::ReviewPrepared;
 
 /// Direction for mouse scroll events
 enum ScrollDirection {
@@ -166,8 +170,13 @@ pub enum Modal {
         /// First visible row of the completions list.
         scroll: usize,
     },
-    /// Loading spinner modal (non-interactive)
-    Loading { title: String, message: String },
+    /// Loading spinner modal (non-interactive). `hint`, when set, renders as a
+    /// dimmed line beneath the spinner (e.g. how to turn the operation off).
+    Loading {
+        title: String,
+        message: String,
+        hint: Option<String>,
+    },
     /// Help modal. `scroll` is the first visible line of `build_help_lines`.
     /// Clamped against the rendered content height in `render_help_modal`.
     Help { scroll: u16 },
@@ -209,6 +218,8 @@ pub enum Modal {
         /// True while `git fetch origin` is running in the background
         fetching: bool,
     },
+    /// Full-screen review-diff-and-comment view.
+    ReviewDiff(Box<DiffReviewState>),
 }
 
 /// A session match in the quick-switch modal
@@ -377,14 +388,85 @@ pub struct SettingsState {
     pub sections_state: SectionsState,
 }
 
+/// Kind of a settings row, carrying its typed value.
+///
+/// Each variant holds its own value — a display/edit string for `Text`, a live
+/// `bool` for `Toggle` — so the row model is fully typed rather than stuffing
+/// everything into a string. String conversion only happens at the
+/// preferences-file boundary (serde) and the text-input edit path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SettingsRowKind {
+    /// Free-text field edited via a text-input box.
+    Text(String),
+    /// Two-state boolean rendered as a checkbox and flipped in place.
+    Toggle(bool),
+}
+
 /// A single row in the settings list
 #[derive(Debug, Clone)]
 pub struct SettingsRow {
     pub label: String,
-    pub value: String,
     pub field_key: String,
+    pub kind: SettingsRowKind,
     /// Optional color for displaying a swatch next to the value (Theme tab only)
     pub color_swatch: Option<Color>,
+}
+
+impl SettingsRow {
+    /// A free-text settings row.
+    pub fn text(
+        label: impl Into<String>,
+        value: impl Into<String>,
+        field_key: impl Into<String>,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            field_key: field_key.into(),
+            kind: SettingsRowKind::Text(value.into()),
+            color_swatch: None,
+        }
+    }
+
+    /// A two-state boolean toggle row.
+    pub fn toggle(label: impl Into<String>, on: bool, field_key: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            field_key: field_key.into(),
+            kind: SettingsRowKind::Toggle(on),
+            color_swatch: None,
+        }
+    }
+
+    /// A text row that also displays a color swatch (Theme tab).
+    pub fn swatch(
+        label: impl Into<String>,
+        value: impl Into<String>,
+        field_key: impl Into<String>,
+        color: Color,
+    ) -> Self {
+        Self {
+            label: label.into(),
+            field_key: field_key.into(),
+            kind: SettingsRowKind::Text(value.into()),
+            color_swatch: Some(color),
+        }
+    }
+
+    /// The display/edit string for a `Text` row; `""` for a `Toggle` row.
+    pub fn text_value(&self) -> &str {
+        match &self.kind {
+            SettingsRowKind::Text(v) => v,
+            SettingsRowKind::Toggle(_) => "",
+        }
+    }
+
+    /// For a Toggle row, the flipped boolean; `None` for other kinds.
+    pub fn toggled(&self) -> Option<bool> {
+        match self.kind {
+            SettingsRowKind::Toggle(on) => Some(!on),
+            SettingsRowKind::Text(_) => None,
+        }
+    }
 }
 
 /// Editing state within the settings modal
@@ -409,6 +491,9 @@ pub enum SettingsEditing {
 pub enum InputAction {
     CreateSession {
         project_id: ProjectId,
+        /// Section the tree cursor was in when the modal opened; the new
+        /// session is placed there (`None` = default "In Progress").
+        section: Option<String>,
     },
     CreateStackedSession {
         project_id: ProjectId,
@@ -465,12 +550,27 @@ pub struct AppUiState {
     pub should_quit: bool,
     /// Last known terminal size (updated each render frame)
     pub terminal_size: Rect,
+    /// Inner rect of the review-diff body pane, recorded each render frame so
+    /// mouse events can map a screen position to a diff line. `None` unless the
+    /// review view is open.
+    pub review_body_rect: Option<Rect>,
+    /// Inner rect of the review-diff file-list pane, recorded each render frame
+    /// so mouse events can map a screen position to a tree row. `None` unless
+    /// the review view is open.
+    pub review_file_list_rect: Option<Rect>,
+    /// Sessions with at least one pending (not-yet-applied) review comment.
+    /// Drives the `*` marker in the session list; refreshed on startup and
+    /// whenever the review view closes.
+    pub sessions_with_comments: HashSet<SessionId>,
     /// Currently selected session (for preview/diff)
     pub selected_session_id: Option<SessionId>,
     /// Currently selected project
     pub selected_project_id: Option<ProjectId>,
     /// Attach command to run after exiting TUI
     pub attach_command: Option<String>,
+    /// Session whose review diff should be opened on returning to the TUI —
+    /// set when the user pressed Ctrl-r inside an attached session.
+    pub pending_open_review: Option<SessionId>,
     /// Editor command + path to open after exiting TUI
     pub editor_command: Option<(String, PathBuf)>,
     /// When attached via shell toggle (Ctrl+\), stores the session name to switch back to.
@@ -502,6 +602,10 @@ pub struct AppUiState {
     /// Last left-mouse click on a session-list row: (list index, timestamp).
     /// Used to detect double-click on the same row within `DOUBLE_CLICK_WINDOW`.
     pub last_left_click: Option<(usize, Instant)>,
+    /// Last left-mouse click in the review diff body: (screen row, timestamp).
+    /// Used to detect a double-click on the same row within `DOUBLE_CLICK_WINDOW`,
+    /// which opens a comment box like a right-click.
+    pub review_last_click: Option<(u16, Instant)>,
     /// Current list view mode (project-grouped vs section-grouped).
     pub view_mode: ViewMode,
     /// Pre-computed stack chain for the selected session (empty if not stacked).
@@ -540,11 +644,15 @@ impl Default for AppUiState {
             preview_content: String::new(),
             diff_info: Arc::new(DiffInfo::empty()),
             status_message: None, // (message, expiry)
+            review_body_rect: None,
+            review_file_list_rect: None,
+            sessions_with_comments: HashSet::new(),
 
             should_quit: false,
             selected_session_id: None,
             selected_project_id: None,
             attach_command: None,
+            pending_open_review: None,
             editor_command: None,
             shell_toggle_pair: None,
             clear_right_pane: false,
@@ -559,6 +667,7 @@ impl Default for AppUiState {
             cascade_paused: false,
             collapsed_sections: std::collections::HashSet::new(),
             last_left_click: None,
+            review_last_click: None,
             view_mode: ViewMode::default(),
             stack_chain: Vec::new(),
             last_project_pull: HashMap::new(),
@@ -590,6 +699,7 @@ impl AppUiState {
             | BindableAction::RestartSession
             | BindableAction::OpenInEditor
             | BindableAction::OpenPullRequest
+            | BindableAction::OpenReviewDiff
             | BindableAction::MoveToSection => has_session,
             // Cascade merge is only meaningful from a session that's part of
             // a stack. We accept any selected session here; the handler is
@@ -718,6 +828,12 @@ impl App {
         let tick_rate = Duration::from_millis(1000 / self.config.ui_refresh_fps as u64);
         self.event_loop.start(tick_rate);
 
+        // Warm the syntax-highlight assets in the background so the first review
+        // open doesn't pay the one-time syntax-set load on its critical path.
+        tokio::spawn(async {
+            let _ = tokio::task::spawn_blocking(crate::tui::syntax_highlight::warm_assets).await;
+        });
+
         // Start background state sync for cross-instance changes
         if self.config.state_sync_interval_ms > 0 {
             let store = self.service.store().clone();
@@ -795,6 +911,9 @@ impl App {
         self.refresh_list_items().await;
         self.restore_selection().await;
 
+        // Surface any pending review comments left from a previous run.
+        self.refresh_comment_indicators().await;
+
         loop {
             // Setup terminal for TUI
             let mut terminal = self.setup_terminal()?;
@@ -842,11 +961,22 @@ impl App {
                         // Attach to session via async PTY bridge (supports Ctrl+Q detach, Ctrl+\ shell toggle)
                         info!("Executing attach command: {}", cmd);
                         let session_name = cmd.split_whitespace().last().unwrap_or("").to_string();
+                        // Track every session viewed during this attach
+                        // (including ones reached via the in-tmux switcher or
+                        // shell toggle) so we can refresh just their agent
+                        // state on the way out — see the post-loop block.
+                        let mut viewed_sessions: HashSet<String> = HashSet::new();
+                        // The session the user ends up on when the attach loop
+                        // exits — possibly reached via the in-session switcher,
+                        // so not necessarily the one they entered with.
+                        let mut final_session: Option<String> = None;
                         if !session_name.is_empty() {
                             let mut current_session = session_name.clone();
                             let mut consecutive_ends: u8 = 0;
 
                             loop {
+                                viewed_sessions.insert(current_session.clone());
+
                                 let editor_triggers =
                                     crate::config::keybindings::editor_trigger_bytes(
                                         &self.config.keybindings,
@@ -857,6 +987,16 @@ impl App {
                                 // sessions, where SIGTSTP would freeze the
                                 // pane with no shell to recover from.
                                 let intercept_ctrl_z = !current_session.ends_with("-sh");
+                                // The Ctrl-r review toggle is intercepted only
+                                // for Claude sessions; in a shell Ctrl-r is
+                                // reverse-history-search, which we leave intact.
+                                let review_triggers = if intercept_ctrl_z {
+                                    crate::config::keybindings::review_trigger_bytes(
+                                        &self.config.keybindings,
+                                    )
+                                } else {
+                                    Vec::new()
+                                };
 
                                 // Stamp last_attached_at so the in-tmux
                                 // switcher can sort Alt+Tab-style by MRU.
@@ -881,6 +1021,7 @@ impl App {
                                 let outcome = match crate::tmux::attach_to_session(
                                     &current_session,
                                     editor_triggers,
+                                    review_triggers,
                                     intercept_ctrl_z,
                                 )
                                 .await
@@ -901,6 +1042,7 @@ impl App {
                                 // necessarily the one we entered with. Trust the outcome.
                                 let switched_via_popup = outcome.final_session != current_session;
                                 current_session = outcome.final_session;
+                                viewed_sessions.insert(current_session.clone());
                                 if switched_via_popup {
                                     // Picking a new session in the popup invalidates the
                                     // shell-toggle pair (which is tied to a specific
@@ -952,6 +1094,26 @@ impl App {
                                         consecutive_ends = 0;
                                         info!("Switching to session: {}", current_session);
                                         continue;
+                                    }
+                                    crate::tmux::AttachResult::SwitchToReview => {
+                                        info!(
+                                            "Review toggle requested from session: {}",
+                                            current_session
+                                        );
+                                        // Resolve the tmux session to its id and
+                                        // queue the review view; the post-loop
+                                        // code opens it once we're back in the
+                                        // TUI. Ctrl-r inside the review
+                                        // re-attaches (see handle_review_key).
+                                        self.ui_state.pending_open_review = {
+                                            let st = self.service.store().read().await;
+                                            st.sessions
+                                                .values()
+                                                .find(|s| s.matches_tmux_name(&current_session))
+                                                .map(|s| s.id)
+                                        };
+                                        self.ui_state.shell_toggle_pair = None;
+                                        break;
                                     }
                                     crate::tmux::AttachResult::OpenEditor => {
                                         info!(
@@ -1013,18 +1175,70 @@ impl App {
                                     }
                                 }
                             }
+                            final_session = Some(current_session);
                         }
 
                         // Flush stdin again after detach to discard any stale input
                         crate::tmux::flush_stdin();
 
-                        // Restart the input reader after detach
+                        // Restart the input reader after detach. This also
+                        // drains the event channel, discarding any
+                        // AgentStatesUpdated events queued while attached.
                         info!("Returned from attach, restarting input reader");
                         self.event_loop.restart_input();
-                        // Discard cached agent states so queued AgentStatesUpdated
-                        // events from during attach can't trigger false
-                        // Working→Idle transitions that re-mark sessions unread.
-                        self.ui_state.agent_states.clear();
+
+                        // Refresh agent state for just the sessions we viewed,
+                        // setting their freshly-observed state directly. We
+                        // deliberately do NOT clear the whole map: clearing
+                        // blanks every spinner in the tree until the next poll
+                        // (~3s) and wipes the unread baseline for background
+                        // sessions, silently dropping genuine Working→Idle
+                        // notifications that occurred while we were attached.
+                        // Setting the viewed sessions directly (bypassing the
+                        // unread diff) avoids re-flagging them as unread, since
+                        // the user was watching them.
+                        if !viewed_sessions.is_empty() {
+                            let targets: Vec<(SessionId, String, String)> = {
+                                let store_state = self.service.store().read().await;
+                                store_state
+                                    .sessions
+                                    .values()
+                                    .filter(|s| s.status == SessionStatus::Running)
+                                    .filter(|s| {
+                                        viewed_sessions.iter().any(|name| s.matches_tmux_name(name))
+                                    })
+                                    .map(|s| (s.id, s.tmux_session_name.clone(), s.program.clone()))
+                                    .collect()
+                            };
+                            if !targets.is_empty() {
+                                let mut detector = AgentStateDetector::new(
+                                    self.service.session_manager().tmux.clone(),
+                                    Duration::from_millis(0),
+                                );
+                                let refreshed = detector.detect_all(&targets).await;
+                                state::apply_viewed_session_refresh(
+                                    &mut self.ui_state.agent_states,
+                                    refreshed,
+                                );
+                                self.refresh_list_items().await;
+                            }
+                        }
+
+                        // Focus the session the user just left so the tree
+                        // lands on it — important after the in-session switcher,
+                        // which may have moved them to a different session than
+                        // the one they entered.
+                        if let Some(name) = final_session {
+                            self.focus_session_in_tree(&name).await;
+                        }
+
+                        // Ctrl-r inside the attached session queued its review
+                        // diff — open it now so the next TUI frame shows it
+                        // (rather than the session list).
+                        if let Some(sid) = self.ui_state.pending_open_review.take() {
+                            self.ui_state.selected_session_id = Some(sid);
+                            self.handle_open_review().await;
+                        }
                     }
                     None => {
                         // Save selection before quitting

@@ -429,11 +429,22 @@ impl App {
                 state.get_project(&project_id).map(|p| p.repo_path.clone())
             };
             let existing_branches = repo_path.and_then(|p| existing_branch_names(&p));
+            // Capture the section under the cursor now, so a background list
+            // refresh while the modal is open can't change where the new
+            // session lands.
+            let section = self
+                .ui_state
+                .list_state
+                .selected()
+                .and_then(|idx| super::selection::section_at(&self.ui_state.list_items, idx));
             self.ui_state.modal = Modal::Input {
                 title: "New Session".to_string(),
                 prompt: "Enter session name:".to_string(),
                 value: String::new(),
-                on_submit: InputAction::CreateSession { project_id },
+                on_submit: InputAction::CreateSession {
+                    project_id,
+                    section,
+                },
                 existing_branches,
             };
         } else {
@@ -835,12 +846,7 @@ impl App {
 
         // Refresh list and select the new placeholder
         self.refresh_list_items().await;
-        if let Some(idx) = self.ui_state.list_items.iter().position(
-            |item| matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id),
-        ) {
-            self.ui_state.list_state.select(Some(idx));
-        }
-        self.update_selection();
+        self.select_session_in_tree(session_id);
 
         // Spawn background task for heavy work (same pattern as NewSession)
         let session_manager = self.service.session_manager().clone();
@@ -1022,6 +1028,27 @@ impl App {
 
         let eff_mode = Self::effective_palette_mode(mode, &query);
         let eff_query = Self::palette_filter_query(eff_mode, &query);
+
+        // Section picker: re-filter the section rows and stop — falling
+        // through would replace them with command entries.
+        if let PaletteMode::SectionPicker { session_id } = eff_mode {
+            let section_items = self.gather_section_picker_items(session_id, eff_query);
+            if let Modal::QuickSwitch {
+                matches,
+                selected_idx,
+                scroll,
+                ..
+            } = &mut self.ui_state.modal
+            {
+                *matches = section_items;
+                if *selected_idx >= matches.len() {
+                    *selected_idx = matches.len().saturating_sub(1);
+                }
+                *scroll = 0;
+                *scroll = adjust_list_scroll(*selected_idx, *scroll, LIST_MAX_VISIBLE);
+            }
+            return;
+        }
 
         // Build the session rows synchronously from list_items so the refilter
         // can run without awaiting the store lock on every keystroke.
@@ -1374,6 +1401,13 @@ impl App {
             })
             .await;
         self.refresh_list_items().await;
+
+        // The session has moved to a new position in the rebuilt list. Keep it
+        // selected by finding its new index and moving the cursor there, then
+        // refresh the preview pane for the (unchanged) selection.
+        if self.select_session_in_tree(session_id) {
+            self.spawn_preview_update();
+        }
     }
 
     /// Handle rename session - show input modal pre-filled with current title.
@@ -1402,7 +1436,10 @@ impl App {
     /// Handle input modal submission
     pub(super) async fn handle_input_submit(&mut self, action: InputAction, value: String) {
         match action {
-            InputAction::CreateSession { project_id } => {
+            InputAction::CreateSession {
+                project_id,
+                section,
+            } => {
                 if value.trim().is_empty() {
                     self.ui_state.status_message = Some((
                         "Session name cannot be empty".to_string(),
@@ -1428,14 +1465,27 @@ impl App {
                     }
                 };
 
+                // Place the new session in the section the cursor was in when
+                // the modal opened, before the list refresh below renders it.
+                if let Some(name) = section {
+                    let sections = self.config.sections.clone();
+                    let now = chrono::Utc::now();
+                    let _ = self
+                        .service
+                        .store()
+                        .mutate(move |state| {
+                            if let Some(session) = state.get_session_mut(&session_id) {
+                                crate::session::place_created_session(
+                                    session, &name, &sections, now,
+                                );
+                            }
+                        })
+                        .await;
+                }
+
                 // Refresh list and select the new placeholder
                 self.refresh_list_items().await;
-                if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
-                    matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
-                }) {
-                    self.ui_state.list_state.select(Some(idx));
-                }
-                self.update_selection();
+                self.select_session_in_tree(session_id);
 
                 // Spawn background task for heavy work
                 let session_manager = self.service.session_manager().clone();
@@ -1515,12 +1565,7 @@ impl App {
 
                 // Refresh list and select the new placeholder
                 self.refresh_list_items().await;
-                if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
-                    matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
-                }) {
-                    self.ui_state.list_state.select(Some(idx));
-                }
-                self.update_selection();
+                self.select_session_in_tree(session_id);
 
                 // Spawn background task for heavy work
                 let session_manager = self.service.session_manager().clone();
@@ -1645,6 +1690,7 @@ impl App {
                 self.ui_state.modal = Modal::Loading {
                     title: "Scanning".to_string(),
                     message: format!("Scanning {} for git repos…", path.display()),
+                    hint: None,
                 };
 
                 match self.service.scan_directory(&path).await {
@@ -1719,12 +1765,7 @@ impl App {
                 }
             }
             ConfirmAction::RestartSession { session_id } => {
-                match self
-                    .service
-                    .session_manager()
-                    .restart_session(&session_id)
-                    .await
-                {
+                match self.service.restart_session(&session_id).await {
                     Ok(_) => {
                         self.ui_state.status_message = Some((
                             "Session restarted".to_string(),

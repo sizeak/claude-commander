@@ -22,6 +22,8 @@ pub enum AttachResult {
     Detached,
     /// User pressed Ctrl+\ to toggle between Claude and shell sessions
     SwitchToShell,
+    /// User pressed the review key (Ctrl+r) to switch to this session's diff
+    SwitchToReview,
     /// User pressed Ctrl+. to open the editor for the session's worktree
     OpenEditor,
     /// The session/process ended
@@ -60,6 +62,7 @@ pub struct AttachOutcome {
 pub async fn attach_to_session(
     session_name: &str,
     editor_triggers: Vec<Vec<u8>>,
+    review_triggers: Vec<Vec<u8>>,
     intercept_ctrl_z: bool,
 ) -> Result<AttachOutcome> {
     // Get terminal size
@@ -96,6 +99,7 @@ pub async fn attach_to_session(
         pty_fd,
         &mut child,
         editor_triggers,
+        review_triggers,
         intercept_ctrl_z,
         current_session.clone(),
         popup_open,
@@ -235,11 +239,15 @@ fn resize_pty(fd: i32, rows: u16, cols: u16) {
     }
 }
 
+// Internal plumbing for the attach I/O loop; the arguments are all distinct
+// channels/handles/policies with no natural grouping worth a struct here.
+#[allow(clippy::too_many_arguments)]
 async fn run_async_loop(
     pty: pty_process::Pty,
     pty_fd: i32,
     child: &mut tokio::process::Child,
     editor_triggers: Vec<Vec<u8>>,
+    review_triggers: Vec<Vec<u8>>,
     intercept_ctrl_z: bool,
     current_session: Arc<Mutex<String>>,
     popup_open: Arc<AtomicBool>,
@@ -349,6 +357,18 @@ async fn run_async_loop(
                         }
                         let _ = pty_writer.flush().await;
                         continue;
+                    }
+
+                    // Check for the review-toggle trigger bytes (Ctrl-r by
+                    // default). Empty `review_triggers` disables it (e.g. for
+                    // shell sessions, where Ctrl-r is reverse-history-search).
+                    if review_triggers
+                        .iter()
+                        .any(|pat| contains_subsequence(data, pat))
+                    {
+                        debug!("Review trigger detected, switching to review");
+                        let _ = stdin_shutdown.send(AttachResult::SwitchToReview).await;
+                        break;
                     }
 
                     // Check for any user-configured editor trigger bytes.

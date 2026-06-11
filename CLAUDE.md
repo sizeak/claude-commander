@@ -26,22 +26,26 @@ Terminal UI for managing Claude coding sessions via tmux and git worktrees. Each
 
 ### Core flow
 
-`App` (TUI main loop) owns a `SessionManager` which coordinates `TmuxExecutor` and `GitBackend`/`WorktreeManager`. State is shared via `Arc<RwLock<AppState>>` between the TUI and SessionManager.
+`App` (TUI main loop) routes through a `CommanderService` (`api.rs`), which owns the `SessionManager` (coordinating `TmuxExecutor` and `GitBackend`/`WorktreeManager`) plus the state/config stores. State is shared via `Arc<RwLock<AppState>>`.
+
+**Layering (CommanderService → API → TUI).** All feature logic lives in the library and is exposed through `CommanderService`; both the CLI and the TUI call it rather than wiring `SessionManager`/stores together themselves. The TUI only renders and dispatches commands — anything worth testing (diff composition/parsing, comment re-anchoring, apply gating, etc.) belongs in the library, where unit tests can reach it without a terminal. When adding a feature, put its logic behind a `CommanderService` method and keep the `tui/` side thin.
 
 ### Modules
 
 - **`session/`** — `types.rs` defines `Project` → `WorktreeSession` hierarchy (UUIDs, display as 8-char prefix). `manager.rs` orchestrates lifecycle: create/restart/delete sessions, content/diff retrieval.
+- **`api.rs`** — `CommanderService`: the single coordination layer the CLI and TUI both depend on. Query/mutation methods plus `Serialize` response structs (`SessionInfo`, `SessionDetail`, `ReviewSnapshot`, …).
+- **`comment/`** — local diff-review comments: `Comment` model + persisted `CommentStore`, snippet-based `reanchor` (drift detection), markdown composition, vim visual-mode selection math, and apply-delivery decision (`decide_send`/`ApplyOutcome`).
 - **`tmux/`** — `executor.rs`: async tmux commands with semaphore throttling (default 16 concurrent). `capture.rs`: cached pane content (50ms TTL, xxh3 hash-based staleness). `state.rs`: pattern-based agent state detection. `attach.rs`: PTY-based session attachment. `input.rs`: non-blocking input forwarding.
-- **`git/`** — `backend.rs`: pure Rust git via gitoxide (gix crate). `worktree.rs`: uses git CLI for worktree mutations. `diff.rs`: cached diff computation (500ms TTL).
-- **`tui/`** — `app.rs` (~1200 lines, largest file): main event loop, rendering, modal system, pane management. `event.rs`: `AppEvent`/`UserCommand` enums, key mappings, `EventLoop` multiplexing crossterm + ticks + state updates. `theme.rs`: auto-detects terminal color capability via COLORTERM/TERM. `widgets/`: TreeList, Preview, DiffView.
-- **`config/`** — `settings.rs`: TOML config via figment, layered defaults → file → env vars (prefix `CC_`). `storage.rs`: JSON state persistence.
+- **`git/`** — `backend.rs`: pure Rust git via gitoxide (gix crate). `worktree.rs`: uses git CLI for worktree mutations. `diff.rs`: cached diffstat computation (500ms TTL). `review_diff.rs`: structured `file→hunk→line` unified-diff parser and `compose_review_diff` (base→working-tree) for the review view.
+- **`tui/`** — `app/` (split into `mod.rs`, `render.rs`, `input.rs`, `modals.rs`, `review.rs`, `settings.rs`, `state.rs`, `actions.rs`, …): main event loop, rendering, modal system, pane management. `event.rs`: `AppEvent`/`UserCommand` enums, key mappings, `EventLoop` multiplexing crossterm + ticks + state updates. `theme.rs`: auto-detects terminal color capability via COLORTERM/TERM. `widgets/`: TreeList, Preview, InfoView. The full-screen review-diff view is rendered in `app/review.rs` (not a widget).
+- **`config/`** — `settings.rs`: TOML config via figment, layered defaults → file → env vars (prefix `CC_`). `storage.rs`: JSON state persistence. `keybindings.rs`: `BindableAction` ↔ key map (palette-only actions may be unbound).
 - **`error.rs`** — thiserror-based hierarchy: SessionError, TmuxError, GitError, ConfigError, TuiError.
 
 ### Key patterns
 
 - Event-driven TUI: `EventLoop` combines terminal input, render ticks, and mpsc state update channels into a single `AppEvent` stream
 - Caching with TTLs: ContentCapture (50ms) and DiffCache (500ms), both with hash-based change detection
-- Modals: Input/Confirm/Help/Error overlay the main UI, handled in `app.rs`
+- Modals: Input/Confirm/Help/Error/ReviewDiff overlay the main UI, handled in `tui/app/modals.rs` + `input.rs`
 - Background updater task periodically refreshes agent states for all active sessions
 
 ## Config and state files
@@ -72,7 +76,8 @@ Use red-green TDD: write a failing test first, then implement the fix. Key areas
 - **Status state machine** (`session/types.rs`) — transition guards, timestamp updates, display strings
 - **Key mappings** (`tui/event.rs`) — every documented keybinding has a test; release/repeat events ignored
 - **Config resolution** (`config/settings.rs`) — editor precedence chain, GUI editor auto-detection
-- **Widget state** (`tui/widgets/`) — TreeListState navigation/wrap/clamp, PreviewState follow mode/scroll, DiffViewState
+- **Widget state** (`tui/widgets/`) — TreeListState navigation/wrap/clamp, PreviewState follow mode/scroll
+- **Review view** (`tui/app/review.rs`) — `DiffReviewState` file/cursor/scroll navigation, visual-mode selection math, side-by-side row pairing, mouse row mapping
 - **Caching** (`tmux/capture.rs`, `git/diff.rs`) — hash determinism, TTL staleness, parse_diff_stat edge cases
 - **Name sanitization** (`session/manager.rs`) — branch name generation, special char handling
 - **Error types** (`error.rs`) — all variant displays, type conversions
@@ -83,7 +88,8 @@ When adding new behavior, add a corresponding unit test that would fail without 
 
 When adding or changing config options, hotkeys, or keybindings:
 
-- **README.md** — Update the Keyboard Shortcuts table and the Configuration TOML block to reflect the change
+- **README.md** — Update the Keyboard Shortcuts table (kept in the README) to reflect the change
+- **docs/configuration.md** — Update the Configuration TOML block (moved here from the README) to reflect the change
 - **Help modal** — Update the help text rendered in `app.rs` (`render_help_modal`) so the in-app `?` help stays in sync with the README
 - **Settings modal** — Add new config options to `build_settings_rows()` in `app.rs` (General tab) and the corresponding `apply_settings_edit()` match arm so they are editable from the in-app settings UI
 - **CLAUDE.md** — No update needed for individual options; the Architecture section points to `Config` struct as the source of truth
@@ -108,5 +114,5 @@ The `cargo fmt` hook auto-fixes formatting. If `cargo clippy` fails, fix the war
 - Precommit hooks may autoformat files while failing the commit; these changes will need to be restaged and the commit reattempted.
 - Before committing, always ensure `cargo clippy` and `cargo build` pass with no warnings or errors. Fix any issues before creating the commit.
 - Bug fixes need a regression test too, not just features: follow the red-green TDD rule under [Testing](#testing) — add a test that fails without the fix and passes with it. If the fix lives somewhere untestable (e.g. `main.rs`), push the logic down into testable library code rather than skipping the test.
-- Cutting a release: `cargo release {patch,minor,major} --execute` (see README). Never bump `Cargo.toml` manually.
+- Cutting a release: `cargo release {patch,minor,major} --execute` (see CONTRIBUTING.md). Never bump `Cargo.toml` manually.
 

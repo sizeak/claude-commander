@@ -101,10 +101,14 @@ fn raise_fd_limit() {}
 
 /// Execute async PTY-based attach to a tmux session
 async fn execute_attach(session_name: &str, editor_triggers: Vec<Vec<u8>>) {
-    // CLI `attach` resolves a Claude session by title/ID, never a shell.
-    match attach_to_session(session_name, editor_triggers, true).await {
+    // CLI `attach` resolves a Claude session by title/ID, never a shell. The
+    // review toggle has no standalone UI here, so it's disabled (empty triggers).
+    match attach_to_session(session_name, editor_triggers, Vec::new(), true).await {
         Ok(outcome) => match outcome.result {
-            AttachResult::Detached | AttachResult::SwitchToShell | AttachResult::OpenEditor => {
+            AttachResult::Detached
+            | AttachResult::SwitchToShell
+            | AttachResult::SwitchToReview
+            | AttachResult::OpenEditor => {
                 info!("Detached from session");
             }
             AttachResult::SessionEnded => {
