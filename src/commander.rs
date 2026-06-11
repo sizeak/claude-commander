@@ -13,7 +13,7 @@
 use std::path::Path;
 
 use crate::config::Config;
-use crate::error::Result;
+use crate::error::{Result, SessionError};
 use crate::session::SessionId;
 use crate::tmux::TmuxExecutor;
 
@@ -122,11 +122,19 @@ fn plan_session_action(exists: bool, pane_dead: bool) -> SessionAction {
 ///
 /// `CLAUDE.md` is rewritten on every call so the CLI reference stays current;
 /// `NOTES.md` is only seeded when absent so accumulated notes survive.
+///
+/// Returns [`SessionError::CommanderDisabled`] when the feature is off. This is
+/// the single enforcement point for the enable gate — every caller (CLI, TUI)
+/// routes through here, so a new caller cannot accidentally bypass the check.
 pub async fn ensure_session(
     config: &Config,
     tmux: &TmuxExecutor,
     cmd: &clap::Command,
 ) -> Result<String> {
+    if !config.commander_enabled {
+        return Err(SessionError::CommanderDisabled.into());
+    }
+
     // Friendly error on tmux-less machines, matching the create-session path.
     tmux.check_installed().await?;
 
@@ -260,6 +268,25 @@ mod tests {
     fn plan_recreates_dead_pane() {
         // The corpse-reattach bug: existing + dead must kill & recreate, never reuse.
         assert_eq!(plan_session_action(true, true), SessionAction::RecreateDead);
+    }
+
+    #[tokio::test]
+    async fn ensure_session_errors_when_disabled() {
+        // `commander_enabled` defaults to false. The guard must fire before any
+        // tmux work, so this passes even on a machine with no tmux server.
+        let config = Config::default();
+        assert!(!config.commander_enabled);
+        let tmux = TmuxExecutor::new();
+        let err = ensure_session(&config, &tmux, &sample_cli())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::error::Error::Session(SessionError::CommanderDisabled)
+            ),
+            "disabled commander must short-circuit with CommanderDisabled, got {err:?}"
+        );
     }
 
     #[test]

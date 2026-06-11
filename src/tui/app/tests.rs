@@ -870,6 +870,35 @@ fn test_apply_commander_dir_sets_and_clears() {
     assert_eq!(app.config.commander_dir, None);
 }
 
+#[tokio::test]
+async fn open_commander_when_disabled_toasts_without_quitting() {
+    // Default config has commander disabled, so `commander_enabled_at_init` is
+    // false and the restart-required snapshot guard short-circuits before any
+    // tmux work — this path is reachable in a unit test with no tmux server.
+    let mut app = make_test_app();
+    assert!(!app.config.commander_enabled);
+    assert!(!app.commander_enabled_at_init);
+
+    app.handle_open_commander().await;
+
+    assert!(
+        app.ui_state.status_message.is_some(),
+        "disabled commander should surface a status message"
+    );
+    assert!(
+        !app.ui_state.should_quit,
+        "disabled commander must not quit the TUI to attach"
+    );
+    assert!(
+        app.ui_state.attach_command.is_none(),
+        "disabled commander must not queue an attach command"
+    );
+    assert!(
+        !matches!(app.ui_state.modal, Modal::Error { .. }),
+        "disabled commander is expected, not an error modal"
+    );
+}
+
 #[test]
 fn test_boolean_rows_are_toggle_kind() {
     let app = make_test_app();
