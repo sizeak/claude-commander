@@ -79,6 +79,11 @@ pub enum SessionError {
 
     #[error("Push failed in session {session}: {reason}")]
     PushFailed { session: SessionId, reason: String },
+
+    #[error(
+        "Commander session is disabled. Enable it with `commander_enabled = true` in config.toml, or toggle it in the in-app settings."
+    )]
+    CommanderDisabled,
 }
 
 /// Tmux integration errors
@@ -251,6 +256,7 @@ mod tests {
             SessionError::ProjectNotFound("proj".to_string()),
             SessionError::MaxSessionsReached(10),
             SessionError::TmuxSessionNotFound("sess".to_string()),
+            SessionError::CommanderDisabled,
         ];
         for err in variants {
             assert!(!err.to_string().is_empty(), "Empty display for {:?}", err);

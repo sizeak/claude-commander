@@ -330,23 +330,27 @@ async fn main() -> Result<()> {
         Some(Commands::Commander) => {
             setup_logging(cli.debug, false)?;
 
-            if !config.commander_enabled {
-                println!(
-                    "Commander session is disabled. Enable it with \
-                     `commander_enabled = true` in config.toml, or toggle it in \
-                     the in-app settings."
-                );
-                return Ok(());
-            }
-
             // One-shot CLI process: a bare executor is sufficient (no shared
-            // semaphore to honour as there is in the long-lived TUI).
+            // semaphore to honour as there is in the long-lived TUI). The
+            // enable gate lives in `ensure_session`, so the disabled case
+            // surfaces as a typed error rather than an inline check here.
             let tmux = claude_commander::tmux::TmuxExecutor::new();
             let cmd = cli_command();
-            let name = claude_commander::commander::ensure_session(&config, &tmux, &cmd).await?;
-
-            let triggers = claude_commander::editor_trigger_bytes(&config.keybindings);
-            execute_attach(&name, triggers).await;
+            match claude_commander::commander::ensure_session(&config, &tmux, &cmd).await {
+                Ok(name) => {
+                    let triggers = claude_commander::editor_trigger_bytes(&config.keybindings);
+                    execute_attach(&name, triggers).await;
+                }
+                Err(
+                    e @ claude_commander::Error::Session(
+                        claude_commander::error::SessionError::CommanderDisabled,
+                    ),
+                ) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
 
         Some(Commands::PickSession { out, current }) => {
