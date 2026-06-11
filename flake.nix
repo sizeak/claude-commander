@@ -13,7 +13,14 @@
         pkgs = nixpkgs.legacyPackages.${system};
         craneLib = crane.mkLib pkgs;
 
-        src = craneLib.cleanCargoSource ./.;
+        # .md files must survive the source filter: src/commander_prime.md is
+        # embedded into the binary via include_str!
+        src = pkgs.lib.cleanSourceWith {
+          src = ./.;
+          filter = path: type:
+            (pkgs.lib.hasSuffix ".md" path) || (craneLib.filterCargoSources path type);
+          name = "source";
+        };
 
         commonArgs = {
           inherit src;
