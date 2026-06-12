@@ -519,6 +519,7 @@ impl Default for KeyBindings {
         let none = KeyModifiers::NONE;
         let ctrl = KeyModifiers::CONTROL;
         let shift = KeyModifiers::SHIFT;
+        let alt = KeyModifiers::ALT;
 
         // Navigation
         bindings.insert(
@@ -566,7 +567,7 @@ impl Default for KeyBindings {
         );
         // RenameSession has no default key — it's reachable via the command
         // palette. `r` is given to OpenReviewDiff so it pairs with the
-        // attached-session Ctrl-r review toggle.
+        // attached-session Alt-r review toggle.
         bindings.insert(
             BindableAction::RestartSession,
             vec![kb(KeyCode::Char('R'), shift)],
@@ -589,7 +590,7 @@ impl Default for KeyBindings {
         );
         bindings.insert(
             BindableAction::OpenReviewDiff,
-            vec![kb(KeyCode::Char('r'), none), kb(KeyCode::Char('r'), ctrl)],
+            vec![kb(KeyCode::Char('r'), none), kb(KeyCode::Char('r'), alt)],
         );
         bindings.insert(
             BindableAction::MoveToSection,
@@ -777,21 +778,30 @@ impl<'de> Visitor<'de> for OneOrManyVisitor {
 fn trigger_bytes_for(bindings: &KeyBindings, action: BindableAction) -> Vec<Vec<u8>> {
     let mut triggers = Vec::new();
     for kb in bindings.keys_for(action) {
-        if kb.modifiers != KeyModifiers::CONTROL {
-            continue;
-        }
         let KeyCode::Char(c) = kb.code else {
             continue;
         };
-        if c.is_ascii_alphabetic() {
-            // Ctrl-<letter> → control byte
-            let byte = (c.to_ascii_lowercase() as u8) - 0x60;
-            triggers.push(vec![byte]);
-        } else if c.is_ascii() {
-            // Ctrl-<non-letter> → CSI-u or modifyOtherKeys sequence
-            let n = c as u32;
-            triggers.push(format!("\x1b[{n};5u").into_bytes());
-            triggers.push(format!("\x1b[27;5;{n}~").into_bytes());
+        if !c.is_ascii() {
+            continue;
+        }
+        match kb.modifiers {
+            KeyModifiers::CONTROL if c.is_ascii_alphabetic() => {
+                // Ctrl-<letter> → control byte
+                let byte = (c.to_ascii_lowercase() as u8) - 0x60;
+                triggers.push(vec![byte]);
+            }
+            KeyModifiers::CONTROL => {
+                // Ctrl-<non-letter> → CSI-u or modifyOtherKeys sequence
+                let n = c as u32;
+                triggers.push(format!("\x1b[{n};5u").into_bytes());
+                triggers.push(format!("\x1b[27;5;{n}~").into_bytes());
+            }
+            KeyModifiers::ALT => {
+                // Alt-<char> → ESC prefix + the literal byte (the standard
+                // metaSendsEscape encoding terminals emit for Meta/Alt).
+                triggers.push(vec![0x1b, c as u8]);
+            }
+            _ => continue,
         }
     }
     triggers
@@ -806,7 +816,8 @@ pub fn editor_trigger_bytes(bindings: &KeyBindings) -> Vec<Vec<u8>> {
 
 /// Raw stdin byte patterns that switch from an attached session to its review
 /// diff (from the [`OpenReviewDiff`](BindableAction::OpenReviewDiff) binding —
-/// `Ctrl-r` by default). See [`trigger_bytes_for`].
+/// `Alt-r` by default, encoded as the `ESC r` metaSendsEscape sequence). See
+/// [`trigger_bytes_for`].
 pub fn review_trigger_bytes(bindings: &KeyBindings) -> Vec<Vec<u8>> {
     trigger_bytes_for(bindings, BindableAction::OpenReviewDiff)
 }
@@ -1177,18 +1188,36 @@ mod tests {
     }
 
     #[test]
-    fn test_review_trigger_bytes_default_is_ctrl_r() {
-        // Default OpenReviewDiff is `r` + Ctrl-r; only the Ctrl binding is
-        // interceptable in a raw attach (Ctrl-r → 0x12), and bare `r` is
-        // skipped so typing `r` in the pane isn't swallowed.
+    fn test_review_trigger_bytes_default_is_alt_r() {
+        // Default OpenReviewDiff is `r` + Alt-r; only the Alt binding is
+        // interceptable in a raw attach (Alt-r → ESC r, the metaSendsEscape
+        // sequence), and bare `r` is skipped so typing `r` in the pane isn't
+        // swallowed. Alt-r replaced Ctrl-r so a shell's reverse-history-search
+        // (Ctrl-r) is never shadowed.
         let kb = KeyBindings::default();
-        assert_eq!(review_trigger_bytes(&kb), vec![vec![0x12]]);
+        assert_eq!(review_trigger_bytes(&kb), vec![vec![0x1b, b'r']]);
+    }
+
+    #[test]
+    fn test_trigger_bytes_alt_letter() {
+        // Alt-<char> encodes to the two-byte ESC-prefix burst the terminal
+        // emits for Meta/Alt, detected mid-attach via subsequence match.
+        let mut kb = KeyBindings::default();
+        kb.set_keys_for(
+            BindableAction::OpenInEditor,
+            vec![
+                KeyBinding::new(KeyCode::Char('e'), KeyModifiers::NONE),
+                KeyBinding::new(KeyCode::Char('e'), KeyModifiers::ALT),
+            ],
+        );
+        // Plain 'e' skipped; Alt-e → ESC e (0x1b 0x65).
+        assert_eq!(editor_trigger_bytes(&kb), vec![vec![0x1b, 0x65]]);
     }
 
     #[test]
     fn test_rename_session_unbound_by_default() {
         // Rename dropped its default key (palette-only) so `r` could go to
-        // OpenReviewDiff, pairing with the attached-session Ctrl-r toggle.
+        // OpenReviewDiff, pairing with the attached-session Alt-r toggle.
         let kb = KeyBindings::default();
         assert!(kb.keys_for(BindableAction::RenameSession).is_empty());
         let r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);

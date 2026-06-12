@@ -103,10 +103,11 @@ and untracked changes — composed from `merge-base(base, HEAD)` through the
 working tree.
 
 While attached to a Claude session you can jump straight to its review diff
-with **`Ctrl-r`**, and **`Ctrl-r`** again from inside the diff switches back to
+with **`Alt-r`**, and **`Alt-r`** again from inside the diff switches back to
 the session — the same direct toggle the shell pane has with `Ctrl-\`, without
-detaching to the session list. (In a shell session `Ctrl-r` is left alone so it
-keeps working as reverse-history-search.)
+detaching to the session list. `Alt-r` is used rather than `Ctrl-r` so a
+shell's `Ctrl-r` reverse-history-search is never shadowed; the toggle is wired
+up for Claude sessions only.
 
 The diff is rendered in a `lumen`/`hunk`-style colour scheme: dark green/red
 line fills, a brighter highlight on the changed span within a line, and (on

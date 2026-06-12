@@ -656,7 +656,7 @@ mod tests {
             ),
             (
                 KeyCode::Char('r'),
-                KeyModifiers::CONTROL,
+                KeyModifiers::ALT,
                 UserCommand::OpenReviewDiff,
             ),
             (

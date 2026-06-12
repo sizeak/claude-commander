@@ -606,7 +606,7 @@ pub struct AppUiState {
     /// Attach command to run after exiting TUI
     pub attach_command: Option<String>,
     /// Session whose review diff should be opened on returning to the TUI —
-    /// set when the user pressed Ctrl-r inside an attached session.
+    /// set when the user pressed Alt-r inside an attached session.
     pub pending_open_review: Option<SessionId>,
     /// Editor command + path to open after exiting TUI
     pub editor_command: Option<(String, PathBuf)>,
@@ -1076,9 +1076,10 @@ impl App {
                                 // sessions, where SIGTSTP would freeze the
                                 // pane with no shell to recover from.
                                 let intercept_ctrl_z = !current_session.ends_with("-sh");
-                                // The Ctrl-r review toggle is intercepted only
-                                // for Claude sessions; in a shell Ctrl-r is
-                                // reverse-history-search, which we leave intact.
+                                // The Alt-r review toggle is intercepted only
+                                // for Claude sessions. (Alt-r replaced Ctrl-r
+                                // precisely so a shell's Ctrl-r reverse-history-
+                                // search is never shadowed.)
                                 let review_triggers = if intercept_ctrl_z {
                                     crate::config::keybindings::review_trigger_bytes(
                                         &self.config.keybindings,
@@ -1192,7 +1193,7 @@ impl App {
                                         // Resolve the tmux session to its id and
                                         // queue the review view; the post-loop
                                         // code opens it once we're back in the
-                                        // TUI. Ctrl-r inside the review
+                                        // TUI. Alt-r inside the review
                                         // re-attaches (see handle_review_key).
                                         self.ui_state.pending_open_review = {
                                             let st = self.service.store().read().await;
@@ -1321,7 +1322,7 @@ impl App {
                             self.focus_session_in_tree(&name).await;
                         }
 
-                        // Ctrl-r inside the attached session queued its review
+                        // Alt-r inside the attached session queued its review
                         // diff — open it now so the next TUI frame shows it
                         // (rather than the session list).
                         if let Some(sid) = self.ui_state.pending_open_review.take() {
