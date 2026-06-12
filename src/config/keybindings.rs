@@ -390,7 +390,9 @@ impl FromStr for KeyBinding {
             "end" => KeyCode::End,
             "delete" | "del" => KeyCode::Delete,
             "insert" | "ins" => KeyCode::Insert,
-            f if f.starts_with('f') && f.len() <= 3 => {
+            // `>= 2` so the bare key "f" falls through to the
+            // single-character arm instead of failing to parse.
+            f if f.starts_with('f') && (2..=3).contains(&f.len()) => {
                 let n: u8 = f[1..]
                     .parse()
                     .map_err(|_| format!("invalid function key: {rest}"))?;
@@ -886,6 +888,35 @@ mod tests {
     fn test_parse_function_key_out_of_range() {
         assert!("F0".parse::<KeyBinding>().is_err());
         assert!("F13".parse::<KeyBinding>().is_err());
+    }
+
+    #[test]
+    fn test_parse_bare_f_is_a_character_not_a_function_key() {
+        // Regression: the function-key arm captured the bare key "f"
+        // ("invalid function key: f"), and because keybinding parse errors
+        // fail Config::load(), one `= "f"` binding silently reverted the
+        // user's entire config to defaults.
+        let kb: KeyBinding = "f".parse().unwrap();
+        assert_eq!(kb.code, KeyCode::Char('f'));
+        assert!(kb.modifiers.is_empty());
+    }
+
+    #[test]
+    fn test_parse_modified_f_is_a_character_not_a_function_key() {
+        // Modifiers are stripped before the key-name match, so these all
+        // reduced to the same broken "f" case.
+        let kb: KeyBinding = "Ctrl-f".parse().unwrap();
+        assert_eq!(kb.code, KeyCode::Char('f'));
+        assert!(kb.modifiers.contains(KeyModifiers::CONTROL));
+
+        let kb: KeyBinding = "Alt-f".parse().unwrap();
+        assert_eq!(kb.code, KeyCode::Char('f'));
+        assert!(kb.modifiers.contains(KeyModifiers::ALT));
+
+        // Uppercase implies Shift, same as every other letter (cf. "N").
+        let kb: KeyBinding = "F".parse().unwrap();
+        assert_eq!(kb.code, KeyCode::Char('F'));
+        assert!(kb.modifiers.contains(KeyModifiers::SHIFT));
     }
 
     #[test]
