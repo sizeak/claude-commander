@@ -592,6 +592,21 @@ impl DiffReviewState {
         true
     }
 
+    /// Append pasted clipboard text to the open comment draft. Newlines are
+    /// kept — bracketed paste delivers them as text rather than Enter key
+    /// events, so a multi-line paste can't accidentally submit, and
+    /// `compose_markdown` passes them to the agent verbatim. Carriage
+    /// returns from CRLF clipboards are dropped. Returns `false` (no-op)
+    /// when no comment is being edited.
+    pub fn paste_into_draft(&mut self, text: &str) -> bool {
+        let Some(draft) = self.comment.as_mut() else {
+            return false;
+        };
+        draft.text.push_str(&text.replace('\r', ""));
+        self.follow_draft();
+        true
+    }
+
     /// Total physical body rows for the current file (hunk headers, diff lines
     /// incl. soft-wrap continuations, and interleaved comment boxes).
     fn total_body_rows(&self) -> usize {
@@ -3411,6 +3426,38 @@ diff --git a/x.rs b/x.rs
         assert_eq!(draft.range, (0, 2));
         // A second call while a comment is open is a no-op.
         assert!(!s.begin_comment());
+    }
+
+    #[test]
+    fn paste_into_draft_appends_text() {
+        // Regression: pasting into the review comment box was silently
+        // dropped because InputEvent::Paste had no ReviewDiff arm.
+        let mut s = state_with_two_files();
+        s.focus = ReviewFocus::Body;
+        s.begin_comment();
+        s.comment.as_mut().unwrap().text.push_str("see ");
+        assert!(s.paste_into_draft("the docs"));
+        assert_eq!(s.comment.as_ref().unwrap().text, "see the docs");
+    }
+
+    #[test]
+    fn paste_into_draft_keeps_newlines_strips_carriage_returns() {
+        // Bracketed paste delivers newlines as text, not Enter key events,
+        // so a multi-line paste can keep its line breaks (compose_markdown
+        // passes them through to the agent verbatim). CRs from CRLF
+        // clipboards are dropped.
+        let mut s = state_with_two_files();
+        s.focus = ReviewFocus::Body;
+        s.begin_comment();
+        assert!(s.paste_into_draft("let x = 1;\r\nlet y = 2;\r\n"));
+        assert_eq!(s.comment.as_ref().unwrap().text, "let x = 1;\nlet y = 2;\n");
+    }
+
+    #[test]
+    fn paste_into_draft_without_open_box_is_noop() {
+        let mut s = state_with_two_files();
+        assert!(!s.paste_into_draft("ignored"));
+        assert!(s.comment.is_none());
     }
 
     #[test]

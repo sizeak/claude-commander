@@ -88,6 +88,12 @@ fn apply_paste_to_modal(modal: &mut Modal, text: &str) -> Option<PasteRefilter> 
             query.push_str(&clean);
             Some(PasteRefilter::QuickSwitch)
         }
+        // The comment draft is multi-line capable, so it gets the raw text
+        // (newline handling lives in `paste_into_draft`), not `clean`.
+        Modal::ReviewDiff(state) => {
+            state.paste_into_draft(text);
+            None
+        }
         _ => None,
     }
 }
@@ -813,22 +819,18 @@ impl App {
                 selected_idx,
                 scroll,
                 ..
-            } => {
-                if !matches.is_empty() {
-                    *selected_idx = wheel_step(*selected_idx, down, matches.len());
-                    *scroll = adjust_list_scroll(*selected_idx, *scroll, LIST_MAX_VISIBLE);
-                }
+            } if !matches.is_empty() => {
+                *selected_idx = wheel_step(*selected_idx, down, matches.len());
+                *scroll = adjust_list_scroll(*selected_idx, *scroll, LIST_MAX_VISIBLE);
             }
             Modal::CheckoutBranch {
                 filtered,
                 selected_idx,
                 scroll,
                 ..
-            } => {
-                if !filtered.is_empty() {
-                    *selected_idx = wheel_step(*selected_idx, down, filtered.len());
-                    *scroll = adjust_list_scroll(*selected_idx, *scroll, LIST_MAX_VISIBLE);
-                }
+            } if !filtered.is_empty() => {
+                *selected_idx = wheel_step(*selected_idx, down, filtered.len());
+                *scroll = adjust_list_scroll(*selected_idx, *scroll, LIST_MAX_VISIBLE);
             }
             Modal::PathInput {
                 completer, scroll, ..
@@ -1293,6 +1295,47 @@ mod tests {
         assert_eq!(refilter, Some(PasteRefilter::QuickSwitch));
         match modal {
             Modal::QuickSwitch { query, .. } => assert_eq!(query, "hello"),
+            _ => panic!("modal variant changed"),
+        }
+    }
+
+    fn review_modal_with_open_draft() -> Modal {
+        use crate::git::parse_unified_diff;
+        use crate::session::SessionId;
+        use crate::tui::app::DiffReviewState;
+        let diff = parse_unified_diff(
+            "\
+diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -1,2 +1,3 @@
+ fn main() {
++    let y = 3;
+ }
+",
+        );
+        let mut state = DiffReviewState::new(
+            SessionId::new(),
+            "test".to_string(),
+            "main".to_string(),
+            diff,
+            Vec::new(),
+        );
+        state.begin_comment();
+        Modal::ReviewDiff(Box::new(state))
+    }
+
+    #[test]
+    fn paste_into_review_comment_draft_appends_without_refilter() {
+        // Regression: paste in the review view fell into the `_ => None`
+        // arm and was dropped even with the comment box open.
+        let mut modal = review_modal_with_open_draft();
+        let refilter = apply_paste_to_modal(&mut modal, "use a helper");
+        assert_eq!(refilter, None);
+        match modal {
+            Modal::ReviewDiff(state) => {
+                assert_eq!(state.comment.as_ref().unwrap().text, "use a helper");
+            }
             _ => panic!("modal variant changed"),
         }
     }
