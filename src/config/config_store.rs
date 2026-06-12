@@ -190,15 +190,8 @@ impl ConfigStore {
     /// Load config from `self.config_path` using the standard layered resolution.
     fn load_from_disk(&self) -> Result<Config> {
         use crate::error::ConfigError;
-        use figment::{
-            Figment,
-            providers::{Env, Format, Serialized, Toml},
-        };
 
-        let config: Config = Figment::new()
-            .merge(Serialized::defaults(Config::default()))
-            .merge(Toml::file(&self.config_path))
-            .merge(Env::prefixed("CC_").split("_"))
+        let config: Config = super::settings::config_figment(&self.config_path)
             .extract()
             .map_err(|e| ConfigError::LoadFailed(e.to_string()))?;
         Ok(config)
