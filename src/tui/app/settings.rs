@@ -1707,10 +1707,11 @@ fn settings_label_width(rows: &[SettingsRow], area_width: u16) -> u16 {
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
     } else if max > 1 {
-        format!("{}…", &s[..max - 1])
+        let kept: String = s.chars().take(max - 1).collect();
+        format!("{kept}…")
     } else {
         "…".to_string()
     }
@@ -1784,5 +1785,20 @@ mod tests {
         let rows = rows_with_labels(&["Some long label that won't fit"]);
         // Cap would be negative; floor wins and labels simply truncate.
         assert_eq!(settings_label_width(&rows, 10), 24);
+    }
+
+    #[test]
+    fn truncate_str_truncates_multibyte_names_without_panicking() {
+        // Regression: byte-index slicing panicked on non-ASCII section names
+        // ("byte index is not a char boundary") when the Sections tab rendered.
+        assert_eq!(truncate_str("ありがとうございます", 6), "ありがとう…");
+        assert_eq!(truncate_str("ありがとう", 5), "ありがとう");
+    }
+
+    #[test]
+    fn truncate_str_ascii_behaviour() {
+        assert_eq!(truncate_str("short", 10), "short");
+        assert_eq!(truncate_str("longer-name", 7), "longer…");
+        assert_eq!(truncate_str("ab", 1), "…");
     }
 }
