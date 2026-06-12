@@ -22,7 +22,7 @@ pub enum AttachResult {
     Detached,
     /// User pressed Ctrl+\ to toggle between Claude and shell sessions
     SwitchToShell,
-    /// User pressed the review key (Ctrl+r) to switch to this session's diff
+    /// User pressed the review key (Alt+r) to switch to this session's diff
     SwitchToReview,
     /// User pressed Ctrl+. to open the editor for the session's worktree
     OpenEditor,
@@ -359,9 +359,11 @@ async fn run_async_loop(
                         continue;
                     }
 
-                    // Check for the review-toggle trigger bytes (Ctrl-r by
-                    // default). Empty `review_triggers` disables it (e.g. for
-                    // shell sessions, where Ctrl-r is reverse-history-search).
+                    // Check for the review-toggle trigger bytes (Alt-r by
+                    // default, i.e. the `ESC r` metaSendsEscape burst). Empty
+                    // `review_triggers` disables it. Alt-r was chosen over
+                    // Ctrl-r so a shell's reverse-history-search (Ctrl-r) is
+                    // never shadowed.
                     if review_triggers
                         .iter()
                         .any(|pat| contains_subsequence(data, pat))

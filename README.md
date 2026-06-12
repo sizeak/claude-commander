@@ -151,7 +151,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `v` | Cycle session list view: Project → Sections → Section Stacks (requires `[[sections]]` config) |
 | palette only | Collapse/expand section (press on any item in the section, or `Enter` on the section header) |
 | `m` | Move session to section (manual override; see [Session List Sections](docs/configuration.md#session-list-sections)) |
-| `r` or `Ctrl-r` | Review & comment on a session's diff — see [Usage](docs/usage.md#reviewing--commenting-on-changes) |
+| `r` or `Alt-r` | Review & comment on a session's diff — see [Usage](docs/usage.md#reviewing--commenting-on-changes) |
 | palette only | Rename session (UI title only; underlying worktree, branch, and tmux session are unchanged) |
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
 | `<` / `>` | Shrink / grow left pane |
@@ -170,7 +170,7 @@ When attached to a session (via `Enter` or `claude-commander attach`):
 |-----|--------|
 | `Ctrl-q` | Detach and return to session list |
 | `Ctrl-\` | Switch between Claude and shell pane |
-| `Ctrl-r` | Switch to this session's review diff (and `Ctrl-r` in the diff switches back) — Claude sessions only; in a shell `Ctrl-r` stays reverse-history-search |
+| `Alt-r` | Switch to this session's review diff (and `Alt-r` in the diff switches back) — Claude sessions only. Uses `Alt-r` rather than `Ctrl-r` so the shell's `Ctrl-r` reverse-history-search is never shadowed |
 | `Ctrl-Space` | Open the in-session switcher popup to jump to another claude-commander session without detaching |
 | `Ctrl-.` | Open the session worktree in your editor (requires a terminal that emits CSI-u or xterm modifyOtherKeys sequences for Ctrl-.) |
 

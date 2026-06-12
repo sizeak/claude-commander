@@ -1155,11 +1155,11 @@ impl App {
             return;
         }
 
-        // Ctrl+R re-attaches to the session — the mirror of pressing Ctrl-r in
+        // Alt+R re-attaches to the session — the mirror of pressing Alt-r in
         // the attached session to reach the review, so the pair toggles back
         // and forth. The modal is already None; `handle_select` queues the
         // attach and quits the TUI loop, which `run()` then picks up.
-        if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::ALT) {
             self.ui_state.selected_session_id = Some(state.session_id);
             self.handle_select().await;
             return;
