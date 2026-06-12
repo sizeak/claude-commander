@@ -253,13 +253,53 @@ pub(crate) fn config_figment(config_path: &std::path::Path) -> Figment {
 impl Config {
     /// Load configuration from all sources
     pub fn load() -> Result<Self> {
-        let config_path = Self::config_file_path()?;
+        Self::load_from(&Self::config_file_path()?)
+    }
 
-        let config: Config = config_figment(&config_path)
+    /// Load configuration layered over the file at `config_path`.
+    ///
+    /// A missing file is not an error (defaults + env vars apply); a file
+    /// that exists but cannot be parsed is.
+    pub fn load_from(config_path: &std::path::Path) -> Result<Self> {
+        let config: Config = config_figment(config_path)
             .extract()
-            .map_err(|e| ConfigError::LoadFailed(e.to_string()))?;
+            .map_err(|e| ConfigError::LoadFailed(format!("{}: {}", config_path.display(), e)))?;
 
         Ok(config)
+    }
+
+    /// Load configuration, or print a clear refusal to stderr and exit
+    /// non-zero when the config file exists but cannot be parsed. Use this
+    /// from CLI entry points instead of falling back to `Config::default()`,
+    /// which silently discards every user setting for the run — and the
+    /// next settings-modal save would then overwrite the user's real
+    /// config.toml with those defaults. (Same pattern as
+    /// `AppState::load_or_exit` for state.json.)
+    pub fn load_or_exit() -> Self {
+        let path = match Self::config_file_path() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("Failed to determine config file path: {}", e);
+                std::process::exit(2);
+            }
+        };
+        match Self::load_from(&path) {
+            Ok(config) => config,
+            Err(e) => {
+                eprintln!(
+                    "Refusing to start: config file exists but failed to load.\n\
+                     Path: {}\n\
+                     Error: {}\n\
+                     \n\
+                     Your settings are still on disk. Fix the entry named in\n\
+                     the error above; to start fresh with defaults, move the\n\
+                     file aside (e.g. `mv … ….bak`) and relaunch.",
+                    path.display(),
+                    e,
+                );
+                std::process::exit(2);
+            }
+        }
     }
 
     /// Get the configuration file path
@@ -484,6 +524,53 @@ mod tests {
     //
     // `figment::Jail` sandboxes env vars and the working directory, so these
     // tests never touch the real environment or filesystem.
+
+    #[test]
+    // figment's Jail closure must return its large Error type by value.
+    #[allow(clippy::result_large_err)]
+    fn test_load_from_unparseable_file_errors_and_names_the_path() {
+        // Regression: main.rs used to swallow this error and fall back to
+        // Config::default(), silently reverting every user setting — and a
+        // subsequent settings save would overwrite the real config.toml
+        // with those defaults. The load must fail loudly, naming the file.
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("config.toml", "default_program = [ this is not valid toml")?;
+
+            let err = Config::load_from(std::path::Path::new("config.toml")).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("config.toml"),
+                "error should name the offending file: {msg}"
+            );
+            Ok(())
+        });
+    }
+
+    #[test]
+    // figment's Jail closure must return its large Error type by value.
+    #[allow(clippy::result_large_err)]
+    fn test_load_from_bad_value_type_errors() {
+        // A structurally valid TOML file with a wrong-typed value (the #132
+        // failure mode: an unbindable key string) must also be a hard error.
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("config.toml", "ui_refresh_fps = \"not-a-number\"")?;
+            assert!(Config::load_from(std::path::Path::new("config.toml")).is_err());
+            Ok(())
+        });
+    }
+
+    #[test]
+    // figment's Jail closure must return its large Error type by value.
+    #[allow(clippy::result_large_err)]
+    fn test_load_from_missing_file_yields_defaults() {
+        // "File doesn't exist" is not an error — first launch has no config.
+        figment::Jail::expect_with(|_jail| {
+            let config = Config::load_from(std::path::Path::new("missing-config.toml"))
+                .expect("a missing config file must not be an error");
+            assert_eq!(config.default_program, "claude");
+            Ok(())
+        });
+    }
 
     #[test]
     // figment's Jail closure must return its large Error type by value.
