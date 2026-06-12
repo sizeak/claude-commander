@@ -767,8 +767,9 @@ impl AppUiState {
     ///
     /// Commands with no effective keybinding are still included — the
     /// palette is intended to be the canonical access surface as hotkeys
-    /// get trimmed over time. `NavigateUp` and `NavigateDown` are excluded
-    /// because they only make sense as palette-internal list navigation.
+    /// get trimmed over time. Pure list motions (navigate up/down,
+    /// group/first/last jumps) are excluded because moving the tree cursor
+    /// from inside the palette makes no sense.
     pub fn gather_command_entries(
         &self,
         kb: &crate::config::KeyBindings,
@@ -778,7 +779,12 @@ impl AppUiState {
         for &action in BindableAction::ALL {
             if matches!(
                 action,
-                BindableAction::NavigateUp | BindableAction::NavigateDown
+                BindableAction::NavigateUp
+                    | BindableAction::NavigateDown
+                    | BindableAction::NextGroup
+                    | BindableAction::PreviousGroup
+                    | BindableAction::NavigateFirst
+                    | BindableAction::NavigateLast
             ) {
                 continue;
             }

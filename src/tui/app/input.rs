@@ -858,6 +858,18 @@ impl App {
             UserCommand::NavigateDown => {
                 self.ui_state.list_state.next();
             }
+            UserCommand::NextGroup => {
+                self.ui_state.list_state.next_group();
+            }
+            UserCommand::PreviousGroup => {
+                self.ui_state.list_state.previous_group();
+            }
+            UserCommand::NavigateFirst => {
+                self.ui_state.list_state.select_first();
+            }
+            UserCommand::NavigateLast => {
+                self.ui_state.list_state.select_last();
+            }
             UserCommand::Select => {
                 if self.selected_item_is_section_header() {
                     self.handle_toggle_section().await;

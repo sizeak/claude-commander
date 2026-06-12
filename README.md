@@ -131,6 +131,8 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | Key | Action |
 |-----|--------|
 | `j/k` or `↑/↓` or `Ctrl-n/p` | Navigate session list |
+| `]` / `[` | Jump to next / previous project or section header |
+| `Home` / `End` | Jump to first / last item |
 | `Space` | Quick-switch palette (sessions and commands) |
 | `Ctrl-Space` | Quick-switch palette (same shortcut as the in-session switcher) |
 | `Shift+Space` | Command palette (commands only) |

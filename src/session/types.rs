@@ -648,6 +648,12 @@ impl SessionListItem {
     pub fn is_selectable(&self) -> bool {
         !matches!(self, Self::Spacer)
     }
+
+    /// Whether this row begins a group — a project or section header.
+    /// Group-jump navigation moves between these rows.
+    pub fn is_group_header(&self) -> bool {
+        matches!(self, Self::Project { .. } | Self::SectionHeader { .. })
+    }
 }
 
 #[cfg(test)]
@@ -1326,5 +1332,27 @@ mod tests {
             nested: false,
         };
         assert!(project.is_selectable());
+    }
+
+    #[test]
+    fn session_list_item_group_headers() {
+        let project = SessionListItem::Project {
+            id: ProjectId::new(),
+            name: "p".to_string(),
+            repo_path: PathBuf::from("/tmp"),
+            main_branch: "main".to_string(),
+            worktree_count: 0,
+            nested: false,
+        };
+        assert!(project.is_group_header());
+
+        let section = SessionListItem::SectionHeader {
+            name: "Open PRs".to_string(),
+            count: 2,
+            collapsed: false,
+        };
+        assert!(section.is_group_header());
+
+        assert!(!SessionListItem::Spacer.is_group_header());
     }
 }
