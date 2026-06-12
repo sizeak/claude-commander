@@ -94,6 +94,22 @@ pub async fn fetch_branch_summary(diff_text: &str, model: &str) -> Result<String
     }
 }
 
+/// Maximum number of diff bytes piped into the Claude CLI.
+const MAX_SUMMARY_INPUT_BYTES: usize = 100_000;
+
+/// Truncate `s` to at most `max_bytes` bytes without splitting a UTF-8
+/// character.
+fn truncate_to_char_boundary(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 async fn run_claude_summary(diff_text: &str, model: &str) -> Result<String, String> {
     let mut child = Command::new("claude")
         .args([
@@ -111,11 +127,7 @@ async fn run_claude_summary(diff_text: &str, model: &str) -> Result<String, Stri
     // Write diff to stdin
     if let Some(mut stdin) = child.stdin.take() {
         // Truncate very large diffs to avoid overwhelming the model
-        let input = if diff_text.len() > 100_000 {
-            &diff_text[..100_000]
-        } else {
-            diff_text
-        };
+        let input = truncate_to_char_boundary(diff_text, MAX_SUMMARY_INPUT_BYTES);
         stdin
             .write_all(input.as_bytes())
             .await
@@ -173,6 +185,29 @@ mod tests {
     async fn test_whitespace_only_diff_skips_claude() {
         let result = fetch_branch_summary("   \n  \n  ", "whatever-model").await;
         assert_eq!(result.unwrap(), "No changes on this branch.");
+    }
+
+    #[test]
+    fn test_truncate_to_char_boundary_short_input_untouched() {
+        assert_eq!(truncate_to_char_boundary("abc", 10), "abc");
+        assert_eq!(truncate_to_char_boundary("abc", 3), "abc");
+    }
+
+    #[test]
+    fn test_truncate_to_char_boundary_ascii_cut() {
+        assert_eq!(truncate_to_char_boundary("abcdef", 4), "abcd");
+    }
+
+    #[test]
+    fn test_truncate_to_char_boundary_does_not_split_multibyte_char() {
+        // Regression: byte-index slicing panicked when the truncation limit
+        // fell inside a multi-byte character in the diff text.
+        // 'é' is 2 bytes, so a limit of 2 lands mid-character.
+        assert_eq!(truncate_to_char_boundary("aé", 2), "a");
+        // '日' is 3 bytes (1..4); limits 2 and 3 both land inside it.
+        assert_eq!(truncate_to_char_boundary("a日b", 2), "a");
+        assert_eq!(truncate_to_char_boundary("a日b", 3), "a");
+        assert_eq!(truncate_to_char_boundary("a日b", 4), "a日");
     }
 
     #[test]
