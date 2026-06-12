@@ -16,9 +16,10 @@ use crate::comment::{
 use crate::config::{AppState, Config, ConfigStore, StateStore};
 use crate::error::{Result, SessionError};
 use crate::git::{
-    GitBackend, ParsedDiff, PrState, ReviewDecision, compose_review_diff, diff_stat_summary,
-    effective_pr_state, parse_unified_diff, prefer_remote_branch,
+    FileDiff, GitBackend, ParsedDiff, PrState, ReviewDecision, compose_review_diff,
+    diff_stat_summary, effective_pr_state, parse_unified_diff, prefer_remote_branch,
 };
+use crate::reviewed::ReviewedStore;
 use crate::session::{
     AgentState, ProjectId, ScanResult, SessionId, SessionManager, SessionStatus, WorktreeSession,
     program_is_claude, program_with_claude_flags,
@@ -34,6 +35,7 @@ pub struct CommanderService {
     store: Arc<StateStore>,
     config_store: Arc<ConfigStore>,
     comments: Arc<CommentStore>,
+    reviewed: Arc<ReviewedStore>,
 }
 
 impl CommanderService {
@@ -47,16 +49,15 @@ impl CommanderService {
         // only fails when no home directory can be resolved (effectively never
         // on supported platforms); fall back to a relative dir to keep `new`
         // infallible, mirroring `for_cli`'s tolerant state load.
-        let comments = Arc::new(CommentStore::new(
-            Config::data_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join("comments"),
-        ));
+        let data_dir = Config::data_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let comments = Arc::new(CommentStore::new(data_dir.join("comments")));
+        let reviewed = Arc::new(ReviewedStore::new(data_dir.join("reviewed")));
         Self {
             manager,
             store,
             config_store,
             comments,
+            reviewed,
         }
     }
 
@@ -310,11 +311,35 @@ impl CommanderService {
         reanchor_comments(&mut comments, &diff);
         self.comments.save(*session_id, &comments)?;
 
+        // Reviewed marks pinned to a file's diff content: drop any whose file
+        // changed or left the diff since they were set.
+        let mut marks = self.reviewed.load(*session_id)?;
+        if crate::reviewed::prune_invalidated(&mut marks, &diff) {
+            self.reviewed.save(*session_id, &marks)?;
+        }
+        let reviewed = marks.into_iter().map(|m| m.file).collect();
+
         Ok(ReviewSnapshot {
             base,
             diff,
             comments,
+            reviewed,
         })
+    }
+
+    /// Toggle the reviewed mark for one file of a session's review diff.
+    /// The hash is computed from the `FileDiff` the caller is displaying, so
+    /// the mark records exactly what the user saw (not a possibly-newer
+    /// working tree). Returns the new reviewed state.
+    pub async fn toggle_file_reviewed(
+        &self,
+        session_id: &SessionId,
+        file: &FileDiff,
+    ) -> Result<bool> {
+        let mut marks = self.reviewed.load(*session_id)?;
+        let now_reviewed = crate::reviewed::toggle(&mut marks, file);
+        self.reviewed.save(*session_id, &marks)?;
+        Ok(now_reviewed)
     }
 
     /// List a session's stored comments (without re-anchoring).
@@ -597,6 +622,8 @@ pub struct ReviewSnapshot {
     pub base: String,
     pub diff: ParsedDiff,
     pub comments: Vec<Comment>,
+    /// Display paths of files still marked reviewed (stale marks pruned).
+    pub reviewed: Vec<String>,
 }
 
 // -- Internal helpers --

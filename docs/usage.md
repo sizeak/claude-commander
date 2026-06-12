@@ -123,6 +123,12 @@ foreground-only colouring on 256- and 16-colour terminals.
   between inline and side-by-side layouts. In the inline layout, lines longer
   than the pane soft-wrap onto continuation rows (GitHub-style) so nothing runs
   off-screen; side-by-side truncates to keep its columns aligned.
+- **Mark reviewed**: press `m` to toggle a ✓ reviewed mark on the current
+  file. Marking dims the file in the tree and auto-advances to the next
+  unreviewed file (wrapping); unmarking stays put. Marks persist per session
+  across restarts and clear automatically when a file's diff changes or it
+  leaves the diff (GitHub "Viewed" semantics), so a re-edited file demands a
+  fresh look. The tree title shows progress (`Files (3/7 reviewed)`).
 - **Comment**: in the body, press `v` to start a line selection (arrows grow
   or shrink it; mouse drag also selects), then `Enter` to attach a comment.
   Right-clicking or double-clicking a line is a mouse shortcut for the same

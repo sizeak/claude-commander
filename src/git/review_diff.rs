@@ -15,6 +15,7 @@ use std::process::Stdio;
 
 use serde::Serialize;
 use tokio::process::Command;
+use xxhash_rust::xxh3::Xxh3;
 
 use super::diff::untracked_patch_and_count;
 use crate::error::{GitError, Result};
@@ -182,6 +183,33 @@ impl FileDiff {
             &self.new_path
         }
     }
+}
+
+/// Stable content hash of a file's diff: xxh3_64 over a canonical byte
+/// rendering of its hunks. Changes whenever any hunk header (position) or
+/// line changes; deliberately excludes the path, which is the identity key.
+pub fn file_diff_hash(file: &FileDiff) -> u64 {
+    let mut h = Xxh3::new();
+    for hunk in &file.hunks {
+        h.update(
+            format!(
+                "@@ -{},{} +{},{} @@{}\n",
+                hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines, hunk.header
+            )
+            .as_bytes(),
+        );
+        for line in &hunk.lines {
+            let origin = match line.origin {
+                LineOrigin::Addition => b'+',
+                LineOrigin::Deletion => b'-',
+                LineOrigin::Context => b' ',
+            };
+            h.update(&[origin]);
+            h.update(line.content.as_bytes());
+            h.update(b"\n");
+        }
+    }
+    h.digest()
 }
 
 /// A parsed unified diff: an ordered list of changed files.
@@ -746,5 +774,81 @@ diff --git a/f b/f
 
         // No `origin/main` remote-tracking ref → bare (local) branch name.
         assert_eq!(prefer_remote_branch(p, "main").await, "main");
+    }
+
+    /// Minimal one-file diff with the given path, hunk ranges, and body lines.
+    fn one_file_diff(path: &str, ranges: &str, body: &str) -> String {
+        format!("diff --git a/{path} b/{path}\n--- a/{path}\n+++ b/{path}\n@@ {ranges} @@\n{body}")
+    }
+
+    #[test]
+    fn file_diff_hash_is_deterministic() {
+        let raw = one_file_diff("src/a.rs", "-1,2 +1,2", " ctx\n-old\n+new\n");
+        let a = parse_unified_diff(&raw);
+        let b = parse_unified_diff(&raw);
+        assert_eq!(file_diff_hash(&a.files[0]), file_diff_hash(&b.files[0]));
+    }
+
+    #[test]
+    fn file_diff_hash_changes_on_line_content_change() {
+        let a = parse_unified_diff(&one_file_diff(
+            "src/a.rs",
+            "-1,2 +1,2",
+            " ctx\n-old\n+new\n",
+        ));
+        let b = parse_unified_diff(&one_file_diff(
+            "src/a.rs",
+            "-1,2 +1,2",
+            " ctx\n-old\n+newer\n",
+        ));
+        assert_ne!(file_diff_hash(&a.files[0]), file_diff_hash(&b.files[0]));
+    }
+
+    #[test]
+    fn file_diff_hash_changes_on_added_line() {
+        let a = parse_unified_diff(&one_file_diff(
+            "src/a.rs",
+            "-1,2 +1,2",
+            " ctx\n-old\n+new\n",
+        ));
+        let b = parse_unified_diff(&one_file_diff(
+            "src/a.rs",
+            "-1,2 +1,3",
+            " ctx\n-old\n+new\n+extra\n",
+        ));
+        assert_ne!(file_diff_hash(&a.files[0]), file_diff_hash(&b.files[0]));
+    }
+
+    #[test]
+    fn file_diff_hash_changes_when_hunk_positions_shift() {
+        // Identical lines, but the hunk has moved within the file.
+        let a = parse_unified_diff(&one_file_diff(
+            "src/a.rs",
+            "-1,2 +1,2",
+            " ctx\n-old\n+new\n",
+        ));
+        let b = parse_unified_diff(&one_file_diff(
+            "src/a.rs",
+            "-10,2 +10,2",
+            " ctx\n-old\n+new\n",
+        ));
+        assert_ne!(file_diff_hash(&a.files[0]), file_diff_hash(&b.files[0]));
+    }
+
+    #[test]
+    fn file_diff_hash_ignores_path() {
+        // Identity is the display path (the map key), not the hash, so two
+        // files with identical hunks hash the same.
+        let a = parse_unified_diff(&one_file_diff(
+            "src/a.rs",
+            "-1,2 +1,2",
+            " ctx\n-old\n+new\n",
+        ));
+        let b = parse_unified_diff(&one_file_diff(
+            "src/b.rs",
+            "-1,2 +1,2",
+            " ctx\n-old\n+new\n",
+        ));
+        assert_eq!(file_diff_hash(&a.files[0]), file_diff_hash(&b.files[0]));
     }
 }
