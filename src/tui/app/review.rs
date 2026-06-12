@@ -1190,11 +1190,12 @@ impl App {
             return;
         }
 
-        // Alt+R re-attaches to the session — the mirror of pressing Alt-r in
-        // the attached session to reach the review, so the pair toggles back
-        // and forth. The modal is already None; `handle_select` queues the
-        // attach and quits the TUI loop, which `run()` then picks up.
-        if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::ALT) {
+        // Re-attaching to the session mirrors the (rebindable) OpenReviewDiff
+        // key that switches an attached session to its review diff (`Alt-r` by
+        // default), so the pair toggles back and forth. The modal is already
+        // None; `handle_select` queues the attach and quits the TUI loop,
+        // which `run()` then picks up.
+        if crate::config::keybindings::matches_review_toggle(&self.config.keybindings, &key) {
             self.ui_state.selected_session_id = Some(state.session_id);
             self.handle_select().await;
             return;
@@ -1347,14 +1348,23 @@ impl App {
         self.render_review_file_list(frame, cols[0], state);
         self.render_review_body(frame, cols[1], state);
 
+        // Label the session toggle with its actual (rebindable) key; omit the
+        // hint entirely when no attach-capable binding exists.
+        let toggle = crate::config::keybindings::review_toggle_binding(&self.config.keybindings)
+            .map(|kb| format!("{kb} session · "))
+            .unwrap_or_default();
         let hint = if state.comment.is_some() {
-            " type comment · Enter save · Esc cancel "
+            " type comment · Enter save · Esc cancel ".to_string()
         } else if state.visual_anchor.is_some() {
-            " ↑↓ extend · Enter/right-click comment · v/Esc cancel selection "
+            " ↑↓ extend · Enter/right-click comment · v/Esc cancel selection ".to_string()
         } else if state.focus == ReviewFocus::FileList {
-            " ↑↓/jk move · Enter expand/collapse · [ ] file · m reviewed · Tab to diff · ^R session · ^Q/Esc close "
+            format!(
+                " ↑↓/jk move · Enter expand/collapse · [ ] file · m reviewed · Tab to diff · {toggle}^Q/Esc close "
+            )
         } else {
-            " ↑↓/jk move · v select · Enter comment · z fold · d delete · m reviewed · a apply · t layout · ^R session · ^Q/Esc close "
+            format!(
+                " ↑↓/jk move · v select · Enter comment · z fold · d delete · m reviewed · a apply · t layout · {toggle}^Q/Esc close "
+            )
         };
         // The footer doubles as this view's status bar — styled like the app
         // status bar so it reads as a replacement, not a second bar.
