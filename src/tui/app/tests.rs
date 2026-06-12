@@ -1079,6 +1079,53 @@ fn test_apply_project_pull_interval_rejects_below_60() {
     );
 }
 
+#[test]
+fn test_apply_ui_refresh_fps_accepts_positive_values() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(SettingsTab::General, "ui_refresh_fps", "60");
+    assert_eq!(app.config.ui_refresh_fps, 60);
+    app.apply_settings_edit(SettingsTab::General, "ui_refresh_fps", "1");
+    assert_eq!(app.config.ui_refresh_fps, 1);
+}
+
+#[test]
+fn test_apply_ui_refresh_fps_rejects_zero() {
+    // Regression: a persisted fps of 0 divides by zero computing the tick
+    // rate at next launch, crash-looping until config.toml is hand-edited.
+    let mut app = make_test_app();
+    app.config.ui_refresh_fps = 30;
+    app.apply_settings_edit(SettingsTab::General, "ui_refresh_fps", "0");
+    assert_eq!(app.config.ui_refresh_fps, 30, "zero fps must be rejected");
+    assert!(
+        app.ui_state.status_message.is_some(),
+        "rejection should surface a status message"
+    );
+}
+
+#[test]
+fn test_apply_max_concurrent_tmux_accepts_positive_values() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(SettingsTab::General, "max_concurrent_tmux", "8");
+    assert_eq!(app.config.max_concurrent_tmux, 8);
+}
+
+#[test]
+fn test_apply_max_concurrent_tmux_rejects_zero() {
+    // Regression: a persisted value of 0 becomes Semaphore::new(0) at next
+    // launch, deadlocking every tmux command.
+    let mut app = make_test_app();
+    app.config.max_concurrent_tmux = 16;
+    app.apply_settings_edit(SettingsTab::General, "max_concurrent_tmux", "0");
+    assert_eq!(
+        app.config.max_concurrent_tmux, 16,
+        "zero concurrency must be rejected"
+    );
+    assert!(
+        app.ui_state.status_message.is_some(),
+        "rejection should surface a status message"
+    );
+}
+
 #[tokio::test]
 async fn apply_section_move_keeps_moved_session_selected() {
     use crate::session::{Project, SectionConfig, WorktreeSession};
