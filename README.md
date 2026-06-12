@@ -9,7 +9,7 @@ A high-performance terminal UI for managing Claude coding sessions, written in R
 - **Git worktree isolation** - Each session has its own worktree and branch
 - **Live preview** - Real-time pane content capture with caching
 - **Info pane** - Session metadata, PR details, CI status, and AI-generated change summaries
-- **Review & comment** - Full-screen diff of a session's changes (vs its PR base) where you select lines, attach comments, and apply them straight to the running agent
+- **Review & comment** - Full-screen diff of a session's changes (vs its PR base) where you select lines and attach comments, then either send them straight to the running agent or submit them to the GitHub PR as a review
 - **Agent state detection** - Detect if agent is waiting for input, processing, or errored
 - **Persistent state** - Sessions survive restarts
 - **Auto-pull project main** - Periodically fast-forwards each project's main branch from `origin` so it doesn't drift stale
@@ -91,7 +91,7 @@ Each session displays a status indicator to the left of its name:
 
 Indicators are shown in priority order — for example, a running session with unread output shows `◆` rather than `●`.
 
-A `*` after a session's title means it has pending [review comments](docs/usage.md#reviewing--commenting-on-changes) that haven't been applied to the agent yet.
+A `*` after a session's title means it has pending [review comments](docs/usage.md#reviewing--commenting-on-changes) that haven't yet been sent to the agent or submitted to the PR.
 
 ### PR Badges
 

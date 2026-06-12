@@ -131,12 +131,26 @@ foreground-only colouring on 256- and 16-colour terminals.
   show as `*` in the gutter and a coloured `*N` count on the file (and its
   parent directories) in the tree. A session with pending comments is also
   flagged with a `*` in the main session list. Each comment also renders as
-  an inline box beneath its line; press `z` (or click the box) to fold it
-  down to a single-line header or expand it again.
-- **Apply**: press `a` to hand all staged comments to the session's agent.
-  They're written to a markdown brief and the agent is prompted to address
-  them — sent immediately when idle/working (it queues natively), held until a
-  permission prompt clears, or deferred if the agent is stopped.
+  an inline box beneath its line, tagged with its destination (`→ Claude` or
+  `→ PR`); press `z` (or click the box) to fold it down to a single-line header
+  or expand it again.
+- **Destination**: each comment goes either to **Claude** (the session's agent)
+  or to the **PR** on GitHub. While typing a comment, press `Tab` to toggle
+  between the two (the footer shows the current destination); the default is
+  Claude. This lets you mix actionable notes for the agent with review comments
+  you want posted to the pull request — handy both on your own PRs and when
+  reviewing someone else's.
+- **Send to Claude**: press `a` to hand all staged *Claude*-destined comments to
+  the session's agent. They're written to a markdown brief and the agent is
+  prompted to address them — sent immediately when idle/working (it queues
+  natively), held until a permission prompt clears, or deferred if the agent is
+  stopped.
+- **Submit to the PR**: press `p` to submit all staged *PR*-destined comments to
+  the session's GitHub pull request as a single review. A small picker asks for
+  the verdict — `c` comment, `a` approve, or `r` request changes — and the
+  comments are posted as inline review comments via `gh` against the PR (which
+  must already exist for the session). Requires the GitHub CLI (`gh`) to be
+  installed and authenticated.
 - **Drift**: if the code under a comment changes before you apply, the view
   re-anchors it by its captured snippet. If it can't be located unambiguously
   the comment is marked `⚠` (drifted) and blocks apply until you review or

@@ -12,9 +12,11 @@
 //! the presentation layer only renders and dispatches.
 
 pub mod apply;
+pub mod pr_review;
 pub mod selection;
 
 pub use apply::{ApplyOutcome, SendDecision, decide_send};
+pub use pr_review::{PrReviewOutcome, PrVerdict, compose_pr_review};
 
 use std::fs;
 use std::path::PathBuf;
@@ -34,6 +36,19 @@ use crate::session::SessionId;
 pub enum CommentSide {
     Old,
     New,
+}
+
+/// Where a comment is destined to be delivered when applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommentTarget {
+    /// Handed to the session's agent (Claude) as a markdown brief. The default,
+    /// so comments persisted before this field existed load as `Agent`.
+    #[default]
+    Agent,
+    /// Posted to the session's GitHub pull request as an inline review comment
+    /// (batched into a single review on submit).
+    Pr,
 }
 
 /// Lifecycle status of an comment.
@@ -62,12 +77,17 @@ pub struct Comment {
     pub snippet: String,
     pub comment: String,
     pub status: CommentStatus,
+    /// Where this comment is delivered when applied. Defaults to [`CommentTarget::Agent`]
+    /// for comments persisted before the field existed.
+    #[serde(default)]
+    pub target: CommentTarget,
     pub created_at: DateTime<Utc>,
 }
 
 impl Comment {
     /// Create a freshly staged comment with a random id and `created_at`
-    /// set to now. `snippet` is normalised to drop any trailing newline.
+    /// set to now, targeting the agent. `snippet` is normalised to drop any
+    /// trailing newline. Use [`Comment::with_target`] to change the destination.
     pub fn new(
         file: impl Into<String>,
         side: CommentSide,
@@ -84,8 +104,15 @@ impl Comment {
             snippet: snippet.trim_end_matches('\n').to_string(),
             comment: comment.into(),
             status: CommentStatus::Staged,
+            target: CommentTarget::Agent,
             created_at: Utc::now(),
         }
+    }
+
+    /// Set this comment's delivery target (builder-style).
+    pub fn with_target(mut self, target: CommentTarget) -> Self {
+        self.target = target;
+        self
     }
 }
 
@@ -291,6 +318,16 @@ pub fn has_blocking_drift(anns: &[Comment]) -> bool {
     anns.iter().any(|a| a.status == CommentStatus::Drifted)
 }
 
+/// The not-yet-applied comments bound for `target`. Agent and PR comments are
+/// delivered through separate flows (`apply_comments` vs `submit_pr_review`),
+/// so each only ever acts on its own target's pending set.
+pub fn pending_for_target(anns: &[Comment], target: CommentTarget) -> Vec<Comment> {
+    anns.iter()
+        .filter(|a| a.status != CommentStatus::Applied && a.target == target)
+        .cloned()
+        .collect()
+}
+
 /// Markdown fence language hint for a path's extension (empty when unknown).
 fn lang_for(path: &str) -> &'static str {
     match path.rsplit('.').next() {
@@ -343,6 +380,34 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         let store = CommentStore::new(tmp.path().join("comments"));
         assert!(store.load(SessionId::new()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn legacy_comment_without_target_loads_as_agent() {
+        // A comment persisted before the `target` field existed must still
+        // deserialize (defaulting to Agent) rather than wiping the store.
+        let legacy = r#"{
+            "id": "00000000-0000-0000-0000-000000000001",
+            "file": "src/a.rs",
+            "side": "new",
+            "line_range": [1, 1],
+            "snippet": "let x = 1;",
+            "comment": "note",
+            "status": "staged",
+            "created_at": "2024-01-01T00:00:00Z"
+        }"#;
+        let c: Comment = serde_json::from_str(legacy).unwrap();
+        assert_eq!(c.target, CommentTarget::Agent);
+    }
+
+    #[test]
+    fn target_round_trips_through_store() {
+        let tmp = TempDir::new().unwrap();
+        let store = CommentStore::new(tmp.path().join("comments"));
+        let sid = SessionId::new();
+        let a = ann("a.rs", CommentSide::New, (1, 1), "a").with_target(CommentTarget::Pr);
+        store.add(sid, a.clone()).unwrap();
+        assert_eq!(store.load(sid).unwrap()[0].target, CommentTarget::Pr);
     }
 
     #[test]
@@ -507,6 +572,23 @@ diff --git a/d.rs b/d.rs
         assert_eq!(gone.status, CommentStatus::Drifted);
         // Applied comments are not re-evaluated.
         assert_eq!(applied.status, CommentStatus::Applied);
+    }
+
+    #[test]
+    fn pending_for_target_splits_by_destination_and_skips_applied() {
+        let agent = ann("a.rs", CommentSide::New, (1, 1), "a");
+        let pr = ann("b.rs", CommentSide::New, (2, 2), "b").with_target(CommentTarget::Pr);
+        let mut applied_pr =
+            ann("c.rs", CommentSide::New, (3, 3), "c").with_target(CommentTarget::Pr);
+        applied_pr.status = CommentStatus::Applied;
+        let all = vec![agent.clone(), pr.clone(), applied_pr];
+
+        let agents = pending_for_target(&all, CommentTarget::Agent);
+        assert_eq!(agents, vec![agent]);
+
+        // The applied PR comment is excluded; only the still-pending one remains.
+        let prs = pending_for_target(&all, CommentTarget::Pr);
+        assert_eq!(prs, vec![pr]);
     }
 
     #[test]
