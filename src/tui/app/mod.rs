@@ -587,6 +587,10 @@ pub struct AppUiState {
     /// so mouse events can map a screen position to a tree row. `None` unless
     /// the review view is open.
     pub review_file_list_rect: Option<Rect>,
+    /// Rows-only area of the open list modal (quick-switch, checkout-branch,
+    /// or path-input completions), recorded each render frame so mouse clicks
+    /// can be mapped to list indices. `None` when no list modal is open.
+    pub modal_list_rect: Option<Rect>,
     /// Sessions with at least one pending (not-yet-applied) review comment.
     /// Drives the `*` marker in the session list; refreshed on startup and
     /// whenever the review view closes.
@@ -639,6 +643,11 @@ pub struct AppUiState {
     /// Used to detect a double-click on the same row within `DOUBLE_CLICK_WINDOW`,
     /// which opens a comment box like a right-click.
     pub review_last_click: Option<(u16, Instant)>,
+    /// Last left-mouse click on a list-modal row: (absolute list index,
+    /// timestamp). Used to detect double-click on the same row within
+    /// `DOUBLE_CLICK_WINDOW`. Cleared on any modal keystroke or paste, since
+    /// typing can refilter the list out from under a pending click.
+    pub modal_list_last_click: Option<(usize, Instant)>,
     /// Current list view mode (project-grouped vs section-grouped).
     pub view_mode: ViewMode,
     /// Pre-computed stack chain for the selected session (empty if not stacked).
@@ -679,6 +688,7 @@ impl Default for AppUiState {
             status_message: None, // (message, expiry)
             review_body_rect: None,
             review_file_list_rect: None,
+            modal_list_rect: None,
             sessions_with_comments: HashSet::new(),
 
             should_quit: false,
@@ -702,6 +712,7 @@ impl Default for AppUiState {
             collapsed_sections: std::collections::HashSet::new(),
             last_left_click: None,
             review_last_click: None,
+            modal_list_last_click: None,
             view_mode: ViewMode::default(),
             stack_chain: Vec::new(),
             last_project_pull: HashMap::new(),

@@ -12,6 +12,18 @@ impl App {
             _ => None,
         };
 
+        // Record the rows-area of any open list modal so mouse events can
+        // map a click position to a list index (same pattern as
+        // `review_body_rect` above).
+        self.ui_state.modal_list_rect = match &self.ui_state.modal {
+            Modal::QuickSwitch { matches, .. } => Some(quick_switch_areas(area, matches.len()).1),
+            Modal::CheckoutBranch { filtered, .. } => {
+                Some(checkout_branch_areas(area, filtered.len()).1)
+            }
+            Modal::PathInput { .. } => Some(path_input_areas(area).1),
+            _ => None,
+        };
+
         match &self.ui_state.modal {
             Modal::None => {}
 
@@ -83,20 +95,7 @@ impl App {
                 scroll,
                 ..
             } => {
-                // Fixed height: 2 border + 3 input block + LIST_MAX_VISIBLE
-                // rows + 1 hint = 16 when the full window fits, capped to
-                // the terminal height. Keeps the modal size predictable so
-                // navigation (which assumes LIST_MAX_VISIBLE) lines up with
-                // the rendered window.
-                let modal_width = (area.width * 60 / 100).max(50);
-                let list_rows = super::actions::LIST_MAX_VISIBLE as u16;
-                let modal_height: u16 = (2 + 3 + list_rows + 1).min(area.height.max(1));
-                let modal_area = Rect {
-                    x: area.x + (area.width.saturating_sub(modal_width)) / 2,
-                    y: area.y + (area.height.saturating_sub(modal_height)) / 2,
-                    width: modal_width,
-                    height: modal_height,
-                };
+                let (modal_area, rows_area) = path_input_areas(area);
                 frame.render_widget(Clear, modal_area);
 
                 let block = Block::default()
@@ -108,26 +107,23 @@ impl App {
                 let inner = block.inner(modal_area);
                 frame.render_widget(block, modal_area);
 
-                // Split: prompt+input at top, completions below, hint at bottom
-                let chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(3), // prompt + input
-                        Constraint::Min(1),    // completions list
-                        Constraint::Length(1), // hint line
-                    ])
-                    .split(inner);
-
+                // Prompt + input on the top three rows, completions below,
+                // hint on the last row (geometry shared with the mouse
+                // handler via `path_input_areas`).
+                let input_area = Rect {
+                    height: inner.height.min(3),
+                    ..inner
+                };
                 let input_text = format!("{}\n\n❯ {}_", prompt, value);
                 let input_para = Paragraph::new(input_text);
-                frame.render_widget(input_para, chunks[0]);
+                frame.render_widget(input_para, input_area);
 
                 // Render completions list with a scroll window so the
                 // highlighted row stays on-screen even when the list is
                 // longer than the visible area.
                 let (completions, highlighted) = completer.visible_completions();
-                if !completions.is_empty() {
-                    let visible = chunks[1].height as usize;
+                if !completions.is_empty() && rows_area.height > 0 {
+                    let visible = rows_area.height as usize;
                     let start = (*scroll).min(completions.len());
                     let lines: Vec<Line> = completions
                         .iter()
@@ -150,14 +146,21 @@ impl App {
                         })
                         .collect();
                     let completions_para = Paragraph::new(lines);
-                    frame.render_widget(completions_para, chunks[1]);
+                    frame.render_widget(completions_para, rows_area);
                 }
 
-                let hint = Line::from(Span::styled(
-                    "↑/↓ navigate  Tab complete  Enter submit  Esc cancel",
-                    Style::default().add_modifier(Modifier::DIM),
-                ));
-                frame.render_widget(Paragraph::new(hint), chunks[2]);
+                if inner.height >= 5 {
+                    let hint_area = Rect {
+                        y: inner.y + inner.height - 1,
+                        height: 1,
+                        ..inner
+                    };
+                    let hint = Line::from(Span::styled(
+                        "↑/↓ navigate  Tab complete  Enter submit  Esc cancel",
+                        Style::default().add_modifier(Modifier::DIM),
+                    ));
+                    frame.render_widget(Paragraph::new(hint), hint_area);
+                }
             }
 
             Modal::Loading {
@@ -279,18 +282,7 @@ impl App {
                 scroll,
             } => {
                 let max_visible = super::actions::LIST_MAX_VISIBLE;
-                let visible_matches = matches.len().min(max_visible);
-                // Dynamic height: border(2) + input(1) + matches
-                let modal_height = (3 + visible_matches) as u16;
-                let modal_width = (area.width * 60 / 100).max(40);
-
-                // Position in upper third
-                let modal_area = Rect {
-                    x: area.x + (area.width.saturating_sub(modal_width)) / 2,
-                    y: area.y + area.height / 5,
-                    width: modal_width,
-                    height: modal_height.min(area.height),
-                };
+                let (modal_area, rows_area) = quick_switch_areas(area, matches.len());
 
                 frame.render_widget(Clear, modal_area);
 
@@ -326,8 +318,8 @@ impl App {
                 // `scroll + max_visible` are off the bottom.
                 let start = (*scroll).min(matches.len());
                 for (i, item) in matches.iter().skip(start).take(max_visible).enumerate() {
-                    let row = inner.y + 1 + i as u16;
-                    if row >= inner.y + inner.height {
+                    let row = rows_area.y + i as u16;
+                    if row >= rows_area.y + rows_area.height {
                         break;
                     }
                     let abs_idx = start + i;
@@ -452,20 +444,7 @@ impl App {
                 fetching,
                 ..
             } => {
-                // Target up to 12 visible branch rows; grow to fill lower two
-                // thirds of the screen if there are many, but cap at a
-                // reasonable height.
-                let desired_visible = filtered.len().clamp(1, 12);
-                // border(2) + input(1) + hint(1) + rows
-                let modal_height = (4 + desired_visible) as u16;
-                let modal_width = (area.width * 70 / 100).max(50);
-
-                let modal_area = Rect {
-                    x: area.x + (area.width.saturating_sub(modal_width)) / 2,
-                    y: area.y + area.height / 6,
-                    width: modal_width,
-                    height: modal_height.min(area.height),
-                };
+                let (modal_area, rows_area) = checkout_branch_areas(area, filtered.len());
 
                 frame.render_widget(Clear, modal_area);
 
@@ -525,11 +504,11 @@ impl App {
                 }
 
                 // Match lines
-                let list_top = inner.y + 2;
-                if inner.height < 3 {
+                let list_top = rows_area.y;
+                if rows_area.height == 0 {
                     return;
                 }
-                let list_height = (inner.height - 2) as usize;
+                let list_height = rows_area.height as usize;
                 let visible_end = (scroll + list_height).min(filtered.len());
                 for (i, m) in filtered[*scroll..visible_end].iter().enumerate() {
                     let row = list_top + i as u16;
@@ -734,4 +713,108 @@ pub(super) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect 
             Constraint::Percentage((100 - percent_x) / 2),
         ])
         .split(popup_layout[1])[1]
+}
+
+// List-modal geometry, shared between the render arms and the mouse handler
+// so a click maps onto exactly the rows the renderer drew. Each `*_areas`
+// function returns `(modal_area, rows_area)` where `rows_area` covers only
+// the selectable list rows (zero-height when the modal is too small to show
+// any).
+
+/// Geometry of the quick-switch palette for `n_matches` filtered rows.
+pub(super) fn quick_switch_areas(area: Rect, n_matches: usize) -> (Rect, Rect) {
+    let visible = n_matches.min(super::actions::LIST_MAX_VISIBLE);
+    // Dynamic height: border(2) + input(1) + rows, positioned in the
+    // upper third of the screen.
+    let modal_height = (3 + visible) as u16;
+    let modal_width = (area.width * 60 / 100).max(40);
+    let modal_area = Rect {
+        x: area.x + (area.width.saturating_sub(modal_width)) / 2,
+        y: area.y + area.height / 5,
+        width: modal_width,
+        height: modal_height.min(area.height),
+    };
+    let inner = modal_area.inner(Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    let rows = Rect {
+        y: inner.y + 1,
+        height: inner.height.saturating_sub(1),
+        ..inner
+    };
+    (modal_area, rows)
+}
+
+/// Geometry of the checkout-branch modal for `n_filtered` branch rows.
+pub(super) fn checkout_branch_areas(area: Rect, n_filtered: usize) -> (Rect, Rect) {
+    // Target up to 12 visible branch rows, but always at least one row of
+    // space so the "no match" state doesn't collapse the modal.
+    let desired_visible = n_filtered.clamp(1, 12);
+    // border(2) + input(1) + hint(1) + rows
+    let modal_height = (4 + desired_visible) as u16;
+    let modal_width = (area.width * 70 / 100).max(50);
+    let modal_area = Rect {
+        x: area.x + (area.width.saturating_sub(modal_width)) / 2,
+        y: area.y + area.height / 6,
+        width: modal_width,
+        height: modal_height.min(area.height),
+    };
+    let inner = modal_area.inner(Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    let rows = Rect {
+        y: inner.y + 2,
+        height: inner.height.saturating_sub(2),
+        ..inner
+    };
+    (modal_area, rows)
+}
+
+/// Geometry of the path-input modal. Fixed height: border(2) +
+/// prompt/input(3) + LIST_MAX_VISIBLE rows + hint(1) when the full window
+/// fits, capped to the terminal height. Keeps the modal size predictable so
+/// navigation (which assumes LIST_MAX_VISIBLE) lines up with the rendered
+/// window.
+pub(super) fn path_input_areas(area: Rect) -> (Rect, Rect) {
+    let list_rows = super::actions::LIST_MAX_VISIBLE as u16;
+    let modal_height: u16 = (2 + 3 + list_rows + 1).min(area.height.max(1));
+    let modal_width = (area.width * 60 / 100).max(50);
+    let modal_area = Rect {
+        x: area.x + (area.width.saturating_sub(modal_width)) / 2,
+        y: area.y + (area.height.saturating_sub(modal_height)) / 2,
+        width: modal_width,
+        height: modal_height,
+    };
+    let inner = modal_area.inner(Margin {
+        horizontal: 1,
+        vertical: 1,
+    });
+    let rows = Rect {
+        y: inner.y + 3,
+        height: inner.height.saturating_sub(4),
+        ..inner
+    };
+    (modal_area, rows)
+}
+
+/// Map a mouse position to an absolute list index. `rows` is the rows-only
+/// area recorded at render time, `scroll` the index of the first visible
+/// row, `len` the list length. Returns `None` for positions outside `rows`
+/// or on an unpopulated row below the end of the list.
+pub(super) fn modal_list_index_at(
+    col: u16,
+    row: u16,
+    rows: Rect,
+    scroll: usize,
+    len: usize,
+) -> Option<usize> {
+    let inside =
+        col >= rows.x && col < rows.x + rows.width && row >= rows.y && row < rows.y + rows.height;
+    if !inside {
+        return None;
+    }
+    let idx = scroll + (row - rows.y) as usize;
+    (idx < len).then_some(idx)
 }

@@ -1142,3 +1142,168 @@ async fn apply_section_move_keeps_moved_session_selected() {
         "selected_session_id should still track the moved session"
     );
 }
+
+// ---------------------------------------------------------------------------
+// List-modal mouse support: geometry, row mapping, click state machine
+// ---------------------------------------------------------------------------
+
+use super::modals::{
+    checkout_branch_areas, modal_list_index_at, path_input_areas, quick_switch_areas,
+};
+
+#[test]
+fn quick_switch_rows_area_sits_below_input_line() {
+    let area = Rect::new(0, 0, 100, 50);
+    let (modal, rows) = quick_switch_areas(area, 5);
+    // border(2) + input(1) + 5 rows
+    assert_eq!(modal.height, 8);
+    assert_eq!(rows.x, modal.x + 1);
+    assert_eq!(rows.width, modal.width - 2);
+    assert_eq!(rows.y, modal.y + 2); // border + input line
+    assert_eq!(rows.height, 5);
+}
+
+#[test]
+fn quick_switch_rows_capped_at_list_max_visible() {
+    let (_, rows) = quick_switch_areas(Rect::new(0, 0, 100, 50), 100);
+    assert_eq!(rows.height, super::actions::LIST_MAX_VISIBLE as u16);
+}
+
+#[test]
+fn quick_switch_rows_empty_when_no_matches() {
+    let (_, rows) = quick_switch_areas(Rect::new(0, 0, 100, 50), 0);
+    assert_eq!(rows.height, 0);
+}
+
+#[test]
+fn checkout_branch_rows_area_sits_below_input_and_hint() {
+    let area = Rect::new(0, 0, 100, 60);
+    let (modal, rows) = checkout_branch_areas(area, 3);
+    // border(2) + input(1) + hint(1) + 3 rows
+    assert_eq!(modal.height, 7);
+    assert_eq!(rows.y, modal.y + 3);
+    assert_eq!(rows.height, 3);
+}
+
+#[test]
+fn path_input_rows_area_uses_fixed_window() {
+    let area = Rect::new(0, 0, 100, 50);
+    let (modal, rows) = path_input_areas(area);
+    assert_eq!(modal.height, 16);
+    assert_eq!(rows.y, modal.y + 4); // border + 3-row prompt/input block
+    assert_eq!(rows.height, super::actions::LIST_MAX_VISIBLE as u16);
+}
+
+#[test]
+fn modal_list_index_at_maps_rows_within_bounds() {
+    let rows = Rect::new(20, 12, 58, 5);
+    assert_eq!(modal_list_index_at(20, 12, rows, 0, 10), Some(0));
+    assert_eq!(modal_list_index_at(77, 16, rows, 0, 10), Some(4));
+    // Left/right of the rows area, the input line above, below the window.
+    assert_eq!(modal_list_index_at(19, 12, rows, 0, 10), None);
+    assert_eq!(modal_list_index_at(78, 12, rows, 0, 10), None);
+    assert_eq!(modal_list_index_at(20, 11, rows, 0, 10), None);
+    assert_eq!(modal_list_index_at(20, 17, rows, 0, 10), None);
+}
+
+#[test]
+fn modal_list_index_at_applies_scroll_offset() {
+    let rows = Rect::new(20, 12, 58, 5);
+    assert_eq!(modal_list_index_at(20, 13, rows, 3, 10), Some(4));
+}
+
+#[test]
+fn modal_list_index_at_rejects_rows_past_end_of_list() {
+    let rows = Rect::new(20, 12, 58, 5);
+    assert_eq!(modal_list_index_at(20, 14, rows, 0, 2), None);
+    assert_eq!(modal_list_index_at(20, 12, rows, 0, 0), None);
+}
+
+#[test]
+fn wheel_step_moves_one_row_and_clamps_at_ends() {
+    use super::actions::wheel_step;
+    assert_eq!(wheel_step(0, false, 5), 0);
+    assert_eq!(wheel_step(2, false, 5), 1);
+    assert_eq!(wheel_step(2, true, 5), 3);
+    assert_eq!(wheel_step(4, true, 5), 4);
+}
+
+/// App with an open section-picker palette of `n_items` rows and the rows
+/// area recorded as the renderer would have left it (rows at y=12..12+n).
+fn make_section_picker_app(n_items: usize) -> App {
+    let mut app = make_test_app();
+    let session_id = SessionId::new();
+    let matches = (0..n_items)
+        .map(|i| QuickSwitchItem::SectionMove {
+            session_id,
+            target: Some(format!("S{i}")),
+            label: format!("S{i}"),
+        })
+        .collect();
+    app.ui_state.modal = Modal::QuickSwitch {
+        mode: PaletteMode::SectionPicker { session_id },
+        query: String::new(),
+        matches,
+        selected_idx: 0,
+        scroll: 0,
+    };
+    app.ui_state.modal_list_rect = Some(Rect::new(20, 12, 40, n_items as u16));
+    app
+}
+
+#[tokio::test]
+async fn modal_single_click_highlights_row_without_activating() {
+    let mut app = make_section_picker_app(3);
+    app.handle_modal_list_click(20, 13).await; // second row
+    match &app.ui_state.modal {
+        Modal::QuickSwitch { selected_idx, .. } => assert_eq!(*selected_idx, 1),
+        other => panic!("modal should stay open, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn modal_double_click_same_row_activates() {
+    let mut app = make_section_picker_app(3);
+    app.handle_modal_list_click(20, 13).await;
+    app.handle_modal_list_click(25, 13).await; // same row, different column
+    assert!(
+        matches!(app.ui_state.modal, Modal::None),
+        "double-click should activate the row and close the modal"
+    );
+}
+
+#[tokio::test]
+async fn modal_clicks_on_different_rows_do_not_activate() {
+    let mut app = make_section_picker_app(3);
+    app.handle_modal_list_click(20, 12).await;
+    app.handle_modal_list_click(20, 13).await;
+    assert!(matches!(app.ui_state.modal, Modal::QuickSwitch { .. }));
+}
+
+#[tokio::test]
+async fn modal_keystroke_between_clicks_resets_double_click() {
+    // A keystroke can refilter the list, so the second click must count as
+    // a fresh first click rather than activating a possibly-shifted row.
+    let mut app = make_section_picker_app(3);
+    app.handle_modal_list_click(20, 13).await;
+    let down = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Down,
+        crossterm::event::KeyModifiers::NONE,
+    );
+    app.handle_modal_key(down).await;
+    app.handle_modal_list_click(20, 13).await;
+    assert!(
+        matches!(app.ui_state.modal, Modal::QuickSwitch { .. }),
+        "second click after a keystroke must not activate"
+    );
+}
+
+#[tokio::test]
+async fn modal_click_outside_rows_leaves_selection_alone() {
+    let mut app = make_section_picker_app(3);
+    app.handle_modal_list_click(20, 11).await; // input line above the rows
+    match &app.ui_state.modal {
+        Modal::QuickSwitch { selected_idx, .. } => assert_eq!(*selected_idx, 0),
+        other => panic!("modal should stay open, got {other:?}"),
+    }
+}
