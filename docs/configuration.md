@@ -138,6 +138,10 @@ state_sync_interval_ms = 2000
 # Custom key bindings — override any default key with one or more alternatives
 # [keybindings]
 # navigate_up = ["k", "Up"]
+# next_group = ["]"]
+# previous_group = ["["]
+# navigate_first = ["Home"]
+# navigate_last = ["End"]
 # quit = ["q", "Ctrl-c"]
 # toggle_pane = ["Tab"]
 ```

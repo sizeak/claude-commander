@@ -151,6 +151,14 @@ pub enum UserCommand {
     NavigateUp,
     /// Navigate down in the list
     NavigateDown,
+    /// Jump to the next project/section header in the list
+    NextGroup,
+    /// Jump to the previous project/section header in the list
+    PreviousGroup,
+    /// Jump to the first item in the list
+    NavigateFirst,
+    /// Jump to the last item in the list
+    NavigateLast,
     /// Select/attach to current item
     Select,
     /// Open shell in worktree
@@ -268,6 +276,10 @@ impl From<BindableAction> for UserCommand {
         match action {
             BindableAction::NavigateUp => Self::NavigateUp,
             BindableAction::NavigateDown => Self::NavigateDown,
+            BindableAction::NextGroup => Self::NextGroup,
+            BindableAction::PreviousGroup => Self::PreviousGroup,
+            BindableAction::NavigateFirst => Self::NavigateFirst,
+            BindableAction::NavigateLast => Self::NavigateLast,
             BindableAction::Select => Self::Select,
             BindableAction::SelectShell => Self::SelectShell,
             BindableAction::NewSession => Self::NewSession,

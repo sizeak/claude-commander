@@ -25,6 +25,10 @@ use serde::{Deserialize, Serialize};
 pub enum BindableAction {
     NavigateUp,
     NavigateDown,
+    NextGroup,
+    PreviousGroup,
+    NavigateFirst,
+    NavigateLast,
     Select,
     SelectShell,
     NewSession,
@@ -67,6 +71,10 @@ impl BindableAction {
     pub const ALL: &'static [BindableAction] = &[
         Self::NavigateUp,
         Self::NavigateDown,
+        Self::NextGroup,
+        Self::PreviousGroup,
+        Self::NavigateFirst,
+        Self::NavigateLast,
         Self::Select,
         Self::SelectShell,
         Self::NewSession,
@@ -109,6 +117,10 @@ impl BindableAction {
         match self {
             Self::NavigateUp => "navigate_up",
             Self::NavigateDown => "navigate_down",
+            Self::NextGroup => "next_group",
+            Self::PreviousGroup => "previous_group",
+            Self::NavigateFirst => "navigate_first",
+            Self::NavigateLast => "navigate_last",
             Self::Select => "select",
             Self::SelectShell => "select_shell",
             Self::NewSession => "new_session",
@@ -152,6 +164,10 @@ impl BindableAction {
         match self {
             Self::NavigateUp => "Navigate up",
             Self::NavigateDown => "Navigate down",
+            Self::NextGroup => "Jump to next project/section",
+            Self::PreviousGroup => "Jump to previous project/section",
+            Self::NavigateFirst => "Jump to first item",
+            Self::NavigateLast => "Jump to last item",
             Self::Select => "Attach to selected session",
             Self::SelectShell => "Open shell in worktree",
             Self::NewSession => "New worktree session",
@@ -193,7 +209,13 @@ impl BindableAction {
     /// Help screen section for grouping.
     pub fn section(self) -> &'static str {
         match self {
-            Self::NavigateUp | Self::NavigateDown | Self::Select => "Navigation",
+            Self::NavigateUp
+            | Self::NavigateDown
+            | Self::NextGroup
+            | Self::PreviousGroup
+            | Self::NavigateFirst
+            | Self::NavigateLast
+            | Self::Select => "Navigation",
             Self::SelectShell
             | Self::NewSession
             | Self::NewStackedSession
@@ -234,6 +256,10 @@ impl FromStr for BindableAction {
         match s {
             "navigate_up" => Ok(Self::NavigateUp),
             "navigate_down" => Ok(Self::NavigateDown),
+            "next_group" => Ok(Self::NextGroup),
+            "previous_group" => Ok(Self::PreviousGroup),
+            "navigate_first" => Ok(Self::NavigateFirst),
+            "navigate_last" => Ok(Self::NavigateLast),
             "select" => Ok(Self::Select),
             "select_shell" => Ok(Self::SelectShell),
             "new_session" => Ok(Self::NewSession),
@@ -540,6 +566,16 @@ impl Default for KeyBindings {
                 kb(KeyCode::Char('n'), ctrl),
             ],
         );
+        bindings.insert(
+            BindableAction::NextGroup,
+            vec![kb(KeyCode::Char(']'), none)],
+        );
+        bindings.insert(
+            BindableAction::PreviousGroup,
+            vec![kb(KeyCode::Char('['), none)],
+        );
+        bindings.insert(BindableAction::NavigateFirst, vec![kb(KeyCode::Home, none)]);
+        bindings.insert(BindableAction::NavigateLast, vec![kb(KeyCode::End, none)]);
         bindings.insert(BindableAction::Select, vec![kb(KeyCode::Enter, none)]);
 
         // Session management
@@ -1059,6 +1095,18 @@ mod tests {
 
         let ctrl_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
         assert_eq!(kb.resolve(&ctrl_p), Some(BindableAction::NavigateUp));
+
+        let rbracket = KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&rbracket), Some(BindableAction::NextGroup));
+
+        let lbracket = KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&lbracket), Some(BindableAction::PreviousGroup));
+
+        let home = KeyEvent::new(KeyCode::Home, KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&home), Some(BindableAction::NavigateFirst));
+
+        let end = KeyEvent::new(KeyCode::End, KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&end), Some(BindableAction::NavigateLast));
 
         // Session management
         let n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);

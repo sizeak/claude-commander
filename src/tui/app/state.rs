@@ -548,6 +548,7 @@ impl App {
         };
 
         let selectable: Vec<bool> = items.iter().map(|i| i.is_selectable()).collect();
+        let group_starts: Vec<bool> = items.iter().map(|i| i.is_group_header()).collect();
         self.ui_state.list_items = items;
         self.ui_state.cascade_paused = state.cascade_paused_at.is_some();
         if matches!(self.ui_state.view_mode, ViewMode::ProjectGrouped) {
@@ -557,6 +558,7 @@ impl App {
         } else {
             self.ui_state.list_state.set_selectable(selectable);
         }
+        self.ui_state.list_state.set_group_starts(group_starts);
 
         // Pre-compute stack chain for the selected session
         self.ui_state.stack_chain.clear();
