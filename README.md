@@ -9,7 +9,7 @@ A high-performance terminal UI for managing Claude coding sessions, written in R
 - **Git worktree isolation** - Each session has its own worktree and branch
 - **Live preview** - Real-time pane content capture with caching
 - **Info pane** - Session metadata, PR details, CI status, and AI-generated change summaries
-- **Review & comment** - Full-screen diff of a session's changes (vs its PR base) where you select lines, attach comments, and apply them straight to the running agent
+- **Review & comment** - Full-screen diff of a session's changes (vs its PR base) where you select lines, attach comments, mark files as reviewed, and apply comments straight to the running agent
 - **Agent state detection** - Detect if agent is waiting for input, processing, or errored
 - **Persistent state** - Sessions survive restarts
 - **Auto-pull project main** - Periodically fast-forwards each project's main branch from `origin` so it doesn't drift stale

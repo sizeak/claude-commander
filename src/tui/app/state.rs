@@ -285,9 +285,11 @@ impl App {
                         base,
                         diff,
                         comments,
+                        reviewed,
                         segments,
                     } = *prepared;
-                    let state = DiffReviewState::new(session_id, title, base, diff, comments);
+                    let mut state = DiffReviewState::new(session_id, title, base, diff, comments);
+                    state.reviewed = reviewed.into_iter().collect();
                     state.prime_segments(segments);
                     self.ui_state.modal = Modal::ReviewDiff(Box::new(state));
                 }

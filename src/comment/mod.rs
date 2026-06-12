@@ -23,7 +23,6 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::config::Config;
 use crate::error::{ConfigError, Result};
 use crate::git::{FileDiff, LineOrigin, ParsedDiff};
 use crate::session::SessionId;
@@ -109,11 +108,6 @@ impl CommentStore {
     /// Construct a store rooted at `dir` (created lazily on first save).
     pub fn new(dir: PathBuf) -> Self {
         Self { dir }
-    }
-
-    /// Default store at `<data_dir>/comments/`.
-    pub fn open_default() -> Result<Self> {
-        Ok(Self::new(Config::data_dir()?.join("comments")))
     }
 
     fn path_for(&self, sid: SessionId) -> PathBuf {

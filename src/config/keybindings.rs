@@ -860,6 +860,36 @@ pub fn review_trigger_bytes(bindings: &KeyBindings) -> Vec<Vec<u8>> {
     trigger_bytes_for(bindings, BindableAction::OpenReviewDiff)
 }
 
+/// Whether a binding survives the [`trigger_bytes_for`] filter: a Ctrl- or
+/// Alt-modified ASCII character. Bare bindings can't be intercepted mid-attach
+/// (they're indistinguishable from typing), so they never form the toggle.
+fn is_attach_interceptable(kb: &KeyBinding) -> bool {
+    matches!(kb.code, KeyCode::Char(c) if c.is_ascii())
+        && matches!(kb.modifiers, KeyModifiers::CONTROL | KeyModifiers::ALT)
+}
+
+/// The first [`OpenReviewDiff`](BindableAction::OpenReviewDiff) binding that
+/// also works while attached to a session (`Alt-r` by default) — the key that
+/// toggles between an attached session and its review diff. The review view
+/// honours the same key for the way back and labels it in its footer.
+pub fn review_toggle_binding(bindings: &KeyBindings) -> Option<&KeyBinding> {
+    bindings
+        .keys_for(BindableAction::OpenReviewDiff)
+        .iter()
+        .find(|kb| is_attach_interceptable(kb))
+}
+
+/// Whether `key` is one of the attach-capable
+/// [`OpenReviewDiff`](BindableAction::OpenReviewDiff) bindings (see
+/// [`review_toggle_binding`]).
+pub fn matches_review_toggle(bindings: &KeyBindings, key: &KeyEvent) -> bool {
+    bindings
+        .keys_for(BindableAction::OpenReviewDiff)
+        .iter()
+        .filter(|kb| is_attach_interceptable(kb))
+        .any(|kb| kb.code == key.code && key.modifiers.contains(kb.modifiers))
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1275,6 +1305,49 @@ mod tests {
         // (Ctrl-r) is never shadowed.
         let kb = KeyBindings::default();
         assert_eq!(review_trigger_bytes(&kb), vec![vec![0x1b, b'r']]);
+    }
+
+    #[test]
+    fn test_review_toggle_binding_default_is_alt_r() {
+        // The bare `r` binding is skipped (not interceptable mid-attach); the
+        // Alt-r binding is the toggle, and its display drives the footer hint.
+        let kb = KeyBindings::default();
+        let toggle = review_toggle_binding(&kb).expect("default has an Alt binding");
+        assert_eq!(toggle.to_string(), "Alt-r");
+    }
+
+    #[test]
+    fn test_review_toggle_binding_none_when_only_bare_keys() {
+        let mut kb = KeyBindings::default();
+        kb.set_keys_for(
+            BindableAction::OpenReviewDiff,
+            vec![KeyBinding::new(KeyCode::Char('r'), KeyModifiers::NONE)],
+        );
+        assert!(review_toggle_binding(&kb).is_none());
+    }
+
+    #[test]
+    fn test_matches_review_toggle_honours_rebinding() {
+        let kb = KeyBindings::default();
+        let alt_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT);
+        let bare_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);
+        assert!(matches_review_toggle(&kb, &alt_r));
+        assert!(
+            !matches_review_toggle(&kb, &bare_r),
+            "bare r is review-local, not the toggle"
+        );
+
+        let mut kb = KeyBindings::default();
+        kb.set_keys_for(
+            BindableAction::OpenReviewDiff,
+            vec![KeyBinding::new(KeyCode::Char('e'), KeyModifiers::ALT)],
+        );
+        let alt_e = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT);
+        assert!(matches_review_toggle(&kb, &alt_e));
+        assert!(
+            !matches_review_toggle(&kb, &alt_r),
+            "old key no longer toggles"
+        );
     }
 
     #[test]

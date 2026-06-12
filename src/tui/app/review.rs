@@ -156,6 +156,9 @@ pub struct DiffReviewState {
     pub base: String,
     pub diff: ParsedDiff,
     pub comments: Vec<Comment>,
+    /// Display paths of files marked reviewed (mirrors the persisted store;
+    /// stale marks are pruned by the service before the view opens).
+    pub reviewed: HashSet<String>,
     /// Index into `diff.files` of the file shown in the body.
     pub selected_file: usize,
     /// First visible body row (scroll offset).
@@ -240,6 +243,7 @@ impl DiffReviewState {
             base,
             diff,
             comments,
+            reviewed: HashSet::new(),
             selected_file,
             scroll: 0,
             focus: ReviewFocus::FileList,
@@ -424,6 +428,34 @@ impl DiffReviewState {
         match self.visual_anchor {
             Some(anchor) => (anchor.min(self.cursor), anchor.max(self.cursor)),
             None => (self.cursor, self.cursor),
+        }
+    }
+
+    /// Whether `path` (a display path) is marked reviewed.
+    fn is_reviewed_path(&self, path: &str) -> bool {
+        self.reviewed.contains(path)
+    }
+
+    /// Set or clear the reviewed mark for `path` in the view's local mirror
+    /// (the persisted store is updated by the service).
+    fn set_reviewed(&mut self, path: String, on: bool) {
+        if on {
+            self.reviewed.insert(path);
+        } else {
+            self.reviewed.remove(&path);
+        }
+    }
+
+    /// Jump the body to the next unreviewed file after the current one (in
+    /// diff order), wrapping around; stays put when every file is reviewed.
+    fn advance_to_next_unreviewed(&mut self) {
+        let count = self.diff.files.len();
+        let next = (1..count)
+            .map(|step| (self.selected_file + step) % count)
+            .find(|&idx| !self.is_reviewed_path(self.diff.files[idx].display_path()));
+        if let Some(idx) = next {
+            self.set_body_file(idx);
+            self.sync_tree_cursor_to_file();
         }
     }
 
@@ -1032,13 +1064,14 @@ impl App {
                 // navigation instead. Opens instantly; the first view of a large
                 // file can be briefly janky.
                 if !self.config.precompute_review_caches {
-                    let state = DiffReviewState::new(
+                    let mut state = DiffReviewState::new(
                         session_id,
                         title,
                         snapshot.base,
                         snapshot.diff,
                         snapshot.comments,
                     );
+                    state.reviewed = snapshot.reviewed.into_iter().collect();
                     self.ui_state.modal = Modal::ReviewDiff(Box::new(state));
                     return;
                 }
@@ -1063,6 +1096,7 @@ impl App {
                 let base = snapshot.base;
                 let diff = snapshot.diff;
                 let comments = snapshot.comments;
+                let reviewed = snapshot.reviewed;
                 tokio::spawn(async move {
                     // The precompute is CPU-bound and synchronous, so keep it off
                     // the async worker pool; hand the diff back out with its
@@ -1081,6 +1115,7 @@ impl App {
                                 base,
                                 diff,
                                 comments,
+                                reviewed,
                                 segments,
                             }),
                         }))
@@ -1155,11 +1190,12 @@ impl App {
             return;
         }
 
-        // Alt+R re-attaches to the session — the mirror of pressing Alt-r in
-        // the attached session to reach the review, so the pair toggles back
-        // and forth. The modal is already None; `handle_select` queues the
-        // attach and quits the TUI loop, which `run()` then picks up.
-        if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::ALT) {
+        // Re-attaching to the session mirrors the (rebindable) OpenReviewDiff
+        // key that switches an attached session to its review diff (`Alt-r` by
+        // default), so the pair toggles back and forth. The modal is already
+        // None; `handle_select` queues the attach and quits the TUI loop,
+        // which `run()` then picks up.
+        if crate::config::keybindings::matches_review_toggle(&self.config.keybindings, &key) {
             self.ui_state.selected_session_id = Some(state.session_id);
             self.handle_select().await;
             return;
@@ -1202,6 +1238,25 @@ impl App {
                     }
                 } else {
                     self.set_review_status("No comment on this line");
+                }
+            }
+            // Toggle the reviewed mark on the file shown in the body (either
+            // focus); marking advances to the next unreviewed file.
+            KeyCode::Char('m') => {
+                if let Some(file) = state.current_file().cloned() {
+                    match self
+                        .service
+                        .toggle_file_reviewed(&state.session_id, &file)
+                        .await
+                    {
+                        Ok(now_reviewed) => {
+                            state.set_reviewed(file.display_path().to_string(), now_reviewed);
+                            if now_reviewed {
+                                state.advance_to_next_unreviewed();
+                            }
+                        }
+                        Err(e) => self.set_review_status(&format!("Mark failed: {e}")),
+                    }
                 }
             }
             KeyCode::Char('a') => self.apply_review(&mut state).await,
@@ -1293,14 +1348,23 @@ impl App {
         self.render_review_file_list(frame, cols[0], state);
         self.render_review_body(frame, cols[1], state);
 
+        // Label the session toggle with its actual (rebindable) key; omit the
+        // hint entirely when no attach-capable binding exists.
+        let toggle = crate::config::keybindings::review_toggle_binding(&self.config.keybindings)
+            .map(|kb| format!("{kb} session · "))
+            .unwrap_or_default();
         let hint = if state.comment.is_some() {
-            " type comment · Enter save · Esc cancel "
+            " type comment · Enter save · Esc cancel ".to_string()
         } else if state.visual_anchor.is_some() {
-            " ↑↓ extend · Enter/right-click comment · v/Esc cancel selection "
+            " ↑↓ extend · Enter/right-click comment · v/Esc cancel selection ".to_string()
         } else if state.focus == ReviewFocus::FileList {
-            " ↑↓/jk move · Enter expand/collapse · [ ] file · Tab to diff · ^R session · ^Q/Esc close "
+            format!(
+                " ↑↓/jk move · Enter expand/collapse · [ ] file · m reviewed · Tab to diff · {toggle}^Q/Esc close "
+            )
         } else {
-            " ↑↓/jk move · v select · Enter comment · z fold · d delete · a apply · t layout · ^R session · ^Q/Esc close "
+            format!(
+                " ↑↓/jk move · v select · Enter comment · z fold · d delete · m reviewed · a apply · t layout · {toggle}^Q/Esc close "
+            )
         };
         // The footer doubles as this view's status bar — styled like the app
         // status bar so it reads as a replacement, not a second bar.
@@ -1344,6 +1408,13 @@ impl App {
                 }
                 TreeRow::File { depth, index, name } => {
                     let file = &state.diff.files[*index];
+                    let reviewed = state.is_reviewed_path(file.display_path());
+                    // Reviewed rows are dimmed so the remaining work stands out.
+                    let dim = if reviewed {
+                        Modifier::DIM
+                    } else {
+                        Modifier::empty()
+                    };
                     let indent = "  ".repeat(*depth);
                     let marker = file_status_marker(file.status);
                     // Only the status letter is coloured; the file name stays
@@ -1352,10 +1423,13 @@ impl App {
                         Span::raw(format!("{indent}  ")),
                         Span::styled(
                             marker.to_string(),
-                            Style::default().fg(file_status_color(file.status, &pal)),
+                            Style::default()
+                                .fg(file_status_color(file.status, &pal))
+                                .add_modifier(dim),
                         ),
-                        Span::raw(format!(" {name}")),
+                        Span::styled(format!(" {name}"), Style::default().add_modifier(dim)),
                     ];
+                    spans.extend(reviewed_check_span(reviewed, &pal));
                     spans.extend(comment_badge_span(
                         state.comment_count(file.display_path()),
                         &pal,
@@ -1373,7 +1447,10 @@ impl App {
             .borders(Borders::ALL)
             .border_type(self.border_type())
             .border_style(Style::default().fg(border))
-            .title(format!(" Files ({}) ", state.diff.files.len()));
+            .title(match state.reviewed.len() {
+                0 => format!(" Files ({}) ", state.diff.files.len()),
+                n => format!(" Files ({n}/{} reviewed) ", state.diff.files.len()),
+            });
         frame.render_widget(
             Paragraph::new(lines)
                 .block(block)
@@ -1392,6 +1469,9 @@ impl App {
         };
 
         let title = match state.current_file() {
+            Some(f) if state.is_reviewed_path(f.display_path()) => {
+                format!(" {} — vs {} ✓ reviewed ", f.display_path(), state.base)
+            }
             Some(f) => format!(" {} — vs {} ", f.display_path(), state.base),
             None => format!(" review — vs {} ", state.base),
         };
@@ -1600,6 +1680,12 @@ fn comment_badge_span(count: usize, pal: &ReviewPalette) -> Option<Span<'static>
             Style::default().fg(pal.comment_border),
         )
     })
+}
+
+/// The ` ✓` reviewed check for a file-tree row, add-coloured so it reads as
+/// "done", or `None` when the file is not marked reviewed.
+fn reviewed_check_span(reviewed: bool, pal: &ReviewPalette) -> Option<Span<'static>> {
+    reviewed.then(|| Span::styled(" ✓", Style::default().fg(pal.add_fg)))
 }
 
 /// Build the inline-rendered body for the current file: hunk headers plus each
@@ -2137,6 +2223,7 @@ pub struct ReviewPrepared {
     pub(super) base: String,
     pub(super) diff: ParsedDiff,
     pub(super) comments: Vec<Comment>,
+    pub(super) reviewed: Vec<String>,
     pub(super) segments: Vec<Vec<WordSegs>>,
 }
 
@@ -2630,6 +2717,77 @@ diff --git a/x.rs b/x.rs
         assert_eq!(s.focus, ReviewFocus::Body);
     }
 
+    // --- reviewed marks ---
+
+    fn state_with_three_files() -> DiffReviewState {
+        let diff = parse_unified_diff(
+            "\
+diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -1 +1 @@
+-a
++A
+diff --git a/b.rs b/b.rs
+--- a/b.rs
++++ b/b.rs
+@@ -1 +1 @@
+-b
++B
+diff --git a/c.rs b/c.rs
+--- a/c.rs
++++ b/c.rs
+@@ -1 +1 @@
+-c
++C
+",
+        );
+        DiffReviewState::new(
+            SessionId::new(),
+            "test".to_string(),
+            "main".to_string(),
+            diff,
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn mark_advances_to_next_unreviewed_file() {
+        let mut s = state_with_two_files();
+        s.set_reviewed("a.rs".to_string(), true);
+        s.advance_to_next_unreviewed();
+        assert!(s.is_reviewed_path("a.rs"));
+        assert_eq!(s.selected_file, 1);
+    }
+
+    #[test]
+    fn advance_wraps_past_end_to_first_unreviewed() {
+        let mut s = state_with_three_files();
+        s.set_reviewed("b.rs".to_string(), true);
+        s.set_reviewed("c.rs".to_string(), true);
+        s.selected_file = 1;
+        s.advance_to_next_unreviewed();
+        assert_eq!(s.selected_file, 0, "wraps past reviewed c.rs to a.rs");
+    }
+
+    #[test]
+    fn advance_stays_put_when_all_reviewed() {
+        let mut s = state_with_two_files();
+        s.set_reviewed("a.rs".to_string(), true);
+        s.set_reviewed("b.rs".to_string(), true);
+        s.advance_to_next_unreviewed();
+        assert_eq!(s.selected_file, 0);
+    }
+
+    #[test]
+    fn unmark_does_not_advance() {
+        let mut s = state_with_two_files();
+        s.set_reviewed("a.rs".to_string(), true);
+        s.set_reviewed("a.rs".to_string(), false);
+        assert!(!s.is_reviewed_path("a.rs"));
+        assert_eq!(s.selected_file, 0, "unmarking never moves the selection");
+    }
+
     // --- file tree ---
 
     fn file(path: &str) -> FileDiff {
@@ -2833,6 +2991,15 @@ diff --git a/x.rs b/x.rs
         let span = comment_badge_span(3, &pal).expect("badge for non-zero count");
         assert_eq!(span.content.as_ref(), format!(" {COMMENT_MARKER}3"));
         assert_eq!(span.style.fg, Some(pal.comment_border));
+    }
+
+    #[test]
+    fn reviewed_check_span_hidden_when_unreviewed() {
+        let pal = Theme::truecolor().review_palette();
+        assert!(reviewed_check_span(false, &pal).is_none());
+        let span = reviewed_check_span(true, &pal).expect("check for reviewed file");
+        assert_eq!(span.content.as_ref(), " ✓");
+        assert_eq!(span.style.fg, Some(pal.add_fg));
     }
 
     #[test]
