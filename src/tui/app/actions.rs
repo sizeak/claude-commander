@@ -34,6 +34,17 @@ pub(super) fn adjust_list_scroll(selected_idx: usize, scroll: usize, visible_row
     }
 }
 
+/// One mouse-wheel step over a list selection: move a single row, clamping
+/// at the ends rather than wrapping like keyboard navigation — a wheel tick
+/// at the bottom of a list jumping back to the top would be disorienting.
+pub(super) fn wheel_step(selected_idx: usize, down: bool, len: usize) -> usize {
+    if down {
+        (selected_idx + 1).min(len.saturating_sub(1))
+    } else {
+        selected_idx.saturating_sub(1)
+    }
+}
+
 impl App {
     /// Open `Modal::PathInput` at the current working directory with its
     /// subdirectory list already populated.

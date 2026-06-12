@@ -191,6 +191,8 @@ impl App {
                 MouseEventKind::ScrollUp => {
                     if let Modal::ReviewDiff(state) = &mut self.ui_state.modal {
                         state.wheel(false);
+                    } else if !matches!(self.ui_state.modal, Modal::None) {
+                        self.modal_wheel(false);
                     } else {
                         self.scroll_pane_at(mouse.column, ScrollDirection::Up);
                     }
@@ -198,6 +200,8 @@ impl App {
                 MouseEventKind::ScrollDown => {
                     if let Modal::ReviewDiff(state) = &mut self.ui_state.modal {
                         state.wheel(true);
+                    } else if !matches!(self.ui_state.modal, Modal::None) {
+                        self.modal_wheel(true);
                     } else {
                         self.scroll_pane_at(mouse.column, ScrollDirection::Down);
                     }
@@ -239,8 +243,20 @@ impl App {
                         }
                         return;
                     }
-                    // Other modals are keyboard-only; an underlying row select
-                    // would be confusing.
+                    // List modals: a click highlights the row under the
+                    // cursor, a double-click activates it (same convention
+                    // as the session tree).
+                    if matches!(
+                        self.ui_state.modal,
+                        Modal::QuickSwitch { .. }
+                            | Modal::CheckoutBranch { .. }
+                            | Modal::PathInput { .. }
+                    ) {
+                        self.handle_modal_list_click(mouse.column, mouse.row).await;
+                        return;
+                    }
+                    // Remaining modals are keyboard-only; an underlying row
+                    // select would be confusing.
                     if !matches!(self.ui_state.modal, Modal::None) {
                         return;
                     }
@@ -269,6 +285,8 @@ impl App {
                 _ => {}
             },
             InputEvent::Paste(text) => {
+                // A paste refilters the list, so drop any pending first-click.
+                self.ui_state.modal_list_last_click = None;
                 // Handle paste in modal input, ignore otherwise
                 match apply_paste_to_modal(&mut self.ui_state.modal, &text) {
                     Some(PasteRefilter::CheckoutBranch) => self.refilter_checkout_branches(),
@@ -282,6 +300,10 @@ impl App {
     /// Handle modal key input
     pub(super) async fn handle_modal_key(&mut self, key: crossterm::event::KeyEvent) {
         use crossterm::event::KeyCode;
+
+        // Any keystroke can refilter the list or swap the modal, so a
+        // pending first-click no longer points at a meaningful row.
+        self.ui_state.modal_list_last_click = None;
 
         match &mut self.ui_state.modal {
             Modal::Input {
@@ -307,7 +329,6 @@ impl App {
 
             Modal::PathInput {
                 value,
-                on_submit,
                 completer,
                 scroll,
                 ..
@@ -348,19 +369,7 @@ impl App {
                     }
                     _ => match key.code {
                         KeyCode::Enter => {
-                            // Prefer the highlighted completion over the
-                            // typed value, so arrow-to-select-then-Enter
-                            // works without first pressing Tab. Fall back
-                            // to the typed value when the list is empty
-                            // (e.g. the user typed a path that doesn't
-                            // exist yet).
-                            let action = on_submit.clone();
-                            let submit_value = completer
-                                .selected_completion()
-                                .map(str::to_string)
-                                .unwrap_or_else(|| value.clone());
-                            self.ui_state.modal = Modal::None;
-                            self.handle_input_submit(action, submit_value).await;
+                            self.submit_path_input().await;
                         }
                         KeyCode::Esc => {
                             self.ui_state.modal = Modal::None;
@@ -478,37 +487,7 @@ impl App {
                             self.ui_state.modal = Modal::None;
                         }
                         KeyCode::Enter => {
-                            // Clone the selected item so we can release the
-                            // borrow on `matches` before we mutate `modal`
-                            // and dispatch.
-                            let selected = matches.get(*selected_idx).cloned();
-                            match selected {
-                                Some(QuickSwitchItem::Session(m)) => {
-                                    let session_id = m.session_id;
-                                    self.ui_state.modal = Modal::None;
-                                    self.ui_state.selected_session_id = Some(session_id);
-                                    if let Some(idx) =
-                                        self.ui_state.list_items.iter().position(|item| {
-                                            matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
-                                        })
-                                    {
-                                        self.ui_state.list_state.select(Some(idx));
-                                    }
-                                    self.update_selection();
-                                    self.handle_select().await;
-                                }
-                                Some(QuickSwitchItem::Command(entry)) => {
-                                    self.ui_state.modal = Modal::None;
-                                    self.handle_command(entry.action.into()).await;
-                                }
-                                Some(QuickSwitchItem::SectionMove {
-                                    session_id, target, ..
-                                }) => {
-                                    self.ui_state.modal = Modal::None;
-                                    self.apply_section_move(session_id, target).await;
-                                }
-                                None => {}
-                            }
+                            self.activate_quick_switch_selection().await;
                         }
                         KeyCode::Tab => {
                             // Tab autocompletes a session title into the
@@ -583,31 +562,7 @@ impl App {
                             self.ui_state.modal = Modal::None;
                         }
                         KeyCode::Enter => {
-                            // Decide which branch to check out:
-                            //   - If filter produced matches, use the highlighted
-                            //     one (even when the user has typed something).
-                            //   - Otherwise fall back to the raw query text so a
-                            //     pasted branch name still works.
-                            let branch_label = if let Some(m) = filtered.get(*selected_idx) {
-                                m.local_name.clone()
-                            } else {
-                                let trimmed = query.trim();
-                                if trimmed.is_empty() {
-                                    return;
-                                }
-                                // Strip a leading "origin/" so we always get a
-                                // local branch name.
-                                trimmed
-                                    .strip_prefix("origin/")
-                                    .unwrap_or(trimmed)
-                                    .to_string()
-                            };
-                            let project_id = match &self.ui_state.modal {
-                                Modal::CheckoutBranch { project_id, .. } => *project_id,
-                                _ => return,
-                            };
-                            self.ui_state.modal = Modal::None;
-                            self.start_checkout_session(project_id, branch_label).await;
+                            self.activate_checkout_selection().await;
                         }
                         KeyCode::Backspace => {
                             query.pop();
@@ -678,6 +633,217 @@ impl App {
             self.handle_command(UserCommand::Select).await;
         } else {
             self.ui_state.last_left_click = Some((idx, now));
+        }
+    }
+
+    /// Handle a left click while a list modal (quick-switch, checkout-branch,
+    /// path-input) is open. A click on a row moves the highlight there; a
+    /// second click on the same row within [`DOUBLE_CLICK_WINDOW`] activates
+    /// it, exactly as Enter would. Clicks anywhere else are ignored.
+    pub(super) async fn handle_modal_list_click(&mut self, col: u16, row: u16) {
+        use super::modals::modal_list_index_at;
+        use super::selection::DOUBLE_CLICK_WINDOW;
+
+        let Some(rows) = self.ui_state.modal_list_rect else {
+            return;
+        };
+        let clicked = match &mut self.ui_state.modal {
+            Modal::QuickSwitch {
+                matches,
+                selected_idx,
+                scroll,
+                ..
+            } => modal_list_index_at(col, row, rows, *scroll, matches.len())
+                .inspect(|&idx| *selected_idx = idx),
+            Modal::CheckoutBranch {
+                filtered,
+                selected_idx,
+                scroll,
+                ..
+            } => modal_list_index_at(col, row, rows, *scroll, filtered.len())
+                .inspect(|&idx| *selected_idx = idx),
+            Modal::PathInput {
+                completer, scroll, ..
+            } => {
+                let len = completer.visible_completions().0.len();
+                modal_list_index_at(col, row, rows, *scroll, len)
+                    .inspect(|&idx| completer.select(idx))
+            }
+            _ => return,
+        };
+
+        let Some(idx) = clicked else {
+            // Border, input line, or an empty row: not a row, so any
+            // pending first-click is stale.
+            self.ui_state.modal_list_last_click = None;
+            return;
+        };
+        let now = Instant::now();
+        let is_double_click = matches!(
+            self.ui_state.modal_list_last_click,
+            Some((prev_idx, prev_at))
+                if prev_idx == idx && now.duration_since(prev_at) <= DOUBLE_CLICK_WINDOW
+        );
+        if is_double_click {
+            // Consume the click pair so a third click doesn't re-fire.
+            self.ui_state.modal_list_last_click = None;
+            self.activate_modal_list_selection().await;
+        } else {
+            self.ui_state.modal_list_last_click = Some((idx, now));
+        }
+    }
+
+    /// Activate the highlighted row of the open list modal — the shared
+    /// endpoint for Enter and double-click.
+    async fn activate_modal_list_selection(&mut self) {
+        match &self.ui_state.modal {
+            Modal::QuickSwitch { .. } => self.activate_quick_switch_selection().await,
+            Modal::CheckoutBranch { .. } => self.activate_checkout_selection().await,
+            Modal::PathInput { .. } => self.submit_path_input().await,
+            _ => {}
+        }
+    }
+
+    /// Activate the highlighted quick-switch row: jump to the session, run
+    /// the command, or apply the section move.
+    async fn activate_quick_switch_selection(&mut self) {
+        // Clone the selected item so the borrow on `matches` is released
+        // before we mutate `modal` and dispatch.
+        let selected = match &self.ui_state.modal {
+            Modal::QuickSwitch {
+                matches,
+                selected_idx,
+                ..
+            } => matches.get(*selected_idx).cloned(),
+            _ => return,
+        };
+        match selected {
+            Some(QuickSwitchItem::Session(m)) => {
+                let session_id = m.session_id;
+                self.ui_state.modal = Modal::None;
+                self.ui_state.selected_session_id = Some(session_id);
+                if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
+                    matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
+                }) {
+                    self.ui_state.list_state.select(Some(idx));
+                }
+                self.update_selection();
+                self.handle_select().await;
+            }
+            Some(QuickSwitchItem::Command(entry)) => {
+                self.ui_state.modal = Modal::None;
+                self.handle_command(entry.action.into()).await;
+            }
+            Some(QuickSwitchItem::SectionMove {
+                session_id, target, ..
+            }) => {
+                self.ui_state.modal = Modal::None;
+                self.apply_section_move(session_id, target).await;
+            }
+            None => {}
+        }
+    }
+
+    /// Check out the branch the checkout modal currently points at: the
+    /// highlighted match when the filter produced any, otherwise the raw
+    /// query text (so a pasted branch name still works — a leading
+    /// "origin/" is stripped to always get a local branch name).
+    async fn activate_checkout_selection(&mut self) {
+        let (project_id, branch_label) = match &self.ui_state.modal {
+            Modal::CheckoutBranch {
+                project_id,
+                query,
+                filtered,
+                selected_idx,
+                ..
+            } => {
+                let label = if let Some(m) = filtered.get(*selected_idx) {
+                    m.local_name.clone()
+                } else {
+                    let trimmed = query.trim();
+                    if trimmed.is_empty() {
+                        return;
+                    }
+                    trimmed
+                        .strip_prefix("origin/")
+                        .unwrap_or(trimmed)
+                        .to_string()
+                };
+                (*project_id, label)
+            }
+            _ => return,
+        };
+        self.ui_state.modal = Modal::None;
+        self.start_checkout_session(project_id, branch_label).await;
+    }
+
+    /// Submit the path-input modal, preferring the highlighted completion
+    /// over the typed value (so arrow-to-select-then-Enter works without
+    /// first pressing Tab) and falling back to the typed value when the
+    /// list is empty (e.g. a path that doesn't exist yet).
+    async fn submit_path_input(&mut self) {
+        let (action, submit_value) = match &self.ui_state.modal {
+            Modal::PathInput {
+                value,
+                on_submit,
+                completer,
+                ..
+            } => (
+                on_submit.clone(),
+                completer
+                    .selected_completion()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| value.clone()),
+            ),
+            _ => return,
+        };
+        self.ui_state.modal = Modal::None;
+        self.handle_input_submit(action, submit_value).await;
+    }
+
+    /// Mouse wheel while a (non-review) modal is open. List modals move the
+    /// highlighted row, clamping at the ends; the Help modal scrolls its
+    /// content. Other modals swallow the event so the panes underneath
+    /// don't scroll while covered.
+    fn modal_wheel(&mut self, down: bool) {
+        use super::actions::{LIST_MAX_VISIBLE, adjust_list_scroll, wheel_step};
+        match &mut self.ui_state.modal {
+            Modal::QuickSwitch {
+                matches,
+                selected_idx,
+                scroll,
+                ..
+            } => {
+                if !matches.is_empty() {
+                    *selected_idx = wheel_step(*selected_idx, down, matches.len());
+                    *scroll = adjust_list_scroll(*selected_idx, *scroll, LIST_MAX_VISIBLE);
+                }
+            }
+            Modal::CheckoutBranch {
+                filtered,
+                selected_idx,
+                scroll,
+                ..
+            } => {
+                if !filtered.is_empty() {
+                    *selected_idx = wheel_step(*selected_idx, down, filtered.len());
+                    *scroll = adjust_list_scroll(*selected_idx, *scroll, LIST_MAX_VISIBLE);
+                }
+            }
+            Modal::PathInput {
+                completer, scroll, ..
+            } => {
+                let (list, highlighted) = completer.visible_completions();
+                if let Some(idx) = highlighted {
+                    let new_idx = wheel_step(idx, down, list.len());
+                    completer.select(new_idx);
+                    *scroll = adjust_list_scroll(new_idx, *scroll, LIST_MAX_VISIBLE);
+                }
+            }
+            Modal::Help { scroll } => {
+                *scroll = scroll.saturating_add_signed(if down { 1 } else { -1 });
+            }
+            _ => {}
         }
     }
 

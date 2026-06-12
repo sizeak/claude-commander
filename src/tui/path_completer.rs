@@ -125,6 +125,14 @@ impl PathCompleter {
         }
     }
 
+    /// Move the highlight directly to `idx` (e.g. a mouse click on that
+    /// row). Out-of-range indices are ignored.
+    pub fn select(&mut self, idx: usize) {
+        if idx < self.completions.len() {
+            self.selected_idx = Some(idx);
+        }
+    }
+
     /// The currently highlighted completion, or `None` when the list is empty.
     pub fn selected_completion(&self) -> Option<&str> {
         self.selected_idx
@@ -446,6 +454,21 @@ mod tests {
         c.move_selection_up();
         c.move_selection_down();
         assert_eq!(c.visible_completions().1, None);
+    }
+
+    #[test]
+    fn select_sets_highlight_and_ignores_out_of_range() {
+        let tmp = setup_dirs(&["aaa", "bbb"]);
+        let mut c = PathCompleter::new();
+        c.refilter(&format!("{}/", tmp.path().display()));
+        c.select(1);
+        assert_eq!(
+            c.selected_completion().map(str::to_string),
+            Some(format!("{}/bbb", tmp.path().display()))
+        );
+        // Out-of-range clicks (e.g. an empty row) leave the highlight alone.
+        c.select(5);
+        assert_eq!(c.visible_completions().1, Some(1));
     }
 
     #[test]
