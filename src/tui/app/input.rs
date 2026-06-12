@@ -813,22 +813,18 @@ impl App {
                 selected_idx,
                 scroll,
                 ..
-            } => {
-                if !matches.is_empty() {
-                    *selected_idx = wheel_step(*selected_idx, down, matches.len());
-                    *scroll = adjust_list_scroll(*selected_idx, *scroll, LIST_MAX_VISIBLE);
-                }
+            } if !matches.is_empty() => {
+                *selected_idx = wheel_step(*selected_idx, down, matches.len());
+                *scroll = adjust_list_scroll(*selected_idx, *scroll, LIST_MAX_VISIBLE);
             }
             Modal::CheckoutBranch {
                 filtered,
                 selected_idx,
                 scroll,
                 ..
-            } => {
-                if !filtered.is_empty() {
-                    *selected_idx = wheel_step(*selected_idx, down, filtered.len());
-                    *scroll = adjust_list_scroll(*selected_idx, *scroll, LIST_MAX_VISIBLE);
-                }
+            } if !filtered.is_empty() => {
+                *selected_idx = wheel_step(*selected_idx, down, filtered.len());
+                *scroll = adjust_list_scroll(*selected_idx, *scroll, LIST_MAX_VISIBLE);
             }
             Modal::PathInput {
                 completer, scroll, ..
