@@ -15,7 +15,6 @@ use std::path::PathBuf;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::config::Config;
 use crate::error::{ConfigError, Result};
 use crate::git::{FileDiff, ParsedDiff, file_diff_hash};
 use crate::session::SessionId;
@@ -45,11 +44,6 @@ impl ReviewedStore {
     /// Construct a store rooted at `dir` (created lazily on first save).
     pub fn new(dir: PathBuf) -> Self {
         Self { dir }
-    }
-
-    /// Default store at `<data_dir>/reviewed/`.
-    pub fn open_default() -> Result<Self> {
-        Ok(Self::new(Config::data_dir()?.join("reviewed")))
     }
 
     fn path_for(&self, sid: SessionId) -> PathBuf {
