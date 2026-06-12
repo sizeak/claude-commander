@@ -231,18 +231,31 @@ fn default_pr_review_labels() -> Vec<String> {
     ]
 }
 
+/// Build the layered configuration sources for `config_path`:
+/// defaults → TOML file (if it exists) → `CC_*` environment variables
+/// (e.g. `CC_DEFAULT_PROGRAM`).
+///
+/// Env keys nest on a *double* underscore so single underscores stay part
+/// of the field name: `CC_DEFAULT_PROGRAM` maps to `default_program`,
+/// while `CC_THEME__PRESET` maps to `theme.preset`. (A single-underscore
+/// separator would shred every multi-word field into nonexistent nested
+/// keys and silently ignore the override.)
+///
+/// Shared by `Config::load` and `ConfigStore`'s hot-reload so the two
+/// resolution paths can never drift apart.
+pub(crate) fn config_figment(config_path: &std::path::Path) -> Figment {
+    Figment::new()
+        .merge(Serialized::defaults(Config::default()))
+        .merge(Toml::file(config_path))
+        .merge(Env::prefixed("CC_").split("__"))
+}
+
 impl Config {
     /// Load configuration from all sources
     pub fn load() -> Result<Self> {
         let config_path = Self::config_file_path()?;
 
-        let config: Config = Figment::new()
-            // Start with defaults
-            .merge(Serialized::defaults(Config::default()))
-            // Layer config file if it exists
-            .merge(Toml::file(&config_path))
-            // Layer environment variables (CC_DEFAULT_PROGRAM, etc.)
-            .merge(Env::prefixed("CC_").split("_"))
+        let config: Config = config_figment(&config_path)
             .extract()
             .map_err(|e| ConfigError::LoadFailed(e.to_string()))?;
 
@@ -466,6 +479,68 @@ fn parse_key_code(s: &str) -> KeyCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- CC_* environment variable layering --------------------------------
+    //
+    // `figment::Jail` sandboxes env vars and the working directory, so these
+    // tests never touch the real environment or filesystem.
+
+    #[test]
+    // figment's Jail closure must return its large Error type by value.
+    #[allow(clippy::result_large_err)]
+    fn test_env_var_overrides_multi_word_field() {
+        // Regression: `.split("_")` broke every underscore into a nested key
+        // (CC_DEFAULT_PROGRAM → `default.program`), so env overrides for
+        // multi-word fields — including the documented canonical example —
+        // were silently ignored.
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("CC_DEFAULT_PROGRAM", "env-program");
+            let config: Config =
+                config_figment(std::path::Path::new("missing-config.toml")).extract()?;
+            assert_eq!(config.default_program, "env-program");
+            Ok(())
+        });
+    }
+
+    #[test]
+    // figment's Jail closure must return its large Error type by value.
+    #[allow(clippy::result_large_err)]
+    fn test_env_var_overrides_config_file_value() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("config.toml", r#"branch_prefix = "from-file""#)?;
+            jail.set_env("CC_BRANCH_PREFIX", "from-env");
+            let config: Config = config_figment(std::path::Path::new("config.toml")).extract()?;
+            assert_eq!(config.branch_prefix, "from-env");
+            Ok(())
+        });
+    }
+
+    #[test]
+    // figment's Jail closure must return its large Error type by value.
+    #[allow(clippy::result_large_err)]
+    fn test_config_file_layers_over_defaults_without_env() {
+        figment::Jail::expect_with(|jail| {
+            jail.create_file("config.toml", r#"branch_prefix = "from-file""#)?;
+            let config: Config = config_figment(std::path::Path::new("config.toml")).extract()?;
+            assert_eq!(config.branch_prefix, "from-file");
+            Ok(())
+        });
+    }
+
+    #[test]
+    // figment's Jail closure must return its large Error type by value.
+    #[allow(clippy::result_large_err)]
+    fn test_env_var_addresses_nested_table_with_double_underscore() {
+        // Double underscore is the nesting separator: CC_THEME__PRESET maps
+        // to `theme.preset` while single underscores stay in the field name.
+        figment::Jail::expect_with(|jail| {
+            jail.set_env("CC_THEME__PRESET", "truecolor");
+            let config: Config =
+                config_figment(std::path::Path::new("missing-config.toml")).extract()?;
+            assert_eq!(config.theme.preset.as_deref(), Some("truecolor"));
+            Ok(())
+        });
+    }
 
     #[test]
     fn test_sections_toml_deserialises() {

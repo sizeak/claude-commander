@@ -93,6 +93,8 @@ tempfile = "3.10"
 pretty_assertions = "1.4"
 # Snapshot testing
 insta = "1.41"
+# figment::Jail for isolated env-var/config-file layering tests
+figment = { version = "0.10", features = ["test"] }
 
 [profile.release]
 lto = true
