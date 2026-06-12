@@ -843,6 +843,19 @@ fn test_apply_commander_enabled_toggles_bool() {
 }
 
 #[test]
+fn test_toggle_commander_enabled_via_bool_path() {
+    // "Commander Enabled" is a Toggle row, so the in-app settings UI flips it
+    // through `apply_bool_setting` (not `apply_settings_edit`, which only runs
+    // for text/editing rows). This arm must exist or the toggle is a no-op.
+    let mut app = make_test_app();
+    assert!(!app.config.commander_enabled);
+    app.apply_bool_setting("commander_enabled", true);
+    assert!(app.config.commander_enabled);
+    app.apply_bool_setting("commander_enabled", false);
+    assert!(!app.config.commander_enabled);
+}
+
+#[test]
 fn test_apply_commander_program_sets_and_clears() {
     let mut app = make_test_app();
     app.apply_settings_edit(

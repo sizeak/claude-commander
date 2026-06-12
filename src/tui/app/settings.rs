@@ -991,6 +991,7 @@ impl App {
             "rounded_borders" => self.config.rounded_borders = value,
             "precompute_review_caches" => self.config.precompute_review_caches = value,
             "ai_summary_enabled" => self.config.ai_summary_enabled = value,
+            "commander_enabled" => self.config.commander_enabled = value,
             _ => {
                 warn!("Unknown boolean setting: {}", field_key);
                 return;
