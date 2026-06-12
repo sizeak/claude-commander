@@ -10,8 +10,9 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::comment::{
-    ApplyOutcome, Comment, CommentSide, CommentStatus, CommentStore, SendDecision,
-    compose_markdown, decide_send, reanchor_comments,
+    ApplyOutcome, Comment, CommentSide, CommentStatus, CommentStore, CommentTarget,
+    PrReviewOutcome, PrVerdict, SendDecision, compose_markdown, compose_pr_review, decide_send,
+    pending_for_target, reanchor_comments,
 };
 use crate::config::{AppState, Config, ConfigStore, StateStore};
 use crate::error::{Result, SessionError};
@@ -338,7 +339,8 @@ impl CommanderService {
             draft.line_range,
             draft.snippet,
             draft.comment,
-        );
+        )
+        .with_target(draft.target);
         let id = ann.id;
         self.comments.add(*session_id, ann)?;
         Ok(id)
@@ -381,12 +383,9 @@ impl CommanderService {
         reanchor_comments(&mut comments, &parsed);
         self.comments.save(*session_id, &comments)?;
 
-        // Only not-yet-applied comments participate.
-        let staged: Vec<Comment> = comments
-            .iter()
-            .filter(|a| a.status != CommentStatus::Applied)
-            .cloned()
-            .collect();
+        // Only not-yet-applied, agent-targeted comments participate; PR comments
+        // are delivered separately via `submit_pr_review`.
+        let staged = pending_for_target(&comments, CommentTarget::Agent);
         if staged.is_empty() {
             return Ok(ApplyOutcome::Nothing);
         }
@@ -425,10 +424,10 @@ impl CommanderService {
         self.manager.tmux.send_keys(&tmux_name, &prompt).await?;
         self.manager.tmux.send_keys(&tmux_name, "Enter").await?;
 
-        // Mark the delivered comments applied.
+        // Mark the delivered (agent-targeted) comments applied.
         for ann in comments
             .iter_mut()
-            .filter(|a| a.status != CommentStatus::Applied)
+            .filter(|a| a.status != CommentStatus::Applied && a.target == CommentTarget::Agent)
         {
             ann.status = CommentStatus::Applied;
         }
@@ -436,6 +435,130 @@ impl CommanderService {
 
         Ok(ApplyOutcome::Applied { path, count })
     }
+
+    /// Submit a session's PR-targeted comments as a single GitHub review.
+    ///
+    /// Re-anchors first so drift status is current; if any PR comment is
+    /// drifted the submission is blocked. The comments are composed into a
+    /// reviews-API payload and posted via `gh api .../pulls/{n}/reviews` from
+    /// the session's worktree. On success the submitted comments are marked
+    /// [`CommentStatus::Applied`]. Returns [`PrReviewOutcome::NoPr`] when the
+    /// session has no associated pull request.
+    pub async fn submit_pr_review(
+        &self,
+        session_id: &SessionId,
+        verdict: PrVerdict,
+        summary: &str,
+    ) -> Result<PrReviewOutcome> {
+        let (worktree_path, review_base, pr_number) = {
+            let state = self.store.read().await;
+            let s = state
+                .sessions
+                .get(session_id)
+                .ok_or(SessionError::NotFound(*session_id))?;
+            (s.worktree_path.clone(), ReviewBase::of(s), s.pr_number)
+        };
+
+        let Some(pr_number) = pr_number else {
+            return Ok(PrReviewOutcome::NoPr);
+        };
+
+        // Re-anchor against a fresh diff so drift status is current.
+        let base = review_base.git_ref(&worktree_path).await;
+        let raw = compose_review_diff(&worktree_path, &base).await?;
+        let parsed = parse_unified_diff(&raw);
+        let mut comments = self.comments.load(*session_id)?;
+        reanchor_comments(&mut comments, &parsed);
+        self.comments.save(*session_id, &comments)?;
+
+        // Only not-yet-applied, PR-targeted comments participate.
+        let staged = pending_for_target(&comments, CommentTarget::Pr);
+        if staged.is_empty() {
+            return Ok(PrReviewOutcome::Nothing);
+        }
+        let drifted: Vec<Uuid> = staged
+            .iter()
+            .filter(|a| a.status == CommentStatus::Drifted)
+            .map(|a| a.id)
+            .collect();
+        if !drifted.is_empty() {
+            return Ok(PrReviewOutcome::Blocked { drifted });
+        }
+
+        // Post the review via `gh api`, letting gh resolve {owner}/{repo} from
+        // the worktree's remote.
+        let payload = compose_pr_review(verdict, summary, &staged);
+        submit_review_via_gh(&worktree_path, pr_number, &payload).await?;
+
+        // Mark the submitted comments applied.
+        for ann in comments
+            .iter_mut()
+            .filter(|a| a.status != CommentStatus::Applied && a.target == CommentTarget::Pr)
+        {
+            ann.status = CommentStatus::Applied;
+        }
+        self.comments.save(*session_id, &comments)?;
+
+        Ok(PrReviewOutcome::Submitted {
+            count: staged.len(),
+        })
+    }
+}
+
+/// Post a composed review payload to a PR via `gh api`. `gh` resolves the
+/// `{owner}`/`{repo}` placeholders from the worktree's git remote, so no repo
+/// slug is needed. The JSON body is fed on stdin.
+async fn submit_review_via_gh(
+    worktree_path: &std::path::Path,
+    pr_number: u32,
+    payload: &serde_json::Value,
+) -> Result<()> {
+    use tokio::io::AsyncWriteExt;
+
+    let body = serde_json::to_string(payload)
+        .map_err(|e| crate::error::GitError::OperationFailed(e.to_string()))?;
+    let mut child = tokio::process::Command::new("gh")
+        .args([
+            "api",
+            "--method",
+            "POST",
+            &format!("repos/{{owner}}/{{repo}}/pulls/{pr_number}/reviews"),
+            "--input",
+            "-",
+        ])
+        .current_dir(worktree_path)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            crate::error::GitError::OperationFailed(format!("gh api spawn failed: {e}"))
+        })?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(body.as_bytes())
+            .await
+            .map_err(|e| crate::error::GitError::OperationFailed(e.to_string()))?;
+        stdin
+            .shutdown()
+            .await
+            .map_err(|e| crate::error::GitError::OperationFailed(e.to_string()))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|e| crate::error::GitError::OperationFailed(e.to_string()))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(crate::error::GitError::OperationFailed(format!(
+            "gh api PR review failed: {}",
+            stderr.trim()
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 /// Write the apply brief to a stable absolute path in the system temp dir
@@ -588,6 +711,8 @@ pub struct NewComment {
     pub line_range: (usize, usize),
     pub snippet: String,
     pub comment: String,
+    /// Where the comment is delivered when applied (agent vs PR).
+    pub target: CommentTarget,
 }
 
 /// Result of opening the review view: the parsed diff plus the session's

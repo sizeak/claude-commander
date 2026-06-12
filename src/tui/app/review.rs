@@ -9,7 +9,7 @@ use super::*;
 use crossterm::event::KeyEvent;
 
 use crate::api::NewComment;
-use crate::comment::{Comment, CommentSide, CommentStatus};
+use crate::comment::{Comment, CommentSide, CommentStatus, CommentTarget, PrVerdict};
 use crate::git::{DiffLine, FileDiff, FileStatus, Hunk, LineOrigin, ParsedDiff};
 use crate::tui::syntax_highlight::{highlight_line, warm_highlight_cache};
 use crate::tui::theme::{ColorMode, ReviewPalette};
@@ -145,6 +145,8 @@ pub struct CommentDraft {
     pub text: String,
     /// Inclusive selectable-line index range the comment applies to.
     pub range: (usize, usize),
+    /// Where the comment will be delivered when applied (toggled with Tab).
+    pub target: CommentTarget,
 }
 
 /// State backing the full-screen review view.
@@ -168,6 +170,8 @@ pub struct DiffReviewState {
     pub visual_anchor: Option<usize>,
     /// `Some` while the comment box is open.
     pub comment: Option<CommentDraft>,
+    /// `true` while the PR-review verdict picker (c/a/r) is open.
+    pub pr_verdict_prompt: bool,
     pub layout: ReviewLayout,
     /// File tree built from the diff's paths (single-child directory chains
     /// compressed, lazygit-style).
@@ -246,6 +250,7 @@ impl DiffReviewState {
             cursor: 0,
             visual_anchor: None,
             comment: None,
+            pr_verdict_prompt: false,
             layout: ReviewLayout::Inline,
             file_tree,
             collapsed: HashSet::new(),
@@ -587,6 +592,7 @@ impl DiffReviewState {
         self.comment = Some(CommentDraft {
             text: String::new(),
             range: self.selection(),
+            target: CommentTarget::Agent,
         });
         self.follow_draft();
         true
@@ -826,7 +832,12 @@ impl DiffReviewState {
     /// text. Picks the New side unless the selection is purely deletions, and
     /// captures the snippet/line range from that side's lines only (so it
     /// re-anchors cleanly).
-    fn build_draft(&self, range: (usize, usize), comment: String) -> Option<NewComment> {
+    fn build_draft(
+        &self,
+        range: (usize, usize),
+        comment: String,
+        target: CommentTarget,
+    ) -> Option<NewComment> {
         let file = self.current_file()?;
         let sel = self.selected_lines(range);
         if sel.is_empty() {
@@ -848,7 +859,15 @@ impl DiffReviewState {
                 .collect::<Vec<_>>()
                 .join("\n"),
             comment,
+            target,
         })
+    }
+
+    /// Whether any PR-targeted comment is still awaiting submission.
+    pub fn has_pending_pr_comments(&self) -> bool {
+        self.comments
+            .iter()
+            .any(|c| c.target == CommentTarget::Pr && c.status != CommentStatus::Applied)
     }
 
     /// Id of a not-yet-applied comment covering the cursor line, if any.
@@ -1149,6 +1168,13 @@ impl App {
             return;
         }
 
+        // PR-review verdict picker captures all input while open.
+        if state.pr_verdict_prompt {
+            self.handle_pr_verdict_key(key, &mut state).await;
+            self.ui_state.modal = Modal::ReviewDiff(state);
+            return;
+        }
+
         // Ctrl+Q closes the view (consistency with the tmux-session shortcut),
         // alongside Esc. The modal was already replaced with None on extraction.
         if key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -1205,9 +1231,62 @@ impl App {
                 }
             }
             KeyCode::Char('a') => self.apply_review(&mut state).await,
+            KeyCode::Char('p') => {
+                if state.has_pending_pr_comments() {
+                    state.pr_verdict_prompt = true;
+                } else {
+                    self.set_review_status("No PR comments to submit");
+                }
+            }
             _ => {}
         }
         self.ui_state.modal = Modal::ReviewDiff(state);
+    }
+
+    /// Handle a key while the PR-review verdict picker is open: pick a verdict
+    /// (c/a/r), submit, or cancel (Esc).
+    async fn handle_pr_verdict_key(&mut self, key: KeyEvent, state: &mut DiffReviewState) {
+        use crossterm::event::KeyCode;
+        let verdict = match key.code {
+            KeyCode::Esc => {
+                state.pr_verdict_prompt = false;
+                return;
+            }
+            KeyCode::Char('c') => PrVerdict::Comment,
+            KeyCode::Char('a') => PrVerdict::Approve,
+            KeyCode::Char('r') => PrVerdict::RequestChanges,
+            _ => return,
+        };
+        state.pr_verdict_prompt = false;
+        self.submit_pr_review(state, verdict).await;
+    }
+
+    /// Submit the session's PR-targeted comments as a GitHub review and report
+    /// the outcome.
+    async fn submit_pr_review(&mut self, state: &mut DiffReviewState, verdict: PrVerdict) {
+        use crate::comment::PrReviewOutcome;
+        match self
+            .service
+            .submit_pr_review(&state.session_id, verdict, "")
+            .await
+        {
+            Ok(PrReviewOutcome::Nothing) => self.set_review_status("No PR comments to submit"),
+            Ok(PrReviewOutcome::NoPr) => {
+                self.set_review_status("This session has no pull request to review")
+            }
+            Ok(PrReviewOutcome::Blocked { drifted }) => self.set_review_status(&format!(
+                "{} drifted comment(s) block submit — review or delete them",
+                drifted.len()
+            )),
+            Ok(PrReviewOutcome::Submitted { count }) => {
+                self.reload_review_comments(state).await;
+                self.set_review_status(&format!(
+                    "Submitted {count} comment(s) to the PR ({})",
+                    verdict.label()
+                ));
+            }
+            Err(e) => self.set_review_status(&format!("PR review failed: {e}")),
+        }
     }
 
     async fn handle_review_comment_key(&mut self, key: KeyEvent, state: &mut DiffReviewState) {
@@ -1224,7 +1303,7 @@ impl App {
                 if draft.text.trim().is_empty() {
                     return;
                 }
-                if let Some(ann) = state.build_draft(draft.range, draft.text) {
+                if let Some(ann) = state.build_draft(draft.range, draft.text, draft.target) {
                     match self.service.create_comment(&state.session_id, ann).await {
                         Ok(_) => {
                             state.visual_anchor = None;
@@ -1233,6 +1312,13 @@ impl App {
                         Err(e) => self.set_review_status(&format!("Comment failed: {e}")),
                     }
                 }
+            }
+            // Toggle where the comment will go: agent (Claude) vs the PR.
+            KeyCode::Tab => {
+                draft.target = match draft.target {
+                    CommentTarget::Agent => CommentTarget::Pr,
+                    CommentTarget::Pr => CommentTarget::Agent,
+                };
             }
             KeyCode::Backspace => {
                 draft.text.pop();
@@ -1293,14 +1379,22 @@ impl App {
         self.render_review_file_list(frame, cols[0], state);
         self.render_review_body(frame, cols[1], state);
 
-        let hint = if state.comment.is_some() {
-            " type comment · Enter save · Esc cancel "
+        let compose_hint = state.comment.as_ref().map(|d| match d.target {
+            CommentTarget::Agent => {
+                " → Claude · type comment · Enter save · Tab → PR · Esc cancel "
+            }
+            CommentTarget::Pr => " → PR · type comment · Enter save · Tab → Claude · Esc cancel ",
+        });
+        let hint = if state.pr_verdict_prompt {
+            " submit PR review — c comment · a approve · r request changes · Esc cancel "
+        } else if let Some(h) = compose_hint {
+            h
         } else if state.visual_anchor.is_some() {
             " ↑↓ extend · Enter/right-click comment · v/Esc cancel selection "
         } else if state.focus == ReviewFocus::FileList {
             " ↑↓/jk move · Enter expand/collapse · [ ] file · Tab to diff · ^R session · ^Q/Esc close "
         } else {
-            " ↑↓/jk move · v select · Enter comment · z fold · d delete · a apply · t layout · ^R session · ^Q/Esc close "
+            " ↑↓/jk move · v select · Enter comment · z fold · d delete · a → Claude · p → PR · t layout · ^R session · ^Q/Esc close "
         };
         // The footer doubles as this view's status bar — styled like the app
         // status bar so it reads as a replacement, not a second bar.
@@ -1308,6 +1402,39 @@ impl App {
             Paragraph::new(Line::from(hint)).style(self.theme.status_bar()),
             rows[1],
         );
+
+        if state.pr_verdict_prompt {
+            self.render_pr_verdict_prompt(frame, rows[0]);
+        }
+    }
+
+    /// Render the centered PR-review verdict picker over the diff body.
+    fn render_pr_verdict_prompt(&self, frame: &mut Frame, area: Rect) {
+        let pal = self.theme.review_palette();
+        let lines = vec![
+            Line::from(""),
+            Line::from("  [c] Comment"),
+            Line::from("  [a] Approve"),
+            Line::from("  [r] Request changes"),
+            Line::from(""),
+            Line::from("  Esc to cancel"),
+        ];
+        let width = 32u16.min(area.width);
+        let height = (lines.len() as u16 + 2).min(area.height);
+        let x = area.x + (area.width.saturating_sub(width)) / 2;
+        let y = area.y + (area.height.saturating_sub(height)) / 2;
+        let popup = Rect {
+            x,
+            y,
+            width,
+            height,
+        };
+        frame.render_widget(Clear, popup);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(pal.border_focused)
+            .title(" Submit PR review ");
+        frame.render_widget(Paragraph::new(lines).block(block), popup);
     }
 
     fn render_review_file_list(&self, frame: &mut Frame, area: Rect, state: &DiffReviewState) {
@@ -1904,12 +2031,17 @@ fn comment_box_lines(
         String::new()
     };
     let chevron = if collapsed { '▸' } else { '▾' };
+    // Tag the destination so agent vs PR comments are distinguishable at a glance.
+    let target = match ann.target {
+        CommentTarget::Agent => "→ Claude",
+        CommentTarget::Pr => "→ PR",
+    };
 
     if collapsed {
         // A single capped horizontal rule (not box corners) so a folded comment
         // reads as one deliberate line rather than the top half of a box.
         let preview = ann.comment.lines().next().unwrap_or("");
-        let header = hrule(&format!("{chevron} {marker}{preview} "), inner);
+        let header = hrule(&format!("{chevron} {marker}[{target}] {preview} "), inner);
         return vec![Line::from(Span::styled(
             format!("{INDENT}╶{header}╴"),
             border,
@@ -1924,7 +2056,7 @@ fn comment_box_lines(
     };
 
     let mut out = Vec::new();
-    let header = hrule(&format!("{chevron} {marker}comment "), inner);
+    let header = hrule(&format!("{chevron} {marker}comment {target} "), inner);
     out.push(Line::from(Span::styled(
         format!("{INDENT}{tl}{header}{tr}"),
         border,
@@ -2551,11 +2683,54 @@ diff --git a/b.rs b/b.rs
     }
 
     #[test]
+    fn begin_comment_defaults_target_to_agent() {
+        let mut s = state_with_two_files();
+        s.focus = ReviewFocus::Body;
+        s.cursor = 1;
+        assert!(s.begin_comment());
+        assert_eq!(s.comment.unwrap().target, CommentTarget::Agent);
+    }
+
+    #[test]
+    fn build_draft_threads_pr_target() {
+        let mut s = state_with_two_files();
+        s.cursor = 1;
+        let draft = s
+            .build_draft((1, 1), "post this".to_string(), CommentTarget::Pr)
+            .unwrap();
+        assert_eq!(draft.target, CommentTarget::Pr);
+    }
+
+    #[test]
+    fn has_pending_pr_comments_ignores_agent_and_applied() {
+        let mut s = state_with_two_files();
+        // Only an agent comment → no pending PR work.
+        s.comments = vec![Comment::new("a.rs", CommentSide::New, (2, 2), "y", "note")];
+        assert!(!s.has_pending_pr_comments());
+
+        // An applied PR comment doesn't count.
+        let mut applied = Comment::new("a.rs", CommentSide::New, (2, 2), "y", "note")
+            .with_target(CommentTarget::Pr);
+        applied.status = CommentStatus::Applied;
+        s.comments.push(applied);
+        assert!(!s.has_pending_pr_comments());
+
+        // A staged PR comment does.
+        s.comments.push(
+            Comment::new("a.rs", CommentSide::New, (2, 2), "y", "note")
+                .with_target(CommentTarget::Pr),
+        );
+        assert!(s.has_pending_pr_comments());
+    }
+
+    #[test]
     fn build_draft_picks_new_side_and_captures_snippet() {
         let mut s = state_with_two_files();
         // Select the inserted line (selectable index 1: "+    let y = 3;").
         s.cursor = 1;
-        let draft = s.build_draft((1, 1), "extract helper".to_string()).unwrap();
+        let draft = s
+            .build_draft((1, 1), "extract helper".to_string(), CommentTarget::Agent)
+            .unwrap();
         assert_eq!(draft.file, "a.rs");
         assert_eq!(draft.side, CommentSide::New);
         assert_eq!(draft.line_range, (2, 2));
@@ -2591,7 +2766,9 @@ diff --git a/x.rs b/x.rs
         assert_eq!(s.resolved_line_range((2, 2)), Some((1, 1)));
         // And build_draft anchors to the same number, so title and storage agree.
         assert_eq!(
-            s.build_draft((2, 2), "x".into()).unwrap().line_range,
+            s.build_draft((2, 2), "x".into(), CommentTarget::Agent)
+                .unwrap()
+                .line_range,
             (1, 1)
         );
     }
@@ -2601,7 +2778,9 @@ diff --git a/x.rs b/x.rs
         let mut s = state_with_two_files();
         s.selected_file = 1; // b.rs: -b / +B
         // selectable index 0 is the deletion "-b".
-        let draft = s.build_draft((0, 0), "why?".to_string()).unwrap();
+        let draft = s
+            .build_draft((0, 0), "why?".to_string(), CommentTarget::Agent)
+            .unwrap();
         assert_eq!(draft.side, CommentSide::Old);
         assert_eq!(draft.snippet, "b");
     }
