@@ -1346,7 +1346,10 @@ diff --git a/a.rs b/a.rs
         assert_eq!(refilter, None);
         match modal {
             Modal::ReviewDiff(state) => {
-                assert_eq!(state.comment.as_ref().unwrap().text, "use a helper");
+                assert_eq!(
+                    state.comment.as_ref().unwrap().input.value(),
+                    "use a helper"
+                );
             }
             _ => panic!("modal variant changed"),
         }

@@ -18,9 +18,11 @@ futures = "0.3"
 clap = { version = "4.5", features = ["derive"] }
 
 # TUI
-ratatui = "0.29"
-crossterm = { version = "0.28", features = ["event-stream"] }
-ansi-to-tui = "7"
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
+ansi-to-tui = "8"
+# Text-input buffer (cursor/editing) for the review comment box.
+tui-input = "0.15"
 
 # Git (pure Rust)
 gix = { version = "0.68", default-features = false, features = [
@@ -76,7 +78,7 @@ pty-process = { version = "0.5", features = ["async"] }
 nix = { version = "0.29", features = ["term", "poll", "fs"] }
 
 # Throbber/spinner widget
-throbber-widgets-tui = "0.8"
+throbber-widgets-tui = "0.11"
 
 # Fuzzy matching for the quick-select palette
 fuzzy-matcher = "0.3"

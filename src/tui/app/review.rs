@@ -15,6 +15,7 @@ use crate::tui::syntax_highlight::{highlight_line, warm_highlight_cache};
 use crate::tui::theme::{ColorMode, ReviewPalette};
 use rayon::prelude::*;
 use std::cell::{Cell, Ref, RefCell};
+use tui_input::Input;
 
 /// Gutter / badge / box marker for a staged comment. An asterisk is the
 /// conventional note/comment marker and stays crisp at one cell.
@@ -142,7 +143,9 @@ fn line_wrap_rows(content: &str, content_width: usize) -> usize {
 /// An in-progress comment, captured against a selectable-line range.
 #[derive(Debug, Clone)]
 pub struct CommentDraft {
-    pub text: String,
+    /// Editable comment text plus cursor (insert/delete/navigate in place),
+    /// backed by `tui-input`.
+    pub input: Input,
     /// Inclusive selectable-line index range the comment applies to.
     pub range: (usize, usize),
 }
@@ -534,7 +537,9 @@ impl DiffReviewState {
                 if draft_anchor == Some(sel)
                     && let Some(draft) = self.comment.as_ref()
                 {
-                    for _ in 0..comment_draft_box_height(&draft.text, body_width) {
+                    for _ in
+                        0..comment_draft_box_height(&draft_caret_text(&draft.input), body_width)
+                    {
                         rows.push(BodyRow::Draft);
                     }
                 }
@@ -617,7 +622,7 @@ impl DiffReviewState {
         }
         self.focus = ReviewFocus::Body;
         self.comment = Some(CommentDraft {
-            text: String::new(),
+            input: Input::default(),
             range: self.selection(),
         });
         self.follow_draft();
@@ -634,7 +639,11 @@ impl DiffReviewState {
         let Some(draft) = self.comment.as_mut() else {
             return false;
         };
-        draft.text.push_str(&text.replace('\r', ""));
+        // `tui-input` has no bulk insert, so feed chars one at a time at the
+        // cursor. CRs from CRLF clipboards are dropped; newlines are kept.
+        for c in text.chars().filter(|&c| c != '\r') {
+            draft.input.handle(tui_input::InputRequest::InsertChar(c));
+        }
         self.follow_draft();
         true
     }
@@ -985,7 +994,10 @@ impl DiffReviewState {
                             if self.draft_anchor() == Some(sel)
                                 && let Some(draft) = self.comment.as_ref()
                             {
-                                row += comment_draft_box_height(&draft.text, width);
+                                row += comment_draft_box_height(
+                                    &draft_caret_text(&draft.input),
+                                    width,
+                                );
                             }
                         }
                     }
@@ -1266,7 +1278,7 @@ impl App {
     }
 
     async fn handle_review_comment_key(&mut self, key: KeyEvent, state: &mut DiffReviewState) {
-        use crossterm::event::{KeyCode, KeyModifiers};
+        use crossterm::event::{Event, KeyCode};
         let Some(draft) = state.comment.as_mut() else {
             return;
         };
@@ -1276,10 +1288,11 @@ impl App {
             }
             KeyCode::Enter => {
                 let draft = state.comment.take().expect("comment present");
-                if draft.text.trim().is_empty() {
+                if draft.input.value().trim().is_empty() {
                     return;
                 }
-                if let Some(ann) = state.build_draft(draft.range, draft.text) {
+                let range = draft.range;
+                if let Some(ann) = state.build_draft(range, draft.input.value().to_string()) {
                     match self.service.create_comment(&state.session_id, ann).await {
                         Ok(_) => {
                             state.visual_anchor = None;
@@ -1289,17 +1302,15 @@ impl App {
                     }
                 }
             }
-            KeyCode::Backspace => {
-                draft.text.pop();
-                state.follow_draft();
+            // Everything else (chars, backspace, delete, arrows, Home/End,
+            // word/line shortcuts) is `tui-input`'s standard edit keymap.
+            _ => {
+                if let Some(req) = tui_input::backend::crossterm::to_input_request(&Event::Key(key))
+                {
+                    draft.input.handle(req);
+                    state.follow_draft();
+                }
             }
-            // Ignore Ctrl-combos (e.g. Ctrl+Q) so they don't insert a literal
-            // character into the comment.
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                draft.text.push(c);
-                state.follow_draft();
-            }
-            _ => {}
         }
     }
 
@@ -1354,7 +1365,7 @@ impl App {
             .map(|kb| format!("{kb} session · "))
             .unwrap_or_default();
         let hint = if state.comment.is_some() {
-            " type comment · Enter save · Esc cancel ".to_string()
+            " type comment · ←→/Home/End move · Enter save · Esc cancel ".to_string()
         } else if state.visual_anchor.is_some() {
             " ↑↓ extend · Enter/right-click comment · v/Esc cancel selection ".to_string()
         } else if state.focus == ReviewFocus::FileList {
@@ -1801,7 +1812,7 @@ fn review_body_lines(
                 && let Some(draft) = state.comment.as_ref()
             {
                 out.extend(comment_draft_box_lines(
-                    &draft.text,
+                    &draft_caret_text(&draft.input),
                     &draft_loc_label(state, draft.range),
                     width,
                     pal,
@@ -2047,10 +2058,30 @@ fn draft_loc_label(state: &DiffReviewState, range: (usize, usize)) -> String {
     }
 }
 
+/// The draft's text with the caret glyph spliced in at the cursor's char
+/// position (appended when the cursor is at the end). Both the layout model and
+/// the renderer wrap this exact string, so they stay in step (guarded by a
+/// test).
+fn draft_caret_text(input: &Input) -> String {
+    let chars: Vec<char> = input.value().chars().collect();
+    let mut out = String::with_capacity(input.value().len() + DRAFT_CARET.len_utf8());
+    for (i, ch) in chars.iter().enumerate() {
+        if i == input.cursor() {
+            out.push(DRAFT_CARET);
+        }
+        out.push(*ch);
+    }
+    if input.cursor() >= chars.len() {
+        out.push(DRAFT_CARET);
+    }
+    out
+}
+
 /// Number of rendered rows [`comment_draft_box_lines`] produces for the same
-/// `text`/`width`. Drives the inline layout model so cursor/scroll/click stay
-/// in step with the rendered edit box (guarded by a test).
-fn comment_draft_box_height(text: &str, width: usize) -> usize {
+/// `display`/`width`. Drives the inline layout model so cursor/scroll/click stay
+/// in step with the rendered edit box (guarded by a test). `display` is the
+/// caret-embedded text from [`draft_caret_text`].
+fn comment_draft_box_height(display: &str, width: usize) -> usize {
     const INDENT_LEN: usize = 2; // "  "
     let avail = width.saturating_sub(INDENT_LEN);
     if avail < 8 {
@@ -2058,7 +2089,7 @@ fn comment_draft_box_height(text: &str, width: usize) -> usize {
     }
     let inner = avail - 2;
     let text_width = inner.saturating_sub(2);
-    let body = wrap_text(&format!("{text}{DRAFT_CARET}"), text_width).len();
+    let body = wrap_text(display, text_width).len();
     // Top border + wrapped body lines + bottom border.
     body + 2
 }
@@ -2066,10 +2097,10 @@ fn comment_draft_box_height(text: &str, width: usize) -> usize {
 /// Render the in-progress comment as an inline edit box, anchored where the
 /// saved comment will appear. Same geometry as [`comment_box_lines`]'s expanded
 /// form (so the layout model can share width math) but with the draft border
-/// colour, a `*`-marked title carrying the line range, and a caret after the
-/// text.
+/// colour, a `*`-marked title carrying the line range, and a caret at the
+/// cursor. `display` is the caret-embedded text from [`draft_caret_text`].
 fn comment_draft_box_lines(
-    text: &str,
+    display: &str,
     loc: &str,
     width: usize,
     pal: &ReviewPalette,
@@ -2095,7 +2126,7 @@ fn comment_draft_box_lines(
         border,
     )));
     let text_width = inner.saturating_sub(2);
-    for chunk in wrap_text(&format!("{text}{DRAFT_CARET}"), text_width) {
+    for chunk in wrap_text(display, text_width) {
         let body: String = chunk.chars().take(text_width).collect();
         out.push(Line::from(vec![
             Span::styled(format!("{INDENT}│"), border),
@@ -2545,7 +2576,7 @@ fn review_body_lines_side_by_side(
                         && let Some(draft) = state.comment.as_ref()
                     {
                         out.extend(comment_draft_box_lines(
-                            &draft.text,
+                            &draft_caret_text(&draft.input),
                             &draft_loc_label(state, draft.range),
                             width,
                             pal,
@@ -3143,12 +3174,19 @@ diff --git a/c.rs b/c.rs
     #[test]
     fn comment_draft_box_height_matches_rendered() {
         let pal = Theme::truecolor().review_palette();
-        for text in ["", "short", &"word ".repeat(40)] {
+        // Cover end-of-text and mid-text caret placement (the caret is spliced
+        // into `display` before either function wraps it).
+        for display in [
+            "▏",
+            "short▏",
+            "mid▏dle",
+            &format!("{}▏", "word ".repeat(40)),
+        ] {
             for width in [12usize, 40, 80, 6 /* below the 8-col floor */] {
                 assert_eq!(
-                    comment_draft_box_height(text, width),
-                    comment_draft_box_lines(text, "line 1", width, &pal, true).len(),
-                    "height mismatch (width={width}, text={text:?})"
+                    comment_draft_box_height(display, width),
+                    comment_draft_box_lines(display, "line 1", width, &pal, true).len(),
+                    "height mismatch (width={width}, display={display:?})"
                 );
             }
         }
@@ -3602,9 +3640,9 @@ diff --git a/x.rs b/x.rs
         let mut s = state_with_two_files();
         s.focus = ReviewFocus::Body;
         s.begin_comment();
-        s.comment.as_mut().unwrap().text.push_str("see ");
+        s.paste_into_draft("see ");
         assert!(s.paste_into_draft("the docs"));
-        assert_eq!(s.comment.as_ref().unwrap().text, "see the docs");
+        assert_eq!(s.comment.as_ref().unwrap().input.value(), "see the docs");
     }
 
     #[test]
@@ -3617,7 +3655,10 @@ diff --git a/x.rs b/x.rs
         s.focus = ReviewFocus::Body;
         s.begin_comment();
         assert!(s.paste_into_draft("let x = 1;\r\nlet y = 2;\r\n"));
-        assert_eq!(s.comment.as_ref().unwrap().text, "let x = 1;\nlet y = 2;\n");
+        assert_eq!(
+            s.comment.as_ref().unwrap().input.value(),
+            "let x = 1;\nlet y = 2;\n"
+        );
     }
 
     #[test]
