@@ -537,9 +537,10 @@ impl DiffReviewState {
                 if draft_anchor == Some(sel)
                     && let Some(draft) = self.comment.as_ref()
                 {
-                    for _ in
-                        0..comment_draft_box_height(&draft_caret_text(&draft.input), body_width)
-                    {
+                    for _ in 0..comment_draft_box_height(
+                        &super::input_with_caret(&draft.input),
+                        body_width,
+                    ) {
                         rows.push(BodyRow::Draft);
                     }
                 }
@@ -995,7 +996,7 @@ impl DiffReviewState {
                                 && let Some(draft) = self.comment.as_ref()
                             {
                                 row += comment_draft_box_height(
-                                    &draft_caret_text(&draft.input),
+                                    &super::input_with_caret(&draft.input),
                                     width,
                                 );
                             }
@@ -1812,7 +1813,7 @@ fn review_body_lines(
                 && let Some(draft) = state.comment.as_ref()
             {
                 out.extend(comment_draft_box_lines(
-                    &draft_caret_text(&draft.input),
+                    &super::input_with_caret(&draft.input),
                     &draft_loc_label(state, draft.range),
                     width,
                     pal,
@@ -2044,9 +2045,6 @@ fn comment_box_lines(
     out
 }
 
-/// Caret glyph shown at the end of the in-progress comment text.
-const DRAFT_CARET: char = '▏';
-
 /// A short label for the line(s) the in-progress comment covers, using the
 /// displayed gutter numbers (e.g. `line 5` / `lines 5–8`), for the edit box
 /// title. Mirrors the label the old bottom overlay showed.
@@ -2058,29 +2056,10 @@ fn draft_loc_label(state: &DiffReviewState, range: (usize, usize)) -> String {
     }
 }
 
-/// The draft's text with the caret glyph spliced in at the cursor's char
-/// position (appended when the cursor is at the end). Both the layout model and
-/// the renderer wrap this exact string, so they stay in step (guarded by a
-/// test).
-fn draft_caret_text(input: &Input) -> String {
-    let chars: Vec<char> = input.value().chars().collect();
-    let mut out = String::with_capacity(input.value().len() + DRAFT_CARET.len_utf8());
-    for (i, ch) in chars.iter().enumerate() {
-        if i == input.cursor() {
-            out.push(DRAFT_CARET);
-        }
-        out.push(*ch);
-    }
-    if input.cursor() >= chars.len() {
-        out.push(DRAFT_CARET);
-    }
-    out
-}
-
 /// Number of rendered rows [`comment_draft_box_lines`] produces for the same
 /// `display`/`width`. Drives the inline layout model so cursor/scroll/click stay
 /// in step with the rendered edit box (guarded by a test). `display` is the
-/// caret-embedded text from [`draft_caret_text`].
+/// caret-embedded text from [`super::input_with_caret`].
 fn comment_draft_box_height(display: &str, width: usize) -> usize {
     const INDENT_LEN: usize = 2; // "  "
     let avail = width.saturating_sub(INDENT_LEN);
@@ -2098,7 +2077,7 @@ fn comment_draft_box_height(display: &str, width: usize) -> usize {
 /// saved comment will appear. Same geometry as [`comment_box_lines`]'s expanded
 /// form (so the layout model can share width math) but with the draft border
 /// colour, a `*`-marked title carrying the line range, and a caret at the
-/// cursor. `display` is the caret-embedded text from [`draft_caret_text`].
+/// cursor. `display` is the caret-embedded text from [`super::input_with_caret`].
 fn comment_draft_box_lines(
     display: &str,
     loc: &str,
@@ -2576,7 +2555,7 @@ fn review_body_lines_side_by_side(
                         && let Some(draft) = state.comment.as_ref()
                     {
                         out.extend(comment_draft_box_lines(
-                            &draft_caret_text(&draft.input),
+                            &super::input_with_caret(&draft.input),
                             &draft_loc_label(state, draft.range),
                             width,
                             pal,

@@ -66,7 +66,7 @@ fn apply_paste_to_modal(modal: &mut Modal, text: &str) -> Option<PasteRefilter> 
     let clean = text.replace(['\n', '\r'], "");
     match modal {
         Modal::Input { value, .. } => {
-            value.push_str(&clean);
+            super::insert_into_input(value, &clean);
             None
         }
         Modal::PathInput {
@@ -75,17 +75,17 @@ fn apply_paste_to_modal(modal: &mut Modal, text: &str) -> Option<PasteRefilter> 
             scroll,
             ..
         } => {
-            value.push_str(&clean);
-            completer.refilter(value);
+            super::insert_into_input(value, &clean);
+            completer.refilter(value.value());
             *scroll = 0;
             None
         }
         Modal::CheckoutBranch { query, .. } => {
-            query.push_str(&clean);
+            super::insert_into_input(query, &clean);
             Some(PasteRefilter::CheckoutBranch)
         }
         Modal::QuickSwitch { query, .. } => {
-            query.push_str(&clean);
+            super::insert_into_input(query, &clean);
             Some(PasteRefilter::QuickSwitch)
         }
         // The comment draft is multi-line capable, so it gets the raw text
@@ -317,20 +317,16 @@ impl App {
             } => match key.code {
                 KeyCode::Enter => {
                     let action = on_submit.clone();
-                    let value = value.clone();
+                    let value = value.value().to_string();
                     self.ui_state.modal = Modal::None;
                     self.handle_input_submit(action, value).await;
                 }
                 KeyCode::Esc => {
                     self.ui_state.modal = Modal::None;
                 }
-                KeyCode::Backspace => {
-                    value.pop();
+                _ => {
+                    super::edit_text_input(value, key);
                 }
-                KeyCode::Char(c) => {
-                    value.push(c);
-                }
-                _ => {}
             },
 
             Modal::PathInput {
@@ -343,10 +339,11 @@ impl App {
 
                 // Plain printable chars are text input — keep them out of
                 // the j/k navigation bindings.
-                if let Some(c) = palette_text_char(&key) {
-                    value.push(c);
-                    completer.refilter(value);
-                    *scroll = 0;
+                if palette_text_char(&key).is_some() {
+                    if super::edit_text_input(value, key) {
+                        completer.refilter(value.value());
+                        *scroll = 0;
+                    }
                     return;
                 }
 
@@ -385,16 +382,18 @@ impl App {
                             // prefix. A single match completes fully + `/`
                             // and `refilter` below surfaces that dir's
                             // children so the user can keep drilling in.
-                            *value = completer.complete(value);
-                            completer.refilter(value);
+                            let completed = completer.complete(value.value());
+                            *value = completed.into();
+                            completer.refilter(value.value());
                             *scroll = 0;
                         }
-                        KeyCode::Backspace => {
-                            value.pop();
-                            completer.refilter(value);
-                            *scroll = 0;
+                        // Backspace/Delete/cursor moves and word/line edits.
+                        _ => {
+                            if super::edit_text_input(value, key) {
+                                completer.refilter(value.value());
+                                *scroll = 0;
+                            }
                         }
-                        _ => {}
                     },
                 }
             }
@@ -456,9 +455,10 @@ impl App {
 
                 // Plain printable chars are text input — keep them out of
                 // the j/k navigation bindings.
-                if let Some(c) = palette_text_char(&key) {
-                    query.push(c);
-                    self.refilter_quick_switch();
+                if palette_text_char(&key).is_some() {
+                    if super::edit_text_input(query, key) {
+                        self.refilter_quick_switch();
+                    }
                     return;
                 }
 
@@ -502,15 +502,16 @@ impl App {
                             if let Some(QuickSwitchItem::Session(m)) =
                                 matches.get(*selected_idx).cloned()
                             {
-                                *query = m.title;
+                                *query = m.title.into();
                                 self.refilter_quick_switch();
                             }
                         }
-                        KeyCode::Backspace => {
-                            query.pop();
-                            self.refilter_quick_switch();
+                        // Backspace/Delete/cursor moves and word/line edits.
+                        _ => {
+                            if super::edit_text_input(query, key) {
+                                self.refilter_quick_switch();
+                            }
                         }
-                        _ => {}
                     },
                 }
             }
@@ -527,9 +528,10 @@ impl App {
 
                 // Plain printable chars are text input — keep them out of
                 // the j/k navigation bindings.
-                if let Some(c) = palette_text_char(&key) {
-                    query.push(c);
-                    self.refilter_checkout_branches();
+                if palette_text_char(&key).is_some() {
+                    if super::edit_text_input(query, key) {
+                        self.refilter_checkout_branches();
+                    }
                     return;
                 }
 
@@ -570,11 +572,12 @@ impl App {
                         KeyCode::Enter => {
                             self.activate_checkout_selection().await;
                         }
-                        KeyCode::Backspace => {
-                            query.pop();
-                            self.refilter_checkout_branches();
+                        // Backspace/Delete/cursor moves and word/line edits.
+                        _ => {
+                            if super::edit_text_input(query, key) {
+                                self.refilter_checkout_branches();
+                            }
                         }
-                        _ => {}
                     },
                 }
             }
@@ -766,7 +769,7 @@ impl App {
                 let label = if let Some(m) = filtered.get(*selected_idx) {
                     m.local_name.clone()
                 } else {
-                    let trimmed = query.trim();
+                    let trimmed = query.value().trim();
                     if trimmed.is_empty() {
                         return;
                     }
@@ -799,7 +802,7 @@ impl App {
                 completer
                     .selected_completion()
                     .map(str::to_string)
-                    .unwrap_or_else(|| value.clone()),
+                    .unwrap_or_else(|| value.value().to_string()),
             ),
             _ => return,
         };
@@ -1233,7 +1236,7 @@ mod tests {
     fn checkout_modal(query: &str) -> Modal {
         Modal::CheckoutBranch {
             project_id: ProjectId::new(),
-            query: query.to_string(),
+            query: query.into(),
             all_branches: Vec::new(),
             filtered: Vec::new(),
             selected_idx: 0,
@@ -1245,7 +1248,7 @@ mod tests {
     fn quick_switch_modal(query: &str) -> Modal {
         Modal::QuickSwitch {
             mode: PaletteMode::Unified,
-            query: query.to_string(),
+            query: query.into(),
             matches: Vec::new(),
             selected_idx: 0,
             scroll: 0,
@@ -1256,7 +1259,7 @@ mod tests {
         Modal::Input {
             title: String::new(),
             prompt: String::new(),
-            value: value.to_string(),
+            value: value.into(),
             on_submit: InputAction::AddProject,
             existing_branches: None,
         }
@@ -1270,7 +1273,7 @@ mod tests {
         let refilter = apply_paste_to_modal(&mut modal, "feature-foo");
         assert_eq!(refilter, Some(PasteRefilter::CheckoutBranch));
         match modal {
-            Modal::CheckoutBranch { query, .. } => assert_eq!(query, "feature-foo"),
+            Modal::CheckoutBranch { query, .. } => assert_eq!(query.value(), "feature-foo"),
             _ => panic!("modal variant changed"),
         }
     }
@@ -1280,7 +1283,7 @@ mod tests {
         let mut modal = checkout_modal("feat-");
         apply_paste_to_modal(&mut modal, "bar");
         match modal {
-            Modal::CheckoutBranch { query, .. } => assert_eq!(query, "feat-bar"),
+            Modal::CheckoutBranch { query, .. } => assert_eq!(query.value(), "feat-bar"),
             _ => panic!("modal variant changed"),
         }
     }
@@ -1294,7 +1297,7 @@ mod tests {
         apply_paste_to_modal(&mut modal, "feature-foo\nfeature-bar\r\n");
         match modal {
             Modal::CheckoutBranch { query, .. } => {
-                assert_eq!(query, "feature-foofeature-bar");
+                assert_eq!(query.value(), "feature-foofeature-bar");
             }
             _ => panic!("modal variant changed"),
         }
@@ -1306,7 +1309,7 @@ mod tests {
         let refilter = apply_paste_to_modal(&mut modal, "hello");
         assert_eq!(refilter, Some(PasteRefilter::QuickSwitch));
         match modal {
-            Modal::QuickSwitch { query, .. } => assert_eq!(query, "hello"),
+            Modal::QuickSwitch { query, .. } => assert_eq!(query.value(), "hello"),
             _ => panic!("modal variant changed"),
         }
     }
@@ -1362,7 +1365,7 @@ diff --git a/a.rs b/a.rs
         let refilter = apply_paste_to_modal(&mut modal, "bar");
         assert_eq!(refilter, None);
         match modal {
-            Modal::Input { value, .. } => assert_eq!(value, "foobar"),
+            Modal::Input { value, .. } => assert_eq!(value.value(), "foobar"),
             _ => panic!("modal variant changed"),
         }
     }
@@ -1374,7 +1377,7 @@ diff --git a/a.rs b/a.rs
         let mut modal = Modal::PathInput {
             title: String::new(),
             prompt: String::new(),
-            value: String::from("/tm"),
+            value: "/tm".into(),
             on_submit: InputAction::AddProject,
             completer: PathCompleter::new(),
             scroll: 7,
@@ -1383,7 +1386,7 @@ diff --git a/a.rs b/a.rs
         assert_eq!(refilter, None);
         match modal {
             Modal::PathInput { value, scroll, .. } => {
-                assert_eq!(value, "/tmp");
+                assert_eq!(value.value(), "/tmp");
                 assert_eq!(scroll, 0, "scroll resets on input change");
             }
             _ => panic!("modal variant changed"),
