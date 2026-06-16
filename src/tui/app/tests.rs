@@ -998,7 +998,7 @@ fn test_refilter_section_picker_keeps_section_rows() {
     let session_id = SessionId::new();
     app.ui_state.modal = Modal::QuickSwitch {
         mode: PaletteMode::SectionPicker { session_id },
-        query: "re".to_string(),
+        query: "re".into(),
         matches: Vec::new(),
         selected_idx: 0,
         scroll: 0,
@@ -1302,7 +1302,7 @@ fn make_section_picker_app(n_items: usize) -> App {
         .collect();
     app.ui_state.modal = Modal::QuickSwitch {
         mode: PaletteMode::SectionPicker { session_id },
-        query: String::new(),
+        query: super::Input::default(),
         matches,
         selected_idx: 0,
         scroll: 0,
@@ -1366,4 +1366,47 @@ async fn modal_click_outside_rows_leaves_selection_alone() {
         Modal::QuickSwitch { selected_idx, .. } => assert_eq!(*selected_idx, 0),
         other => panic!("modal should stay open, got {other:?}"),
     }
+}
+
+// -- shared single-line text-input helpers (back the modal input boxes) --
+
+fn key(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
+    crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::NONE)
+}
+
+#[test]
+fn input_with_caret_marks_cursor_position() {
+    use crossterm::event::KeyCode;
+    let mut input = Input::from("ab");
+    // Cursor starts at the end → caret appended.
+    assert_eq!(input_with_caret(&input), "ab▏");
+    // Move left once → caret sits before the last char.
+    input.handle(tui_input::InputRequest::GoToPrevChar);
+    assert_eq!(input_with_caret(&input), "a▏b");
+    // Sanity: KeyCode plumbing builds a Left arrow.
+    assert!(matches!(key(KeyCode::Left).code, KeyCode::Left));
+}
+
+#[test]
+fn edit_text_input_inserts_at_cursor_and_reports_change() {
+    use crossterm::event::KeyCode;
+    let mut input = Input::from("ac");
+    input.handle(tui_input::InputRequest::GoToPrevChar); // cursor between a|c
+
+    // Typing inserts at the cursor and signals the value changed.
+    assert!(edit_text_input(&mut input, key(KeyCode::Char('b'))));
+    assert_eq!(input.value(), "abc");
+
+    // A cursor move changes no text → returns false (callers skip refiltering).
+    assert!(!edit_text_input(&mut input, key(KeyCode::Home)));
+    assert_eq!(input.value(), "abc");
+    assert_eq!(input.cursor(), 0);
+
+    // Delete-forward at the start removes the first char.
+    assert!(edit_text_input(&mut input, key(KeyCode::Delete)));
+    assert_eq!(input.value(), "bc");
+
+    // A non-editing key (Enter) is left for the caller: no change, returns false.
+    assert!(!edit_text_input(&mut input, key(KeyCode::Enter)));
+    assert_eq!(input.value(), "bc");
 }

@@ -417,7 +417,7 @@ impl App {
                     }
                     SettingsRowKind::Text(text) if is_selected => {
                         if let Some(SettingsEditing::TextInput { value }) = &state.editing {
-                            format!("{value}▏")
+                            super::input_with_caret(value)
                         } else if let Some(SettingsEditing::OptionPicker { options, selected }) =
                             &state.editing
                         {
@@ -581,7 +581,7 @@ impl App {
             }
             let input_y = list_area.y + name_rows as u16;
             let input_style = self.theme.selection().add_modifier(Modifier::UNDERLINED);
-            let display = format!("  {value}▏");
+            let display = format!("  {}", super::input_with_caret(value));
             frame.render_widget(
                 Paragraph::new(Span::styled(display, input_style)),
                 Rect {
@@ -615,7 +615,7 @@ impl App {
                 let prefix = if is_selected { "▸ " } else { "  " };
                 let name = if is_selected {
                     if let Some(SectionsEditing::RenamingSection { value }) = &sec.editing {
-                        format!("{prefix}{value}▏")
+                        format!("{prefix}{}", super::input_with_caret(value))
                     } else {
                         let n = truncate_str(&section.name, list_width as usize - 2);
                         format!("{prefix}{n}")
@@ -696,7 +696,7 @@ impl App {
 
                     let display_val = if is_selected {
                         if let Some(SectionsEditing::EditingPredicate { value: v }) = &sec.editing {
-                            format!("{v}▏")
+                            super::input_with_caret(v)
                         } else {
                             value.clone()
                         }
@@ -1027,7 +1027,7 @@ impl App {
             match editing {
                 SettingsEditing::TextInput { value } => match key.code {
                     KeyCode::Enter => {
-                        let val = value.clone();
+                        let val = value.value().to_string();
                         let field_key = state.rows[state.selected_row].field_key.clone();
                         state.editing = None;
                         self.apply_settings_edit(state.tab, &field_key, &val);
@@ -1039,15 +1039,8 @@ impl App {
                         state.editing = None;
                         self.ui_state.modal = Modal::Settings(state);
                     }
-                    KeyCode::Backspace => {
-                        value.pop();
-                        self.ui_state.modal = Modal::Settings(state);
-                    }
-                    KeyCode::Char(c) => {
-                        value.push(c);
-                        self.ui_state.modal = Modal::Settings(state);
-                    }
                     _ => {
+                        super::edit_text_input(value, key);
                         self.ui_state.modal = Modal::Settings(state);
                     }
                 },
@@ -1185,7 +1178,9 @@ impl App {
                                     } else {
                                         current_value.to_string()
                                     };
-                                state.editing = Some(SettingsEditing::TextInput { value: initial });
+                                state.editing = Some(SettingsEditing::TextInput {
+                                    value: initial.into(),
+                                });
                             }
                         }
                         self.ui_state.modal = Modal::Settings(state);
@@ -1213,7 +1208,7 @@ impl App {
             match editing {
                 SectionsEditing::RenamingSection { value } => match key.code {
                     KeyCode::Enter => {
-                        let new_name = value.trim().to_string();
+                        let new_name = value.value().trim().to_string();
                         if !new_name.is_empty() && sec.selected_section < self.config.sections.len()
                         {
                             let has_dup = self
@@ -1234,21 +1229,14 @@ impl App {
                         sec.editing = None;
                         self.ui_state.modal = Modal::Settings(state);
                     }
-                    KeyCode::Backspace => {
-                        value.pop();
-                        self.ui_state.modal = Modal::Settings(state);
-                    }
-                    KeyCode::Char(c) => {
-                        value.push(c);
-                        self.ui_state.modal = Modal::Settings(state);
-                    }
                     _ => {
+                        super::edit_text_input(value, key);
                         self.ui_state.modal = Modal::Settings(state);
                     }
                 },
                 SectionsEditing::EditingPredicate { value } => match key.code {
                     KeyCode::Enter => {
-                        let val = value.clone();
+                        let val = value.value().to_string();
                         let pred_idx = sec.pred_selected;
                         if sec.selected_section < self.config.sections.len() {
                             apply_predicate_edit(
@@ -1265,21 +1253,14 @@ impl App {
                         sec.editing = None;
                         self.ui_state.modal = Modal::Settings(state);
                     }
-                    KeyCode::Backspace => {
-                        value.pop();
-                        self.ui_state.modal = Modal::Settings(state);
-                    }
-                    KeyCode::Char(c) => {
-                        value.push(c);
-                        self.ui_state.modal = Modal::Settings(state);
-                    }
                     _ => {
+                        super::edit_text_input(value, key);
                         self.ui_state.modal = Modal::Settings(state);
                     }
                 },
                 SectionsEditing::CreatingSection { value } => match key.code {
                     KeyCode::Enter => {
-                        let new_name = value.trim().to_string();
+                        let new_name = value.value().trim().to_string();
                         if !new_name.is_empty() {
                             let has_dup = self.config.sections.iter().any(|s| s.name == new_name);
                             if !has_dup {
@@ -1298,15 +1279,8 @@ impl App {
                         sec.editing = None;
                         self.ui_state.modal = Modal::Settings(state);
                     }
-                    KeyCode::Backspace => {
-                        value.pop();
-                        self.ui_state.modal = Modal::Settings(state);
-                    }
-                    KeyCode::Char(c) => {
-                        value.push(c);
-                        self.ui_state.modal = Modal::Settings(state);
-                    }
                     _ => {
+                        super::edit_text_input(value, key);
                         self.ui_state.modal = Modal::Settings(state);
                     }
                 },
@@ -1368,7 +1342,7 @@ impl App {
                         }
                         KeyCode::Char('n') => {
                             sec.editing = Some(SectionsEditing::CreatingSection {
-                                value: String::new(),
+                                value: super::Input::default(),
                             });
                             self.ui_state.modal = Modal::Settings(state);
                         }
@@ -1376,8 +1350,9 @@ impl App {
                             if sec.selected_section < sections_len {
                                 let current =
                                     self.config.sections[sec.selected_section].name.clone();
-                                sec.editing =
-                                    Some(SectionsEditing::RenamingSection { value: current });
+                                sec.editing = Some(SectionsEditing::RenamingSection {
+                                    value: current.into(),
+                                });
                             }
                             self.ui_state.modal = Modal::Settings(state);
                         }
@@ -1475,8 +1450,9 @@ impl App {
                                 } else {
                                     current_val.clone()
                                 };
-                                sec.editing =
-                                    Some(SectionsEditing::EditingPredicate { value: initial });
+                                sec.editing = Some(SectionsEditing::EditingPredicate {
+                                    value: initial.into(),
+                                });
                             }
                             self.ui_state.modal = Modal::Settings(state);
                         }

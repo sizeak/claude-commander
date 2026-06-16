@@ -70,7 +70,7 @@ impl App {
         self.ui_state.modal = Modal::PathInput {
             title,
             prompt,
-            value,
+            value: value.into(),
             on_submit,
             completer,
             scroll: 0,
@@ -463,7 +463,7 @@ impl App {
             self.ui_state.modal = Modal::Input {
                 title: "New Session".to_string(),
                 prompt: "Enter session name:".to_string(),
-                value: String::new(),
+                value: super::Input::default(),
                 on_submit: InputAction::CreateSession {
                     project_id,
                     section,
@@ -520,7 +520,7 @@ impl App {
         self.ui_state.modal = Modal::Input {
             title: format!("New Session Stacked on \"{}\"", parent_title),
             prompt: "Enter session name:".to_string(),
-            value: String::new(),
+            value: super::Input::default(),
             on_submit: InputAction::CreateStackedSession {
                 project_id,
                 parent_session_id,
@@ -753,7 +753,7 @@ impl App {
         let filtered = all_branches.clone();
         self.ui_state.modal = Modal::CheckoutBranch {
             project_id,
-            query: String::new(),
+            query: super::Input::default(),
             all_branches,
             filtered,
             selected_idx: 0,
@@ -806,7 +806,7 @@ impl App {
             ..
         } = &mut self.ui_state.modal
         {
-            let q = query.to_lowercase();
+            let q = query.value().to_lowercase();
             *filtered = if q.is_empty() {
                 all_branches.clone()
             } else {
@@ -903,7 +903,7 @@ impl App {
         let matches = self.build_palette_items(mode, "").await;
         self.ui_state.modal = Modal::QuickSwitch {
             mode,
-            query: String::new(),
+            query: super::Input::default(),
             matches,
             selected_idx: 0,
             scroll: 0,
@@ -1045,7 +1045,7 @@ impl App {
         // Snapshot the inputs we need so the closure borrow on self doesn't
         // conflict with the `&mut self.ui_state.modal` below.
         let (mode, query) = match &self.ui_state.modal {
-            Modal::QuickSwitch { mode, query, .. } => (*mode, query.clone()),
+            Modal::QuickSwitch { mode, query, .. } => (*mode, query.value().to_string()),
             _ => return,
         };
 
@@ -1387,7 +1387,7 @@ impl App {
         let matches = self.gather_section_picker_items(session_id, "");
         self.ui_state.modal = Modal::QuickSwitch {
             mode,
-            query: String::new(),
+            query: super::Input::default(),
             matches,
             selected_idx: 0,
             scroll: 0,
@@ -1450,7 +1450,7 @@ impl App {
         self.ui_state.modal = Modal::Input {
             title: "Rename Session".to_string(),
             prompt: "Enter new session name:".to_string(),
-            value: current_title,
+            value: current_title.into(),
             on_submit: InputAction::RenameSession { session_id },
             existing_branches: None,
         };
