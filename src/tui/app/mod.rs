@@ -31,7 +31,7 @@ use ratatui::{
         ScrollbarState, Wrap,
     },
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use tui_input::Input;
 
 use super::event::{AppEvent, EventLoop, InputEvent, StateUpdate, UserCommand};
@@ -1061,12 +1061,22 @@ impl App {
             // Run main loop until quit or attach
             info!("Entering main loop");
             let result = self.main_loop(&mut terminal).await;
-            info!("Main loop exited with result: {:?}", result.is_ok());
+            match &result {
+                Ok(()) => info!("Main loop exited cleanly"),
+                Err(e) => error!("Main loop exited with error: {e:?}"),
+            }
 
-            // Restore terminal before attach or exit
+            // Restore terminal before propagating, attaching, or exiting — a
+            // raw-mode/alternate-screen terminal must never outlive the loop,
+            // even on the error path below.
             info!("Restoring terminal");
             self.restore_terminal(&mut terminal)?;
             info!("Terminal restored successfully");
+
+            // A main-loop error is fatal: propagate it so `main` exits
+            // non-zero and color-eyre reports it on stderr, rather than
+            // silently dropping into the quit path. Restore has already run.
+            result?;
 
             // Reset should_quit for next iteration
             self.ui_state.should_quit = false;
