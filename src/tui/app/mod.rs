@@ -31,7 +31,7 @@ use ratatui::{
         ScrollbarState, Wrap,
     },
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use tui_input::Input;
 
 use super::event::{AppEvent, EventLoop, InputEvent, StateUpdate, UserCommand};
@@ -1061,7 +1061,10 @@ impl App {
             // Run main loop until quit or attach
             info!("Entering main loop");
             let result = self.main_loop(&mut terminal).await;
-            info!("Main loop exited with result: {:?}", result.is_ok());
+            match &result {
+                Ok(()) => info!("Main loop exited cleanly"),
+                Err(e) => error!("Main loop exited with error: {e:?}"),
+            }
 
             // Restore terminal before attach or exit
             info!("Restoring terminal");
