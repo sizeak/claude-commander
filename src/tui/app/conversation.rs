@@ -214,7 +214,7 @@ impl App {
                 return;
             }
         };
-        if let Err(e) = std::fs::create_dir_all(&dir) {
+        if let Err(e) = tokio::fs::create_dir_all(&dir).await {
             view.lock().unwrap().set_error(format!("mkdir failed: {e}"));
             return;
         }
@@ -229,7 +229,7 @@ impl App {
             prime.trim_end(),
             crate::commander::generate_cli_reference(&cli)
         );
-        if let Err(e) = std::fs::write(dir.join("CLAUDE.md"), claude_md) {
+        if let Err(e) = tokio::fs::write(dir.join("CLAUDE.md"), claude_md).await {
             warn!(target: "conversation", "failed to write CLAUDE.md: {e}");
         }
 
