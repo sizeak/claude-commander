@@ -307,15 +307,15 @@ impl CommanderService {
         let raw = compose_review_diff(&worktree_path, &base).await?;
         let diff = parse_unified_diff(&raw);
 
-        let mut comments = self.comments.load(*session_id)?;
+        let mut comments = self.comments.load(*session_id).await?;
         reanchor_comments(&mut comments, &diff);
-        self.comments.save(*session_id, &comments)?;
+        self.comments.save(*session_id, &comments).await?;
 
         // Reviewed marks pinned to a file's diff content: drop any whose file
         // changed or left the diff since they were set.
-        let mut marks = self.reviewed.load(*session_id)?;
+        let mut marks = self.reviewed.load(*session_id).await?;
         if crate::reviewed::prune_invalidated(&mut marks, &diff) {
-            self.reviewed.save(*session_id, &marks)?;
+            self.reviewed.save(*session_id, &marks).await?;
         }
         let reviewed = marks.into_iter().map(|m| m.file).collect();
 
@@ -336,15 +336,15 @@ impl CommanderService {
         session_id: &SessionId,
         file: &FileDiff,
     ) -> Result<bool> {
-        let mut marks = self.reviewed.load(*session_id)?;
+        let mut marks = self.reviewed.load(*session_id).await?;
         let now_reviewed = crate::reviewed::toggle(&mut marks, file);
-        self.reviewed.save(*session_id, &marks)?;
+        self.reviewed.save(*session_id, &marks).await?;
         Ok(now_reviewed)
     }
 
     /// List a session's stored comments (without re-anchoring).
     pub async fn list_comments(&self, session_id: &SessionId) -> Result<Vec<Comment>> {
-        self.comments.load(*session_id)
+        self.comments.load(*session_id).await
     }
 
     /// Session ids that have at least one not-yet-applied comment, for the
@@ -352,7 +352,7 @@ impl CommanderService {
     pub async fn sessions_with_pending_comments(
         &self,
     ) -> Result<std::collections::HashSet<SessionId>> {
-        self.comments.sessions_with_pending()
+        self.comments.sessions_with_pending().await
     }
 
     /// Stage a new comment; returns its id.
@@ -365,13 +365,13 @@ impl CommanderService {
             draft.comment,
         );
         let id = ann.id;
-        self.comments.add(*session_id, ann)?;
+        self.comments.add(*session_id, ann).await?;
         Ok(id)
     }
 
     /// Delete a staged comment by id (no-op if absent).
     pub async fn delete_comment(&self, session_id: &SessionId, id: Uuid) -> Result<()> {
-        self.comments.delete(*session_id, id)
+        self.comments.delete(*session_id, id).await
     }
 
     /// Apply a session's staged comments: re-anchor them, and if none are
@@ -402,9 +402,9 @@ impl CommanderService {
         let base = review_base.git_ref(&worktree_path).await;
         let raw = compose_review_diff(&worktree_path, &base).await?;
         let parsed = parse_unified_diff(&raw);
-        let mut comments = self.comments.load(*session_id)?;
+        let mut comments = self.comments.load(*session_id).await?;
         reanchor_comments(&mut comments, &parsed);
-        self.comments.save(*session_id, &comments)?;
+        self.comments.save(*session_id, &comments).await?;
 
         // Only not-yet-applied comments participate.
         let staged: Vec<Comment> = comments
@@ -425,7 +425,7 @@ impl CommanderService {
         }
 
         // Compose the brief to an absolute temp path outside the worktree.
-        let path = write_apply_brief(*session_id, &compose_markdown(&title, &staged))?;
+        let path = write_apply_brief(*session_id, &compose_markdown(&title, &staged)).await?;
         let count = staged.len();
 
         if !is_active {
@@ -457,7 +457,7 @@ impl CommanderService {
         {
             ann.status = CommentStatus::Applied;
         }
-        self.comments.save(*session_id, &comments)?;
+        self.comments.save(*session_id, &comments).await?;
 
         Ok(ApplyOutcome::Applied { path, count })
     }
@@ -466,9 +466,10 @@ impl CommanderService {
 /// Write the apply brief to a stable absolute path in the system temp dir
 /// (outside the worktree, so it's never committed). One file per session,
 /// overwritten on re-apply.
-fn write_apply_brief(session_id: SessionId, markdown: &str) -> Result<PathBuf> {
+async fn write_apply_brief(session_id: SessionId, markdown: &str) -> Result<PathBuf> {
     let path = std::env::temp_dir().join(format!("cc-comments-{}.md", session_id.as_uuid()));
-    std::fs::write(&path, markdown)
+    tokio::fs::write(&path, markdown)
+        .await
         .map_err(|e| crate::error::ConfigError::SaveFailed(e.to_string()))?;
     Ok(path)
 }

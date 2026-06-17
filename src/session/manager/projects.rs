@@ -13,8 +13,9 @@ impl SessionManager {
 
         info!("Adding project '{}' from {:?}", name, repo_path);
 
-        let repo_path =
-            std::fs::canonicalize(backend.path()).unwrap_or_else(|_| backend.path().to_path_buf());
+        let repo_path = tokio::fs::canonicalize(backend.path())
+            .await
+            .unwrap_or_else(|_| backend.path().to_path_buf());
         let project = Project::new(name, repo_path, main_branch);
         let project_id = project.id;
 
@@ -49,8 +50,15 @@ impl SessionManager {
                 .collect()
         };
 
-        // Walk the directory tree and collect git repo roots
-        let repo_paths = Self::find_git_repos(dir);
+        // Walk the directory tree and collect git repo roots. The walk is an
+        // unbounded recursive `read_dir`, so run it on a blocking thread rather
+        // than stalling the async runtime.
+        let scan_root = dir.to_path_buf();
+        let repo_paths = tokio::task::spawn_blocking(move || Self::find_git_repos(&scan_root))
+            .await
+            .map_err(|e| {
+                crate::error::GitError::OperationFailed(format!("directory scan task failed: {e}"))
+            })?;
         info!("Found {} git repositories in {:?}", repo_paths.len(), dir);
 
         let mut added = 0;
@@ -59,7 +67,8 @@ impl SessionManager {
         for repo_path in repo_paths {
             // Resolve to canonical git root for duplicate detection
             let canonical = match GitBackend::discover(&repo_path) {
-                Ok(backend) => std::fs::canonicalize(backend.path())
+                Ok(backend) => tokio::fs::canonicalize(backend.path())
+                    .await
                     .unwrap_or_else(|_| backend.path().to_path_buf()),
                 Err(e) => {
                     debug!("Skipping {:?}: {}", repo_path, e);
