@@ -25,10 +25,20 @@ pub struct TtsClient {
     base_url: String,
 }
 
+/// Per-request timeout. Generous enough for slow CPU synthesis of a long
+/// sentence, but bounded so a hung/unresponsive TTS server (e.g. a GPU hang
+/// that never returns) can't wedge the worker indefinitely — the request errors
+/// out, is logged, and the next turn proceeds.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 impl TtsClient {
     pub fn new(base_url: impl Into<String>) -> Self {
+        let http = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .unwrap_or_default();
         Self {
-            http: reqwest::Client::new(),
+            http,
             base_url: base_url.into(),
         }
     }
