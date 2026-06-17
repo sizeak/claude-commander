@@ -330,9 +330,6 @@ impl App {
                     }
                 }
             }
-            StateUpdate::VoiceTranscript(text) => {
-                self.on_voice_transcript(text).await;
-            }
             _ => {}
         }
     }

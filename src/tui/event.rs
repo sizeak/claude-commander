@@ -142,9 +142,6 @@ pub enum StateUpdate {
     ReviewPrepared {
         prepared: Box<super::app::ReviewPrepared>,
     },
-    /// A transcript from voice input (Alt-V), to be sent to the conversation
-    /// session as if typed.
-    VoiceTranscript(String),
 }
 
 /// User commands triggered by input

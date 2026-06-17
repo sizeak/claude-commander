@@ -880,6 +880,15 @@ pub fn review_trigger_bytes(bindings: &KeyBindings) -> Vec<Vec<u8>> {
     trigger_bytes_for(bindings, BindableAction::OpenReviewDiff)
 }
 
+/// Raw stdin byte patterns that toggle voice input mid-attach (from the
+/// [`ToggleVoiceInput`](BindableAction::ToggleVoiceInput) binding — `Alt-v` by
+/// default, encoded as the `ESC v` metaSendsEscape sequence). See
+/// [`trigger_bytes_for`]. Unlike the review/editor triggers these don't exit the
+/// attach — the attach loop swallows them and toggles the mic in place.
+pub fn voice_trigger_bytes(bindings: &KeyBindings) -> Vec<Vec<u8>> {
+    trigger_bytes_for(bindings, BindableAction::ToggleVoiceInput)
+}
+
 /// Whether a binding survives the [`trigger_bytes_for`] filter: a Ctrl- or
 /// Alt-modified ASCII character. Bare bindings can't be intercepted mid-attach
 /// (they're indistinguishable from typing), so they never form the toggle.
@@ -1354,6 +1363,14 @@ mod tests {
         // (Ctrl-r) is never shadowed.
         let kb = KeyBindings::default();
         assert_eq!(review_trigger_bytes(&kb), vec![vec![0x1b, b'r']]);
+    }
+
+    #[test]
+    fn test_voice_trigger_bytes_default_is_alt_v() {
+        // Default ToggleVoiceInput is Alt-v, interceptable mid-attach as the
+        // metaSendsEscape sequence `ESC v` so it can toggle the mic in place.
+        let kb = KeyBindings::default();
+        assert_eq!(voice_trigger_bytes(&kb), vec![vec![0x1b, b'v']]);
     }
 
     #[test]

@@ -15,7 +15,6 @@ use super::*;
 use crate::conversation::{
     ConversationEvent, ConversationSession, ListenerCommand, spawn_listener, spawn_speaker,
 };
-use crate::tui::event::{AppEvent, StateUpdate};
 
 /// Canonical project spinner frames (advanced every 3 render ticks).
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -175,7 +174,10 @@ impl ConversationView {
 #[derive(Default)]
 pub struct ConversationRuntime {
     /// The headless `claude` subprocess; `None` until first opened / after exit.
-    pub session: Option<ConversationSession>,
+    /// Shared behind an async mutex so a transcript can be submitted off the UI
+    /// loop (e.g. while the main loop is parked in a tmux attach) as well as from
+    /// the typed-input path on the loop.
+    pub session: Arc<tokio::sync::Mutex<Option<ConversationSession>>>,
     /// Shared display model — updated off-loop, read by the renderer.
     pub view: Arc<Mutex<ConversationView>>,
     /// Voice-input listener command channel; `None` if STT is off/unavailable.
@@ -189,6 +191,32 @@ impl ConversationRuntime {
         if let Some(tx) = &self.listener {
             tx.send(cmd).is_ok()
         } else {
+            false
+        }
+    }
+}
+
+/// Write one user turn to the session and record it in the shared view. Returns
+/// `false` if there's no live session (caller may respawn and retry). Lives free
+/// of `&App` so it can run off the UI loop — from the typed-input path *and* from
+/// the off-loop voice-submit task (which keeps working during a tmux attach).
+async fn submit_to_session(
+    session: &Arc<tokio::sync::Mutex<Option<ConversationSession>>>,
+    view: &Arc<Mutex<ConversationView>>,
+    text: String,
+) -> bool {
+    let mut guard = session.lock().await;
+    let Some(s) = guard.as_mut() else {
+        return false;
+    };
+    match s.send_user_message(&text).await {
+        Ok(()) => {
+            drop(guard);
+            view.lock().unwrap().push_user(text);
+            true
+        }
+        Err(e) => {
+            tracing::warn!(target: "conversation", "send failed: {e}");
             false
         }
     }
@@ -219,8 +247,8 @@ impl App {
 
     /// Spawn the headless streaming `claude` session, the TTS speaker, and the
     /// off-loop bridge that updates the shared model + feeds the speaker. Idempotent.
-    async fn ensure_conversation_started(&mut self) {
-        if self.conversation.session.is_some() {
+    pub(super) async fn ensure_conversation_started(&mut self) {
+        if self.conversation.session.lock().await.is_some() {
             return;
         }
         let view = self.conversation.view.clone();
@@ -268,7 +296,7 @@ impl App {
         let command = self.config.conversation.command.clone();
         let permission_mode = self.config.conversation.permission_mode.clone();
         match ConversationSession::spawn(&command, &permission_mode, &dir, ev_tx) {
-            Ok(session) => self.conversation.session = Some(session),
+            Ok(session) => *self.conversation.session.lock().await = Some(session),
             Err(e) => {
                 view.lock().unwrap().set_error(e.to_string());
                 return;
@@ -297,24 +325,25 @@ impl App {
             tracing::debug!(target: "conversation", "bridge task ended");
         });
 
-        // Voice-input listener (Alt-V). Transcripts come back on the main loop
-        // (a `VoiceTranscript` state update) so they go through the same `&mut
-        // self` submit path as typed input. Failure (no mic) is non-fatal.
+        // Voice-input listener (Alt-V) + its off-loop submit task. The listener
+        // captures the mic and emits a transcript; the submit task writes it to
+        // the session directly (not via the UI loop), so voice input works even
+        // while the main loop is parked inside a tmux attach. Failure (no mic) is
+        // non-fatal.
         if self.config.stt.enabled && self.conversation.listener.is_none() {
             let (tx_text, mut rx_text) = tokio::sync::mpsc::unbounded_channel::<String>();
             match spawn_listener(self.config.stt.clone(), tx_text) {
                 Ok(tx) => {
                     self.conversation.listener = Some(tx);
-                    let app_tx = self.event_loop.sender();
+                    let session = self.conversation.session.clone();
+                    let submit_view = view.clone();
                     tokio::spawn(async move {
                         while let Some(text) = rx_text.recv().await {
-                            if app_tx
-                                .send(AppEvent::StateUpdate(StateUpdate::VoiceTranscript(text)))
-                                .await
-                                .is_err()
-                            {
-                                break;
+                            let text = text.trim().to_string();
+                            if text.is_empty() {
+                                continue;
                             }
+                            submit_to_session(&session, &submit_view, text).await;
                         }
                     });
                 }
@@ -329,29 +358,24 @@ impl App {
     /// Self-heals a dead session by respawning and retrying once.
     pub(super) async fn submit_conversation_input(&mut self, text: String) {
         self.ensure_conversation_started().await;
-        let mut result = self.send_to_session(&text).await;
-        if result.is_err() {
-            // Session likely exited (idle timeout / crash) — respawn and retry.
-            self.conversation.session = None;
-            self.ensure_conversation_started().await;
-            result = self.send_to_session(&text).await;
+        if submit_to_session(
+            &self.conversation.session,
+            &self.conversation.view,
+            text.clone(),
+        )
+        .await
+        {
+            return;
         }
-        match result {
-            Ok(()) => self.conversation.view.lock().unwrap().push_user(text),
-            Err(e) => {
-                tracing::warn!(target: "conversation", "send failed: {e}");
-                self.conversation.view.lock().unwrap().set_error(e);
-            }
-        }
-    }
-
-    async fn send_to_session(&mut self, text: &str) -> std::result::Result<(), String> {
-        match self.conversation.session.as_mut() {
-            Some(session) => session
-                .send_user_message(text)
-                .await
-                .map_err(|e| e.to_string()),
-            None => Err("session not running".to_string()),
+        // Session likely exited (idle timeout / crash) — respawn and retry once.
+        *self.conversation.session.lock().await = None;
+        self.ensure_conversation_started().await;
+        if !submit_to_session(&self.conversation.session, &self.conversation.view, text).await {
+            self.conversation
+                .view
+                .lock()
+                .unwrap()
+                .set_error("session not running".to_string());
         }
     }
 
@@ -381,15 +405,6 @@ impl App {
             self.conversation.recording = true;
             self.set_status_message("🎙 Listening… (Alt-V to send)", 60);
         }
-    }
-
-    /// Feed a voice transcript to the session as if it had been typed.
-    pub(super) async fn on_voice_transcript(&mut self, text: String) {
-        let text = text.trim().to_string();
-        if text.is_empty() {
-            return;
-        }
-        self.submit_conversation_input(text).await;
     }
 
     /// Show a transient status-bar message for `secs` seconds.
