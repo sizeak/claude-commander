@@ -10,15 +10,16 @@ use crate::tui::event::{AppEvent, StateUpdate};
 /// Canonical project spinner frames (advanced every 3 render ticks).
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-/// Preamble seeded into the conversation session's `CLAUDE.md`. Followed by the
-/// generated `claude-commander` CLI reference so the agent can inspect live
-/// session/project state. Tuned for spoken replies.
+/// Preamble seeded into the conversation session's `CLAUDE.md` (`{name}` is
+/// replaced with the configured assistant name). Followed by the generated
+/// `claude-commander` CLI reference so the agent can inspect live session/
+/// project state. Tuned for spoken replies.
 const CONVERSATION_PRIME: &str = "\
-# Conversation assistant
+# {name}
 
-You are a voice assistant for Claude Commander (the `claude-commander` CLI),
-which manages the user's Claude coding sessions across their projects. The user
-is *talking* to you, and your replies are read aloud by text-to-speech.
+You are {name}, a voice assistant for Claude Commander (the `claude-commander`
+CLI), which manages the user's Claude coding sessions across their projects. The
+user is *talking* to you, and your replies are read aloud by text-to-speech.
 
 ## Tone
 - Be concise and conversational — a sentence or two, not a wall of text.
@@ -133,9 +134,10 @@ impl App {
         // assistant and how to inspect live session/project state. Rewritten on
         // each (re)spawn so the embedded CLI reference stays current.
         let cli = crate::cli_args::cli_command();
+        let prime = CONVERSATION_PRIME.replace("{name}", &self.config.conversation.name);
         let claude_md = format!(
             "{}\n{}",
-            CONVERSATION_PRIME.trim_end(),
+            prime.trim_end(),
             crate::commander::generate_cli_reference(&cli)
         );
         if let Err(e) = std::fs::write(dir.join("CLAUDE.md"), claude_md) {
@@ -388,7 +390,10 @@ impl App {
     ) {
         let (label, color) = match role {
             ConvRole::User => ("You", self.theme.text_accent),
-            ConvRole::Assistant => ("Claude", self.theme.status_running),
+            ConvRole::Assistant => (
+                self.config.conversation.name.as_str(),
+                self.theme.status_running,
+            ),
         };
         lines.push(Line::from(Span::styled(
             format!("{label}:"),

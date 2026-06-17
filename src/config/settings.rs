@@ -187,6 +187,11 @@ pub struct ConversationConfig {
     /// spoken replies. When off, Alt-c does nothing. Off by default.
     pub enabled: bool,
 
+    /// Display name / nickname for the assistant (the default voice is female,
+    /// so this defaults to "Claudette"). Used as the chat label and told to the
+    /// agent in its CLAUDE.md.
+    pub name: String,
+
     /// Binary to run for the headless conversation session.
     pub command: String,
 
@@ -223,6 +228,7 @@ impl Default for ConversationConfig {
             // Master switch for the whole feature: gates both the Alt-c overlay
             // and spoken replies. Off by default — enable it in Settings.
             enabled: false,
+            name: "Claudette".to_string(),
             command: "claude".to_string(),
             permission_mode: "auto".to_string(),
             base_url: "http://127.0.0.1:8002/v1".to_string(),

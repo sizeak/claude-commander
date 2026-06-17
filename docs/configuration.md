@@ -140,6 +140,7 @@ state_sync_interval_ms = 2000
 # aloud via an OpenAI-compatible TTS engine. See "Conversation mode" below.
 # [conversation]
 # enabled = true                          # master switch: Alt-c overlay + spoken replies (off by default)
+# name = "Claudette"                       # assistant's display name / nickname
 # command = "claude"                       # binary for the conversation session
 # permission_mode = "auto"                 # --permission-mode for the agent (acts without approval prompts)
 # base_url = "http://127.0.0.1:8002/v1"   # OpenAI-compatible TTS endpoint (include /v1)

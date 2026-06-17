@@ -153,6 +153,7 @@ impl App {
                         c.enabled,
                         "conversation_enabled",
                     ),
+                    SettingsRow::text("Assistant Name", c.name.clone(), "conversation_name"),
                     SettingsRow::text("TTS Base URL", c.base_url.clone(), "conversation_base_url"),
                     SettingsRow::text("Model", c.model.clone(), "conversation_model"),
                     SettingsRow::text(
@@ -876,6 +877,14 @@ impl App {
                 _ => {}
             },
             SettingsTab::Conversation => match field_key {
+                "conversation_name" => {
+                    let v = value.trim();
+                    self.config.conversation.name = if v.is_empty() {
+                        "Claudette".to_string()
+                    } else {
+                        v.to_string()
+                    };
+                }
                 "conversation_base_url" => self.config.conversation.base_url = value.to_string(),
                 "conversation_model" => self.config.conversation.model = value.to_string(),
                 "conversation_voice" => {
