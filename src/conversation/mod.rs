@@ -17,5 +17,5 @@ pub mod tts;
 
 pub use extract::{SpeakScope, split_sentences, spoken_text};
 pub use session::{ConversationEvent, ConversationSession, parse_event, user_message_line};
-pub use speaker::{SentenceAccumulator, SpeakerCommand, spawn_speaker};
+pub use speaker::{SentenceAccumulator, SpeakerCommand, spawn_speaker, speaker_command_for};
 pub use tts::{SpeechRequest, TtsClient, build_speech_body};

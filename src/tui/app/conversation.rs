@@ -85,14 +85,6 @@ pub struct ConversationRuntime {
     pub pending_user: std::collections::VecDeque<String>,
 }
 
-impl ConversationRuntime {
-    fn speak(&self, cmd: SpeakerCommand) {
-        if let Some(tx) = &self.speaker {
-            let _ = tx.send(cmd);
-        }
-    }
-}
-
 impl App {
     /// Alt-c: open the overlay (starting the session on first use) or close it
     /// (leaving the session running). The single `conversation.enabled` setting
@@ -147,6 +139,16 @@ impl App {
             warn!("conversation: failed to write CLAUDE.md: {e}");
         }
 
+        // Start the streaming-TTS speaker first, so the bridge can feed it
+        // directly. Failure (e.g. no audio device) is non-fatal: the
+        // conversation still works, just silent.
+        if self.config.conversation.enabled {
+            match spawn_speaker(self.config.conversation.clone()) {
+                Ok(tx) => self.conversation.speaker = Some(tx),
+                Err(e) => warn!(target: "conversation", "TTS unavailable: {e}"),
+            }
+        }
+
         let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<ConversationEvent>();
         let command = self.config.conversation.command.clone();
         let permission_mode = self.config.conversation.permission_mode.clone();
@@ -158,11 +160,25 @@ impl App {
             }
         }
 
-        // Bridge the session's events onto the main AppEvent loop, so history
-        // updates (and TTS) keep flowing even while the overlay is closed.
+        // Bridge the session's events. Crucially, the speaker is fed *directly*
+        // here (off the UI loop), so audio runs even while the overlay is closed
+        // or the main loop is busy — the design requirement. Events are *also*
+        // forwarded to the main loop, but only to drive the on-screen log.
         let app_tx = self.event_loop.sender();
+        let speaker = self.conversation.speaker.clone();
         tokio::spawn(async move {
             while let Some(ev) = ev_rx.recv().await {
+                // Per-token deltas are too frequent for debug; log the rest.
+                if matches!(ev, ConversationEvent::Delta(_)) {
+                    tracing::trace!(target: "conversation", "bridge delta");
+                } else {
+                    tracing::debug!(target: "conversation", "bridge event: {ev:?}");
+                }
+                if let Some(sp) = &speaker
+                    && let Some(cmd) = crate::conversation::speaker_command_for(&ev)
+                {
+                    let _ = sp.send(cmd);
+                }
                 if app_tx
                     .send(AppEvent::StateUpdate(StateUpdate::Conversation(ev)))
                     .await
@@ -171,16 +187,8 @@ impl App {
                     break;
                 }
             }
+            tracing::debug!(target: "conversation", "bridge task ended");
         });
-
-        // Start the streaming-TTS speaker if enabled. Failure (e.g. no audio
-        // device) is non-fatal: the conversation still works, just silent.
-        if self.config.conversation.enabled {
-            match spawn_speaker(self.config.conversation.clone()) {
-                Ok(tx) => self.conversation.speaker = Some(tx),
-                Err(e) => warn!("conversation TTS unavailable: {e}"),
-            }
-        }
         self.conversation.status = ConvStatus::Idle;
     }
 
@@ -197,24 +205,22 @@ impl App {
                 }
             }
             ConversationEvent::Delta(text) => {
+                // Display only — audio is fed directly by the bridge task.
                 self.conversation.last_delta_at = Some(std::time::Instant::now());
                 self.conversation.streaming.push_str(&text);
-                self.conversation.speak(SpeakerCommand::Chunk(text));
             }
             ConversationEvent::Break => {
-                // A new text segment: separate it from the previous one (which
-                // streamed with no trailing separator), and speak the pending
-                // sentence before the gap.
+                // A new text segment: separate it from the previous one, which
+                // streamed with no trailing separator. (Audio flush is handled
+                // by the bridge.)
                 let s = &mut self.conversation.streaming;
                 if !s.is_empty() && !s.ends_with(char::is_whitespace) {
                     s.push_str("\n\n");
                 }
-                self.conversation.speak(SpeakerCommand::Flush);
             }
             ConversationEvent::TurnComplete => {
                 tracing::debug!(overlay_open, "conversation: turn complete");
                 self.finalize_streaming();
-                self.conversation.speak(SpeakerCommand::Flush);
                 // If the user queued a message while this reply was streaming,
                 // show it now (after the reply) and stay Thinking — the session
                 // is already answering it next.
@@ -231,7 +237,6 @@ impl App {
             ConversationEvent::Error(e) => {
                 tracing::warn!(overlay_open, "conversation: turn error: {e}");
                 self.finalize_streaming();
-                self.conversation.speak(SpeakerCommand::Flush);
                 self.conversation.status = ConvStatus::Error(e);
             }
             ConversationEvent::Exited => {

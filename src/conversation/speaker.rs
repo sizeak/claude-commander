@@ -63,7 +63,7 @@ impl SentenceAccumulator {
 }
 
 /// Commands to the speaker task.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpeakerCommand {
     /// A streamed chunk of assistant text.
     Chunk(String),
@@ -71,6 +71,19 @@ pub enum SpeakerCommand {
     Flush,
     /// Stop playback and discard buffered text (e.g. a new user turn).
     Interrupt,
+}
+
+/// Map a session event to the speaker command it drives (if any). Pure, so the
+/// bridge's audio routing is unit-testable. Lets speech be driven straight off
+/// the session stream, independent of the UI loop.
+pub fn speaker_command_for(ev: &crate::conversation::ConversationEvent) -> Option<SpeakerCommand> {
+    use crate::conversation::ConversationEvent as E;
+    match ev {
+        E::Delta(text) => Some(SpeakerCommand::Chunk(text.clone())),
+        // A block boundary, turn end, or error all flush the buffered sentence.
+        E::Break | E::TurnComplete | E::Error(_) => Some(SpeakerCommand::Flush),
+        E::Started { .. } | E::Exited => None,
+    }
 }
 
 /// Start the speaker task. Returns a sender for [`SpeakerCommand`]s, or an error
@@ -109,8 +122,11 @@ pub fn spawn_speaker(
             tokio::select! {
                 // Enqueue finished audio in order as it becomes ready.
                 Some(result) = pending.next(), if !pending.is_empty() => match result {
-                    Ok(bytes) => player.enqueue(bytes),
-                    Err(e) => warn!("TTS synthesis failed: {e}"),
+                    Ok(bytes) => {
+                        tracing::debug!(target: "conversation", "audio enqueued: {} bytes", bytes.len());
+                        player.enqueue(bytes);
+                    }
+                    Err(e) => warn!(target: "conversation", "TTS synthesis failed: {e}"),
                 },
                 cmd = rx.recv() => match cmd {
                     Some(SpeakerCommand::Chunk(text)) => {
@@ -153,6 +169,7 @@ fn synth_future(
     if text.trim().is_empty() {
         return None;
     }
+    tracing::debug!(target: "conversation", "speak: {:?}", text.chars().take(60).collect::<String>());
     let client = client.clone();
     let model = cfg.model.clone();
     let voice = cfg.voice.clone().unwrap_or_default();
@@ -227,6 +244,31 @@ mod tests {
         acc.push("partial");
         acc.clear();
         assert_eq!(acc.flush(), None);
+    }
+
+    #[test]
+    fn speaker_command_routing() {
+        use crate::conversation::ConversationEvent as E;
+        assert_eq!(
+            speaker_command_for(&E::Delta("hi".into())),
+            Some(SpeakerCommand::Chunk("hi".into()))
+        );
+        assert_eq!(speaker_command_for(&E::Break), Some(SpeakerCommand::Flush));
+        assert_eq!(
+            speaker_command_for(&E::TurnComplete),
+            Some(SpeakerCommand::Flush)
+        );
+        assert_eq!(
+            speaker_command_for(&E::Error("x".into())),
+            Some(SpeakerCommand::Flush)
+        );
+        assert_eq!(
+            speaker_command_for(&E::Started {
+                session_id: "s".into()
+            }),
+            None
+        );
+        assert_eq!(speaker_command_for(&E::Exited), None);
     }
 
     #[test]
