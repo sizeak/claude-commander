@@ -84,6 +84,16 @@ throbber-widgets-tui = "0.11"
 fuzzy-matcher = "0.3"
 rayon = "1.12.0"
 
+# Conversation mode (TTS): HTTP client for the OpenAI-compatible TTS endpoint
+# (rustls to avoid an OpenSSL C dependency, consistent with the pure-Rust lean)
+# and in-process audio playback. rodio's cpal backend links ALSA on Linux —
+# the build host needs alsa-lib (see flake.nix / CONTRIBUTING).
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+rodio = { version = "0.19", default-features = false, features = ["wav", "mp3"] }
+
 [dev-dependencies]
 # Property-based testing
 proptest = "1.4"

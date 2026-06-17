@@ -28,6 +28,9 @@ pub enum Error {
 
     #[error("TUI error: {0}")]
     Tui(#[from] TuiError),
+
+    #[error("TTS error: {0}")]
+    Tts(#[from] TtsError),
 }
 
 /// Session management errors
@@ -184,6 +187,32 @@ pub enum ConfigError {
     DirectoryCreationFailed(PathBuf),
 }
 
+/// Text-to-speech / conversation-mode errors.
+///
+/// These never reach the UI event loop: the conversation worker logs them via
+/// `tracing::warn!` and continues, so a flaky or absent TTS server degrades
+/// gracefully rather than blocking the terminal.
+#[derive(Error, Debug)]
+pub enum TtsError {
+    #[error("TTS request failed: {0}")]
+    Request(String),
+
+    #[error("TTS server returned {status}: {body}")]
+    Status { status: u16, body: String },
+
+    #[error("Audio playback error: {0}")]
+    Audio(String),
+
+    #[error("No commander transcript found at {0}")]
+    TranscriptNotFound(PathBuf),
+}
+
+impl From<reqwest::Error> for TtsError {
+    fn from(e: reqwest::Error) -> Self {
+        TtsError::Request(e.to_string())
+    }
+}
+
 /// TUI-related errors
 #[derive(Error, Debug)]
 pub enum TuiError {
@@ -314,5 +343,28 @@ mod tests {
         let tui_err = TuiError::InitFailed("test".to_string());
         let top_err: Error = tui_err.into();
         assert!(matches!(top_err, Error::Tui(_)));
+    }
+
+    #[test]
+    fn test_all_tts_error_variants_display() {
+        let variants: Vec<TtsError> = vec![
+            TtsError::Request("connection refused".to_string()),
+            TtsError::Status {
+                status: 500,
+                body: "boom".to_string(),
+            },
+            TtsError::Audio("no device".to_string()),
+            TtsError::TranscriptNotFound(PathBuf::from("/tmp/missing")),
+        ];
+        for err in variants {
+            assert!(!err.to_string().is_empty(), "Empty display for {:?}", err);
+        }
+    }
+
+    #[test]
+    fn test_tts_error_conversion() {
+        let tts_err = TtsError::Audio("test".to_string());
+        let top_err: Error = tts_err.into();
+        assert!(matches!(top_err, Error::Tts(_)));
     }
 }

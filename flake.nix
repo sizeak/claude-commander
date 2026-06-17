@@ -33,6 +33,11 @@
           ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
             pkgs.apple-sdk_15
           ];
+
+          # rodio (conversation-mode audio) links ALSA via cpal on Linux.
+          buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+            pkgs.alsa-lib
+          ];
         };
 
         # Build only dependencies (cached separately for incremental rebuilds)
@@ -79,6 +84,9 @@
             rust-analyzer
             tmux
             git
+            pkg-config
+          ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+            alsa-lib
           ];
         };
       }

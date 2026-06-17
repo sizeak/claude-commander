@@ -172,6 +172,61 @@ pub struct Config {
     /// `<data dir>/commander`.
     #[serde(default)]
     pub commander_dir: Option<PathBuf>,
+
+    /// Conversation mode (TTS): speak the commander's replies aloud via an
+    /// OpenAI-compatible TTS engine. Disabled by default.
+    #[serde(default)]
+    pub conversation: ConversationConfig,
+}
+
+/// Conversation-mode (text-to-speech) settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConversationConfig {
+    /// Start with conversation mode on at launch. The live on/off state is a
+    /// transient UI toggle (a hotkey); this is just its initial value.
+    pub enabled: bool,
+
+    /// Base URL of the OpenAI-compatible TTS API (include the `/v1`).
+    pub base_url: String,
+
+    /// Model name sent in each request (engines serving one model ignore it).
+    pub model: String,
+
+    /// Voice name. `None` lets the server use its configured default.
+    pub voice: Option<String>,
+
+    /// Audio container requested per chunk. `wav` avoids a server-side
+    /// transcode and client-side mp3 decode, for the lowest local latency.
+    pub response_format: String,
+
+    /// Playback speed (0.25–4.0).
+    pub speed: f32,
+
+    /// How much of each reply to speak.
+    pub speak_scope: crate::conversation::SpeakScope,
+
+    /// Transcript poll interval in milliseconds.
+    pub poll_interval_ms: u64,
+
+    /// Playback volume (0.0–2.0; 1.0 = unchanged).
+    pub volume: f32,
+}
+
+impl Default for ConversationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            base_url: "http://127.0.0.1:8002/v1".to_string(),
+            model: "kokoro".to_string(),
+            voice: None,
+            response_format: "wav".to_string(),
+            speed: 1.0,
+            speak_scope: crate::conversation::SpeakScope::ProseOnly,
+            poll_interval_ms: 700,
+            volume: 1.0,
+        }
+    }
 }
 
 impl Default for Config {
@@ -215,6 +270,7 @@ impl Default for Config {
             commander_enabled: false,
             commander_program: None,
             commander_dir: None,
+            conversation: ConversationConfig::default(),
         }
     }
 }
@@ -283,6 +339,15 @@ impl Config {
         } else {
             Ok(Self::data_dir()?.join("commander"))
         }
+    }
+
+    /// Directory holding the commander session's Claude Code transcript(s)
+    /// (`~/.claude/projects/<encoded-cwd>`), or `None` if the home directory or
+    /// commander dir can't be resolved.
+    pub fn commander_transcript_dir(&self) -> Option<PathBuf> {
+        let home = directories::BaseDirs::new()?.home_dir().to_path_buf();
+        let cwd = self.commander_dir().ok()?;
+        Some(crate::conversation::transcript_dir(&home, &cwd))
     }
 
     /// Program (with flags) to launch for the commander session, falling back
@@ -501,6 +566,49 @@ has_label = ["blocked", "waiting-on-author"]
         assert_eq!(config.max_concurrent_tmux, 16);
         assert_eq!(config.capture_cache_ttl_ms, 50);
         assert_eq!(config.ui_refresh_fps, 30);
+    }
+
+    #[test]
+    fn test_conversation_defaults() {
+        let c = ConversationConfig::default();
+        assert!(!c.enabled);
+        assert_eq!(c.base_url, "http://127.0.0.1:8002/v1");
+        assert_eq!(c.model, "kokoro");
+        assert_eq!(c.voice, None);
+        assert_eq!(c.response_format, "wav");
+        assert_eq!(c.speed, 1.0);
+        assert_eq!(c.speak_scope, crate::conversation::SpeakScope::ProseOnly);
+        assert_eq!(c.volume, 1.0);
+    }
+
+    #[test]
+    fn test_empty_toml_yields_conversation_defaults() {
+        let config: Config = toml::from_str("").expect("empty toml");
+        assert!(!config.conversation.enabled);
+        assert_eq!(config.conversation.base_url, "http://127.0.0.1:8002/v1");
+    }
+
+    #[test]
+    fn test_conversation_toml_roundtrip() {
+        let toml_src = r#"
+[conversation]
+enabled = true
+base_url = "http://host:9000/v1"
+voice = "bm_fable"
+speak_scope = "final_summary"
+speed = 1.25
+"#;
+        let config: Config = toml::from_str(toml_src).expect("toml parse");
+        assert!(config.conversation.enabled);
+        assert_eq!(config.conversation.base_url, "http://host:9000/v1");
+        assert_eq!(config.conversation.voice.as_deref(), Some("bm_fable"));
+        assert_eq!(
+            config.conversation.speak_scope,
+            crate::conversation::SpeakScope::FinalSummary
+        );
+        assert_eq!(config.conversation.speed, 1.25);
+        // Unspecified fields keep their defaults.
+        assert_eq!(config.conversation.model, "kokoro");
     }
 
     #[test]

@@ -145,6 +145,37 @@ impl App {
                     ),
                 ]
             }
+            SettingsTab::Conversation => {
+                let c = &self.config.conversation;
+                vec![
+                    // Runtime toggle (UI state, not persisted) — mirrors the hotkey.
+                    SettingsRow::toggle(
+                        "Conversation Mode (now)",
+                        self.ui_state.conversation_mode,
+                        "conversation_mode",
+                    ),
+                    SettingsRow::toggle("Enabled at Startup", c.enabled, "conversation_enabled"),
+                    SettingsRow::text("TTS Base URL", c.base_url.clone(), "conversation_base_url"),
+                    SettingsRow::text("Model", c.model.clone(), "conversation_model"),
+                    SettingsRow::text(
+                        "Voice",
+                        c.voice.clone().unwrap_or_else(|| "(default)".into()),
+                        "conversation_voice",
+                    ),
+                    SettingsRow::text(
+                        "Response Format",
+                        c.response_format.clone(),
+                        "conversation_format",
+                    ),
+                    SettingsRow::text("Speed", format!("{:.2}", c.speed), "conversation_speed"),
+                    SettingsRow::text("Volume", format!("{:.2}", c.volume), "conversation_volume"),
+                    SettingsRow::text(
+                        "Speak Scope",
+                        c.speak_scope.label().to_string(),
+                        "conversation_speak_scope",
+                    ),
+                ]
+            }
             SettingsTab::Sections => {
                 vec![]
             }
@@ -846,6 +877,39 @@ impl App {
                 }
                 _ => {}
             },
+            SettingsTab::Conversation => match field_key {
+                "conversation_base_url" => self.config.conversation.base_url = value.to_string(),
+                "conversation_model" => self.config.conversation.model = value.to_string(),
+                "conversation_voice" => {
+                    self.config.conversation.voice = if value.is_empty() || value == "(default)" {
+                        None
+                    } else {
+                        Some(value.to_string())
+                    };
+                }
+                "conversation_format" => {
+                    self.config.conversation.response_format = value.to_string();
+                }
+                "conversation_speed" => {
+                    if let Ok(v) = value.parse::<f32>() {
+                        self.config.conversation.speed = v.clamp(0.25, 4.0);
+                    }
+                }
+                "conversation_volume" => {
+                    if let Ok(v) = value.parse::<f32>() {
+                        self.config.conversation.volume = v.clamp(0.0, 2.0);
+                    }
+                }
+                "conversation_speak_scope" => {
+                    // The picker passes the human label; config/tests use tokens.
+                    if let Some(scope) = crate::conversation::SpeakScope::from_token(value)
+                        .or_else(|| crate::conversation::SpeakScope::from_label(value))
+                    {
+                        self.config.conversation.speak_scope = scope;
+                    }
+                }
+                _ => {}
+            },
             SettingsTab::Theme => {
                 use crate::config::theme::ColorValue;
 
@@ -992,6 +1056,7 @@ impl App {
             "precompute_review_caches" => self.config.precompute_review_caches = value,
             "ai_summary_enabled" => self.config.ai_summary_enabled = value,
             "commander_enabled" => self.config.commander_enabled = value,
+            "conversation_enabled" => self.config.conversation.enabled = value,
             _ => {
                 warn!("Unknown boolean setting: {}", field_key);
                 return;
@@ -1115,7 +1180,15 @@ impl App {
                 .flatten();
             if let Some(new_val) = new_val {
                 let field_key = state.rows[state.selected_row].field_key.clone();
-                self.apply_bool_setting(&field_key, new_val);
+                if field_key == "conversation_mode" {
+                    // Runtime toggle: UI state + live watcher, never persisted.
+                    self.ui_state.conversation_mode = new_val;
+                    if let Some(tx) = &self.conversation_tx {
+                        let _ = tx.send(new_val);
+                    }
+                } else {
+                    self.apply_bool_setting(&field_key, new_val);
+                }
                 state.rows = self.build_settings_rows(state.tab);
                 self.ui_state.modal = Modal::Settings(state);
                 return;
@@ -1165,6 +1238,18 @@ impl App {
                                 use crate::tui::theme::PRESET_NAMES;
                                 let options: Vec<String> =
                                     PRESET_NAMES.iter().map(|s| (*s).to_string()).collect();
+                                let current_value = state.rows[state.selected_row].text_value();
+                                let selected =
+                                    options.iter().position(|o| o == current_value).unwrap_or(0);
+                                state.editing =
+                                    Some(SettingsEditing::OptionPicker { options, selected });
+                            } else if field_key == "conversation_speak_scope" {
+                                // Inline option picker for the speak-scope enum.
+                                use crate::conversation::SpeakScope;
+                                let options: Vec<String> = SpeakScope::ALL
+                                    .iter()
+                                    .map(|s| s.label().to_string())
+                                    .collect();
                                 let current_value = state.rows[state.selected_row].text_value();
                                 let selected =
                                     options.iter().position(|o| o == current_value).unwrap_or(0);
@@ -1791,5 +1876,20 @@ mod tests {
         assert_eq!(truncate_str("short", 10), "short");
         assert_eq!(truncate_str("longer-name", 7), "longer…");
         assert_eq!(truncate_str("ab", 1), "…");
+    }
+
+    #[test]
+    fn settings_tab_cycle_includes_conversation() {
+        assert_eq!(SettingsTab::ALL.len(), 5);
+        assert!(SettingsTab::ALL.contains(&SettingsTab::Conversation));
+        assert_eq!(SettingsTab::General.next(), SettingsTab::Conversation);
+        assert_eq!(SettingsTab::Conversation.prev(), SettingsTab::General);
+        // A full forward cycle returns to the start.
+        let mut t = SettingsTab::General;
+        for _ in 0..SettingsTab::ALL.len() {
+            t = t.next();
+        }
+        assert_eq!(t, SettingsTab::General);
+        assert_eq!(SettingsTab::Conversation.label(), "Conversation");
     }
 }

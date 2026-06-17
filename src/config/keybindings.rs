@@ -47,6 +47,7 @@ pub enum BindableAction {
     OpenInEditor,
     OpenPullRequest,
     OpenCommander,
+    ToggleConversationMode,
     OpenReviewDiff,
     TogglePane,
     TogglePaneReverse,
@@ -93,6 +94,7 @@ impl BindableAction {
         Self::OpenInEditor,
         Self::OpenPullRequest,
         Self::OpenCommander,
+        Self::ToggleConversationMode,
         Self::OpenReviewDiff,
         Self::ScanDirectory,
         Self::MoveToSection,
@@ -156,6 +158,7 @@ impl BindableAction {
             Self::MoveToSection => "move_to_section",
             Self::ToggleSection => "toggle_section",
             Self::ToggleViewMode => "toggle_view_mode",
+            Self::ToggleConversationMode => "toggle_conversation_mode",
         }
     }
 
@@ -203,6 +206,7 @@ impl BindableAction {
             Self::MoveToSection => "Move session to section…",
             Self::ToggleSection => "Collapse/expand section",
             Self::ToggleViewMode => "Cycle project / sections / section stacks view",
+            Self::ToggleConversationMode => "Toggle conversation mode (speak commander replies)",
         }
     }
 
@@ -233,6 +237,7 @@ impl BindableAction {
             | Self::OpenInEditor
             | Self::OpenPullRequest
             | Self::OpenCommander
+            | Self::ToggleConversationMode
             | Self::OpenReviewDiff
             | Self::ScanDirectory
             | Self::MoveToSection
@@ -295,6 +300,7 @@ impl FromStr for BindableAction {
             "move_to_section" => Ok(Self::MoveToSection),
             "toggle_section" => Ok(Self::ToggleSection),
             "toggle_view_mode" => Ok(Self::ToggleViewMode),
+            "toggle_conversation_mode" => Ok(Self::ToggleConversationMode),
             _ => Err(format!("unknown action: {s}")),
         }
     }
@@ -625,6 +631,10 @@ impl Default for KeyBindings {
         bindings.insert(
             BindableAction::OpenCommander,
             vec![kb(KeyCode::Char('C'), shift)],
+        );
+        bindings.insert(
+            BindableAction::ToggleConversationMode,
+            vec![kb(KeyCode::Char('v'), alt)],
         );
         bindings.insert(
             BindableAction::OpenReviewDiff,
@@ -1067,6 +1077,16 @@ mod tests {
         let kb = KeyBindings::default();
         let key = KeyEvent::new(KeyCode::Char('C'), KeyModifiers::SHIFT);
         assert_eq!(kb.resolve(&key), Some(BindableAction::OpenCommander));
+    }
+
+    #[test]
+    fn test_toggle_conversation_mode_default_bound_to_alt_v() {
+        let kb = KeyBindings::default();
+        let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT);
+        assert_eq!(
+            kb.resolve(&key),
+            Some(BindableAction::ToggleConversationMode)
+        );
     }
 
     #[test]

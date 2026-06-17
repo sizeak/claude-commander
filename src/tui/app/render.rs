@@ -487,6 +487,17 @@ impl App {
             );
         }
 
+        // Conversation mode (TTS) indicator.
+        if self.ui_state.conversation_mode {
+            left_spans.splice(
+                1..1,
+                [
+                    Span::styled(" \u{2502} ", base_style),
+                    Span::styled("\u{1F50A} TTS", base_style.fg(self.theme.text_accent)),
+                ],
+            );
+        }
+
         // Split the status area into left (fill) and right (fixed width for help hint)
         let help_width = 8u16; // "? help " + padding
         let chunks = Layout::default()
