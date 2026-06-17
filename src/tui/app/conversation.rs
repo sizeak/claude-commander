@@ -7,6 +7,9 @@ use super::*;
 use crate::conversation::{ConversationEvent, ConversationSession, SpeakerCommand, spawn_speaker};
 use crate::tui::event::{AppEvent, StateUpdate};
 
+/// Canonical project spinner frames (advanced every 3 render ticks).
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
 /// Who authored a conversation message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConvRole {
@@ -28,16 +31,6 @@ pub enum ConvStatus {
     Idle,
     Thinking,
     Error(String),
-}
-
-impl ConvStatus {
-    fn label(&self) -> String {
-        match self {
-            ConvStatus::Idle => "ready".to_string(),
-            ConvStatus::Thinking => "thinking…".to_string(),
-            ConvStatus::Error(e) => format!("error: {e}"),
-        }
-    }
 }
 
 /// Conversation runtime state held on `App`, independent of the overlay's
@@ -230,44 +223,49 @@ impl App {
         let inner = block.inner(area);
         frame.render_widget(block, area);
 
-        // Layout: status line, history (fills), input box (3 rows).
+        // Layout: history (fills), input box (3 rows). No top status line — the
+        // feature is TTS by definition, and progress is shown inline at the
+        // bottom where the reply appears.
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1),
-                Constraint::Min(1),
-                Constraint::Length(3),
-            ])
+            .constraints([Constraint::Min(1), Constraint::Length(3)])
             .split(inner);
-
-        // Status line.
-        let tts = if self.conversation.speaker.is_some() {
-            " · 🔊 TTS"
-        } else {
-            ""
-        };
-        frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(
-                format!(" {}{}", self.conversation.status.label(), tts),
-                Style::default().fg(self.theme.text_secondary),
-            ))),
-            chunks[0],
-        );
 
         // History: wrap every message to the inner width, bottom-anchored with
         // `scroll` lines paged up.
-        let width = chunks[1].width.max(1) as usize;
+        let width = chunks[0].width.max(1) as usize;
         let mut lines: Vec<Line> = Vec::new();
         for msg in &self.conversation.messages {
             self.push_message_lines(&mut lines, msg.role, &msg.text, width);
         }
         if !self.conversation.streaming.is_empty() {
+            // The reply is arriving — the text itself is the progress indicator.
             self.push_message_lines(
                 &mut lines,
                 ConvRole::Assistant,
                 &self.conversation.streaming,
                 width,
             );
+        } else {
+            // No text yet: show a spinner where the reply will appear, or an
+            // error if the last turn failed.
+            match &self.conversation.status {
+                ConvStatus::Thinking => {
+                    let frame_glyph = SPINNER_FRAMES
+                        [(self.ui_state.tick_count as usize / 3) % SPINNER_FRAMES.len()];
+                    lines.push(Line::from(Span::styled(
+                        format!("{frame_glyph} thinking…"),
+                        Style::default().fg(self.theme.status_running),
+                    )));
+                }
+                ConvStatus::Error(e) => {
+                    lines.push(Line::from(Span::styled(
+                        format!("⚠ {e}"),
+                        Style::default().fg(self.theme.modal_error),
+                    )));
+                }
+                ConvStatus::Idle => {}
+            }
         }
         if lines.is_empty() {
             lines.push(Line::from(Span::styled(
@@ -275,21 +273,21 @@ impl App {
                 Style::default().fg(self.theme.text_secondary),
             )));
         }
-        let view_h = chunks[1].height as usize;
+        let view_h = chunks[0].height as usize;
         let total = lines.len();
         let bottom_start = total.saturating_sub(view_h);
         let start = bottom_start.saturating_sub(scroll as usize);
         let end = (start + view_h).min(total);
         let visible: Vec<Line> = lines[start..end].to_vec();
-        frame.render_widget(Paragraph::new(visible), chunks[1]);
+        frame.render_widget(Paragraph::new(visible), chunks[0]);
 
         // Input box.
         let input_block = Block::default()
             .borders(Borders::ALL)
             .border_type(self.border_type())
             .border_style(Style::default().fg(self.theme.border_unfocused));
-        let input_inner = input_block.inner(chunks[2]);
-        frame.render_widget(input_block, chunks[2]);
+        let input_inner = input_block.inner(chunks[1]);
+        frame.render_widget(input_block, chunks[1]);
         let text_width = input_inner.width.max(1);
         let view_scroll = input.visual_scroll(text_width as usize);
         frame.render_widget(
