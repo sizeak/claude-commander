@@ -15,6 +15,11 @@ use crate::conversation::extract::{SpeakScope, first_sentence_boundary, spoken_t
 use crate::conversation::tts::{SpeechRequest, TtsClient};
 use crate::error::TtsError;
 
+/// Maximum concurrent synth requests. Enough to keep the audio queue fed
+/// (synth runs ahead of playback) without flooding the TTS server, which on a
+/// CPU box would cause request timeouts and dropped/skipped sentences.
+const MAX_INFLIGHT: usize = 3;
+
 /// Buffers streamed text and yields complete sentences. Pure + unit-tested.
 #[derive(Debug, Default)]
 pub struct SentenceAccumulator {
@@ -58,7 +63,7 @@ impl SentenceAccumulator {
 }
 
 /// Commands to the speaker task.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpeakerCommand {
     /// A streamed chunk of assistant text.
     Chunk(String),
@@ -66,6 +71,19 @@ pub enum SpeakerCommand {
     Flush,
     /// Stop playback and discard buffered text (e.g. a new user turn).
     Interrupt,
+}
+
+/// Map a session event to the speaker command it drives (if any). Pure, so the
+/// bridge's audio routing is unit-testable. Lets speech be driven straight off
+/// the session stream, independent of the UI loop.
+pub fn speaker_command_for(ev: &crate::conversation::ConversationEvent) -> Option<SpeakerCommand> {
+    use crate::conversation::ConversationEvent as E;
+    match ev {
+        E::Delta(text) => Some(SpeakerCommand::Chunk(text.clone())),
+        // A block boundary, turn end, or error all flush the buffered sentence.
+        E::Break | E::TurnComplete | E::Error(_) => Some(SpeakerCommand::Flush),
+        E::Started { .. } | E::Exited => None,
+    }
 }
 
 /// Start the speaker task. Returns a sender for [`SpeakerCommand`]s, or an error
@@ -85,32 +103,43 @@ pub fn spawn_speaker(
 
     tokio::spawn(async move {
         let mut acc = SentenceAccumulator::new();
-        // In-flight synth requests; polled concurrently, yielded in push order.
+        // Sentences awaiting synthesis (in order), and the bounded set of
+        // in-flight synth requests (polled concurrently, yielded in push order).
+        let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
         let mut pending: FuturesOrdered<_> = FuturesOrdered::new();
         loop {
+            // Keep at most MAX_INFLIGHT requests running: enough to stay ahead
+            // of playback, few enough not to overload the TTS server (which
+            // would cause timeouts and dropped — i.e. skipped — sentences).
+            while pending.len() < MAX_INFLIGHT {
+                let Some(sentence) = queue.pop_front() else {
+                    break;
+                };
+                if let Some(fut) = synth_future(&client, &cfg, &sentence) {
+                    pending.push_back(fut);
+                }
+            }
             tokio::select! {
                 // Enqueue finished audio in order as it becomes ready.
                 Some(result) = pending.next(), if !pending.is_empty() => match result {
-                    Ok(bytes) => player.enqueue(bytes),
-                    Err(e) => warn!("TTS synthesis failed: {e}"),
+                    Ok(bytes) => {
+                        tracing::debug!(target: "conversation", "audio enqueued: {} bytes", bytes.len());
+                        player.enqueue(bytes);
+                    }
+                    Err(e) => warn!(target: "conversation", "TTS synthesis failed: {e}"),
                 },
                 cmd = rx.recv() => match cmd {
                     Some(SpeakerCommand::Chunk(text)) => {
-                        for sentence in acc.push(&text) {
-                            if let Some(fut) = synth_future(&client, &cfg, &sentence) {
-                                pending.push_back(fut);
-                            }
-                        }
+                        queue.extend(acc.push(&text));
                     }
                     Some(SpeakerCommand::Flush) => {
-                        if let Some(remainder) = acc.flush()
-                            && let Some(fut) = synth_future(&client, &cfg, &remainder)
-                        {
-                            pending.push_back(fut);
+                        if let Some(remainder) = acc.flush() {
+                            queue.push_back(remainder);
                         }
                     }
                     Some(SpeakerCommand::Interrupt) => {
                         acc.clear();
+                        queue.clear();
                         pending = FuturesOrdered::new(); // cancel in-flight synth
                         player.stop();
                     }
@@ -140,6 +169,7 @@ fn synth_future(
     if text.trim().is_empty() {
         return None;
     }
+    tracing::debug!(target: "conversation", "speak: {:?}", text.chars().take(60).collect::<String>());
     let client = client.clone();
     let model = cfg.model.clone();
     let voice = cfg.voice.clone().unwrap_or_default();
@@ -214,6 +244,31 @@ mod tests {
         acc.push("partial");
         acc.clear();
         assert_eq!(acc.flush(), None);
+    }
+
+    #[test]
+    fn speaker_command_routing() {
+        use crate::conversation::ConversationEvent as E;
+        assert_eq!(
+            speaker_command_for(&E::Delta("hi".into())),
+            Some(SpeakerCommand::Chunk("hi".into()))
+        );
+        assert_eq!(speaker_command_for(&E::Break), Some(SpeakerCommand::Flush));
+        assert_eq!(
+            speaker_command_for(&E::TurnComplete),
+            Some(SpeakerCommand::Flush)
+        );
+        assert_eq!(
+            speaker_command_for(&E::Error("x".into())),
+            Some(SpeakerCommand::Flush)
+        );
+        assert_eq!(
+            speaker_command_for(&E::Started {
+                session_id: "s".into()
+            }),
+            None
+        );
+        assert_eq!(speaker_command_for(&E::Exited), None);
     }
 
     #[test]

@@ -9,11 +9,11 @@
 //! All logic here is pure or filesystem-only so it is testable without a TUI;
 //! the presentation layer only renders and dispatches.
 
-use std::fs;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use tokio::fs;
 
 use crate::error::{ConfigError, Result};
 use crate::git::{FileDiff, ParsedDiff, file_diff_hash};
@@ -51,8 +51,11 @@ impl ReviewedStore {
     }
 
     /// Load a session's marks (an absent file yields an empty list).
-    pub fn load(&self, sid: SessionId) -> Result<Vec<ReviewedMark>> {
-        match fs::read_to_string(self.path_for(sid)) {
+    ///
+    /// Async + `tokio::fs` so per-session disk reads never block the executor
+    /// (every caller runs on the TUI/CLI runtime).
+    pub async fn load(&self, sid: SessionId) -> Result<Vec<ReviewedMark>> {
+        match fs::read_to_string(self.path_for(sid)).await {
             Ok(s) => {
                 Ok(serde_json::from_str(&s).map_err(|e| ConfigError::LoadFailed(e.to_string()))?)
             }
@@ -62,13 +65,19 @@ impl ReviewedStore {
     }
 
     /// Persist a session's marks via a temp-file + rename (atomic).
-    pub fn save(&self, sid: SessionId, marks: &[ReviewedMark]) -> Result<()> {
-        fs::create_dir_all(&self.dir).map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
+    pub async fn save(&self, sid: SessionId, marks: &[ReviewedMark]) -> Result<()> {
+        fs::create_dir_all(&self.dir)
+            .await
+            .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
         let json = serde_json::to_string_pretty(marks)
             .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
         let tmp = self.dir.join(format!(".{}.tmp", sid.as_uuid()));
-        fs::write(&tmp, json).map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
-        fs::rename(&tmp, self.path_for(sid)).map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
+        fs::write(&tmp, json)
+            .await
+            .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
+        fs::rename(&tmp, self.path_for(sid))
+            .await
+            .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
         Ok(())
     }
 }
@@ -126,25 +135,25 @@ mod tests {
 
     // --- store ---
 
-    #[test]
-    fn load_missing_returns_empty() {
+    #[tokio::test]
+    async fn load_missing_returns_empty() {
         let tmp = TempDir::new().unwrap();
         let store = ReviewedStore::new(tmp.path().join("reviewed"));
-        assert!(store.load(SessionId::new()).unwrap().is_empty());
+        assert!(store.load(SessionId::new()).await.unwrap().is_empty());
     }
 
-    #[test]
-    fn save_then_load_round_trips() {
+    #[tokio::test]
+    async fn save_then_load_round_trips() {
         let tmp = TempDir::new().unwrap();
         let store = ReviewedStore::new(tmp.path().join("reviewed"));
         let sid = SessionId::new();
         let diff = diff_for("src/a.rs", " ctx\n-old\n+new\n");
         let marks = vec![mark_for(&diff.files[0])];
 
-        store.save(sid, &marks).unwrap();
-        assert_eq!(store.load(sid).unwrap(), marks);
+        store.save(sid, &marks).await.unwrap();
+        assert_eq!(store.load(sid).await.unwrap(), marks);
         // Other sessions are unaffected.
-        assert!(store.load(SessionId::new()).unwrap().is_empty());
+        assert!(store.load(SessionId::new()).await.unwrap().is_empty());
     }
 
     // --- toggle ---

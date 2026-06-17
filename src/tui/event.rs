@@ -142,9 +142,6 @@ pub enum StateUpdate {
     ReviewPrepared {
         prepared: Box<super::app::ReviewPrepared>,
     },
-    /// An event from the headless conversation-mode session (init / text delta /
-    /// turn complete / error / exit), bridged onto the main loop.
-    Conversation(crate::conversation::ConversationEvent),
     /// A transcript from voice input (Alt-V), to be sent to the conversation
     /// session as if typed.
     VoiceTranscript(String),
