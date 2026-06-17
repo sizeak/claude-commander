@@ -363,11 +363,12 @@ impl App {
         frame.render_widget(Paragraph::new(visible), chunks[0]);
 
         // Input: a single prompt line bracketed by top/bottom rules (à la
-        // Claude Code), rather than a heavy full box.
+        // Claude Code), rather than a heavy full box. Use the green accent (not
+        // the focused-blue) so the rules don't blend into the blue modal border.
         let input_block = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
             .border_type(self.border_type())
-            .border_style(Style::default().fg(self.theme.border_focused));
+            .border_style(Style::default().fg(self.theme.status_running));
         let input_inner = input_block.inner(chunks[1]);
         frame.render_widget(input_block, chunks[1]);
 
