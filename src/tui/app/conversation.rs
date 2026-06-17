@@ -296,9 +296,10 @@ impl App {
             .borders(Borders::ALL)
             .border_type(self.border_type())
             .border_style(Style::default().fg(self.theme.modal_info));
-        // Inset the content from the border so text isn't flush against it.
+        // Keep a top/bottom gap, but no extra horizontal inset so the text
+        // lines up with the title (both sit one cell in from the border).
         let inner = block.inner(area).inner(Margin {
-            horizontal: 2,
+            horizontal: 0,
             vertical: 1,
         });
         frame.render_widget(block, area);
