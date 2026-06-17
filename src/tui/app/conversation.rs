@@ -376,7 +376,7 @@ impl App {
         frame.render_widget(
             Paragraph::new(PROMPT).style(
                 Style::default()
-                    .fg(self.theme.text_primary)
+                    .fg(self.theme.status_running)
                     .add_modifier(Modifier::BOLD),
             ),
             Rect {
