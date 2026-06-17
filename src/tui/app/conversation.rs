@@ -296,15 +296,23 @@ impl App {
             .borders(Borders::ALL)
             .border_type(self.border_type())
             .border_style(Style::default().fg(self.theme.modal_info));
-        let inner = block.inner(area);
+        // Inset the content from the border so text isn't flush against it.
+        let inner = block.inner(area).inner(Margin {
+            horizontal: 2,
+            vertical: 1,
+        });
         frame.render_widget(block, area);
 
-        // Layout: history (fills), input box (3 rows). No top status line — the
-        // feature is TTS by definition, and progress is shown inline at the
-        // bottom where the reply appears.
+        // Layout: history (fills), a blank gutter, then the input box (3 rows).
+        // No top status line — the feature is TTS by definition, and progress is
+        // shown inline at the bottom where the reply appears.
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(1), Constraint::Length(3)])
+            .constraints([
+                Constraint::Min(1),
+                Constraint::Length(1),
+                Constraint::Length(3),
+            ])
             .split(inner);
 
         // History: wrap every message to the inner width, bottom-anchored with
@@ -362,8 +370,8 @@ impl App {
             .borders(Borders::ALL)
             .border_type(self.border_type())
             .border_style(Style::default().fg(self.theme.border_unfocused));
-        let input_inner = input_block.inner(chunks[1]);
-        frame.render_widget(input_block, chunks[1]);
+        let input_inner = input_block.inner(chunks[2]);
+        frame.render_widget(input_block, chunks[2]);
         let text_width = input_inner.width.max(1);
         let view_scroll = input.visual_scroll(text_width as usize);
         frame.render_widget(
