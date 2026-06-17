@@ -177,6 +177,12 @@ pub struct Config {
     /// OpenAI-compatible TTS engine. Disabled by default.
     #[serde(default)]
     pub conversation: ConversationConfig,
+
+    /// Speech-to-text (voice input): transcribe the microphone via an
+    /// OpenAI-compatible transcription engine and feed it to the conversation
+    /// agent (Alt-V). Disabled by default.
+    #[serde(default)]
+    pub stt: SttConfig,
 }
 
 /// Conversation-mode (text-to-speech) settings.
@@ -242,6 +248,53 @@ impl Default for ConversationConfig {
     }
 }
 
+/// Speech-to-text (voice-input) settings.
+///
+/// Mirrors [`ConversationConfig`] for the transcription side: an
+/// OpenAI-compatible `POST {base_url}/audio/transcriptions` endpoint. The
+/// transcribed text is fed to the conversation session, so STT only does
+/// anything useful with conversation mode running.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SttConfig {
+    /// Master switch for voice input. When off, Alt-V does nothing. Off by
+    /// default.
+    pub enabled: bool,
+
+    /// Base URL of the OpenAI-compatible transcription API (include the `/v1`).
+    pub base_url: String,
+
+    /// Model name sent with each request (engines serving one model ignore it).
+    pub model: String,
+
+    /// ISO-639-1 language hint. `None` lets the server auto-detect.
+    pub language: Option<String>,
+
+    /// Optional decoding prompt (domain vocabulary / spelling hints). `None`
+    /// sends nothing.
+    pub prompt: Option<String>,
+
+    /// API key, sent as a `Bearer` header when set. `None` for local servers
+    /// that don't authenticate.
+    pub api_key: Option<String>,
+}
+
+impl Default for SttConfig {
+    fn default() -> Self {
+        Self {
+            // Off by default — enable it in Settings ▸ Conversation.
+            enabled: false,
+            // Localhost placeholder, like the TTS default; override in config to
+            // point at your transcription server.
+            base_url: "http://127.0.0.1:8000/v1".to_string(),
+            model: "Systran/faster-whisper-base".to_string(),
+            language: None,
+            prompt: None,
+            api_key: None,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -284,6 +337,7 @@ impl Default for Config {
             commander_program: None,
             commander_dir: None,
             conversation: ConversationConfig::default(),
+            stt: SttConfig::default(),
         }
     }
 }
@@ -590,6 +644,42 @@ has_label = ["blocked", "waiting-on-author"]
         let config: Config = toml::from_str("").expect("empty toml");
         assert!(!config.conversation.enabled);
         assert_eq!(config.conversation.base_url, "http://127.0.0.1:8002/v1");
+    }
+
+    #[test]
+    fn test_stt_defaults() {
+        let c = SttConfig::default();
+        assert!(!c.enabled);
+        assert_eq!(c.base_url, "http://127.0.0.1:8000/v1");
+        assert_eq!(c.model, "Systran/faster-whisper-base");
+        assert_eq!(c.language, None);
+        assert_eq!(c.prompt, None);
+        assert_eq!(c.api_key, None);
+    }
+
+    #[test]
+    fn test_empty_toml_yields_stt_defaults() {
+        let config: Config = toml::from_str("").expect("empty toml");
+        assert!(!config.stt.enabled);
+        assert_eq!(config.stt.base_url, "http://127.0.0.1:8000/v1");
+    }
+
+    #[test]
+    fn test_stt_toml_roundtrip() {
+        let toml_src = r#"
+[stt]
+enabled = true
+base_url = "http://192.168.1.10:8080/v1"
+model = "large-v3-turbo"
+language = "en"
+"#;
+        let config: Config = toml::from_str(toml_src).expect("toml parse");
+        assert!(config.stt.enabled);
+        assert_eq!(config.stt.base_url, "http://192.168.1.10:8080/v1");
+        assert_eq!(config.stt.model, "large-v3-turbo");
+        assert_eq!(config.stt.language.as_deref(), Some("en"));
+        // Unspecified fields keep their defaults.
+        assert_eq!(config.stt.prompt, None);
     }
 
     #[test]

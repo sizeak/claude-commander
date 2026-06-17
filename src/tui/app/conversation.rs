@@ -4,7 +4,10 @@
 //! running — and keeps speaking — while the overlay is closed.
 
 use super::*;
-use crate::conversation::{ConversationEvent, ConversationSession, SpeakerCommand, spawn_speaker};
+use crate::conversation::{
+    ConversationEvent, ConversationSession, ListenerCommand, SpeakerCommand, spawn_listener,
+    spawn_speaker,
+};
 use crate::tui::event::{AppEvent, StateUpdate};
 
 /// Canonical project spinner frames (advanced every 3 render ticks).
@@ -70,6 +73,10 @@ pub struct ConversationRuntime {
     pub session: Option<ConversationSession>,
     /// Streaming-TTS speaker command channel; `None` if TTS is off/unavailable.
     pub speaker: Option<tokio::sync::mpsc::UnboundedSender<SpeakerCommand>>,
+    /// Voice-input listener command channel; `None` if STT is off/unavailable.
+    pub listener: Option<tokio::sync::mpsc::UnboundedSender<ListenerCommand>>,
+    /// Whether the microphone is currently capturing (toggled by Alt-V).
+    pub recording: bool,
     /// Finalized turns.
     pub messages: Vec<ConvMessage>,
     /// In-progress assistant text (streaming).
@@ -88,6 +95,14 @@ impl ConversationRuntime {
             let _ = tx.send(cmd);
         }
     }
+
+    fn listen(&self, cmd: ListenerCommand) -> bool {
+        if let Some(tx) = &self.listener {
+            tx.send(cmd).is_ok()
+        } else {
+            false
+        }
+    }
 }
 
 impl App {
@@ -100,10 +115,10 @@ impl App {
             return;
         }
         if !self.config.conversation.enabled {
-            self.ui_state.status_message = Some((
-                "Conversation mode is disabled — enable it in Settings ▸ Conversation".to_string(),
-                std::time::Instant::now() + std::time::Duration::from_secs(4),
-            ));
+            self.set_status_message(
+                "Conversation mode is disabled — enable it in Settings ▸ Conversation",
+                4,
+            );
             return;
         }
         self.ensure_conversation_started().await;
@@ -176,6 +191,31 @@ impl App {
             match spawn_speaker(self.config.conversation.clone()) {
                 Ok(tx) => self.conversation.speaker = Some(tx),
                 Err(e) => warn!("conversation TTS unavailable: {e}"),
+            }
+        }
+
+        // Start the voice-input listener if STT is enabled. Transcripts are
+        // bridged onto the main loop (like session events) so they're handled
+        // whether the overlay is open or not. Failure (no mic) is non-fatal.
+        if self.config.stt.enabled && self.conversation.listener.is_none() {
+            let (tx_text, mut rx_text) = tokio::sync::mpsc::unbounded_channel::<String>();
+            match spawn_listener(self.config.stt.clone(), tx_text) {
+                Ok(tx) => {
+                    self.conversation.listener = Some(tx);
+                    let app_tx = self.event_loop.sender();
+                    tokio::spawn(async move {
+                        while let Some(text) = rx_text.recv().await {
+                            if app_tx
+                                .send(AppEvent::StateUpdate(StateUpdate::VoiceTranscript(text)))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    });
+                }
+                Err(e) => warn!("conversation STT unavailable: {e}"),
             }
         }
         self.conversation.status = ConvStatus::Idle;
@@ -280,6 +320,51 @@ impl App {
             });
             self.conversation.status = ConvStatus::Thinking;
         }
+    }
+
+    /// Alt-V: toggle voice input. First press starts recording the microphone;
+    /// the next press stops it and submits the transcript to the conversation
+    /// agent. Works whether the overlay is open or not, mirroring spoken replies.
+    pub(super) async fn toggle_voice_input(&mut self) {
+        if !self.config.stt.enabled {
+            self.set_status_message(
+                "Voice input is disabled — enable STT in Settings ▸ Conversation",
+                4,
+            );
+            return;
+        }
+        // Bring the session (and listener) up on first use, just like typing.
+        self.ensure_conversation_started().await;
+        if self.conversation.listener.is_none() {
+            self.set_status_message("Voice input unavailable — no microphone?", 4);
+            return;
+        }
+
+        if self.conversation.recording {
+            self.conversation.recording = false;
+            self.conversation.listen(ListenerCommand::Stop);
+            self.set_status_message("🎙 Transcribing…", 4);
+        } else if self.conversation.listen(ListenerCommand::Start) {
+            self.conversation.recording = true;
+            self.set_status_message("🎙 Listening… (Alt-V to send)", 60);
+        }
+    }
+
+    /// Feed a voice transcript to the session as if it had been typed.
+    pub(super) async fn on_voice_transcript(&mut self, text: String) {
+        let text = text.trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        self.submit_conversation_input(text).await;
+    }
+
+    /// Show a transient status-bar message for `secs` seconds.
+    fn set_status_message(&mut self, msg: impl Into<String>, secs: u64) {
+        self.ui_state.status_message = Some((
+            msg.into(),
+            std::time::Instant::now() + std::time::Duration::from_secs(secs),
+        ));
     }
 
     /// Render the full-screen conversation overlay.
@@ -391,7 +476,18 @@ impl App {
         };
         let text_width = text_area.width.max(1);
         let view_scroll = input.visual_scroll(text_width as usize);
-        if input.value().is_empty() {
+        if self.conversation.recording {
+            // Recording takes over the input row — show a live indicator instead
+            // of the typing placeholder.
+            frame.render_widget(
+                Paragraph::new("🎙 Listening… (Alt-V to send)").style(
+                    Style::default()
+                        .fg(self.theme.modal_error)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                text_area,
+            );
+        } else if input.value().is_empty() {
             frame.render_widget(
                 Paragraph::new("Type a message…")
                     .style(Style::default().fg(self.theme.text_secondary)),

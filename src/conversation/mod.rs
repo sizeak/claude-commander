@@ -11,11 +11,16 @@
 
 pub mod audio;
 pub mod extract;
+pub mod listener;
+pub mod recorder;
 pub mod session;
 pub mod speaker;
+pub mod stt;
 pub mod tts;
 
 pub use extract::{SpeakScope, split_sentences, spoken_text};
+pub use listener::{ListenerCommand, spawn_listener};
 pub use session::{ConversationEvent, ConversationSession, parse_event, user_message_line};
 pub use speaker::{SentenceAccumulator, SpeakerCommand, spawn_speaker};
+pub use stt::SttClient;
 pub use tts::{SpeechRequest, TtsClient, build_speech_body};

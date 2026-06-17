@@ -333,6 +333,9 @@ impl App {
             StateUpdate::Conversation(ev) => {
                 self.on_conversation_event(ev);
             }
+            StateUpdate::VoiceTranscript(text) => {
+                self.on_voice_transcript(text).await;
+            }
             _ => {}
         }
     }

@@ -48,6 +48,7 @@ pub enum BindableAction {
     OpenPullRequest,
     OpenCommander,
     ToggleConversationOverlay,
+    ToggleVoiceInput,
     OpenReviewDiff,
     TogglePane,
     TogglePaneReverse,
@@ -95,6 +96,7 @@ impl BindableAction {
         Self::OpenPullRequest,
         Self::OpenCommander,
         Self::ToggleConversationOverlay,
+        Self::ToggleVoiceInput,
         Self::OpenReviewDiff,
         Self::ScanDirectory,
         Self::MoveToSection,
@@ -142,6 +144,7 @@ impl BindableAction {
             Self::OpenPullRequest => "open_pull_request",
             Self::OpenCommander => "open_commander",
             Self::ToggleConversationOverlay => "toggle_conversation_overlay",
+            Self::ToggleVoiceInput => "toggle_voice_input",
             Self::OpenReviewDiff => "open_review_diff",
             Self::TogglePane => "toggle_pane",
             Self::TogglePaneReverse => "toggle_pane_reverse",
@@ -190,6 +193,7 @@ impl BindableAction {
             Self::OpenPullRequest => "Open PR in browser",
             Self::OpenCommander => "Open commander session",
             Self::ToggleConversationOverlay => "Open/close conversation overlay (TTS)",
+            Self::ToggleVoiceInput => "Voice input: record / send (STT)",
             Self::OpenReviewDiff => "Review diff & comment",
             Self::TogglePane => "Toggle preview/diff/shell view",
             Self::TogglePaneReverse => "Toggle view (reverse)",
@@ -238,6 +242,7 @@ impl BindableAction {
             | Self::OpenPullRequest
             | Self::OpenCommander
             | Self::ToggleConversationOverlay
+            | Self::ToggleVoiceInput
             | Self::OpenReviewDiff
             | Self::ScanDirectory
             | Self::MoveToSection
@@ -284,6 +289,7 @@ impl FromStr for BindableAction {
             "open_pull_request" => Ok(Self::OpenPullRequest),
             "open_commander" => Ok(Self::OpenCommander),
             "toggle_conversation_overlay" => Ok(Self::ToggleConversationOverlay),
+            "toggle_voice_input" => Ok(Self::ToggleVoiceInput),
             "open_review_diff" => Ok(Self::OpenReviewDiff),
             "toggle_pane" => Ok(Self::TogglePane),
             "toggle_pane_reverse" => Ok(Self::TogglePaneReverse),
@@ -635,6 +641,10 @@ impl Default for KeyBindings {
         bindings.insert(
             BindableAction::ToggleConversationOverlay,
             vec![kb(KeyCode::Char('c'), alt)],
+        );
+        bindings.insert(
+            BindableAction::ToggleVoiceInput,
+            vec![kb(KeyCode::Char('v'), alt)],
         );
         bindings.insert(
             BindableAction::OpenReviewDiff,
@@ -1086,6 +1096,25 @@ mod tests {
         assert_eq!(
             kb.resolve(&key),
             Some(BindableAction::ToggleConversationOverlay)
+        );
+    }
+
+    #[test]
+    fn test_toggle_voice_input_default_bound_to_alt_v() {
+        let kb = KeyBindings::default();
+        let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT);
+        assert_eq!(kb.resolve(&key), Some(BindableAction::ToggleVoiceInput));
+    }
+
+    #[test]
+    fn test_toggle_voice_input_config_name_roundtrips() {
+        assert_eq!(
+            "toggle_voice_input".parse::<BindableAction>().unwrap(),
+            BindableAction::ToggleVoiceInput
+        );
+        assert_eq!(
+            BindableAction::ToggleVoiceInput.config_name(),
+            "toggle_voice_input"
         );
     }
 

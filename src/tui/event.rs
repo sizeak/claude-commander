@@ -145,6 +145,9 @@ pub enum StateUpdate {
     /// An event from the headless conversation-mode session (init / text delta /
     /// turn complete / error / exit), bridged onto the main loop.
     Conversation(crate::conversation::ConversationEvent),
+    /// A transcript from voice input (Alt-V), to be sent to the conversation
+    /// session as if typed.
+    VoiceTranscript(String),
 }
 
 /// User commands triggered by input
@@ -200,6 +203,8 @@ pub enum UserCommand {
     OpenCommander,
     /// Open/close the full-screen conversation overlay (TTS conversation mode)
     ToggleConversationOverlay,
+    /// Toggle voice input: start/stop recording the mic for transcription (STT)
+    ToggleVoiceInput,
     /// Open the full-screen review-diff-and-comment view for the session
     OpenReviewDiff,
     /// Toggle between preview/diff panes
@@ -304,6 +309,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::OpenPullRequest => Self::OpenPullRequest,
             BindableAction::OpenCommander => Self::OpenCommander,
             BindableAction::ToggleConversationOverlay => Self::ToggleConversationOverlay,
+            BindableAction::ToggleVoiceInput => Self::ToggleVoiceInput,
             BindableAction::OpenReviewDiff => Self::OpenReviewDiff,
             BindableAction::TogglePane => Self::TogglePane,
             BindableAction::TogglePaneReverse => Self::TogglePaneReverse,
