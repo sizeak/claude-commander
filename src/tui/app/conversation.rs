@@ -10,6 +10,34 @@ use crate::tui::event::{AppEvent, StateUpdate};
 /// Canonical project spinner frames (advanced every 3 render ticks).
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// Preamble seeded into the conversation session's `CLAUDE.md`. Followed by the
+/// generated `claude-commander` CLI reference so the agent can inspect live
+/// session/project state. Tuned for spoken replies.
+const CONVERSATION_PRIME: &str = "\
+# Conversation assistant
+
+You are a voice assistant for Claude Commander (the `claude-commander` CLI),
+which manages the user's Claude coding sessions across their projects. The user
+is *talking* to you, and your replies are read aloud by text-to-speech.
+
+## Tone
+- Be concise and conversational — a sentence or two, not a wall of text.
+- Don't read out code, long file paths, or long lists verbatim; summarise them.
+- Avoid markdown tables and code blocks; they sound bad spoken.
+
+## Checking current state
+Don't guess about the user's sessions or projects — inspect the live state with
+the CLI (it needs no approval). Good first commands:
+- `claude-commander list` — all current sessions, their projects and status.
+- `claude-commander status <name>` — detail on one session.
+- `claude-commander log <name>` — recent output from a session.
+Run `claude-commander list` early when the user asks anything about what's
+going on. You can read anything on the filesystem the user can.
+
+## Working directory
+This directory is your own scratch space; nothing else in it matters.
+";
+
 /// Who authored a conversation message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConvRole {
@@ -99,6 +127,19 @@ impl App {
         if let Err(e) = std::fs::create_dir_all(&dir) {
             self.conversation.status = ConvStatus::Error(format!("mkdir failed: {e}"));
             return;
+        }
+
+        // Seed CLAUDE.md so the agent knows it's a (spoken) Claude Commander
+        // assistant and how to inspect live session/project state. Rewritten on
+        // each (re)spawn so the embedded CLI reference stays current.
+        let cli = crate::cli_args::cli_command();
+        let claude_md = format!(
+            "{}\n{}",
+            CONVERSATION_PRIME.trim_end(),
+            crate::commander::generate_cli_reference(&cli)
+        );
+        if let Err(e) = std::fs::write(dir.join("CLAUDE.md"), claude_md) {
+            warn!("conversation: failed to write CLAUDE.md: {e}");
         }
 
         let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<ConversationEvent>();
