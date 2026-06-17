@@ -330,9 +330,6 @@ impl App {
                     }
                 }
             }
-            StateUpdate::Conversation(ev) => {
-                self.on_conversation_event(ev);
-            }
             _ => {}
         }
     }

@@ -142,9 +142,6 @@ pub enum StateUpdate {
     ReviewPrepared {
         prepared: Box<super::app::ReviewPrepared>,
     },
-    /// An event from the headless conversation-mode session (init / text delta /
-    /// turn complete / error / exit), bridged onto the main loop.
-    Conversation(crate::conversation::ConversationEvent),
 }
 
 /// User commands triggered by input
