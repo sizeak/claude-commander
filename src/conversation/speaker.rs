@@ -157,6 +157,21 @@ mod tests {
     }
 
     #[test]
+    fn accumulator_speaks_list_lines_as_they_complete() {
+        // A list with no sentence terminators must still be spoken line-by-line
+        // (via colon + newline boundaries), not buffered until a closing period.
+        let mut acc = SentenceAccumulator::new();
+        let mut spoken = Vec::new();
+        spoken.extend(acc.push("Here are the items:\n"));
+        spoken.extend(acc.push("- first item\n"));
+        spoken.extend(acc.push("- second item\n"));
+        assert_eq!(
+            spoken,
+            vec!["Here are the items:", "- first item", "- second item"]
+        );
+    }
+
+    #[test]
     fn accumulator_handles_multiple_sentences_in_one_chunk() {
         let mut acc = SentenceAccumulator::new();
         let out = acc.push("One. Two. Three");

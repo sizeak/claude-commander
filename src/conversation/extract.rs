@@ -128,17 +128,24 @@ pub fn split_sentences(text: &str) -> Vec<String> {
     out
 }
 
-/// Byte index just past the first *confirmed* sentence boundary in `s` — a
-/// `.?!` run immediately followed by whitespace, and not a known abbreviation.
-/// Returns `None` if no boundary is confirmed yet (text ends mid-sentence, or at
-/// a terminator with nothing after it). Lets the streaming accumulator emit a
-/// sentence the moment it's complete, instead of waiting for the next to begin.
+/// Byte index just past the first *confirmed* speech boundary in `s`:
+/// - a `.?!` run followed by whitespace (and, for `.`, not a known abbreviation),
+/// - a `:` followed by whitespace (lead-ins like "Here's the plan:" — the
+///   whitespace requirement keeps `3:14` and `http://` from triggering), or
+/// - a newline (a list item, heading or paragraph that has no terminator still
+///   gets spoken as soon as its line completes, rather than buffering the whole
+///   block until a closing period).
+///
+/// Returns `None` if no boundary is confirmed yet (text ends mid-line with no
+/// terminator). Lets the streaming accumulator start speaking a segment the
+/// moment it's complete, instead of waiting for the next to begin.
 pub fn first_sentence_boundary(s: &str) -> Option<usize> {
     let chars: Vec<(usize, char)> = s.char_indices().collect();
     let n = chars.len();
     let mut i = 0;
     while i < n {
-        if matches!(chars[i].1, '.' | '?' | '!') {
+        let c = chars[i].1;
+        if matches!(c, '.' | '?' | '!') {
             let mut j = i;
             while j + 1 < n && matches!(chars[j + 1].1, '.' | '?' | '!') {
                 j += 1;
@@ -151,6 +158,19 @@ pub fn first_sentence_boundary(s: &str) -> Option<usize> {
             }
             i = j + 1;
             continue;
+        }
+        // A colon followed by whitespace is a boundary too (no abbreviation
+        // guard — that's period-specific).
+        if c == ':'
+            && let Some(&(after_byte, next)) = chars.get(i + 1)
+            && next.is_whitespace()
+        {
+            return Some(after_byte);
+        }
+        // A newline ends a line (list item / heading / paragraph) — a boundary
+        // even with no terminator.
+        if c == '\n' {
+            return Some(chars.get(i + 1).map_or(s.len(), |&(b, _)| b));
         }
         i += 1;
     }
@@ -425,6 +445,14 @@ mod tests {
         assert_eq!(first_sentence_boundary("e.g. this"), None);
         // No terminator at all.
         assert_eq!(first_sentence_boundary("just words"), None);
+        // A colon followed by whitespace is a boundary (lead-in before a list).
+        assert_eq!(first_sentence_boundary("Here is the plan: do it"), Some(17));
+        // …but a colon not followed by whitespace is not (times, URLs).
+        assert_eq!(first_sentence_boundary("It is 3:14 now"), None);
+        assert_eq!(first_sentence_boundary("see http://x.y for more"), None);
+        // A newline ends a line even with no terminator (lists/headings).
+        assert_eq!(first_sentence_boundary("- one item\n- two"), Some(11));
+        assert_eq!(first_sentence_boundary("a heading\n"), Some(10));
     }
 
     #[test]
