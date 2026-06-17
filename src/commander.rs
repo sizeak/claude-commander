@@ -78,17 +78,21 @@ pub fn generate_cli_reference(cmd: &clap::Command) -> String {
 
 /// Write `CLAUDE.md` into the commander directory, overwriting any existing
 /// copy (the file is owned by Claude Commander, not the commander session).
-pub fn write_claude_md(dir: &Path, cmd: &clap::Command) -> Result<()> {
-    std::fs::write(dir.join("CLAUDE.md"), claude_md_content(cmd))?;
+///
+/// Async because it runs on the TUI/CLI runtime; uses `tokio::fs` so the disk
+/// write never blocks the executor. The CLI reference is composed synchronously
+/// (pure CPU) before the `await`.
+pub async fn write_claude_md(dir: &Path, cmd: &clap::Command) -> Result<()> {
+    tokio::fs::write(dir.join("CLAUDE.md"), claude_md_content(cmd)).await?;
     Ok(())
 }
 
 /// Create `NOTES.md` with the seed skeleton if it does not already exist.
 /// Existing notes are left untouched.
-pub fn seed_notes_md(dir: &Path) -> Result<()> {
+pub async fn seed_notes_md(dir: &Path) -> Result<()> {
     let path = dir.join("NOTES.md");
-    if !path.exists() {
-        std::fs::write(&path, NOTES_SEED)?;
+    if !tokio::fs::try_exists(&path).await.unwrap_or(false) {
+        tokio::fs::write(&path, NOTES_SEED).await?;
     }
     Ok(())
 }
@@ -140,9 +144,9 @@ pub async fn ensure_session(
     tmux.check_installed().await?;
 
     let dir = config.commander_dir()?;
-    std::fs::create_dir_all(&dir)?;
-    write_claude_md(&dir, cmd)?;
-    seed_notes_md(&dir)?;
+    tokio::fs::create_dir_all(&dir).await?;
+    write_claude_md(&dir, cmd).await?;
+    seed_notes_md(&dir).await?;
 
     let exists = tmux.session_exists(COMMANDER_TMUX_NAME).await?;
     let pane_dead = if exists {
@@ -222,23 +226,23 @@ mod tests {
         assert!(content.contains("claude-commander list"));
     }
 
-    #[test]
-    fn write_claude_md_overwrites_existing() {
+    #[tokio::test]
+    async fn write_claude_md_overwrites_existing() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("CLAUDE.md");
         std::fs::write(&path, "stale content the commander scribbled").unwrap();
 
-        write_claude_md(dir.path(), &sample_cli()).unwrap();
+        write_claude_md(dir.path(), &sample_cli()).await.unwrap();
 
         let written = std::fs::read_to_string(&path).unwrap();
         assert!(!written.contains("stale content"));
         assert!(written.starts_with("# Commander Claude"));
     }
 
-    #[test]
-    fn seed_notes_md_creates_when_absent() {
+    #[tokio::test]
+    async fn seed_notes_md_creates_when_absent() {
         let dir = TempDir::new().unwrap();
-        seed_notes_md(dir.path()).unwrap();
+        seed_notes_md(dir.path()).await.unwrap();
         let written = std::fs::read_to_string(dir.path().join("NOTES.md")).unwrap();
         assert!(written.starts_with("# Commander notes"));
     }
@@ -299,13 +303,13 @@ mod tests {
         assert_ne!(commander_sentinel_id(), SessionId::new());
     }
 
-    #[test]
-    fn seed_notes_md_does_not_overwrite_existing() {
+    #[tokio::test]
+    async fn seed_notes_md_does_not_overwrite_existing() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("NOTES.md");
         std::fs::write(&path, "## my own notes\nimportant").unwrap();
 
-        seed_notes_md(dir.path()).unwrap();
+        seed_notes_md(dir.path()).await.unwrap();
 
         let after = std::fs::read_to_string(&path).unwrap();
         assert_eq!(after, "## my own notes\nimportant");

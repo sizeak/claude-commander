@@ -202,7 +202,7 @@ impl SessionManager {
         };
 
         // Refuse to resume while the worktree is still mid-merge.
-        if merge_in_progress(&worktree_path) {
+        if merge_in_progress(&worktree_path).await {
             return Err(SessionError::CascadeMergeIncomplete(paused_at).into());
         }
 
@@ -471,20 +471,28 @@ fn walk_to_stack_base(start: SessionId, project_sessions: &[&WorktreeSession]) -
 
 /// `true` if the worktree at `path` has a `.git/MERGE_HEAD` marker, i.e. a
 /// merge is currently in progress.
-fn merge_in_progress(worktree_path: &Path) -> bool {
+///
+/// Async + `tokio::fs` so the probe never blocks the executor (both callers
+/// run inside async cascade paths).
+async fn merge_in_progress(worktree_path: &Path) -> bool {
     // In a linked worktree `.git` is a file pointing to `gitdir: …`; inside
     // that gitdir the merge state files live. Just probe both locations.
     let dot_git = worktree_path.join(".git");
-    if dot_git.is_dir() {
-        return dot_git.join("MERGE_HEAD").exists();
+    let dot_git_meta = tokio::fs::metadata(&dot_git).await;
+    if dot_git_meta.as_ref().is_ok_and(|m| m.is_dir()) {
+        return tokio::fs::try_exists(dot_git.join("MERGE_HEAD"))
+            .await
+            .unwrap_or(false);
     }
-    if dot_git.is_file()
-        && let Ok(content) = std::fs::read_to_string(&dot_git)
+    if dot_git_meta.is_ok_and(|m| m.is_file())
+        && let Ok(content) = tokio::fs::read_to_string(&dot_git).await
         && let Some(line) = content.lines().next()
         && let Some(gitdir) = line.strip_prefix("gitdir: ")
     {
         let gitdir = worktree_path.join(gitdir.trim());
-        return gitdir.join("MERGE_HEAD").exists();
+        return tokio::fs::try_exists(gitdir.join("MERGE_HEAD"))
+            .await
+            .unwrap_or(false);
     }
     false
 }
@@ -619,7 +627,7 @@ pub async fn run_git_merge(worktree_path: &Path, upstream: &str) -> Result<Merge
     // Non-zero exit — distinguish conflict from real failure. A conflict
     // leaves MERGE_HEAD in the worktree; a fatal error (bad branch, etc.)
     // does not.
-    if merge_in_progress(worktree_path) || stdout.contains("CONFLICT") {
+    if merge_in_progress(worktree_path).await || stdout.contains("CONFLICT") {
         return Ok(MergeOutcome::Conflict);
     }
 
@@ -749,7 +757,7 @@ mod tests {
         run(repo, &["checkout", "-q", "feature"]);
         let outcome = run_git_merge(repo, "main").await.unwrap();
         assert_eq!(outcome, MergeOutcome::Conflict);
-        assert!(merge_in_progress(repo));
+        assert!(merge_in_progress(repo).await);
     }
 
     #[tokio::test]
