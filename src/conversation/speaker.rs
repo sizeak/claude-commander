@@ -15,6 +15,11 @@ use crate::conversation::extract::{SpeakScope, first_sentence_boundary, spoken_t
 use crate::conversation::tts::{SpeechRequest, TtsClient};
 use crate::error::TtsError;
 
+/// Maximum concurrent synth requests. Enough to keep the audio queue fed
+/// (synth runs ahead of playback) without flooding the TTS server, which on a
+/// CPU box would cause request timeouts and dropped/skipped sentences.
+const MAX_INFLIGHT: usize = 3;
+
 /// Buffers streamed text and yields complete sentences. Pure + unit-tested.
 #[derive(Debug, Default)]
 pub struct SentenceAccumulator {
@@ -85,9 +90,22 @@ pub fn spawn_speaker(
 
     tokio::spawn(async move {
         let mut acc = SentenceAccumulator::new();
-        // In-flight synth requests; polled concurrently, yielded in push order.
+        // Sentences awaiting synthesis (in order), and the bounded set of
+        // in-flight synth requests (polled concurrently, yielded in push order).
+        let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
         let mut pending: FuturesOrdered<_> = FuturesOrdered::new();
         loop {
+            // Keep at most MAX_INFLIGHT requests running: enough to stay ahead
+            // of playback, few enough not to overload the TTS server (which
+            // would cause timeouts and dropped — i.e. skipped — sentences).
+            while pending.len() < MAX_INFLIGHT {
+                let Some(sentence) = queue.pop_front() else {
+                    break;
+                };
+                if let Some(fut) = synth_future(&client, &cfg, &sentence) {
+                    pending.push_back(fut);
+                }
+            }
             tokio::select! {
                 // Enqueue finished audio in order as it becomes ready.
                 Some(result) = pending.next(), if !pending.is_empty() => match result {
@@ -96,21 +114,16 @@ pub fn spawn_speaker(
                 },
                 cmd = rx.recv() => match cmd {
                     Some(SpeakerCommand::Chunk(text)) => {
-                        for sentence in acc.push(&text) {
-                            if let Some(fut) = synth_future(&client, &cfg, &sentence) {
-                                pending.push_back(fut);
-                            }
-                        }
+                        queue.extend(acc.push(&text));
                     }
                     Some(SpeakerCommand::Flush) => {
-                        if let Some(remainder) = acc.flush()
-                            && let Some(fut) = synth_future(&client, &cfg, &remainder)
-                        {
-                            pending.push_back(fut);
+                        if let Some(remainder) = acc.flush() {
+                            queue.push_back(remainder);
                         }
                     }
                     Some(SpeakerCommand::Interrupt) => {
                         acc.clear();
+                        queue.clear();
                         pending = FuturesOrdered::new(); // cancel in-flight synth
                         player.stop();
                     }

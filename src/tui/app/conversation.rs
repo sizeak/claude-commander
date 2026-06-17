@@ -76,6 +76,9 @@ pub struct ConversationRuntime {
     pub streaming: String,
     pub status: ConvStatus,
     pub session_id: Option<String>,
+    /// When the last text delta arrived. Used to show a "working…" spinner when
+    /// the reply stalls mid-turn (the agent is running tools, producing no text).
+    pub last_delta_at: Option<std::time::Instant>,
     /// User messages sent while a turn was still in progress. The session
     /// queues them and answers them in order; we defer *displaying* each until
     /// the preceding reply completes, so history stays correctly ordered.
@@ -194,6 +197,7 @@ impl App {
                 }
             }
             ConversationEvent::Delta(text) => {
+                self.conversation.last_delta_at = Some(std::time::Instant::now());
                 self.conversation.streaming.push_str(&text);
                 self.conversation.speak(SpeakerCommand::Chunk(text));
             }
@@ -279,6 +283,8 @@ impl App {
                 text,
             });
             self.conversation.status = ConvStatus::Thinking;
+            // Reset so the "thinking…" spinner shows immediately for this turn.
+            self.conversation.last_delta_at = None;
         }
     }
 
@@ -327,26 +333,39 @@ impl App {
                 &self.conversation.streaming,
                 width,
             );
-        } else {
-            // No text yet: show a spinner where the reply will appear, or an
-            // error if the last turn failed.
-            match &self.conversation.status {
-                ConvStatus::Thinking => {
+        }
+        // Progress / error indicator below the (partial) reply.
+        match &self.conversation.status {
+            ConvStatus::Thinking => {
+                // While tokens are actively streaming, the text is the
+                // indicator. Once it stalls (no delta for a moment — the agent
+                // is thinking or running a tool), show a spinner so the silence
+                // doesn't read as a hang.
+                let streaming_now = self
+                    .conversation
+                    .last_delta_at
+                    .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(700));
+                if !streaming_now {
                     let frame_glyph = SPINNER_FRAMES
                         [(self.ui_state.tick_count as usize / 3) % SPINNER_FRAMES.len()];
+                    let label = if self.conversation.streaming.is_empty() {
+                        "thinking…"
+                    } else {
+                        "working…"
+                    };
                     lines.push(Line::from(Span::styled(
-                        format!("{frame_glyph} thinking…"),
+                        format!("{frame_glyph} {label}"),
                         Style::default().fg(self.theme.conversation_accent),
                     )));
                 }
-                ConvStatus::Error(e) => {
-                    lines.push(Line::from(Span::styled(
-                        format!("⚠ {e}"),
-                        Style::default().fg(self.theme.modal_error),
-                    )));
-                }
-                ConvStatus::Idle => {}
             }
+            ConvStatus::Error(e) => {
+                lines.push(Line::from(Span::styled(
+                    format!("⚠ {e}"),
+                    Style::default().fg(self.theme.modal_error),
+                )));
+            }
+            ConvStatus::Idle => {}
         }
         if lines.is_empty() {
             lines.push(Line::from(Span::styled(
