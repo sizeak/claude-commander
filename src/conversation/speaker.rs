@@ -5,6 +5,7 @@
 //! audio [`Player`] and TTS client, synthesizing + queuing each sentence as it
 //! lands so speech starts within a sentence of the assistant beginning to type.
 
+use futures::stream::{FuturesOrdered, StreamExt};
 use tokio::sync::mpsc;
 use tracing::warn;
 
@@ -70,6 +71,11 @@ pub enum SpeakerCommand {
 /// Start the speaker task. Returns a sender for [`SpeakerCommand`]s, or an error
 /// if no audio output device is available. Dropping the sender ends the task and
 /// stops audio.
+///
+/// Sentences are synthesized **concurrently** (via `FuturesOrdered`) but enqueued
+/// **in order**, so a chunk's audio is ready by the time the previous one
+/// finishes playing — no pause-to-synthesize gap between short chunks. Playback
+/// itself runs on the audio thread, so `enqueue` never blocks synthesis.
 pub fn spawn_speaker(
     cfg: ConversationConfig,
 ) -> Result<mpsc::UnboundedSender<SpeakerCommand>, TtsError> {
@@ -79,22 +85,37 @@ pub fn spawn_speaker(
 
     tokio::spawn(async move {
         let mut acc = SentenceAccumulator::new();
-        while let Some(cmd) = rx.recv().await {
-            match cmd {
-                SpeakerCommand::Chunk(text) => {
-                    for sentence in acc.push(&text) {
-                        speak(&client, &player, &cfg, &sentence).await;
+        // In-flight synth requests; polled concurrently, yielded in push order.
+        let mut pending: FuturesOrdered<_> = FuturesOrdered::new();
+        loop {
+            tokio::select! {
+                // Enqueue finished audio in order as it becomes ready.
+                Some(result) = pending.next(), if !pending.is_empty() => match result {
+                    Ok(bytes) => player.enqueue(bytes),
+                    Err(e) => warn!("TTS synthesis failed: {e}"),
+                },
+                cmd = rx.recv() => match cmd {
+                    Some(SpeakerCommand::Chunk(text)) => {
+                        for sentence in acc.push(&text) {
+                            if let Some(fut) = synth_future(&client, &cfg, &sentence) {
+                                pending.push_back(fut);
+                            }
+                        }
                     }
-                }
-                SpeakerCommand::Flush => {
-                    if let Some(remainder) = acc.flush() {
-                        speak(&client, &player, &cfg, &remainder).await;
+                    Some(SpeakerCommand::Flush) => {
+                        if let Some(remainder) = acc.flush()
+                            && let Some(fut) = synth_future(&client, &cfg, &remainder)
+                        {
+                            pending.push_back(fut);
+                        }
                     }
-                }
-                SpeakerCommand::Interrupt => {
-                    acc.clear();
-                    player.stop();
-                }
+                    Some(SpeakerCommand::Interrupt) => {
+                        acc.clear();
+                        pending = FuturesOrdered::new(); // cancel in-flight synth
+                        player.stop();
+                    }
+                    None => break, // sender dropped → end the task (and audio)
+                },
             }
         }
     });
@@ -102,31 +123,38 @@ pub fn spawn_speaker(
     Ok(tx)
 }
 
-async fn speak(client: &TtsClient, player: &Player, cfg: &ConversationConfig, sentence: &str) {
+/// Build a self-contained synth future for one sentence, or `None` if nothing is
+/// speakable (e.g. a code-only fragment). Owns its inputs so it can run
+/// concurrently in a `FuturesOrdered`.
+fn synth_future(
+    client: &TtsClient,
+    cfg: &ConversationConfig,
+    sentence: &str,
+) -> Option<impl std::future::Future<Output = Result<Vec<u8>, TtsError>> + 'static> {
     // Verbatim speaks markup as-is; every other scope strips to prose. (A
     // "final summary" can't be known mid-stream, so it degrades to prose here.)
     let text = match cfg.speak_scope {
         SpeakScope::Verbatim => sentence.to_string(),
-        _ => match spoken_text(&[sentence.to_string()], SpeakScope::ProseOnly) {
-            Some(t) => t,
-            None => return, // nothing speakable (e.g. a code-only fragment)
-        },
+        _ => spoken_text(&[sentence.to_string()], SpeakScope::ProseOnly)?,
     };
     if text.trim().is_empty() {
-        return;
+        return None;
     }
+    let client = client.clone();
+    let model = cfg.model.clone();
     let voice = cfg.voice.clone().unwrap_or_default();
-    let req = SpeechRequest {
-        model: &cfg.model,
-        input: &text,
-        voice: &voice,
-        response_format: &cfg.response_format,
-        speed: cfg.speed,
-    };
-    match client.synthesize(&req).await {
-        Ok(bytes) => player.enqueue(bytes),
-        Err(e) => warn!("TTS synthesis failed: {e}"),
-    }
+    let response_format = cfg.response_format.clone();
+    let speed = cfg.speed;
+    Some(async move {
+        let req = SpeechRequest {
+            model: &model,
+            input: &text,
+            voice: &voice,
+            response_format: &response_format,
+            speed,
+        };
+        client.synthesize(&req).await
+    })
 }
 
 #[cfg(test)]
