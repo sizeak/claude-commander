@@ -37,6 +37,16 @@ impl App {
         let size = frame.area();
         self.ui_state.terminal_size = size;
 
+        // Force a full repaint on view switch to clear stale styled cells.
+        // This is done with the `Clear` widget (a pure in-memory cell reset)
+        // rather than `Terminal::clear()`, which since ratatui 0.30 reads the
+        // cursor position from stdin — a blocking read that races our
+        // background input reader and times out (RenderError), killing the
+        // event loop. See `event_loop.rs`.
+        if std::mem::take(&mut self.ui_state.clear_right_pane) {
+            frame.render_widget(Clear, size);
+        }
+
         // The review-diff view is a full-screen takeover: it owns the whole
         // frame (including the bottom row, where it draws its own status bar)
         // rather than overlaying the normal UI, so there's only one status bar.

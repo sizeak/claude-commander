@@ -1410,3 +1410,30 @@ fn edit_text_input_inserts_at_cursor_and_reports_change() {
     assert!(!edit_text_input(&mut input, key(KeyCode::Enter)));
     assert_eq!(input.value(), "bc");
 }
+
+// ---------------------------------------------------------------------------
+// View-switch clearing happens in render(), not via terminal.clear()
+// ---------------------------------------------------------------------------
+
+#[test]
+fn render_consumes_clear_right_pane_flag() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    app.ui_state.clear_right_pane = true;
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+    // render() must consume the flag itself by drawing the `Clear` widget.
+    // Before the fix the flag was cleared by a `terminal.clear()` call in the
+    // event loop, which since ratatui 0.30 reads the cursor from stdin — a
+    // blocking read that races the background input reader and crashes the
+    // loop. Drawing through ratatui here performs no cursor read.
+    terminal.draw(|f| app.render(f)).unwrap();
+
+    assert!(
+        !app.ui_state.clear_right_pane,
+        "render() should consume clear_right_pane so the event loop never needs terminal.clear()"
+    );
+}
