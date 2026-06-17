@@ -304,16 +304,12 @@ impl App {
         });
         frame.render_widget(block, area);
 
-        // Layout: history (fills), a blank gutter, then the input box (3 rows).
+        // Layout: history (fills), then the input row bracketed by rules.
         // No top status line — the feature is TTS by definition, and progress is
         // shown inline at the bottom where the reply appears.
         let chunks = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(1),
-                Constraint::Length(1),
-                Constraint::Length(3),
-            ])
+            .constraints([Constraint::Min(1), Constraint::Length(3)])
             .split(inner);
 
         // History: wrap every message to the inner width, bottom-anchored with
@@ -366,26 +362,50 @@ impl App {
         let visible: Vec<Line> = lines[start..end].to_vec();
         frame.render_widget(Paragraph::new(visible), chunks[0]);
 
-        // Input box.
+        // Input: a single prompt line bracketed by top/bottom rules (à la
+        // Claude Code), rather than a heavy full box.
         let input_block = Block::default()
-            .borders(Borders::ALL)
+            .borders(Borders::TOP | Borders::BOTTOM)
             .border_type(self.border_type())
-            .border_style(Style::default().fg(self.theme.border_unfocused));
-        let input_inner = input_block.inner(chunks[2]);
-        frame.render_widget(input_block, chunks[2]);
-        let text_width = input_inner.width.max(1);
-        let view_scroll = input.visual_scroll(text_width as usize);
+            .border_style(Style::default().fg(self.theme.border_focused));
+        let input_inner = input_block.inner(chunks[1]);
+        frame.render_widget(input_block, chunks[1]);
+
+        const PROMPT: &str = "› ";
+        let prompt_w = PROMPT.chars().count() as u16;
         frame.render_widget(
-            Paragraph::new(input.value())
-                .scroll((0, view_scroll as u16))
-                .style(Style::default().fg(self.theme.text_primary)),
-            input_inner,
+            Paragraph::new(PROMPT).style(Style::default().fg(self.theme.border_focused)),
+            Rect {
+                width: prompt_w.min(input_inner.width),
+                ..input_inner
+            },
         );
-        // Real cursor in the input field.
+        let text_area = Rect {
+            x: input_inner.x + prompt_w,
+            width: input_inner.width.saturating_sub(prompt_w),
+            ..input_inner
+        };
+        let text_width = text_area.width.max(1);
+        let view_scroll = input.visual_scroll(text_width as usize);
+        if input.value().is_empty() {
+            frame.render_widget(
+                Paragraph::new("Type a message…")
+                    .style(Style::default().fg(self.theme.text_secondary)),
+                text_area,
+            );
+        } else {
+            frame.render_widget(
+                Paragraph::new(input.value())
+                    .scroll((0, view_scroll as u16))
+                    .style(Style::default().fg(self.theme.text_primary)),
+                text_area,
+            );
+        }
+        // Real cursor in the text field.
         let col = (input.visual_cursor().saturating_sub(view_scroll)) as u16;
         frame.set_cursor_position((
-            input_inner.x + col.min(text_width.saturating_sub(1)),
-            input_inner.y,
+            text_area.x + col.min(text_width.saturating_sub(1)),
+            text_area.y,
         ));
     }
 
