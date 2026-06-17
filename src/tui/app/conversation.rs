@@ -336,7 +336,7 @@ impl App {
                         [(self.ui_state.tick_count as usize / 3) % SPINNER_FRAMES.len()];
                     lines.push(Line::from(Span::styled(
                         format!("{frame_glyph} thinking…"),
-                        Style::default().fg(self.theme.status_running),
+                        Style::default().fg(self.theme.conversation_accent),
                     )));
                 }
                 ConvStatus::Error(e) => {
@@ -368,18 +368,14 @@ impl App {
         let input_block = Block::default()
             .borders(Borders::TOP | Borders::BOTTOM)
             .border_type(self.border_type())
-            .border_style(Style::default().fg(self.theme.status_running));
+            .border_style(Style::default().fg(self.theme.conversation_accent));
         let input_inner = input_block.inner(chunks[1]);
         frame.render_widget(input_block, chunks[1]);
 
         const PROMPT: &str = "› ";
         let prompt_w = PROMPT.chars().count() as u16;
         frame.render_widget(
-            Paragraph::new(PROMPT).style(
-                Style::default()
-                    .fg(self.theme.status_running)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Paragraph::new(PROMPT).style(Style::default().fg(self.theme.text_secondary)),
             Rect {
                 width: prompt_w.min(input_inner.width),
                 ..input_inner
@@ -426,7 +422,7 @@ impl App {
             ConvRole::User => ("You", self.theme.text_accent),
             ConvRole::Assistant => (
                 self.config.conversation.name.as_str(),
-                self.theme.status_running,
+                self.theme.conversation_accent,
             ),
         };
         lines.push(Line::from(Span::styled(
