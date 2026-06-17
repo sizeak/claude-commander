@@ -47,6 +47,10 @@ pub struct ConversationRuntime {
     pub streaming: String,
     pub status: ConvStatus,
     pub session_id: Option<String>,
+    /// User messages sent while a turn was still in progress. The session
+    /// queues them and answers them in order; we defer *displaying* each until
+    /// the preceding reply completes, so history stays correctly ordered.
+    pub pending_user: std::collections::VecDeque<String>,
 }
 
 impl ConversationRuntime {
@@ -164,7 +168,18 @@ impl App {
                 tracing::debug!(overlay_open, "conversation: turn complete");
                 self.finalize_streaming();
                 self.conversation.speak(SpeakerCommand::Flush);
-                self.conversation.status = ConvStatus::Idle;
+                // If the user queued a message while this reply was streaming,
+                // show it now (after the reply) and stay Thinking — the session
+                // is already answering it next.
+                if let Some(next) = self.conversation.pending_user.pop_front() {
+                    self.conversation.messages.push(ConvMessage {
+                        role: ConvRole::User,
+                        text: next,
+                    });
+                    self.conversation.status = ConvStatus::Thinking;
+                } else {
+                    self.conversation.status = ConvStatus::Idle;
+                }
             }
             ConversationEvent::Error(e) => {
                 tracing::warn!(overlay_open, "conversation: turn error: {e}");
@@ -194,26 +209,33 @@ impl App {
     }
 
     /// Send a typed user turn to the session.
+    ///
+    /// The session serializes turns: a message sent while a reply is still
+    /// streaming is queued and answered after. So we never interrupt or discard
+    /// the in-flight reply — we send the new message (the session queues it) and,
+    /// if a turn is in progress, defer displaying it until that reply completes.
     pub(super) async fn submit_conversation_input(&mut self, text: String) {
-        self.conversation.messages.push(ConvMessage {
-            role: ConvRole::User,
-            text: text.clone(),
-        });
-        // Interrupt any in-flight speech and start a fresh turn.
-        self.conversation.speak(SpeakerCommand::Interrupt);
-        self.conversation.streaming.clear();
-        self.conversation.status = ConvStatus::Thinking;
-
-        // Self-heal: if the session exited (e.g. idle timeout, crash), bring it
-        // back before sending so a dead session doesn't silently swallow turns.
+        // Self-heal: if the session exited (idle timeout / crash), bring it back.
         self.ensure_conversation_started().await;
-        if let Some(session) = self.conversation.session.as_mut() {
-            if let Err(e) = session.send_user_message(&text).await {
-                tracing::warn!("conversation: send failed: {e}");
-                self.conversation.status = ConvStatus::Error(e.to_string());
-            }
-        } else {
+        let Some(session) = self.conversation.session.as_mut() else {
             self.conversation.status = ConvStatus::Error("session not running".to_string());
+            return;
+        };
+        if let Err(e) = session.send_user_message(&text).await {
+            tracing::warn!("conversation: send failed: {e}");
+            self.conversation.status = ConvStatus::Error(e.to_string());
+            return;
+        }
+
+        if self.conversation.status == ConvStatus::Thinking {
+            // A reply is still in progress — queue this for display until it ends.
+            self.conversation.pending_user.push_back(text);
+        } else {
+            self.conversation.messages.push(ConvMessage {
+                role: ConvRole::User,
+                text,
+            });
+            self.conversation.status = ConvStatus::Thinking;
         }
     }
 
