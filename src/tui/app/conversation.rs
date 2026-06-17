@@ -374,7 +374,11 @@ impl App {
         const PROMPT: &str = "› ";
         let prompt_w = PROMPT.chars().count() as u16;
         frame.render_widget(
-            Paragraph::new(PROMPT).style(Style::default().fg(self.theme.border_focused)),
+            Paragraph::new(PROMPT).style(
+                Style::default()
+                    .fg(self.theme.text_primary)
+                    .add_modifier(Modifier::BOLD),
+            ),
             Rect {
                 width: prompt_w.min(input_inner.width),
                 ..input_inner
@@ -451,11 +455,14 @@ impl App {
             return false;
         };
         match key.code {
-            // Esc, or Alt-c again, closes the overlay (session keeps running).
+            // Esc, Alt-c again, or Ctrl-q close the overlay (session keeps running).
             KeyCode::Esc => {
                 self.ui_state.modal = Modal::None;
             }
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.ui_state.modal = Modal::None;
+            }
+            KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 self.ui_state.modal = Modal::None;
             }
             KeyCode::Enter => {
