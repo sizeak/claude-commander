@@ -134,10 +134,13 @@ impl App {
         self.conversation.status = ConvStatus::Idle;
     }
 
-    /// Handle one parsed conversation event (called from the StateUpdate loop).
+    /// Handle one parsed conversation event (called from the StateUpdate loop,
+    /// regardless of whether the overlay is open).
     pub(super) fn on_conversation_event(&mut self, ev: ConversationEvent) {
+        let overlay_open = matches!(self.ui_state.modal, Modal::Conversation { .. });
         match ev {
             ConversationEvent::Started { session_id } => {
+                tracing::debug!(%session_id, overlay_open, "conversation: started");
                 self.conversation.session_id = Some(session_id);
                 if self.conversation.status != ConvStatus::Thinking {
                     self.conversation.status = ConvStatus::Idle;
@@ -158,17 +161,21 @@ impl App {
                 self.conversation.speak(SpeakerCommand::Flush);
             }
             ConversationEvent::TurnComplete => {
+                tracing::debug!(overlay_open, "conversation: turn complete");
                 self.finalize_streaming();
                 self.conversation.speak(SpeakerCommand::Flush);
                 self.conversation.status = ConvStatus::Idle;
             }
             ConversationEvent::Error(e) => {
+                tracing::warn!(overlay_open, "conversation: turn error: {e}");
                 self.finalize_streaming();
                 self.conversation.speak(SpeakerCommand::Flush);
                 self.conversation.status = ConvStatus::Error(e);
             }
             ConversationEvent::Exited => {
+                tracing::debug!(overlay_open, "conversation: session exited");
                 self.finalize_streaming();
+                // Drop the dead handle; the next message respawns it.
                 self.conversation.session = None;
                 self.conversation.status = ConvStatus::Error("session ended".to_string());
             }
@@ -197,8 +204,12 @@ impl App {
         self.conversation.streaming.clear();
         self.conversation.status = ConvStatus::Thinking;
 
+        // Self-heal: if the session exited (e.g. idle timeout, crash), bring it
+        // back before sending so a dead session doesn't silently swallow turns.
+        self.ensure_conversation_started().await;
         if let Some(session) = self.conversation.session.as_mut() {
             if let Err(e) = session.send_user_message(&text).await {
+                tracing::warn!("conversation: send failed: {e}");
                 self.conversation.status = ConvStatus::Error(e.to_string());
             }
         } else {
