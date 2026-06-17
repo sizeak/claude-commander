@@ -139,7 +139,7 @@ state_sync_interval_ms = 2000
 # dedicated headless Claude session, whose replies stream in and are spoken
 # aloud via an OpenAI-compatible TTS engine. See "Conversation mode" below.
 # [conversation]
-# enabled = true                          # speak replies via TTS (off = text-only chat)
+# enabled = true                          # master switch: Alt-c overlay + spoken replies (off by default)
 # command = "claude"                       # binary for the conversation session
 # base_url = "http://127.0.0.1:8002/v1"   # OpenAI-compatible TTS endpoint (include /v1)
 # model = "kokoro"                         # TTS model name (engines serving one model ignore it)
@@ -175,7 +175,8 @@ text — so TTS can start within a sentence of Claude beginning to type, rather 
 whole reply. A new message interrupts in-flight speech. If the TTS server is unreachable, the chat
 still works (text-only) and never blocks the UI.
 
-Set `enabled = false` to use the overlay as a plain text chat with no speech. We develop against a
+`enabled` is the master switch for the whole feature and is **off by default** — set it (in
+Settings ▸ Conversation or config) before `Alt-c` will open the overlay. We develop against a
 local [Kokoro](https://github.com/sizeak/kokoro-tts-rocm) container (default
 `http://127.0.0.1:8002/v1`), but any OpenAI-compatible endpoint works.
 

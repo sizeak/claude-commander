@@ -183,8 +183,8 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ConversationConfig {
-    /// Whether the conversation session speaks its replies aloud (TTS). When
-    /// off, the conversation overlay works as a normal text chat.
+    /// Master switch for conversation mode: gates both the Alt-c overlay and
+    /// spoken replies. When off, Alt-c does nothing. Off by default.
     pub enabled: bool,
 
     /// Binary to run for the headless conversation session.
@@ -216,6 +216,8 @@ pub struct ConversationConfig {
 impl Default for ConversationConfig {
     fn default() -> Self {
         Self {
+            // Master switch for the whole feature: gates both the Alt-c overlay
+            // and spoken replies. Off by default — enable it in Settings.
             enabled: false,
             command: "claude".to_string(),
             base_url: "http://127.0.0.1:8002/v1".to_string(),

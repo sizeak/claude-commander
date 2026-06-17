@@ -148,7 +148,11 @@ impl App {
             SettingsTab::Conversation => {
                 let c = &self.config.conversation;
                 vec![
-                    SettingsRow::toggle("Speak Replies (TTS)", c.enabled, "conversation_enabled"),
+                    SettingsRow::toggle(
+                        "Enable Conversation Mode",
+                        c.enabled,
+                        "conversation_enabled",
+                    ),
                     SettingsRow::text("TTS Base URL", c.base_url.clone(), "conversation_base_url"),
                     SettingsRow::text("Model", c.model.clone(), "conversation_model"),
                     SettingsRow::text(

@@ -66,10 +66,18 @@ impl ConversationRuntime {
 
 impl App {
     /// Alt-c: open the overlay (starting the session on first use) or close it
-    /// (leaving the session running).
+    /// (leaving the session running). The single `conversation.enabled` setting
+    /// gates the whole feature — when off, the overlay doesn't open at all.
     pub(super) async fn toggle_conversation_overlay(&mut self) {
         if matches!(self.ui_state.modal, Modal::Conversation { .. }) {
             self.ui_state.modal = Modal::None;
+            return;
+        }
+        if !self.config.conversation.enabled {
+            self.ui_state.status_message = Some((
+                "Conversation mode is disabled — enable it in Settings ▸ Conversation".to_string(),
+                std::time::Instant::now() + std::time::Duration::from_secs(4),
+            ));
             return;
         }
         self.ensure_conversation_started().await;
