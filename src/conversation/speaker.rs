@@ -10,7 +10,7 @@ use tracing::warn;
 
 use crate::config::ConversationConfig;
 use crate::conversation::audio::Player;
-use crate::conversation::extract::{SpeakScope, split_sentences, spoken_text};
+use crate::conversation::extract::{SpeakScope, first_sentence_boundary, spoken_text};
 use crate::conversation::tts::{SpeechRequest, TtsClient};
 use crate::error::TtsError;
 
@@ -25,20 +25,22 @@ impl SentenceAccumulator {
         Self::default()
     }
 
-    /// Append a streamed chunk; return any sentences that are now complete. The
-    /// trailing (possibly unfinished) sentence stays buffered until more text
-    /// confirms it's done (or [`flush`](Self::flush) is called).
+    /// Append a streamed chunk; return any sentences that are now complete. A
+    /// sentence is emitted as soon as its boundary is confirmed (a terminator
+    /// followed by whitespace) — we don't wait for the next sentence to begin.
+    /// The trailing, not-yet-terminated text stays buffered for
+    /// [`flush`](Self::flush).
     pub fn push(&mut self, text: &str) -> Vec<String> {
         self.buf.push_str(text);
-        let parts = split_sentences(&self.buf);
-        // Fewer than 2 parts → we can't be sure the single part is finished.
-        if parts.len() < 2 {
-            return Vec::new();
+        let mut out = Vec::new();
+        while let Some(end) = first_sentence_boundary(&self.buf) {
+            let sentence = self.buf[..end].trim().to_string();
+            self.buf = self.buf[end..].trim_start().to_string();
+            if !sentence.is_empty() {
+                out.push(sentence);
+            }
         }
-        let keep = parts.last().cloned().unwrap_or_default();
-        let complete = parts[..parts.len() - 1].to_vec();
-        self.buf = keep;
-        complete
+        out
     }
 
     /// Return and clear whatever remains (end of turn).
@@ -142,6 +144,16 @@ mod tests {
         assert_eq!(acc.push(" you? And then"), vec!["How are you?"]);
         // Flush yields the remainder.
         assert_eq!(acc.flush(), Some("And then".to_string()));
+    }
+
+    #[test]
+    fn accumulator_emits_as_soon_as_boundary_confirmed() {
+        let mut acc = SentenceAccumulator::new();
+        // No boundary yet.
+        assert!(acc.push("First sentence").is_empty());
+        // A terminator + trailing whitespace confirms it immediately — no need
+        // to wait for the next sentence's text to arrive.
+        assert_eq!(acc.push(". "), vec!["First sentence."]);
     }
 
     #[test]

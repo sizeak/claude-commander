@@ -26,6 +26,10 @@ pub enum ConversationEvent {
     /// An incremental chunk of assistant text (a `text_delta`). Chunks can split
     /// mid-word, so consumers must buffer.
     Delta(String),
+    /// A new text block started. In an agentic turn the assistant emits text →
+    /// tool → more text as separate blocks with no separator between them, so
+    /// consumers insert a paragraph break (and flush any pending TTS sentence).
+    Break,
     /// The assistant finished the current turn.
     TurnComplete,
     /// A non-fatal error event from the stream.
@@ -59,19 +63,33 @@ pub fn parse_event(line: &str) -> Option<ConversationEvent> {
         }),
         "stream_event" => {
             let event = parsed.event?;
-            if event.get("type").and_then(|t| t.as_str()) == Some("content_block_delta") {
-                let delta = event.get("delta")?;
-                if delta.get("type").and_then(|t| t.as_str()) == Some("text_delta") {
-                    let text = delta
-                        .get("text")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or_default();
-                    if !text.is_empty() {
-                        return Some(ConversationEvent::Delta(text.to_string()));
+            match event.get("type").and_then(|t| t.as_str()) {
+                Some("content_block_delta") => {
+                    let delta = event.get("delta")?;
+                    if delta.get("type").and_then(|t| t.as_str()) == Some("text_delta") {
+                        let text = delta
+                            .get("text")
+                            .and_then(|t| t.as_str())
+                            .unwrap_or_default();
+                        if !text.is_empty() {
+                            return Some(ConversationEvent::Delta(text.to_string()));
+                        }
                     }
+                    None
                 }
+                // A new *text* block — separates agentic text segments that
+                // would otherwise be concatenated with no space between them.
+                Some("content_block_start")
+                    if event
+                        .get("content_block")
+                        .and_then(|b| b.get("type"))
+                        .and_then(|t| t.as_str())
+                        == Some("text") =>
+                {
+                    Some(ConversationEvent::Break)
+                }
+                _ => None,
             }
-            None
         }
         "result" => {
             if parsed.is_error == Some(true) {
@@ -106,9 +124,12 @@ pub struct ConversationSession {
 
 impl ConversationSession {
     /// Spawn the streaming `claude` process in `cwd`, forwarding parsed stdout
-    /// events on `events`. `command` is the binary to run (default `"claude"`).
+    /// events on `events`. `command` is the binary to run (default `"claude"`);
+    /// `permission_mode` is passed to `--permission-mode` (e.g. `"auto"`) so the
+    /// conversation agent can act without interactive approval prompts.
     pub fn spawn(
         command: &str,
+        permission_mode: &str,
         cwd: &Path,
         events: mpsc::UnboundedSender<ConversationEvent>,
     ) -> Result<Self, TtsError> {
@@ -117,6 +138,7 @@ impl ConversationSession {
             .arg("-p")
             .args(["--input-format", "stream-json"])
             .args(["--output-format", "stream-json"])
+            .args(["--permission-mode", permission_mode])
             .arg("--include-partial-messages")
             .arg("--verbose")
             .stdin(Stdio::piped())
@@ -201,6 +223,16 @@ mod tests {
             parse_event(line),
             Some(ConversationEvent::Delta("Hello".to_string()))
         );
+    }
+
+    #[test]
+    fn text_block_start_is_a_break_others_are_not() {
+        let text = r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"text","text":""}}}"#;
+        assert_eq!(parse_event(text), Some(ConversationEvent::Break));
+        let thinking = r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"thinking"}}}"#;
+        assert_eq!(parse_event(thinking), None);
+        let tool = r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"tool_use","name":"Bash"}}}"#;
+        assert_eq!(parse_event(tool), None);
     }
 
     #[test]

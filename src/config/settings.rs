@@ -190,6 +190,10 @@ pub struct ConversationConfig {
     /// Binary to run for the headless conversation session.
     pub command: String,
 
+    /// `--permission-mode` for the conversation agent. `auto` lets it act
+    /// without interactive approval prompts (which it can't answer headlessly).
+    pub permission_mode: String,
+
     /// Base URL of the OpenAI-compatible TTS API (include the `/v1`).
     pub base_url: String,
 
@@ -220,6 +224,7 @@ impl Default for ConversationConfig {
             // and spoken replies. Off by default — enable it in Settings.
             enabled: false,
             command: "claude".to_string(),
+            permission_mode: "auto".to_string(),
             base_url: "http://127.0.0.1:8002/v1".to_string(),
             model: "kokoro".to_string(),
             voice: None,

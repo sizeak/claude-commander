@@ -141,6 +141,7 @@ state_sync_interval_ms = 2000
 # [conversation]
 # enabled = true                          # master switch: Alt-c overlay + spoken replies (off by default)
 # command = "claude"                       # binary for the conversation session
+# permission_mode = "auto"                 # --permission-mode for the agent (acts without approval prompts)
 # base_url = "http://127.0.0.1:8002/v1"   # OpenAI-compatible TTS endpoint (include /v1)
 # model = "kokoro"                         # TTS model name (engines serving one model ignore it)
 # voice = "af_sky"                         # omit to use the server's default voice

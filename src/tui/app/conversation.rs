@@ -106,7 +106,8 @@ impl App {
 
         let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<ConversationEvent>();
         let command = self.config.conversation.command.clone();
-        match ConversationSession::spawn(&command, &dir, ev_tx) {
+        let permission_mode = self.config.conversation.permission_mode.clone();
+        match ConversationSession::spawn(&command, &permission_mode, &dir, ev_tx) {
             Ok(session) => self.conversation.session = Some(session),
             Err(e) => {
                 self.conversation.status = ConvStatus::Error(e.to_string());
@@ -152,6 +153,16 @@ impl App {
             ConversationEvent::Delta(text) => {
                 self.conversation.streaming.push_str(&text);
                 self.conversation.speak(SpeakerCommand::Chunk(text));
+            }
+            ConversationEvent::Break => {
+                // A new text segment: separate it from the previous one (which
+                // streamed with no trailing separator), and speak the pending
+                // sentence before the gap.
+                let s = &mut self.conversation.streaming;
+                if !s.is_empty() && !s.ends_with(char::is_whitespace) {
+                    s.push_str("\n\n");
+                }
+                self.conversation.speak(SpeakerCommand::Flush);
             }
             ConversationEvent::TurnComplete => {
                 self.finalize_streaming();

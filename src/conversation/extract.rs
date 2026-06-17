@@ -128,6 +128,35 @@ pub fn split_sentences(text: &str) -> Vec<String> {
     out
 }
 
+/// Byte index just past the first *confirmed* sentence boundary in `s` — a
+/// `.?!` run immediately followed by whitespace, and not a known abbreviation.
+/// Returns `None` if no boundary is confirmed yet (text ends mid-sentence, or at
+/// a terminator with nothing after it). Lets the streaming accumulator emit a
+/// sentence the moment it's complete, instead of waiting for the next to begin.
+pub fn first_sentence_boundary(s: &str) -> Option<usize> {
+    let chars: Vec<(usize, char)> = s.char_indices().collect();
+    let n = chars.len();
+    let mut i = 0;
+    while i < n {
+        if matches!(chars[i].1, '.' | '?' | '!') {
+            let mut j = i;
+            while j + 1 < n && matches!(chars[j + 1].1, '.' | '?' | '!') {
+                j += 1;
+            }
+            if let Some(&(after_byte, next)) = chars.get(j + 1)
+                && next.is_whitespace()
+                && !ends_with_abbrev(&s[..after_byte])
+            {
+                return Some(after_byte);
+            }
+            i = j + 1;
+            continue;
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Common abbreviations that end in a period but don't end a sentence.
 const ABBREVIATIONS: &[&str] = &[
     "eg", "ie", "etc", "mr", "mrs", "ms", "dr", "prof", "vs", "fig", "no", "st", "approx", "inc",
@@ -383,6 +412,19 @@ mod tests {
         let s = split_sentences("It costs 3.14 dollars, e.g. cheap. Done.");
         // The decimal and "e.g." must not create spurious sentence breaks.
         assert_eq!(s, vec!["It costs 3.14 dollars, e.g. cheap.", "Done."]);
+    }
+
+    #[test]
+    fn first_boundary_confirms_on_trailing_whitespace_only() {
+        // No whitespace after the terminator yet → not confirmed.
+        assert_eq!(first_sentence_boundary("Hello there."), None);
+        // Whitespace confirms it; index points just past the terminator.
+        assert_eq!(first_sentence_boundary("Hello there. "), Some(12));
+        // Decimals and abbreviations are not boundaries.
+        assert_eq!(first_sentence_boundary("It is 3.14 today"), None);
+        assert_eq!(first_sentence_boundary("e.g. this"), None);
+        // No terminator at all.
+        assert_eq!(first_sentence_boundary("just words"), None);
     }
 
     #[test]
