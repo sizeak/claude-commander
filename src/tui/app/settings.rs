@@ -148,13 +148,7 @@ impl App {
             SettingsTab::Conversation => {
                 let c = &self.config.conversation;
                 vec![
-                    // Runtime toggle (UI state, not persisted) — mirrors the hotkey.
-                    SettingsRow::toggle(
-                        "Conversation Mode (now)",
-                        self.ui_state.conversation_mode,
-                        "conversation_mode",
-                    ),
-                    SettingsRow::toggle("Enabled at Startup", c.enabled, "conversation_enabled"),
+                    SettingsRow::toggle("Speak Replies (TTS)", c.enabled, "conversation_enabled"),
                     SettingsRow::text("TTS Base URL", c.base_url.clone(), "conversation_base_url"),
                     SettingsRow::text("Model", c.model.clone(), "conversation_model"),
                     SettingsRow::text(
@@ -1180,15 +1174,7 @@ impl App {
                 .flatten();
             if let Some(new_val) = new_val {
                 let field_key = state.rows[state.selected_row].field_key.clone();
-                if field_key == "conversation_mode" {
-                    // Runtime toggle: UI state + live watcher, never persisted.
-                    self.ui_state.conversation_mode = new_val;
-                    if let Some(tx) = &self.conversation_tx {
-                        let _ = tx.send(new_val);
-                    }
-                } else {
-                    self.apply_bool_setting(&field_key, new_val);
-                }
+                self.apply_bool_setting(&field_key, new_val);
                 state.rows = self.build_settings_rows(state.tab);
                 self.ui_state.modal = Modal::Settings(state);
                 return;

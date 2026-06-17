@@ -1,0 +1,418 @@
+//! TUI side of conversation mode: owns the long-lived headless `claude` session
+//! and the streaming-TTS speaker, tracks the on-screen history, and renders the
+//! full-screen overlay. The session lives on `App` (not the modal), so it keeps
+//! running — and keeps speaking — while the overlay is closed.
+
+use super::*;
+use crate::conversation::{ConversationEvent, ConversationSession, SpeakerCommand, spawn_speaker};
+use crate::tui::event::{AppEvent, StateUpdate};
+
+/// Who authored a conversation message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConvRole {
+    User,
+    Assistant,
+}
+
+/// A finalized turn in the conversation history.
+#[derive(Debug, Clone)]
+pub struct ConvMessage {
+    pub role: ConvRole,
+    pub text: String,
+}
+
+/// Lifecycle status of the conversation, shown in the overlay.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ConvStatus {
+    #[default]
+    Idle,
+    Thinking,
+    Error(String),
+}
+
+impl ConvStatus {
+    fn label(&self) -> String {
+        match self {
+            ConvStatus::Idle => "ready".to_string(),
+            ConvStatus::Thinking => "thinking…".to_string(),
+            ConvStatus::Error(e) => format!("error: {e}"),
+        }
+    }
+}
+
+/// Conversation runtime state held on `App`, independent of the overlay's
+/// visibility.
+#[derive(Default)]
+pub struct ConversationRuntime {
+    /// The headless `claude` subprocess; `None` until first opened.
+    pub session: Option<ConversationSession>,
+    /// Streaming-TTS speaker command channel; `None` if TTS is off/unavailable.
+    pub speaker: Option<tokio::sync::mpsc::UnboundedSender<SpeakerCommand>>,
+    /// Finalized turns.
+    pub messages: Vec<ConvMessage>,
+    /// In-progress assistant text (streaming).
+    pub streaming: String,
+    pub status: ConvStatus,
+    pub session_id: Option<String>,
+}
+
+impl ConversationRuntime {
+    fn speak(&self, cmd: SpeakerCommand) {
+        if let Some(tx) = &self.speaker {
+            let _ = tx.send(cmd);
+        }
+    }
+}
+
+impl App {
+    /// Alt-c: open the overlay (starting the session on first use) or close it
+    /// (leaving the session running).
+    pub(super) async fn toggle_conversation_overlay(&mut self) {
+        if matches!(self.ui_state.modal, Modal::Conversation { .. }) {
+            self.ui_state.modal = Modal::None;
+            return;
+        }
+        self.ensure_conversation_started().await;
+        self.ui_state.modal = Modal::Conversation {
+            input: Input::default(),
+            scroll: 0,
+        };
+    }
+
+    /// Spawn the headless streaming `claude` session (and the TTS speaker) once.
+    async fn ensure_conversation_started(&mut self) {
+        if self.conversation.session.is_some() {
+            return;
+        }
+        let dir = match Config::data_dir() {
+            Ok(d) => d.join("conversation"),
+            Err(e) => {
+                self.conversation.status = ConvStatus::Error(format!("no data dir: {e}"));
+                return;
+            }
+        };
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.conversation.status = ConvStatus::Error(format!("mkdir failed: {e}"));
+            return;
+        }
+
+        let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<ConversationEvent>();
+        let command = self.config.conversation.command.clone();
+        match ConversationSession::spawn(&command, &dir, ev_tx) {
+            Ok(session) => self.conversation.session = Some(session),
+            Err(e) => {
+                self.conversation.status = ConvStatus::Error(e.to_string());
+                return;
+            }
+        }
+
+        // Bridge the session's events onto the main AppEvent loop, so history
+        // updates (and TTS) keep flowing even while the overlay is closed.
+        let app_tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            while let Some(ev) = ev_rx.recv().await {
+                if app_tx
+                    .send(AppEvent::StateUpdate(StateUpdate::Conversation(ev)))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+
+        // Start the streaming-TTS speaker if enabled. Failure (e.g. no audio
+        // device) is non-fatal: the conversation still works, just silent.
+        if self.config.conversation.enabled {
+            match spawn_speaker(self.config.conversation.clone()) {
+                Ok(tx) => self.conversation.speaker = Some(tx),
+                Err(e) => warn!("conversation TTS unavailable: {e}"),
+            }
+        }
+        self.conversation.status = ConvStatus::Idle;
+    }
+
+    /// Handle one parsed conversation event (called from the StateUpdate loop).
+    pub(super) fn on_conversation_event(&mut self, ev: ConversationEvent) {
+        match ev {
+            ConversationEvent::Started { session_id } => {
+                self.conversation.session_id = Some(session_id);
+                if self.conversation.status != ConvStatus::Thinking {
+                    self.conversation.status = ConvStatus::Idle;
+                }
+            }
+            ConversationEvent::Delta(text) => {
+                self.conversation.streaming.push_str(&text);
+                self.conversation.speak(SpeakerCommand::Chunk(text));
+            }
+            ConversationEvent::TurnComplete => {
+                self.finalize_streaming();
+                self.conversation.speak(SpeakerCommand::Flush);
+                self.conversation.status = ConvStatus::Idle;
+            }
+            ConversationEvent::Error(e) => {
+                self.finalize_streaming();
+                self.conversation.speak(SpeakerCommand::Flush);
+                self.conversation.status = ConvStatus::Error(e);
+            }
+            ConversationEvent::Exited => {
+                self.finalize_streaming();
+                self.conversation.session = None;
+                self.conversation.status = ConvStatus::Error("session ended".to_string());
+            }
+        }
+    }
+
+    fn finalize_streaming(&mut self) {
+        let text = std::mem::take(&mut self.conversation.streaming);
+        let text = text.trim();
+        if !text.is_empty() {
+            self.conversation.messages.push(ConvMessage {
+                role: ConvRole::Assistant,
+                text: text.to_string(),
+            });
+        }
+    }
+
+    /// Send a typed user turn to the session.
+    pub(super) async fn submit_conversation_input(&mut self, text: String) {
+        self.conversation.messages.push(ConvMessage {
+            role: ConvRole::User,
+            text: text.clone(),
+        });
+        // Interrupt any in-flight speech and start a fresh turn.
+        self.conversation.speak(SpeakerCommand::Interrupt);
+        self.conversation.streaming.clear();
+        self.conversation.status = ConvStatus::Thinking;
+
+        if let Some(session) = self.conversation.session.as_mut() {
+            if let Err(e) = session.send_user_message(&text).await {
+                self.conversation.status = ConvStatus::Error(e.to_string());
+            }
+        } else {
+            self.conversation.status = ConvStatus::Error("session not running".to_string());
+        }
+    }
+
+    /// Render the full-screen conversation overlay.
+    pub(super) fn render_conversation_modal(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        input: &Input,
+        scroll: u16,
+    ) {
+        frame.render_widget(Clear, area);
+        let block = Block::default()
+            .title(" Conversation ")
+            .borders(Borders::ALL)
+            .border_type(self.border_type())
+            .border_style(Style::default().fg(self.theme.modal_info));
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        // Layout: status line, history (fills), input box (3 rows).
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(3),
+            ])
+            .split(inner);
+
+        // Status line.
+        let tts = if self.conversation.speaker.is_some() {
+            " · 🔊 TTS"
+        } else {
+            ""
+        };
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!(" {}{}", self.conversation.status.label(), tts),
+                Style::default().fg(self.theme.text_secondary),
+            ))),
+            chunks[0],
+        );
+
+        // History: wrap every message to the inner width, bottom-anchored with
+        // `scroll` lines paged up.
+        let width = chunks[1].width.max(1) as usize;
+        let mut lines: Vec<Line> = Vec::new();
+        for msg in &self.conversation.messages {
+            self.push_message_lines(&mut lines, msg.role, &msg.text, width);
+        }
+        if !self.conversation.streaming.is_empty() {
+            self.push_message_lines(
+                &mut lines,
+                ConvRole::Assistant,
+                &self.conversation.streaming,
+                width,
+            );
+        }
+        if lines.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "Type a message and press Enter. Replies stream in and are spoken aloud.",
+                Style::default().fg(self.theme.text_secondary),
+            )));
+        }
+        let view_h = chunks[1].height as usize;
+        let total = lines.len();
+        let bottom_start = total.saturating_sub(view_h);
+        let start = bottom_start.saturating_sub(scroll as usize);
+        let end = (start + view_h).min(total);
+        let visible: Vec<Line> = lines[start..end].to_vec();
+        frame.render_widget(Paragraph::new(visible), chunks[1]);
+
+        // Input box.
+        let input_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(self.border_type())
+            .border_style(Style::default().fg(self.theme.border_unfocused));
+        let input_inner = input_block.inner(chunks[2]);
+        frame.render_widget(input_block, chunks[2]);
+        let text_width = input_inner.width.max(1);
+        let view_scroll = input.visual_scroll(text_width as usize);
+        frame.render_widget(
+            Paragraph::new(input.value())
+                .scroll((0, view_scroll as u16))
+                .style(Style::default().fg(self.theme.text_primary)),
+            input_inner,
+        );
+        // Real cursor in the input field.
+        let col = (input.visual_cursor().saturating_sub(view_scroll)) as u16;
+        frame.set_cursor_position((
+            input_inner.x + col.min(text_width.saturating_sub(1)),
+            input_inner.y,
+        ));
+    }
+
+    /// Append a message's wrapped lines (role header + body) to `lines`.
+    fn push_message_lines(
+        &self,
+        lines: &mut Vec<Line<'static>>,
+        role: ConvRole,
+        text: &str,
+        width: usize,
+    ) {
+        let (label, color) = match role {
+            ConvRole::User => ("You", self.theme.text_accent),
+            ConvRole::Assistant => ("Claude", self.theme.status_running),
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{label}:"),
+            Style::default().fg(color).add_modifier(Modifier::BOLD),
+        )));
+        for raw in text.split('\n') {
+            if raw.is_empty() {
+                lines.push(Line::from(String::new()));
+                continue;
+            }
+            for chunk in wrap_text(raw, width) {
+                lines.push(Line::from(chunk));
+            }
+        }
+        lines.push(Line::from(String::new())); // blank between messages
+    }
+
+    /// Conversation overlay key handling. Returns `true` if the key was consumed.
+    pub(super) async fn handle_conversation_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+    ) -> bool {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let Modal::Conversation { input, scroll } = &mut self.ui_state.modal else {
+            return false;
+        };
+        match key.code {
+            // Esc, or Alt-c again, closes the overlay (session keeps running).
+            KeyCode::Esc => {
+                self.ui_state.modal = Modal::None;
+            }
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::ALT) => {
+                self.ui_state.modal = Modal::None;
+            }
+            KeyCode::Enter => {
+                let text = input.value().trim().to_string();
+                *input = Input::default();
+                *scroll = 0; // snap back to the live bottom
+                if !text.is_empty() {
+                    self.submit_conversation_input(text).await;
+                }
+            }
+            KeyCode::PageUp => {
+                *scroll = scroll.saturating_add(10);
+            }
+            KeyCode::PageDown => {
+                *scroll = scroll.saturating_sub(10);
+            }
+            _ => {
+                super::edit_text_input(input, key);
+            }
+        }
+        true
+    }
+}
+
+/// Greedy word-wrap to `width` columns (by char count). Always returns at least
+/// one segment for non-empty input.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![text.to_string()];
+    }
+    let mut out = Vec::new();
+    let mut line = String::new();
+    for word in text.split(' ') {
+        // A single word longer than the width is hard-split across rows.
+        if word.chars().count() > width {
+            if !line.is_empty() {
+                out.push(std::mem::take(&mut line));
+            }
+            for ch in word.chars() {
+                if line.chars().count() == width {
+                    out.push(std::mem::take(&mut line));
+                }
+                line.push(ch);
+            }
+            continue;
+        }
+        if line.is_empty() {
+            line.push_str(word);
+        } else if line.chars().count() + 1 + word.chars().count() <= width {
+            line.push(' ');
+            line.push_str(word);
+        } else {
+            out.push(std::mem::take(&mut line));
+            line.push_str(word);
+        }
+    }
+    if !line.is_empty() {
+        out.push(line);
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wrap_text;
+
+    #[test]
+    fn wrap_basic() {
+        assert_eq!(wrap_text("hello world foo", 11), vec!["hello world", "foo"]);
+    }
+
+    #[test]
+    fn wrap_long_word_hard_splits() {
+        let out = wrap_text("abcdefghij", 4);
+        assert_eq!(out, vec!["abcd", "efgh", "ij"]);
+    }
+
+    #[test]
+    fn wrap_short_fits_on_one_line() {
+        assert_eq!(wrap_text("hi there", 80), vec!["hi there"]);
+    }
+}

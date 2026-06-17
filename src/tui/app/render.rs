@@ -60,6 +60,12 @@ impl App {
             return;
         }
 
+        // The conversation overlay is also a full-screen takeover.
+        if let Modal::Conversation { input, scroll } = &self.ui_state.modal {
+            self.render_conversation_modal(frame, size, input, *scroll);
+            return;
+        }
+
         // Content area with margin on top, left, right, and space for status bar at bottom
         let content_area = Rect {
             x: size.x + 1,
@@ -493,17 +499,6 @@ impl App {
                 [
                     Span::styled(" \u{2502} ", base_style),
                     Span::styled(label, base_style.fg(self.theme.status_running)),
-                ],
-            );
-        }
-
-        // Conversation mode (TTS) indicator.
-        if self.ui_state.conversation_mode {
-            left_spans.splice(
-                1..1,
-                [
-                    Span::styled(" \u{2502} ", base_style),
-                    Span::styled("\u{1F50A} TTS", base_style.fg(self.theme.text_accent)),
                 ],
             );
         }

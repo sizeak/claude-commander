@@ -57,6 +57,7 @@ use crate::tmux::AgentStateDetector;
 
 mod actions;
 mod background;
+mod conversation;
 mod event_loop;
 mod input;
 mod modals;
@@ -293,6 +294,10 @@ pub enum Modal {
     },
     /// Full-screen review-diff-and-comment view.
     ReviewDiff(Box<DiffReviewState>),
+    /// Full-screen conversation overlay (view onto the headless `claude`
+    /// session). View-only state; the session itself lives on `App`, so closing
+    /// this leaves the conversation running.
+    Conversation { input: Input, scroll: u16 },
 }
 
 /// A session match in the quick-switch modal
@@ -652,10 +657,6 @@ pub struct AppUiState {
     /// the background agent-state poll so the (sync) renderers — the footer chip
     /// — can read it without awaiting tmux.
     pub commander_running: bool,
-    /// Whether conversation mode (speak the commander's replies via TTS) is
-    /// active. Transient runtime toggle (hotkey); not persisted. Its initial
-    /// value comes from `config.conversation.enabled` at startup.
-    pub conversation_mode: bool,
     /// Attach command to run after exiting TUI
     pub attach_command: Option<String>,
     /// Session whose review diff should be opened on returning to the TUI —
@@ -748,7 +749,6 @@ impl Default for AppUiState {
             selected_session_id: None,
             selected_project_id: None,
             commander_running: false,
-            conversation_mode: false,
             attach_command: None,
             pending_open_review: None,
             editor_command: None,
@@ -890,9 +890,9 @@ pub struct App {
     suppress_keys_until: Instant,
     /// Two-digit session number accumulator with debounce
     digit_accumulator: super::digit_accumulator::DigitAccumulator,
-    /// Sends conversation-mode on/off to the background TTS watcher task. `None`
-    /// when the commander is disabled (the watcher isn't spawned).
-    conversation_tx: Option<tokio::sync::watch::Sender<bool>>,
+    /// Conversation mode runtime (headless streaming `claude` session + TTS).
+    /// Lives here, not in the overlay modal, so it keeps running while closed.
+    conversation: conversation::ConversationRuntime,
 }
 
 impl App {
@@ -920,7 +920,7 @@ impl App {
             theme,
             suppress_keys_until: Instant::now(),
             digit_accumulator: super::digit_accumulator::DigitAccumulator::new(debounce),
-            conversation_tx: None,
+            conversation: conversation::ConversationRuntime::default(),
         }
     }
 
@@ -1043,63 +1043,6 @@ impl App {
                                 commander_running,
                             }))
                             .await;
-                    }
-                }
-            });
-        }
-
-        // Conversation mode (TTS): speak the commander's replies aloud. Only
-        // spawned when the commander is enabled (nothing to read otherwise). A
-        // watch channel lets the hotkey toggle the worker on/off live, without a
-        // restart. The worker reads the transcript + plays audio entirely off
-        // the UI thread; its errors are logged, never surfaced as modals.
-        self.ui_state.conversation_mode =
-            self.config.conversation.enabled && self.commander_enabled_at_init;
-        if self.commander_enabled_at_init
-            && let Some(dir) = self.config.commander_transcript_dir()
-        {
-            let cfg = self.config.conversation.clone();
-            let initial = self.ui_state.conversation_mode;
-            let (tx_toggle, mut rx_toggle) = tokio::sync::watch::channel(initial);
-            self.conversation_tx = Some(tx_toggle);
-            let poll = Duration::from_millis(cfg.poll_interval_ms.max(200));
-            tokio::spawn(async move {
-                use crate::conversation::ConversationWorker;
-
-                let build = |on: bool| -> Option<ConversationWorker> {
-                    if !on {
-                        return None;
-                    }
-                    match ConversationWorker::new(cfg.clone(), dir.clone()) {
-                        Ok(w) => Some(w),
-                        Err(e) => {
-                            tracing::warn!("conversation mode unavailable: {e}");
-                            None
-                        }
-                    }
-                };
-
-                let mut worker = build(initial);
-                let mut interval = tokio::time::interval(poll);
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    tokio::select! {
-                        changed = rx_toggle.changed() => {
-                            if changed.is_err() {
-                                break; // App dropped → stop the watcher (and audio)
-                            }
-                            let on = *rx_toggle.borrow();
-                            // Rebuilding on each enable picks up any config edits
-                            // and resets the tail to the live end of the transcript.
-                            worker = build(on);
-                        }
-                        _ = interval.tick() => {
-                            if let Some(w) = worker.as_mut()
-                                && let Err(e) = w.tick().await
-                            {
-                                tracing::warn!("conversation tick failed: {e}");
-                            }
-                        }
                     }
                 }
             });

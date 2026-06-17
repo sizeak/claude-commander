@@ -135,18 +135,18 @@ state_sync_interval_ms = 2000
 # Working directory for the commander; defaults to <data dir>/commander.
 # commander_dir = "/path/to/commander"
 
-# Conversation mode (TTS): speak the commander's replies aloud via an
-# OpenAI-compatible TTS engine. Toggle live with `Alt-v` (requires the
-# commander to be enabled). Disabled by default. See "Conversation mode" below.
+# Conversation mode: a full-screen chat (open with `Alt-c`) backed by a
+# dedicated headless Claude session, whose replies stream in and are spoken
+# aloud via an OpenAI-compatible TTS engine. See "Conversation mode" below.
 # [conversation]
-# enabled = false                         # start with conversation mode on at launch
+# enabled = true                          # speak replies via TTS (off = text-only chat)
+# command = "claude"                       # binary for the conversation session
 # base_url = "http://127.0.0.1:8002/v1"   # OpenAI-compatible TTS endpoint (include /v1)
-# model = "kokoro"                         # model name (engines serving one model ignore it)
+# model = "kokoro"                         # TTS model name (engines serving one model ignore it)
 # voice = "af_sky"                         # omit to use the server's default voice
 # response_format = "wav"                  # wav | mp3 | opus | flac (wav = lowest local latency)
 # speed = 1.0                              # 0.25–4.0
-# speak_scope = "prose_only"               # prose_only | final_summary | verbatim
-# poll_interval_ms = 700                   # transcript poll cadence
+# speak_scope = "prose_only"               # prose_only | verbatim (per-sentence, streamed)
 # volume = 1.0                             # 0.0–2.0
 
 # Custom key bindings — override any default key with one or more alternatives
@@ -162,41 +162,42 @@ state_sync_interval_ms = 2000
 
 ## Conversation mode (TTS)
 
-Conversation mode speaks the **commander's** natural-language replies aloud through any
-**OpenAI-compatible** TTS engine (it posts to `{base_url}/audio/speech`). It's optional and
-off by default. Toggle it live with **`Alt-v`** (or from Settings ▸ Conversation); a `🔊 TTS`
-chip appears in the footer while it's active. It requires the commander to be enabled
-(`commander_enabled = true`) — there's nothing to speak otherwise.
+Press **`Alt-c`** to open a full-screen **conversation overlay** — a chat with a dedicated
+Claude session whose replies **stream in and are spoken aloud** through any **OpenAI-compatible**
+TTS engine (it posts to `{base_url}/audio/speech`). Type a message, press Enter; the reply is
+spoken sentence-by-sentence *as it's generated*. Closing the overlay (Esc / `Alt-c`) leaves the
+session running, so the conversation continues where you left off.
 
-How it works: the app tails the commander's Claude Code transcript and, for each new assistant
-turn, extracts the speakable text (per `speak_scope`), splits it into sentences, and synthesizes
-+ plays them incrementally so audio starts within ~a second rather than after the whole reply.
-A new reply interrupts the previous one. If the TTS server is unreachable, conversation mode
-degrades quietly (a log line, no audio) and never blocks the UI.
+This session is **separate from the commander** (`Shift-C`) and unrelated to it. It's driven over
+Claude Code's stream-json protocol (`claude -p --input-format stream-json --output-format
+stream-json --include-partial-messages`), which is the supported way to get clean token-level
+text — so TTS can start within a sentence of Claude beginning to type, rather than waiting for the
+whole reply. A new message interrupts in-flight speech. If the TTS server is unreachable, the chat
+still works (text-only) and never blocks the UI.
 
-We develop against a local [Kokoro](https://github.com/sizeak/kokoro-tts-rocm) container
-(default `http://127.0.0.1:8002/v1`), but any OpenAI-compatible endpoint works.
+Set `enabled = false` to use the overlay as a plain text chat with no speech. We develop against a
+local [Kokoro](https://github.com/sizeak/kokoro-tts-rocm) container (default
+`http://127.0.0.1:8002/v1`), but any OpenAI-compatible endpoint works.
 
 ```toml
 [conversation]
-enabled = false                         # start with conversation mode on at launch
+enabled = true                          # speak replies via TTS (off = text-only chat)
+command = "claude"                       # binary for the conversation session
 base_url = "http://127.0.0.1:8002/v1"   # OpenAI-compatible TTS endpoint (include /v1)
-model = "kokoro"                         # model name (engines serving one model ignore it)
+model = "kokoro"                         # TTS model name (engines serving one model ignore it)
 voice = "af_sky"                         # omit to use the server's default voice
 response_format = "wav"                  # wav | mp3 | opus | flac (wav = lowest local latency)
 speed = 1.0                              # 0.25–4.0
-speak_scope = "prose_only"               # prose_only | final_summary | verbatim
-poll_interval_ms = 700                   # transcript poll cadence
+speak_scope = "prose_only"               # prose_only | verbatim
 volume = 1.0                             # 0.0–2.0
 ```
 
-`speak_scope` controls how much of each reply is spoken:
+`speak_scope` controls what's spoken (applied per sentence as it streams):
 
 | Value | Behaviour |
 |-------|-----------|
 | `prose_only` (default) | Strip code blocks and markdown; speak the natural-language prose |
-| `final_summary` | Speak only the final paragraph of each reply |
-| `verbatim` | Speak the full reply text unchanged |
+| `verbatim` | Speak the text unchanged |
 
 > **Build note:** in-process playback uses `rodio`, which links **ALSA** on Linux. Building from
 > source needs the ALSA development headers (`libasound2-dev` on Debian/Ubuntu, `alsa-lib` on

@@ -183,9 +183,12 @@ pub struct Config {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ConversationConfig {
-    /// Start with conversation mode on at launch. The live on/off state is a
-    /// transient UI toggle (a hotkey); this is just its initial value.
+    /// Whether the conversation session speaks its replies aloud (TTS). When
+    /// off, the conversation overlay works as a normal text chat.
     pub enabled: bool,
+
+    /// Binary to run for the headless conversation session.
+    pub command: String,
 
     /// Base URL of the OpenAI-compatible TTS API (include the `/v1`).
     pub base_url: String,
@@ -206,9 +209,6 @@ pub struct ConversationConfig {
     /// How much of each reply to speak.
     pub speak_scope: crate::conversation::SpeakScope,
 
-    /// Transcript poll interval in milliseconds.
-    pub poll_interval_ms: u64,
-
     /// Playback volume (0.0–2.0; 1.0 = unchanged).
     pub volume: f32,
 }
@@ -217,13 +217,13 @@ impl Default for ConversationConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            command: "claude".to_string(),
             base_url: "http://127.0.0.1:8002/v1".to_string(),
             model: "kokoro".to_string(),
             voice: None,
             response_format: "wav".to_string(),
             speed: 1.0,
             speak_scope: crate::conversation::SpeakScope::ProseOnly,
-            poll_interval_ms: 700,
             volume: 1.0,
         }
     }
@@ -339,15 +339,6 @@ impl Config {
         } else {
             Ok(Self::data_dir()?.join("commander"))
         }
-    }
-
-    /// Directory holding the commander session's Claude Code transcript(s)
-    /// (`~/.claude/projects/<encoded-cwd>`), or `None` if the home directory or
-    /// commander dir can't be resolved.
-    pub fn commander_transcript_dir(&self) -> Option<PathBuf> {
-        let home = directories::BaseDirs::new()?.home_dir().to_path_buf();
-        let cwd = self.commander_dir().ok()?;
-        Some(crate::conversation::transcript_dir(&home, &cwd))
     }
 
     /// Program (with flags) to launch for the commander session, falling back

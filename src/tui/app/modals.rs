@@ -45,6 +45,9 @@ impl App {
         match &self.ui_state.modal {
             Modal::None => {}
 
+            // Full-screen takeovers are rendered directly in `render()`, not here.
+            Modal::Conversation { .. } => {}
+
             Modal::ReviewDiff(state) => self.render_review_modal(frame, area, state),
 
             Modal::Input {

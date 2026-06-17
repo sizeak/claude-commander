@@ -311,6 +311,14 @@ impl App {
         // pending first-click no longer points at a meaningful row.
         self.ui_state.modal_list_last_click = None;
 
+        // The conversation overlay owns all keys while open (typing, send,
+        // scroll, close) — dispatch before the shared modal match to avoid a
+        // double mutable borrow of `self`.
+        if matches!(self.ui_state.modal, Modal::Conversation { .. }) {
+            self.handle_conversation_key(key).await;
+            return;
+        }
+
         match &mut self.ui_state.modal {
             Modal::Input {
                 value, on_submit, ..
@@ -590,6 +598,9 @@ impl App {
                 };
                 self.handle_review_key(key, state).await;
             }
+
+            // Handled by the early dispatch above.
+            Modal::Conversation { .. } => {}
 
             Modal::None => {}
         }
@@ -945,29 +956,8 @@ impl App {
             UserCommand::OpenCommander => {
                 self.handle_open_commander().await;
             }
-            UserCommand::ToggleConversationMode => {
-                // The watcher is only spawned when the commander is enabled, so
-                // there's nothing to toggle otherwise — explain why.
-                if self.conversation_tx.is_none() {
-                    self.ui_state.status_message = Some((
-                        "Conversation mode needs the commander enabled (Settings ▸ General)"
-                            .to_string(),
-                        Instant::now() + Duration::from_secs(4),
-                    ));
-                    return;
-                }
-                let on = !self.ui_state.conversation_mode;
-                self.ui_state.conversation_mode = on;
-                if let Some(tx) = &self.conversation_tx {
-                    let _ = tx.send(on);
-                }
-                let msg = if on {
-                    "Conversation mode on \u{1F50A}"
-                } else {
-                    "Conversation mode off"
-                };
-                self.ui_state.status_message =
-                    Some((msg.to_string(), Instant::now() + Duration::from_secs(3)));
+            UserCommand::ToggleConversationOverlay => {
+                self.toggle_conversation_overlay().await;
             }
             UserCommand::OpenReviewDiff => {
                 self.handle_open_review().await;

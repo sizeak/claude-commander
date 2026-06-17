@@ -203,8 +203,8 @@ pub enum TtsError {
     #[error("Audio playback error: {0}")]
     Audio(String),
 
-    #[error("No commander transcript found at {0}")]
-    TranscriptNotFound(PathBuf),
+    #[error("Conversation session error: {0}")]
+    Session(String),
 }
 
 impl From<reqwest::Error> for TtsError {
@@ -354,7 +354,7 @@ mod tests {
                 body: "boom".to_string(),
             },
             TtsError::Audio("no device".to_string()),
-            TtsError::TranscriptNotFound(PathBuf::from("/tmp/missing")),
+            TtsError::Session("spawn failed".to_string()),
         ];
         for err in variants {
             assert!(!err.to_string().is_empty(), "Empty display for {:?}", err);

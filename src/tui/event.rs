@@ -142,6 +142,9 @@ pub enum StateUpdate {
     ReviewPrepared {
         prepared: Box<super::app::ReviewPrepared>,
     },
+    /// An event from the headless conversation-mode session (init / text delta /
+    /// turn complete / error / exit), bridged onto the main loop.
+    Conversation(crate::conversation::ConversationEvent),
 }
 
 /// User commands triggered by input
@@ -195,8 +198,8 @@ pub enum UserCommand {
     OpenPullRequest,
     /// Open (creating if needed) the persistent commander session
     OpenCommander,
-    /// Toggle conversation mode: speak the commander's replies aloud via TTS
-    ToggleConversationMode,
+    /// Open/close the full-screen conversation overlay (TTS conversation mode)
+    ToggleConversationOverlay,
     /// Open the full-screen review-diff-and-comment view for the session
     OpenReviewDiff,
     /// Toggle between preview/diff panes
@@ -300,7 +303,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::OpenInEditor => Self::OpenInEditor,
             BindableAction::OpenPullRequest => Self::OpenPullRequest,
             BindableAction::OpenCommander => Self::OpenCommander,
-            BindableAction::ToggleConversationMode => Self::ToggleConversationMode,
+            BindableAction::ToggleConversationOverlay => Self::ToggleConversationOverlay,
             BindableAction::OpenReviewDiff => Self::OpenReviewDiff,
             BindableAction::TogglePane => Self::TogglePane,
             BindableAction::TogglePaneReverse => Self::TogglePaneReverse,
@@ -753,22 +756,6 @@ mod tests {
         assert!(matches!(
             UserCommand::from_key(q_shift, &b),
             Some(UserCommand::ShowHelp)
-        ));
-    }
-
-    #[test]
-    fn test_toggle_conversation_mode_key() {
-        let b = kb();
-        // Default binding is Alt-v.
-        let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT);
-        assert!(matches!(
-            UserCommand::from_key(key, &b),
-            Some(UserCommand::ToggleConversationMode)
-        ));
-        // And the action maps straight through.
-        assert!(matches!(
-            UserCommand::from(BindableAction::ToggleConversationMode),
-            UserCommand::ToggleConversationMode
         ));
     }
 

@@ -47,7 +47,7 @@ pub enum BindableAction {
     OpenInEditor,
     OpenPullRequest,
     OpenCommander,
-    ToggleConversationMode,
+    ToggleConversationOverlay,
     OpenReviewDiff,
     TogglePane,
     TogglePaneReverse,
@@ -94,7 +94,7 @@ impl BindableAction {
         Self::OpenInEditor,
         Self::OpenPullRequest,
         Self::OpenCommander,
-        Self::ToggleConversationMode,
+        Self::ToggleConversationOverlay,
         Self::OpenReviewDiff,
         Self::ScanDirectory,
         Self::MoveToSection,
@@ -141,6 +141,7 @@ impl BindableAction {
             Self::OpenInEditor => "open_in_editor",
             Self::OpenPullRequest => "open_pull_request",
             Self::OpenCommander => "open_commander",
+            Self::ToggleConversationOverlay => "toggle_conversation_overlay",
             Self::OpenReviewDiff => "open_review_diff",
             Self::TogglePane => "toggle_pane",
             Self::TogglePaneReverse => "toggle_pane_reverse",
@@ -158,7 +159,6 @@ impl BindableAction {
             Self::MoveToSection => "move_to_section",
             Self::ToggleSection => "toggle_section",
             Self::ToggleViewMode => "toggle_view_mode",
-            Self::ToggleConversationMode => "toggle_conversation_mode",
         }
     }
 
@@ -189,6 +189,7 @@ impl BindableAction {
             Self::OpenInEditor => "Open in editor/IDE",
             Self::OpenPullRequest => "Open PR in browser",
             Self::OpenCommander => "Open commander session",
+            Self::ToggleConversationOverlay => "Open/close conversation overlay (TTS)",
             Self::OpenReviewDiff => "Review diff & comment",
             Self::TogglePane => "Toggle preview/diff/shell view",
             Self::TogglePaneReverse => "Toggle view (reverse)",
@@ -206,7 +207,6 @@ impl BindableAction {
             Self::MoveToSection => "Move session to section…",
             Self::ToggleSection => "Collapse/expand section",
             Self::ToggleViewMode => "Cycle project / sections / section stacks view",
-            Self::ToggleConversationMode => "Toggle conversation mode (speak commander replies)",
         }
     }
 
@@ -237,7 +237,7 @@ impl BindableAction {
             | Self::OpenInEditor
             | Self::OpenPullRequest
             | Self::OpenCommander
-            | Self::ToggleConversationMode
+            | Self::ToggleConversationOverlay
             | Self::OpenReviewDiff
             | Self::ScanDirectory
             | Self::MoveToSection
@@ -283,6 +283,7 @@ impl FromStr for BindableAction {
             "open_in_editor" => Ok(Self::OpenInEditor),
             "open_pull_request" => Ok(Self::OpenPullRequest),
             "open_commander" => Ok(Self::OpenCommander),
+            "toggle_conversation_overlay" => Ok(Self::ToggleConversationOverlay),
             "open_review_diff" => Ok(Self::OpenReviewDiff),
             "toggle_pane" => Ok(Self::TogglePane),
             "toggle_pane_reverse" => Ok(Self::TogglePaneReverse),
@@ -300,7 +301,6 @@ impl FromStr for BindableAction {
             "move_to_section" => Ok(Self::MoveToSection),
             "toggle_section" => Ok(Self::ToggleSection),
             "toggle_view_mode" => Ok(Self::ToggleViewMode),
-            "toggle_conversation_mode" => Ok(Self::ToggleConversationMode),
             _ => Err(format!("unknown action: {s}")),
         }
     }
@@ -633,8 +633,8 @@ impl Default for KeyBindings {
             vec![kb(KeyCode::Char('C'), shift)],
         );
         bindings.insert(
-            BindableAction::ToggleConversationMode,
-            vec![kb(KeyCode::Char('v'), alt)],
+            BindableAction::ToggleConversationOverlay,
+            vec![kb(KeyCode::Char('c'), alt)],
         );
         bindings.insert(
             BindableAction::OpenReviewDiff,
@@ -1080,12 +1080,12 @@ mod tests {
     }
 
     #[test]
-    fn test_toggle_conversation_mode_default_bound_to_alt_v() {
+    fn test_toggle_conversation_overlay_default_bound_to_alt_c() {
         let kb = KeyBindings::default();
-        let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT);
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT);
         assert_eq!(
             kb.resolve(&key),
-            Some(BindableAction::ToggleConversationMode)
+            Some(BindableAction::ToggleConversationOverlay)
         );
     }
 
