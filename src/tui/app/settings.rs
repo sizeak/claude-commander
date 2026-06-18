@@ -143,6 +143,13 @@ impl App {
                             .unwrap_or_else(|| "(default)".into()),
                         "commander_dir",
                     ),
+                    SettingsRow::text(
+                        "In Progress WIP Limit",
+                        c.in_progress_limit
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| "(unlimited)".into()),
+                        "in_progress_limit",
+                    ),
                 ]
             }
             SettingsTab::Sections => {
@@ -843,6 +850,14 @@ impl App {
                     } else {
                         Some(PathBuf::from(value))
                     };
+                }
+                "in_progress_limit" => {
+                    self.config.in_progress_limit =
+                        if value.is_empty() || value == "(unlimited)" {
+                            None
+                        } else {
+                            value.parse::<u32>().ok().filter(|&n| n > 0)
+                        };
                 }
                 _ => {}
             },
@@ -1552,6 +1567,12 @@ fn predicate_rows(section: &crate::session::SectionConfig) -> Vec<(String, Strin
                 .as_ref()
                 .map_or_else(|| not_set.clone(), fmt_reviewer),
         ),
+        (
+            "max_sessions".into(),
+            section
+                .max_sessions
+                .map_or_else(|| not_set.clone(), |n| n.to_string()),
+        ),
     ]
 }
 
@@ -1626,6 +1647,14 @@ fn apply_predicate_edit(section: &mut crate::session::SectionConfig, pred_idx: u
                     _ => Some(OneOrMany::Any(parsed)),
                 };
             }
+        }
+        // max_sessions
+        6 => {
+            section.max_sessions = if trimmed.is_empty() {
+                None
+            } else {
+                trimmed.parse::<u32>().ok().filter(|&n| n > 0)
+            };
         }
         // has_reviewer
         5 => {

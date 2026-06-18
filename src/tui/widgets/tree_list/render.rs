@@ -232,8 +232,21 @@ impl<'a> TreeList<'a> {
                     name,
                     count,
                     collapsed,
+                    max_sessions,
                 } => {
                     let twistie = if *collapsed { "▸ " } else { "▾ " };
+                    let (count_text, count_color) = match max_sessions {
+                        Some(limit) => {
+                            let over = *count >= *limit as usize;
+                            let color = if over {
+                                self.theme.modal_warning
+                            } else {
+                                self.theme.text_secondary
+                            };
+                            (format!(" ({}/{})", count, limit), color)
+                        }
+                        None => (format!(" ({})", count), self.theme.text_secondary),
+                    };
                     let line = Line::from(vec![
                         Span::raw(" "),
                         Span::styled(twistie, Style::default().fg(self.theme.text_secondary)),
@@ -243,10 +256,7 @@ impl<'a> TreeList<'a> {
                                 .fg(self.theme.text_accent)
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(
-                            format!(" ({})", count),
-                            Style::default().fg(self.theme.text_secondary),
-                        ),
+                        Span::styled(count_text, Style::default().fg(count_color)),
                     ]);
                     ListItem::new(line)
                 }
