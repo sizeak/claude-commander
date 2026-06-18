@@ -1779,9 +1779,7 @@ mod stack_order_tests {
 
         let ip_header = items.iter().find_map(|i| match i {
             SessionListItem::SectionHeader {
-                name,
-                max_sessions,
-                ..
+                name, max_sessions, ..
             } if name == crate::session::IN_PROGRESS => Some(*max_sessions),
             _ => None,
         });
@@ -1811,17 +1809,13 @@ mod stack_order_tests {
 
         let review_limit = items.iter().find_map(|i| match i {
             SessionListItem::SectionHeader {
-                name,
-                max_sessions,
-                ..
+                name, max_sessions, ..
             } if name == "Review" => Some(*max_sessions),
             _ => None,
         });
         let ip_limit = items.iter().find_map(|i| match i {
             SessionListItem::SectionHeader {
-                name,
-                max_sessions,
-                ..
+                name, max_sessions, ..
             } if name == crate::session::IN_PROGRESS => Some(*max_sessions),
             _ => None,
         });

@@ -852,12 +852,11 @@ impl App {
                     };
                 }
                 "in_progress_limit" => {
-                    self.config.in_progress_limit =
-                        if value.is_empty() || value == "(unlimited)" {
-                            None
-                        } else {
-                            value.parse::<u32>().ok().filter(|&n| n > 0)
-                        };
+                    self.config.in_progress_limit = if value.is_empty() || value == "(unlimited)" {
+                        None
+                    } else {
+                        value.parse::<u32>().ok().filter(|&n| n > 0)
+                    };
                 }
                 _ => {}
             },
