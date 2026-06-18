@@ -161,6 +161,8 @@ state_sync_interval_ms = 2000
 # language = "en"                          # ISO-639-1 hint; omit to auto-detect
 # prompt = "..."                           # optional decoding prompt (domain vocab / spelling)
 # api_key = "..."                          # sent as a Bearer header; omit for local servers
+# pause_media = true                       # pause other players while recording, resume after the
+#                                          # reply (best-effort via playerctl/osascript; on by default)
 
 # Custom key bindings — override any default key with one or more alternatives
 # [keybindings]
@@ -240,7 +242,14 @@ model = "Systran/faster-whisper-base"    # transcription model name
 language = "en"                          # ISO-639-1 hint; omit to auto-detect
 # prompt = "Vitest, Kotlin, ..."         # optional decoding prompt (domain vocab / spelling hints)
 # api_key = "..."                        # sent as a Bearer header; omit for local servers
+pause_media = true                       # pause other players while recording, resume after the reply
 ```
+
+While you're recording (and until the assistant has finished its spoken reply), `pause_media`
+pauses any other media players so they don't talk over the conversation, then resumes whatever was
+playing once things go quiet. It's best-effort — `playerctl` on Linux, `osascript` (Spotify/Music)
+on macOS — and a silent no-op when neither is available, so it never blocks or breaks voice input.
+On by default; set to `false` to leave your media alone.
 
 Audio is captured at the microphone's native rate, downmixed to mono, and encoded as 16-bit PCM
 WAV; the server resamples as needed. Recording isn't chunked yet — the whole utterance is uploaded

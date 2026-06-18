@@ -10,8 +10,9 @@ use tokio::sync::mpsc;
 use tracing::warn;
 
 use crate::config::ConversationConfig;
-use crate::conversation::audio::Player;
+use crate::conversation::audio::{PlaybackEdge, Player};
 use crate::conversation::extract::{SpeakScope, first_sentence_boundary, spoken_text};
+use crate::conversation::media::{MediaSignal, signal as media_signal};
 use crate::conversation::tts::{SpeechRequest, TtsClient};
 use crate::error::TtsError;
 
@@ -96,8 +97,12 @@ pub fn speaker_command_for(ev: &crate::conversation::ConversationEvent) -> Optio
 /// itself runs on the audio thread, so `enqueue` never blocks synthesis.
 pub fn spawn_speaker(
     cfg: ConversationConfig,
+    gate: Option<mpsc::UnboundedSender<MediaSignal>>,
 ) -> Result<mpsc::UnboundedSender<SpeakerCommand>, TtsError> {
-    let player = Player::new(cfg.volume)?;
+    // Playback span boundaries from the audio thread, so we can tell the media
+    // gate when the reply actually starts and finishes being spoken.
+    let (edge_tx, mut edge_rx) = mpsc::unbounded_channel::<PlaybackEdge>();
+    let player = Player::with_edges(cfg.volume, gate.as_ref().map(|_| edge_tx))?;
     let client = TtsClient::new(cfg.base_url.clone());
     let (tx, mut rx) = mpsc::unbounded_channel::<SpeakerCommand>();
 
@@ -107,6 +112,9 @@ pub fn spawn_speaker(
         // in-flight synth requests (polled concurrently, yielded in push order).
         let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
         let mut pending: FuturesOrdered<_> = FuturesOrdered::new();
+        // Whether we've told the gate the reply is being spoken (and not yet that
+        // it finished). Tracks contiguous-plus-gapped playback as one logical span.
+        let mut speaking = false;
         loop {
             // Keep at most MAX_INFLIGHT requests running: enough to stay ahead
             // of playback, few enough not to overload the TTS server (which
@@ -127,6 +135,21 @@ pub fn spawn_speaker(
                         player.enqueue(bytes);
                     }
                     Err(e) => warn!(target: "conversation", "TTS synthesis failed: {e}"),
+                },
+                // Playback boundaries → tell the media gate when the spoken reply
+                // begins and (once nothing is queued or synthesizing) ends.
+                Some(edge) = edge_rx.recv() => match edge {
+                    PlaybackEdge::Started if !speaking => {
+                        speaking = true;
+                        media_signal(&gate, MediaSignal::SpeakingStarted);
+                    }
+                    PlaybackEdge::Stopped if speaking && queue.is_empty() && pending.is_empty() => {
+                        speaking = false;
+                        media_signal(&gate, MediaSignal::SpeakingEnded);
+                    }
+                    // A gap mid-reply (more queued/synthesizing) or a redundant
+                    // edge — keep the current span open.
+                    _ => {}
                 },
                 cmd = rx.recv() => match cmd {
                     Some(SpeakerCommand::Chunk(text)) => {

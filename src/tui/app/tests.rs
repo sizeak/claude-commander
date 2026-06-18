@@ -882,6 +882,16 @@ fn test_stt_rows_present_with_defaults() {
         kind_of("stt_prompt"),
         SettingsRowKind::Text("(none)".to_string())
     );
+    // Media pausing is on by default.
+    assert_eq!(kind_of("stt_pause_media"), SettingsRowKind::Toggle(true));
+}
+
+#[test]
+fn test_apply_stt_pause_media_toggle() {
+    let mut app = make_test_app();
+    assert!(app.config.stt.pause_media);
+    app.apply_bool_setting("stt_pause_media", false);
+    assert!(!app.config.stt.pause_media);
 }
 
 #[test]

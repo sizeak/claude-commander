@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, warn};
 
 use crate::config::SttConfig;
+use crate::conversation::media::{MediaSignal, signal as media_signal};
 use crate::conversation::recorder::Recorder;
 use crate::conversation::stt::SttClient;
 use crate::error::TtsError;
@@ -33,6 +34,7 @@ pub enum ListenerCommand {
 pub fn spawn_listener(
     cfg: SttConfig,
     transcript_tx: mpsc::UnboundedSender<String>,
+    gate: Option<mpsc::UnboundedSender<MediaSignal>>,
 ) -> Result<mpsc::UnboundedSender<ListenerCommand>, TtsError> {
     let (wav_tx, mut wav_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let recorder = Recorder::new(wav_tx)?;
@@ -61,17 +63,35 @@ pub fn spawn_listener(
                         }
                         // Empty transcript (silence) — nothing to send, but still
                         // worth timing so a slow "no speech" round-trip is visible.
-                        Ok(_) => debug!(
-                            target: "conversation",
-                            "timing [stt] transcribed {wav_bytes} byte WAV in {} ms (empty — silence)",
-                            t0.elapsed().as_millis()
-                        ),
-                        Err(e) => warn!("STT transcription failed: {e}"),
+                        // No reply is coming, so let any paused media resume now.
+                        Ok(_) => {
+                            debug!(
+                                target: "conversation",
+                                "timing [stt] transcribed {wav_bytes} byte WAV in {} ms (empty — silence)",
+                                t0.elapsed().as_millis()
+                            );
+                            media_signal(&gate, MediaSignal::Silence);
+                        }
+                        Err(e) => {
+                            warn!("STT transcription failed: {e}");
+                            // Failed round-trip → no reply either; don't strand media.
+                            media_signal(&gate, MediaSignal::Silence);
+                        }
                     }
                 },
                 cmd = rx.recv() => match cmd {
-                    Some(ListenerCommand::Start) => recorder.start(),
-                    Some(ListenerCommand::Stop) => recorder.stop(),
+                    Some(ListenerCommand::Start) => {
+                        // Signal *before* opening the mic: the gate snapshots the
+                        // playing players concurrently, and on Bluetooth the mic
+                        // opening only pauses playback ~300ms later — so the
+                        // snapshot reads "Playing" before the device pause lands.
+                        media_signal(&gate, MediaSignal::RecordStarted);
+                        recorder.start();
+                    }
+                    Some(ListenerCommand::Stop) => {
+                        recorder.stop();
+                        media_signal(&gate, MediaSignal::RecordStopped);
+                    }
                     None => break, // sender dropped → end the task (releases mic)
                 },
             }

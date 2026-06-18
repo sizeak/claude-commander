@@ -20,6 +20,17 @@ enum Command {
     Stop,
 }
 
+/// A playback span boundary, reported (if a listener was given) so a caller can
+/// track when audio is actually coming out of the speaker. `Started` fires when
+/// audio begins from an idle sink; `Stopped` when the sink drains (or is
+/// stopped). Synthesis gaps produce separate spans, so these can repeat within
+/// one logical reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlaybackEdge {
+    Started,
+    Stopped,
+}
+
 /// A `Send` handle to the audio thread. Clips enqueued play back-to-back; `stop`
 /// clears the queue (used to interrupt on a new reply / when toggled off).
 pub struct Player {
@@ -30,11 +41,20 @@ impl Player {
     /// Start the audio thread. Returns an error synchronously if no output
     /// device is available.
     pub fn new(volume: f32) -> Result<Self, TtsError> {
+        Self::with_edges(volume, None)
+    }
+
+    /// Like [`Player::new`], but reports playback span boundaries on `edges` so
+    /// the caller can tell when audio is actually playing.
+    pub fn with_edges(
+        volume: f32,
+        edges: Option<tokio::sync::mpsc::UnboundedSender<PlaybackEdge>>,
+    ) -> Result<Self, TtsError> {
         let (tx, rx) = channel::<Command>();
         let (ready_tx, ready_rx) = channel::<Result<(), String>>();
         std::thread::Builder::new()
             .name("cc-tts-audio".into())
-            .spawn(move || audio_thread(rx, volume, ready_tx))
+            .spawn(move || audio_thread(rx, volume, ready_tx, edges))
             .map_err(|e| TtsError::Audio(e.to_string()))?;
         match ready_rx.recv() {
             Ok(Ok(())) => Ok(Self { tx }),
@@ -54,7 +74,17 @@ impl Player {
     }
 }
 
-fn audio_thread(rx: Receiver<Command>, volume: f32, ready: Sender<Result<(), String>>) {
+fn audio_thread(
+    rx: Receiver<Command>,
+    volume: f32,
+    ready: Sender<Result<(), String>>,
+    edges: Option<tokio::sync::mpsc::UnboundedSender<PlaybackEdge>>,
+) {
+    let emit = |edge: PlaybackEdge| {
+        if let Some(tx) = &edges {
+            let _ = tx.send(edge);
+        }
+    };
     let stream = match OutputStream::try_default() {
         Ok((stream, handle)) => {
             // Keep `stream` alive for the thread's lifetime; build the first sink.
@@ -106,7 +136,9 @@ fn audio_thread(rx: Receiver<Command>, volume: f32, ready: Sender<Result<(), Str
                 Command::Stop => {
                     // A stopped Sink can't accept new sources, so replace it.
                     sink.stop();
-                    playing_since = None;
+                    if playing_since.take().is_some() {
+                        emit(PlaybackEdge::Stopped);
+                    }
                     match Sink::try_new(&handle) {
                         Ok(fresh) => {
                             fresh.set_volume(volume);
@@ -125,9 +157,11 @@ fn audio_thread(rx: Receiver<Command>, volume: f32, ready: Sender<Result<(), Str
                     "timing [tts] playback finished: {} ms of audio played",
                     t0.elapsed().as_millis()
                 );
+                emit(PlaybackEdge::Stopped);
             }
         } else if playing_since.is_none() {
             playing_since = Some(Instant::now());
+            emit(PlaybackEdge::Started);
         }
     }
 }
