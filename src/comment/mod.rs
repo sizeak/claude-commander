@@ -16,8 +16,9 @@ pub mod selection;
 
 pub use apply::{ApplyOutcome, SendDecision, decide_send};
 
-use std::fs;
 use std::path::PathBuf;
+
+use tokio::fs;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -115,8 +116,11 @@ impl CommentStore {
     }
 
     /// Load a session's comments (an absent file yields an empty list).
-    pub fn load(&self, sid: SessionId) -> Result<Vec<Comment>> {
-        match fs::read_to_string(self.path_for(sid)) {
+    ///
+    /// Async + `tokio::fs` so per-session disk reads never block the executor
+    /// (every caller runs on the TUI/CLI runtime).
+    pub async fn load(&self, sid: SessionId) -> Result<Vec<Comment>> {
+        match fs::read_to_string(self.path_for(sid)).await {
             Ok(s) => {
                 Ok(serde_json::from_str(&s).map_err(|e| ConfigError::LoadFailed(e.to_string()))?)
             }
@@ -126,41 +130,51 @@ impl CommentStore {
     }
 
     /// Persist a session's comments via a temp-file + rename (atomic).
-    pub fn save(&self, sid: SessionId, anns: &[Comment]) -> Result<()> {
-        fs::create_dir_all(&self.dir).map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
+    pub async fn save(&self, sid: SessionId, anns: &[Comment]) -> Result<()> {
+        fs::create_dir_all(&self.dir)
+            .await
+            .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
         let json = serde_json::to_string_pretty(anns)
             .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
         let tmp = self.dir.join(format!(".{}.tmp", sid.as_uuid()));
-        fs::write(&tmp, json).map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
-        fs::rename(&tmp, self.path_for(sid)).map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
+        fs::write(&tmp, json)
+            .await
+            .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
+        fs::rename(&tmp, self.path_for(sid))
+            .await
+            .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
         Ok(())
     }
 
     /// Append an comment to a session.
-    pub fn add(&self, sid: SessionId, ann: Comment) -> Result<()> {
-        let mut anns = self.load(sid)?;
+    pub async fn add(&self, sid: SessionId, ann: Comment) -> Result<()> {
+        let mut anns = self.load(sid).await?;
         anns.push(ann);
-        self.save(sid, &anns)
+        self.save(sid, &anns).await
     }
 
     /// Remove the comment with `id` from a session (no-op if absent).
-    pub fn delete(&self, sid: SessionId, id: Uuid) -> Result<()> {
-        let mut anns = self.load(sid)?;
+    pub async fn delete(&self, sid: SessionId, id: Uuid) -> Result<()> {
+        let mut anns = self.load(sid).await?;
         anns.retain(|a| a.id != id);
-        self.save(sid, &anns)
+        self.save(sid, &anns).await
     }
 
     /// Session ids with at least one not-yet-applied comment. Scans the store
     /// directory (a missing directory yields an empty set); unreadable or
     /// malformed files are skipped rather than failing the whole scan.
-    pub fn sessions_with_pending(&self) -> Result<std::collections::HashSet<SessionId>> {
+    pub async fn sessions_with_pending(&self) -> Result<std::collections::HashSet<SessionId>> {
         let mut out = std::collections::HashSet::new();
-        let entries = match fs::read_dir(&self.dir) {
+        let mut entries = match fs::read_dir(&self.dir).await {
             Ok(e) => e,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
             Err(e) => return Err(ConfigError::LoadFailed(e.to_string()).into()),
         };
-        for entry in entries.flatten() {
+        while let Some(entry) = entries
+            .next_entry()
+            .await
+            .map_err(|e| ConfigError::LoadFailed(e.to_string()))?
+        {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
@@ -175,6 +189,7 @@ impl CommentStore {
             let sid = SessionId::from_uuid(uuid);
             if self
                 .load(sid)
+                .await
                 .is_ok_and(|cs| cs.iter().any(|c| c.status != CommentStatus::Applied))
             {
                 out.insert(sid);
@@ -184,12 +199,12 @@ impl CommentStore {
     }
 
     /// Set the status of one comment.
-    pub fn set_status(&self, sid: SessionId, id: Uuid, status: CommentStatus) -> Result<()> {
-        let mut anns = self.load(sid)?;
+    pub async fn set_status(&self, sid: SessionId, id: Uuid, status: CommentStatus) -> Result<()> {
+        let mut anns = self.load(sid).await?;
         if let Some(a) = anns.iter_mut().find(|a| a.id == id) {
             a.status = status;
         }
-        self.save(sid, &anns)
+        self.save(sid, &anns).await
     }
 }
 
@@ -332,74 +347,82 @@ mod tests {
 
     // --- store ---
 
-    #[test]
-    fn load_missing_returns_empty() {
+    #[tokio::test]
+    async fn load_missing_returns_empty() {
         let tmp = TempDir::new().unwrap();
         let store = CommentStore::new(tmp.path().join("comments"));
-        assert!(store.load(SessionId::new()).unwrap().is_empty());
+        assert!(store.load(SessionId::new()).await.unwrap().is_empty());
     }
 
-    #[test]
-    fn add_then_load_round_trips() {
+    #[tokio::test]
+    async fn add_then_load_round_trips() {
         let tmp = TempDir::new().unwrap();
         let store = CommentStore::new(tmp.path().join("comments"));
         let sid = SessionId::new();
         let a = ann("src/foo.rs", CommentSide::New, (10, 12), "let x = 1;");
-        store.add(sid, a.clone()).unwrap();
+        store.add(sid, a.clone()).await.unwrap();
 
-        let loaded = store.load(sid).unwrap();
+        let loaded = store.load(sid).await.unwrap();
         assert_eq!(loaded, vec![a]);
     }
 
-    #[test]
-    fn delete_removes_only_target() {
+    #[tokio::test]
+    async fn delete_removes_only_target() {
         let tmp = TempDir::new().unwrap();
         let store = CommentStore::new(tmp.path().join("comments"));
         let sid = SessionId::new();
         let a = ann("a.rs", CommentSide::New, (1, 1), "a");
         let b = ann("b.rs", CommentSide::New, (2, 2), "b");
-        store.add(sid, a.clone()).unwrap();
-        store.add(sid, b.clone()).unwrap();
+        store.add(sid, a.clone()).await.unwrap();
+        store.add(sid, b.clone()).await.unwrap();
 
-        store.delete(sid, a.id).unwrap();
-        let loaded = store.load(sid).unwrap();
+        store.delete(sid, a.id).await.unwrap();
+        let loaded = store.load(sid).await.unwrap();
         assert_eq!(loaded, vec![b]);
     }
 
-    #[test]
-    fn set_status_updates_target() {
+    #[tokio::test]
+    async fn set_status_updates_target() {
         let tmp = TempDir::new().unwrap();
         let store = CommentStore::new(tmp.path().join("comments"));
         let sid = SessionId::new();
         let a = ann("a.rs", CommentSide::New, (1, 1), "a");
-        store.add(sid, a.clone()).unwrap();
+        store.add(sid, a.clone()).await.unwrap();
 
-        store.set_status(sid, a.id, CommentStatus::Applied).unwrap();
-        assert_eq!(store.load(sid).unwrap()[0].status, CommentStatus::Applied);
+        store
+            .set_status(sid, a.id, CommentStatus::Applied)
+            .await
+            .unwrap();
+        assert_eq!(
+            store.load(sid).await.unwrap()[0].status,
+            CommentStatus::Applied
+        );
     }
 
-    #[test]
-    fn sessions_with_pending_lists_only_unapplied() {
+    #[tokio::test]
+    async fn sessions_with_pending_lists_only_unapplied() {
         let tmp = TempDir::new().unwrap();
         let store = CommentStore::new(tmp.path().join("comments"));
 
         // Empty (missing dir) → empty set.
-        assert!(store.sessions_with_pending().unwrap().is_empty());
+        assert!(store.sessions_with_pending().await.unwrap().is_empty());
 
         let staged = SessionId::new();
         store
             .add(staged, ann("a.rs", CommentSide::New, (1, 1), "a"))
+            .await
             .unwrap();
 
         // A session whose only comment has been applied is not pending.
         let applied = SessionId::new();
         let a = ann("b.rs", CommentSide::New, (1, 1), "b");
-        store.add(applied, a.clone()).unwrap();
+        store.add(applied, a.clone()).await.unwrap();
         store
             .set_status(applied, a.id, CommentStatus::Applied)
+            .await
             .unwrap();
 
-        let pending = store.sessions_with_pending().unwrap();
+        let pending = store.sessions_with_pending().await.unwrap();
         assert!(pending.contains(&staged));
         assert!(!pending.contains(&applied));
     }
