@@ -137,11 +137,10 @@ async fn main() -> Result<()> {
 
     let cli = Cli::parse();
 
-    // Load configuration
-    let config = Config::load().unwrap_or_else(|e| {
-        eprintln!("Warning: Failed to load config, using defaults: {}", e);
-        Config::default()
-    });
+    // Load configuration. A present-but-unparseable config file is a hard
+    // error: falling back to defaults here would silently drop every user
+    // setting and the next settings save would overwrite the real file.
+    let config = Config::load_or_exit();
 
     // Ensure required directories exist
     if let Err(e) = config.ensure_directories() {
