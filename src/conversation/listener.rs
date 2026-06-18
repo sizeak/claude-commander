@@ -7,8 +7,10 @@
 //! and the resulting transcript is sent on `transcript_tx` for the app to feed
 //! to the conversation session.
 
+use std::time::Instant;
+
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use crate::config::SttConfig;
 use crate::conversation::recorder::Recorder;
@@ -41,14 +43,31 @@ pub fn spawn_listener(
         loop {
             tokio::select! {
                 // A finished recording arrived from the recorder thread.
-                Some(wav) = wav_rx.recv() => match client.transcribe(wav).await {
-                    Ok(text) if !text.is_empty() => {
-                        if transcript_tx.send(text).is_err() {
-                            break; // app gone
+                Some(wav) = wav_rx.recv() => {
+                    // Stage 1 timing: WAV bytes in → transcript out.
+                    let wav_bytes = wav.len();
+                    let t0 = Instant::now();
+                    match client.transcribe(wav).await {
+                        Ok(text) if !text.is_empty() => {
+                            debug!(
+                                target: "conversation",
+                                "timing [stt] transcribed {wav_bytes} byte WAV in {} ms ({} chars)",
+                                t0.elapsed().as_millis(),
+                                text.len()
+                            );
+                            if transcript_tx.send(text).is_err() {
+                                break; // app gone
+                            }
                         }
+                        // Empty transcript (silence) — nothing to send, but still
+                        // worth timing so a slow "no speech" round-trip is visible.
+                        Ok(_) => debug!(
+                            target: "conversation",
+                            "timing [stt] transcribed {wav_bytes} byte WAV in {} ms (empty — silence)",
+                            t0.elapsed().as_millis()
+                        ),
+                        Err(e) => warn!("STT transcription failed: {e}"),
                     }
-                    Ok(_) => {} // empty transcript (silence) — nothing to send
-                    Err(e) => warn!("STT transcription failed: {e}"),
                 },
                 cmd = rx.recv() => match cmd {
                     Some(ListenerCommand::Start) => recorder.start(),
