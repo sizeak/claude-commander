@@ -291,8 +291,27 @@ impl App {
                     let mut state = DiffReviewState::new(session_id, title, base, diff, comments);
                     state.reviewed = reviewed.into_iter().collect();
                     state.prime_segments(segments);
+                    self.review_images.borrow_mut().clear();
+                    self.ensure_review_image(&state).await;
                     self.ui_state.modal = Modal::ReviewDiff(Box::new(state));
                 }
+            }
+            StateUpdate::ReviewImageLoaded { path, side, image } => {
+                // Build the render protocol on the main thread (it owns the
+                // Picker) and cache it for the `&self` render path. Late arrivals
+                // for a since-closed review just land in the cache harmlessly.
+                let entry = match image {
+                    Err(e) => ImageEntry::Failed(e),
+                    Ok(img) => match &self.picker {
+                        Some(picker) => {
+                            let dynimg = std::sync::Arc::try_unwrap(img)
+                                .unwrap_or_else(|shared| (*shared).clone());
+                            ImageEntry::Ready(Box::new(picker.new_resize_protocol(dynimg)))
+                        }
+                        None => ImageEntry::Failed("terminal has no image support".to_string()),
+                    },
+                };
+                self.review_images.borrow_mut().insert((path, side), entry);
             }
             StateUpdate::CascadeFinished { result } => {
                 self.handle_cascade_finished(result).await;

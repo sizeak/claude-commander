@@ -5,6 +5,7 @@
 //! - User input handling
 //! - Background state updates
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Stdout};
 use std::path::PathBuf;
@@ -41,7 +42,7 @@ use super::widgets::{
     InfoContent, InfoProjectData, InfoSessionData, InfoView, InfoViewState, Preview, PreviewState,
     TreeList, TreeListState,
 };
-use crate::api::CommanderService;
+use crate::api::{CommanderService, DiffSide};
 use crate::config::{BindableAction, Config, ConfigStore, StateStore};
 use crate::error::{Result, TuiError};
 use crate::git::{
@@ -70,6 +71,7 @@ mod state;
 mod tests;
 
 pub use review::DiffReviewState;
+pub(crate) use review::ImageEntry;
 pub use review::ReviewPrepared;
 
 /// Direction for mouse scroll events
@@ -880,6 +882,15 @@ pub struct App {
     suppress_keys_until: Instant,
     /// Two-digit session number accumulator with debounce
     digit_accumulator: super::digit_accumulator::DigitAccumulator,
+    /// Terminal graphics capability for the review image view, probed ONCE
+    /// before the input reader starts (see `run`); `None` until then. Kept on
+    /// `App` rather than in `DiffReviewState` because the protocol cache below
+    /// isn't `Clone`, and `DiffReviewState` is.
+    picker: Option<ratatui_image::picker::Picker>,
+    /// Decoded review images keyed by (display path, side). Interior-mutable so
+    /// the `&self` render path can read them; populated by the background fetch
+    /// task via `StateUpdate::ReviewImageLoaded`. Cleared when a review opens.
+    review_images: RefCell<HashMap<(String, DiffSide), review::ImageEntry>>,
 }
 
 impl App {
@@ -907,6 +918,8 @@ impl App {
             theme,
             suppress_keys_until: Instant::now(),
             digit_accumulator: super::digit_accumulator::DigitAccumulator::new(debounce),
+            picker: None,
+            review_images: RefCell::new(HashMap::new()),
         }
     }
 
@@ -928,6 +941,18 @@ impl App {
                 self.spawn_pr_status_check();
             }
         }
+
+        // Probe terminal graphics capability ONCE, here — BEFORE the background
+        // input reader starts below. `from_query_stdio` writes DA/DSR escape
+        // queries and reads the replies from stdin; if the reader were already
+        // running it would steal those replies, time out, and (since ratatui
+        // 0.30) crash the loop. It manages its own raw mode for the query. On
+        // any failure (non-tty, unsupported terminal) we fall back to Unicode
+        // half-blocks, which render on any truecolor terminal.
+        self.picker = Some(
+            ratatui_image::picker::Picker::from_query_stdio()
+                .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks()),
+        );
 
         // Floor at 1: a hand-edited config with fps 0 must not divide by zero.
         let tick_rate = Duration::from_millis(1000 / self.config.ui_refresh_fps.max(1) as u64);

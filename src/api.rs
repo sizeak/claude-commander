@@ -324,6 +324,16 @@ impl CommanderService {
         })
     }
 
+    /// A session's worktree path and the resolved base git ref the review diff
+    /// is computed against. These are the inputs a background image fetch needs
+    /// to read blob bytes (via `crate::git::read_base_blob`/`read_worktree_file`)
+    /// without holding the non-`Send` service handle across the task boundary.
+    pub async fn review_blob_source(&self, session_id: &SessionId) -> Result<(PathBuf, String)> {
+        let (worktree_path, review_base) = self.review_context(session_id).await?;
+        let base = review_base.git_ref(&worktree_path).await;
+        Ok((worktree_path, base))
+    }
+
     /// A session's worktree path and review base, looked up under one read lock.
     /// Shared by `open_review` and `fetch_diff_blob` so both agree on the base.
     async fn review_context(&self, session_id: &SessionId) -> Result<(PathBuf, ReviewBase)> {
@@ -650,7 +660,7 @@ pub struct NewComment {
 
 /// Which side of a diff a binary blob fetch refers to: the base ("before") or
 /// the working tree ("after").
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DiffSide {
     Old,

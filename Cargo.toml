@@ -83,6 +83,13 @@ throbber-widgets-tui = "0.11"
 # Fuzzy matching for the quick-select palette
 fuzzy-matcher = "0.3"
 rayon = "1.12.0"
+# default features include `chafa-dyn`, which needs the chafa C lib via
+# pkg-config; we only need the built-in protocols + crossterm integration.
+ratatui-image = { version = "11.0.4", default-features = false, features = [
+    "crossterm",
+    "image-defaults",
+] }
+image = "0.25"
 
 [dev-dependencies]
 # Property-based testing
