@@ -8,6 +8,7 @@
 mod auto_pull;
 mod backend;
 mod diff;
+mod lfs;
 mod pr;
 mod review_diff;
 mod summary;

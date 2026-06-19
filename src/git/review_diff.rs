@@ -112,6 +112,10 @@ async fn diff_target(worktree: &Path, base: &str) -> String {
 /// [`diff_target`]. Returns an error when the path doesn't exist there (e.g. an
 /// added file has no base side). Runs `git show` as a subprocess, so the read
 /// happens off the async runtime's worker threads.
+///
+/// For git-LFS-tracked files the committed blob is a pointer, so the bytes are
+/// resolved to the real content via [`super::lfs::resolve_if_pointer`] before
+/// returning (best-effort: falls back to the pointer if LFS can't smudge).
 pub async fn read_base_blob(worktree: &Path, base: &str, path: &str) -> Result<Vec<u8>> {
     let target = diff_target(worktree, base).await;
     let spec = format!("{target}:{path}");
@@ -131,15 +135,20 @@ pub async fn read_base_blob(worktree: &Path, base: &str, path: &str) -> Result<V
         ))
         .into());
     }
-    Ok(out.stdout)
+    Ok(super::lfs::resolve_if_pointer(worktree, path, out.stdout).await)
 }
 
 /// Read the working-tree (new-side) bytes of `path`. Uses async `tokio::fs` so
 /// the read never blocks the executor.
+///
+/// If the working-tree file is still an LFS pointer (LFS installed but the
+/// object not pulled, or a fresh checkout), it is resolved to real bytes via
+/// [`super::lfs::resolve_if_pointer`] before returning.
 pub async fn read_worktree_file(worktree: &Path, path: &str) -> Result<Vec<u8>> {
-    Ok(tokio::fs::read(worktree.join(path))
+    let bytes = tokio::fs::read(worktree.join(path))
         .await
-        .map_err(|e| GitError::OperationFailed(e.to_string()))?)
+        .map_err(|e| GitError::OperationFailed(e.to_string()))?;
+    Ok(super::lfs::resolve_if_pointer(worktree, path, bytes).await)
 }
 
 /// `git cat-file -s <oid>` — the byte size of a blob without reading its
