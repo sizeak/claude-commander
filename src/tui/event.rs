@@ -142,6 +142,16 @@ pub enum StateUpdate {
     ReviewPrepared {
         prepared: Box<super::app::ReviewPrepared>,
     },
+    /// An open review view's diff was re-composed in the background (agent went
+    /// idle, or a manual refresh). `refreshed` carries the fresh, warmed payload
+    /// to fold into the view in place; `None` means the working tree was
+    /// unchanged. `manual` distinguishes a user-pressed refresh (which reports
+    /// an outcome) from the automatic idle-triggered one (silent). Boxed — the
+    /// payload is large.
+    ReviewRefreshed {
+        refreshed: Option<Box<super::app::ReviewPrepared>>,
+        manual: bool,
+    },
 }
 
 /// User commands triggered by input
