@@ -1647,14 +1647,6 @@ fn apply_predicate_edit(section: &mut crate::session::SectionConfig, pred_idx: u
                 };
             }
         }
-        // max_sessions
-        6 => {
-            section.max_sessions = if trimmed.is_empty() {
-                None
-            } else {
-                trimmed.parse::<u32>().ok().filter(|&n| n > 0)
-            };
-        }
         // has_reviewer
         5 => {
             if trimmed.is_empty() {
@@ -1677,6 +1669,14 @@ fn apply_predicate_edit(section: &mut crate::session::SectionConfig, pred_idx: u
                     }
                 }
             }
+        }
+        // max_sessions
+        6 => {
+            section.max_sessions = if trimmed.is_empty() {
+                None
+            } else {
+                trimmed.parse::<u32>().ok().filter(|&n| n > 0)
+            };
         }
         _ => {}
     }
