@@ -13,13 +13,11 @@ impl App {
         self.spawn_preview_update();
 
         loop {
-            // Force full terminal redraw on view switch to clear stale styled cells
-            if self.ui_state.clear_right_pane {
-                terminal
-                    .clear()
-                    .map_err(|e| TuiError::RenderError(e.to_string()))?;
-                self.ui_state.clear_right_pane = false;
-            }
+            // View-switch clearing happens inside `render` via the `Clear`
+            // widget (see the `clear_right_pane` handling there). We must not
+            // call `terminal.clear()`: since ratatui 0.30 it reads the cursor
+            // position from stdin, which races our background input reader,
+            // times out, and kills the loop.
 
             // Render with whatever data we have — never blocks on I/O
             terminal

@@ -617,6 +617,9 @@ pub enum SessionListItem {
         name: String,
         count: usize,
         collapsed: bool,
+        /// Advisory WIP limit resolved from config. `None` means no limit
+        /// configured for this section.
+        max_sessions: Option<u32>,
     },
     /// A blank spacer row for visual separation between sections.
     /// Not selectable.
@@ -647,6 +650,12 @@ impl SessionListItem {
     /// Whether navigation/selection should land on this row.
     pub fn is_selectable(&self) -> bool {
         !matches!(self, Self::Spacer)
+    }
+
+    /// Whether this row begins a group — a project or section header.
+    /// Group-jump navigation moves between these rows.
+    pub fn is_group_header(&self) -> bool {
+        matches!(self, Self::Project { .. } | Self::SectionHeader { .. })
     }
 }
 
@@ -1326,5 +1335,28 @@ mod tests {
             nested: false,
         };
         assert!(project.is_selectable());
+    }
+
+    #[test]
+    fn session_list_item_group_headers() {
+        let project = SessionListItem::Project {
+            id: ProjectId::new(),
+            name: "p".to_string(),
+            repo_path: PathBuf::from("/tmp"),
+            main_branch: "main".to_string(),
+            worktree_count: 0,
+            nested: false,
+        };
+        assert!(project.is_group_header());
+
+        let section = SessionListItem::SectionHeader {
+            name: "Open PRs".to_string(),
+            count: 2,
+            collapsed: false,
+            max_sessions: None,
+        };
+        assert!(section.is_group_header());
+
+        assert!(!SessionListItem::Spacer.is_group_header());
     }
 }

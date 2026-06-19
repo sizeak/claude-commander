@@ -31,7 +31,8 @@ use ratatui::{
         ScrollbarState, Wrap,
     },
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
+use tui_input::Input;
 
 use super::event::{AppEvent, EventLoop, InputEvent, StateUpdate, UserCommand};
 use super::path_completer::PathCompleter;
@@ -157,6 +158,49 @@ pub struct StackChainEntry {
 }
 
 /// Modal dialog state
+/// Caret glyph shown at the cursor position in single-line text inputs,
+/// matching the review comment box.
+pub(super) const INPUT_CARET: char = '▏';
+
+/// Render a [`tui_input::Input`]'s value with the caret glyph spliced in at the
+/// cursor (appended when the cursor is at the end). Single-line inputs across
+/// the app render through this so the caret tracks the cursor instead of
+/// sitting at the end of the text.
+pub(super) fn input_with_caret(input: &Input) -> String {
+    let chars: Vec<char> = input.value().chars().collect();
+    let mut out = String::with_capacity(input.value().len() + INPUT_CARET.len_utf8());
+    for (i, ch) in chars.iter().enumerate() {
+        if i == input.cursor() {
+            out.push(INPUT_CARET);
+        }
+        out.push(*ch);
+    }
+    if input.cursor() >= chars.len() {
+        out.push(INPUT_CARET);
+    }
+    out
+}
+
+/// Forward an editing key to a single-line `tui-input` field, returning `true`
+/// when the text value changed (so callers can recompute dependent state such
+/// as fuzzy filters or path completions). Cursor-only moves and keys `tui-input`
+/// doesn't recognise (Enter, Esc, Tab, Up/Down, …) return `false` and are left
+/// for the caller to handle.
+pub(super) fn edit_text_input(input: &mut Input, key: crossterm::event::KeyEvent) -> bool {
+    use tui_input::backend::crossterm::to_input_request;
+    match to_input_request(&crossterm::event::Event::Key(key)) {
+        Some(req) => input.handle(req).is_some_and(|c| c.value),
+        None => false,
+    }
+}
+
+/// Insert a string at the cursor of a `tui-input` field (it has no bulk insert).
+pub(super) fn insert_into_input(input: &mut Input, s: &str) {
+    for c in s.chars() {
+        input.handle(tui_input::InputRequest::InsertChar(c));
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum Modal {
     /// No modal open
@@ -165,7 +209,7 @@ pub enum Modal {
     Input {
         title: String,
         prompt: String,
-        value: String,
+        value: Input,
         on_submit: InputAction,
         /// When `Some`, the dialog renders a dynamic hint indicating whether
         /// the sanitized session name corresponds to an already-existing
@@ -193,7 +237,7 @@ pub enum Modal {
     PathInput {
         title: String,
         prompt: String,
-        value: String,
+        value: Input,
         on_submit: InputAction,
         completer: PathCompleter,
         /// First visible row of the completions list.
@@ -221,7 +265,7 @@ pub enum Modal {
         /// to commands without changing this field, so backspacing past the
         /// `>` naturally restores the unified view.
         mode: PaletteMode,
-        query: String,
+        query: Input,
         matches: Vec<QuickSwitchItem>,
         selected_idx: usize,
         /// Index of the first visible row — keeps `selected_idx` inside
@@ -235,7 +279,7 @@ pub enum Modal {
         /// Project the session will belong to
         project_id: ProjectId,
         /// Current input text (filter + paste target)
-        query: String,
+        query: Input,
         /// All branches loaded from the repo (source for filtering)
         all_branches: Vec<BranchEntry>,
         /// Filtered view of branches matching `query`
@@ -389,9 +433,9 @@ pub struct SectionsState {
 /// Editing state for the Sections tab
 #[derive(Debug, Clone)]
 pub enum SectionsEditing {
-    RenamingSection { value: String },
-    EditingPredicate { value: String },
-    CreatingSection { value: String },
+    RenamingSection { value: Input },
+    EditingPredicate { value: Input },
+    CreatingSection { value: Input },
 }
 
 impl Default for SectionsState {
@@ -502,7 +546,7 @@ impl SettingsRow {
 #[derive(Debug, Clone)]
 pub enum SettingsEditing {
     /// Editing a text value
-    TextInput { value: String },
+    TextInput { value: Input },
     /// Capturing a key for keybinding
     KeyCapture {
         action_name: String,
@@ -606,7 +650,7 @@ pub struct AppUiState {
     /// Attach command to run after exiting TUI
     pub attach_command: Option<String>,
     /// Session whose review diff should be opened on returning to the TUI —
-    /// set when the user pressed Ctrl-r inside an attached session.
+    /// set when the user pressed Alt-r inside an attached session.
     pub pending_open_review: Option<SessionId>,
     /// Editor command + path to open after exiting TUI
     pub editor_command: Option<(String, PathBuf)>,
@@ -623,6 +667,9 @@ pub struct AppUiState {
     pub gh_available: bool,
     /// When the last background preview fetch was spawned (None = not in flight)
     pub preview_update_spawned_at: Option<Instant>,
+    /// Whether a review-diff refresh re-compose is currently in flight, so the
+    /// idle trigger and a manual refresh don't double-spawn.
+    pub review_refresh_in_flight: bool,
     /// Tick counter for animations (incremented each render tick)
     pub tick_count: u64,
     /// Throbber/spinner state for loading modals
@@ -704,6 +751,7 @@ impl Default for AppUiState {
             last_pr_check: None,
             gh_available: false,
             preview_update_spawned_at: None,
+            review_refresh_in_flight: false,
             terminal_size: Rect::default(),
             tick_count: 0,
             throbber_state: throbber_widgets_tui::ThrobberState::default(),
@@ -767,8 +815,9 @@ impl AppUiState {
     ///
     /// Commands with no effective keybinding are still included — the
     /// palette is intended to be the canonical access surface as hotkeys
-    /// get trimmed over time. `NavigateUp` and `NavigateDown` are excluded
-    /// because they only make sense as palette-internal list navigation.
+    /// get trimmed over time. Pure list motions (navigate up/down,
+    /// group/first/last jumps) are excluded because moving the tree cursor
+    /// from inside the palette makes no sense.
     pub fn gather_command_entries(
         &self,
         kb: &crate::config::KeyBindings,
@@ -778,7 +827,12 @@ impl AppUiState {
         for &action in BindableAction::ALL {
             if matches!(
                 action,
-                BindableAction::NavigateUp | BindableAction::NavigateDown
+                BindableAction::NavigateUp
+                    | BindableAction::NavigateDown
+                    | BindableAction::NextGroup
+                    | BindableAction::PreviousGroup
+                    | BindableAction::NavigateFirst
+                    | BindableAction::NavigateLast
             ) {
                 continue;
             }
@@ -1011,12 +1065,22 @@ impl App {
             // Run main loop until quit or attach
             info!("Entering main loop");
             let result = self.main_loop(&mut terminal).await;
-            info!("Main loop exited with result: {:?}", result.is_ok());
+            match &result {
+                Ok(()) => info!("Main loop exited cleanly"),
+                Err(e) => error!("Main loop exited with error: {e:?}"),
+            }
 
-            // Restore terminal before attach or exit
+            // Restore terminal before propagating, attaching, or exiting — a
+            // raw-mode/alternate-screen terminal must never outlive the loop,
+            // even on the error path below.
             info!("Restoring terminal");
             self.restore_terminal(&mut terminal)?;
             info!("Terminal restored successfully");
+
+            // A main-loop error is fatal: propagate it so `main` exits
+            // non-zero and color-eyre reports it on stderr, rather than
+            // silently dropping into the quit path. Restore has already run.
+            result?;
 
             // Reset should_quit for next iteration
             self.ui_state.should_quit = false;
@@ -1076,9 +1140,10 @@ impl App {
                                 // sessions, where SIGTSTP would freeze the
                                 // pane with no shell to recover from.
                                 let intercept_ctrl_z = !current_session.ends_with("-sh");
-                                // The Ctrl-r review toggle is intercepted only
-                                // for Claude sessions; in a shell Ctrl-r is
-                                // reverse-history-search, which we leave intact.
+                                // The Alt-r review toggle is intercepted only
+                                // for Claude sessions. (Alt-r replaced Ctrl-r
+                                // precisely so a shell's Ctrl-r reverse-history-
+                                // search is never shadowed.)
                                 let review_triggers = if intercept_ctrl_z {
                                     crate::config::keybindings::review_trigger_bytes(
                                         &self.config.keybindings,
@@ -1192,7 +1257,7 @@ impl App {
                                         // Resolve the tmux session to its id and
                                         // queue the review view; the post-loop
                                         // code opens it once we're back in the
-                                        // TUI. Ctrl-r inside the review
+                                        // TUI. Alt-r inside the review
                                         // re-attaches (see handle_review_key).
                                         self.ui_state.pending_open_review = {
                                             let st = self.service.store().read().await;
@@ -1321,7 +1386,7 @@ impl App {
                             self.focus_session_in_tree(&name).await;
                         }
 
-                        // Ctrl-r inside the attached session queued its review
+                        // Alt-r inside the attached session queued its review
                         // diff — open it now so the next TUI frame shows it
                         // (rather than the session list).
                         if let Some(sid) = self.ui_state.pending_open_review.take() {

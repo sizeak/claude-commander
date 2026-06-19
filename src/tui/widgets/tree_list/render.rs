@@ -232,8 +232,21 @@ impl<'a> TreeList<'a> {
                     name,
                     count,
                     collapsed,
+                    max_sessions,
                 } => {
                     let twistie = if *collapsed { "▸ " } else { "▾ " };
+                    let (count_text, count_color) = match max_sessions {
+                        Some(limit) => {
+                            let over = *count >= *limit as usize;
+                            let color = if over {
+                                self.theme.modal_warning
+                            } else {
+                                self.theme.text_secondary
+                            };
+                            (format!(" ({}/{})", count, limit), color)
+                        }
+                        None => (format!(" ({})", count), self.theme.text_secondary),
+                    };
                     let line = Line::from(vec![
                         Span::raw(" "),
                         Span::styled(twistie, Style::default().fg(self.theme.text_secondary)),
@@ -243,10 +256,7 @@ impl<'a> TreeList<'a> {
                                 .fg(self.theme.text_accent)
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(
-                            format!(" ({})", count),
-                            Style::default().fg(self.theme.text_secondary),
-                        ),
+                        Span::styled(count_text, Style::default().fg(count_color)),
                     ]);
                     ListItem::new(line)
                 }
@@ -298,16 +308,24 @@ pub(super) fn find_text_in_row(
 
 /// Post-process buffer to wrap PR badge text in OSC 8 hyperlink escape sequences.
 ///
-/// Uses 2-char chunking to work around terminal width calculation issues,
-/// following ratatui's official hyperlink example pattern.
+/// Each badge character is given its own cell whose symbol is the character
+/// wrapped in OSC 8 open/close escapes. The escapes balloon the symbol's
+/// computed width far beyond 1, so we pin each cell to [`CellDiffOption::ForcedWidth`]
+/// of 1 — otherwise ratatui treats the cell as an enormous multi-width grapheme
+/// and blanks every following cell (which silently drops `#<num>` from the
+/// badge). Terminals coalesce adjacent cells carrying the same URL into one link.
 pub(super) fn inject_pr_hyperlinks(
     list_area: Rect,
     buf: &mut Buffer,
     pr_data: &[Option<(u32, String)>],
     state: &ListState,
 ) {
+    use ratatui::buffer::CellDiffOption;
+    use std::num::NonZeroU16;
+
     let offset = state.offset();
     let visible_rows = list_area.height as usize;
+    let one = NonZeroU16::new(1).expect("1 is non-zero");
 
     for row in 0..visible_rows {
         let item_idx = offset + row;
@@ -328,46 +346,17 @@ pub(super) fn inject_pr_hyperlinks(
             continue;
         };
 
-        // Apply OSC 8 hyperlink via 2-char chunking
         let osc_open = format!("\x1B]8;;{}\x07", url);
         let osc_close = "\x1B]8;;\x07";
 
-        let needle_chars: Vec<char> = needle.chars().collect();
-        let mut char_idx = 0;
-
-        while char_idx < needle_chars.len() {
-            let x = start_x + char_idx as u16;
+        for (i, ch) in needle.chars().enumerate() {
+            let x = start_x + i as u16;
             if x >= list_area.x + list_area.width {
                 break;
             }
-
-            // Collect up to 2 characters for this chunk
-            let mut chunk_end = (char_idx + 2).min(needle_chars.len());
-            let mut chunk: String = needle_chars[char_idx..chunk_end].iter().collect();
-            let mut chunk_len = chunk_end - char_idx;
-
-            // If this would be a trailing 1-char chunk, extend it with the
-            // following cell's first character so the chunk is always 2-char.
-            // Reason: the OSC 8 escapes balloon the cell's reported symbol
-            // width far beyond 1, which sets ratatui's `to_skip` and blocks
-            // the very next cell from emitting — leaving a stale 1-col gap
-            // in the highlight when the row is selected.
-            if chunk_len == 1 && x + 1 < list_area.x + list_area.width {
-                let next_char = buf[(x + 1, y)].symbol().chars().next().unwrap_or(' ');
-                chunk.push(next_char);
-                chunk_end += 1; // consume the borrowed cell from the loop's POV
-                chunk_len = 2;
-            }
-
-            buf[(x, y)].set_symbol(&format!("{}{}{}", osc_open, chunk, osc_close));
-
-            // If we packed 2 chars into one cell, mark the next cell as a
-            // wide-char continuation so the renderer skips it entirely.
-            if chunk_len == 2 && x + 1 < list_area.x + list_area.width {
-                buf[(x + 1, y)].set_skip(true);
-            }
-
-            char_idx = chunk_end;
+            buf[(x, y)]
+                .set_symbol(&format!("{osc_open}{ch}{osc_close}"))
+                .set_diff_option(CellDiffOption::ForcedWidth(one));
         }
     }
 }

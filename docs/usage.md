@@ -103,10 +103,11 @@ and untracked changes — composed from `merge-base(base, HEAD)` through the
 working tree.
 
 While attached to a Claude session you can jump straight to its review diff
-with **`Ctrl-r`**, and **`Ctrl-r`** again from inside the diff switches back to
+with **`Alt-r`**, and **`Alt-r`** again from inside the diff switches back to
 the session — the same direct toggle the shell pane has with `Ctrl-\`, without
-detaching to the session list. (In a shell session `Ctrl-r` is left alone so it
-keeps working as reverse-history-search.)
+detaching to the session list. `Alt-r` is used rather than `Ctrl-r` so a
+shell's `Ctrl-r` reverse-history-search is never shadowed; the toggle is wired
+up for Claude sessions only.
 
 The diff is rendered in a `lumen`/`hunk`-style colour scheme: dark green/red
 line fills, a brighter highlight on the changed span within a line, and (on
@@ -122,6 +123,12 @@ foreground-only colouring on 256- and 16-colour terminals.
   between inline and side-by-side layouts. In the inline layout, lines longer
   than the pane soft-wrap onto continuation rows (GitHub-style) so nothing runs
   off-screen; side-by-side truncates to keep its columns aligned.
+- **Mark reviewed**: press `m` to toggle a ✓ reviewed mark on the current
+  file. Marking dims the file in the tree and auto-advances to the next
+  unreviewed file (wrapping); unmarking stays put. Marks persist per session
+  across restarts and clear automatically when a file's diff changes or it
+  leaves the diff (GitHub "Viewed" semantics), so a re-edited file demands a
+  fresh look. The tree title shows progress (`Files (3/7 reviewed)`).
 - **Comment**: in the body, press `v` to start a line selection (arrows grow
   or shrink it; mouse drag also selects), then `Enter` to attach a comment.
   Right-clicking or double-clicking a line is a mouse shortcut for the same
@@ -136,6 +143,12 @@ foreground-only colouring on 256- and 16-colour terminals.
   They're written to a markdown brief and the agent is prompted to address
   them — sent immediately when idle/working (it queues natively), held until a
   permission prompt clears, or deferred if the agent is stopped.
+- **Refresh**: the diff is a snapshot taken when you opened the view, so the
+  agent's edits (e.g. after applying comments) don't appear until it's
+  re-composed. This happens automatically when the session's agent goes idle —
+  i.e. finishes a turn — folding its changes in while keeping your place (same
+  file, clamped cursor/scroll). Press `r` to re-compose on demand at any time;
+  it reports "Review refreshed" or "Review already up to date".
 - **Drift**: if the code under a comment changes before you apply, the view
   re-anchors it by its captured snippet. If it can't be located unambiguously
   the comment is marked `⚠` (drifted) and blocks apply until you review or

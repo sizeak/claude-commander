@@ -25,6 +25,10 @@ use serde::{Deserialize, Serialize};
 pub enum BindableAction {
     NavigateUp,
     NavigateDown,
+    NextGroup,
+    PreviousGroup,
+    NavigateFirst,
+    NavigateLast,
     Select,
     SelectShell,
     NewSession,
@@ -67,6 +71,10 @@ impl BindableAction {
     pub const ALL: &'static [BindableAction] = &[
         Self::NavigateUp,
         Self::NavigateDown,
+        Self::NextGroup,
+        Self::PreviousGroup,
+        Self::NavigateFirst,
+        Self::NavigateLast,
         Self::Select,
         Self::SelectShell,
         Self::NewSession,
@@ -109,6 +117,10 @@ impl BindableAction {
         match self {
             Self::NavigateUp => "navigate_up",
             Self::NavigateDown => "navigate_down",
+            Self::NextGroup => "next_group",
+            Self::PreviousGroup => "previous_group",
+            Self::NavigateFirst => "navigate_first",
+            Self::NavigateLast => "navigate_last",
             Self::Select => "select",
             Self::SelectShell => "select_shell",
             Self::NewSession => "new_session",
@@ -152,6 +164,10 @@ impl BindableAction {
         match self {
             Self::NavigateUp => "Navigate up",
             Self::NavigateDown => "Navigate down",
+            Self::NextGroup => "Jump to next project/section",
+            Self::PreviousGroup => "Jump to previous project/section",
+            Self::NavigateFirst => "Jump to first item",
+            Self::NavigateLast => "Jump to last item",
             Self::Select => "Attach to selected session",
             Self::SelectShell => "Open shell in worktree",
             Self::NewSession => "New worktree session",
@@ -193,7 +209,13 @@ impl BindableAction {
     /// Help screen section for grouping.
     pub fn section(self) -> &'static str {
         match self {
-            Self::NavigateUp | Self::NavigateDown | Self::Select => "Navigation",
+            Self::NavigateUp
+            | Self::NavigateDown
+            | Self::NextGroup
+            | Self::PreviousGroup
+            | Self::NavigateFirst
+            | Self::NavigateLast
+            | Self::Select => "Navigation",
             Self::SelectShell
             | Self::NewSession
             | Self::NewStackedSession
@@ -234,6 +256,10 @@ impl FromStr for BindableAction {
         match s {
             "navigate_up" => Ok(Self::NavigateUp),
             "navigate_down" => Ok(Self::NavigateDown),
+            "next_group" => Ok(Self::NextGroup),
+            "previous_group" => Ok(Self::PreviousGroup),
+            "navigate_first" => Ok(Self::NavigateFirst),
+            "navigate_last" => Ok(Self::NavigateLast),
             "select" => Ok(Self::Select),
             "select_shell" => Ok(Self::SelectShell),
             "new_session" => Ok(Self::NewSession),
@@ -390,7 +416,9 @@ impl FromStr for KeyBinding {
             "end" => KeyCode::End,
             "delete" | "del" => KeyCode::Delete,
             "insert" | "ins" => KeyCode::Insert,
-            f if f.starts_with('f') && f.len() <= 3 => {
+            // `>= 2` so the bare key "f" falls through to the
+            // single-character arm instead of failing to parse.
+            f if f.starts_with('f') && (2..=3).contains(&f.len()) => {
                 let n: u8 = f[1..]
                     .parse()
                     .map_err(|_| format!("invalid function key: {rest}"))?;
@@ -519,6 +547,7 @@ impl Default for KeyBindings {
         let none = KeyModifiers::NONE;
         let ctrl = KeyModifiers::CONTROL;
         let shift = KeyModifiers::SHIFT;
+        let alt = KeyModifiers::ALT;
 
         // Navigation
         bindings.insert(
@@ -537,6 +566,16 @@ impl Default for KeyBindings {
                 kb(KeyCode::Char('n'), ctrl),
             ],
         );
+        bindings.insert(
+            BindableAction::NextGroup,
+            vec![kb(KeyCode::Char(']'), none)],
+        );
+        bindings.insert(
+            BindableAction::PreviousGroup,
+            vec![kb(KeyCode::Char('['), none)],
+        );
+        bindings.insert(BindableAction::NavigateFirst, vec![kb(KeyCode::Home, none)]);
+        bindings.insert(BindableAction::NavigateLast, vec![kb(KeyCode::End, none)]);
         bindings.insert(BindableAction::Select, vec![kb(KeyCode::Enter, none)]);
 
         // Session management
@@ -566,7 +605,7 @@ impl Default for KeyBindings {
         );
         // RenameSession has no default key — it's reachable via the command
         // palette. `r` is given to OpenReviewDiff so it pairs with the
-        // attached-session Ctrl-r review toggle.
+        // attached-session Alt-r review toggle.
         bindings.insert(
             BindableAction::RestartSession,
             vec![kb(KeyCode::Char('R'), shift)],
@@ -589,7 +628,7 @@ impl Default for KeyBindings {
         );
         bindings.insert(
             BindableAction::OpenReviewDiff,
-            vec![kb(KeyCode::Char('r'), none), kb(KeyCode::Char('r'), ctrl)],
+            vec![kb(KeyCode::Char('r'), none), kb(KeyCode::Char('r'), alt)],
         );
         bindings.insert(
             BindableAction::MoveToSection,
@@ -777,21 +816,30 @@ impl<'de> Visitor<'de> for OneOrManyVisitor {
 fn trigger_bytes_for(bindings: &KeyBindings, action: BindableAction) -> Vec<Vec<u8>> {
     let mut triggers = Vec::new();
     for kb in bindings.keys_for(action) {
-        if kb.modifiers != KeyModifiers::CONTROL {
-            continue;
-        }
         let KeyCode::Char(c) = kb.code else {
             continue;
         };
-        if c.is_ascii_alphabetic() {
-            // Ctrl-<letter> → control byte
-            let byte = (c.to_ascii_lowercase() as u8) - 0x60;
-            triggers.push(vec![byte]);
-        } else if c.is_ascii() {
-            // Ctrl-<non-letter> → CSI-u or modifyOtherKeys sequence
-            let n = c as u32;
-            triggers.push(format!("\x1b[{n};5u").into_bytes());
-            triggers.push(format!("\x1b[27;5;{n}~").into_bytes());
+        if !c.is_ascii() {
+            continue;
+        }
+        match kb.modifiers {
+            KeyModifiers::CONTROL if c.is_ascii_alphabetic() => {
+                // Ctrl-<letter> → control byte
+                let byte = (c.to_ascii_lowercase() as u8) - 0x60;
+                triggers.push(vec![byte]);
+            }
+            KeyModifiers::CONTROL => {
+                // Ctrl-<non-letter> → CSI-u or modifyOtherKeys sequence
+                let n = c as u32;
+                triggers.push(format!("\x1b[{n};5u").into_bytes());
+                triggers.push(format!("\x1b[27;5;{n}~").into_bytes());
+            }
+            KeyModifiers::ALT => {
+                // Alt-<char> → ESC prefix + the literal byte (the standard
+                // metaSendsEscape encoding terminals emit for Meta/Alt).
+                triggers.push(vec![0x1b, c as u8]);
+            }
+            _ => continue,
         }
     }
     triggers
@@ -806,9 +854,40 @@ pub fn editor_trigger_bytes(bindings: &KeyBindings) -> Vec<Vec<u8>> {
 
 /// Raw stdin byte patterns that switch from an attached session to its review
 /// diff (from the [`OpenReviewDiff`](BindableAction::OpenReviewDiff) binding —
-/// `Ctrl-r` by default). See [`trigger_bytes_for`].
+/// `Alt-r` by default, encoded as the `ESC r` metaSendsEscape sequence). See
+/// [`trigger_bytes_for`].
 pub fn review_trigger_bytes(bindings: &KeyBindings) -> Vec<Vec<u8>> {
     trigger_bytes_for(bindings, BindableAction::OpenReviewDiff)
+}
+
+/// Whether a binding survives the [`trigger_bytes_for`] filter: a Ctrl- or
+/// Alt-modified ASCII character. Bare bindings can't be intercepted mid-attach
+/// (they're indistinguishable from typing), so they never form the toggle.
+fn is_attach_interceptable(kb: &KeyBinding) -> bool {
+    matches!(kb.code, KeyCode::Char(c) if c.is_ascii())
+        && matches!(kb.modifiers, KeyModifiers::CONTROL | KeyModifiers::ALT)
+}
+
+/// The first [`OpenReviewDiff`](BindableAction::OpenReviewDiff) binding that
+/// also works while attached to a session (`Alt-r` by default) — the key that
+/// toggles between an attached session and its review diff. The review view
+/// honours the same key for the way back and labels it in its footer.
+pub fn review_toggle_binding(bindings: &KeyBindings) -> Option<&KeyBinding> {
+    bindings
+        .keys_for(BindableAction::OpenReviewDiff)
+        .iter()
+        .find(|kb| is_attach_interceptable(kb))
+}
+
+/// Whether `key` is one of the attach-capable
+/// [`OpenReviewDiff`](BindableAction::OpenReviewDiff) bindings (see
+/// [`review_toggle_binding`]).
+pub fn matches_review_toggle(bindings: &KeyBindings, key: &KeyEvent) -> bool {
+    bindings
+        .keys_for(BindableAction::OpenReviewDiff)
+        .iter()
+        .filter(|kb| is_attach_interceptable(kb))
+        .any(|kb| kb.code == key.code && key.modifiers.contains(kb.modifiers))
 }
 
 // ---------------------------------------------------------------------------
@@ -886,6 +965,35 @@ mod tests {
     fn test_parse_function_key_out_of_range() {
         assert!("F0".parse::<KeyBinding>().is_err());
         assert!("F13".parse::<KeyBinding>().is_err());
+    }
+
+    #[test]
+    fn test_parse_bare_f_is_a_character_not_a_function_key() {
+        // Regression: the function-key arm captured the bare key "f"
+        // ("invalid function key: f"), and because keybinding parse errors
+        // fail Config::load(), one `= "f"` binding silently reverted the
+        // user's entire config to defaults.
+        let kb: KeyBinding = "f".parse().unwrap();
+        assert_eq!(kb.code, KeyCode::Char('f'));
+        assert!(kb.modifiers.is_empty());
+    }
+
+    #[test]
+    fn test_parse_modified_f_is_a_character_not_a_function_key() {
+        // Modifiers are stripped before the key-name match, so these all
+        // reduced to the same broken "f" case.
+        let kb: KeyBinding = "Ctrl-f".parse().unwrap();
+        assert_eq!(kb.code, KeyCode::Char('f'));
+        assert!(kb.modifiers.contains(KeyModifiers::CONTROL));
+
+        let kb: KeyBinding = "Alt-f".parse().unwrap();
+        assert_eq!(kb.code, KeyCode::Char('f'));
+        assert!(kb.modifiers.contains(KeyModifiers::ALT));
+
+        // Uppercase implies Shift, same as every other letter (cf. "N").
+        let kb: KeyBinding = "F".parse().unwrap();
+        assert_eq!(kb.code, KeyCode::Char('F'));
+        assert!(kb.modifiers.contains(KeyModifiers::SHIFT));
     }
 
     #[test]
@@ -1017,6 +1125,18 @@ mod tests {
 
         let ctrl_p = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
         assert_eq!(kb.resolve(&ctrl_p), Some(BindableAction::NavigateUp));
+
+        let rbracket = KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&rbracket), Some(BindableAction::NextGroup));
+
+        let lbracket = KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&lbracket), Some(BindableAction::PreviousGroup));
+
+        let home = KeyEvent::new(KeyCode::Home, KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&home), Some(BindableAction::NavigateFirst));
+
+        let end = KeyEvent::new(KeyCode::End, KeyModifiers::NONE);
+        assert_eq!(kb.resolve(&end), Some(BindableAction::NavigateLast));
 
         // Session management
         let n = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE);
@@ -1177,18 +1297,79 @@ mod tests {
     }
 
     #[test]
-    fn test_review_trigger_bytes_default_is_ctrl_r() {
-        // Default OpenReviewDiff is `r` + Ctrl-r; only the Ctrl binding is
-        // interceptable in a raw attach (Ctrl-r → 0x12), and bare `r` is
-        // skipped so typing `r` in the pane isn't swallowed.
+    fn test_review_trigger_bytes_default_is_alt_r() {
+        // Default OpenReviewDiff is `r` + Alt-r; only the Alt binding is
+        // interceptable in a raw attach (Alt-r → ESC r, the metaSendsEscape
+        // sequence), and bare `r` is skipped so typing `r` in the pane isn't
+        // swallowed. Alt-r replaced Ctrl-r so a shell's reverse-history-search
+        // (Ctrl-r) is never shadowed.
         let kb = KeyBindings::default();
-        assert_eq!(review_trigger_bytes(&kb), vec![vec![0x12]]);
+        assert_eq!(review_trigger_bytes(&kb), vec![vec![0x1b, b'r']]);
+    }
+
+    #[test]
+    fn test_review_toggle_binding_default_is_alt_r() {
+        // The bare `r` binding is skipped (not interceptable mid-attach); the
+        // Alt-r binding is the toggle, and its display drives the footer hint.
+        let kb = KeyBindings::default();
+        let toggle = review_toggle_binding(&kb).expect("default has an Alt binding");
+        assert_eq!(toggle.to_string(), "Alt-r");
+    }
+
+    #[test]
+    fn test_review_toggle_binding_none_when_only_bare_keys() {
+        let mut kb = KeyBindings::default();
+        kb.set_keys_for(
+            BindableAction::OpenReviewDiff,
+            vec![KeyBinding::new(KeyCode::Char('r'), KeyModifiers::NONE)],
+        );
+        assert!(review_toggle_binding(&kb).is_none());
+    }
+
+    #[test]
+    fn test_matches_review_toggle_honours_rebinding() {
+        let kb = KeyBindings::default();
+        let alt_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT);
+        let bare_r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);
+        assert!(matches_review_toggle(&kb, &alt_r));
+        assert!(
+            !matches_review_toggle(&kb, &bare_r),
+            "bare r is review-local, not the toggle"
+        );
+
+        let mut kb = KeyBindings::default();
+        kb.set_keys_for(
+            BindableAction::OpenReviewDiff,
+            vec![KeyBinding::new(KeyCode::Char('e'), KeyModifiers::ALT)],
+        );
+        let alt_e = KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT);
+        assert!(matches_review_toggle(&kb, &alt_e));
+        assert!(
+            !matches_review_toggle(&kb, &alt_r),
+            "old key no longer toggles"
+        );
+    }
+
+    #[test]
+    fn test_trigger_bytes_alt_letter() {
+        // Alt-<char> encodes to the two-byte ESC-prefix burst the terminal
+        // emits for Meta/Alt, detected mid-attach via subsequence match.
+        let mut kb = KeyBindings::default();
+        kb.set_keys_for(
+            BindableAction::OpenInEditor,
+            vec![
+                KeyBinding::new(KeyCode::Char('e'), KeyModifiers::NONE),
+                KeyBinding::new(KeyCode::Char('e'), KeyModifiers::ALT),
+            ],
+        );
+        // Plain 'e' skipped; Alt-e → ESC e (0x1b 0x65).
+        assert_eq!(editor_trigger_bytes(&kb), vec![vec![0x1b, 0x65]]);
     }
 
     #[test]
     fn test_rename_session_unbound_by_default() {
         // Rename dropped its default key (palette-only) so `r` could go to
-        // OpenReviewDiff, pairing with the attached-session Ctrl-r toggle.
+        // OpenReviewDiff, pairing with the attached-session Alt-r toggle.
         let kb = KeyBindings::default();
         assert!(kb.keys_for(BindableAction::RenameSession).is_empty());
         let r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);

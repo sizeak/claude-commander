@@ -9,7 +9,7 @@ A high-performance terminal UI for managing Claude coding sessions, written in R
 - **Git worktree isolation** - Each session has its own worktree and branch
 - **Live preview** - Real-time pane content capture with caching
 - **Info pane** - Session metadata, PR details, CI status, and AI-generated change summaries
-- **Review & comment** - Full-screen diff of a session's changes (vs its PR base) where you select lines, attach comments, and apply them straight to the running agent
+- **Review & comment** - Full-screen diff of a session's changes (vs its PR base) where you select lines, attach comments, mark files as reviewed, and apply comments straight to the running agent
 - **Agent state detection** - Detect if agent is waiting for input, processing, or errored
 - **Persistent state** - Sessions survive restarts
 - **Auto-pull project main** - Periodically fast-forwards each project's main branch from `origin` so it doesn't drift stale
@@ -131,6 +131,8 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | Key | Action |
 |-----|--------|
 | `j/k` or `↑/↓` or `Ctrl-n/p` | Navigate session list |
+| `]` / `[` | Jump to next / previous project or section header |
+| `Home` / `End` | Jump to first / last item |
 | `Space` | Quick-switch palette (sessions and commands) |
 | `Ctrl-Space` | Quick-switch palette (same shortcut as the in-session switcher) |
 | `Shift+Space` | Command palette (commands only) |
@@ -151,7 +153,7 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `v` | Cycle session list view: Project → Sections → Section Stacks (requires `[[sections]]` config) |
 | palette only | Collapse/expand section (press on any item in the section, or `Enter` on the section header) |
 | `m` | Move session to section (manual override; see [Session List Sections](docs/configuration.md#session-list-sections)) |
-| `r` or `Ctrl-r` | Review & comment on a session's diff — see [Usage](docs/usage.md#reviewing--commenting-on-changes) |
+| `r` or `Alt-r` | Review & comment on a session's diff — see [Usage](docs/usage.md#reviewing--commenting-on-changes) |
 | palette only | Rename session (UI title only; underlying worktree, branch, and tmux session are unchanged) |
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
 | `<` / `>` | Shrink / grow left pane |
@@ -170,14 +172,14 @@ When attached to a session (via `Enter` or `claude-commander attach`):
 |-----|--------|
 | `Ctrl-q` | Detach and return to session list |
 | `Ctrl-\` | Switch between Claude and shell pane |
-| `Ctrl-r` | Switch to this session's review diff (and `Ctrl-r` in the diff switches back) — Claude sessions only; in a shell `Ctrl-r` stays reverse-history-search |
+| `Alt-r` | Switch to this session's review diff (and `Alt-r` in the diff switches back) — Claude sessions only. Uses `Alt-r` rather than `Ctrl-r` so the shell's `Ctrl-r` reverse-history-search is never shadowed |
 | `Ctrl-Space` | Open the in-session switcher popup to jump to another claude-commander session without detaching |
 | `Ctrl-.` | Open the session worktree in your editor (requires a terminal that emits CSI-u or xterm modifyOtherKeys sequences for Ctrl-.) |
 
 ## Documentation
 
 - **[Usage guide](docs/usage.md)** — CLI commands, the session list, PR stacks (cascade merge / push stack), and AI summaries
-- **[Configuration](docs/configuration.md)** — all config options, theme presets, session-list sections, and data-storage paths
+- **[Configuration](docs/configuration.md)** — all config options, theme presets, session-list sections (with optional advisory WIP limits), and data-storage paths
 - **[Contributing](CONTRIBUTING.md)** — releasing, the local dev loop, and architecture overview
 
 ## License

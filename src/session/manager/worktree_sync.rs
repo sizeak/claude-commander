@@ -11,7 +11,7 @@ impl SessionManager {
     /// recreate the tmux session on demand).
     #[instrument(skip(self))]
     pub async fn sync_worktrees(&self, project_id: &ProjectId) -> Result<usize> {
-        let (repo_path, existing_paths) = {
+        let (repo_path, worktree_paths) = {
             let state = self.store.read().await;
             let project = match state.get_project(project_id) {
                 Some(p) => p,
@@ -20,16 +20,24 @@ impl SessionManager {
 
             let repo_path = project.repo_path.clone();
 
-            // Collect canonicalized worktree paths from all existing sessions
+            // Snapshot existing session worktree paths to canonicalize off-lock.
             let paths: Vec<PathBuf> = project
                 .worktrees
                 .iter()
                 .filter_map(|sid| state.get_session(sid))
-                .filter_map(|s| std::fs::canonicalize(&s.worktree_path).ok())
+                .map(|s| s.worktree_path.clone())
                 .collect();
 
             (repo_path, paths)
         };
+
+        // Canonicalize existing session paths without holding the state lock.
+        let mut existing_paths: Vec<PathBuf> = Vec::with_capacity(worktree_paths.len());
+        for path in worktree_paths {
+            if let Ok(canonical) = tokio::fs::canonicalize(&path).await {
+                existing_paths.push(canonical);
+            }
+        }
 
         // Open git backend and list worktrees
         let backend = match GitBackend::open(&repo_path) {
@@ -41,8 +49,9 @@ impl SessionManager {
         };
 
         let worktrees_dir = self.config_store.read().worktrees_dir()?;
-        let canonical_worktrees_dir =
-            std::fs::canonicalize(&worktrees_dir).unwrap_or_else(|_| worktrees_dir.clone());
+        let canonical_worktrees_dir = tokio::fs::canonicalize(&worktrees_dir)
+            .await
+            .unwrap_or_else(|_| worktrees_dir.clone());
         let worktree_manager = WorktreeManager::new(backend, worktrees_dir);
 
         let worktrees = match worktree_manager.list_worktrees().await {
@@ -54,7 +63,9 @@ impl SessionManager {
         };
 
         // Also canonicalize the repo path for main worktree comparison
-        let canonical_repo = std::fs::canonicalize(&repo_path).unwrap_or(repo_path);
+        let canonical_repo = tokio::fs::canonicalize(&repo_path)
+            .await
+            .unwrap_or(repo_path);
 
         let mut imported = 0;
         let mut new_sessions = Vec::new();
@@ -64,7 +75,7 @@ impl SessionManager {
                 continue;
             }
 
-            let canonical_wt = match std::fs::canonicalize(&wt.path) {
+            let canonical_wt = match tokio::fs::canonicalize(&wt.path).await {
                 Ok(p) => p,
                 Err(_) => continue, // Worktree path doesn't exist, skip
             };

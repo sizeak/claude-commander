@@ -82,6 +82,20 @@ async fn create_test_repo() -> (TempDir, PathBuf) {
     (temp_dir, repo_path)
 }
 
+/// Initialise a minimal committed git repo at `path` (creating `path` and any
+/// parent directories first). Used to build scan-directory fixtures.
+async fn init_repo_at(path: &std::path::Path) {
+    tokio::fs::create_dir_all(path).await.unwrap();
+    run_git(path, &["init"]).await;
+    run_git(path, &["config", "user.email", "test@test.com"]).await;
+    run_git(path, &["config", "user.name", "Test User"]).await;
+    tokio::fs::write(path.join("README.md"), "# repo\n")
+        .await
+        .unwrap();
+    run_git(path, &["add", "."]).await;
+    run_git(path, &["commit", "-m", "init"]).await;
+}
+
 /// Run a git command in `dir`, asserting it succeeds.
 async fn run_git(dir: &std::path::Path, args: &[&str]) {
     let output = tokio::process::Command::new("git")
@@ -194,6 +208,64 @@ async fn test_session_manager_add_project() {
     // Keep temp dirs alive until end of test
     drop(repo_temp_dir);
     drop(state_temp_dir);
+}
+
+/// `scan_directory` must walk a tree, register each repo once, prune repos
+/// nested inside another repo, and skip duplicates on re-scan. This exercises
+/// the `spawn_blocking` directory walk (`find_git_repos`) and the
+/// canonical-path dedup end-to-end.
+#[tokio::test]
+async fn test_scan_directory_discovers_dedupes_and_prunes() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let scan_root = TempDir::new().unwrap();
+    let root = scan_root.path();
+
+    // Two repos at different depths — both must be discovered.
+    init_repo_at(&root.join("repo_a")).await;
+    init_repo_at(&root.join("nested/repo_b")).await;
+    // A repo nested *inside* repo_a — must be pruned (walk never descends into
+    // a discovered repo), so it must NOT be registered separately.
+    init_repo_at(&root.join("repo_a/inner_repo")).await;
+    // A plain non-repo directory with a file — must be ignored entirely.
+    tokio::fs::create_dir_all(root.join("plain")).await.unwrap();
+    tokio::fs::write(root.join("plain/file.txt"), "x")
+        .await
+        .unwrap();
+
+    let state_temp_dir = TempDir::new().unwrap();
+    let config_store = create_isolated_config_store(&state_temp_dir, Config::default());
+    let store = create_isolated_store(&state_temp_dir);
+    let manager = SessionManager::new(config_store, store.clone(), "");
+
+    // First scan: discovers repo_a and nested/repo_b; inner_repo is pruned.
+    let result = manager.scan_directory(root).await.unwrap();
+    assert_eq!(
+        result.added, 2,
+        "should add only repo_a and nested/repo_b (inner repo pruned)"
+    );
+    assert_eq!(result.skipped, 0);
+    assert_eq!(
+        store.read().await.project_count(),
+        2,
+        "exactly the two top-level repos must be registered"
+    );
+
+    // Second scan over the same tree: every repo is now a known duplicate.
+    let result = manager.scan_directory(root).await.unwrap();
+    assert_eq!(result.added, 0, "re-scan must add nothing");
+    assert_eq!(
+        result.skipped, 2,
+        "both existing repos must be skipped as duplicates"
+    );
+    assert_eq!(
+        store.read().await.project_count(),
+        2,
+        "re-scan must not create duplicate projects"
+    );
 }
 
 #[tokio::test]

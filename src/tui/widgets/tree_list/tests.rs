@@ -273,6 +273,148 @@ fn test_next_wraps_to_first() {
 }
 
 #[test]
+fn test_next_group_jumps_between_group_starts() {
+    let mut state = TreeListState::new();
+    // Project-grouped layout: headers at 0 and 3, worktrees between.
+    state.set_item_count(6);
+    state.set_group_starts(vec![true, false, false, true, false, false]);
+
+    state.select(Some(1));
+    state.next_group();
+    assert_eq!(state.selected(), Some(3));
+
+    // Wraps past the end back to the first header.
+    state.next_group();
+    assert_eq!(state.selected(), Some(0));
+}
+
+#[test]
+fn test_next_group_with_no_selection_selects_first_group() {
+    let mut state = TreeListState::new();
+    state.set_item_count(4);
+    state.set_group_starts(vec![false, true, false, false]);
+
+    state.next_group();
+    assert_eq!(state.selected(), Some(1));
+}
+
+#[test]
+fn test_previous_group_goes_to_current_group_header_first() {
+    let mut state = TreeListState::new();
+    state.set_item_count(6);
+    state.set_group_starts(vec![true, false, false, true, false, false]);
+
+    // From a row inside a group, land on that group's own header…
+    state.select(Some(5));
+    state.previous_group();
+    assert_eq!(state.selected(), Some(3));
+
+    // …and from a header, on the previous group's header.
+    state.previous_group();
+    assert_eq!(state.selected(), Some(0));
+}
+
+#[test]
+fn test_previous_group_wraps_to_last_group() {
+    let mut state = TreeListState::new();
+    state.set_item_count(6);
+    state.set_group_starts(vec![true, false, false, true, false, false]);
+
+    state.select(Some(0));
+    state.previous_group();
+    assert_eq!(state.selected(), Some(3));
+}
+
+#[test]
+fn test_group_jump_without_group_starts_is_noop() {
+    let mut state = TreeListState::new();
+    state.set_item_count(3);
+    state.set_group_starts(vec![false, false, false]);
+    state.select(Some(1));
+
+    state.next_group();
+    assert_eq!(state.selected(), Some(1));
+
+    state.previous_group();
+    assert_eq!(state.selected(), Some(1));
+}
+
+#[test]
+fn test_group_jump_on_empty_list_is_noop() {
+    let mut state = TreeListState::new();
+
+    state.next_group();
+    assert_eq!(state.selected(), None);
+
+    state.previous_group();
+    assert_eq!(state.selected(), None);
+}
+
+#[test]
+fn test_group_jump_skips_unselectable_group_starts() {
+    let mut state = TreeListState::new();
+    state.set_selectable(vec![false, true, true, true]);
+    state.set_group_starts(vec![true, false, true, false]);
+
+    // Wrapping forward from the end: index 0 is a group start but
+    // unselectable, so the jump continues to the next header at 2.
+    state.select(Some(3));
+    state.next_group();
+    assert_eq!(state.selected(), Some(2));
+}
+
+#[test]
+fn test_set_item_count_clears_stale_group_starts() {
+    let mut state = TreeListState::new();
+    state.set_item_count(4);
+    state.set_group_starts(vec![false, true, false, false]);
+
+    // Re-entering via set_item_count means "fresh list, no masks" — a
+    // stale group mask would send the cursor to a row that may no longer
+    // be a header.
+    state.set_item_count(4);
+    state.select(Some(2));
+    state.next_group();
+    assert_eq!(state.selected(), Some(2));
+}
+
+#[test]
+fn test_select_first_and_last() {
+    let mut state = TreeListState::new();
+    state.set_item_count(5);
+
+    state.select_first();
+    assert_eq!(state.selected(), Some(0));
+
+    state.select_last();
+    assert_eq!(state.selected(), Some(4));
+}
+
+#[test]
+fn test_select_first_and_last_skip_unselectable_edges() {
+    let mut state = TreeListState::new();
+    // Spacer rows at both edges.
+    state.set_selectable(vec![false, true, true, false]);
+
+    state.select_first();
+    assert_eq!(state.selected(), Some(1));
+
+    state.select_last();
+    assert_eq!(state.selected(), Some(2));
+}
+
+#[test]
+fn test_select_first_and_last_on_empty_list_are_noops() {
+    let mut state = TreeListState::new();
+
+    state.select_first();
+    assert_eq!(state.selected(), None);
+
+    state.select_last();
+    assert_eq!(state.selected(), None);
+}
+
+#[test]
 fn test_set_item_count_clears_stale_selectable_mask() {
     // Regression: cycling view modes used to leave the previous view's
     // per-index selectable mask in place. When the next view called
@@ -743,6 +885,7 @@ fn make_section_header(name: &str, count: usize, collapsed: bool) -> SessionList
         name: name.to_string(),
         count,
         collapsed,
+        max_sessions: None,
     }
 }
 
@@ -789,6 +932,38 @@ fn test_section_header_shows_count() {
     assert!(
         lines[0].contains("(5)"),
         "Expected count in section header: {:?}",
+        lines[0]
+    );
+}
+
+#[test]
+fn test_section_header_shows_count_over_limit_when_max_sessions_set() {
+    let item = SessionListItem::SectionHeader {
+        name: "Review".to_string(),
+        count: 3,
+        collapsed: false,
+        max_sessions: Some(2),
+    };
+    let lines = render_tree(&[item], 60, 2);
+    assert!(
+        lines[0].contains("(3/2)"),
+        "Expected count/limit display when over limit: {:?}",
+        lines[0]
+    );
+}
+
+#[test]
+fn test_section_header_shows_count_under_limit_when_max_sessions_set() {
+    let item = SessionListItem::SectionHeader {
+        name: "Review".to_string(),
+        count: 1,
+        collapsed: false,
+        max_sessions: Some(5),
+    };
+    let lines = render_tree(&[item], 60, 2);
+    assert!(
+        lines[0].contains("(1/5)"),
+        "Expected count/limit display when under limit: {:?}",
         lines[0]
     );
 }

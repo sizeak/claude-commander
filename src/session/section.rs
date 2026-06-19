@@ -27,6 +27,11 @@ pub struct SectionConfig {
     pub review_decision: Option<DecisionPredicate>,
     #[serde(default)]
     pub has_reviewer: Option<ReviewerPredicate>,
+    /// Advisory WIP limit. When `Some(n)`, the section header shows
+    /// `count/n` and renders in a warning colour once `count >= n`. Purely
+    /// informational — never blocks creation or section transitions.
+    #[serde(default)]
+    pub max_sessions: Option<u32>,
 }
 
 /// Reviewer predicate.

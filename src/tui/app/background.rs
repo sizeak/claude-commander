@@ -62,6 +62,84 @@ impl App {
         });
     }
 
+    /// Spawn a background re-compose of the open review diff. When the working
+    /// tree's diff differs from what the view currently shows, the freshly
+    /// parsed-and-warmed payload arrives as [`StateUpdate::ReviewRefreshed`] and
+    /// is folded into the view in place (preserving cursor/scroll/focus); an
+    /// unchanged diff just clears the in-flight guard. This keeps the review
+    /// view live without the user leaving and re-opening it — triggered when the
+    /// session's agent goes idle (it likely just acted on applied comments) or
+    /// on a manual refresh keypress.
+    ///
+    /// `title` is carried only to populate [`ReviewPrepared`]; the in-place
+    /// `refresh_diff` keeps the view's existing title.
+    pub(super) fn spawn_review_refresh(
+        &mut self,
+        session_id: SessionId,
+        title: String,
+        prev_hash: u64,
+        manual: bool,
+    ) {
+        // Coalesce: one refresh at a time. The idle poll and a manual press can
+        // race; whichever spawns first wins, the other is dropped.
+        if self.ui_state.review_refresh_in_flight {
+            return;
+        }
+        self.ui_state.review_refresh_in_flight = true;
+
+        let service = self.service.clone();
+        let tx = self.event_loop.sender();
+        let highlight = self.theme.mode == crate::tui::theme::ColorMode::TrueColor;
+        let text_fg = self.theme.review_palette().text;
+
+        tokio::spawn(async move {
+            let refreshed = match service
+                .refresh_review_if_changed(&session_id, prev_hash)
+                .await
+            {
+                Ok(Some(snapshot)) => {
+                    let crate::api::ReviewSnapshot {
+                        base,
+                        diff,
+                        comments,
+                        reviewed,
+                        content_hash,
+                    } = snapshot;
+                    // The precompute is CPU-bound and synchronous; keep it off
+                    // the async pool and hand the diff back with its segments.
+                    let (diff, segments) = tokio::task::spawn_blocking(move || {
+                        let segments =
+                            super::review::precompute_review_caches(&diff, highlight, text_fg);
+                        (diff, segments)
+                    })
+                    .await
+                    .expect("review refresh precompute task panicked");
+                    Some(Box::new(ReviewPrepared {
+                        session_id,
+                        title,
+                        base,
+                        diff,
+                        comments,
+                        reviewed,
+                        segments,
+                        content_hash,
+                    }))
+                }
+                Ok(None) => None,
+                Err(e) => {
+                    debug!("Review refresh failed: {e}");
+                    None
+                }
+            };
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::ReviewRefreshed {
+                    refreshed,
+                    manual,
+                }))
+                .await;
+        });
+    }
+
     /// Spawn a background task to check PR status for all sessions
     pub(super) fn spawn_pr_status_check(&mut self) {
         self.ui_state.last_pr_check = Some(Instant::now());

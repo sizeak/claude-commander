@@ -2,6 +2,24 @@
 
 use super::*;
 
+/// Place the real terminal cursor for a single-line text input whose visible
+/// text starts at `(text_x, text_y)` and spans `text_width` columns. Uses
+/// tui-input's wide-char-aware `visual_cursor`, clamped within the row so a long
+/// value can't push the cursor past the field's edge. Preferred over splicing a
+/// caret glyph into the text: the glyph reads as a stray blank when the cursor
+/// sits mid-string.
+fn place_input_cursor(
+    frame: &mut Frame,
+    input: &tui_input::Input,
+    text_x: u16,
+    text_y: u16,
+    text_width: u16,
+) {
+    let col = input.visual_cursor() as u16;
+    let max_x = text_x + text_width.saturating_sub(1);
+    frame.set_cursor_position(((text_x + col).min(max_x), text_y));
+}
+
 impl App {
     pub(super) fn render_modal(&mut self, frame: &mut Frame, area: Rect) {
         // Record the review body geometry (depends only on `area`) so mouse
@@ -42,7 +60,7 @@ impl App {
                 // 5-row layout.
                 let hint = existing_branches.as_ref().and_then(|branches| {
                     crate::session::match_existing_branch(
-                        value,
+                        value.value(),
                         &self.config.branch_prefix,
                         branches,
                     )
@@ -74,7 +92,7 @@ impl App {
                 let mut lines: Vec<Line> = vec![
                     Line::from(prompt.as_str()),
                     Line::from(""),
-                    Line::from(format!("❯ {}_", value)),
+                    Line::from(format!("❯ {}", value.value())),
                 ];
                 if let Some(h) = hint {
                     lines.push(Line::from(Span::styled(
@@ -85,6 +103,14 @@ impl App {
                     )));
                 }
                 frame.render_widget(Paragraph::new(lines), inner);
+                // Input is the third line ("❯ " + value); place the real cursor.
+                place_input_cursor(
+                    frame,
+                    value,
+                    inner.x + 2,
+                    inner.y + 2,
+                    inner.width.saturating_sub(2),
+                );
             }
 
             Modal::PathInput {
@@ -114,9 +140,17 @@ impl App {
                     height: inner.height.min(3),
                     ..inner
                 };
-                let input_text = format!("{}\n\n❯ {}_", prompt, value);
+                let input_text = format!("{}\n\n❯ {}", prompt, value.value());
                 let input_para = Paragraph::new(input_text);
                 frame.render_widget(input_para, input_area);
+                // The "❯ " input line is the third row of `input_area`.
+                place_input_cursor(
+                    frame,
+                    value,
+                    input_area.x + 2,
+                    input_area.y + 2,
+                    input_area.width.saturating_sub(2),
+                );
 
                 // Render completions list with a scroll window so the
                 // highlighted row stays on-screen even when the list is
@@ -288,7 +322,7 @@ impl App {
 
                 // Switch the modal title by effective mode so a `>`-prefixed
                 // query in unified mode reads as "Commands" while we type.
-                let effective_mode = App::effective_palette_mode(*mode, query);
+                let effective_mode = App::effective_palette_mode(*mode, query.value());
                 let title = match effective_mode {
                     PaletteMode::Unified => " Quick Switch ",
                     PaletteMode::CommandOnly => " Commands ",
@@ -308,9 +342,16 @@ impl App {
                 }
 
                 // Input line
-                let input_line = Line::from(format!("❯ {}_", query));
+                let input_line = Line::from(format!("❯ {}", query.value()));
                 let input_area = Rect { height: 1, ..inner };
                 frame.render_widget(Paragraph::new(input_line), input_area);
+                place_input_cursor(
+                    frame,
+                    query,
+                    input_area.x + 2,
+                    input_area.y,
+                    input_area.width.saturating_sub(2),
+                );
 
                 // Match lines. The `scroll` offset lets us page through a
                 // list longer than `max_visible`; rows below `scroll` are
@@ -467,18 +508,25 @@ impl App {
                 }
 
                 // Input line
-                let input_line = Line::from(format!("❯ {}_", query));
+                let input_line = Line::from(format!("❯ {}", query.value()));
                 let input_area = Rect { height: 1, ..inner };
                 frame.render_widget(Paragraph::new(input_line), input_area);
+                place_input_cursor(
+                    frame,
+                    query,
+                    input_area.x + 2,
+                    input_area.y,
+                    input_area.width.saturating_sub(2),
+                );
 
                 // Hint line
                 let hint = if filtered.is_empty() {
-                    if query.is_empty() {
+                    if query.value().is_empty() {
                         "No branches found. Press Esc to cancel.".to_string()
                     } else {
                         format!(
                             "No match — press Enter to use '{}' as-is, or keep typing.",
-                            query
+                            query.value()
                         )
                     }
                 } else {

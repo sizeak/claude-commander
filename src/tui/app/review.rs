@@ -15,6 +15,7 @@ use crate::tui::syntax_highlight::{highlight_line, warm_highlight_cache};
 use crate::tui::theme::{ColorMode, ReviewPalette};
 use rayon::prelude::*;
 use std::cell::{Cell, Ref, RefCell};
+use tui_input::Input;
 
 /// Gutter / badge / box marker for a staged comment. An asterisk is the
 /// conventional note/comment marker and stays crisp at one cell.
@@ -142,7 +143,9 @@ fn line_wrap_rows(content: &str, content_width: usize) -> usize {
 /// An in-progress comment, captured against a selectable-line range.
 #[derive(Debug, Clone)]
 pub struct CommentDraft {
-    pub text: String,
+    /// Editable comment text plus cursor (insert/delete/navigate in place),
+    /// backed by `tui-input`.
+    pub input: Input,
     /// Inclusive selectable-line index range the comment applies to.
     pub range: (usize, usize),
 }
@@ -156,6 +159,12 @@ pub struct DiffReviewState {
     pub base: String,
     pub diff: ParsedDiff,
     pub comments: Vec<Comment>,
+    /// xxh3 hash of the raw diff this view was last built from. Lets the
+    /// background refresh skip a rebuild when the working tree is unchanged.
+    pub content_hash: u64,
+    /// Display paths of files marked reviewed (mirrors the persisted store;
+    /// stale marks are pruned by the service before the view opens).
+    pub reviewed: HashSet<String>,
     /// Index into `diff.files` of the file shown in the body.
     pub selected_file: usize,
     /// First visible body row (scroll offset).
@@ -240,6 +249,8 @@ impl DiffReviewState {
             base,
             diff,
             comments,
+            content_hash: 0,
+            reviewed: HashSet::new(),
             selected_file,
             scroll: 0,
             focus: ReviewFocus::FileList,
@@ -297,6 +308,47 @@ impl DiffReviewState {
                 *slot = Some(segs);
             }
         }
+    }
+
+    /// Replace the displayed diff with a freshly composed one (the working
+    /// tree changed while the view stayed open), preserving navigation state
+    /// where it still makes sense: the body stays on the same file by path, the
+    /// cursor and scroll clamp into the new content, collapsed directories and
+    /// reviewed marks are kept, and any in-progress visual selection is dropped
+    /// (line indices may have moved). Render caches are reset and re-primed from
+    /// the precomputed `segments`.
+    pub(super) fn refresh_diff(
+        &mut self,
+        diff: ParsedDiff,
+        comments: Vec<Comment>,
+        reviewed: HashSet<String>,
+        segments: Vec<Vec<WordSegs>>,
+        content_hash: u64,
+    ) {
+        let prev_path = self.current_file().map(|f| f.display_path().to_string());
+        self.diff = diff;
+        self.comments = comments;
+        self.reviewed = reviewed;
+        self.content_hash = content_hash;
+        self.file_tree = build_file_tree(&self.diff.files);
+        // Reset and re-prime the per-file segment cache for the new file set.
+        let seg_slots = self.diff.files.len().max(1);
+        self.seg_cache = RefCell::new(vec![None; seg_slots]);
+        self.prime_segments(segments);
+        self.visual_anchor = None;
+        // Re-locate the file that was on screen by its path; fall back to the
+        // first file when it left the diff.
+        self.selected_file = prev_path
+            .and_then(|p| self.diff.files.iter().position(|f| f.display_path() == p))
+            .or_else(|| first_file_index(&self.file_tree))
+            .unwrap_or(0)
+            .min(self.diff.files.len().saturating_sub(1));
+        // Clamp the cursor into the (possibly shorter) current file, keep it in
+        // view, and resync the tree cursor onto the shown file.
+        let count = self.selectable_count();
+        self.cursor = self.cursor.min(count.saturating_sub(1));
+        self.follow_cursor();
+        self.sync_tree_cursor_to_file();
     }
 
     /// The currently-visible tree rows (respecting collapsed directories).
@@ -427,6 +479,34 @@ impl DiffReviewState {
         }
     }
 
+    /// Whether `path` (a display path) is marked reviewed.
+    fn is_reviewed_path(&self, path: &str) -> bool {
+        self.reviewed.contains(path)
+    }
+
+    /// Set or clear the reviewed mark for `path` in the view's local mirror
+    /// (the persisted store is updated by the service).
+    fn set_reviewed(&mut self, path: String, on: bool) {
+        if on {
+            self.reviewed.insert(path);
+        } else {
+            self.reviewed.remove(&path);
+        }
+    }
+
+    /// Jump the body to the next unreviewed file after the current one (in
+    /// diff order), wrapping around; stays put when every file is reviewed.
+    fn advance_to_next_unreviewed(&mut self) {
+        let count = self.diff.files.len();
+        let next = (1..count)
+            .map(|step| (self.selected_file + step) % count)
+            .find(|&idx| !self.is_reviewed_path(self.diff.files[idx].display_path()));
+        if let Some(idx) = next {
+            self.set_body_file(idx);
+            self.sync_tree_cursor_to_file();
+        }
+    }
+
     /// Jump the body to the next file (in diff order), syncing the tree cursor.
     pub fn next_file(&mut self) {
         if self.diff.files.is_empty() {
@@ -502,7 +582,10 @@ impl DiffReviewState {
                 if draft_anchor == Some(sel)
                     && let Some(draft) = self.comment.as_ref()
                 {
-                    for _ in 0..comment_draft_box_height(&draft.text, body_width) {
+                    for _ in 0..comment_draft_box_height(
+                        &super::input_with_caret(&draft.input),
+                        body_width,
+                    ) {
                         rows.push(BodyRow::Draft);
                     }
                 }
@@ -585,9 +668,28 @@ impl DiffReviewState {
         }
         self.focus = ReviewFocus::Body;
         self.comment = Some(CommentDraft {
-            text: String::new(),
+            input: Input::default(),
             range: self.selection(),
         });
+        self.follow_draft();
+        true
+    }
+
+    /// Append pasted clipboard text to the open comment draft. Newlines are
+    /// kept — bracketed paste delivers them as text rather than Enter key
+    /// events, so a multi-line paste can't accidentally submit, and
+    /// `compose_markdown` passes them to the agent verbatim. Carriage
+    /// returns from CRLF clipboards are dropped. Returns `false` (no-op)
+    /// when no comment is being edited.
+    pub fn paste_into_draft(&mut self, text: &str) -> bool {
+        let Some(draft) = self.comment.as_mut() else {
+            return false;
+        };
+        // `tui-input` has no bulk insert, so feed chars one at a time at the
+        // cursor. CRs from CRLF clipboards are dropped; newlines are kept.
+        for c in text.chars().filter(|&c| c != '\r') {
+            draft.input.handle(tui_input::InputRequest::InsertChar(c));
+        }
         self.follow_draft();
         true
     }
@@ -938,7 +1040,10 @@ impl DiffReviewState {
                             if self.draft_anchor() == Some(sel)
                                 && let Some(draft) = self.comment.as_ref()
                             {
-                                row += comment_draft_box_height(&draft.text, width);
+                                row += comment_draft_box_height(
+                                    &super::input_with_caret(&draft.input),
+                                    width,
+                                );
                             }
                         }
                     }
@@ -1017,13 +1122,16 @@ impl App {
                 // navigation instead. Opens instantly; the first view of a large
                 // file can be briefly janky.
                 if !self.config.precompute_review_caches {
-                    let state = DiffReviewState::new(
+                    let content_hash = snapshot.content_hash;
+                    let mut state = DiffReviewState::new(
                         session_id,
                         title,
                         snapshot.base,
                         snapshot.diff,
                         snapshot.comments,
                     );
+                    state.content_hash = content_hash;
+                    state.reviewed = snapshot.reviewed.into_iter().collect();
                     self.ui_state.modal = Modal::ReviewDiff(Box::new(state));
                     return;
                 }
@@ -1048,6 +1156,8 @@ impl App {
                 let base = snapshot.base;
                 let diff = snapshot.diff;
                 let comments = snapshot.comments;
+                let reviewed = snapshot.reviewed;
+                let content_hash = snapshot.content_hash;
                 tokio::spawn(async move {
                     // The precompute is CPU-bound and synchronous, so keep it off
                     // the async worker pool; hand the diff back out with its
@@ -1066,7 +1176,9 @@ impl App {
                                 base,
                                 diff,
                                 comments,
+                                reviewed,
                                 segments,
+                                content_hash,
                             }),
                         }))
                         .await;
@@ -1080,7 +1192,7 @@ impl App {
         }
     }
 
-    fn set_review_status(&mut self, msg: &str) {
+    pub(super) fn set_review_status(&mut self, msg: &str) {
         self.ui_state.status_message =
             Some((msg.to_string(), Instant::now() + Duration::from_secs(3)));
     }
@@ -1140,11 +1252,12 @@ impl App {
             return;
         }
 
-        // Ctrl+R re-attaches to the session — the mirror of pressing Ctrl-r in
-        // the attached session to reach the review, so the pair toggles back
-        // and forth. The modal is already None; `handle_select` queues the
-        // attach and quits the TUI loop, which `run()` then picks up.
-        if key.code == KeyCode::Char('r') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        // Re-attaching to the session mirrors the (rebindable) OpenReviewDiff
+        // key that switches an attached session to its review diff (`Alt-r` by
+        // default), so the pair toggles back and forth. The modal is already
+        // None; `handle_select` queues the attach and quits the TUI loop,
+        // which `run()` then picks up.
+        if crate::config::keybindings::matches_review_toggle(&self.config.keybindings, &key) {
             self.ui_state.selected_session_id = Some(state.session_id);
             self.handle_select().await;
             return;
@@ -1189,14 +1302,41 @@ impl App {
                     self.set_review_status("No comment on this line");
                 }
             }
+            // Toggle the reviewed mark on the file shown in the body (either
+            // focus); marking advances to the next unreviewed file.
+            KeyCode::Char('m') => {
+                if let Some(file) = state.current_file().cloned() {
+                    match self
+                        .service
+                        .toggle_file_reviewed(&state.session_id, &file)
+                        .await
+                    {
+                        Ok(now_reviewed) => {
+                            state.set_reviewed(file.display_path().to_string(), now_reviewed);
+                            if now_reviewed {
+                                state.advance_to_next_unreviewed();
+                            }
+                        }
+                        Err(e) => self.set_review_status(&format!("Mark failed: {e}")),
+                    }
+                }
+            }
             KeyCode::Char('a') => self.apply_review(&mut state).await,
+            // Manually re-compose the diff against the working tree, folding in
+            // any edits made since the view opened (e.g. by the agent acting on
+            // applied comments). Idle agents trigger this automatically too.
+            KeyCode::Char('r') => {
+                let (sid, title, prev_hash) =
+                    (state.session_id, state.title.clone(), state.content_hash);
+                self.spawn_review_refresh(sid, title, prev_hash, true);
+            }
             _ => {}
         }
         self.ui_state.modal = Modal::ReviewDiff(state);
     }
 
     async fn handle_review_comment_key(&mut self, key: KeyEvent, state: &mut DiffReviewState) {
-        use crossterm::event::{KeyCode, KeyModifiers};
+        use crossterm::event::{Event, KeyCode};
         let Some(draft) = state.comment.as_mut() else {
             return;
         };
@@ -1206,10 +1346,11 @@ impl App {
             }
             KeyCode::Enter => {
                 let draft = state.comment.take().expect("comment present");
-                if draft.text.trim().is_empty() {
+                if draft.input.value().trim().is_empty() {
                     return;
                 }
-                if let Some(ann) = state.build_draft(draft.range, draft.text) {
+                let range = draft.range;
+                if let Some(ann) = state.build_draft(range, draft.input.value().to_string()) {
                     match self.service.create_comment(&state.session_id, ann).await {
                         Ok(_) => {
                             state.visual_anchor = None;
@@ -1219,17 +1360,15 @@ impl App {
                     }
                 }
             }
-            KeyCode::Backspace => {
-                draft.text.pop();
-                state.follow_draft();
+            // Everything else (chars, backspace, delete, arrows, Home/End,
+            // word/line shortcuts) is `tui-input`'s standard edit keymap.
+            _ => {
+                if let Some(req) = tui_input::backend::crossterm::to_input_request(&Event::Key(key))
+                {
+                    draft.input.handle(req);
+                    state.follow_draft();
+                }
             }
-            // Ignore Ctrl-combos (e.g. Ctrl+Q) so they don't insert a literal
-            // character into the comment.
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                draft.text.push(c);
-                state.follow_draft();
-            }
-            _ => {}
         }
     }
 
@@ -1278,14 +1417,23 @@ impl App {
         self.render_review_file_list(frame, cols[0], state);
         self.render_review_body(frame, cols[1], state);
 
+        // Label the session toggle with its actual (rebindable) key; omit the
+        // hint entirely when no attach-capable binding exists.
+        let toggle = crate::config::keybindings::review_toggle_binding(&self.config.keybindings)
+            .map(|kb| format!("{kb} session · "))
+            .unwrap_or_default();
         let hint = if state.comment.is_some() {
-            " type comment · Enter save · Esc cancel "
+            " type comment · ←→/Home/End move · Enter save · Esc cancel ".to_string()
         } else if state.visual_anchor.is_some() {
-            " ↑↓ extend · Enter/right-click comment · v/Esc cancel selection "
+            " ↑↓ extend · Enter/right-click comment · v/Esc cancel selection ".to_string()
         } else if state.focus == ReviewFocus::FileList {
-            " ↑↓/jk move · Enter expand/collapse · [ ] file · Tab to diff · ^R session · ^Q/Esc close "
+            format!(
+                " ↑↓/jk move · Enter expand/collapse · [ ] file · m reviewed · Tab to diff · {toggle}^Q/Esc close "
+            )
         } else {
-            " ↑↓/jk move · v select · Enter comment · z fold · d delete · a apply · t layout · ^R session · ^Q/Esc close "
+            format!(
+                " ↑↓/jk move · v select · Enter comment · z fold · d delete · m reviewed · a apply · r refresh · t layout · {toggle}^Q/Esc close "
+            )
         };
         // The footer doubles as this view's status bar — styled like the app
         // status bar so it reads as a replacement, not a second bar.
@@ -1329,6 +1477,13 @@ impl App {
                 }
                 TreeRow::File { depth, index, name } => {
                     let file = &state.diff.files[*index];
+                    let reviewed = state.is_reviewed_path(file.display_path());
+                    // Reviewed rows are dimmed so the remaining work stands out.
+                    let dim = if reviewed {
+                        Modifier::DIM
+                    } else {
+                        Modifier::empty()
+                    };
                     let indent = "  ".repeat(*depth);
                     let marker = file_status_marker(file.status);
                     // Only the status letter is coloured; the file name stays
@@ -1337,10 +1492,13 @@ impl App {
                         Span::raw(format!("{indent}  ")),
                         Span::styled(
                             marker.to_string(),
-                            Style::default().fg(file_status_color(file.status, &pal)),
+                            Style::default()
+                                .fg(file_status_color(file.status, &pal))
+                                .add_modifier(dim),
                         ),
-                        Span::raw(format!(" {name}")),
+                        Span::styled(format!(" {name}"), Style::default().add_modifier(dim)),
                     ];
+                    spans.extend(reviewed_check_span(reviewed, &pal));
                     spans.extend(comment_badge_span(
                         state.comment_count(file.display_path()),
                         &pal,
@@ -1358,7 +1516,10 @@ impl App {
             .borders(Borders::ALL)
             .border_type(self.border_type())
             .border_style(Style::default().fg(border))
-            .title(format!(" Files ({}) ", state.diff.files.len()));
+            .title(match state.reviewed.len() {
+                0 => format!(" Files ({}) ", state.diff.files.len()),
+                n => format!(" Files ({n}/{} reviewed) ", state.diff.files.len()),
+            });
         frame.render_widget(
             Paragraph::new(lines)
                 .block(block)
@@ -1377,6 +1538,9 @@ impl App {
         };
 
         let title = match state.current_file() {
+            Some(f) if state.is_reviewed_path(f.display_path()) => {
+                format!(" {} — vs {} ✓ reviewed ", f.display_path(), state.base)
+            }
             Some(f) => format!(" {} — vs {} ", f.display_path(), state.base),
             None => format!(" review — vs {} ", state.base),
         };
@@ -1587,6 +1751,12 @@ fn comment_badge_span(count: usize, pal: &ReviewPalette) -> Option<Span<'static>
     })
 }
 
+/// The ` ✓` reviewed check for a file-tree row, add-coloured so it reads as
+/// "done", or `None` when the file is not marked reviewed.
+fn reviewed_check_span(reviewed: bool, pal: &ReviewPalette) -> Option<Span<'static>> {
+    reviewed.then(|| Span::styled(" ✓", Style::default().fg(pal.add_fg)))
+}
+
 /// Build the inline-rendered body for the current file: hunk headers plus each
 /// diff line with a coloured gutter, full-width add/remove background fill,
 /// word-level intra-line highlight, and an comment marker. Selected lines
@@ -1700,7 +1870,7 @@ fn review_body_lines(
                 && let Some(draft) = state.comment.as_ref()
             {
                 out.extend(comment_draft_box_lines(
-                    &draft.text,
+                    &super::input_with_caret(&draft.input),
                     &draft_loc_label(state, draft.range),
                     width,
                     pal,
@@ -1932,9 +2102,6 @@ fn comment_box_lines(
     out
 }
 
-/// Caret glyph shown at the end of the in-progress comment text.
-const DRAFT_CARET: char = '▏';
-
 /// A short label for the line(s) the in-progress comment covers, using the
 /// displayed gutter numbers (e.g. `line 5` / `lines 5–8`), for the edit box
 /// title. Mirrors the label the old bottom overlay showed.
@@ -1947,9 +2114,10 @@ fn draft_loc_label(state: &DiffReviewState, range: (usize, usize)) -> String {
 }
 
 /// Number of rendered rows [`comment_draft_box_lines`] produces for the same
-/// `text`/`width`. Drives the inline layout model so cursor/scroll/click stay
-/// in step with the rendered edit box (guarded by a test).
-fn comment_draft_box_height(text: &str, width: usize) -> usize {
+/// `display`/`width`. Drives the inline layout model so cursor/scroll/click stay
+/// in step with the rendered edit box (guarded by a test). `display` is the
+/// caret-embedded text from [`super::input_with_caret`].
+fn comment_draft_box_height(display: &str, width: usize) -> usize {
     const INDENT_LEN: usize = 2; // "  "
     let avail = width.saturating_sub(INDENT_LEN);
     if avail < 8 {
@@ -1957,7 +2125,7 @@ fn comment_draft_box_height(text: &str, width: usize) -> usize {
     }
     let inner = avail - 2;
     let text_width = inner.saturating_sub(2);
-    let body = wrap_text(&format!("{text}{DRAFT_CARET}"), text_width).len();
+    let body = wrap_text(display, text_width).len();
     // Top border + wrapped body lines + bottom border.
     body + 2
 }
@@ -1965,10 +2133,10 @@ fn comment_draft_box_height(text: &str, width: usize) -> usize {
 /// Render the in-progress comment as an inline edit box, anchored where the
 /// saved comment will appear. Same geometry as [`comment_box_lines`]'s expanded
 /// form (so the layout model can share width math) but with the draft border
-/// colour, a `*`-marked title carrying the line range, and a caret after the
-/// text.
+/// colour, a `*`-marked title carrying the line range, and a caret at the
+/// cursor. `display` is the caret-embedded text from [`super::input_with_caret`].
 fn comment_draft_box_lines(
-    text: &str,
+    display: &str,
     loc: &str,
     width: usize,
     pal: &ReviewPalette,
@@ -1994,7 +2162,7 @@ fn comment_draft_box_lines(
         border,
     )));
     let text_width = inner.saturating_sub(2);
-    for chunk in wrap_text(&format!("{text}{DRAFT_CARET}"), text_width) {
+    for chunk in wrap_text(display, text_width) {
         let body: String = chunk.chars().take(text_width).collect();
         out.push(Line::from(vec![
             Span::styled(format!("{INDENT}│"), border),
@@ -2122,7 +2290,9 @@ pub struct ReviewPrepared {
     pub(super) base: String,
     pub(super) diff: ParsedDiff,
     pub(super) comments: Vec<Comment>,
+    pub(super) reviewed: Vec<String>,
     pub(super) segments: Vec<Vec<WordSegs>>,
+    pub(super) content_hash: u64,
 }
 
 /// Token class for intra-line diffing: identifier runs and whitespace runs are
@@ -2443,7 +2613,7 @@ fn review_body_lines_side_by_side(
                         && let Some(draft) = state.comment.as_ref()
                     {
                         out.extend(comment_draft_box_lines(
-                            &draft.text,
+                            &super::input_with_caret(&draft.input),
                             &draft_loc_label(state, draft.range),
                             width,
                             pal,
@@ -2522,6 +2692,101 @@ diff --git a/b.rs b/b.rs
         assert_eq!(s.cursor, 2);
         s.move_cursor(false);
         assert_eq!(s.cursor, 1);
+    }
+
+    #[test]
+    fn refresh_diff_swaps_content_and_keeps_file_by_path() {
+        let mut s = state_with_two_files();
+        // Viewing b.rs (the second file).
+        s.selected_file = 1;
+        s.focus = ReviewFocus::Body;
+        assert_eq!(s.current_file().unwrap().display_path(), "b.rs");
+
+        // Simulate the agent editing files after comments were applied: a fresh
+        // diff where b.rs gained a line and the file order changed.
+        let new_diff = parse_unified_diff(
+            "\
+diff --git a/b.rs b/b.rs
+--- a/b.rs
++++ b/b.rs
+@@ -1 +1,2 @@
+-b
++B
++extra
+diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -1,2 +1,3 @@
+ fn main() {
++    let y = 3;
+ }
+",
+        );
+        s.refresh_diff(new_diff, Vec::new(), HashSet::new(), Vec::new(), 42);
+
+        assert_eq!(s.content_hash, 42);
+        // The body still shows b.rs even though it moved to index 0...
+        assert_eq!(s.selected_file, 0);
+        assert_eq!(s.current_file().unwrap().display_path(), "b.rs");
+        // ...and it reflects the *new* content (the stale snapshot lacked it).
+        let body: Vec<_> = s
+            .selectable_lines()
+            .iter()
+            .map(|l| l.content.clone())
+            .collect();
+        assert!(
+            body.iter().any(|c| c == "extra"),
+            "fresh diff shown: {body:?}"
+        );
+    }
+
+    #[test]
+    fn refresh_diff_clamps_cursor_into_shorter_file() {
+        let mut s = state_with_two_files();
+        s.selected_file = 0; // a.rs has 3 selectable lines
+        s.focus = ReviewFocus::Body;
+        s.cursor = 2;
+        // a.rs shrinks to a single changed line in the refreshed diff.
+        let new_diff = parse_unified_diff(
+            "\
+diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -1 +1 @@
+-fn main() {}
++fn main() { }
+",
+        );
+        s.refresh_diff(new_diff, Vec::new(), HashSet::new(), Vec::new(), 7);
+        assert_eq!(s.current_file().unwrap().display_path(), "a.rs");
+        assert_eq!(s.selectable_count(), 2);
+        assert!(
+            s.cursor < s.selectable_count(),
+            "cursor clamped: {}",
+            s.cursor
+        );
+    }
+
+    #[test]
+    fn refresh_diff_falls_back_when_file_removed() {
+        let mut s = state_with_two_files();
+        s.selected_file = 1; // b.rs
+        // Refreshed diff no longer contains b.rs.
+        let new_diff = parse_unified_diff(
+            "\
+diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -1,2 +1,3 @@
+ fn main() {
++    let y = 3;
+ }
+",
+        );
+        s.refresh_diff(new_diff, Vec::new(), HashSet::new(), Vec::new(), 1);
+        assert_eq!(s.diff.files.len(), 1);
+        assert_eq!(s.selected_file, 0);
+        assert_eq!(s.current_file().unwrap().display_path(), "a.rs");
     }
 
     #[test]
@@ -2613,6 +2878,77 @@ diff --git a/x.rs b/x.rs
         assert_eq!(s.focus, ReviewFocus::FileList);
         s.toggle_focus();
         assert_eq!(s.focus, ReviewFocus::Body);
+    }
+
+    // --- reviewed marks ---
+
+    fn state_with_three_files() -> DiffReviewState {
+        let diff = parse_unified_diff(
+            "\
+diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -1 +1 @@
+-a
++A
+diff --git a/b.rs b/b.rs
+--- a/b.rs
++++ b/b.rs
+@@ -1 +1 @@
+-b
++B
+diff --git a/c.rs b/c.rs
+--- a/c.rs
++++ b/c.rs
+@@ -1 +1 @@
+-c
++C
+",
+        );
+        DiffReviewState::new(
+            SessionId::new(),
+            "test".to_string(),
+            "main".to_string(),
+            diff,
+            Vec::new(),
+        )
+    }
+
+    #[test]
+    fn mark_advances_to_next_unreviewed_file() {
+        let mut s = state_with_two_files();
+        s.set_reviewed("a.rs".to_string(), true);
+        s.advance_to_next_unreviewed();
+        assert!(s.is_reviewed_path("a.rs"));
+        assert_eq!(s.selected_file, 1);
+    }
+
+    #[test]
+    fn advance_wraps_past_end_to_first_unreviewed() {
+        let mut s = state_with_three_files();
+        s.set_reviewed("b.rs".to_string(), true);
+        s.set_reviewed("c.rs".to_string(), true);
+        s.selected_file = 1;
+        s.advance_to_next_unreviewed();
+        assert_eq!(s.selected_file, 0, "wraps past reviewed c.rs to a.rs");
+    }
+
+    #[test]
+    fn advance_stays_put_when_all_reviewed() {
+        let mut s = state_with_two_files();
+        s.set_reviewed("a.rs".to_string(), true);
+        s.set_reviewed("b.rs".to_string(), true);
+        s.advance_to_next_unreviewed();
+        assert_eq!(s.selected_file, 0);
+    }
+
+    #[test]
+    fn unmark_does_not_advance() {
+        let mut s = state_with_two_files();
+        s.set_reviewed("a.rs".to_string(), true);
+        s.set_reviewed("a.rs".to_string(), false);
+        assert!(!s.is_reviewed_path("a.rs"));
+        assert_eq!(s.selected_file, 0, "unmarking never moves the selection");
     }
 
     // --- file tree ---
@@ -2821,6 +3157,15 @@ diff --git a/x.rs b/x.rs
     }
 
     #[test]
+    fn reviewed_check_span_hidden_when_unreviewed() {
+        let pal = Theme::truecolor().review_palette();
+        assert!(reviewed_check_span(false, &pal).is_none());
+        let span = reviewed_check_span(true, &pal).expect("check for reviewed file");
+        assert_eq!(span.content.as_ref(), " ✓");
+        assert_eq!(span.style.fg, Some(pal.add_fg));
+    }
+
+    #[test]
     fn dir_comment_count_aggregates_subtree_pending_comments() {
         let mut s = state_with_two_files();
         s.comments.push(Comment::new(
@@ -2961,12 +3306,19 @@ diff --git a/x.rs b/x.rs
     #[test]
     fn comment_draft_box_height_matches_rendered() {
         let pal = Theme::truecolor().review_palette();
-        for text in ["", "short", &"word ".repeat(40)] {
+        // Cover end-of-text and mid-text caret placement (the caret is spliced
+        // into `display` before either function wraps it).
+        for display in [
+            "▏",
+            "short▏",
+            "mid▏dle",
+            &format!("{}▏", "word ".repeat(40)),
+        ] {
             for width in [12usize, 40, 80, 6 /* below the 8-col floor */] {
                 assert_eq!(
-                    comment_draft_box_height(text, width),
-                    comment_draft_box_lines(text, "line 1", width, &pal, true).len(),
-                    "height mismatch (width={width}, text={text:?})"
+                    comment_draft_box_height(display, width),
+                    comment_draft_box_lines(display, "line 1", width, &pal, true).len(),
+                    "height mismatch (width={width}, display={display:?})"
                 );
             }
         }
@@ -3411,6 +3763,41 @@ diff --git a/x.rs b/x.rs
         assert_eq!(draft.range, (0, 2));
         // A second call while a comment is open is a no-op.
         assert!(!s.begin_comment());
+    }
+
+    #[test]
+    fn paste_into_draft_appends_text() {
+        // Regression: pasting into the review comment box was silently
+        // dropped because InputEvent::Paste had no ReviewDiff arm.
+        let mut s = state_with_two_files();
+        s.focus = ReviewFocus::Body;
+        s.begin_comment();
+        s.paste_into_draft("see ");
+        assert!(s.paste_into_draft("the docs"));
+        assert_eq!(s.comment.as_ref().unwrap().input.value(), "see the docs");
+    }
+
+    #[test]
+    fn paste_into_draft_keeps_newlines_strips_carriage_returns() {
+        // Bracketed paste delivers newlines as text, not Enter key events,
+        // so a multi-line paste can keep its line breaks (compose_markdown
+        // passes them through to the agent verbatim). CRs from CRLF
+        // clipboards are dropped.
+        let mut s = state_with_two_files();
+        s.focus = ReviewFocus::Body;
+        s.begin_comment();
+        assert!(s.paste_into_draft("let x = 1;\r\nlet y = 2;\r\n"));
+        assert_eq!(
+            s.comment.as_ref().unwrap().input.value(),
+            "let x = 1;\nlet y = 2;\n"
+        );
+    }
+
+    #[test]
+    fn paste_into_draft_without_open_box_is_noop() {
+        let mut s = state_with_two_files();
+        assert!(!s.paste_into_draft("ignored"));
+        assert!(s.comment.is_none());
     }
 
     #[test]

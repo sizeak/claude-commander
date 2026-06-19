@@ -16,9 +16,10 @@ use crate::comment::{
 use crate::config::{AppState, Config, ConfigStore, StateStore};
 use crate::error::{Result, SessionError};
 use crate::git::{
-    GitBackend, ParsedDiff, PrState, ReviewDecision, compose_review_diff, diff_stat_summary,
-    effective_pr_state, parse_unified_diff, prefer_remote_branch,
+    FileDiff, GitBackend, ParsedDiff, PrState, ReviewDecision, compose_review_diff,
+    diff_stat_summary, effective_pr_state, parse_unified_diff, prefer_remote_branch,
 };
+use crate::reviewed::ReviewedStore;
 use crate::session::{
     AgentState, ProjectId, ScanResult, SessionId, SessionManager, SessionStatus, WorktreeSession,
     program_is_claude, program_with_claude_flags,
@@ -29,11 +30,17 @@ use crate::tui::theme::Theme;
 /// High-level service that wraps `SessionManager`, state stores, and agent
 /// detection into a single entry point. Both the CLI and TUI route through
 /// this rather than wiring the pieces together independently.
+///
+/// Cheap to clone: every field is an `Arc` or itself `Arc`-backed, so a clone
+/// is a shared handle to the same state — used to hand the service to
+/// background tasks (e.g. the review-diff refresh).
+#[derive(Clone)]
 pub struct CommanderService {
     manager: SessionManager,
     store: Arc<StateStore>,
     config_store: Arc<ConfigStore>,
     comments: Arc<CommentStore>,
+    reviewed: Arc<ReviewedStore>,
 }
 
 impl CommanderService {
@@ -46,17 +53,16 @@ impl CommanderService {
         // Comments live beside state.json under the data dir. `data_dir()`
         // only fails when no home directory can be resolved (effectively never
         // on supported platforms); fall back to a relative dir to keep `new`
-        // infallible.
-        let comments = Arc::new(CommentStore::new(
-            Config::data_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join("comments"),
-        ));
+        // infallible, mirroring `for_cli`'s tolerant state load.
+        let data_dir = Config::data_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let comments = Arc::new(CommentStore::new(data_dir.join("comments")));
+        let reviewed = Arc::new(ReviewedStore::new(data_dir.join("reviewed")));
         Self {
             manager,
             store,
             config_store,
             comments,
+            reviewed,
         }
     }
 
@@ -296,33 +302,95 @@ impl CommanderService {
     /// (persisting any status changes). Returns the parsed diff plus the
     /// re-anchored comments.
     pub async fn open_review(&self, session_id: &SessionId) -> Result<ReviewSnapshot> {
-        let (worktree_path, review_base) = {
-            let state = self.store.read().await;
-            let session = state
-                .sessions
-                .get(session_id)
-                .ok_or(SessionError::NotFound(*session_id))?;
-            (session.worktree_path.clone(), ReviewBase::of(session))
-        };
-
+        let (worktree_path, review_base) = self.review_target(session_id).await?;
         let base = review_base.git_ref(&worktree_path).await;
         let raw = compose_review_diff(&worktree_path, &base).await?;
+        self.snapshot_from_raw(session_id, base, raw).await
+    }
+
+    /// Re-compose the review diff and, when its content differs from
+    /// `prev_hash`, return a fresh snapshot (re-anchoring comments and pruning
+    /// reviewed marks against the new diff). Returns `None` when the working
+    /// tree is unchanged, so the caller can skip the expensive parse/precompute
+    /// and leave the open view untouched. Drives the review view's in-place
+    /// refresh after the agent finishes a turn (or on manual request).
+    pub async fn refresh_review_if_changed(
+        &self,
+        session_id: &SessionId,
+        prev_hash: u64,
+    ) -> Result<Option<ReviewSnapshot>> {
+        let (worktree_path, review_base) = self.review_target(session_id).await?;
+        let base = review_base.git_ref(&worktree_path).await;
+        let raw = compose_review_diff(&worktree_path, &base).await?;
+        if xxhash_rust::xxh3::xxh3_64(raw.as_bytes()) == prev_hash {
+            return Ok(None);
+        }
+        Ok(Some(self.snapshot_from_raw(session_id, base, raw).await?))
+    }
+
+    /// Resolve the worktree path and review base for a session under a brief
+    /// read lock. Shared by `open_review` and `refresh_review_if_changed`.
+    async fn review_target(&self, session_id: &SessionId) -> Result<(PathBuf, ReviewBase)> {
+        let state = self.store.read().await;
+        let session = state
+            .sessions
+            .get(session_id)
+            .ok_or(SessionError::NotFound(*session_id))?;
+        Ok((session.worktree_path.clone(), ReviewBase::of(session)))
+    }
+
+    /// Build a [`ReviewSnapshot`] from an already-composed raw unified diff:
+    /// hash it for staleness detection, parse it, then re-anchor the session's
+    /// comments and prune stale reviewed marks against the parsed diff
+    /// (persisting any changes).
+    async fn snapshot_from_raw(
+        &self,
+        session_id: &SessionId,
+        base: String,
+        raw: String,
+    ) -> Result<ReviewSnapshot> {
+        let content_hash = xxhash_rust::xxh3::xxh3_64(raw.as_bytes());
         let diff = parse_unified_diff(&raw);
 
-        let mut comments = self.comments.load(*session_id)?;
+        let mut comments = self.comments.load(*session_id).await?;
         reanchor_comments(&mut comments, &diff);
-        self.comments.save(*session_id, &comments)?;
+        self.comments.save(*session_id, &comments).await?;
+
+        // Reviewed marks pinned to a file's diff content: drop any whose file
+        // changed or left the diff since they were set.
+        let mut marks = self.reviewed.load(*session_id).await?;
+        if crate::reviewed::prune_invalidated(&mut marks, &diff) {
+            self.reviewed.save(*session_id, &marks).await?;
+        }
+        let reviewed = marks.into_iter().map(|m| m.file).collect();
 
         Ok(ReviewSnapshot {
             base,
             diff,
             comments,
+            reviewed,
+            content_hash,
         })
+    }
+
+    /// Toggle the reviewed mark for one file of a session's review diff.
+    /// The hash is computed from the `FileDiff` the caller is displaying, so
+    /// the mark records exactly what the user saw (not a possibly-newer
+    /// working tree). Returns the new reviewed state.
+    pub async fn toggle_file_reviewed(
+        &self,
+        session_id: &SessionId,
+        file: &FileDiff,
+    ) -> Result<bool> {
+        let mut marks = self.reviewed.load(*session_id).await?;
+        let now_reviewed = crate::reviewed::toggle(&mut marks, file);
+        self.reviewed.save(*session_id, &marks).await?;
+        Ok(now_reviewed)
     }
 
     /// List a session's stored comments (without re-anchoring).
     pub async fn list_comments(&self, session_id: &SessionId) -> Result<Vec<Comment>> {
-        self.comments.load(*session_id)
+        self.comments.load(*session_id).await
     }
 
     /// Session ids that have at least one not-yet-applied comment, for the
@@ -330,7 +398,7 @@ impl CommanderService {
     pub async fn sessions_with_pending_comments(
         &self,
     ) -> Result<std::collections::HashSet<SessionId>> {
-        self.comments.sessions_with_pending()
+        self.comments.sessions_with_pending().await
     }
 
     /// Stage a new comment; returns its id.
@@ -343,13 +411,13 @@ impl CommanderService {
             draft.comment,
         );
         let id = ann.id;
-        self.comments.add(*session_id, ann)?;
+        self.comments.add(*session_id, ann).await?;
         Ok(id)
     }
 
     /// Delete a staged comment by id (no-op if absent).
     pub async fn delete_comment(&self, session_id: &SessionId, id: Uuid) -> Result<()> {
-        self.comments.delete(*session_id, id)
+        self.comments.delete(*session_id, id).await
     }
 
     /// Apply a session's staged comments: re-anchor them, and if none are
@@ -380,9 +448,9 @@ impl CommanderService {
         let base = review_base.git_ref(&worktree_path).await;
         let raw = compose_review_diff(&worktree_path, &base).await?;
         let parsed = parse_unified_diff(&raw);
-        let mut comments = self.comments.load(*session_id)?;
+        let mut comments = self.comments.load(*session_id).await?;
         reanchor_comments(&mut comments, &parsed);
-        self.comments.save(*session_id, &comments)?;
+        self.comments.save(*session_id, &comments).await?;
 
         // Only not-yet-applied comments participate.
         let staged: Vec<Comment> = comments
@@ -403,7 +471,7 @@ impl CommanderService {
         }
 
         // Compose the brief to an absolute temp path outside the worktree.
-        let path = write_apply_brief(*session_id, &compose_markdown(&title, &staged))?;
+        let path = write_apply_brief(*session_id, &compose_markdown(&title, &staged)).await?;
         let count = staged.len();
 
         if !is_active {
@@ -435,7 +503,7 @@ impl CommanderService {
         {
             ann.status = CommentStatus::Applied;
         }
-        self.comments.save(*session_id, &comments)?;
+        self.comments.save(*session_id, &comments).await?;
 
         Ok(ApplyOutcome::Applied { path, count })
     }
@@ -444,9 +512,10 @@ impl CommanderService {
 /// Write the apply brief to a stable absolute path in the system temp dir
 /// (outside the worktree, so it's never committed). One file per session,
 /// overwritten on re-apply.
-fn write_apply_brief(session_id: SessionId, markdown: &str) -> Result<PathBuf> {
+async fn write_apply_brief(session_id: SessionId, markdown: &str) -> Result<PathBuf> {
     let path = std::env::temp_dir().join(format!("cc-comments-{}.md", session_id.as_uuid()));
-    std::fs::write(&path, markdown)
+    tokio::fs::write(&path, markdown)
+        .await
         .map_err(|e| crate::error::ConfigError::SaveFailed(e.to_string()))?;
     Ok(path)
 }
@@ -600,6 +669,12 @@ pub struct ReviewSnapshot {
     pub base: String,
     pub diff: ParsedDiff,
     pub comments: Vec<Comment>,
+    /// Display paths of files still marked reviewed (stale marks pruned).
+    pub reviewed: Vec<String>,
+    /// xxh3 hash of the raw unified diff this snapshot was built from, so an
+    /// open review view can cheaply tell whether a re-compose actually changed
+    /// anything before rebuilding.
+    pub content_hash: u64,
 }
 
 // -- Internal helpers --

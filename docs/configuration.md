@@ -138,6 +138,10 @@ state_sync_interval_ms = 2000
 # Custom key bindings — override any default key with one or more alternatives
 # [keybindings]
 # navigate_up = ["k", "Up"]
+# next_group = ["]"]
+# previous_group = ["["]
+# navigate_first = ["Home"]
+# navigate_last = ["End"]
 # quit = ["q", "Ctrl-c"]
 # toggle_pane = ["Tab"]
 ```
@@ -236,6 +240,7 @@ All fields are optional; a section matches when **every declared field** matches
 | `has_label` | string (literal) or array (any-of) | |
 | `review_decision` | `"approved"` \| `"changes_requested"` \| `"review_required"` — scalar or array (any-of) | Mirrors GitHub's `reviewDecision` field |
 | `has_reviewer` | `true` / `false`, a specific login, or an array of logins (any-of) | `true` excludes Copilot via case-insensitive `"copilot"` substring match; specific/array forms match literally |
+| `max_sessions` | positive integer | Advisory WIP limit. Section header shows `count/limit` and highlights when at or over the limit. Never blocks creation. |
 
 ### Process order and forward-only
 
@@ -248,6 +253,22 @@ Select a session and press `m` (or open the palette with `Space`, or `Shift+Spac
 ### Creating sessions inside a section
 
 In the section-grouped views, a session created with `n` lands in the section the cursor was in, not the "In Progress" catch-all. For a manual-only waypoint (no predicates) this sets the same pin as a manual move; for a predicate-bearing section it's a soft placement — the session starts there but still auto-advances through the pipeline as its PR progresses. Creating from "In Progress" keeps the default behaviour. The CLI's `claude-commander new --section` flag follows the same rules.
+
+### WIP limits
+
+Set `max_sessions = N` on any section to flag it when it accumulates too much work. The header renders `count/N` and switches to the warning colour once `count >= N`. The catch-all "In Progress" section uses the top-level `in_progress_limit` instead:
+
+```toml
+in_progress_limit = 3
+
+[[sections]]
+name = "In Review"
+pr_state = "open"
+has_reviewer = true
+max_sessions = 5
+```
+
+Limits are advisory — they never block session creation or section transitions. Sessions still flow through the pipeline as their PRs progress.
 
 ### Reordering, adding, or removing sections
 

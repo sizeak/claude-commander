@@ -142,6 +142,16 @@ pub enum StateUpdate {
     ReviewPrepared {
         prepared: Box<super::app::ReviewPrepared>,
     },
+    /// An open review view's diff was re-composed in the background (agent went
+    /// idle, or a manual refresh). `refreshed` carries the fresh, warmed payload
+    /// to fold into the view in place; `None` means the working tree was
+    /// unchanged. `manual` distinguishes a user-pressed refresh (which reports
+    /// an outcome) from the automatic idle-triggered one (silent). Boxed — the
+    /// payload is large.
+    ReviewRefreshed {
+        refreshed: Option<Box<super::app::ReviewPrepared>>,
+        manual: bool,
+    },
 }
 
 /// User commands triggered by input
@@ -151,6 +161,14 @@ pub enum UserCommand {
     NavigateUp,
     /// Navigate down in the list
     NavigateDown,
+    /// Jump to the next project/section header in the list
+    NextGroup,
+    /// Jump to the previous project/section header in the list
+    PreviousGroup,
+    /// Jump to the first item in the list
+    NavigateFirst,
+    /// Jump to the last item in the list
+    NavigateLast,
     /// Select/attach to current item
     Select,
     /// Open shell in worktree
@@ -268,6 +286,10 @@ impl From<BindableAction> for UserCommand {
         match action {
             BindableAction::NavigateUp => Self::NavigateUp,
             BindableAction::NavigateDown => Self::NavigateDown,
+            BindableAction::NextGroup => Self::NextGroup,
+            BindableAction::PreviousGroup => Self::PreviousGroup,
+            BindableAction::NavigateFirst => Self::NavigateFirst,
+            BindableAction::NavigateLast => Self::NavigateLast,
             BindableAction::Select => Self::Select,
             BindableAction::SelectShell => Self::SelectShell,
             BindableAction::NewSession => Self::NewSession,
@@ -656,7 +678,7 @@ mod tests {
             ),
             (
                 KeyCode::Char('r'),
-                KeyModifiers::CONTROL,
+                KeyModifiers::ALT,
                 UserCommand::OpenReviewDiff,
             ),
             (
