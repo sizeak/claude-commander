@@ -1,11 +1,14 @@
 //! Cross-platform local IPC for triggering voice input from outside the TUI.
 //!
 //! A terminal app can't capture global hotkeys itself (terminal key events need
-//! window focus; Wayland has no client-side global-shortcut API). The portable
-//! route is a desktop-level global shortcut that runs a command which signals
-//! the already-running TUI. The signal travels over a Unix-domain socket — the
-//! one IPC primitive shared by Linux and macOS. (On Linux we additionally serve
-//! the same toggle over D-Bus; see [`dbus`](super::dbus).)
+//! window focus; Wayland has no client-side global-shortcut API). The portable,
+//! reliable route is a desktop-level global shortcut that runs a *command* which
+//! signals the already-running TUI — e.g. a KDE Plasma custom command shortcut
+//! bound to `claude-commander listen-toggle`. The signal travels over a
+//! Unix-domain socket, the one IPC primitive shared by Linux and macOS. (The XDG
+//! `GlobalShortcuts` portal was tried but is unreliable for a non-sandboxed TUI:
+//! the portal can't assign it a stable app id, so KDE never persists a bindable
+//! shortcut.)
 //!
 //! The server ([`serve`]) feeds [`apply_listen_action`] with the shared listener
 //! channel + recording flag — the exact same core the in-app Alt-V key path and

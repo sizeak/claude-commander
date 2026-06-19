@@ -248,8 +248,8 @@ pub struct ConversationRuntime {
     pub listener: Option<tokio::sync::mpsc::UnboundedSender<ListenerCommand>>,
     /// Whether the microphone is currently capturing. Shared (`Arc`) so every
     /// trigger — the Alt-V key path, the in-attach byte interceptor, and the
-    /// external IPC routes (Unix socket / D-Bus) — observes and flips the one
-    /// flag without copying state in and out of the attach loop.
+    /// external Unix-socket toggle — observes and flips the one flag without
+    /// copying state in and out of the attach loop.
     pub recording: Arc<AtomicBool>,
     /// Media-gate signal channel: pauses other players for the voice turn and
     /// resumes them after the reply. `None` when the feature is disabled.
@@ -448,8 +448,8 @@ impl App {
     /// Bring up *just* the microphone listener (and its off-loop submit task),
     /// without the heavy headless session. Idempotent and gated on `stt.enabled`.
     ///
-    /// Called eagerly at startup so an external global hotkey (Unix socket /
-    /// D-Bus) — or in-app Alt-V — can toggle recording even before the
+    /// Called eagerly at startup so an external global hotkey (the Unix-socket
+    /// toggle) — or in-app Alt-V — can toggle recording even before the
     /// conversation overlay is ever opened. The submit task spawns the session
     /// lazily on the first transcript, so the mic costs nothing until used.
     pub(super) async fn ensure_listener_started(&mut self) {
@@ -493,27 +493,22 @@ impl App {
         }
     }
 
-    /// Start the external voice-toggle trigger(s) so the hotkey works from
-    /// anywhere on the desktop. On Linux, register a system-wide shortcut via the
-    /// XDG Desktop Portal (the Wayland-native route; the user binds the key in
-    /// System Settings). On every platform, also serve a portable Unix socket
-    /// backing `claude-commander listen-toggle` (the macOS path + a scriptable
-    /// CLI trigger). Both feed the same listener + recording flag as in-app
-    /// Alt-V. No-op when the mic listener didn't come up (STT off / no mic).
+    /// Start the external voice-toggle trigger so the hotkey works from anywhere
+    /// on the desktop: a portable Unix-domain socket backing `claude-commander
+    /// listen-toggle`, which a desktop global shortcut (e.g. a KDE Plasma custom
+    /// *command* shortcut) runs to toggle recording — feeding the same listener +
+    /// recording flag as in-app Alt-V. No-op when the mic listener didn't come up
+    /// (STT off / no microphone).
     pub(super) fn spawn_listen_ipc(&self) {
         let Some(listener) = self.conversation.listener.clone() else {
             debug!(target: "conversation", "voice IPC not started: no mic listener");
             return;
         };
         let recording = self.conversation.recording.clone();
-
         let path = crate::conversation::ipc::default_socket_path();
-        if let Err(e) = crate::conversation::ipc::serve(path, listener.clone(), recording.clone()) {
+        if let Err(e) = crate::conversation::ipc::serve(path, listener, recording) {
             warn!(target: "conversation", "voice IPC socket unavailable: {e}");
         }
-
-        #[cfg(target_os = "linux")]
-        crate::conversation::global_shortcut::spawn(listener, recording);
     }
 
     /// Send a typed user turn to the session. The session serializes turns, so a

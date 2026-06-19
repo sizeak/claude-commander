@@ -41,9 +41,9 @@ pub enum ListenAction {
 /// Apply a [`ListenAction`] against the shared recording flag and listener.
 ///
 /// This is the single shared entry point for *every* voice trigger — the in-app
-/// Alt-V key path, the in-attach byte interceptor, and the external IPC routes
-/// (Unix socket / D-Bus) — so the recording state machine stays consistent no
-/// matter where the toggle originates. Returns the new recording state. Sends a
+/// Alt-V key path, the in-attach byte interceptor, and the external Unix-socket
+/// toggle — so the recording state machine stays consistent no matter where the
+/// toggle originates. Returns the new recording state. Sends a
 /// [`ListenerCommand`] only when the state actually changes (so a redundant
 /// `Start`/`Stop` doesn't restart capture or transcribe silence).
 pub fn apply_listen_action(

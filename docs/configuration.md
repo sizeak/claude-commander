@@ -258,21 +258,8 @@ when you stop — so very long dictations wait until the end to transcribe.
 ### Global voice hotkey
 
 `Alt-v` only fires when the terminal window is focused — a terminal app can't read key events
-otherwise. To toggle voice input from **anywhere on the desktop**, the running TUI registers a
-system-wide shortcut (when `stt.enabled = true`).
-
-**Linux (Wayland/X11, via the XDG Desktop Portal).** On launch the TUI registers a `toggle-voice`
-global shortcut with your compositor through the portal's `GlobalShortcuts` interface. You don't
-bind a command; the action is already registered. Set or change its key in
-**System Settings ▸ Shortcuts** (KDE shows
-it once registered; the suggested default is `Meta+Alt+V`). Pick a combo **different from `Alt-v`**
-so the system grab doesn't shadow the in-app binding. Pressing it toggles recording exactly as
-`Alt-v` would — and it works even while you're attached to a session.
-
-> Requires an XDG Desktop Portal with a GlobalShortcuts backend (KDE Plasma 5.27+ / a recent GNOME).
-> If the portal is unavailable the TUI logs a warning and carries on without the global hotkey.
-
-**macOS / scripting (Unix socket).** There's no XDG portal on macOS, so use the CLI instead:
+otherwise. To toggle voice input from **anywhere on the desktop**, bind a desktop-level global
+shortcut to the `listen-toggle` command:
 
 ```sh
 claude-commander listen-toggle          # toggle (also: --start / --stop)
@@ -280,13 +267,21 @@ claude-commander listen-toggle          # toggle (also: --start / --stop)
 
 This connects to the running TUI over a per-user Unix socket
 (`$XDG_RUNTIME_DIR/claude-commander.sock`, falling back to the OS temp dir on macOS) and toggles
-recording. The socket server starts automatically with `stt.enabled = true`; `listen-toggle` exits
-non-zero (with a message) if no TUI is running. Bind it to a key with skhd, Karabiner-Elements,
-Raycast, or Shortcuts.app on macOS — or call it from any script. It's available on Linux too if you
-prefer a command shortcut over the portal.
+recording exactly as `Alt-v` would — and it works even while you're attached to a session. The
+socket server starts automatically when the TUI launches with `stt.enabled = true`; the command
+prints `recording`/`stopped` and exits non-zero (with a message) if no TUI is running.
 
-All routes feed the same recording state, so they stay consistent with each other and with `Alt-v`.
-Only one running TUI instance owns the socket; a second instance logs and skips.
+- **KDE Plasma / Linux:** System Settings ▸ Shortcuts ▸ **Add ▸ Command or Script**, set the command
+  to `claude-commander listen-toggle`, and assign your key. Pick a combo **different from `Alt-v`** so
+  the global grab doesn't shadow the in-app binding.
+- **macOS:** bind the same command via skhd, Karabiner-Elements, Raycast, or Shortcuts.app.
+
+> A command shortcut is used (rather than the in-process XDG `GlobalShortcuts` portal) because the
+> portal can't assign a non-sandboxed terminal binary a stable app identity, so the compositor never
+> persists a reliably-bindable shortcut for it. The command route has no such limitation.
+
+Both this and in-app `Alt-v` feed the same recording state, so they stay consistent. Only one running
+TUI instance owns the socket; a second instance logs and skips.
 
 ## Theme Presets
 

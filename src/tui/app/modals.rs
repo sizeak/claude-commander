@@ -650,17 +650,12 @@ impl App {
         lines.push(Line::from(""));
         lines.push(Line::from("Global Voice Hotkey:"));
         lines.push(Line::from(format!(
-            "  {:<width$}Toggle voice input system-wide. Linux: set the key",
+            "  {:<width$}Toggle voice input system-wide: bind a desktop",
             "system-wide",
             width = key_col_width,
         )));
         lines.push(Line::from(format!(
-            "  {:<width$}in System Settings ▸ Shortcuts (toggle-voice);",
-            "",
-            width = key_col_width,
-        )));
-        lines.push(Line::from(format!(
-            "  {:<width$}macOS: bind `claude-commander listen-toggle`",
+            "  {:<width$}shortcut to `claude-commander listen-toggle`",
             "",
             width = key_col_width,
         )));

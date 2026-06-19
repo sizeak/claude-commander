@@ -11,8 +11,6 @@
 
 pub mod audio;
 pub mod extract;
-#[cfg(target_os = "linux")]
-pub mod global_shortcut;
 pub mod ipc;
 pub mod listener;
 pub mod media;

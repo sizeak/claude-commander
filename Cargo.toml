@@ -100,14 +100,6 @@ rodio = { version = "0.19", default-features = false, features = ["wav", "mp3"] 
 cpal = "0.15"
 hound = "3.5"
 
-# Linux-only system-wide voice hotkey via the XDG Desktop Portal
-# `GlobalShortcuts` interface (the Wayland-native route; same approach as the
-# `dictator` app). The TUI registers a "toggle-voice" shortcut in-process and the
-# compositor delivers activations; the user binds the key in System Settings.
-# Pure-Rust, tokio-backed (pulls zbus internally, no libdbus C dependency).
-[target.'cfg(target_os = "linux")'.dependencies]
-ashpd = "0.12"
-
 [dev-dependencies]
 # Property-based testing
 proptest = "1.4"
