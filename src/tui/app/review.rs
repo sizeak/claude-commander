@@ -1129,7 +1129,7 @@ impl App {
                         snapshot.comments,
                     );
                     state.reviewed = snapshot.reviewed.into_iter().collect();
-                    self.review_images.borrow_mut().clear();
+                    self.reset_review_images();
                     self.ensure_review_image(&state).await;
                     self.ui_state.modal = Modal::ReviewDiff(Box::new(state));
                     return;
@@ -1330,6 +1330,16 @@ impl App {
         self.ui_state.modal = Modal::ReviewDiff(state);
     }
 
+    /// Clear the decoded-image cache and bump the review generation. Called when
+    /// a review opens so in-flight fetches from the previous review (which
+    /// captured the old generation) are dropped on arrival rather than poisoning
+    /// the new review's cache.
+    pub(super) fn reset_review_images(&self) {
+        self.review_images.borrow_mut().clear();
+        self.review_image_gen
+            .set(self.review_image_gen.get().wrapping_add(1));
+    }
+
     /// Ensure the binary image for the currently-shown file+side is being (or
     /// has been) loaded. Inserts a `Pending` marker and spawns an off-thread
     /// fetch+decode that reports back via [`StateUpdate::ReviewImageLoaded`].
@@ -1368,6 +1378,7 @@ impl App {
         };
 
         let tx = self.event_loop.sender();
+        let generation = self.review_image_gen.get();
         tokio::spawn(async move {
             let bytes = match side {
                 DiffSide::Old => crate::git::read_base_blob(&worktree, &base, &path).await,
@@ -1386,6 +1397,7 @@ impl App {
             };
             let _ = tx
                 .send(AppEvent::StateUpdate(StateUpdate::ReviewImageLoaded {
+                    generation,
                     path,
                     side,
                     image,
@@ -1707,7 +1719,7 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(0)])
             .split(inner);
-        let caption = format!(" {side_label} · {} · press o to toggle ", human_size(size));
+        let caption = image_caption(file.status, side_label, size);
         frame.render_widget(
             Paragraph::new(caption).style(Style::default().fg(pal.gutter_fg)),
             rows[0],
@@ -1742,6 +1754,17 @@ impl App {
                 );
             }
         }
+    }
+}
+
+/// Caption shown above a review image: side label + size, plus a `press o to
+/// toggle` hint only when the file is a modification (the sole case where `o`
+/// has two sides to flip between — added/deleted files are single-sided).
+fn image_caption(status: FileStatus, side_label: &str, size: Option<u64>) -> String {
+    if status == FileStatus::Modified {
+        format!(" {side_label} · {} · press o to toggle ", human_size(size))
+    } else {
+        format!(" {side_label} · {} ", human_size(size))
     }
 }
 
@@ -3920,6 +3943,30 @@ diff --git a/x.rs b/x.rs
         assert_eq!(human_size(Some(512)), "512 bytes");
         assert_eq!(human_size(Some(2048)), "2.0 KiB");
         assert_eq!(human_size(Some(3 * 1024 * 1024)), "3.0 MiB");
+    }
+
+    #[test]
+    fn image_caption_shows_toggle_hint_only_for_modified() {
+        // A modification has two sides, so the `o` toggle is meaningful.
+        let modified = image_caption(FileStatus::Modified, "after", Some(2048));
+        assert!(
+            modified.contains("press o to toggle"),
+            "modified caption should advertise the toggle: {modified:?}"
+        );
+        assert!(modified.contains("after") && modified.contains("2.0 KiB"));
+
+        // Added/deleted images are single-sided; `o` is a no-op, so the hint
+        // must not appear (it would be misleading UI).
+        let added = image_caption(FileStatus::Added, "after", Some(2048));
+        assert!(
+            !added.contains("press o to toggle"),
+            "added caption must not advertise a no-op toggle: {added:?}"
+        );
+        let deleted = image_caption(FileStatus::Deleted, "before", Some(512));
+        assert!(
+            !deleted.contains("press o to toggle"),
+            "deleted caption must not advertise a no-op toggle: {deleted:?}"
+        );
     }
 
     #[test]

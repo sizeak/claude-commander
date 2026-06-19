@@ -291,15 +291,25 @@ impl App {
                     let mut state = DiffReviewState::new(session_id, title, base, diff, comments);
                     state.reviewed = reviewed.into_iter().collect();
                     state.prime_segments(segments);
-                    self.review_images.borrow_mut().clear();
+                    self.reset_review_images();
                     self.ensure_review_image(&state).await;
                     self.ui_state.modal = Modal::ReviewDiff(Box::new(state));
                 }
             }
-            StateUpdate::ReviewImageLoaded { path, side, image } => {
+            StateUpdate::ReviewImageLoaded {
+                generation,
+                path,
+                side,
+                image,
+            } => {
+                // Drop arrivals from a previous review: a stale fetch could
+                // otherwise repopulate the cleared cache and show the wrong image
+                // for a same-named path in the now-open review.
+                if generation != self.review_image_gen.get() {
+                    return;
+                }
                 // Build the render protocol on the main thread (it owns the
-                // Picker) and cache it for the `&self` render path. Late arrivals
-                // for a since-closed review just land in the cache harmlessly.
+                // Picker) and cache it for the `&self` render path.
                 let entry = match image {
                     Err(e) => ImageEntry::Failed(e),
                     Ok(img) => match &self.picker {

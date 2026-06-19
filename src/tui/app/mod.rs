@@ -5,7 +5,7 @@
 //! - User input handling
 //! - Background state updates
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Stdout};
 use std::path::PathBuf;
@@ -891,6 +891,12 @@ pub struct App {
     /// the `&self` render path can read them; populated by the background fetch
     /// task via `StateUpdate::ReviewImageLoaded`. Cleared when a review opens.
     review_images: RefCell<HashMap<(String, DiffSide), review::ImageEntry>>,
+    /// Monotonic generation, bumped each time a review opens (when
+    /// `review_images` is cleared). A background fetch captures the generation
+    /// it was spawned under; a late arrival from a since-closed review carries a
+    /// stale generation and is dropped, so it can't poison the new review's
+    /// cache (e.g. a same-named path in a different session).
+    review_image_gen: Cell<u64>,
 }
 
 impl App {
@@ -920,6 +926,7 @@ impl App {
             digit_accumulator: super::digit_accumulator::DigitAccumulator::new(debounce),
             picker: None,
             review_images: RefCell::new(HashMap::new()),
+            review_image_gen: Cell::new(0),
         }
     }
 
