@@ -68,7 +68,10 @@ impl CommanderService {
 
     pub fn for_cli(config: crate::config::Config) -> std::result::Result<Self, crate::Error> {
         let config_store = Arc::new(ConfigStore::new(config)?);
-        let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
+        // A corrupt state file must propagate, not default to an empty
+        // state: `list` would report no sessions and `create` would persist
+        // a duplicate project alongside the unreadable original.
+        let app_state = AppState::load()?;
         let store = Arc::new(StateStore::new(app_state)?);
         Ok(Self::new(config_store, store))
     }
