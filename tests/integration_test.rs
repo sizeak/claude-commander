@@ -1109,7 +1109,6 @@ async fn test_commander_session_lifecycle() {
     drop(dir);
 }
 
-
 /// Helper to check if git-lfs is available.
 async fn git_lfs_available() -> bool {
     tokio::process::Command::new("git")
@@ -1155,7 +1154,11 @@ async fn read_base_blob_resolves_lfs_pointer_to_real_bytes() {
     let base = claude_commander::git::read_base_blob(&repo, "HEAD", "img.png")
         .await
         .expect("read_base_blob should succeed");
-    assert_eq!(&base[..4], b"\x89PNG", "base side should be smudged PNG bytes");
+    assert_eq!(
+        &base[..4],
+        b"\x89PNG",
+        "base side should be smudged PNG bytes"
+    );
     assert_eq!(base, png, "base side should round-trip the original image");
 
     // The working-tree file is smudged on checkout, so it's already real bytes;
