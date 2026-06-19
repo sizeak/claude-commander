@@ -2808,6 +2808,7 @@ diff --git a/c.rs b/c.rs
             added: 1,
             removed: 0,
             hunks: Vec::new(),
+            binary: None,
         }
     }
 
