@@ -192,11 +192,26 @@ impl App {
                 // must not drive the unread/`mutate` path (which would take the
                 // write lock for a no-op `get_session_mut` miss every idle).
                 let sentinel = crate::commander::commander_sentinel_id();
-                let unread_ids: Vec<_> =
-                    detect_unread_transitions(&self.ui_state.agent_states, &states)
-                        .into_iter()
-                        .filter(|sid| *sid != sentinel)
-                        .collect();
+                let transitions = detect_unread_transitions(&self.ui_state.agent_states, &states);
+                // If the agent for the open review view just finished a turn, it
+                // likely acted on applied comments — fold its fresh edits into
+                // the view in place. Skip while a comment box is open (a rebuild
+                // would lose the in-progress draft's anchor).
+                let review_refresh = match &self.ui_state.modal {
+                    Modal::ReviewDiff(state)
+                        if state.comment.is_none() && transitions.contains(&state.session_id) =>
+                    {
+                        Some((state.session_id, state.title.clone(), state.content_hash))
+                    }
+                    _ => None,
+                };
+                if let Some((sid, title, prev_hash)) = review_refresh {
+                    self.spawn_review_refresh(sid, title, prev_hash, false);
+                }
+                let unread_ids: Vec<_> = transitions
+                    .into_iter()
+                    .filter(|sid| *sid != sentinel)
+                    .collect();
                 if !unread_ids.is_empty() {
                     let _ = self
                         .service
@@ -287,11 +302,48 @@ impl App {
                         comments,
                         reviewed,
                         segments,
+                        content_hash,
                     } = *prepared;
                     let mut state = DiffReviewState::new(session_id, title, base, diff, comments);
+                    state.content_hash = content_hash;
                     state.reviewed = reviewed.into_iter().collect();
                     state.prime_segments(segments);
                     self.ui_state.modal = Modal::ReviewDiff(Box::new(state));
+                }
+            }
+            StateUpdate::ReviewRefreshed { refreshed, manual } => {
+                self.ui_state.review_refresh_in_flight = false;
+                match refreshed {
+                    Some(prepared) => {
+                        // Fold the fresh diff in only if the same review is still
+                        // open and the user isn't mid-comment (a rebuild would
+                        // drop the draft); otherwise discard it.
+                        if let Modal::ReviewDiff(state) = &mut self.ui_state.modal
+                            && state.session_id == prepared.session_id
+                            && state.comment.is_none()
+                        {
+                            let ReviewPrepared {
+                                diff,
+                                comments,
+                                reviewed,
+                                segments,
+                                content_hash,
+                                ..
+                            } = *prepared;
+                            state.refresh_diff(
+                                diff,
+                                comments,
+                                reviewed.into_iter().collect(),
+                                segments,
+                                content_hash,
+                            );
+                            if manual {
+                                self.set_review_status("Review refreshed");
+                            }
+                        }
+                    }
+                    None if manual => self.set_review_status("Review already up to date"),
+                    None => {}
                 }
             }
             StateUpdate::CascadeFinished { result } => {

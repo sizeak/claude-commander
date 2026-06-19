@@ -667,6 +667,9 @@ pub struct AppUiState {
     pub gh_available: bool,
     /// When the last background preview fetch was spawned (None = not in flight)
     pub preview_update_spawned_at: Option<Instant>,
+    /// Whether a review-diff refresh re-compose is currently in flight, so the
+    /// idle trigger and a manual refresh don't double-spawn.
+    pub review_refresh_in_flight: bool,
     /// Tick counter for animations (incremented each render tick)
     pub tick_count: u64,
     /// Throbber/spinner state for loading modals
@@ -748,6 +751,7 @@ impl Default for AppUiState {
             last_pr_check: None,
             gh_available: false,
             preview_update_spawned_at: None,
+            review_refresh_in_flight: false,
             terminal_size: Rect::default(),
             tick_count: 0,
             throbber_state: throbber_widgets_tui::ThrobberState::default(),
