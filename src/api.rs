@@ -31,6 +31,11 @@ use crate::tui::theme::Theme;
 /// High-level service that wraps `SessionManager`, state stores, and agent
 /// detection into a single entry point. Both the CLI and TUI route through
 /// this rather than wiring the pieces together independently.
+///
+/// Cheap to clone: every field is an `Arc` or itself `Arc`-backed, so a clone
+/// is a shared handle to the same state — used to hand the service to
+/// background tasks (e.g. the review-diff refresh).
+#[derive(Clone)]
 pub struct CommanderService {
     manager: SessionManager,
     store: Arc<StateStore>,
@@ -64,7 +69,10 @@ impl CommanderService {
 
     pub fn for_cli(config: crate::config::Config) -> std::result::Result<Self, crate::Error> {
         let config_store = Arc::new(ConfigStore::new(config)?);
-        let app_state = AppState::load().unwrap_or_else(|_| AppState::new());
+        // A corrupt state file must propagate, not default to an empty
+        // state: `list` would report no sessions and `create` would persist
+        // a duplicate project alongside the unreadable original.
+        let app_state = AppState::load()?;
         let store = Arc::new(StateStore::new(app_state)?);
         Ok(Self::new(config_store, store))
     }
@@ -295,14 +303,64 @@ impl CommanderService {
     /// (persisting any status changes). Returns the parsed diff plus the
     /// re-anchored comments.
     pub async fn open_review(&self, session_id: &SessionId) -> Result<ReviewSnapshot> {
-        let (worktree_path, review_base) = self.review_context(session_id).await?;
-
+        let (worktree_path, review_base) = self.review_target(session_id).await?;
         let base = review_base.git_ref(&worktree_path).await;
         let raw = compose_review_diff(&worktree_path, &base).await?;
+        self.snapshot_from_raw(session_id, &worktree_path, base, raw)
+            .await
+    }
+
+    /// Re-compose the review diff and, when its content differs from
+    /// `prev_hash`, return a fresh snapshot (re-anchoring comments and pruning
+    /// reviewed marks against the new diff). Returns `None` when the working
+    /// tree is unchanged, so the caller can skip the expensive parse/precompute
+    /// and leave the open view untouched. Drives the review view's in-place
+    /// refresh after the agent finishes a turn (or on manual request).
+    pub async fn refresh_review_if_changed(
+        &self,
+        session_id: &SessionId,
+        prev_hash: u64,
+    ) -> Result<Option<ReviewSnapshot>> {
+        let (worktree_path, review_base) = self.review_target(session_id).await?;
+        let base = review_base.git_ref(&worktree_path).await;
+        let raw = compose_review_diff(&worktree_path, &base).await?;
+        if xxhash_rust::xxh3::xxh3_64(raw.as_bytes()) == prev_hash {
+            return Ok(None);
+        }
+        Ok(Some(
+            self.snapshot_from_raw(session_id, &worktree_path, base, raw)
+                .await?,
+        ))
+    }
+
+    /// Resolve the worktree path and review base for a session under a brief
+    /// read lock. Shared by `open_review`, `refresh_review_if_changed`,
+    /// `review_blob_source` and `fetch_diff_blob`.
+    async fn review_target(&self, session_id: &SessionId) -> Result<(PathBuf, ReviewBase)> {
+        let state = self.store.read().await;
+        let session = state
+            .sessions
+            .get(session_id)
+            .ok_or(SessionError::NotFound(*session_id))?;
+        Ok((session.worktree_path.clone(), ReviewBase::of(session)))
+    }
+
+    /// Build a [`ReviewSnapshot`] from an already-composed raw unified diff:
+    /// hash it for staleness detection, parse it, then re-anchor the session's
+    /// comments and prune stale reviewed marks against the parsed diff
+    /// (persisting any changes).
+    async fn snapshot_from_raw(
+        &self,
+        session_id: &SessionId,
+        worktree_path: &Path,
+        base: String,
+        raw: String,
+    ) -> Result<ReviewSnapshot> {
+        let content_hash = xxhash_rust::xxh3::xxh3_64(raw.as_bytes());
         let mut diff = parse_unified_diff(&raw);
         // Binary files carry metadata only; fill in the blob sizes the parser
         // can't know. Bytes are lazy-loaded via `fetch_diff_blob`.
-        enrich_binary_sizes(&mut diff, &worktree_path).await;
+        enrich_binary_sizes(&mut diff, worktree_path).await;
 
         let mut comments = self.comments.load(*session_id).await?;
         reanchor_comments(&mut comments, &diff);
@@ -321,6 +379,7 @@ impl CommanderService {
             diff,
             comments,
             reviewed,
+            content_hash,
         })
     }
 
@@ -329,20 +388,9 @@ impl CommanderService {
     /// to read blob bytes (via `crate::git::read_base_blob`/`read_worktree_file`)
     /// without holding the non-`Send` service handle across the task boundary.
     pub async fn review_blob_source(&self, session_id: &SessionId) -> Result<(PathBuf, String)> {
-        let (worktree_path, review_base) = self.review_context(session_id).await?;
+        let (worktree_path, review_base) = self.review_target(session_id).await?;
         let base = review_base.git_ref(&worktree_path).await;
         Ok((worktree_path, base))
-    }
-
-    /// A session's worktree path and review base, looked up under one read lock.
-    /// Shared by `open_review` and `fetch_diff_blob` so both agree on the base.
-    async fn review_context(&self, session_id: &SessionId) -> Result<(PathBuf, ReviewBase)> {
-        let state = self.store.read().await;
-        let session = state
-            .sessions
-            .get(session_id)
-            .ok_or(SessionError::NotFound(*session_id))?;
-        Ok((session.worktree_path.clone(), ReviewBase::of(session)))
     }
 
     /// Fetch the raw bytes of one side of a binary file in a session's review
@@ -359,7 +407,7 @@ impl CommanderService {
         side: DiffSide,
         path: &str,
     ) -> Result<Vec<u8>> {
-        let (worktree_path, review_base) = self.review_context(session_id).await?;
+        let (worktree_path, review_base) = self.review_target(session_id).await?;
         match side {
             DiffSide::New => read_worktree_file(&worktree_path, path).await,
             DiffSide::Old => {
@@ -676,6 +724,10 @@ pub struct ReviewSnapshot {
     pub comments: Vec<Comment>,
     /// Display paths of files still marked reviewed (stale marks pruned).
     pub reviewed: Vec<String>,
+    /// xxh3 hash of the raw unified diff this snapshot was built from, so an
+    /// open review view can cheaply tell whether a re-compose actually changed
+    /// anything before rebuilding.
+    pub content_hash: u64,
 }
 
 // -- Internal helpers --

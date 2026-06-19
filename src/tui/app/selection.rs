@@ -306,6 +306,7 @@ mod tests {
             name: name.to_string(),
             count: 1,
             collapsed: false,
+            max_sessions: None,
         }
     }
 
