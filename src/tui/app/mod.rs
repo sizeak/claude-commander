@@ -1138,6 +1138,13 @@ impl App {
                         // so not necessarily the one they entered with.
                         let mut final_session: Option<String> = None;
                         if !session_name.is_empty() {
+                            // Pre-warm the conversation runtime so voice input
+                            // (Alt-V) works immediately while attached — the mic
+                            // listener only exists once the conversation has been
+                            // started. Idempotent; no-op after the first attach.
+                            if self.config.stt.enabled {
+                                self.ensure_conversation_started().await;
+                            }
                             let mut current_session = session_name.clone();
                             let mut consecutive_ends: u8 = 0;
 
@@ -1165,6 +1172,20 @@ impl App {
                                 } else {
                                     Vec::new()
                                 };
+                                // Voice input (Alt-V) is toggled in-place mid-
+                                // attach; only meaningful for Claude sessions
+                                // with STT enabled and a listener running.
+                                let (voice_triggers, voice_listener) =
+                                    if intercept_ctrl_z && self.config.stt.enabled {
+                                        (
+                                            crate::config::keybindings::voice_trigger_bytes(
+                                                &self.config.keybindings,
+                                            ),
+                                            self.conversation.listener.clone(),
+                                        )
+                                    } else {
+                                        (Vec::new(), None)
+                                    };
 
                                 // Stamp last_attached_at so the in-tmux
                                 // switcher can sort Alt+Tab-style by MRU.
@@ -1190,6 +1211,9 @@ impl App {
                                     &current_session,
                                     editor_triggers,
                                     review_triggers,
+                                    voice_triggers,
+                                    voice_listener,
+                                    self.conversation.recording,
                                     intercept_ctrl_z,
                                 )
                                 .await
@@ -1204,6 +1228,10 @@ impl App {
                                         break;
                                     }
                                 };
+
+                                // Voice input may have been toggled mid-attach;
+                                // keep our flag (and the overlay indicator) in sync.
+                                self.conversation.recording = outcome.recording;
 
                                 // The in-session switcher may have run `tmux switch-client`
                                 // mid-attach, so the session we exited from isn't

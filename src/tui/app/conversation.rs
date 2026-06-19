@@ -8,11 +8,14 @@
 //! model and renders it. This satisfies the "runs fully headless; the window is
 //! just a log + input" requirement.
 
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use super::*;
-use crate::conversation::{ConversationEvent, ConversationSession, spawn_speaker};
+use crate::conversation::{
+    ConversationEvent, ConversationSession, ListenerCommand, spawn_listener, spawn_speaker,
+};
 
 /// Canonical project spinner frames (advanced every 3 render ticks).
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -29,9 +32,16 @@ CLI), which manages the user's Claude coding sessions across their projects. The
 user is *talking* to you, and your replies are read aloud by text-to-speech.
 
 ## Tone
-- Be concise and conversational — a sentence or two, not a wall of text.
-- Don't read out code, long file paths, or long lists verbatim; summarise them.
-- Avoid markdown tables and code blocks; they sound bad spoken.
+You are *speaking*, not writing. Talk like a person would out loud.
+- Lead with the answer. Give the conclusion or result directly — don't narrate
+  your reasoning, your plan, or the steps you took to find it.
+- Keep it short: a sentence or two for most things. Be succinct, but don't drop
+  details the user actually needs — brevity, not vagueness.
+- Plain spoken English prose only. No markdown, headings, bullet lists, tables,
+  or code blocks — they sound terrible read aloud.
+- Don't read out code, long file paths, IDs, or long lists verbatim; summarise
+  them in words (\"three sessions, all running\" — not each name and hash).
+- It's fine to ask a quick follow-up question instead of guessing.
 
 ## Checking current state
 Don't guess about the user's sessions or projects — inspect the live state with
@@ -45,6 +55,26 @@ going on. You can read anything on the filesystem the user can.
 ## Working directory
 This directory is your own scratch space; nothing else in it matters.
 ";
+
+/// File (in the conversation scratch dir) holding the last headless session id,
+/// so the next launch resumes the same conversation via `--resume`.
+const SESSION_ID_FILE: &str = "session-id";
+
+/// Read the persisted session id to resume, if any. A missing/blank file means
+/// "start fresh" (e.g. the very first launch).
+fn read_resume_id(dir: &Path) -> Option<String> {
+    let id = std::fs::read_to_string(dir.join(SESSION_ID_FILE)).ok()?;
+    let id = id.trim();
+    (!id.is_empty()).then(|| id.to_string())
+}
+
+/// Persist the current session id so the next launch can resume it. Best-effort:
+/// a write failure just means the next launch starts a fresh conversation.
+fn write_resume_id(dir: &Path, id: &str) {
+    if let Err(e) = std::fs::write(dir.join(SESSION_ID_FILE), id) {
+        warn!(target: "conversation", "failed to persist session id: {e}");
+    }
+}
 
 /// Who authored a conversation message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,6 +116,12 @@ pub struct ConversationView {
     /// them and answers them in order; we defer *displaying* each until the
     /// preceding reply completes, so history stays correctly ordered.
     pub pending_user: std::collections::VecDeque<String>,
+    /// When the current agent turn began (user message handed to the session).
+    /// Drives the stage-2 latency traces; `None` between turns.
+    turn_started_at: Option<Instant>,
+    /// Whether time-to-first-token has already been logged for this turn (so we
+    /// emit it once, at the first delta).
+    first_token_logged: bool,
 }
 
 impl ConversationView {
@@ -101,6 +137,18 @@ impl ConversationView {
             }
             ConversationEvent::Delta(text) => {
                 self.last_delta_at = Some(Instant::now());
+                // Stage 2a: time-to-first-token — how long the agent spent
+                // thinking / running tools before it started speaking.
+                if let Some(t0) = self.turn_started_at
+                    && !self.first_token_logged
+                {
+                    self.first_token_logged = true;
+                    tracing::debug!(
+                        target: "conversation",
+                        "timing [agent] first token after {} ms (think/tool latency)",
+                        t0.elapsed().as_millis()
+                    );
+                }
                 self.streaming.push_str(text);
             }
             ConversationEvent::Break => {
@@ -111,6 +159,14 @@ impl ConversationView {
                 }
             }
             ConversationEvent::TurnComplete => {
+                // Stage 2b: total agent turn — submission to last token.
+                if let Some(t0) = self.turn_started_at.take() {
+                    tracing::debug!(
+                        target: "conversation",
+                        "timing [agent] turn complete in {} ms total",
+                        t0.elapsed().as_millis()
+                    );
+                }
                 self.finalize_streaming();
                 // If the user queued a message while this reply streamed, show it
                 // now (after the reply) and stay Thinking — it's answered next.
@@ -120,15 +176,20 @@ impl ConversationView {
                         text: next,
                     });
                     self.status = ConvStatus::Thinking;
+                    // The queued turn starts being answered now — restart the clock.
+                    self.turn_started_at = Some(Instant::now());
+                    self.first_token_logged = false;
                 } else {
                     self.status = ConvStatus::Idle;
                 }
             }
             ConversationEvent::Error(e) => {
+                self.turn_started_at = None;
                 self.finalize_streaming();
                 self.status = ConvStatus::Error(e.clone());
             }
             ConversationEvent::Exited => {
+                self.turn_started_at = None;
                 self.finalize_streaming();
                 self.status = ConvStatus::Error("session ended".to_string());
             }
@@ -159,6 +220,9 @@ impl ConversationView {
             });
             self.status = ConvStatus::Thinking;
             self.last_delta_at = None;
+            // Start the stage-2 clock: this turn is now in the agent's hands.
+            self.turn_started_at = Some(Instant::now());
+            self.first_token_logged = false;
         }
     }
 
@@ -172,9 +236,52 @@ impl ConversationView {
 #[derive(Default)]
 pub struct ConversationRuntime {
     /// The headless `claude` subprocess; `None` until first opened / after exit.
-    pub session: Option<ConversationSession>,
+    /// Shared behind an async mutex so a transcript can be submitted off the UI
+    /// loop (e.g. while the main loop is parked in a tmux attach) as well as from
+    /// the typed-input path on the loop.
+    pub session: Arc<tokio::sync::Mutex<Option<ConversationSession>>>,
     /// Shared display model — updated off-loop, read by the renderer.
     pub view: Arc<Mutex<ConversationView>>,
+    /// Voice-input listener command channel; `None` if STT is off/unavailable.
+    pub listener: Option<tokio::sync::mpsc::UnboundedSender<ListenerCommand>>,
+    /// Whether the microphone is currently capturing (toggled by Alt-V).
+    pub recording: bool,
+}
+
+impl ConversationRuntime {
+    fn listen(&self, cmd: ListenerCommand) -> bool {
+        if let Some(tx) = &self.listener {
+            tx.send(cmd).is_ok()
+        } else {
+            false
+        }
+    }
+}
+
+/// Write one user turn to the session and record it in the shared view. Returns
+/// `false` if there's no live session (caller may respawn and retry). Lives free
+/// of `&App` so it can run off the UI loop — from the typed-input path *and* from
+/// the off-loop voice-submit task (which keeps working during a tmux attach).
+async fn submit_to_session(
+    session: &Arc<tokio::sync::Mutex<Option<ConversationSession>>>,
+    view: &Arc<Mutex<ConversationView>>,
+    text: String,
+) -> bool {
+    let mut guard = session.lock().await;
+    let Some(s) = guard.as_mut() else {
+        return false;
+    };
+    match s.send_user_message(&text).await {
+        Ok(()) => {
+            drop(guard);
+            view.lock().unwrap().push_user(text);
+            true
+        }
+        Err(e) => {
+            tracing::warn!(target: "conversation", "send failed: {e}");
+            false
+        }
+    }
 }
 
 impl App {
@@ -187,10 +294,10 @@ impl App {
             return;
         }
         if !self.config.conversation.enabled {
-            self.ui_state.status_message = Some((
-                "Conversation mode is disabled — enable it in Settings ▸ Conversation".to_string(),
-                Instant::now() + std::time::Duration::from_secs(4),
-            ));
+            self.set_status_message(
+                "Conversation mode is disabled — enable it in Settings ▸ Conversation",
+                4,
+            );
             return;
         }
         self.ensure_conversation_started().await;
@@ -202,8 +309,8 @@ impl App {
 
     /// Spawn the headless streaming `claude` session, the TTS speaker, and the
     /// off-loop bridge that updates the shared model + feeds the speaker. Idempotent.
-    async fn ensure_conversation_started(&mut self) {
-        if self.conversation.session.is_some() {
+    pub(super) async fn ensure_conversation_started(&mut self) {
+        if self.conversation.session.lock().await.is_some() {
             return;
         }
         let view = self.conversation.view.clone();
@@ -250,8 +357,12 @@ impl App {
         let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<ConversationEvent>();
         let command = self.config.conversation.command.clone();
         let permission_mode = self.config.conversation.permission_mode.clone();
-        match ConversationSession::spawn(&command, &permission_mode, &dir, ev_tx) {
-            Ok(session) => self.conversation.session = Some(session),
+        // Resume the previous conversation if we have a stored session id, so the
+        // agent keeps its history (and memory of the user) across restarts.
+        let resume = read_resume_id(&dir);
+        match ConversationSession::spawn(&command, &permission_mode, &dir, resume.as_deref(), ev_tx)
+        {
+            Ok(session) => *self.conversation.session.lock().await = Some(session),
             Err(e) => {
                 view.lock().unwrap().set_error(e.to_string());
                 return;
@@ -263,12 +374,19 @@ impl App {
         // overlay is closed / the main loop is busy. The renderer just reads the
         // model when visible.
         let bridge_view = view.clone();
+        let bridge_dir = dir.clone();
         tokio::spawn(async move {
             while let Some(ev) = ev_rx.recv().await {
                 if matches!(ev, ConversationEvent::Delta(_)) {
                     tracing::trace!(target: "conversation", "bridge delta");
                 } else {
                     tracing::debug!(target: "conversation", "bridge event: {ev:?}");
+                }
+                // Persist the session id so the next launch resumes this
+                // conversation. Claude may fork a fresh id on resume, so record
+                // whatever the latest init reports.
+                if let ConversationEvent::Started { session_id } = &ev {
+                    write_resume_id(&bridge_dir, session_id);
                 }
                 if let Some(sp) = &speaker
                     && let Some(cmd) = crate::conversation::speaker_command_for(&ev)
@@ -279,6 +397,32 @@ impl App {
             }
             tracing::debug!(target: "conversation", "bridge task ended");
         });
+
+        // Voice-input listener (Alt-V) + its off-loop submit task. The listener
+        // captures the mic and emits a transcript; the submit task writes it to
+        // the session directly (not via the UI loop), so voice input works even
+        // while the main loop is parked inside a tmux attach. Failure (no mic) is
+        // non-fatal.
+        if self.config.stt.enabled && self.conversation.listener.is_none() {
+            let (tx_text, mut rx_text) = tokio::sync::mpsc::unbounded_channel::<String>();
+            match spawn_listener(self.config.stt.clone(), tx_text) {
+                Ok(tx) => {
+                    self.conversation.listener = Some(tx);
+                    let session = self.conversation.session.clone();
+                    let submit_view = view.clone();
+                    tokio::spawn(async move {
+                        while let Some(text) = rx_text.recv().await {
+                            let text = text.trim().to_string();
+                            if text.is_empty() {
+                                continue;
+                            }
+                            submit_to_session(&session, &submit_view, text).await;
+                        }
+                    });
+                }
+                Err(e) => warn!(target: "conversation", "STT unavailable: {e}"),
+            }
+        }
         view.lock().unwrap().status = ConvStatus::Idle;
     }
 
@@ -287,30 +431,61 @@ impl App {
     /// Self-heals a dead session by respawning and retrying once.
     pub(super) async fn submit_conversation_input(&mut self, text: String) {
         self.ensure_conversation_started().await;
-        let mut result = self.send_to_session(&text).await;
-        if result.is_err() {
-            // Session likely exited (idle timeout / crash) — respawn and retry.
-            self.conversation.session = None;
-            self.ensure_conversation_started().await;
-            result = self.send_to_session(&text).await;
+        if submit_to_session(
+            &self.conversation.session,
+            &self.conversation.view,
+            text.clone(),
+        )
+        .await
+        {
+            return;
         }
-        match result {
-            Ok(()) => self.conversation.view.lock().unwrap().push_user(text),
-            Err(e) => {
-                tracing::warn!(target: "conversation", "send failed: {e}");
-                self.conversation.view.lock().unwrap().set_error(e);
-            }
+        // Session likely exited (idle timeout / crash) — respawn and retry once.
+        *self.conversation.session.lock().await = None;
+        self.ensure_conversation_started().await;
+        if !submit_to_session(&self.conversation.session, &self.conversation.view, text).await {
+            self.conversation
+                .view
+                .lock()
+                .unwrap()
+                .set_error("session not running".to_string());
         }
     }
 
-    async fn send_to_session(&mut self, text: &str) -> std::result::Result<(), String> {
-        match self.conversation.session.as_mut() {
-            Some(session) => session
-                .send_user_message(text)
-                .await
-                .map_err(|e| e.to_string()),
-            None => Err("session not running".to_string()),
+    /// Alt-V: toggle voice input. First press starts recording the microphone;
+    /// the next press stops it and submits the transcript to the conversation
+    /// agent. Works whether the overlay is open or not, mirroring spoken replies.
+    pub(super) async fn toggle_voice_input(&mut self) {
+        if !self.config.stt.enabled {
+            self.set_status_message(
+                "Voice input is disabled — enable STT in Settings ▸ Conversation",
+                4,
+            );
+            return;
         }
+        // Bring the session (and listener) up on first use, just like typing.
+        self.ensure_conversation_started().await;
+        if self.conversation.listener.is_none() {
+            self.set_status_message("Voice input unavailable — no microphone?", 4);
+            return;
+        }
+
+        if self.conversation.recording {
+            self.conversation.recording = false;
+            self.conversation.listen(ListenerCommand::Stop);
+            self.set_status_message("🎙 Transcribing…", 4);
+        } else if self.conversation.listen(ListenerCommand::Start) {
+            self.conversation.recording = true;
+            self.set_status_message("🎙 Listening… (Alt-V to send)", 60);
+        }
+    }
+
+    /// Show a transient status-bar message for `secs` seconds.
+    fn set_status_message(&mut self, msg: impl Into<String>, secs: u64) {
+        self.ui_state.status_message = Some((
+            msg.into(),
+            Instant::now() + std::time::Duration::from_secs(secs),
+        ));
     }
 
     /// Render the full-screen conversation overlay (a pure view of the model).
@@ -423,7 +598,18 @@ impl App {
         };
         let text_width = text_area.width.max(1);
         let view_scroll = input.visual_scroll(text_width as usize);
-        if input.value().is_empty() {
+        if self.conversation.recording {
+            // Recording takes over the input row — show a live indicator instead
+            // of the typing placeholder.
+            frame.render_widget(
+                Paragraph::new("🎙 Listening… (Alt-V to send)").style(
+                    Style::default()
+                        .fg(self.theme.modal_error)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                text_area,
+            );
+        } else if input.value().is_empty() {
             frame.render_widget(
                 Paragraph::new("Type a message…")
                     .style(Style::default().fg(self.theme.text_secondary)),
@@ -570,6 +756,19 @@ mod tests {
     }
 
     #[test]
+    fn resume_id_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        // No file yet → start fresh.
+        assert_eq!(read_resume_id(dir.path()), None);
+        // After persisting, the same id comes back for the next launch.
+        write_resume_id(dir.path(), "abc-123");
+        assert_eq!(read_resume_id(dir.path()), Some("abc-123".to_string()));
+        // A blank/whitespace file is treated as "no id" (start fresh).
+        write_resume_id(dir.path(), "  \n");
+        assert_eq!(read_resume_id(dir.path()), None);
+    }
+
+    #[test]
     fn wrap_long_word_hard_splits() {
         assert_eq!(wrap_text("abcdefghij", 4), vec!["abcd", "efgh", "ij"]);
     }
@@ -596,6 +795,45 @@ mod tests {
         assert_eq!(v.streaming, "");
         assert_eq!(v.messages.last().unwrap().role, ConvRole::Assistant);
         assert_eq!(v.messages.last().unwrap().text, "Hello there.");
+    }
+
+    #[test]
+    fn agent_turn_timer_tracks_turn_boundaries() {
+        let mut v = ConversationView::default();
+        // No turn in flight initially.
+        assert!(v.turn_started_at.is_none());
+
+        // Submitting a turn starts the stage-2 clock.
+        v.push_user("hi".into());
+        assert!(v.turn_started_at.is_some());
+        assert!(!v.first_token_logged);
+
+        // First delta marks time-to-first-token (logged once).
+        v.apply(&ConversationEvent::Delta("Hel".into()));
+        assert!(v.first_token_logged);
+        assert!(v.turn_started_at.is_some()); // still timing the total turn
+        v.apply(&ConversationEvent::Delta("lo.".into()));
+        assert!(v.first_token_logged); // not re-armed by later deltas
+
+        // Completing the turn (nothing queued) stops the clock.
+        v.apply(&ConversationEvent::TurnComplete);
+        assert!(v.turn_started_at.is_none());
+
+        // A queued message promoted at TurnComplete restarts the clock.
+        v.push_user("one".into());
+        v.apply(&ConversationEvent::Delta("a".into()));
+        v.push_user("two".into()); // queued while Thinking
+        v.apply(&ConversationEvent::TurnComplete);
+        assert!(v.turn_started_at.is_some()); // re-armed for the queued turn
+        assert!(!v.first_token_logged);
+    }
+
+    #[test]
+    fn agent_turn_timer_cleared_on_error() {
+        let mut v = ConversationView::default();
+        v.push_user("hi".into());
+        v.apply(&ConversationEvent::Error("boom".into()));
+        assert!(v.turn_started_at.is_none());
     }
 
     #[test]

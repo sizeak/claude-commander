@@ -103,7 +103,18 @@ fn raise_fd_limit() {}
 async fn execute_attach(session_name: &str, editor_triggers: Vec<Vec<u8>>) {
     // CLI `attach` resolves a Claude session by title/ID, never a shell. The
     // review toggle has no standalone UI here, so it's disabled (empty triggers).
-    match attach_to_session(session_name, editor_triggers, Vec::new(), true).await {
+    // Voice input needs the TUI's conversation runtime, so it's disabled here too.
+    match attach_to_session(
+        session_name,
+        editor_triggers,
+        Vec::new(),
+        Vec::new(),
+        None,
+        false,
+        true,
+    )
+    .await
+    {
         Ok(outcome) => match outcome.result {
             AttachResult::Detached
             | AttachResult::SwitchToShell

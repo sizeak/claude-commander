@@ -126,21 +126,28 @@ impl ConversationSession {
     /// Spawn the streaming `claude` process in `cwd`, forwarding parsed stdout
     /// events on `events`. `command` is the binary to run (default `"claude"`);
     /// `permission_mode` is passed to `--permission-mode` (e.g. `"auto"`) so the
-    /// conversation agent can act without interactive approval prompts.
+    /// conversation agent can act without interactive approval prompts. When
+    /// `resume` is `Some(id)`, `--resume <id>` continues that prior session so
+    /// the conversation keeps its history across restarts.
     pub fn spawn(
         command: &str,
         permission_mode: &str,
         cwd: &Path,
+        resume: Option<&str>,
         events: mpsc::UnboundedSender<ConversationEvent>,
     ) -> Result<Self, TtsError> {
-        let mut child = Command::new(command)
-            .current_dir(cwd)
+        let mut cmd = Command::new(command);
+        cmd.current_dir(cwd)
             .arg("-p")
             .args(["--input-format", "stream-json"])
             .args(["--output-format", "stream-json"])
             .args(["--permission-mode", permission_mode])
             .arg("--include-partial-messages")
-            .arg("--verbose")
+            .arg("--verbose");
+        if let Some(id) = resume.filter(|id| !id.is_empty()) {
+            cmd.args(["--resume", id]);
+        }
+        let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())

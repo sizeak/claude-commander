@@ -175,6 +175,7 @@ fn synth_future(
     let voice = cfg.voice.clone().unwrap_or_default();
     let response_format = cfg.response_format.clone();
     let speed = cfg.speed;
+    let char_len = text.chars().count();
     Some(async move {
         let req = SpeechRequest {
             model: &model,
@@ -183,7 +184,18 @@ fn synth_future(
             response_format: &response_format,
             speed,
         };
-        client.synthesize(&req).await
+        // Stage 3a timing: TTS synthesis request (text → encoded audio bytes).
+        let t0 = std::time::Instant::now();
+        let result = client.synthesize(&req).await;
+        if let Ok(bytes) = &result {
+            tracing::debug!(
+                target: "conversation",
+                "timing [tts] synth {char_len} chars -> {} bytes in {} ms",
+                bytes.len(),
+                t0.elapsed().as_millis()
+            );
+        }
+        result
     })
 }
 

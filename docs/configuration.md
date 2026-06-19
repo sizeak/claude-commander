@@ -151,6 +151,17 @@ state_sync_interval_ms = 2000
 # speak_scope = "prose_only"               # prose_only | verbatim (per-sentence, streamed)
 # volume = 1.0                             # 0.0–2.0
 
+# Voice input (speech-to-text): hold a conversation by talking. Toggle recording
+# with `Alt-v`, then it's transcribed via an OpenAI-compatible STT engine and sent
+# to the conversation agent. See "Voice input (STT)" below.
+# [stt]
+# enabled = true                          # master switch for Alt-v voice input (off by default)
+# base_url = "http://127.0.0.1:8000/v1"   # OpenAI-compatible transcription endpoint (include /v1)
+# model = "Systran/faster-whisper-base"    # transcription model name
+# language = "en"                          # ISO-639-1 hint; omit to auto-detect
+# prompt = "..."                           # optional decoding prompt (domain vocab / spelling)
+# api_key = "..."                          # sent as a Bearer header; omit for local servers
+
 # Custom key bindings — override any default key with one or more alternatives
 # [keybindings]
 # navigate_up = ["k", "Up"]
@@ -205,6 +216,35 @@ volume = 1.0                             # 0.0–2.0
 > **Build note:** in-process playback uses `rodio`, which links **ALSA** on Linux. Building from
 > source needs the ALSA development headers (`libasound2-dev` on Debian/Ubuntu, `alsa-lib` on
 > Arch). The Nix dev shell provides them automatically.
+
+## Voice input (STT)
+
+Press **`Alt-v`** to talk to the conversation agent. It's a **toggle**: the first press starts
+recording the microphone, the next press stops it, transcribes the audio through any
+**OpenAI-compatible** speech-to-text engine (it posts a WAV to `{base_url}/audio/transcriptions`),
+and sends the resulting text to the conversation session — exactly as if you'd typed it. The reply
+then streams back and is spoken aloud (if TTS is enabled). Voice input works **whether the overlay
+is open or not**, mirroring spoken replies.
+
+`stt.enabled` is a separate switch from `conversation.enabled` and is **off by default**. Voice
+input feeds the conversation session, so it's only useful alongside conversation mode. Microphone
+capture uses `cpal` (also ALSA on Linux — see the build note above). If no microphone is available
+or the STT server is unreachable, voice input degrades gracefully (a status message) and never
+blocks the UI.
+
+```toml
+[stt]
+enabled = true                          # master switch for Alt-v voice input (off = no voice input)
+base_url = "http://127.0.0.1:8000/v1"   # OpenAI-compatible transcription endpoint (include /v1)
+model = "Systran/faster-whisper-base"    # transcription model name
+language = "en"                          # ISO-639-1 hint; omit to auto-detect
+# prompt = "Vitest, Kotlin, ..."         # optional decoding prompt (domain vocab / spelling hints)
+# api_key = "..."                        # sent as a Bearer header; omit for local servers
+```
+
+Audio is captured at the microphone's native rate, downmixed to mono, and encoded as 16-bit PCM
+WAV; the server resamples as needed. Recording isn't chunked yet — the whole utterance is uploaded
+when you stop — so very long dictations wait until the end to transcribe.
 
 ## Theme Presets
 

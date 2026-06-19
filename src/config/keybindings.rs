@@ -48,6 +48,7 @@ pub enum BindableAction {
     OpenPullRequest,
     OpenCommander,
     ToggleConversationOverlay,
+    ToggleVoiceInput,
     OpenReviewDiff,
     TogglePane,
     TogglePaneReverse,
@@ -95,6 +96,7 @@ impl BindableAction {
         Self::OpenPullRequest,
         Self::OpenCommander,
         Self::ToggleConversationOverlay,
+        Self::ToggleVoiceInput,
         Self::OpenReviewDiff,
         Self::ScanDirectory,
         Self::MoveToSection,
@@ -142,6 +144,7 @@ impl BindableAction {
             Self::OpenPullRequest => "open_pull_request",
             Self::OpenCommander => "open_commander",
             Self::ToggleConversationOverlay => "toggle_conversation_overlay",
+            Self::ToggleVoiceInput => "toggle_voice_input",
             Self::OpenReviewDiff => "open_review_diff",
             Self::TogglePane => "toggle_pane",
             Self::TogglePaneReverse => "toggle_pane_reverse",
@@ -190,6 +193,7 @@ impl BindableAction {
             Self::OpenPullRequest => "Open PR in browser",
             Self::OpenCommander => "Open commander session",
             Self::ToggleConversationOverlay => "Open/close conversation overlay (TTS)",
+            Self::ToggleVoiceInput => "Voice input: record / send (STT)",
             Self::OpenReviewDiff => "Review diff & comment",
             Self::TogglePane => "Toggle preview/diff/shell view",
             Self::TogglePaneReverse => "Toggle view (reverse)",
@@ -238,6 +242,7 @@ impl BindableAction {
             | Self::OpenPullRequest
             | Self::OpenCommander
             | Self::ToggleConversationOverlay
+            | Self::ToggleVoiceInput
             | Self::OpenReviewDiff
             | Self::ScanDirectory
             | Self::MoveToSection
@@ -284,6 +289,7 @@ impl FromStr for BindableAction {
             "open_pull_request" => Ok(Self::OpenPullRequest),
             "open_commander" => Ok(Self::OpenCommander),
             "toggle_conversation_overlay" => Ok(Self::ToggleConversationOverlay),
+            "toggle_voice_input" => Ok(Self::ToggleVoiceInput),
             "open_review_diff" => Ok(Self::OpenReviewDiff),
             "toggle_pane" => Ok(Self::TogglePane),
             "toggle_pane_reverse" => Ok(Self::TogglePaneReverse),
@@ -637,6 +643,10 @@ impl Default for KeyBindings {
             vec![kb(KeyCode::Char('c'), alt)],
         );
         bindings.insert(
+            BindableAction::ToggleVoiceInput,
+            vec![kb(KeyCode::Char('v'), alt)],
+        );
+        bindings.insert(
             BindableAction::OpenReviewDiff,
             vec![kb(KeyCode::Char('r'), none), kb(KeyCode::Char('r'), alt)],
         );
@@ -870,6 +880,15 @@ pub fn review_trigger_bytes(bindings: &KeyBindings) -> Vec<Vec<u8>> {
     trigger_bytes_for(bindings, BindableAction::OpenReviewDiff)
 }
 
+/// Raw stdin byte patterns that toggle voice input mid-attach (from the
+/// [`ToggleVoiceInput`](BindableAction::ToggleVoiceInput) binding — `Alt-v` by
+/// default, encoded as the `ESC v` metaSendsEscape sequence). See
+/// [`trigger_bytes_for`]. Unlike the review/editor triggers these don't exit the
+/// attach — the attach loop swallows them and toggles the mic in place.
+pub fn voice_trigger_bytes(bindings: &KeyBindings) -> Vec<Vec<u8>> {
+    trigger_bytes_for(bindings, BindableAction::ToggleVoiceInput)
+}
+
 /// Whether a binding survives the [`trigger_bytes_for`] filter: a Ctrl- or
 /// Alt-modified ASCII character. Bare bindings can't be intercepted mid-attach
 /// (they're indistinguishable from typing), so they never form the toggle.
@@ -1086,6 +1105,25 @@ mod tests {
         assert_eq!(
             kb.resolve(&key),
             Some(BindableAction::ToggleConversationOverlay)
+        );
+    }
+
+    #[test]
+    fn test_toggle_voice_input_default_bound_to_alt_v() {
+        let kb = KeyBindings::default();
+        let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT);
+        assert_eq!(kb.resolve(&key), Some(BindableAction::ToggleVoiceInput));
+    }
+
+    #[test]
+    fn test_toggle_voice_input_config_name_roundtrips() {
+        assert_eq!(
+            "toggle_voice_input".parse::<BindableAction>().unwrap(),
+            BindableAction::ToggleVoiceInput
+        );
+        assert_eq!(
+            BindableAction::ToggleVoiceInput.config_name(),
+            "toggle_voice_input"
         );
     }
 
@@ -1325,6 +1363,14 @@ mod tests {
         // (Ctrl-r) is never shadowed.
         let kb = KeyBindings::default();
         assert_eq!(review_trigger_bytes(&kb), vec![vec![0x1b, b'r']]);
+    }
+
+    #[test]
+    fn test_voice_trigger_bytes_default_is_alt_v() {
+        // Default ToggleVoiceInput is Alt-v, interceptable mid-attach as the
+        // metaSendsEscape sequence `ESC v` so it can toggle the mic in place.
+        let kb = KeyBindings::default();
+        assert_eq!(voice_trigger_bytes(&kb), vec![vec![0x1b, b'v']]);
     }
 
     #[test]

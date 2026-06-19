@@ -856,6 +856,68 @@ fn test_toggle_commander_enabled_via_bool_path() {
 }
 
 #[test]
+fn test_stt_rows_present_with_defaults() {
+    let app = make_test_app();
+    let rows = app.build_settings_rows(SettingsTab::Conversation);
+
+    let kind_of = |key: &str| {
+        rows.iter()
+            .find(|r| r.field_key == key)
+            .unwrap_or_else(|| panic!("missing row {key}"))
+            .kind
+            .clone()
+    };
+
+    assert_eq!(kind_of("stt_enabled"), SettingsRowKind::Toggle(false));
+    assert_eq!(
+        kind_of("stt_base_url"),
+        SettingsRowKind::Text("http://127.0.0.1:8000/v1".to_string())
+    );
+    // Optional fields fall back to sentinel free-text when unset.
+    assert_eq!(
+        kind_of("stt_language"),
+        SettingsRowKind::Text("(auto)".to_string())
+    );
+    assert_eq!(
+        kind_of("stt_prompt"),
+        SettingsRowKind::Text("(none)".to_string())
+    );
+}
+
+#[test]
+fn test_apply_stt_text_fields() {
+    let mut app = make_test_app();
+    app.apply_settings_edit(
+        SettingsTab::Conversation,
+        "stt_base_url",
+        "http://192.168.1.10:8080/v1",
+    );
+    app.apply_settings_edit(SettingsTab::Conversation, "stt_model", "large-v3-turbo");
+    app.apply_settings_edit(SettingsTab::Conversation, "stt_language", "en");
+    assert_eq!(app.config.stt.base_url, "http://192.168.1.10:8080/v1");
+    assert_eq!(app.config.stt.model, "large-v3-turbo");
+    assert_eq!(app.config.stt.language.as_deref(), Some("en"));
+
+    // Sentinel / empty clears the optional fields back to None.
+    app.apply_settings_edit(SettingsTab::Conversation, "stt_language", "(auto)");
+    assert_eq!(app.config.stt.language, None);
+    app.apply_settings_edit(SettingsTab::Conversation, "stt_prompt", "");
+    assert_eq!(app.config.stt.prompt, None);
+}
+
+#[test]
+fn test_toggle_stt_enabled_via_bool_path() {
+    // "Enable Voice Input (STT)" is a Toggle row, flipped through
+    // `apply_bool_setting`. This arm must exist or the toggle is a no-op.
+    let mut app = make_test_app();
+    assert!(!app.config.stt.enabled);
+    app.apply_bool_setting("stt_enabled", true);
+    assert!(app.config.stt.enabled);
+    app.apply_bool_setting("stt_enabled", false);
+    assert!(!app.config.stt.enabled);
+}
+
+#[test]
 fn test_apply_commander_program_sets_and_clears() {
     let mut app = make_test_app();
     app.apply_settings_edit(

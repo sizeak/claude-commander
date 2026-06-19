@@ -147,6 +147,7 @@ impl App {
             }
             SettingsTab::Conversation => {
                 let c = &self.config.conversation;
+                let s = &self.config.stt;
                 vec![
                     SettingsRow::toggle(
                         "Enable Conversation Mode",
@@ -172,6 +173,20 @@ impl App {
                         "Speak Scope",
                         c.speak_scope.label().to_string(),
                         "conversation_speak_scope",
+                    ),
+                    // Speech-to-text (voice input, Alt-V).
+                    SettingsRow::toggle("Enable Voice Input (STT)", s.enabled, "stt_enabled"),
+                    SettingsRow::text("STT Base URL", s.base_url.clone(), "stt_base_url"),
+                    SettingsRow::text("STT Model", s.model.clone(), "stt_model"),
+                    SettingsRow::text(
+                        "STT Language",
+                        s.language.clone().unwrap_or_else(|| "(auto)".into()),
+                        "stt_language",
+                    ),
+                    SettingsRow::text(
+                        "STT Prompt",
+                        s.prompt.clone().unwrap_or_else(|| "(none)".into()),
+                        "stt_prompt",
                     ),
                 ]
             }
@@ -915,6 +930,22 @@ impl App {
                         self.config.conversation.speak_scope = scope;
                     }
                 }
+                "stt_base_url" => self.config.stt.base_url = value.to_string(),
+                "stt_model" => self.config.stt.model = value.to_string(),
+                "stt_language" => {
+                    self.config.stt.language = if value.is_empty() || value == "(auto)" {
+                        None
+                    } else {
+                        Some(value.to_string())
+                    };
+                }
+                "stt_prompt" => {
+                    self.config.stt.prompt = if value.is_empty() || value == "(none)" {
+                        None
+                    } else {
+                        Some(value.to_string())
+                    };
+                }
                 _ => {}
             },
             SettingsTab::Theme => {
@@ -1064,6 +1095,7 @@ impl App {
             "ai_summary_enabled" => self.config.ai_summary_enabled = value,
             "commander_enabled" => self.config.commander_enabled = value,
             "conversation_enabled" => self.config.conversation.enabled = value,
+            "stt_enabled" => self.config.stt.enabled = value,
             _ => {
                 warn!("Unknown boolean setting: {}", field_key);
                 return;
