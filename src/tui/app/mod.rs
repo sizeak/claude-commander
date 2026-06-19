@@ -1071,6 +1071,15 @@ impl App {
         // Surface any pending review comments left from a previous run.
         self.refresh_comment_indicators().await;
 
+        // Bring the mic listener up eagerly (when STT is enabled) so a global
+        // hotkey can toggle recording even before the conversation is opened.
+        // The heavy headless session stays lazy — the listener spawns it on the
+        // first transcript. Then start the external IPC trigger(s).
+        if self.config.stt.enabled {
+            self.ensure_listener_started().await;
+            self.spawn_listen_ipc();
+        }
+
         loop {
             // Setup terminal for TUI
             let mut terminal = self.setup_terminal()?;
@@ -1213,7 +1222,7 @@ impl App {
                                     review_triggers,
                                     voice_triggers,
                                     voice_listener,
-                                    self.conversation.recording,
+                                    self.conversation.recording.clone(),
                                     intercept_ctrl_z,
                                 )
                                 .await
@@ -1229,9 +1238,9 @@ impl App {
                                     }
                                 };
 
-                                // Voice input may have been toggled mid-attach;
-                                // keep our flag (and the overlay indicator) in sync.
-                                self.conversation.recording = outcome.recording;
+                                // `conversation.recording` is shared (`Arc`) with
+                                // the attach loop, so a mid-attach Alt-V toggle is
+                                // already reflected — no readback needed.
 
                                 // The in-session switcher may have run `tmux switch-client`
                                 // mid-attach, so the session we exited from isn't

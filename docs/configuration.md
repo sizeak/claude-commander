@@ -255,6 +255,34 @@ Audio is captured at the microphone's native rate, downmixed to mono, and encode
 WAV; the server resamples as needed. Recording isn't chunked yet — the whole utterance is uploaded
 when you stop — so very long dictations wait until the end to transcribe.
 
+### Global voice hotkey
+
+`Alt-v` only fires when the terminal window is focused — a terminal app can't read key events
+otherwise. To toggle voice input from **anywhere on the desktop**, bind a desktop-level global
+shortcut to the `listen-toggle` command:
+
+```sh
+claude-commander listen-toggle          # toggle (also: --start / --stop)
+```
+
+This connects to the running TUI over a per-user Unix socket
+(`$XDG_RUNTIME_DIR/claude-commander.sock`, falling back to the OS temp dir on macOS) and toggles
+recording exactly as `Alt-v` would — and it works even while you're attached to a session. The
+socket server starts automatically when the TUI launches with `stt.enabled = true`; the command
+prints `recording`/`stopped` and exits non-zero (with a message) if no TUI is running.
+
+- **KDE Plasma / Linux:** System Settings ▸ Shortcuts ▸ **Add ▸ Command or Script**, set the command
+  to `claude-commander listen-toggle`, and assign your key. Pick a combo **different from `Alt-v`** so
+  the global grab doesn't shadow the in-app binding.
+- **macOS:** bind the same command via skhd, Karabiner-Elements, Raycast, or Shortcuts.app.
+
+> A command shortcut is used (rather than the in-process XDG `GlobalShortcuts` portal) because the
+> portal can't assign a non-sandboxed terminal binary a stable app identity, so the compositor never
+> persists a reliably-bindable shortcut for it. The command route has no such limitation.
+
+Both this and in-app `Alt-v` feed the same recording state, so they stay consistent. Only one running
+TUI instance owns the socket; a second instance logs and skips.
+
 ## Theme Presets
 
 Set `preset` under `[theme]` in your config to switch the entire color palette:
