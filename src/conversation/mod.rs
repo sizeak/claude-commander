@@ -11,6 +11,9 @@
 
 pub mod audio;
 pub mod extract;
+#[cfg(target_os = "linux")]
+pub mod global_shortcut;
+pub mod ipc;
 pub mod listener;
 pub mod media;
 pub mod recorder;
@@ -20,7 +23,7 @@ pub mod stt;
 pub mod tts;
 
 pub use extract::{SpeakScope, split_sentences, spoken_text};
-pub use listener::{ListenerCommand, spawn_listener};
+pub use listener::{ListenAction, ListenerCommand, apply_listen_action, spawn_listener};
 pub use media::{MediaSignal, signal as media_signal, spawn_media_gate};
 pub use session::{ConversationEvent, ConversationSession, parse_event, user_message_line};
 pub use speaker::{SentenceAccumulator, SpeakerCommand, spawn_speaker, speaker_command_for};

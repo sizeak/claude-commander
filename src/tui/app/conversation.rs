@@ -9,13 +9,14 @@
 //! just a log + input" requirement.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use super::*;
 use crate::conversation::{
-    ConversationEvent, ConversationSession, ListenerCommand, MediaSignal, media_signal,
-    spawn_listener, spawn_media_gate, spawn_speaker,
+    ConversationEvent, ConversationSession, ListenAction, ListenerCommand, MediaSignal,
+    apply_listen_action, media_signal, spawn_listener, spawn_media_gate, spawn_speaker,
 };
 
 /// Canonical project spinner frames (advanced every 3 render ticks).
@@ -245,20 +246,27 @@ pub struct ConversationRuntime {
     pub view: Arc<Mutex<ConversationView>>,
     /// Voice-input listener command channel; `None` if STT is off/unavailable.
     pub listener: Option<tokio::sync::mpsc::UnboundedSender<ListenerCommand>>,
-    /// Whether the microphone is currently capturing (toggled by Alt-V).
-    pub recording: bool,
+    /// Whether the microphone is currently capturing. Shared (`Arc`) so every
+    /// trigger — the Alt-V key path, the in-attach byte interceptor, and the
+    /// external IPC routes (Unix socket / D-Bus) — observes and flips the one
+    /// flag without copying state in and out of the attach loop.
+    pub recording: Arc<AtomicBool>,
     /// Media-gate signal channel: pauses other players for the voice turn and
     /// resumes them after the reply. `None` when the feature is disabled.
     pub gate: Option<tokio::sync::mpsc::UnboundedSender<MediaSignal>>,
 }
 
 impl ConversationRuntime {
-    fn listen(&self, cmd: ListenerCommand) -> bool {
-        if let Some(tx) = &self.listener {
-            tx.send(cmd).is_ok()
-        } else {
-            false
-        }
+    /// Apply a voice [`ListenAction`] if a listener is up. Returns the new
+    /// recording state, or `None` when there's no listener (STT off / no mic).
+    pub fn apply_listen(&self, action: ListenAction) -> Option<bool> {
+        let listener = self.listener.as_ref()?;
+        Some(apply_listen_action(listener, &self.recording, action))
+    }
+
+    /// Whether the microphone is currently capturing.
+    pub fn is_recording(&self) -> bool {
+        self.recording.load(Ordering::Acquire)
     }
 }
 
@@ -288,6 +296,116 @@ async fn submit_to_session(
     }
 }
 
+/// Spawn the headless `claude` session, the TTS speaker, and the off-loop bridge
+/// that feeds the speaker + updates the shared model. Idempotent (a no-op if a
+/// session is already running). Free of `&App` so it can run off the UI loop —
+/// the listener's submit task calls it to lazily heal the session when a voice
+/// transcript arrives before the conversation was ever opened.
+async fn spawn_session_runtime(
+    conv: &crate::config::ConversationConfig,
+    gate: Option<tokio::sync::mpsc::UnboundedSender<MediaSignal>>,
+    session: &Arc<tokio::sync::Mutex<Option<ConversationSession>>>,
+    view: &Arc<Mutex<ConversationView>>,
+) {
+    if session.lock().await.is_some() {
+        return;
+    }
+    let dir = match Config::data_dir() {
+        Ok(d) => d.join("conversation"),
+        Err(e) => {
+            view.lock().unwrap().set_error(format!("no data dir: {e}"));
+            return;
+        }
+    };
+    if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+        view.lock().unwrap().set_error(format!("mkdir failed: {e}"));
+        return;
+    }
+
+    // Seed CLAUDE.md so the agent knows it's a (spoken) Claude Commander
+    // assistant and how to inspect live session/project state. Rewritten on
+    // each (re)spawn so the embedded CLI reference stays current.
+    let cli = crate::cli_args::cli_command();
+    let prime = CONVERSATION_PRIME.replace("{name}", &conv.name);
+    let claude_md = format!(
+        "{}\n{}",
+        prime.trim_end(),
+        crate::commander::generate_cli_reference(&cli)
+    );
+    if let Err(e) = tokio::fs::write(dir.join("CLAUDE.md"), claude_md).await {
+        warn!(target: "conversation", "failed to write CLAUDE.md: {e}");
+    }
+
+    // Streaming-TTS speaker (fed directly by the bridge, off the UI loop).
+    // Failure (e.g. no audio device) is non-fatal: chat still works, silent.
+    let speaker = if conv.enabled {
+        match spawn_speaker(conv.clone(), gate.clone()) {
+            Ok(tx) => Some(tx),
+            Err(e) => {
+                warn!(target: "conversation", "TTS unavailable: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<ConversationEvent>();
+    // Resume the previous conversation if we have a stored session id, so the
+    // agent keeps its history (and memory of the user) across restarts.
+    let resume = read_resume_id(&dir);
+    match ConversationSession::spawn(
+        &conv.command,
+        &conv.permission_mode,
+        &dir,
+        resume.as_deref(),
+        ev_tx,
+    ) {
+        Ok(s) => *session.lock().await = Some(s),
+        Err(e) => {
+            view.lock().unwrap().set_error(e.to_string());
+            return;
+        }
+    }
+
+    // Bridge: entirely off the UI loop. Feeds the speaker AND updates the
+    // shared model, so audio and the conversation log both advance while the
+    // overlay is closed / the main loop is busy. The renderer just reads the
+    // model when visible.
+    let bridge_view = view.clone();
+    let bridge_dir = dir.clone();
+    let bridge_gate = gate.clone();
+    tokio::spawn(async move {
+        while let Some(ev) = ev_rx.recv().await {
+            // Let the media gate know the text turn finished, so it can resume
+            // media once the spoken reply (if any) has drained.
+            if matches!(ev, ConversationEvent::TurnComplete) {
+                media_signal(&bridge_gate, MediaSignal::TurnComplete);
+            }
+            if matches!(ev, ConversationEvent::Delta(_)) {
+                tracing::trace!(target: "conversation", "bridge delta");
+            } else {
+                tracing::debug!(target: "conversation", "bridge event: {ev:?}");
+            }
+            // Persist the session id so the next launch resumes this
+            // conversation. Claude may fork a fresh id on resume, so record
+            // whatever the latest init reports.
+            if let ConversationEvent::Started { session_id } = &ev {
+                write_resume_id(&bridge_dir, session_id);
+            }
+            if let Some(sp) = &speaker
+                && let Some(cmd) = crate::conversation::speaker_command_for(&ev)
+            {
+                let _ = sp.send(cmd);
+            }
+            bridge_view.lock().unwrap().apply(&ev);
+        }
+        tracing::debug!(target: "conversation", "bridge task ended");
+    });
+
+    view.lock().unwrap().status = ConvStatus::Idle;
+}
+
 impl App {
     /// Alt-c: open the overlay (starting the session on first use) or close it
     /// (leaving the session running). The single `conversation.enabled` setting
@@ -311,140 +429,91 @@ impl App {
         };
     }
 
-    /// Spawn the headless streaming `claude` session, the TTS speaker, and the
-    /// off-loop bridge that updates the shared model + feeds the speaker. Idempotent.
+    /// Bring up the full conversation runtime: the mic listener (eager, via
+    /// [`ensure_listener_started`](Self::ensure_listener_started)) plus the
+    /// headless `claude` session, TTS speaker, and off-loop bridge. Idempotent.
     pub(super) async fn ensure_conversation_started(&mut self) {
-        if self.conversation.session.lock().await.is_some() {
-            return;
-        }
-        let view = self.conversation.view.clone();
-        let dir = match Config::data_dir() {
-            Ok(d) => d.join("conversation"),
-            Err(e) => {
-                view.lock().unwrap().set_error(format!("no data dir: {e}"));
-                return;
-            }
-        };
-        if let Err(e) = tokio::fs::create_dir_all(&dir).await {
-            view.lock().unwrap().set_error(format!("mkdir failed: {e}"));
-            return;
-        }
+        self.ensure_listener_started().await;
+        let conv = self.config.conversation.clone();
+        let gate = self.conversation.gate.clone();
+        spawn_session_runtime(
+            &conv,
+            gate,
+            &self.conversation.session,
+            &self.conversation.view,
+        )
+        .await;
+    }
 
-        // Seed CLAUDE.md so the agent knows it's a (spoken) Claude Commander
-        // assistant and how to inspect live session/project state. Rewritten on
-        // each (re)spawn so the embedded CLI reference stays current.
-        let cli = crate::cli_args::cli_command();
-        let prime = CONVERSATION_PRIME.replace("{name}", &self.config.conversation.name);
-        let claude_md = format!(
-            "{}\n{}",
-            prime.trim_end(),
-            crate::commander::generate_cli_reference(&cli)
-        );
-        if let Err(e) = tokio::fs::write(dir.join("CLAUDE.md"), claude_md).await {
-            warn!(target: "conversation", "failed to write CLAUDE.md: {e}");
+    /// Bring up *just* the microphone listener (and its off-loop submit task),
+    /// without the heavy headless session. Idempotent and gated on `stt.enabled`.
+    ///
+    /// Called eagerly at startup so an external global hotkey (Unix socket /
+    /// D-Bus) — or in-app Alt-V — can toggle recording even before the
+    /// conversation overlay is ever opened. The submit task spawns the session
+    /// lazily on the first transcript, so the mic costs nothing until used.
+    pub(super) async fn ensure_listener_started(&mut self) {
+        if !self.config.stt.enabled || self.conversation.listener.is_some() {
+            return;
         }
 
         // Media gate: pause other players while recording voice and until the
-        // assistant finishes its spoken reply. Created once and reused across
-        // respawns; a no-op handle when the feature/STT is disabled.
-        if self.conversation.gate.is_none()
-            && self.config.stt.enabled
-            && self.config.stt.pause_media
-        {
+        // assistant finishes its spoken reply. Shared by the listener and the
+        // (later) speaker; created once and reused across session respawns.
+        if self.conversation.gate.is_none() && self.config.stt.pause_media {
             self.conversation.gate = spawn_media_gate(true);
         }
         let gate = self.conversation.gate.clone();
 
-        // Streaming-TTS speaker (fed directly by the bridge, off the UI loop).
-        // Failure (e.g. no audio device) is non-fatal: chat still works, silent.
-        let speaker = if self.config.conversation.enabled {
-            match spawn_speaker(self.config.conversation.clone(), gate.clone()) {
-                Ok(tx) => Some(tx),
-                Err(e) => {
-                    warn!(target: "conversation", "TTS unavailable: {e}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
-
-        let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<ConversationEvent>();
-        let command = self.config.conversation.command.clone();
-        let permission_mode = self.config.conversation.permission_mode.clone();
-        // Resume the previous conversation if we have a stored session id, so the
-        // agent keeps its history (and memory of the user) across restarts.
-        let resume = read_resume_id(&dir);
-        match ConversationSession::spawn(&command, &permission_mode, &dir, resume.as_deref(), ev_tx)
-        {
-            Ok(session) => *self.conversation.session.lock().await = Some(session),
-            Err(e) => {
-                view.lock().unwrap().set_error(e.to_string());
-                return;
-            }
-        }
-
-        // Bridge: entirely off the UI loop. Feeds the speaker AND updates the
-        // shared model, so audio and the conversation log both advance while the
-        // overlay is closed / the main loop is busy. The renderer just reads the
-        // model when visible.
-        let bridge_view = view.clone();
-        let bridge_dir = dir.clone();
-        let bridge_gate = gate.clone();
-        tokio::spawn(async move {
-            while let Some(ev) = ev_rx.recv().await {
-                // Let the media gate know the text turn finished, so it can resume
-                // media once the spoken reply (if any) has drained.
-                if matches!(ev, ConversationEvent::TurnComplete) {
-                    media_signal(&bridge_gate, MediaSignal::TurnComplete);
-                }
-                if matches!(ev, ConversationEvent::Delta(_)) {
-                    tracing::trace!(target: "conversation", "bridge delta");
-                } else {
-                    tracing::debug!(target: "conversation", "bridge event: {ev:?}");
-                }
-                // Persist the session id so the next launch resumes this
-                // conversation. Claude may fork a fresh id on resume, so record
-                // whatever the latest init reports.
-                if let ConversationEvent::Started { session_id } = &ev {
-                    write_resume_id(&bridge_dir, session_id);
-                }
-                if let Some(sp) = &speaker
-                    && let Some(cmd) = crate::conversation::speaker_command_for(&ev)
-                {
-                    let _ = sp.send(cmd);
-                }
-                bridge_view.lock().unwrap().apply(&ev);
-            }
-            tracing::debug!(target: "conversation", "bridge task ended");
-        });
-
-        // Voice-input listener (Alt-V) + its off-loop submit task. The listener
-        // captures the mic and emits a transcript; the submit task writes it to
-        // the session directly (not via the UI loop), so voice input works even
-        // while the main loop is parked inside a tmux attach. Failure (no mic) is
-        // non-fatal.
-        if self.config.stt.enabled && self.conversation.listener.is_none() {
-            let (tx_text, mut rx_text) = tokio::sync::mpsc::unbounded_channel::<String>();
-            match spawn_listener(self.config.stt.clone(), tx_text, gate.clone()) {
-                Ok(tx) => {
-                    self.conversation.listener = Some(tx);
-                    let session = self.conversation.session.clone();
-                    let submit_view = view.clone();
-                    tokio::spawn(async move {
-                        while let Some(text) = rx_text.recv().await {
-                            let text = text.trim().to_string();
-                            if text.is_empty() {
-                                continue;
-                            }
-                            submit_to_session(&session, &submit_view, text).await;
+        let (tx_text, mut rx_text) = tokio::sync::mpsc::unbounded_channel::<String>();
+        match spawn_listener(self.config.stt.clone(), tx_text, gate.clone()) {
+            Ok(tx) => {
+                self.conversation.listener = Some(tx);
+                let session = self.conversation.session.clone();
+                let view = self.conversation.view.clone();
+                let conv = self.config.conversation.clone();
+                tokio::spawn(async move {
+                    while let Some(text) = rx_text.recv().await {
+                        let text = text.trim().to_string();
+                        if text.is_empty() {
+                            continue;
                         }
-                    });
-                }
-                Err(e) => warn!(target: "conversation", "STT unavailable: {e}"),
+                        // Submit directly (off the UI loop) so voice input works
+                        // even while the main loop is parked in a tmux attach. If
+                        // no session is up yet (transcript arrived before the
+                        // overlay was opened), spawn one and retry once.
+                        if !submit_to_session(&session, &view, text.clone()).await {
+                            spawn_session_runtime(&conv, gate.clone(), &session, &view).await;
+                            submit_to_session(&session, &view, text).await;
+                        }
+                    }
+                });
             }
+            Err(e) => warn!(target: "conversation", "STT unavailable: {e}"),
         }
-        view.lock().unwrap().status = ConvStatus::Idle;
+    }
+
+    /// Start the external voice-toggle trigger(s) so the hotkey works from
+    /// anywhere on the desktop. On Linux, register a system-wide shortcut via the
+    /// XDG Desktop Portal (the Wayland-native route; the user binds the key in
+    /// System Settings). On every platform, also serve a portable Unix socket
+    /// backing `claude-commander listen-toggle` (the macOS path + a scriptable
+    /// CLI trigger). Both feed the same listener + recording flag as in-app
+    /// Alt-V. No-op when the mic listener didn't come up (STT off / no mic).
+    pub(super) fn spawn_listen_ipc(&self) {
+        let Some(listener) = self.conversation.listener.clone() else {
+            debug!(target: "conversation", "voice IPC not started: no mic listener");
+            return;
+        };
+        let recording = self.conversation.recording.clone();
+
+        let path = crate::conversation::ipc::default_socket_path();
+        if let Err(e) = crate::conversation::ipc::serve(path, listener.clone(), recording.clone()) {
+            warn!(target: "conversation", "voice IPC socket unavailable: {e}");
+        }
+
+        #[cfg(target_os = "linux")]
+        crate::conversation::global_shortcut::spawn(listener, recording);
     }
 
     /// Send a typed user turn to the session. The session serializes turns, so a
@@ -486,18 +555,10 @@ impl App {
         }
         // Bring the session (and listener) up on first use, just like typing.
         self.ensure_conversation_started().await;
-        if self.conversation.listener.is_none() {
-            self.set_status_message("Voice input unavailable — no microphone?", 4);
-            return;
-        }
-
-        if self.conversation.recording {
-            self.conversation.recording = false;
-            self.conversation.listen(ListenerCommand::Stop);
-            self.set_status_message("🎙 Transcribing…", 4);
-        } else if self.conversation.listen(ListenerCommand::Start) {
-            self.conversation.recording = true;
-            self.set_status_message("🎙 Listening… (Alt-V to send)", 60);
+        match self.conversation.apply_listen(ListenAction::Toggle) {
+            Some(true) => self.set_status_message("🎙 Listening… (Alt-V to send)", 60),
+            Some(false) => self.set_status_message("🎙 Transcribing…", 4),
+            None => self.set_status_message("Voice input unavailable — no microphone?", 4),
         }
     }
 
@@ -619,7 +680,7 @@ impl App {
         };
         let text_width = text_area.width.max(1);
         let view_scroll = input.visual_scroll(text_width as usize);
-        if self.conversation.recording {
+        if self.conversation.is_recording() {
             // Recording takes over the input row — show a live indicator instead
             // of the typing placeholder.
             frame.render_widget(

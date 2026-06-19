@@ -646,6 +646,25 @@ impl App {
             width = key_col_width,
         )));
 
+        // Global voice hotkey (a desktop shortcut, not an in-app keybinding).
+        lines.push(Line::from(""));
+        lines.push(Line::from("Global Voice Hotkey:"));
+        lines.push(Line::from(format!(
+            "  {:<width$}Toggle voice input system-wide. Linux: set the key",
+            "system-wide",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}in System Settings ▸ Shortcuts (toggle-voice);",
+            "",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}macOS: bind `claude-commander listen-toggle`",
+            "",
+            width = key_col_width,
+        )));
+
         // Status indicators (not keybinding-related, stays hardcoded)
         lines.push(Line::from(""));
         lines.push(Line::from("Status Indicators:"));

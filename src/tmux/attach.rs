@@ -41,10 +41,6 @@ pub enum AttachResult {
 pub struct AttachOutcome {
     pub result: AttachResult,
     pub final_session: String,
-    /// Whether the microphone was still recording when the attach loop exited
-    /// (voice input can be toggled mid-attach with Alt-V). The caller syncs its
-    /// own recording flag from this.
-    pub recording: bool,
 }
 
 /// Async PTY attachment - runs entirely within tokio
@@ -69,7 +65,7 @@ pub async fn attach_to_session(
     review_triggers: Vec<Vec<u8>>,
     voice_triggers: Vec<Vec<u8>>,
     voice_listener: Option<mpsc::UnboundedSender<crate::conversation::ListenerCommand>>,
-    recording: bool,
+    recording: Arc<AtomicBool>,
     intercept_ctrl_z: bool,
 ) -> Result<AttachOutcome> {
     // Get terminal size
@@ -98,9 +94,10 @@ pub async fn attach_to_session(
     // (shell-toggle pair, editor open) uses the right session.
     let current_session = Arc::new(Mutex::new(session_name.to_string()));
     let popup_open = Arc::new(AtomicBool::new(false));
-    // Shared mic state: the stdin task flips it on each Alt-V; we read it back
-    // after the loop so the caller's recording flag stays in sync.
-    let recording_flag = Arc::new(AtomicBool::new(recording));
+    // Shared mic state: the stdin task flips it on each Alt-V. Owned by the
+    // caller (`ConversationRuntime.recording`) and shared in, so an external
+    // IPC toggle and the post-attach UI observe the same flag — no syncing.
+    let recording_flag = recording;
 
     // Run the async I/O loop
     info!("Starting async I/O loop");
@@ -141,16 +138,16 @@ pub async fn attach_to_session(
     log_pending_stdin("after second tcflush");
 
     let final_session = current_session.lock().await.clone();
-    let recording = recording_flag.load(Ordering::Acquire);
     info!(
         "Attach complete, result: {:?}, final session: {}, recording: {}",
-        result, final_session, recording
+        result,
+        final_session,
+        recording_flag.load(Ordering::Acquire)
     );
 
     Ok(AttachOutcome {
         result,
         final_session,
-        recording,
     })
 }
 
@@ -407,13 +404,11 @@ async fn run_async_loop(
                             .any(|pat| contains_subsequence(data, pat))
                     {
                         if let Some(listener) = &voice_listener {
-                            let now_recording = !recording_flag.fetch_xor(true, Ordering::AcqRel);
-                            let cmd = if now_recording {
-                                crate::conversation::ListenerCommand::Start
-                            } else {
-                                crate::conversation::ListenerCommand::Stop
-                            };
-                            let _ = listener.send(cmd);
+                            let now_recording = crate::conversation::apply_listen_action(
+                                listener,
+                                &recording_flag,
+                                crate::conversation::ListenAction::Toggle,
+                            );
                             let msg = if now_recording {
                                 "🎙 Recording… (Alt-V to send)"
                             } else {

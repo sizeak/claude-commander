@@ -255,6 +255,39 @@ Audio is captured at the microphone's native rate, downmixed to mono, and encode
 WAV; the server resamples as needed. Recording isn't chunked yet — the whole utterance is uploaded
 when you stop — so very long dictations wait until the end to transcribe.
 
+### Global voice hotkey
+
+`Alt-v` only fires when the terminal window is focused — a terminal app can't read key events
+otherwise. To toggle voice input from **anywhere on the desktop**, the running TUI registers a
+system-wide shortcut (when `stt.enabled = true`).
+
+**Linux (Wayland/X11, via the XDG Desktop Portal).** On launch the TUI registers a `toggle-voice`
+global shortcut with your compositor through the portal's `GlobalShortcuts` interface. You don't
+bind a command; the action is already registered. Set or change its key in
+**System Settings ▸ Shortcuts** (KDE shows
+it once registered; the suggested default is `Meta+Alt+V`). Pick a combo **different from `Alt-v`**
+so the system grab doesn't shadow the in-app binding. Pressing it toggles recording exactly as
+`Alt-v` would — and it works even while you're attached to a session.
+
+> Requires an XDG Desktop Portal with a GlobalShortcuts backend (KDE Plasma 5.27+ / a recent GNOME).
+> If the portal is unavailable the TUI logs a warning and carries on without the global hotkey.
+
+**macOS / scripting (Unix socket).** There's no XDG portal on macOS, so use the CLI instead:
+
+```sh
+claude-commander listen-toggle          # toggle (also: --start / --stop)
+```
+
+This connects to the running TUI over a per-user Unix socket
+(`$XDG_RUNTIME_DIR/claude-commander.sock`, falling back to the OS temp dir on macOS) and toggles
+recording. The socket server starts automatically with `stt.enabled = true`; `listen-toggle` exits
+non-zero (with a message) if no TUI is running. Bind it to a key with skhd, Karabiner-Elements,
+Raycast, or Shortcuts.app on macOS — or call it from any script. It's available on Linux too if you
+prefer a command shortcut over the portal.
+
+All routes feed the same recording state, so they stay consistent with each other and with `Alt-v`.
+Only one running TUI instance owns the socket; a second instance logs and skips.
+
 ## Theme Presets
 
 Set `preset` under `[theme]` in your config to switch the entire color palette:
