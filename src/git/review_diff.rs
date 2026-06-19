@@ -29,9 +29,7 @@ use crate::error::{GitError, Result};
 /// can't be resolved (e.g. a stacked-PR base that only exists remotely), the
 /// diff degrades to working-tree-vs-`HEAD` rather than failing the view.
 pub async fn compose_review_diff(worktree: &Path, base: &str) -> Result<String> {
-    let target = merge_base(worktree, base)
-        .await
-        .unwrap_or_else(|| base.to_string());
+    let target = diff_target(worktree, base).await;
 
     // Force standard `a/`/`b/` prefixes so the parser is independent of the
     // user's `diff.mnemonicPrefix` config (which would emit `i/`/`w/`/`c/`).
@@ -98,6 +96,90 @@ async fn ref_exists(worktree: &Path, refname: &str) -> bool {
         .await
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+/// The commit-ish the review diff treats as "base": the merge-base of `base`
+/// and `HEAD`, falling back to `base` verbatim when it can't be computed. Both
+/// the diff composition and binary blob reads resolve the old side through this
+/// so they always agree on which commit the "before" image comes from.
+async fn diff_target(worktree: &Path, base: &str) -> String {
+    merge_base(worktree, base)
+        .await
+        .unwrap_or_else(|| base.to_string())
+}
+
+/// Read the base-side bytes of `path` as the review diff sees them: the blob at
+/// [`diff_target`]. Returns an error when the path doesn't exist there (e.g. an
+/// added file has no base side). Runs `git show` as a subprocess, so the read
+/// happens off the async runtime's worker threads.
+pub async fn read_base_blob(worktree: &Path, base: &str, path: &str) -> Result<Vec<u8>> {
+    let target = diff_target(worktree, base).await;
+    let spec = format!("{target}:{path}");
+    let out = Command::new("git")
+        .current_dir(worktree)
+        .args(["show", &spec])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| GitError::OperationFailed(e.to_string()))?;
+    if !out.status.success() {
+        return Err(GitError::OperationFailed(format!(
+            "git show {spec}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+        .into());
+    }
+    Ok(out.stdout)
+}
+
+/// Read the working-tree (new-side) bytes of `path`. Uses async `tokio::fs` so
+/// the read never blocks the executor.
+pub async fn read_worktree_file(worktree: &Path, path: &str) -> Result<Vec<u8>> {
+    Ok(tokio::fs::read(worktree.join(path))
+        .await
+        .map_err(|e| GitError::OperationFailed(e.to_string()))?)
+}
+
+/// `git cat-file -s <oid>` — the byte size of a blob without reading its
+/// contents. `None` if the lookup fails (e.g. an absent/abbreviated oid).
+async fn blob_size(worktree: &Path, oid: &str) -> Option<u64> {
+    let out = Command::new("git")
+        .current_dir(worktree)
+        .args(["cat-file", "-s", oid])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+/// Fill in the binary file sizes the parser leaves `None`: the base blob size
+/// via `git cat-file -s`, and the new-side size from the working-tree file on
+/// disk. Best effort — a size stays `None` if its lookup fails.
+pub async fn enrich_binary_sizes(diff: &mut ParsedDiff, worktree: &Path) {
+    for f in &mut diff.files {
+        let new_path = f.new_path.clone();
+        let Some(info) = f.binary.as_mut() else {
+            continue;
+        };
+        if let Some(oid) = info.old_oid.clone() {
+            info.old_size = blob_size(worktree, &oid).await;
+        }
+        if info.new_oid.is_some() {
+            // The new side is the working tree, so its size is the file on disk.
+            info.new_size = tokio::fs::metadata(worktree.join(&new_path))
+                .await
+                .ok()
+                .map(|m| m.len());
+        }
+    }
 }
 
 /// Resolve `git merge-base <base> HEAD`, returning `None` if it cannot be
@@ -907,6 +989,64 @@ Binary files a/data.bin and b/data.bin differ
             }
         );
         assert!(f.hunks.is_empty(), "binary file has no textual hunks");
+    }
+
+    #[tokio::test]
+    async fn read_base_blob_returns_committed_bytes_not_worktree() {
+        let tmp = init_repo().await;
+        let p = tmp.path();
+        let v1: &[u8] = b"\x00base-bytes\x00";
+        let v2: &[u8] = b"\x00worktree-bytes-changed\x00";
+        fs::write(p.join("img.png"), v1).unwrap();
+        git(p, &["add", "."]).await;
+        git(p, &["commit", "-q", "-m", "A"]).await;
+        let base = git_capture(p, &["rev-parse", "HEAD"]).await;
+        fs::write(p.join("img.png"), v2).unwrap();
+
+        // Old side reads the committed blob; new side reads the working tree.
+        let old = read_base_blob(p, &base, "img.png").await.unwrap();
+        assert_eq!(old, v1);
+        let new = read_worktree_file(p, "img.png").await.unwrap();
+        assert_eq!(new, v2);
+    }
+
+    #[tokio::test]
+    async fn read_base_blob_errors_for_file_absent_at_base() {
+        let tmp = init_repo().await;
+        let p = tmp.path();
+        fs::write(p.join("seed.txt"), "x\n").unwrap();
+        git(p, &["add", "."]).await;
+        git(p, &["commit", "-q", "-m", "A"]).await;
+        let base = git_capture(p, &["rev-parse", "HEAD"]).await;
+
+        // An added file has no base side -> error rather than bogus bytes.
+        fs::write(p.join("added.png"), b"\x00new\x00").unwrap();
+        assert!(read_base_blob(p, &base, "added.png").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn enrich_binary_sizes_fills_old_and_new() {
+        let tmp = init_repo().await;
+        let p = tmp.path();
+        let v1: &[u8] = b"\x00abc\x00"; // 5 bytes
+        let v2: &[u8] = b"\x00abcdefgh\x00"; // 10 bytes
+        fs::write(p.join("logo.png"), v1).unwrap();
+        git(p, &["add", "."]).await;
+        git(p, &["commit", "-q", "-m", "A"]).await;
+        let base = git_capture(p, &["rev-parse", "HEAD"]).await;
+        fs::write(p.join("logo.png"), v2).unwrap();
+
+        let raw = compose_review_diff(p, &base).await.unwrap();
+        let mut diff = parse_unified_diff(&raw);
+        enrich_binary_sizes(&mut diff, p).await;
+        let f = diff
+            .files
+            .iter()
+            .find(|f| f.display_path() == "logo.png")
+            .unwrap();
+        let b = f.binary.as_ref().unwrap();
+        assert_eq!(b.old_size, Some(v1.len() as u64));
+        assert_eq!(b.new_size, Some(v2.len() as u64));
     }
 
     #[tokio::test]

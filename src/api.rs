@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use uuid::Uuid;
 
@@ -17,7 +17,8 @@ use crate::config::{AppState, Config, ConfigStore, StateStore};
 use crate::error::{Result, SessionError};
 use crate::git::{
     FileDiff, GitBackend, ParsedDiff, PrState, ReviewDecision, compose_review_diff,
-    diff_stat_summary, effective_pr_state, parse_unified_diff, prefer_remote_branch,
+    diff_stat_summary, effective_pr_state, enrich_binary_sizes, parse_unified_diff,
+    prefer_remote_branch, read_base_blob, read_worktree_file,
 };
 use crate::reviewed::ReviewedStore;
 use crate::session::{
@@ -294,18 +295,14 @@ impl CommanderService {
     /// (persisting any status changes). Returns the parsed diff plus the
     /// re-anchored comments.
     pub async fn open_review(&self, session_id: &SessionId) -> Result<ReviewSnapshot> {
-        let (worktree_path, review_base) = {
-            let state = self.store.read().await;
-            let session = state
-                .sessions
-                .get(session_id)
-                .ok_or(SessionError::NotFound(*session_id))?;
-            (session.worktree_path.clone(), ReviewBase::of(session))
-        };
+        let (worktree_path, review_base) = self.review_context(session_id).await?;
 
         let base = review_base.git_ref(&worktree_path).await;
         let raw = compose_review_diff(&worktree_path, &base).await?;
-        let diff = parse_unified_diff(&raw);
+        let mut diff = parse_unified_diff(&raw);
+        // Binary files carry metadata only; fill in the blob sizes the parser
+        // can't know. Bytes are lazy-loaded via `fetch_diff_blob`.
+        enrich_binary_sizes(&mut diff, &worktree_path).await;
 
         let mut comments = self.comments.load(*session_id).await?;
         reanchor_comments(&mut comments, &diff);
@@ -325,6 +322,41 @@ impl CommanderService {
             comments,
             reviewed,
         })
+    }
+
+    /// A session's worktree path and review base, looked up under one read lock.
+    /// Shared by `open_review` and `fetch_diff_blob` so both agree on the base.
+    async fn review_context(&self, session_id: &SessionId) -> Result<(PathBuf, ReviewBase)> {
+        let state = self.store.read().await;
+        let session = state
+            .sessions
+            .get(session_id)
+            .ok_or(SessionError::NotFound(*session_id))?;
+        Ok((session.worktree_path.clone(), ReviewBase::of(session)))
+    }
+
+    /// Fetch the raw bytes of one side of a binary file in a session's review
+    /// diff. This is the lazy-load half of the binary-diff seam: bytes are kept
+    /// OUT of `ReviewSnapshot` and fetched on demand only when a consumer needs
+    /// to render (or compare) the image.
+    ///
+    /// - `DiffSide::New` reads the working-tree file.
+    /// - `DiffSide::Old` reads the blob at the review base (errors for an added
+    ///   file, which has no base side).
+    pub async fn fetch_diff_blob(
+        &self,
+        session_id: &SessionId,
+        side: DiffSide,
+        path: &str,
+    ) -> Result<Vec<u8>> {
+        let (worktree_path, review_base) = self.review_context(session_id).await?;
+        match side {
+            DiffSide::New => read_worktree_file(&worktree_path, path).await,
+            DiffSide::Old => {
+                let base = review_base.git_ref(&worktree_path).await;
+                read_base_blob(&worktree_path, &base, path).await
+            }
+        }
     }
 
     /// Toggle the reviewed mark for one file of a session's review diff.
@@ -614,6 +646,15 @@ pub struct NewComment {
     pub line_range: (usize, usize),
     pub snippet: String,
     pub comment: String,
+}
+
+/// Which side of a diff a binary blob fetch refers to: the base ("before") or
+/// the working tree ("after").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffSide {
+    Old,
+    New,
 }
 
 /// Result of opening the review view: the parsed diff plus the session's
