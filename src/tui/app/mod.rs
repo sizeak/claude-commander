@@ -80,6 +80,26 @@ enum ScrollDirection {
     Down,
 }
 
+/// iTerm2 advertises Kitty-graphics support (since 3.5) so the stdio probe can
+/// land on `Kitty`, but iTerm2 renders that protocol unreliably — the escapes
+/// are emitted and nothing is drawn. Its native inline-image protocol (OSC
+/// 1337) is solid, so when the probe chose Kitty *and* the terminal identifies
+/// as iTerm2, fall back to iTerm2. Returns the protocol to force, or `None` to
+/// keep `detected`. Pure (env passed in) so it is unit-testable without a tty.
+fn iterm2_kitty_override(
+    detected: ratatui_image::picker::ProtocolType,
+    term_program: Option<&str>,
+    lc_terminal: Option<&str>,
+) -> Option<ratatui_image::picker::ProtocolType> {
+    use ratatui_image::picker::ProtocolType;
+    if detected != ProtocolType::Kitty {
+        return None;
+    }
+    let is_iterm2 = term_program.is_some_and(|t| t.contains("iTerm"))
+        || lc_terminal.is_some_and(|t| t.contains("iTerm"));
+    is_iterm2.then_some(ProtocolType::Iterm2)
+}
+
 /// Whether an ended attached session should be auto-restarted fresh.
 ///
 /// Shell sessions (suffix `-sh`) and the project-less commander are never
@@ -949,10 +969,19 @@ impl App {
         // 0.30) crash the loop. It manages its own raw mode for the query. On
         // any failure (non-tty, unsupported terminal) we fall back to Unicode
         // half-blocks, which render on any truecolor terminal.
-        self.picker = Some(
-            ratatui_image::picker::Picker::from_query_stdio()
-                .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks()),
-        );
+        let mut picker = ratatui_image::picker::Picker::from_query_stdio()
+            .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
+        let term_program = std::env::var("TERM_PROGRAM").ok();
+        let lc_terminal = std::env::var("LC_TERMINAL").ok();
+        if let Some(proto) = iterm2_kitty_override(
+            picker.protocol_type(),
+            term_program.as_deref(),
+            lc_terminal.as_deref(),
+        ) {
+            debug!(?proto, "iTerm2 detected: overriding Kitty probe result");
+            picker.set_protocol_type(proto);
+        }
+        self.picker = Some(picker);
 
         // Floor at 1: a hand-edited config with fps 0 must not divide by zero.
         let tick_rate = Duration::from_millis(1000 / self.config.ui_refresh_fps.max(1) as u64);
