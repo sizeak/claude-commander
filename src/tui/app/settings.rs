@@ -188,6 +188,11 @@ impl App {
                         s.prompt.clone().unwrap_or_else(|| "(none)".into()),
                         "stt_prompt",
                     ),
+                    SettingsRow::toggle(
+                        "Pause Media While Recording",
+                        s.pause_media,
+                        "stt_pause_media",
+                    ),
                 ]
             }
             SettingsTab::Sections => {
@@ -1096,6 +1101,7 @@ impl App {
             "commander_enabled" => self.config.commander_enabled = value,
             "conversation_enabled" => self.config.conversation.enabled = value,
             "stt_enabled" => self.config.stt.enabled = value,
+            "stt_pause_media" => self.config.stt.pause_media = value,
             _ => {
                 warn!("Unknown boolean setting: {}", field_key);
                 return;

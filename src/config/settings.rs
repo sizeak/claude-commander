@@ -277,6 +277,12 @@ pub struct SttConfig {
     /// API key, sent as a `Bearer` header when set. `None` for local servers
     /// that don't authenticate.
     pub api_key: Option<String>,
+
+    /// Pause other media players while recording voice input, resuming them once
+    /// the assistant finishes its spoken reply. Best-effort via `playerctl`
+    /// (Linux) / `osascript` (macOS); a silent no-op when neither is available.
+    /// On by default.
+    pub pause_media: bool,
 }
 
 impl Default for SttConfig {
@@ -291,6 +297,7 @@ impl Default for SttConfig {
             language: None,
             prompt: None,
             api_key: None,
+            pause_media: true,
         }
     }
 }

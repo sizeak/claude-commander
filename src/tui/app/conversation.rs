@@ -14,7 +14,8 @@ use std::time::Instant;
 
 use super::*;
 use crate::conversation::{
-    ConversationEvent, ConversationSession, ListenerCommand, spawn_listener, spawn_speaker,
+    ConversationEvent, ConversationSession, ListenerCommand, MediaSignal, media_signal,
+    spawn_listener, spawn_media_gate, spawn_speaker,
 };
 
 /// Canonical project spinner frames (advanced every 3 render ticks).
@@ -246,6 +247,9 @@ pub struct ConversationRuntime {
     pub listener: Option<tokio::sync::mpsc::UnboundedSender<ListenerCommand>>,
     /// Whether the microphone is currently capturing (toggled by Alt-V).
     pub recording: bool,
+    /// Media-gate signal channel: pauses other players for the voice turn and
+    /// resumes them after the reply. `None` when the feature is disabled.
+    pub gate: Option<tokio::sync::mpsc::UnboundedSender<MediaSignal>>,
 }
 
 impl ConversationRuntime {
@@ -340,10 +344,21 @@ impl App {
             warn!(target: "conversation", "failed to write CLAUDE.md: {e}");
         }
 
+        // Media gate: pause other players while recording voice and until the
+        // assistant finishes its spoken reply. Created once and reused across
+        // respawns; a no-op handle when the feature/STT is disabled.
+        if self.conversation.gate.is_none()
+            && self.config.stt.enabled
+            && self.config.stt.pause_media
+        {
+            self.conversation.gate = spawn_media_gate(true);
+        }
+        let gate = self.conversation.gate.clone();
+
         // Streaming-TTS speaker (fed directly by the bridge, off the UI loop).
         // Failure (e.g. no audio device) is non-fatal: chat still works, silent.
         let speaker = if self.config.conversation.enabled {
-            match spawn_speaker(self.config.conversation.clone()) {
+            match spawn_speaker(self.config.conversation.clone(), gate.clone()) {
                 Ok(tx) => Some(tx),
                 Err(e) => {
                     warn!(target: "conversation", "TTS unavailable: {e}");
@@ -375,8 +390,14 @@ impl App {
         // model when visible.
         let bridge_view = view.clone();
         let bridge_dir = dir.clone();
+        let bridge_gate = gate.clone();
         tokio::spawn(async move {
             while let Some(ev) = ev_rx.recv().await {
+                // Let the media gate know the text turn finished, so it can resume
+                // media once the spoken reply (if any) has drained.
+                if matches!(ev, ConversationEvent::TurnComplete) {
+                    media_signal(&bridge_gate, MediaSignal::TurnComplete);
+                }
                 if matches!(ev, ConversationEvent::Delta(_)) {
                     tracing::trace!(target: "conversation", "bridge delta");
                 } else {
@@ -405,7 +426,7 @@ impl App {
         // non-fatal.
         if self.config.stt.enabled && self.conversation.listener.is_none() {
             let (tx_text, mut rx_text) = tokio::sync::mpsc::unbounded_channel::<String>();
-            match spawn_listener(self.config.stt.clone(), tx_text) {
+            match spawn_listener(self.config.stt.clone(), tx_text, gate.clone()) {
                 Ok(tx) => {
                     self.conversation.listener = Some(tx);
                     let session = self.conversation.session.clone();
