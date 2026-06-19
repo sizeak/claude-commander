@@ -8,6 +8,29 @@
 //! streamed text into spoken-ready sentences; [`tts`] synthesizes them and
 //! [`audio`] plays them. All the text logic is pure and unit-tested; only
 //! [`audio`] and [`session`] touch the outside world.
+//!
+//! # Why headless streaming, not hooks / MCP / transcript-tail
+//!
+//! The overriding requirement is *reliable, low-latency* capture: start speaking
+//! the first sentence before the whole reply finishes. Only the stream-json
+//! protocol delivers that — it is the one mechanism that yields text *mid-reply*.
+//! The alternatives were evaluated and set aside; don't "simplify" to one of them
+//! without re-checking against this requirement:
+//!
+//! - **Stop hook** — fires only at end-of-turn and hands over `transcript_path`,
+//!   not the text. Whole-reply latency; defeats sentence-streamed TTS.
+//! - **Transcript-tail** (`*.jsonl`) — written at block/turn boundaries, not per
+//!   token; same end-of-reply latency, plus file races on fast turns.
+//! - **MCP `speak(text)` tool** — an *instructed* call (the agent must choose to
+//!   call it), not observation. It could speak the real commander and reuse its
+//!   tmux UI — the one thing streaming forfeits — but latency is ~end-of-reply
+//!   (the model composes, then calls the tool) and reliability is prompt-dependent.
+//!   Rejected because the conversation overlay is a *secondary* interface, so that
+//!   UI-reuse win doesn't justify losing guaranteed mid-reply latency.
+//!
+//! The interactive commander TUI does not emit stream-json, so "reuse the
+//! commander's UI" and "sub-reply latency" are mutually exclusive (short of
+//! fragile pane-scraping). See [`session`] for the actual protocol handling.
 
 pub mod audio;
 pub mod extract;
