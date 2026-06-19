@@ -590,12 +590,14 @@ impl App {
             ViewMode::SectionGrouped => build_section_grouped_items(
                 &state,
                 &self.config.sections,
+                self.config.in_progress_limit,
                 &self.ui_state.agent_states,
                 &self.ui_state.collapsed_sections,
             ),
             ViewMode::SectionStacks => build_stacked_section_items(
                 &state,
                 &self.config.sections,
+                self.config.in_progress_limit,
                 &self.ui_state.agent_states,
                 &self.ui_state.collapsed_sections,
             ),
@@ -827,9 +829,28 @@ fn build_project_grouped_items(
     items
 }
 
+/// Resolve the advisory WIP limit for a section by name. Returns the
+/// matching `SectionConfig::max_sessions` for user-defined sections, the
+/// top-level `in_progress_limit` for the implicit "In Progress" catch-all,
+/// or `None` when no limit is configured.
+fn resolve_section_limit(
+    name: &str,
+    sections: &[crate::session::SectionConfig],
+    in_progress_limit: Option<u32>,
+) -> Option<u32> {
+    if name == crate::session::IN_PROGRESS {
+        return in_progress_limit;
+    }
+    sections
+        .iter()
+        .find(|s| s.name == name)
+        .and_then(|s| s.max_sessions)
+}
+
 fn build_section_grouped_items(
     state: &crate::config::AppState,
     sections: &[crate::session::SectionConfig],
+    in_progress_limit: Option<u32>,
     agent_states: &HashMap<SessionId, AgentState>,
     collapsed_sections: &std::collections::HashSet<String>,
 ) -> Vec<SessionListItem> {
@@ -849,6 +870,7 @@ fn build_section_grouped_items(
             name: group.name.clone(),
             count: group.sessions.len(),
             collapsed,
+            max_sessions: resolve_section_limit(&group.name, sections, in_progress_limit),
         });
 
         if collapsed {
@@ -904,6 +926,7 @@ fn build_section_grouped_items(
 fn build_stacked_section_items(
     state: &crate::config::AppState,
     sections: &[crate::session::SectionConfig],
+    in_progress_limit: Option<u32>,
     agent_states: &HashMap<SessionId, AgentState>,
     collapsed_sections: &std::collections::HashSet<String>,
 ) -> Vec<SessionListItem> {
@@ -1040,6 +1063,7 @@ fn build_stacked_section_items(
             name: section_name.clone(),
             count: total_count,
             collapsed,
+            max_sessions: resolve_section_limit(section_name, sections, in_progress_limit),
         });
         if collapsed {
             continue;
@@ -1379,7 +1403,7 @@ mod stack_order_tests {
         let agent_states = HashMap::new();
         let collapsed = std::collections::HashSet::new();
 
-        let items = build_stacked_section_items(&state, &sections, &agent_states, &collapsed);
+        let items = build_stacked_section_items(&state, &sections, None, &agent_states, &collapsed);
 
         // Walk items: find the "Open" header, then base+child should follow.
         let found_open = items.iter().any(
@@ -1456,6 +1480,7 @@ mod stack_order_tests {
         let items = build_stacked_section_items(
             &state,
             &sections,
+            None,
             &HashMap::new(),
             &std::collections::HashSet::new(),
         );
@@ -1506,6 +1531,7 @@ mod stack_order_tests {
         let items = build_stacked_section_items(
             &state,
             &sections,
+            None,
             &HashMap::new(),
             &std::collections::HashSet::new(),
         );
@@ -1579,6 +1605,7 @@ mod stack_order_tests {
         let items = build_stacked_section_items(
             &state,
             &sections,
+            None,
             &HashMap::new(),
             &std::collections::HashSet::new(),
         );
@@ -1656,12 +1683,14 @@ mod stack_order_tests {
         let sections = vec![section_named("Open")];
         let collapsed = std::collections::HashSet::new();
 
-        let first = build_stacked_section_items(&state, &sections, &HashMap::new(), &collapsed);
+        let first =
+            build_stacked_section_items(&state, &sections, None, &HashMap::new(), &collapsed);
         // Call many times — every iteration constructs fresh internal
         // HashMaps with a new RandomState, so any non-determinism shows up
         // here. 32 calls is well past the birthday-paradox threshold.
         for _ in 0..32 {
-            let again = build_stacked_section_items(&state, &sections, &HashMap::new(), &collapsed);
+            let again =
+                build_stacked_section_items(&state, &sections, None, &HashMap::new(), &collapsed);
             assert_eq!(
                 again, first,
                 "build_stacked_section_items must produce identical output on every call"
@@ -1686,6 +1715,7 @@ mod stack_order_tests {
         let items = build_stacked_section_items(
             &state,
             &sections,
+            None,
             &HashMap::new(),
             &std::collections::HashSet::new(),
         );
@@ -1712,6 +1742,137 @@ mod stack_order_tests {
             vec![older.id, newer.id],
             "Open section should be sorted by entered_section_at (oldest first)"
         );
+    }
+
+    #[test]
+    fn resolve_section_limit_uses_in_progress_limit_for_catch_all() {
+        let sections = vec![section_named("Open")];
+        assert_eq!(
+            super::resolve_section_limit(crate::session::IN_PROGRESS, &sections, Some(3)),
+            Some(3)
+        );
+        assert_eq!(
+            super::resolve_section_limit(crate::session::IN_PROGRESS, &sections, None),
+            None
+        );
+    }
+
+    #[test]
+    fn resolve_section_limit_reads_max_sessions_from_matching_config() {
+        let sections = vec![
+            section_named("Open"),
+            crate::session::SectionConfig {
+                name: "Review".into(),
+                max_sessions: Some(2),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(
+            super::resolve_section_limit("Review", &sections, None),
+            Some(2)
+        );
+        assert_eq!(super::resolve_section_limit("Open", &sections, None), None);
+        assert_eq!(
+            super::resolve_section_limit("Missing", &sections, Some(99)),
+            None,
+            "in_progress_limit must not leak into other section names"
+        );
+    }
+
+    #[test]
+    fn section_grouped_header_carries_max_sessions_from_config() {
+        let project_id = ProjectId::new();
+        let mut s = make_session_in_section("s", "s", 0, "Review");
+        s.project_id = project_id;
+
+        let state = appstate_from(vec![s]);
+        let sections = vec![crate::session::SectionConfig {
+            name: "Review".into(),
+            max_sessions: Some(5),
+            ..Default::default()
+        }];
+
+        let items = super::build_section_grouped_items(
+            &state,
+            &sections,
+            None,
+            &HashMap::new(),
+            &std::collections::HashSet::new(),
+        );
+
+        let review_header = items.iter().find_map(|i| match i {
+            SessionListItem::SectionHeader {
+                name,
+                max_sessions,
+                count,
+                ..
+            } if name == "Review" => Some((*count, *max_sessions)),
+            _ => None,
+        });
+        assert_eq!(review_header, Some((1, Some(5))));
+    }
+
+    #[test]
+    fn section_grouped_in_progress_header_carries_in_progress_limit() {
+        let project_id = ProjectId::new();
+        let mut s = make_session("a", "a", 0);
+        s.project_id = project_id;
+
+        let state = appstate_from(vec![s]);
+        let sections: Vec<crate::session::SectionConfig> = vec![];
+
+        let items = super::build_section_grouped_items(
+            &state,
+            &sections,
+            Some(2),
+            &HashMap::new(),
+            &std::collections::HashSet::new(),
+        );
+
+        let ip_header = items.iter().find_map(|i| match i {
+            SessionListItem::SectionHeader {
+                name, max_sessions, ..
+            } if name == crate::session::IN_PROGRESS => Some(*max_sessions),
+            _ => None,
+        });
+        assert_eq!(ip_header, Some(Some(2)));
+    }
+
+    #[test]
+    fn stacked_section_header_carries_max_sessions() {
+        let project_id = ProjectId::new();
+        let mut s = make_session_in_section("s", "s", 0, "Review");
+        s.project_id = project_id;
+
+        let state = appstate_from(vec![s]);
+        let sections = vec![crate::session::SectionConfig {
+            name: "Review".into(),
+            max_sessions: Some(4),
+            ..Default::default()
+        }];
+
+        let items = build_stacked_section_items(
+            &state,
+            &sections,
+            Some(1),
+            &HashMap::new(),
+            &std::collections::HashSet::new(),
+        );
+
+        let review_limit = items.iter().find_map(|i| match i {
+            SessionListItem::SectionHeader {
+                name, max_sessions, ..
+            } if name == "Review" => Some(*max_sessions),
+            _ => None,
+        });
+        let ip_limit = items.iter().find_map(|i| match i {
+            SessionListItem::SectionHeader {
+                name, max_sessions, ..
+            } if name == crate::session::IN_PROGRESS => Some(*max_sessions),
+            _ => None,
+        });
+        assert_eq!(review_limit, Some(Some(4)));
+        assert_eq!(ip_limit, Some(Some(1)));
     }
 
     #[test]
