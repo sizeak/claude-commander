@@ -617,6 +617,9 @@ pub enum SessionListItem {
         name: String,
         count: usize,
         collapsed: bool,
+        /// Advisory WIP limit resolved from config. `None` means no limit
+        /// configured for this section.
+        max_sessions: Option<u32>,
     },
     /// A blank spacer row for visual separation between sections.
     /// Not selectable.
@@ -1350,6 +1353,7 @@ mod tests {
             name: "Open PRs".to_string(),
             count: 2,
             collapsed: false,
+            max_sessions: None,
         };
         assert!(section.is_group_header());
 

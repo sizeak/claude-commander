@@ -190,6 +190,9 @@ pub struct DiffReviewState {
     pub base: String,
     pub diff: ParsedDiff,
     pub comments: Vec<Comment>,
+    /// xxh3 hash of the raw diff this view was last built from. Lets the
+    /// background refresh skip a rebuild when the working tree is unchanged.
+    pub content_hash: u64,
     /// Display paths of files marked reviewed (mirrors the persisted store;
     /// stale marks are pruned by the service before the view opens).
     pub reviewed: HashSet<String>,
@@ -280,6 +283,7 @@ impl DiffReviewState {
             base,
             diff,
             comments,
+            content_hash: 0,
             reviewed: HashSet::new(),
             selected_file,
             scroll: 0,
@@ -339,6 +343,47 @@ impl DiffReviewState {
                 *slot = Some(segs);
             }
         }
+    }
+
+    /// Replace the displayed diff with a freshly composed one (the working
+    /// tree changed while the view stayed open), preserving navigation state
+    /// where it still makes sense: the body stays on the same file by path, the
+    /// cursor and scroll clamp into the new content, collapsed directories and
+    /// reviewed marks are kept, and any in-progress visual selection is dropped
+    /// (line indices may have moved). Render caches are reset and re-primed from
+    /// the precomputed `segments`.
+    pub(super) fn refresh_diff(
+        &mut self,
+        diff: ParsedDiff,
+        comments: Vec<Comment>,
+        reviewed: HashSet<String>,
+        segments: Vec<Vec<WordSegs>>,
+        content_hash: u64,
+    ) {
+        let prev_path = self.current_file().map(|f| f.display_path().to_string());
+        self.diff = diff;
+        self.comments = comments;
+        self.reviewed = reviewed;
+        self.content_hash = content_hash;
+        self.file_tree = build_file_tree(&self.diff.files);
+        // Reset and re-prime the per-file segment cache for the new file set.
+        let seg_slots = self.diff.files.len().max(1);
+        self.seg_cache = RefCell::new(vec![None; seg_slots]);
+        self.prime_segments(segments);
+        self.visual_anchor = None;
+        // Re-locate the file that was on screen by its path; fall back to the
+        // first file when it left the diff.
+        self.selected_file = prev_path
+            .and_then(|p| self.diff.files.iter().position(|f| f.display_path() == p))
+            .or_else(|| first_file_index(&self.file_tree))
+            .unwrap_or(0)
+            .min(self.diff.files.len().saturating_sub(1));
+        // Clamp the cursor into the (possibly shorter) current file, keep it in
+        // view, and resync the tree cursor onto the shown file.
+        let count = self.selectable_count();
+        self.cursor = self.cursor.min(count.saturating_sub(1));
+        self.follow_cursor();
+        self.sync_tree_cursor_to_file();
     }
 
     /// The currently-visible tree rows (respecting collapsed directories).
@@ -1121,6 +1166,7 @@ impl App {
                 // navigation instead. Opens instantly; the first view of a large
                 // file can be briefly janky.
                 if !self.config.precompute_review_caches {
+                    let content_hash = snapshot.content_hash;
                     let mut state = DiffReviewState::new(
                         session_id,
                         title,
@@ -1128,8 +1174,9 @@ impl App {
                         snapshot.diff,
                         snapshot.comments,
                     );
+                    state.content_hash = content_hash;
                     state.reviewed = snapshot.reviewed.into_iter().collect();
-                    self.review_images.borrow_mut().clear();
+                    self.reset_review_images();
                     self.ensure_review_image(&state).await;
                     self.ui_state.modal = Modal::ReviewDiff(Box::new(state));
                     return;
@@ -1156,6 +1203,7 @@ impl App {
                 let diff = snapshot.diff;
                 let comments = snapshot.comments;
                 let reviewed = snapshot.reviewed;
+                let content_hash = snapshot.content_hash;
                 tokio::spawn(async move {
                     // The precompute is CPU-bound and synchronous, so keep it off
                     // the async worker pool; hand the diff back out with its
@@ -1176,6 +1224,7 @@ impl App {
                                 comments,
                                 reviewed,
                                 segments,
+                                content_hash,
                             }),
                         }))
                         .await;
@@ -1189,7 +1238,7 @@ impl App {
         }
     }
 
-    fn set_review_status(&mut self, msg: &str) {
+    pub(super) fn set_review_status(&mut self, msg: &str) {
         self.ui_state.status_message =
             Some((msg.to_string(), Instant::now() + Duration::from_secs(3)));
     }
@@ -1322,12 +1371,30 @@ impl App {
                 }
             }
             KeyCode::Char('a') => self.apply_review(&mut state).await,
+            // Manually re-compose the diff against the working tree, folding in
+            // any edits made since the view opened (e.g. by the agent acting on
+            // applied comments). Idle agents trigger this automatically too.
+            KeyCode::Char('r') => {
+                let (sid, title, prev_hash) =
+                    (state.session_id, state.title.clone(), state.content_hash);
+                self.spawn_review_refresh(sid, title, prev_hash, true);
+            }
             _ => {}
         }
         // A navigation key or side toggle may have changed the visible binary
         // image; kick off its lazy fetch if not already loaded.
         self.ensure_review_image(&state).await;
         self.ui_state.modal = Modal::ReviewDiff(state);
+    }
+
+    /// Clear the decoded-image cache and bump the review generation. Called when
+    /// a review opens so in-flight fetches from the previous review (which
+    /// captured the old generation) are dropped on arrival rather than poisoning
+    /// the new review's cache.
+    pub(super) fn reset_review_images(&self) {
+        self.review_images.borrow_mut().clear();
+        self.review_image_gen
+            .set(self.review_image_gen.get().wrapping_add(1));
     }
 
     /// Ensure the binary image for the currently-shown file+side is being (or
@@ -1368,6 +1435,7 @@ impl App {
         };
 
         let tx = self.event_loop.sender();
+        let generation = self.review_image_gen.get();
         tokio::spawn(async move {
             let bytes = match side {
                 DiffSide::Old => crate::git::read_base_blob(&worktree, &base, &path).await,
@@ -1386,6 +1454,7 @@ impl App {
             };
             let _ = tx
                 .send(AppEvent::StateUpdate(StateUpdate::ReviewImageLoaded {
+                    generation,
                     path,
                     side,
                     image,
@@ -1505,7 +1574,7 @@ impl App {
                 _ => "",
             };
             format!(
-                " ↑↓/jk move · v select · Enter comment · z fold · d delete · m reviewed · a apply · t layout · {image_toggle}{toggle}^Q/Esc close "
+                " ↑↓/jk move · v select · Enter comment · z fold · d delete · m reviewed · a apply · r refresh · t layout · {image_toggle}{toggle}^Q/Esc close "
             )
         };
         // The footer doubles as this view's status bar — styled like the app
@@ -1707,7 +1776,7 @@ impl App {
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(0)])
             .split(inner);
-        let caption = format!(" {side_label} · {} · press o to toggle ", human_size(size));
+        let caption = image_caption(file.status, side_label, size);
         frame.render_widget(
             Paragraph::new(caption).style(Style::default().fg(pal.gutter_fg)),
             rows[0],
@@ -1742,6 +1811,17 @@ impl App {
                 );
             }
         }
+    }
+}
+
+/// Caption shown above a review image: side label + size, plus a `press o to
+/// toggle` hint only when the file is a modification (the sole case where `o`
+/// has two sides to flip between — added/deleted files are single-sided).
+fn image_caption(status: FileStatus, side_label: &str, size: Option<u64>) -> String {
+    if status == FileStatus::Modified {
+        format!(" {side_label} · {} · press o to toggle ", human_size(size))
+    } else {
+        format!(" {side_label} · {} ", human_size(size))
     }
 }
 
@@ -2468,6 +2548,7 @@ pub struct ReviewPrepared {
     pub(super) comments: Vec<Comment>,
     pub(super) reviewed: Vec<String>,
     pub(super) segments: Vec<Vec<WordSegs>>,
+    pub(super) content_hash: u64,
 }
 
 /// Token class for intra-line diffing: identifier runs and whitespace runs are
@@ -2867,6 +2948,101 @@ diff --git a/b.rs b/b.rs
         assert_eq!(s.cursor, 2);
         s.move_cursor(false);
         assert_eq!(s.cursor, 1);
+    }
+
+    #[test]
+    fn refresh_diff_swaps_content_and_keeps_file_by_path() {
+        let mut s = state_with_two_files();
+        // Viewing b.rs (the second file).
+        s.selected_file = 1;
+        s.focus = ReviewFocus::Body;
+        assert_eq!(s.current_file().unwrap().display_path(), "b.rs");
+
+        // Simulate the agent editing files after comments were applied: a fresh
+        // diff where b.rs gained a line and the file order changed.
+        let new_diff = parse_unified_diff(
+            "\
+diff --git a/b.rs b/b.rs
+--- a/b.rs
++++ b/b.rs
+@@ -1 +1,2 @@
+-b
++B
++extra
+diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -1,2 +1,3 @@
+ fn main() {
++    let y = 3;
+ }
+",
+        );
+        s.refresh_diff(new_diff, Vec::new(), HashSet::new(), Vec::new(), 42);
+
+        assert_eq!(s.content_hash, 42);
+        // The body still shows b.rs even though it moved to index 0...
+        assert_eq!(s.selected_file, 0);
+        assert_eq!(s.current_file().unwrap().display_path(), "b.rs");
+        // ...and it reflects the *new* content (the stale snapshot lacked it).
+        let body: Vec<_> = s
+            .selectable_lines()
+            .iter()
+            .map(|l| l.content.clone())
+            .collect();
+        assert!(
+            body.iter().any(|c| c == "extra"),
+            "fresh diff shown: {body:?}"
+        );
+    }
+
+    #[test]
+    fn refresh_diff_clamps_cursor_into_shorter_file() {
+        let mut s = state_with_two_files();
+        s.selected_file = 0; // a.rs has 3 selectable lines
+        s.focus = ReviewFocus::Body;
+        s.cursor = 2;
+        // a.rs shrinks to a single changed line in the refreshed diff.
+        let new_diff = parse_unified_diff(
+            "\
+diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -1 +1 @@
+-fn main() {}
++fn main() { }
+",
+        );
+        s.refresh_diff(new_diff, Vec::new(), HashSet::new(), Vec::new(), 7);
+        assert_eq!(s.current_file().unwrap().display_path(), "a.rs");
+        assert_eq!(s.selectable_count(), 2);
+        assert!(
+            s.cursor < s.selectable_count(),
+            "cursor clamped: {}",
+            s.cursor
+        );
+    }
+
+    #[test]
+    fn refresh_diff_falls_back_when_file_removed() {
+        let mut s = state_with_two_files();
+        s.selected_file = 1; // b.rs
+        // Refreshed diff no longer contains b.rs.
+        let new_diff = parse_unified_diff(
+            "\
+diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -1,2 +1,3 @@
+ fn main() {
++    let y = 3;
+ }
+",
+        );
+        s.refresh_diff(new_diff, Vec::new(), HashSet::new(), Vec::new(), 1);
+        assert_eq!(s.diff.files.len(), 1);
+        assert_eq!(s.selected_file, 0);
+        assert_eq!(s.current_file().unwrap().display_path(), "a.rs");
     }
 
     #[test]
@@ -3920,6 +4096,30 @@ diff --git a/x.rs b/x.rs
         assert_eq!(human_size(Some(512)), "512 bytes");
         assert_eq!(human_size(Some(2048)), "2.0 KiB");
         assert_eq!(human_size(Some(3 * 1024 * 1024)), "3.0 MiB");
+    }
+
+    #[test]
+    fn image_caption_shows_toggle_hint_only_for_modified() {
+        // A modification has two sides, so the `o` toggle is meaningful.
+        let modified = image_caption(FileStatus::Modified, "after", Some(2048));
+        assert!(
+            modified.contains("press o to toggle"),
+            "modified caption should advertise the toggle: {modified:?}"
+        );
+        assert!(modified.contains("after") && modified.contains("2.0 KiB"));
+
+        // Added/deleted images are single-sided; `o` is a no-op, so the hint
+        // must not appear (it would be misleading UI).
+        let added = image_caption(FileStatus::Added, "after", Some(2048));
+        assert!(
+            !added.contains("press o to toggle"),
+            "added caption must not advertise a no-op toggle: {added:?}"
+        );
+        let deleted = image_caption(FileStatus::Deleted, "before", Some(512));
+        assert!(
+            !deleted.contains("press o to toggle"),
+            "deleted caption must not advertise a no-op toggle: {deleted:?}"
+        );
     }
 
     #[test]

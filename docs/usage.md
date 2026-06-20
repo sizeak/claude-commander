@@ -150,6 +150,12 @@ foreground-only colouring on 256- and 16-colour terminals.
   They're written to a markdown brief and the agent is prompted to address
   them — sent immediately when idle/working (it queues natively), held until a
   permission prompt clears, or deferred if the agent is stopped.
+- **Refresh**: the diff is a snapshot taken when you opened the view, so the
+  agent's edits (e.g. after applying comments) don't appear until it's
+  re-composed. This happens automatically when the session's agent goes idle —
+  i.e. finishes a turn — folding its changes in while keeping your place (same
+  file, clamped cursor/scroll). Press `r` to re-compose on demand at any time;
+  it reports "Review refreshed" or "Review already up to date".
 - **Drift**: if the code under a comment changes before you apply, the view
   re-anchors it by its captured snippet. If it can't be located unambiguously
   the comment is marked `⚠` (drifted) and blocks apply until you review or

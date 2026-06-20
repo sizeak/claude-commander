@@ -156,6 +156,13 @@ pub struct Config {
     #[serde(default)]
     pub sections: Vec<crate::session::SectionConfig>,
 
+    /// Advisory WIP limit for the implicit "In Progress" catch-all section.
+    /// When set, the section header shows `count/n` and renders in a warning
+    /// colour once `count >= n`. Purely informational — never blocks session
+    /// creation.
+    #[serde(default)]
+    pub in_progress_limit: Option<u32>,
+
     /// Enable the persistent top-level "commander" Claude session — a session
     /// (not tied to any project) that coordinates other sessions via the CLI.
     /// Disabled by default; opt-in via config or the settings UI.
@@ -212,6 +219,7 @@ impl Default for Config {
             rounded_borders: false,
             precompute_review_caches: true,
             sections: Vec::new(),
+            in_progress_limit: None,
             commander_enabled: false,
             commander_program: None,
             commander_dir: None,
@@ -466,6 +474,26 @@ fn parse_key_code(s: &str) -> KeyCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_max_sessions_and_in_progress_limit_round_trip() {
+        let toml_src = r#"
+in_progress_limit = 4
+
+[[sections]]
+name = "Needs Review"
+has_label = "ready-for-review"
+max_sessions = 5
+"#;
+        let config: Config = toml::from_str(toml_src).expect("toml parse");
+        assert_eq!(config.in_progress_limit, Some(4));
+        assert_eq!(config.sections.len(), 1);
+        assert_eq!(config.sections[0].max_sessions, Some(5));
+
+        // Defaults are unset.
+        let default = Config::default();
+        assert_eq!(default.in_progress_limit, None);
+    }
 
     #[test]
     fn test_sections_toml_deserialises() {

@@ -885,6 +885,7 @@ fn make_section_header(name: &str, count: usize, collapsed: bool) -> SessionList
         name: name.to_string(),
         count,
         collapsed,
+        max_sessions: None,
     }
 }
 
@@ -931,6 +932,38 @@ fn test_section_header_shows_count() {
     assert!(
         lines[0].contains("(5)"),
         "Expected count in section header: {:?}",
+        lines[0]
+    );
+}
+
+#[test]
+fn test_section_header_shows_count_over_limit_when_max_sessions_set() {
+    let item = SessionListItem::SectionHeader {
+        name: "Review".to_string(),
+        count: 3,
+        collapsed: false,
+        max_sessions: Some(2),
+    };
+    let lines = render_tree(&[item], 60, 2);
+    assert!(
+        lines[0].contains("(3/2)"),
+        "Expected count/limit display when over limit: {:?}",
+        lines[0]
+    );
+}
+
+#[test]
+fn test_section_header_shows_count_under_limit_when_max_sessions_set() {
+    let item = SessionListItem::SectionHeader {
+        name: "Review".to_string(),
+        count: 1,
+        collapsed: false,
+        max_sessions: Some(5),
+    };
+    let lines = render_tree(&[item], 60, 2);
+    assert!(
+        lines[0].contains("(1/5)"),
+        "Expected count/limit display when under limit: {:?}",
         lines[0]
     );
 }
