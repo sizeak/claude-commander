@@ -63,17 +63,21 @@ This directory is your own scratch space; nothing else in it matters.
 const SESSION_ID_FILE: &str = "session-id";
 
 /// Read the persisted session id to resume, if any. A missing/blank file means
-/// "start fresh" (e.g. the very first launch).
-fn read_resume_id(dir: &Path) -> Option<String> {
-    let id = std::fs::read_to_string(dir.join(SESSION_ID_FILE)).ok()?;
+/// "start fresh" (e.g. the very first launch). Async (`tokio::fs`) so it never
+/// blocks the runtime from the spawn path.
+async fn read_resume_id(dir: &Path) -> Option<String> {
+    let id = tokio::fs::read_to_string(dir.join(SESSION_ID_FILE))
+        .await
+        .ok()?;
     let id = id.trim();
     (!id.is_empty()).then(|| id.to_string())
 }
 
 /// Persist the current session id so the next launch can resume it. Best-effort:
 /// a write failure just means the next launch starts a fresh conversation.
-fn write_resume_id(dir: &Path, id: &str) {
-    if let Err(e) = std::fs::write(dir.join(SESSION_ID_FILE), id) {
+/// Async (`tokio::fs`) so it never blocks the bridge task.
+async fn write_resume_id(dir: &Path, id: &str) {
+    if let Err(e) = tokio::fs::write(dir.join(SESSION_ID_FILE), id).await {
         warn!(target: "conversation", "failed to persist session id: {e}");
     }
 }
@@ -353,7 +357,7 @@ async fn spawn_session_runtime(
     let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<ConversationEvent>();
     // Resume the previous conversation if we have a stored session id, so the
     // agent keeps its history (and memory of the user) across restarts.
-    let resume = read_resume_id(&dir);
+    let resume = read_resume_id(&dir).await;
     match ConversationSession::spawn(
         &conv.command,
         &conv.permission_mode,
@@ -391,7 +395,7 @@ async fn spawn_session_runtime(
             // conversation. Claude may fork a fresh id on resume, so record
             // whatever the latest init reports.
             if let ConversationEvent::Started { session_id } = &ev {
-                write_resume_id(&bridge_dir, session_id);
+                write_resume_id(&bridge_dir, session_id).await;
             }
             if let Some(sp) = &speaker
                 && let Some(cmd) = crate::conversation::speaker_command_for(&ev)
@@ -832,17 +836,20 @@ mod tests {
         assert_eq!(wrap_text("hello world foo", 11), vec!["hello world", "foo"]);
     }
 
-    #[test]
-    fn resume_id_round_trips() {
+    #[tokio::test]
+    async fn resume_id_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         // No file yet → start fresh.
-        assert_eq!(read_resume_id(dir.path()), None);
+        assert_eq!(read_resume_id(dir.path()).await, None);
         // After persisting, the same id comes back for the next launch.
-        write_resume_id(dir.path(), "abc-123");
-        assert_eq!(read_resume_id(dir.path()), Some("abc-123".to_string()));
+        write_resume_id(dir.path(), "abc-123").await;
+        assert_eq!(
+            read_resume_id(dir.path()).await,
+            Some("abc-123".to_string())
+        );
         // A blank/whitespace file is treated as "no id" (start fresh).
-        write_resume_id(dir.path(), "  \n");
-        assert_eq!(read_resume_id(dir.path()), None);
+        write_resume_id(dir.path(), "  \n").await;
+        assert_eq!(read_resume_id(dir.path()).await, None);
     }
 
     #[test]

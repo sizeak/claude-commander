@@ -12,7 +12,7 @@ use std::process::Stdio;
 
 use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
 use tracing::warn;
 
@@ -129,6 +129,12 @@ impl ConversationSession {
     /// conversation agent can act without interactive approval prompts. When
     /// `resume` is `Some(id)`, `--resume <id>` continues that prior session so
     /// the conversation keeps its history across restarts.
+    ///
+    /// The child's stderr is captured and logged (not discarded): when `claude`
+    /// fails to start a session — a bad flag, an unknown `--resume` id, an auth
+    /// problem — it explains itself there, and stdout just closes (surfacing as a
+    /// bare `Exited`). Logging it turns an opaque "session ended" into a
+    /// diagnosable line in the `conversation` target.
     pub fn spawn(
         command: &str,
         permission_mode: &str,
@@ -150,7 +156,7 @@ impl ConversationSession {
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .map_err(|e| TtsError::Session(format!("failed to start `{command}`: {e}")))?;
@@ -163,6 +169,13 @@ impl ConversationSession {
             .stdin
             .take()
             .ok_or_else(|| TtsError::Session("child stdin unavailable".into()))?;
+
+        // Best-effort: log whatever `claude` writes to stderr so startup
+        // failures (bad flag, stale `--resume`, auth) aren't lost behind a bare
+        // `Exited`. Missing stderr is non-fatal — just skip the logger.
+        if let Some(stderr) = child.stderr.take() {
+            tokio::spawn(log_stderr(stderr));
+        }
 
         tokio::spawn(read_events(stdout, events));
         Ok(Self { child, stdin })
@@ -206,6 +219,18 @@ async fn read_events(stdout: ChildStdout, events: mpsc::UnboundedSender<Conversa
         }
     }
     let _ = events.send(ConversationEvent::Exited);
+}
+
+/// Drain the child's stderr, logging each non-empty line under the
+/// `conversation` target so a failed launch is diagnosable. Ends when stderr
+/// closes (process exit).
+async fn log_stderr(stderr: ChildStderr) {
+    let mut lines = BufReader::new(stderr).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        if !line.trim().is_empty() {
+            warn!(target: "conversation", "claude stderr: {line}");
+        }
+    }
 }
 
 #[cfg(test)]
