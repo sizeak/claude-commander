@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use uuid::Uuid;
 
@@ -17,7 +17,8 @@ use crate::config::{AppState, Config, ConfigStore, StateStore};
 use crate::error::{Result, SessionError};
 use crate::git::{
     FileDiff, GitBackend, ParsedDiff, PrState, ReviewDecision, compose_review_diff,
-    diff_stat_summary, effective_pr_state, parse_unified_diff, prefer_remote_branch,
+    diff_stat_summary, effective_pr_state, enrich_binary_sizes, parse_unified_diff,
+    prefer_remote_branch, read_base_blob, read_worktree_file,
 };
 use crate::reviewed::ReviewedStore;
 use crate::session::{
@@ -305,7 +306,8 @@ impl CommanderService {
         let (worktree_path, review_base) = self.review_target(session_id).await?;
         let base = review_base.git_ref(&worktree_path).await;
         let raw = compose_review_diff(&worktree_path, &base).await?;
-        self.snapshot_from_raw(session_id, base, raw).await
+        self.snapshot_from_raw(session_id, &worktree_path, base, raw)
+            .await
     }
 
     /// Re-compose the review diff and, when its content differs from
@@ -325,11 +327,15 @@ impl CommanderService {
         if xxhash_rust::xxh3::xxh3_64(raw.as_bytes()) == prev_hash {
             return Ok(None);
         }
-        Ok(Some(self.snapshot_from_raw(session_id, base, raw).await?))
+        Ok(Some(
+            self.snapshot_from_raw(session_id, &worktree_path, base, raw)
+                .await?,
+        ))
     }
 
     /// Resolve the worktree path and review base for a session under a brief
-    /// read lock. Shared by `open_review` and `refresh_review_if_changed`.
+    /// read lock. Shared by `open_review`, `refresh_review_if_changed`,
+    /// `review_blob_source` and `fetch_diff_blob`.
     async fn review_target(&self, session_id: &SessionId) -> Result<(PathBuf, ReviewBase)> {
         let state = self.store.read().await;
         let session = state
@@ -346,11 +352,15 @@ impl CommanderService {
     async fn snapshot_from_raw(
         &self,
         session_id: &SessionId,
+        worktree_path: &Path,
         base: String,
         raw: String,
     ) -> Result<ReviewSnapshot> {
         let content_hash = xxhash_rust::xxh3::xxh3_64(raw.as_bytes());
-        let diff = parse_unified_diff(&raw);
+        let mut diff = parse_unified_diff(&raw);
+        // Binary files carry metadata only; fill in the blob sizes the parser
+        // can't know. Bytes are lazy-loaded via `fetch_diff_blob`.
+        enrich_binary_sizes(&mut diff, worktree_path).await;
 
         let mut comments = self.comments.load(*session_id).await?;
         reanchor_comments(&mut comments, &diff);
@@ -371,6 +381,40 @@ impl CommanderService {
             reviewed,
             content_hash,
         })
+    }
+
+    /// A session's worktree path and the resolved base git ref the review diff
+    /// is computed against. These are the inputs a background image fetch needs
+    /// to read blob bytes (via `crate::git::read_base_blob`/`read_worktree_file`)
+    /// without holding the non-`Send` service handle across the task boundary.
+    pub async fn review_blob_source(&self, session_id: &SessionId) -> Result<(PathBuf, String)> {
+        let (worktree_path, review_base) = self.review_target(session_id).await?;
+        let base = review_base.git_ref(&worktree_path).await;
+        Ok((worktree_path, base))
+    }
+
+    /// Fetch the raw bytes of one side of a binary file in a session's review
+    /// diff. This is the lazy-load half of the binary-diff seam: bytes are kept
+    /// OUT of `ReviewSnapshot` and fetched on demand only when a consumer needs
+    /// to render (or compare) the image.
+    ///
+    /// - `DiffSide::New` reads the working-tree file.
+    /// - `DiffSide::Old` reads the blob at the review base (errors for an added
+    ///   file, which has no base side).
+    pub async fn fetch_diff_blob(
+        &self,
+        session_id: &SessionId,
+        side: DiffSide,
+        path: &str,
+    ) -> Result<Vec<u8>> {
+        let (worktree_path, review_base) = self.review_target(session_id).await?;
+        match side {
+            DiffSide::New => read_worktree_file(&worktree_path, path).await,
+            DiffSide::Old => {
+                let base = review_base.git_ref(&worktree_path).await;
+                read_base_blob(&worktree_path, &base, path).await
+            }
+        }
     }
 
     /// Toggle the reviewed mark for one file of a session's review diff.
@@ -660,6 +704,15 @@ pub struct NewComment {
     pub line_range: (usize, usize),
     pub snippet: String,
     pub comment: String,
+}
+
+/// Which side of a diff a binary blob fetch refers to: the base ("before") or
+/// the working tree ("after").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiffSide {
+    Old,
+    New,
 }
 
 /// Result of opening the review view: the parsed diff plus the session's

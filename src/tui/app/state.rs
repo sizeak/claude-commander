@@ -308,8 +308,37 @@ impl App {
                     state.content_hash = content_hash;
                     state.reviewed = reviewed.into_iter().collect();
                     state.prime_segments(segments);
+                    self.reset_review_images();
+                    self.ensure_review_image(&state).await;
                     self.ui_state.modal = Modal::ReviewDiff(Box::new(state));
                 }
+            }
+            StateUpdate::ReviewImageLoaded {
+                generation,
+                path,
+                side,
+                image,
+            } => {
+                // Drop arrivals from a previous review: a stale fetch could
+                // otherwise repopulate the cleared cache and show the wrong image
+                // for a same-named path in the now-open review.
+                if generation != self.review_image_gen.get() {
+                    return;
+                }
+                // Build the render protocol on the main thread (it owns the
+                // Picker) and cache it for the `&self` render path.
+                let entry = match image {
+                    Err(e) => ImageEntry::Failed(e),
+                    Ok(img) => match &self.picker {
+                        Some(picker) => {
+                            let dynimg = std::sync::Arc::try_unwrap(img)
+                                .unwrap_or_else(|shared| (*shared).clone());
+                            ImageEntry::Ready(Box::new(picker.new_resize_protocol(dynimg)))
+                        }
+                        None => ImageEntry::Failed("terminal has no image support".to_string()),
+                    },
+                };
+                self.review_images.borrow_mut().insert((path, side), entry);
             }
             StateUpdate::ReviewRefreshed { refreshed, manual } => {
                 self.ui_state.review_refresh_in_flight = false;

@@ -129,6 +129,13 @@ foreground-only colouring on 256- and 16-colour terminals.
   across restarts and clear automatically when a file's diff changes or it
   leaves the diff (GitHub "Viewed" semantics), so a re-edited file demands a
   fresh look. The tree title shows progress (`Files (3/7 reviewed)`).
+- **Binary & image files**: image files (PNG, JPEG, GIF, WebP, BMP, …) render
+  inline in the diff body using the terminal's graphics protocol (Kitty,
+  iTerm2, or Sixel), falling back to Unicode half-blocks on terminals without
+  one. For a modified image, `o` toggles between the **before** and **after**
+  versions; added and deleted images show their only side. Image bytes are
+  loaded lazily when the file scrolls into view. Other (non-image) binaries
+  show a size/placeholder line instead of a textual diff.
 - **Comment**: in the body, press `v` to start a line selection (arrows grow
   or shrink it; mouse drag also selects), then `Enter` to attach a comment.
   Right-clicking or double-clicking a line is a mouse shortcut for the same
