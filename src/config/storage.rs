@@ -121,11 +121,21 @@ impl AppState {
             return Ok(state);
         }
 
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| ConfigError::LoadFailed(format!("Failed to read state file: {}", e)))?;
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            ConfigError::LoadFailed(format!(
+                "Failed to read state file {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
 
-        let mut state: AppState = serde_json::from_str(&content)
-            .map_err(|e| ConfigError::LoadFailed(format!("Failed to parse state file: {}", e)))?;
+        let mut state: AppState = serde_json::from_str(&content).map_err(|e| {
+            ConfigError::LoadFailed(format!(
+                "Failed to parse state file {}: {}",
+                path.display(),
+                e
+            ))
+        })?;
 
         // Update version and remember path
         state.version = env!("CARGO_PKG_VERSION").to_string();
@@ -286,6 +296,26 @@ mod tests {
         assert!(state.projects.is_empty());
         assert!(state.sessions.is_empty());
         assert!(!state.seen_help);
+    }
+
+    #[test]
+    fn test_load_from_corrupt_file_errors_and_names_the_path() {
+        // Regression: `for_cli` and the popup picker swallowed this error
+        // with `.unwrap_or_else(|_| AppState::new())`, so a corrupt
+        // state.json silently reported "no sessions" — and creating a
+        // session from that empty view persisted a duplicate project. The
+        // error must propagate, and should name the file so the CLI's
+        // printed error tells the user what to look at.
+        let temp_dir = TempDir::new().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+        std::fs::write(&state_path, "{ not valid json").unwrap();
+
+        let err = AppState::load_from(&state_path).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("state.json"),
+            "error should name the state file: {msg}"
+        );
     }
 
     #[test]

@@ -91,7 +91,10 @@ fn gather_matches(state: &AppState, query: &str, current: Option<&str>) -> Vec<M
 /// session is excluded from the list so the top row is always the
 /// previously-viewed session (Alt+Tab semantics).
 pub fn run_session_picker(out_path: &Path, current: Option<&str>) -> Result<()> {
-    let state = AppState::load().unwrap_or_else(|_| AppState::new());
+    // Propagate state-load failures (before entering the alternate screen)
+    // rather than defaulting to an empty state, which would render a
+    // misleading "no sessions" picker over a corrupt state file.
+    let state = AppState::load()?;
 
     enable_raw_mode().map_err(|e| TuiError::InitFailed(e.to_string()))?;
     let mut stdout = io::stdout();

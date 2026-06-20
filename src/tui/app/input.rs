@@ -226,35 +226,50 @@ impl App {
                     // positions the diff cursor, depending on which pane it hits.
                     let body = self.ui_state.review_body_rect;
                     let files = self.ui_state.review_file_list_rect;
-                    if let Modal::ReviewDiff(state) = &mut self.ui_state.modal {
+                    if matches!(self.ui_state.modal, Modal::ReviewDiff(_)) {
                         let (col, row) = (mouse.column, mouse.row);
-                        let in_files = files.is_some_and(|r| {
-                            col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
-                        });
-                        if let Some(rect) = files.filter(|_| in_files) {
-                            self.ui_state.review_last_click = None;
-                            state.click_file_list_at(col, row, rect);
-                        } else if let Some(rect) = body {
-                            // A double-click on the same body row selects that
-                            // line and opens its comment box (like right-click);
-                            // a single click just positions the cursor.
-                            use super::selection::DOUBLE_CLICK_WINDOW;
-                            let now = Instant::now();
-                            let is_double = matches!(
-                                self.ui_state.review_last_click,
-                                Some((prev_row, prev_at))
-                                    if prev_row == row
-                                        && now.duration_since(prev_at) <= DOUBLE_CLICK_WINDOW
-                            );
-                            if is_double {
+                        let mut selected_file = false;
+                        if let Modal::ReviewDiff(state) = &mut self.ui_state.modal {
+                            let in_files = files.is_some_and(|r| {
+                                col >= r.x
+                                    && col < r.x + r.width
+                                    && row >= r.y
+                                    && row < r.y + r.height
+                            });
+                            if let Some(rect) = files.filter(|_| in_files) {
                                 self.ui_state.review_last_click = None;
-                                if !state.double_click_comment(col, row, rect) {
+                                state.click_file_list_at(col, row, rect);
+                                selected_file = true;
+                            } else if let Some(rect) = body {
+                                // A double-click on the same body row selects that
+                                // line and opens its comment box (like right-click);
+                                // a single click just positions the cursor.
+                                use super::selection::DOUBLE_CLICK_WINDOW;
+                                let now = Instant::now();
+                                let is_double = matches!(
+                                    self.ui_state.review_last_click,
+                                    Some((prev_row, prev_at))
+                                        if prev_row == row
+                                            && now.duration_since(prev_at) <= DOUBLE_CLICK_WINDOW
+                                );
+                                if is_double {
+                                    self.ui_state.review_last_click = None;
+                                    if !state.double_click_comment(col, row, rect) {
+                                        state.click_at(col, row, rect);
+                                    }
+                                } else {
                                     state.click_at(col, row, rect);
+                                    self.ui_state.review_last_click = Some((row, now));
                                 }
-                            } else {
-                                state.click_at(col, row, rect);
-                                self.ui_state.review_last_click = Some((row, now));
                             }
+                        }
+                        // A file-list click may have changed the selected file;
+                        // kick off the lazy image fetch for it. The keyboard nav
+                        // path does this in `handle_review_key`, but mouse
+                        // selection bypasses that — without this, clicking an
+                        // image file leaves it stuck on "Loading image…".
+                        if selected_file && let Modal::ReviewDiff(state) = &self.ui_state.modal {
+                            self.ensure_review_image(state).await;
                         }
                         return;
                     }

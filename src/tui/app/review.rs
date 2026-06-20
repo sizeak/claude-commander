@@ -8,7 +8,7 @@
 use super::*;
 use crossterm::event::KeyEvent;
 
-use crate::api::NewComment;
+use crate::api::{DiffSide, NewComment};
 use crate::comment::{Comment, CommentSide, CommentStatus};
 use crate::git::{DiffLine, FileDiff, FileStatus, Hunk, LineOrigin, ParsedDiff};
 use crate::tui::syntax_highlight::{highlight_line, warm_highlight_cache};
@@ -140,6 +140,37 @@ fn line_wrap_rows(content: &str, content_width: usize) -> usize {
     wrap_row_lens(content, content_width).len()
 }
 
+/// A review image's load state, cached on `App` keyed by (display path, side).
+/// Lives on `App` (not `DiffReviewState`) because `StatefulProtocol` isn't
+/// `Clone` and `DiffReviewState` derives `Clone`.
+pub(crate) enum ImageEntry {
+    /// Fetch + decode in flight; nothing to draw yet.
+    Pending,
+    /// Fetch or decode failed; the string is a short reason for display.
+    Failed(String),
+    /// Decoded and ready: a resize protocol bound to the detected terminal
+    /// graphics capability. Boxed — it's far larger than the other variants.
+    Ready(Box<ratatui_image::protocol::StatefulProtocol>),
+}
+
+/// The side of `file`'s image to display: forced for added/deleted files
+/// (which have only one side), else the user's toggle preference.
+pub(super) fn shown_image_side(file: &FileDiff, pref: DiffSide) -> DiffSide {
+    match file.status {
+        FileStatus::Added => DiffSide::New,
+        FileStatus::Deleted => DiffSide::Old,
+        _ => pref,
+    }
+}
+
+/// The path of `file` on a given side (differs only for renames).
+fn side_path(file: &FileDiff, side: DiffSide) -> &str {
+    match side {
+        DiffSide::Old => &file.old_path,
+        DiffSide::New => &file.new_path,
+    }
+}
+
 /// An in-progress comment, captured against a selectable-line range.
 #[derive(Debug, Clone)]
 pub struct CommentDraft {
@@ -178,6 +209,9 @@ pub struct DiffReviewState {
     /// `Some` while the comment box is open.
     pub comment: Option<CommentDraft>,
     pub layout: ReviewLayout,
+    /// Which side of a binary image to show. Clamped per file: added files
+    /// always show New, deleted always show Old (see [`Self::shown_image_side`]).
+    pub image_side: DiffSide,
     /// File tree built from the diff's paths (single-child directory chains
     /// compressed, lazygit-style).
     file_tree: Vec<TreeNode>,
@@ -258,6 +292,7 @@ impl DiffReviewState {
             visual_anchor: None,
             comment: None,
             layout: ReviewLayout::Inline,
+            image_side: DiffSide::New,
             file_tree,
             collapsed: HashSet::new(),
             tree_cursor: 0,
@@ -436,6 +471,15 @@ impl DiffReviewState {
 
     fn current_file(&self) -> Option<&FileDiff> {
         self.diff.files.get(self.selected_file)
+    }
+
+    /// Flip the preferred binary-image side (before ⇄ after). No-op visually on
+    /// added/deleted files, which always show their only side.
+    pub(super) fn toggle_image_side(&mut self) {
+        self.image_side = match self.image_side {
+            DiffSide::Old => DiffSide::New,
+            DiffSide::New => DiffSide::Old,
+        };
     }
 
     /// The current file's diff lines in render order (selection operates over
@@ -1132,6 +1176,8 @@ impl App {
                     );
                     state.content_hash = content_hash;
                     state.reviewed = snapshot.reviewed.into_iter().collect();
+                    self.reset_review_images();
+                    self.ensure_review_image(&state).await;
                     self.ui_state.modal = Modal::ReviewDiff(Box::new(state));
                     return;
                 }
@@ -1283,6 +1329,9 @@ impl App {
             KeyCode::PageDown => state.page_body(true),
             KeyCode::PageUp => state.page_body(false),
             KeyCode::Char('t') => state.toggle_layout(),
+            // Flip the before/after side of a binary image (no-op for non-image
+            // files and for added/deleted files, which have only one side).
+            KeyCode::Char('o') => state.toggle_image_side(),
             KeyCode::Char('z') => state.toggle_comment_fold(),
             KeyCode::Char('v') if state.focus == ReviewFocus::Body => state.toggle_visual(),
             // Enter: toggle a directory in the tree, or open the comment box in
@@ -1332,7 +1381,86 @@ impl App {
             }
             _ => {}
         }
+        // A navigation key or side toggle may have changed the visible binary
+        // image; kick off its lazy fetch if not already loaded.
+        self.ensure_review_image(&state).await;
         self.ui_state.modal = Modal::ReviewDiff(state);
+    }
+
+    /// Clear the decoded-image cache and bump the review generation. Called when
+    /// a review opens so in-flight fetches from the previous review (which
+    /// captured the old generation) are dropped on arrival rather than poisoning
+    /// the new review's cache.
+    pub(super) fn reset_review_images(&self) {
+        self.review_images.borrow_mut().clear();
+        self.review_image_gen
+            .set(self.review_image_gen.get().wrapping_add(1));
+    }
+
+    /// Ensure the binary image for the currently-shown file+side is being (or
+    /// has been) loaded. Inserts a `Pending` marker and spawns an off-thread
+    /// fetch+decode that reports back via [`StateUpdate::ReviewImageLoaded`].
+    /// Cheap no-op when the current file isn't an image or is already cached.
+    pub(super) async fn ensure_review_image(&self, state: &DiffReviewState) {
+        let Some(file) = state.current_file() else {
+            return;
+        };
+        let Some(info) = file.binary.as_ref() else {
+            return;
+        };
+        if !matches!(info.kind, crate::git::BinaryKind::Image { .. }) {
+            return;
+        }
+        let side = shown_image_side(file, state.image_side);
+        let path = side_path(file, side).to_string();
+        let key = (path.clone(), side);
+
+        if self.review_images.borrow().contains_key(&key) {
+            return;
+        }
+        // Mark in-flight before the first await so repeated renders/keypresses
+        // don't spawn duplicate fetches.
+        self.review_images
+            .borrow_mut()
+            .insert(key, ImageEntry::Pending);
+
+        let (worktree, base) = match self.service.review_blob_source(&state.session_id).await {
+            Ok(src) => src,
+            Err(e) => {
+                self.review_images
+                    .borrow_mut()
+                    .insert((path, side), ImageEntry::Failed(e.to_string()));
+                return;
+            }
+        };
+
+        let tx = self.event_loop.sender();
+        let generation = self.review_image_gen.get();
+        tokio::spawn(async move {
+            let bytes = match side {
+                DiffSide::Old => crate::git::read_base_blob(&worktree, &base, &path).await,
+                DiffSide::New => crate::git::read_worktree_file(&worktree, &path).await,
+            };
+            // Decode off the async runtime — it's CPU-bound.
+            let image = match bytes {
+                Err(e) => Err(format!("read failed: {e}")),
+                Ok(b) => tokio::task::spawn_blocking(move || {
+                    image::load_from_memory(&b)
+                        .map(std::sync::Arc::new)
+                        .map_err(|e| e.to_string())
+                })
+                .await
+                .unwrap_or_else(|e| Err(format!("decode task failed: {e}"))),
+            };
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::ReviewImageLoaded {
+                    generation,
+                    path,
+                    side,
+                    image,
+                }))
+                .await;
+        });
     }
 
     async fn handle_review_comment_key(&mut self, key: KeyEvent, state: &mut DiffReviewState) {
@@ -1431,8 +1559,22 @@ impl App {
                 " ↑↓/jk move · Enter expand/collapse · [ ] file · m reviewed · Tab to diff · {toggle}^Q/Esc close "
             )
         } else {
+            // Offer the image side-toggle only when it does something: a binary
+            // image with two sides (a modification).
+            let image_toggle = match state.current_file() {
+                Some(f)
+                    if f.status == FileStatus::Modified
+                        && matches!(
+                            f.binary.as_ref().map(|b| &b.kind),
+                            Some(crate::git::BinaryKind::Image { .. })
+                        ) =>
+                {
+                    "o before/after · "
+                }
+                _ => "",
+            };
             format!(
-                " ↑↓/jk move · v select · Enter comment · z fold · d delete · m reviewed · a apply · r refresh · t layout · {toggle}^Q/Esc close "
+                " ↑↓/jk move · v select · Enter comment · z fold · d delete · m reviewed · a apply · r refresh · t layout · {image_toggle}{toggle}^Q/Esc close "
             )
         };
         // The footer doubles as this view's status bar — styled like the app
@@ -1545,6 +1687,21 @@ impl App {
             None => format!(" review — vs {} ", state.base),
         };
 
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(self.border_type())
+            .border_style(Style::default().fg(border))
+            .title(title);
+
+        // Binary files (images, blobs) carry no textual hunks — render the image
+        // (or a placeholder) instead of the line-based diff body.
+        if let Some(file) = state.current_file()
+            && let Some(info) = file.binary.as_ref()
+        {
+            self.render_review_binary(frame, area, block, state, file, info);
+            return;
+        }
+
         // Syntax highlighting emits RGB foregrounds, so only apply it on
         // true-color terminals; otherwise fall back to the palette text colour.
         let highlight = self.theme.mode == ColorMode::TrueColor;
@@ -1567,15 +1724,114 @@ impl App {
             ),
         };
 
-        let block = Block::default()
-            .borders(Borders::ALL)
-            .border_type(self.border_type())
-            .border_style(Style::default().fg(border))
-            .title(title);
         frame.render_widget(
             Paragraph::new(lines).block(block).scroll((state.scroll, 0)),
             area,
         );
+    }
+
+    /// Render a binary file's review body: the decoded image via `ratatui-image`
+    /// (graphics protocol or half-block fallback), or a placeholder for
+    /// non-image blobs and not-yet-loaded images. Bytes are fetched lazily — see
+    /// `ensure_review_image`.
+    fn render_review_binary(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        block: Block<'static>,
+        state: &DiffReviewState,
+        file: &FileDiff,
+        info: &crate::git::BinaryInfo,
+    ) {
+        let pal = self.theme.review_palette();
+        let inner = block.inner(area);
+        frame.render_widget(block, area);
+
+        let side = shown_image_side(file, state.image_side);
+        let size = match side {
+            DiffSide::Old => info.old_size,
+            DiffSide::New => info.new_size,
+        };
+        let side_label = match side {
+            DiffSide::Old => "before",
+            DiffSide::New => "after",
+        };
+
+        if !matches!(info.kind, crate::git::BinaryKind::Image { .. }) {
+            let note = format!(
+                "Binary file · {} · not a previewable image",
+                human_size(size)
+            );
+            frame.render_widget(
+                Paragraph::new(note)
+                    .alignment(Alignment::Center)
+                    .style(Style::default().fg(pal.text)),
+                inner,
+            );
+            return;
+        }
+
+        // Caption (one row) above the image area.
+        let rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(inner);
+        let caption = image_caption(file.status, side_label, size);
+        frame.render_widget(
+            Paragraph::new(caption).style(Style::default().fg(pal.gutter_fg)),
+            rows[0],
+        );
+
+        let path = side_path(file, side).to_string();
+        let mut images = self.review_images.borrow_mut();
+        match images.get_mut(&(path, side)) {
+            Some(ImageEntry::Ready(proto)) => {
+                frame.render_stateful_widget(
+                    ratatui_image::StatefulImage::default(),
+                    rows[1],
+                    proto.as_mut(),
+                );
+            }
+            Some(ImageEntry::Failed(e)) => {
+                frame.render_widget(
+                    Paragraph::new(format!("Failed to load image: {e}"))
+                        .alignment(Alignment::Center)
+                        .style(Style::default().fg(pal.del_fg)),
+                    rows[1],
+                );
+            }
+            // Pending, or not yet requested (the request is kicked off by the
+            // navigation handlers, which insert `Pending` before this renders).
+            _ => {
+                frame.render_widget(
+                    Paragraph::new("Loading image…")
+                        .alignment(Alignment::Center)
+                        .style(Style::default().fg(pal.gutter_fg)),
+                    rows[1],
+                );
+            }
+        }
+    }
+}
+
+/// Caption shown above a review image: side label + size, plus a `press o to
+/// toggle` hint only when the file is a modification (the sole case where `o`
+/// has two sides to flip between — added/deleted files are single-sided).
+fn image_caption(status: FileStatus, side_label: &str, size: Option<u64>) -> String {
+    if status == FileStatus::Modified {
+        format!(" {side_label} · {} · press o to toggle ", human_size(size))
+    } else {
+        format!(" {side_label} · {} ", human_size(size))
+    }
+}
+
+/// Human-readable byte size for an optional count (`None` → `"? bytes"`).
+fn human_size(size: Option<u64>) -> String {
+    match size {
+        None => "? bytes".to_string(),
+        Some(n) if n < 1024 => format!("{n} bytes"),
+        Some(n) if n < 1024 * 1024 => format!("{:.1} KiB", n as f64 / 1024.0),
+        Some(n) => format!("{:.1} MiB", n as f64 / (1024.0 * 1024.0)),
     }
 }
 
@@ -2961,6 +3217,7 @@ diff --git a/c.rs b/c.rs
             added: 1,
             removed: 0,
             hunks: Vec::new(),
+            binary: None,
         }
     }
 
@@ -3806,6 +4063,63 @@ diff --git a/x.rs b/x.rs
         assert_eq!(s.layout, ReviewLayout::Inline);
         s.toggle_layout();
         assert_eq!(s.layout, ReviewLayout::SideBySide);
+    }
+
+    #[test]
+    fn toggle_image_side_flips() {
+        let mut s = state_with_two_files();
+        assert_eq!(s.image_side, DiffSide::New);
+        s.toggle_image_side();
+        assert_eq!(s.image_side, DiffSide::Old);
+        s.toggle_image_side();
+        assert_eq!(s.image_side, DiffSide::New);
+    }
+
+    #[test]
+    fn shown_image_side_forces_single_sided_statuses() {
+        let mut f = file("img.png");
+        // Added: always the new side, ignoring the preference.
+        f.status = FileStatus::Added;
+        assert_eq!(shown_image_side(&f, DiffSide::Old), DiffSide::New);
+        // Deleted: always the old side.
+        f.status = FileStatus::Deleted;
+        assert_eq!(shown_image_side(&f, DiffSide::New), DiffSide::Old);
+        // Modified: honours the preference.
+        f.status = FileStatus::Modified;
+        assert_eq!(shown_image_side(&f, DiffSide::Old), DiffSide::Old);
+        assert_eq!(shown_image_side(&f, DiffSide::New), DiffSide::New);
+    }
+
+    #[test]
+    fn human_size_formats_units() {
+        assert_eq!(human_size(None), "? bytes");
+        assert_eq!(human_size(Some(512)), "512 bytes");
+        assert_eq!(human_size(Some(2048)), "2.0 KiB");
+        assert_eq!(human_size(Some(3 * 1024 * 1024)), "3.0 MiB");
+    }
+
+    #[test]
+    fn image_caption_shows_toggle_hint_only_for_modified() {
+        // A modification has two sides, so the `o` toggle is meaningful.
+        let modified = image_caption(FileStatus::Modified, "after", Some(2048));
+        assert!(
+            modified.contains("press o to toggle"),
+            "modified caption should advertise the toggle: {modified:?}"
+        );
+        assert!(modified.contains("after") && modified.contains("2.0 KiB"));
+
+        // Added/deleted images are single-sided; `o` is a no-op, so the hint
+        // must not appear (it would be misleading UI).
+        let added = image_caption(FileStatus::Added, "after", Some(2048));
+        assert!(
+            !added.contains("press o to toggle"),
+            "added caption must not advertise a no-op toggle: {added:?}"
+        );
+        let deleted = image_caption(FileStatus::Deleted, "before", Some(512));
+        assert!(
+            !deleted.contains("press o to toggle"),
+            "deleted caption must not advertise a no-op toggle: {deleted:?}"
+        );
     }
 
     #[test]

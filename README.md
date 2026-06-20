@@ -181,7 +181,7 @@ When attached to a session (via `Enter` or `claude-commander attach`):
 ## Documentation
 
 - **[Usage guide](docs/usage.md)** — CLI commands, the session list, PR stacks (cascade merge / push stack), and AI summaries
-- **[Configuration](docs/configuration.md)** — all config options, theme presets, session-list sections, and data-storage paths
+- **[Configuration](docs/configuration.md)** — all config options, theme presets, session-list sections (with optional advisory WIP limits), and data-storage paths
 - **[Contributing](CONTRIBUTING.md)** — releasing, the local dev loop, and architecture overview
 
 ## License

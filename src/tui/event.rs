@@ -142,6 +142,17 @@ pub enum StateUpdate {
     ReviewPrepared {
         prepared: Box<super::app::ReviewPrepared>,
     },
+    /// A binary review image finished loading off-thread: decoded bytes for one
+    /// side of one file, ready to build a render protocol from (on the main
+    /// thread, which owns the `Picker`). `Arc` keeps the enum cheap to clone.
+    ReviewImageLoaded {
+        /// The review generation this fetch was spawned under. A late arrival
+        /// whose generation no longer matches the open review is dropped.
+        generation: u64,
+        path: String,
+        side: crate::api::DiffSide,
+        image: std::result::Result<Arc<image::DynamicImage>, String>,
+    },
     /// An open review view's diff was re-composed in the background (agent went
     /// idle, or a manual refresh). `refreshed` carries the fresh, warmed payload
     /// to fold into the view in place; `None` means the working tree was

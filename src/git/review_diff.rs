@@ -29,9 +29,7 @@ use crate::error::{GitError, Result};
 /// can't be resolved (e.g. a stacked-PR base that only exists remotely), the
 /// diff degrades to working-tree-vs-`HEAD` rather than failing the view.
 pub async fn compose_review_diff(worktree: &Path, base: &str) -> Result<String> {
-    let target = merge_base(worktree, base)
-        .await
-        .unwrap_or_else(|| base.to_string());
+    let target = diff_target(worktree, base).await;
 
     // Force standard `a/`/`b/` prefixes so the parser is independent of the
     // user's `diff.mnemonicPrefix` config (which would emit `i/`/`w/`/`c/`).
@@ -100,6 +98,90 @@ async fn ref_exists(worktree: &Path, refname: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// The commit-ish the review diff treats as "base": the merge-base of `base`
+/// and `HEAD`, falling back to `base` verbatim when it can't be computed. Both
+/// the diff composition and binary blob reads resolve the old side through this
+/// so they always agree on which commit the "before" image comes from.
+async fn diff_target(worktree: &Path, base: &str) -> String {
+    merge_base(worktree, base)
+        .await
+        .unwrap_or_else(|| base.to_string())
+}
+
+/// Read the base-side bytes of `path` as the review diff sees them: the blob at
+/// [`diff_target`]. Returns an error when the path doesn't exist there (e.g. an
+/// added file has no base side). Runs `git show` as a subprocess, so the read
+/// happens off the async runtime's worker threads.
+pub async fn read_base_blob(worktree: &Path, base: &str, path: &str) -> Result<Vec<u8>> {
+    let target = diff_target(worktree, base).await;
+    let spec = format!("{target}:{path}");
+    let out = Command::new("git")
+        .current_dir(worktree)
+        .args(["show", &spec])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| GitError::OperationFailed(e.to_string()))?;
+    if !out.status.success() {
+        return Err(GitError::OperationFailed(format!(
+            "git show {spec}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+        .into());
+    }
+    Ok(out.stdout)
+}
+
+/// Read the working-tree (new-side) bytes of `path`. Uses async `tokio::fs` so
+/// the read never blocks the executor.
+pub async fn read_worktree_file(worktree: &Path, path: &str) -> Result<Vec<u8>> {
+    Ok(tokio::fs::read(worktree.join(path))
+        .await
+        .map_err(|e| GitError::OperationFailed(e.to_string()))?)
+}
+
+/// `git cat-file -s <oid>` — the byte size of a blob without reading its
+/// contents. `None` if the lookup fails (e.g. an absent/abbreviated oid).
+async fn blob_size(worktree: &Path, oid: &str) -> Option<u64> {
+    let out = Command::new("git")
+        .current_dir(worktree)
+        .args(["cat-file", "-s", oid])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+/// Fill in the binary file sizes the parser leaves `None`: the base blob size
+/// via `git cat-file -s`, and the new-side size from the working-tree file on
+/// disk. Best effort — a size stays `None` if its lookup fails.
+pub async fn enrich_binary_sizes(diff: &mut ParsedDiff, worktree: &Path) {
+    for f in &mut diff.files {
+        let new_path = f.new_path.clone();
+        let Some(info) = f.binary.as_mut() else {
+            continue;
+        };
+        if let Some(oid) = info.old_oid.clone() {
+            info.old_size = blob_size(worktree, &oid).await;
+        }
+        if info.new_oid.is_some() {
+            // The new side is the working tree, so its size is the file on disk.
+            info.new_size = tokio::fs::metadata(worktree.join(&new_path))
+                .await
+                .ok()
+                .map(|m| m.len());
+        }
+    }
+}
+
 /// Resolve `git merge-base <base> HEAD`, returning `None` if it cannot be
 /// computed (so the caller can fall back).
 async fn merge_base(worktree: &Path, base: &str) -> Option<String> {
@@ -162,6 +244,34 @@ pub enum FileStatus {
     Renamed,
 }
 
+/// What kind of binary a file is, for consumers deciding how to render it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum BinaryKind {
+    /// A raster image we can render, tagged with its MIME type (e.g.
+    /// `image/png`) so a GUI can build a `data:` URL directly.
+    Image { mime: String },
+    /// Any other binary blob (rendered as a placeholder, not an image).
+    Other,
+}
+
+/// Metadata for a binary file's diff. The bytes themselves are NOT inlined
+/// here — consumers lazy-load them via `CommanderService::fetch_diff_blob`
+/// keyed by `(side, path)`. `old_*`/`new_*` are `None` on the side that does
+/// not exist (added files have no old side; deleted files have no new side).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BinaryInfo {
+    pub kind: BinaryKind,
+    /// Base-side blob oid (from the diff `index` line), if present.
+    pub old_oid: Option<String>,
+    /// Working-tree-side blob oid (from the diff `index` line), if present.
+    pub new_oid: Option<String>,
+    /// Base-side blob size in bytes, filled in by `open_review` (not the parser).
+    pub old_size: Option<u64>,
+    /// Working-tree-side size in bytes, filled in by `open_review`.
+    pub new_size: Option<u64>,
+}
+
 /// All changes to a single file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FileDiff {
@@ -171,6 +281,8 @@ pub struct FileDiff {
     pub added: usize,
     pub removed: usize,
     pub hunks: Vec<Hunk>,
+    /// `Some` when this file is binary (no textual hunks); `None` for text.
+    pub binary: Option<BinaryInfo>,
 }
 
 impl FileDiff {
@@ -320,8 +432,20 @@ pub fn parse_unified_diff(raw: &str) -> ParsedDiff {
         } else if let Some(to) = line.strip_prefix("rename to ") {
             b.renamed = true;
             b.new_path = to.to_string();
+        } else if let Some(rest) = line.strip_prefix("index ") {
+            // `index <old>..<new>[ <mode>]` — capture both blob oids so binary
+            // metadata can carry them. Harmless to record for text files too.
+            if let Some((old, new)) = rest.split_once("..") {
+                b.old_oid = Some(old.trim().to_string());
+                // The new oid may be followed by a file mode; keep just the oid.
+                b.new_oid = new.split_whitespace().next().map(str::to_string);
+            }
+        } else if line.starts_with("Binary files ") || line.starts_with("GIT binary patch") {
+            // git emits "Binary files a/x and b/x differ" (default) or a
+            // "GIT binary patch" header (with --binary) — either marks a binary.
+            b.binary = true;
         }
-        // Everything else (index, mode, similarity, Binary files) is ignored.
+        // Everything else (mode, similarity) is ignored.
     }
 
     if let Some(b) = cur.take() {
@@ -339,6 +463,9 @@ struct FileBuilder {
     added_file: bool,
     deleted_file: bool,
     renamed: bool,
+    binary: bool,
+    old_oid: Option<String>,
+    new_oid: Option<String>,
     added: usize,
     removed: usize,
     hunks: Vec<Hunk>,
@@ -371,6 +498,28 @@ impl FileBuilder {
         } else {
             FileStatus::Modified
         };
+        let binary = if self.binary {
+            let display = if status == FileStatus::Deleted {
+                self.old_path.as_str()
+            } else {
+                self.new_path.as_str()
+            };
+            let kind = match image_mime_for_path(display) {
+                Some(mime) => BinaryKind::Image {
+                    mime: mime.to_string(),
+                },
+                None => BinaryKind::Other,
+            };
+            Some(BinaryInfo {
+                kind,
+                old_oid: zero_oid_to_none(self.old_oid.take()),
+                new_oid: zero_oid_to_none(self.new_oid.take()),
+                old_size: None,
+                new_size: None,
+            })
+        } else {
+            None
+        };
         FileDiff {
             old_path: self.old_path,
             new_path: self.new_path,
@@ -378,8 +527,32 @@ impl FileBuilder {
             added: self.added,
             removed: self.removed,
             hunks: self.hunks,
+            binary,
         }
     }
+}
+
+/// Map an all-zero blob oid (git's "absent" sentinel for the missing side of an
+/// add or delete) to `None`; pass any real oid through unchanged.
+fn zero_oid_to_none(oid: Option<String>) -> Option<String> {
+    oid.filter(|o| !o.is_empty() && o.bytes().any(|c| c != b'0'))
+}
+
+/// MIME type for a path's extension when it names a raster image we can render,
+/// else `None` (treated as a generic binary). SVG is intentionally excluded:
+/// git diffs it as text, and rasterizing it would need an extra dependency.
+fn image_mime_for_path(path: &str) -> Option<&'static str> {
+    let ext = Path::new(path).extension()?.to_str()?.to_ascii_lowercase();
+    Some(match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "ico" => "image/x-icon",
+        "tif" | "tiff" => "image/tiff",
+        _ => return None,
+    })
 }
 
 /// Parse a `---`/`+++` header path, stripping the `a/`/`b/` prefix and handling
@@ -625,6 +798,98 @@ diff --git a/f b/f
         assert_eq!(f.hunks[0].lines.len(), 2);
     }
 
+    // --- binary files ---
+
+    #[test]
+    fn text_file_is_not_binary() {
+        let raw = one_file_diff("src/a.rs", "-1,2 +1,2", " ctx\n-old\n+new\n");
+        let f = &parse_unified_diff(&raw).files[0];
+        assert_eq!(f.binary, None);
+    }
+
+    #[test]
+    fn parses_binary_modified_image() {
+        let raw = "\
+diff --git a/assets/logo.png b/assets/logo.png
+index 1111111..2222222 100644
+Binary files a/assets/logo.png and b/assets/logo.png differ
+";
+        let f = &parse_unified_diff(raw).files[0];
+        assert_eq!(f.status, FileStatus::Modified);
+        assert_eq!(f.display_path(), "assets/logo.png");
+        let b = f.binary.as_ref().expect("binary info present");
+        assert_eq!(
+            b.kind,
+            BinaryKind::Image {
+                mime: "image/png".to_string()
+            }
+        );
+        assert_eq!(b.old_oid.as_deref(), Some("1111111"));
+        assert_eq!(b.new_oid.as_deref(), Some("2222222"));
+        // Sizes are enriched by open_review, not the parser.
+        assert_eq!(b.old_size, None);
+        assert_eq!(b.new_size, None);
+        // Binary files carry no textual hunks.
+        assert!(f.hunks.is_empty());
+    }
+
+    #[test]
+    fn parses_binary_added_image_with_no_old_side() {
+        let raw = "\
+diff --git a/new.jpg b/new.jpg
+new file mode 100644
+index 0000000..3333333
+Binary files /dev/null and b/new.jpg differ
+";
+        let f = &parse_unified_diff(raw).files[0];
+        assert_eq!(f.status, FileStatus::Added);
+        let b = f.binary.as_ref().expect("binary info present");
+        assert_eq!(
+            b.kind,
+            BinaryKind::Image {
+                mime: "image/jpeg".to_string()
+            }
+        );
+        // All-zero base oid is the "absent side" sentinel -> None.
+        assert_eq!(b.old_oid, None);
+        assert_eq!(b.new_oid.as_deref(), Some("3333333"));
+    }
+
+    #[test]
+    fn parses_binary_deleted_image_with_no_new_side() {
+        let raw = "\
+diff --git a/old.gif b/old.gif
+deleted file mode 100644
+index 4444444..0000000
+Binary files a/old.gif and /dev/null differ
+";
+        let f = &parse_unified_diff(raw).files[0];
+        assert_eq!(f.status, FileStatus::Deleted);
+        // Deletions resolve kind from the old (display) path.
+        assert_eq!(f.display_path(), "old.gif");
+        let b = f.binary.as_ref().expect("binary info present");
+        assert_eq!(
+            b.kind,
+            BinaryKind::Image {
+                mime: "image/gif".to_string()
+            }
+        );
+        assert_eq!(b.old_oid.as_deref(), Some("4444444"));
+        assert_eq!(b.new_oid, None);
+    }
+
+    #[test]
+    fn non_image_binary_is_kind_other() {
+        let raw = "\
+diff --git a/data.bin b/data.bin
+index 5555555..6666666 100644
+Binary files a/data.bin and b/data.bin differ
+";
+        let f = &parse_unified_diff(raw).files[0];
+        let b = f.binary.as_ref().expect("binary info present");
+        assert_eq!(b.kind, BinaryKind::Other);
+    }
+
     // --- composition (real git repos via TempDir) ---
 
     use std::fs;
@@ -692,6 +957,96 @@ diff --git a/f b/f
         let parsed = parse_unified_diff(&diff);
         assert_eq!(parsed.files.len(), 1);
         assert_eq!(parsed.files[0].display_path(), "file.txt");
+    }
+
+    #[tokio::test]
+    async fn binary_image_change_survives_composition_and_parsing() {
+        let tmp = init_repo().await;
+        let p = tmp.path();
+
+        // Bytes with embedded NULs so git classifies the file as binary.
+        let v1: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x00v1\x00";
+        let v2: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x00v2-longer\x00";
+        fs::write(p.join("logo.png"), v1).unwrap();
+        git(p, &["add", "."]).await;
+        git(p, &["commit", "-q", "-m", "A"]).await;
+        let base = git_capture(p, &["rev-parse", "HEAD"]).await;
+
+        fs::write(p.join("logo.png"), v2).unwrap();
+
+        let diff = compose_review_diff(p, &base).await.unwrap();
+        let parsed = parse_unified_diff(&diff);
+        let f = parsed
+            .files
+            .iter()
+            .find(|f| f.display_path() == "logo.png")
+            .expect("binary file present in parsed diff");
+        let info = f.binary.as_ref().expect("binary info present");
+        assert_eq!(
+            info.kind,
+            BinaryKind::Image {
+                mime: "image/png".to_string()
+            }
+        );
+        assert!(f.hunks.is_empty(), "binary file has no textual hunks");
+    }
+
+    #[tokio::test]
+    async fn read_base_blob_returns_committed_bytes_not_worktree() {
+        let tmp = init_repo().await;
+        let p = tmp.path();
+        let v1: &[u8] = b"\x00base-bytes\x00";
+        let v2: &[u8] = b"\x00worktree-bytes-changed\x00";
+        fs::write(p.join("img.png"), v1).unwrap();
+        git(p, &["add", "."]).await;
+        git(p, &["commit", "-q", "-m", "A"]).await;
+        let base = git_capture(p, &["rev-parse", "HEAD"]).await;
+        fs::write(p.join("img.png"), v2).unwrap();
+
+        // Old side reads the committed blob; new side reads the working tree.
+        let old = read_base_blob(p, &base, "img.png").await.unwrap();
+        assert_eq!(old, v1);
+        let new = read_worktree_file(p, "img.png").await.unwrap();
+        assert_eq!(new, v2);
+    }
+
+    #[tokio::test]
+    async fn read_base_blob_errors_for_file_absent_at_base() {
+        let tmp = init_repo().await;
+        let p = tmp.path();
+        fs::write(p.join("seed.txt"), "x\n").unwrap();
+        git(p, &["add", "."]).await;
+        git(p, &["commit", "-q", "-m", "A"]).await;
+        let base = git_capture(p, &["rev-parse", "HEAD"]).await;
+
+        // An added file has no base side -> error rather than bogus bytes.
+        fs::write(p.join("added.png"), b"\x00new\x00").unwrap();
+        assert!(read_base_blob(p, &base, "added.png").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn enrich_binary_sizes_fills_old_and_new() {
+        let tmp = init_repo().await;
+        let p = tmp.path();
+        let v1: &[u8] = b"\x00abc\x00"; // 5 bytes
+        let v2: &[u8] = b"\x00abcdefgh\x00"; // 10 bytes
+        fs::write(p.join("logo.png"), v1).unwrap();
+        git(p, &["add", "."]).await;
+        git(p, &["commit", "-q", "-m", "A"]).await;
+        let base = git_capture(p, &["rev-parse", "HEAD"]).await;
+        fs::write(p.join("logo.png"), v2).unwrap();
+
+        let raw = compose_review_diff(p, &base).await.unwrap();
+        let mut diff = parse_unified_diff(&raw);
+        enrich_binary_sizes(&mut diff, p).await;
+        let f = diff
+            .files
+            .iter()
+            .find(|f| f.display_path() == "logo.png")
+            .unwrap();
+        let b = f.binary.as_ref().unwrap();
+        assert_eq!(b.old_size, Some(v1.len() as u64));
+        assert_eq!(b.new_size, Some(v2.len() as u64));
     }
 
     #[tokio::test]

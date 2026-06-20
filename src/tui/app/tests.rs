@@ -1509,3 +1509,133 @@ fn render_consumes_clear_right_pane_flag() {
         "render() should consume clear_right_pane so the event loop never needs terminal.clear()"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Review image cache: generation guard + mouse-driven lazy fetch
+// ---------------------------------------------------------------------------
+
+/// A single modified image `FileDiff` for review-image tests.
+fn modified_image_file(path: &str) -> crate::git::FileDiff {
+    crate::git::FileDiff {
+        old_path: path.to_string(),
+        new_path: path.to_string(),
+        status: crate::git::FileStatus::Modified,
+        added: 0,
+        removed: 0,
+        hunks: Vec::new(),
+        binary: Some(crate::git::BinaryInfo {
+            kind: crate::git::BinaryKind::Image {
+                mime: "image/png".to_string(),
+            },
+            old_oid: None,
+            new_oid: None,
+            old_size: Some(10),
+            new_size: Some(20),
+        }),
+    }
+}
+
+#[test]
+fn reset_review_images_clears_cache_and_bumps_generation() {
+    let app = make_test_app();
+    let gen0 = app.review_image_gen.get();
+    app.review_images.borrow_mut().insert(
+        ("logo.png".to_string(), crate::api::DiffSide::New),
+        ImageEntry::Pending,
+    );
+
+    app.reset_review_images();
+
+    assert!(app.review_images.borrow().is_empty(), "cache should clear");
+    assert_eq!(
+        app.review_image_gen.get(),
+        gen0 + 1,
+        "opening a review bumps the generation"
+    );
+}
+
+#[tokio::test]
+async fn stale_review_image_arrivals_are_dropped() {
+    use crate::api::DiffSide;
+    use crate::tui::event::StateUpdate;
+
+    let mut app = make_test_app();
+    // Opening a review bumps the generation and clears the cache.
+    app.reset_review_images();
+    let current = app.review_image_gen.get();
+
+    // A late arrival from a *previous* review (stale generation) must be
+    // dropped — otherwise it could repopulate the cleared cache and show the
+    // wrong image for a same-named path in the now-open review.
+    app.handle_state_update(StateUpdate::ReviewImageLoaded {
+        generation: current.wrapping_sub(1),
+        path: "logo.png".to_string(),
+        side: DiffSide::New,
+        image: Err("from a closed review".to_string()),
+    })
+    .await;
+    assert!(
+        app.review_images.borrow().is_empty(),
+        "stale-generation arrival must be dropped, not cached"
+    );
+
+    // An arrival for the currently-open review is cached.
+    app.handle_state_update(StateUpdate::ReviewImageLoaded {
+        generation: current,
+        path: "logo.png".to_string(),
+        side: DiffSide::New,
+        image: Err("decode failed".to_string()),
+    })
+    .await;
+    assert!(
+        app.review_images
+            .borrow()
+            .contains_key(&("logo.png".to_string(), DiffSide::New)),
+        "current-generation arrival must be cached"
+    );
+}
+
+#[tokio::test]
+async fn mouse_file_click_kicks_off_image_fetch() {
+    use crate::api::DiffSide;
+
+    let mut app = make_test_app();
+    let state = DiffReviewState::new(
+        SessionId::new(),
+        "t".to_string(),
+        "base".to_string(),
+        crate::git::ParsedDiff {
+            files: vec![modified_image_file("logo.png")],
+        },
+        Vec::new(),
+    );
+    app.ui_state.modal = Modal::ReviewDiff(Box::new(state));
+    app.ui_state.review_file_list_rect = Some(Rect {
+        x: 0,
+        y: 0,
+        width: 20,
+        height: 20,
+    });
+
+    // Left-click the (single) image file row in the tree. Before the fix this
+    // changed the selection but never started the lazy fetch, leaving the image
+    // stuck on "Loading image…" forever. Now it must enqueue a fetch — an entry
+    // appears in the image cache (the session has no worktree on disk here, so
+    // the fetch resolves to `Failed`, but the key being present proves the fetch
+    // was kicked off).
+    let click = crossterm::event::MouseEvent {
+        kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        column: 5,
+        row: 0,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    };
+    app.handle_input(crate::tui::event::InputEvent::Mouse(click))
+        .await;
+
+    assert!(
+        app.review_images
+            .borrow()
+            .contains_key(&("logo.png".to_string(), DiffSide::New)),
+        "clicking an image file in the tree should kick off its image fetch"
+    );
+}
