@@ -1108,3 +1108,63 @@ async fn test_commander_session_lifecycle() {
     // on success here and on a panic at any assertion above.
     drop(dir);
 }
+
+/// Helper to check if git-lfs is available.
+async fn git_lfs_available() -> bool {
+    tokio::process::Command::new("git")
+        .args(["lfs", "version"])
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// git-LFS pointer resolution: a committed LFS-tracked PNG is stored as a
+/// pointer, so `read_base_blob` must smudge it back to the real image bytes
+/// rather than returning the pointer text. Skips gracefully when `git lfs`
+/// isn't installed (mirrors the tmux-guarded tests).
+#[tokio::test]
+async fn read_base_blob_resolves_lfs_pointer_to_real_bytes() {
+    if !git_lfs_available().await {
+        eprintln!("Skipping test: git-lfs not available");
+        return;
+    }
+
+    let (_temp, repo) = create_test_repo().await;
+
+    // A minimal 1x1 PNG: signature + IHDR. Embedded NULs make git treat it as
+    // binary, and the leading magic lets us assert smudge returned real bytes.
+    let png: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR\
+\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89";
+
+    run_git(&repo, &["lfs", "install", "--local"]).await;
+    run_git(&repo, &["lfs", "track", "*.png"]).await;
+    tokio::fs::write(repo.join("img.png"), png).await.unwrap();
+    run_git(&repo, &["add", ".gitattributes", "img.png"]).await;
+    run_git(&repo, &["commit", "-m", "add lfs image"]).await;
+
+    // Sanity: the committed blob is the LFS pointer text, not the PNG.
+    let stored = git_stdout(&repo, &["show", "HEAD:img.png"]).await;
+    assert!(
+        stored.starts_with("version https://git-lfs.github.com/spec/"),
+        "expected committed blob to be an LFS pointer, got: {stored:.40}"
+    );
+
+    // read_base_blob must resolve the pointer to the real PNG bytes.
+    let base = claude_commander::git::read_base_blob(&repo, "HEAD", "img.png")
+        .await
+        .expect("read_base_blob should succeed");
+    assert_eq!(
+        &base[..4],
+        b"\x89PNG",
+        "base side should be smudged PNG bytes"
+    );
+    assert_eq!(base, png, "base side should round-trip the original image");
+
+    // The working-tree file is smudged on checkout, so it's already real bytes;
+    // read_worktree_file passes them through unchanged.
+    let new = claude_commander::git::read_worktree_file(&repo, "img.png")
+        .await
+        .expect("read_worktree_file should succeed");
+    assert_eq!(new, png, "new side should be the real image bytes");
+}
