@@ -23,7 +23,9 @@ use crate::error::{GitError, Result};
 /// Pointer files are tiny by spec; anything larger is real content, not a
 /// pointer. Guarding on size keeps the UTF-8 / line scan cheap and avoids
 /// misclassifying a large text blob that happens to start with `version `.
-const MAX_POINTER_LEN: usize = 1024;
+/// `pub(crate)` so the diff parser can bail out of reconstructing a side once
+/// it provably exceeds this cap (see `review_diff::reconstruct_side`).
+pub(crate) const MAX_POINTER_LEN: usize = 1024;
 
 /// Whether `bytes` is a git-LFS pointer file.
 ///
@@ -50,12 +52,16 @@ pub fn is_lfs_pointer(bytes: &[u8]) -> bool {
     if !is_version {
         return false;
     }
-    let has_oid = text
-        .lines()
-        .any(|l| l.starts_with("oid sha256:") && l.len() > "oid sha256:".len());
-    let has_size = text
-        .lines()
-        .any(|l| l.strip_prefix("size ").is_some_and(|n| !n.is_empty()));
+    // `oid sha256:<64 hex>` and `size <u64>` — require the exact shapes the
+    // spec mandates, so near-miss text (e.g. `size abc`) isn't smudged.
+    let has_oid = text.lines().any(|l| {
+        l.strip_prefix("oid sha256:")
+            .is_some_and(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+    });
+    let has_size = text.lines().any(|l| {
+        l.strip_prefix("size ")
+            .is_some_and(|n| n.parse::<u64>().is_ok())
+    });
     has_oid && has_size
 }
 
@@ -63,6 +69,13 @@ pub fn is_lfs_pointer(bytes: &[u8]) -> bool {
 /// blob bytes. The pointer is fed on stdin; the resolved content comes back on
 /// stdout. Runs as a subprocess so the work stays off the async runtime's
 /// worker threads, matching the other blob reads in this crate.
+///
+/// Deadlock invariant: writing the whole `pointer` to stdin *before* draining
+/// stdout (`wait_with_output`) is safe only because callers reach this through
+/// `resolve_if_pointer`, which gates on `is_lfs_pointer` — so `pointer` is
+/// always ≤ `MAX_POINTER_LEN` (1 KiB), far under the OS pipe buffer, and can't
+/// block on a full pipe before the child starts reading. A future caller that
+/// fed a large payload here would deadlock; keep the `is_lfs_pointer` gate.
 async fn smudge(worktree: &Path, path: &str, pointer: &[u8]) -> Result<Vec<u8>> {
     let mut child = Command::new("git")
         .current_dir(worktree)
@@ -159,6 +172,26 @@ size 12345\n";
     fn pointer_missing_size_is_rejected() {
         let p = "version https://git-lfs.github.com/spec/v1\noid sha256:abc\n";
         assert!(!is_lfs_pointer(p.as_bytes()));
+    }
+
+    #[test]
+    fn non_numeric_size_is_rejected() {
+        // Near-miss text that would have slipped past a "non-empty suffix" check.
+        let p = "version https://git-lfs.github.com/spec/v1\n\
+oid sha256:4d7a214614ab2935c943f9e0ff69d22eadbb8f32b1258daaa5e2ca24d17e2393\n\
+size abc\n";
+        assert!(!is_lfs_pointer(p.as_bytes()));
+    }
+
+    #[test]
+    fn non_hex_or_wrong_length_oid_is_rejected() {
+        // Right prefix, wrong oid shape (too short / non-hex) must not match.
+        let short = "version https://git-lfs.github.com/spec/v1\noid sha256:abcd\nsize 12345\n";
+        assert!(!is_lfs_pointer(short.as_bytes()));
+        let non_hex = "version https://git-lfs.github.com/spec/v1\n\
+oid sha256:zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz\n\
+size 12345\n";
+        assert!(!is_lfs_pointer(non_hex.as_bytes()));
     }
 
     #[test]

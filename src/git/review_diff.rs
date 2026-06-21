@@ -558,6 +558,12 @@ impl FileBuilder {
 /// Reconstruct one side of a file from its hunks: the new side keeps context +
 /// additions, the old side keeps context + deletions. Used to recover an LFS
 /// pointer's text from a diff so it can be recognised as binary.
+///
+/// Bails out as soon as the output exceeds the LFS pointer-size cap: past that
+/// point `is_lfs_pointer` rejects it anyway, so for a large modified text file
+/// (thousands of diff lines) we avoid building a near-full-size `String` only
+/// to discard it. The returned (truncated) string is still `> MAX_POINTER_LEN`,
+/// so the caller's pointer check fails exactly as it would on the full string.
 fn reconstruct_side(hunks: &[Hunk], want_new: bool) -> String {
     let mut out = String::new();
     for hunk in hunks {
@@ -570,6 +576,9 @@ fn reconstruct_side(hunks: &[Hunk], want_new: bool) -> String {
             if keep {
                 out.push_str(&line.content);
                 out.push('\n');
+                if out.len() > super::lfs::MAX_POINTER_LEN {
+                    return out;
+                }
             }
         }
     }
