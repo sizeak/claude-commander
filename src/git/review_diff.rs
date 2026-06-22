@@ -112,6 +112,10 @@ async fn diff_target(worktree: &Path, base: &str) -> String {
 /// [`diff_target`]. Returns an error when the path doesn't exist there (e.g. an
 /// added file has no base side). Runs `git show` as a subprocess, so the read
 /// happens off the async runtime's worker threads.
+///
+/// For git-LFS-tracked files the committed blob is a pointer, so the bytes are
+/// resolved to the real content via [`super::lfs::resolve_if_pointer`] before
+/// returning (best-effort: falls back to the pointer if LFS can't smudge).
 pub async fn read_base_blob(worktree: &Path, base: &str, path: &str) -> Result<Vec<u8>> {
     let target = diff_target(worktree, base).await;
     let spec = format!("{target}:{path}");
@@ -131,15 +135,20 @@ pub async fn read_base_blob(worktree: &Path, base: &str, path: &str) -> Result<V
         ))
         .into());
     }
-    Ok(out.stdout)
+    Ok(super::lfs::resolve_if_pointer(worktree, path, out.stdout).await)
 }
 
 /// Read the working-tree (new-side) bytes of `path`. Uses async `tokio::fs` so
 /// the read never blocks the executor.
+///
+/// If the working-tree file is still an LFS pointer (LFS installed but the
+/// object not pulled, or a fresh checkout), it is resolved to real bytes via
+/// [`super::lfs::resolve_if_pointer`] before returning.
 pub async fn read_worktree_file(worktree: &Path, path: &str) -> Result<Vec<u8>> {
-    Ok(tokio::fs::read(worktree.join(path))
+    let bytes = tokio::fs::read(worktree.join(path))
         .await
-        .map_err(|e| GitError::OperationFailed(e.to_string()))?)
+        .map_err(|e| GitError::OperationFailed(e.to_string()))?;
+    Ok(super::lfs::resolve_if_pointer(worktree, path, bytes).await)
 }
 
 /// `git cat-file -s <oid>` — the byte size of a blob without reading its
@@ -162,17 +171,22 @@ async fn blob_size(worktree: &Path, oid: &str) -> Option<u64> {
 
 /// Fill in the binary file sizes the parser leaves `None`: the base blob size
 /// via `git cat-file -s`, and the new-side size from the working-tree file on
-/// disk. Best effort — a size stays `None` if its lookup fails.
+/// disk. Best effort — a size stays `None` if its lookup fails. Sizes the
+/// parser already resolved (e.g. an LFS pointer's `size` line, which is correct
+/// where `git cat-file -s` would report only the ~130-byte pointer blob) are
+/// left untouched.
 pub async fn enrich_binary_sizes(diff: &mut ParsedDiff, worktree: &Path) {
     for f in &mut diff.files {
         let new_path = f.new_path.clone();
         let Some(info) = f.binary.as_mut() else {
             continue;
         };
-        if let Some(oid) = info.old_oid.clone() {
+        if info.old_size.is_none()
+            && let Some(oid) = info.old_oid.clone()
+        {
             info.old_size = blob_size(worktree, &oid).await;
         }
-        if info.new_oid.is_some() {
+        if info.new_size.is_none() && info.new_oid.is_some() {
             // The new side is the working tree, so its size is the file on disk.
             info.new_size = tokio::fs::metadata(worktree.join(&new_path))
                 .await
@@ -498,7 +512,15 @@ impl FileBuilder {
         } else {
             FileStatus::Modified
         };
-        let binary = if self.binary {
+        // git diffs an LFS-tracked file as a textual diff of its pointer (never
+        // "Binary files differ"), so a textual diff whose content is an LFS
+        // pointer is really a binary change. Reclassify it as binary — but keep
+        // the hunks, since `file_diff_hash` keys reviewed marks off them and the
+        // pointer's `oid` lines make that hash invalidate on re-upload.
+        let lfs_sizes = (!self.binary)
+            .then(|| lfs_pointer_sizes(&self.hunks))
+            .flatten();
+        let binary = if self.binary || lfs_sizes.is_some() {
             let display = if status == FileStatus::Deleted {
                 self.old_path.as_str()
             } else {
@@ -510,12 +532,13 @@ impl FileBuilder {
                 },
                 None => BinaryKind::Other,
             };
+            let (old_size, new_size) = lfs_sizes.unwrap_or((None, None));
             Some(BinaryInfo {
                 kind,
                 old_oid: zero_oid_to_none(self.old_oid.take()),
                 new_oid: zero_oid_to_none(self.new_oid.take()),
-                old_size: None,
-                new_size: None,
+                old_size,
+                new_size,
             })
         } else {
             None
@@ -530,6 +553,67 @@ impl FileBuilder {
             binary,
         }
     }
+}
+
+/// Reconstruct one side of a file from its hunks: the new side keeps context +
+/// additions, the old side keeps context + deletions. Used to recover an LFS
+/// pointer's text from a diff so it can be recognised as binary.
+///
+/// Bails out as soon as the output exceeds the LFS pointer-size cap: past that
+/// point `is_lfs_pointer` rejects it anyway, so for a large modified text file
+/// (thousands of diff lines) we avoid building a near-full-size `String` only
+/// to discard it. The returned (truncated) string is still `> MAX_POINTER_LEN`,
+/// so the caller's pointer check fails exactly as it would on the full string.
+fn reconstruct_side(hunks: &[Hunk], want_new: bool) -> String {
+    let mut out = String::new();
+    for hunk in hunks {
+        for line in &hunk.lines {
+            let keep = match line.origin {
+                LineOrigin::Context => true,
+                LineOrigin::Addition => want_new,
+                LineOrigin::Deletion => !want_new,
+            };
+            if keep {
+                out.push_str(&line.content);
+                out.push('\n');
+                if out.len() > super::lfs::MAX_POINTER_LEN {
+                    return out;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The `size <n>` value from an LFS pointer (the real blob size LFS records),
+/// or `None` if absent/unparseable.
+fn lfs_pointer_size(pointer: &str) -> Option<u64> {
+    pointer
+        .lines()
+        .find_map(|l| l.strip_prefix("size "))
+        .and_then(|n| n.trim().parse().ok())
+}
+
+/// If a file's hunks reconstruct to a git-LFS pointer on either side, return the
+/// `(old, new)` real blob sizes parsed from the pointer `size` lines (each
+/// `None` on the side that isn't a pointer, e.g. an added or deleted file).
+/// Returns `None` when neither side is a pointer. This is how an LFS image —
+/// which git diffs as pointer text — is recognised as a binary change.
+fn lfs_pointer_sizes(hunks: &[Hunk]) -> Option<(Option<u64>, Option<u64>)> {
+    if hunks.is_empty() {
+        return None;
+    }
+    let old = reconstruct_side(hunks, false);
+    let new = reconstruct_side(hunks, true);
+    let old_ptr = super::lfs::is_lfs_pointer(old.as_bytes());
+    let new_ptr = super::lfs::is_lfs_pointer(new.as_bytes());
+    if !old_ptr && !new_ptr {
+        return None;
+    }
+    Some((
+        old_ptr.then(|| lfs_pointer_size(&old)).flatten(),
+        new_ptr.then(|| lfs_pointer_size(&new)).flatten(),
+    ))
 }
 
 /// Map an all-zero blob oid (git's "absent" sentinel for the missing side of an
@@ -890,6 +974,76 @@ Binary files a/data.bin and b/data.bin differ
         assert_eq!(b.kind, BinaryKind::Other);
     }
 
+    // --- git-LFS pointer diffs (rendered as text by git, reclassified binary) ---
+
+    #[test]
+    fn lfs_pointer_modify_is_reclassified_binary() {
+        // git diffs an LFS-tracked file as a textual diff of the pointer, never
+        // "Binary files differ". The parser must still surface it as binary so
+        // the image render + smudge path handles it.
+        let raw = "\
+diff --git a/img.png b/img.png
+index 1111111..2222222 100644
+--- a/img.png
++++ b/img.png
+@@ -1,3 +1,3 @@
+ version https://git-lfs.github.com/spec/v1
+-oid sha256:930e747ddba87c999aca665444a5cf1f2430572b5d082ffc5f43fa30b303427c
+-size 10880
++oid sha256:ab65d9a6269a47be4c6ab439904ca1c889c19f91b78011951cfee0bab401b373
++size 23676
+";
+        let f = &parse_unified_diff(raw).files[0];
+        assert_eq!(f.status, FileStatus::Modified);
+        let b = f.binary.as_ref().expect("LFS pointer must be binary");
+        assert_eq!(
+            b.kind,
+            BinaryKind::Image {
+                mime: "image/png".to_string()
+            }
+        );
+        // Sizes come from the pointer `size` lines, not git cat-file (which
+        // would report the ~130-byte pointer blob).
+        assert_eq!(b.old_size, Some(10880));
+        assert_eq!(b.new_size, Some(23676));
+        // Hunks are kept so file_diff_hash stays content-sensitive (the oid
+        // lines change when the image is re-uploaded), not collapsed to empty.
+        assert!(!f.hunks.is_empty());
+    }
+
+    #[test]
+    fn lfs_pointer_add_has_no_old_side() {
+        let raw = "\
+diff --git a/new.png b/new.png
+new file mode 100644
+index 0000000..2222222
+--- /dev/null
++++ b/new.png
+@@ -0,0 +1,3 @@
++version https://git-lfs.github.com/spec/v1
++oid sha256:ab65d9a6269a47be4c6ab439904ca1c889c19f91b78011951cfee0bab401b373
++size 23676
+";
+        let f = &parse_unified_diff(raw).files[0];
+        assert_eq!(f.status, FileStatus::Added);
+        let b = f.binary.as_ref().expect("added LFS pointer must be binary");
+        assert_eq!(b.old_size, None);
+        assert_eq!(b.new_size, Some(23676));
+    }
+
+    #[test]
+    fn text_diff_resembling_pointer_is_not_reclassified() {
+        // A real text file whose content merely mentions "version ..." must not
+        // be mistaken for an LFS pointer.
+        let raw = one_file_diff(
+            "notes.txt",
+            "-1,2 +1,2",
+            " version https://git-lfs.github.com/spec/v1\n-old note\n+new note\n",
+        );
+        let f = &parse_unified_diff(&raw).files[0];
+        assert_eq!(f.binary, None);
+    }
+
     // --- composition (real git repos via TempDir) ---
 
     use std::fs;
@@ -989,6 +1143,71 @@ Binary files a/data.bin and b/data.bin differ
             }
         );
         assert!(f.hunks.is_empty(), "binary file has no textual hunks");
+    }
+
+    /// Whether `git lfs` is installed, so LFS-dependent tests can skip cleanly
+    /// (mirrors the tmux-guarded integration tests).
+    async fn git_lfs_available() -> bool {
+        Command::new("git")
+            .args(["lfs", "version"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    #[tokio::test]
+    async fn lfs_image_change_is_binary_end_to_end() {
+        if !git_lfs_available().await {
+            eprintln!("Skipping test: git-lfs not available");
+            return;
+        }
+        let tmp = init_repo().await;
+        let p = tmp.path();
+
+        // Distinct LFS-tracked PNGs of different lengths so the pointer `size`
+        // lines differ. git stores these as pointers and diffs them as text.
+        let v1: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x00v1\x00";
+        let v2: &[u8] = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x00v2-is-longer\x00";
+
+        git(p, &["lfs", "install", "--local"]).await;
+        git(p, &["lfs", "track", "*.png"]).await;
+        fs::write(p.join("logo.png"), v1).unwrap();
+        git(p, &["add", ".gitattributes", "logo.png"]).await;
+        git(p, &["commit", "-q", "-m", "A"]).await;
+        let base = git_capture(p, &["rev-parse", "HEAD"]).await;
+
+        fs::write(p.join("logo.png"), v2).unwrap();
+
+        // git diffs the LFS file as pointer *text*, yet it must surface as binary.
+        let diff = compose_review_diff(p, &base).await.unwrap();
+        assert!(
+            diff.contains("version https://git-lfs.github.com/spec/"),
+            "expected a textual pointer diff from git:\n{diff}"
+        );
+        let parsed = parse_unified_diff(&diff);
+        let f = parsed
+            .files
+            .iter()
+            .find(|f| f.display_path() == "logo.png")
+            .expect("logo.png present in parsed diff");
+        let info = f.binary.as_ref().expect("LFS image must be binary");
+        assert_eq!(
+            info.kind,
+            BinaryKind::Image {
+                mime: "image/png".to_string()
+            }
+        );
+        // Sizes come from the pointer `size` lines = the real object sizes.
+        assert_eq!(info.old_size, Some(v1.len() as u64));
+        assert_eq!(info.new_size, Some(v2.len() as u64));
+
+        // The full loop: read_base_blob smudges the base pointer back to v1.
+        let old = read_base_blob(p, &base, "logo.png").await.unwrap();
+        assert_eq!(old, v1, "base side should smudge to the real image bytes");
     }
 
     #[tokio::test]

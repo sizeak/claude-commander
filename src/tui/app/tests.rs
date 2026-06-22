@@ -1510,6 +1510,55 @@ fn render_consumes_clear_right_pane_flag() {
     );
 }
 
+#[cfg(test)]
+mod iterm2_protocol_override {
+    use super::iterm2_kitty_override;
+    use ratatui_image::picker::ProtocolType;
+
+    #[test]
+    fn kitty_on_iterm2_is_overridden_to_iterm2() {
+        assert_eq!(
+            iterm2_kitty_override(ProtocolType::Kitty, Some("iTerm.app"), None),
+            Some(ProtocolType::Iterm2)
+        );
+    }
+
+    #[test]
+    fn kitty_on_iterm2_via_lc_terminal_is_overridden() {
+        // LC_TERMINAL is iTerm2's marker when forwarded over ssh.
+        assert_eq!(
+            iterm2_kitty_override(ProtocolType::Kitty, Some("tmux"), Some("iTerm2")),
+            Some(ProtocolType::Iterm2)
+        );
+    }
+
+    #[test]
+    fn kitty_on_a_real_kitty_terminal_is_kept() {
+        assert_eq!(
+            iterm2_kitty_override(ProtocolType::Kitty, Some("ghostty"), None),
+            None
+        );
+    }
+
+    #[test]
+    fn non_kitty_detection_is_never_overridden() {
+        // An honest iTerm2 probe (or halfblocks fallback) must pass through.
+        assert_eq!(
+            iterm2_kitty_override(ProtocolType::Iterm2, Some("iTerm.app"), None),
+            None
+        );
+        assert_eq!(
+            iterm2_kitty_override(ProtocolType::Halfblocks, Some("iTerm.app"), None),
+            None
+        );
+    }
+
+    #[test]
+    fn missing_env_keeps_detection() {
+        assert_eq!(iterm2_kitty_override(ProtocolType::Kitty, None, None), None);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Review image cache: generation guard + mouse-driven lazy fetch
 // ---------------------------------------------------------------------------
