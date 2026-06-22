@@ -29,16 +29,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
+      # Run clippy through the Nix dev shell so system dependencies (ALSA via
+      # rodio, pkg-config, …) come from flake.nix — the single source of truth —
+      # rather than a hand-maintained apt list that drifts from the flake.
+      - name: Install Nix
+        uses: nixbuild/nix-quick-install-action@v30
         with:
-          components: clippy
+          nix_conf: |
+            keep-env-derivations = true
+            keep-outputs = true
+
+      - name: Restore Nix Store Cache
+        uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-clippy-${{ runner.os }}-${{ hashFiles('**/flake.lock', '**/Cargo.lock') }}
+          restore-prefixes-first-match: nix-clippy-${{ runner.os }}-
 
       - name: Restore Cargo Cache
         uses: Swatinem/rust-cache@v2
 
       - name: Run Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: nix develop -c cargo clippy --all-targets -- -D warnings
 
   nix:
     name: Nix Build
@@ -79,17 +90,27 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
+      # Build and test through the Nix dev shell: tmux, git, ALSA and the Rust
+      # toolchain all come from flake.nix. Tests run outside the Nix build
+      # sandbox (unlike `nix build`), so the ones needing a real git repo work.
+      - name: Install Nix
+        uses: nixbuild/nix-quick-install-action@v30
+        with:
+          nix_conf: |
+            keep-env-derivations = true
+            keep-outputs = true
+
+      - name: Restore Nix Store Cache
+        uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-test-${{ runner.os }}-${{ hashFiles('**/flake.lock', '**/Cargo.lock') }}
+          restore-prefixes-first-match: nix-test-${{ runner.os }}-
 
       - name: Restore Cargo Cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Install Tmux
-        run: sudo apt-get update && sudo apt-get install -y tmux
-
       - name: Build
-        run: cargo build --all-targets
+        run: nix develop -c cargo build --all-targets
 
       - name: Run Tests
-        run: cargo test
+        run: nix develop -c cargo test
