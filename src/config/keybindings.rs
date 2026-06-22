@@ -46,6 +46,7 @@ pub enum BindableAction {
     RemoveProject,
     OpenInEditor,
     OpenPullRequest,
+    RefreshPrStatus,
     OpenCommander,
     ToggleConversationOverlay,
     ToggleVoiceInput,
@@ -94,6 +95,7 @@ impl BindableAction {
         Self::RemoveProject,
         Self::OpenInEditor,
         Self::OpenPullRequest,
+        Self::RefreshPrStatus,
         Self::OpenCommander,
         Self::ToggleConversationOverlay,
         Self::ToggleVoiceInput,
@@ -142,6 +144,7 @@ impl BindableAction {
             Self::RemoveProject => "remove_project",
             Self::OpenInEditor => "open_in_editor",
             Self::OpenPullRequest => "open_pull_request",
+            Self::RefreshPrStatus => "refresh_pr_status",
             Self::OpenCommander => "open_commander",
             Self::ToggleConversationOverlay => "toggle_conversation_overlay",
             Self::ToggleVoiceInput => "toggle_voice_input",
@@ -191,6 +194,7 @@ impl BindableAction {
             Self::RemoveProject => "Remove project",
             Self::OpenInEditor => "Open in editor/IDE",
             Self::OpenPullRequest => "Open PR in browser",
+            Self::RefreshPrStatus => "Refresh PR status",
             Self::OpenCommander => "Open commander session",
             Self::ToggleConversationOverlay => "Open/close conversation overlay (TTS)",
             Self::ToggleVoiceInput => "Voice input: record / send (STT)",
@@ -240,6 +244,7 @@ impl BindableAction {
             | Self::RemoveProject
             | Self::OpenInEditor
             | Self::OpenPullRequest
+            | Self::RefreshPrStatus
             | Self::OpenCommander
             | Self::ToggleConversationOverlay
             | Self::ToggleVoiceInput
@@ -287,6 +292,7 @@ impl FromStr for BindableAction {
             "remove_project" => Ok(Self::RemoveProject),
             "open_in_editor" => Ok(Self::OpenInEditor),
             "open_pull_request" => Ok(Self::OpenPullRequest),
+            "refresh_pr_status" => Ok(Self::RefreshPrStatus),
             "open_commander" => Ok(Self::OpenCommander),
             "toggle_conversation_overlay" => Ok(Self::ToggleConversationOverlay),
             "toggle_voice_input" => Ok(Self::ToggleVoiceInput),
@@ -1165,6 +1171,23 @@ mod tests {
         assert!(kb.keys_for(BindableAction::CascadeResume).is_empty());
         assert!(kb.keys_for(BindableAction::CascadeAbandon).is_empty());
         assert!(kb.keys_for(BindableAction::PushStack).is_empty());
+    }
+
+    #[test]
+    fn test_refresh_pr_status_palette_only() {
+        // Palette-only: no default hotkey resolves to it, but it must still
+        // round-trip through TOML so a user who binds it doesn't hit
+        // "unknown action".
+        let kb = KeyBindings::default();
+        assert!(kb.keys_for(BindableAction::RefreshPrStatus).is_empty());
+        assert_eq!(
+            "refresh_pr_status".parse::<BindableAction>().unwrap(),
+            BindableAction::RefreshPrStatus
+        );
+        assert_eq!(
+            BindableAction::RefreshPrStatus.config_name(),
+            "refresh_pr_status"
+        );
     }
 
     #[test]
