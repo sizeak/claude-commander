@@ -98,6 +98,10 @@ pub struct Theme {
     pub text_primary: Color,
     pub text_secondary: Color,
     pub text_accent: Color,
+    /// Accent for conversation mode (the assistant's name, reply text framing,
+    /// and the input rules) — a warm light purple/pink, distinct from the
+    /// session/agent status colours.
+    pub conversation_accent: Color,
     pub project_colors: Vec<(Color, Color)>, // (project_header, session_title)
 
     // Diff colors
@@ -289,6 +293,7 @@ impl Theme {
             text_primary: Color::Reset,
             text_secondary: Color::DarkGray,
             text_accent: Color::Blue,
+            conversation_accent: Color::LightMagenta,
             project_colors: vec![
                 (Color::Magenta, Color::LightMagenta),
                 (Color::Cyan, Color::LightCyan),
@@ -351,6 +356,7 @@ impl Theme {
             text_primary: Color::Reset,
             text_secondary: Color::Indexed(250),
             text_accent: Color::Indexed(147), // Pastel lavender
+            conversation_accent: Color::Indexed(218), // Light pink #ffafd7
             project_colors: vec![
                 (Color::Indexed(168), Color::Indexed(218)), // Pink
                 (Color::Indexed(68), Color::Indexed(117)),  // Blue
@@ -413,6 +419,7 @@ impl Theme {
             text_primary: Color::Rgb(245, 245, 250),
             text_secondary: Color::Rgb(166, 173, 200),
             text_accent: Color::Rgb(180, 190, 254), // Pastel periwinkle
+            conversation_accent: Color::Rgb(245, 194, 231), // Pastel pink #f5c2e7
             project_colors: vec![
                 (Color::Rgb(199, 120, 140), Color::Rgb(243, 174, 190)), // Pink
                 (Color::Rgb(100, 140, 210), Color::Rgb(160, 190, 245)), // Blue
@@ -474,6 +481,7 @@ impl Theme {
             text_primary: Color::Rgb(212, 212, 212), // Light gray #d4d4d4
             text_secondary: Color::Rgb(150, 150, 150), // Medium gray #969696
             text_accent: Color::Rgb(124, 165, 212),  // Muted blue #7ca5d4
+            conversation_accent: Color::Rgb(198, 163, 207), // Muted lilac
             project_colors: vec![
                 (Color::Rgb(181, 165, 106), Color::Rgb(220, 220, 170)), // Gold / muted yellow
                 (Color::Rgb(100, 160, 160), Color::Rgb(140, 200, 200)), // Teal
@@ -535,6 +543,7 @@ impl Theme {
             text_primary: Color::Rgb(248, 248, 242), // Warm white #f8f8f2
             text_secondary: Color::Rgb(117, 113, 94), // Warm gray #75715e
             text_accent: Color::Rgb(174, 129, 255),  // Vivid purple #ae81ff
+            conversation_accent: Color::Rgb(217, 160, 255), // Light purple #d9a0ff
             project_colors: vec![
                 (Color::Rgb(249, 38, 114), Color::Rgb(255, 100, 150)), // Pink
                 (Color::Rgb(102, 217, 239), Color::Rgb(140, 230, 245)), // Cyan
@@ -596,6 +605,7 @@ impl Theme {
             text_primary: Color::Rgb(224, 222, 244), // Soft white #e0def4
             text_secondary: Color::Rgb(144, 140, 170), // Subtle #908caa
             text_accent: Color::Rgb(196, 167, 231),  // Iris/purple #c4a7e7
+            conversation_accent: Color::Rgb(235, 188, 186), // Rose #ebbcba
             project_colors: vec![
                 (Color::Rgb(235, 111, 146), Color::Rgb(235, 188, 186)), // Rose / rose-lighter
                 (Color::Rgb(196, 167, 231), Color::Rgb(196, 167, 231)), // Iris

@@ -60,6 +60,12 @@ impl App {
             return;
         }
 
+        // The conversation overlay is also a full-screen takeover.
+        if let Modal::Conversation { input, scroll } = &self.ui_state.modal {
+            self.render_conversation_modal(frame, size, input, *scroll);
+            return;
+        }
+
         // Content area with margin on top, left, right, and space for status bar at bottom
         let content_area = Rect {
             x: size.x + 1,

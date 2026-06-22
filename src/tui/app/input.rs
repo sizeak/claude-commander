@@ -132,6 +132,15 @@ impl App {
                     return;
                 }
 
+                // Voice input (Alt-V) is intercepted before modal routing so it
+                // works whether the conversation overlay (or any modal) is open
+                // or not — mirroring how spoken replies play regardless of UI
+                // state. Its Alt modifier means it never shadows text entry.
+                if self.config.keybindings.resolve(&key) == Some(BindableAction::ToggleVoiceInput) {
+                    self.toggle_voice_input().await;
+                    return;
+                }
+
                 // Check for modal-specific handling first
                 if !matches!(self.ui_state.modal, Modal::None) {
                     self.handle_modal_key(key).await;
@@ -325,6 +334,14 @@ impl App {
         // Any keystroke can refilter the list or swap the modal, so a
         // pending first-click no longer points at a meaningful row.
         self.ui_state.modal_list_last_click = None;
+
+        // The conversation overlay owns all keys while open (typing, send,
+        // scroll, close) — dispatch before the shared modal match to avoid a
+        // double mutable borrow of `self`.
+        if matches!(self.ui_state.modal, Modal::Conversation { .. }) {
+            self.handle_conversation_key(key).await;
+            return;
+        }
 
         match &mut self.ui_state.modal {
             Modal::Input {
@@ -605,6 +622,9 @@ impl App {
                 };
                 self.handle_review_key(key, state).await;
             }
+
+            // Handled by the early dispatch above.
+            Modal::Conversation { .. } => {}
 
             Modal::None => {}
         }
@@ -959,6 +979,12 @@ impl App {
             }
             UserCommand::OpenCommander => {
                 self.handle_open_commander().await;
+            }
+            UserCommand::ToggleConversationOverlay => {
+                self.toggle_conversation_overlay().await;
+            }
+            UserCommand::ToggleVoiceInput => {
+                self.toggle_voice_input().await;
             }
             UserCommand::OpenReviewDiff => {
                 self.handle_open_review().await;

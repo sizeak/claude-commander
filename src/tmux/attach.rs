@@ -63,6 +63,9 @@ pub async fn attach_to_session(
     session_name: &str,
     editor_triggers: Vec<Vec<u8>>,
     review_triggers: Vec<Vec<u8>>,
+    voice_triggers: Vec<Vec<u8>>,
+    voice_listener: Option<mpsc::UnboundedSender<crate::conversation::ListenerCommand>>,
+    recording: Arc<AtomicBool>,
     intercept_ctrl_z: bool,
 ) -> Result<AttachOutcome> {
     // Get terminal size
@@ -91,6 +94,10 @@ pub async fn attach_to_session(
     // (shell-toggle pair, editor open) uses the right session.
     let current_session = Arc::new(Mutex::new(session_name.to_string()));
     let popup_open = Arc::new(AtomicBool::new(false));
+    // Shared mic state: the stdin task flips it on each Alt-V. Owned by the
+    // caller (`ConversationRuntime.recording`) and shared in, so an external
+    // IPC toggle and the post-attach UI observe the same flag — no syncing.
+    let recording_flag = recording;
 
     // Run the async I/O loop
     info!("Starting async I/O loop");
@@ -100,6 +107,9 @@ pub async fn attach_to_session(
         &mut child,
         editor_triggers,
         review_triggers,
+        voice_triggers,
+        voice_listener,
+        recording_flag.clone(),
         intercept_ctrl_z,
         current_session.clone(),
         popup_open,
@@ -129,8 +139,10 @@ pub async fn attach_to_session(
 
     let final_session = current_session.lock().await.clone();
     info!(
-        "Attach complete, result: {:?}, final session: {}",
-        result, final_session
+        "Attach complete, result: {:?}, final session: {}, recording: {}",
+        result,
+        final_session,
+        recording_flag.load(Ordering::Acquire)
     );
 
     Ok(AttachOutcome {
@@ -145,6 +157,25 @@ fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
         return false;
     }
     haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Remove every occurrence of any `needle` from `data`. Used to strip an
+/// intercepted hotkey's bytes (e.g. the `ESC v` Alt-V burst) so they're never
+/// forwarded to the attached pane while we keep the attach running.
+fn remove_subsequences(data: &[u8], needles: &[Vec<u8>]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(data.len());
+    let mut i = 0;
+    'outer: while i < data.len() {
+        for n in needles {
+            if !n.is_empty() && data[i..].starts_with(n) {
+                i += n.len();
+                continue 'outer;
+            }
+        }
+        out.push(data[i]);
+        i += 1;
+    }
+    out
 }
 
 /// Strip Ctrl+Z (0x1A) bytes from `data`. Returns `Some(filtered)` when any
@@ -248,6 +279,9 @@ async fn run_async_loop(
     child: &mut tokio::process::Child,
     editor_triggers: Vec<Vec<u8>>,
     review_triggers: Vec<Vec<u8>>,
+    voice_triggers: Vec<Vec<u8>>,
+    voice_listener: Option<mpsc::UnboundedSender<crate::conversation::ListenerCommand>>,
+    recording_flag: Arc<AtomicBool>,
     intercept_ctrl_z: bool,
     current_session: Arc<Mutex<String>>,
     popup_open: Arc<AtomicBool>,
@@ -349,6 +383,47 @@ async fn run_async_loop(
                         // Skip the 0x00 byte; never forward it.
                         let filtered: Vec<u8> =
                             data.iter().copied().filter(|b| *b != 0x00).collect();
+                        if filtered.is_empty() {
+                            continue;
+                        }
+                        if pty_writer.write_all(&filtered).await.is_err() {
+                            break;
+                        }
+                        let _ = pty_writer.flush().await;
+                        continue;
+                    }
+
+                    // Check for the voice-input toggle (Alt-V by default).
+                    // Unlike every other trigger this does NOT exit the attach:
+                    // we swallow the bytes, flip the mic on/off via the listener
+                    // channel, and stay in the pane. A `tmux display-message`
+                    // gives feedback since the TUI status bar isn't visible here.
+                    if !voice_triggers.is_empty()
+                        && voice_triggers
+                            .iter()
+                            .any(|pat| contains_subsequence(data, pat))
+                    {
+                        if let Some(listener) = &voice_listener {
+                            let now_recording = crate::conversation::apply_listen_action(
+                                listener,
+                                &recording_flag,
+                                crate::conversation::ListenAction::Toggle,
+                            );
+                            let msg = if now_recording {
+                                "🎙 Recording… (Alt-V to send)"
+                            } else {
+                                "Transcribing…"
+                            };
+                            let target = current_session.lock().await.clone();
+                            tokio::spawn(async move {
+                                let _ = tokio::process::Command::new("tmux")
+                                    .args(["display-message", "-t", &target, msg])
+                                    .status()
+                                    .await;
+                            });
+                        }
+                        // Never forward the trigger bytes into the pane.
+                        let filtered = remove_subsequences(data, &voice_triggers);
                         if filtered.is_empty() {
                             continue;
                         }
@@ -545,6 +620,20 @@ mod tests {
         assert!(!contains_subsequence(b"", b"x"));
         assert!(!contains_subsequence(b"x", b""));
         assert!(!contains_subsequence(b"ab", b"abc"));
+    }
+
+    #[test]
+    fn test_remove_subsequences_strips_voice_trigger() {
+        let triggers = vec![vec![0x1b, b'v']];
+        // A lone Alt-V burst is swallowed entirely (nothing forwarded).
+        assert!(remove_subsequences(b"\x1bv", &triggers).is_empty());
+        // Surrounding bytes are preserved; only the trigger is removed.
+        assert_eq!(
+            remove_subsequences(b"ab\x1bvcd", &triggers),
+            b"abcd".to_vec()
+        );
+        // Input without the trigger is untouched.
+        assert_eq!(remove_subsequences(b"hello", &triggers), b"hello".to_vec());
     }
 
     #[test]

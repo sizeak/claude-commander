@@ -216,6 +216,10 @@ pub enum UserCommand {
     OpenPullRequest,
     /// Open (creating if needed) the persistent commander session
     OpenCommander,
+    /// Open/close the full-screen conversation overlay (TTS conversation mode)
+    ToggleConversationOverlay,
+    /// Toggle voice input: start/stop recording the mic for transcription (STT)
+    ToggleVoiceInput,
     /// Open the full-screen review-diff-and-comment view for the session
     OpenReviewDiff,
     /// Toggle between preview/diff panes
@@ -319,6 +323,8 @@ impl From<BindableAction> for UserCommand {
             BindableAction::OpenInEditor => Self::OpenInEditor,
             BindableAction::OpenPullRequest => Self::OpenPullRequest,
             BindableAction::OpenCommander => Self::OpenCommander,
+            BindableAction::ToggleConversationOverlay => Self::ToggleConversationOverlay,
+            BindableAction::ToggleVoiceInput => Self::ToggleVoiceInput,
             BindableAction::OpenReviewDiff => Self::OpenReviewDiff,
             BindableAction::TogglePane => Self::TogglePane,
             BindableAction::TogglePaneReverse => Self::TogglePaneReverse,

@@ -152,6 +152,56 @@ impl App {
                     ),
                 ]
             }
+            SettingsTab::Conversation => {
+                let c = &self.config.conversation;
+                let s = &self.config.stt;
+                vec![
+                    SettingsRow::toggle(
+                        "Enable Conversation Mode",
+                        c.enabled,
+                        "conversation_enabled",
+                    ),
+                    SettingsRow::text("Assistant Name", c.name.clone(), "conversation_name"),
+                    SettingsRow::text("TTS Base URL", c.base_url.clone(), "conversation_base_url"),
+                    SettingsRow::text("Model", c.model.clone(), "conversation_model"),
+                    SettingsRow::text(
+                        "Voice",
+                        c.voice.clone().unwrap_or_else(|| "(default)".into()),
+                        "conversation_voice",
+                    ),
+                    SettingsRow::text(
+                        "Response Format",
+                        c.response_format.clone(),
+                        "conversation_format",
+                    ),
+                    SettingsRow::text("Speed", format!("{:.2}", c.speed), "conversation_speed"),
+                    SettingsRow::text("Volume", format!("{:.2}", c.volume), "conversation_volume"),
+                    SettingsRow::text(
+                        "Speak Scope",
+                        c.speak_scope.label().to_string(),
+                        "conversation_speak_scope",
+                    ),
+                    // Speech-to-text (voice input, Alt-V).
+                    SettingsRow::toggle("Enable Voice Input (STT)", s.enabled, "stt_enabled"),
+                    SettingsRow::text("STT Base URL", s.base_url.clone(), "stt_base_url"),
+                    SettingsRow::text("STT Model", s.model.clone(), "stt_model"),
+                    SettingsRow::text(
+                        "STT Language",
+                        s.language.clone().unwrap_or_else(|| "(auto)".into()),
+                        "stt_language",
+                    ),
+                    SettingsRow::text(
+                        "STT Prompt",
+                        s.prompt.clone().unwrap_or_else(|| "(none)".into()),
+                        "stt_prompt",
+                    ),
+                    SettingsRow::toggle(
+                        "Pause Media While Recording",
+                        s.pause_media,
+                        "stt_pause_media",
+                    ),
+                ]
+            }
             SettingsTab::Sections => {
                 vec![]
             }
@@ -860,6 +910,63 @@ impl App {
                 }
                 _ => {}
             },
+            SettingsTab::Conversation => match field_key {
+                "conversation_name" => {
+                    let v = value.trim();
+                    self.config.conversation.name = if v.is_empty() {
+                        "Claudette".to_string()
+                    } else {
+                        v.to_string()
+                    };
+                }
+                "conversation_base_url" => self.config.conversation.base_url = value.to_string(),
+                "conversation_model" => self.config.conversation.model = value.to_string(),
+                "conversation_voice" => {
+                    self.config.conversation.voice = if value.is_empty() || value == "(default)" {
+                        None
+                    } else {
+                        Some(value.to_string())
+                    };
+                }
+                "conversation_format" => {
+                    self.config.conversation.response_format = value.to_string();
+                }
+                "conversation_speed" => {
+                    if let Ok(v) = value.parse::<f32>() {
+                        self.config.conversation.speed = v.clamp(0.25, 4.0);
+                    }
+                }
+                "conversation_volume" => {
+                    if let Ok(v) = value.parse::<f32>() {
+                        self.config.conversation.volume = v.clamp(0.0, 2.0);
+                    }
+                }
+                "conversation_speak_scope" => {
+                    // The picker passes the human label; config/tests use tokens.
+                    if let Some(scope) = crate::conversation::SpeakScope::from_token(value)
+                        .or_else(|| crate::conversation::SpeakScope::from_label(value))
+                    {
+                        self.config.conversation.speak_scope = scope;
+                    }
+                }
+                "stt_base_url" => self.config.stt.base_url = value.to_string(),
+                "stt_model" => self.config.stt.model = value.to_string(),
+                "stt_language" => {
+                    self.config.stt.language = if value.is_empty() || value == "(auto)" {
+                        None
+                    } else {
+                        Some(value.to_string())
+                    };
+                }
+                "stt_prompt" => {
+                    self.config.stt.prompt = if value.is_empty() || value == "(none)" {
+                        None
+                    } else {
+                        Some(value.to_string())
+                    };
+                }
+                _ => {}
+            },
             SettingsTab::Theme => {
                 use crate::config::theme::ColorValue;
 
@@ -1006,6 +1113,9 @@ impl App {
             "precompute_review_caches" => self.config.precompute_review_caches = value,
             "ai_summary_enabled" => self.config.ai_summary_enabled = value,
             "commander_enabled" => self.config.commander_enabled = value,
+            "conversation_enabled" => self.config.conversation.enabled = value,
+            "stt_enabled" => self.config.stt.enabled = value,
+            "stt_pause_media" => self.config.stt.pause_media = value,
             _ => {
                 warn!("Unknown boolean setting: {}", field_key);
                 return;
@@ -1179,6 +1289,18 @@ impl App {
                                 use crate::tui::theme::PRESET_NAMES;
                                 let options: Vec<String> =
                                     PRESET_NAMES.iter().map(|s| (*s).to_string()).collect();
+                                let current_value = state.rows[state.selected_row].text_value();
+                                let selected =
+                                    options.iter().position(|o| o == current_value).unwrap_or(0);
+                                state.editing =
+                                    Some(SettingsEditing::OptionPicker { options, selected });
+                            } else if field_key == "conversation_speak_scope" {
+                                // Inline option picker for the speak-scope enum.
+                                use crate::conversation::SpeakScope;
+                                let options: Vec<String> = SpeakScope::ALL
+                                    .iter()
+                                    .map(|s| s.label().to_string())
+                                    .collect();
                                 let current_value = state.rows[state.selected_row].text_value();
                                 let selected =
                                     options.iter().position(|o| o == current_value).unwrap_or(0);
@@ -1819,5 +1941,20 @@ mod tests {
         assert_eq!(truncate_str("short", 10), "short");
         assert_eq!(truncate_str("longer-name", 7), "longer…");
         assert_eq!(truncate_str("ab", 1), "…");
+    }
+
+    #[test]
+    fn settings_tab_cycle_includes_conversation() {
+        assert_eq!(SettingsTab::ALL.len(), 5);
+        assert!(SettingsTab::ALL.contains(&SettingsTab::Conversation));
+        assert_eq!(SettingsTab::General.next(), SettingsTab::Conversation);
+        assert_eq!(SettingsTab::Conversation.prev(), SettingsTab::General);
+        // A full forward cycle returns to the start.
+        let mut t = SettingsTab::General;
+        for _ in 0..SettingsTab::ALL.len() {
+            t = t.next();
+        }
+        assert_eq!(t, SettingsTab::General);
+        assert_eq!(SettingsTab::Conversation.label(), "Conversation");
     }
 }

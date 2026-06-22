@@ -115,6 +115,20 @@ pub enum Commands {
         init: bool,
     },
 
+    /// Toggle voice input in the running TUI. Intended for binding to a desktop
+    /// global keyboard shortcut (e.g. a KDE Plasma custom shortcut) so STT can be
+    /// triggered system-wide, not just when the terminal is focused. Talks to the
+    /// already-running instance over a local socket; with no flag it toggles.
+    ListenToggle {
+        /// Start recording (instead of toggling)
+        #[arg(long, conflicts_with = "stop")]
+        start: bool,
+
+        /// Stop recording and transcribe (instead of toggling)
+        #[arg(long, conflicts_with = "start")]
+        stop: bool,
+    },
+
     /// Show the in-session session picker (used by Ctrl+Space inside an attached
     /// session via `tmux display-popup`). Writes the chosen tmux session name
     /// to `--out` on selection; writes nothing on cancel.
@@ -154,6 +168,7 @@ mod tests {
             "attach",
             "config",
             "commander",
+            "listen-toggle",
         ] {
             assert!(
                 names.contains(&expected),

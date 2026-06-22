@@ -179,6 +179,134 @@ pub struct Config {
     /// `<data dir>/commander`.
     #[serde(default)]
     pub commander_dir: Option<PathBuf>,
+
+    /// Conversation mode (TTS): speak the commander's replies aloud via an
+    /// OpenAI-compatible TTS engine. Disabled by default.
+    #[serde(default)]
+    pub conversation: ConversationConfig,
+
+    /// Speech-to-text (voice input): transcribe the microphone via an
+    /// OpenAI-compatible transcription engine and feed it to the conversation
+    /// agent (Alt-V). Disabled by default.
+    #[serde(default)]
+    pub stt: SttConfig,
+}
+
+/// Conversation-mode (text-to-speech) settings.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ConversationConfig {
+    /// Master switch for conversation mode: gates both the Alt-c overlay and
+    /// spoken replies. When off, Alt-c does nothing. Off by default.
+    pub enabled: bool,
+
+    /// Display name / nickname for the assistant (the default voice is female,
+    /// so this defaults to "Claudette"). Used as the chat label and told to the
+    /// agent in its CLAUDE.md.
+    pub name: String,
+
+    /// Binary to run for the headless conversation session.
+    pub command: String,
+
+    /// `--permission-mode` for the conversation agent. `auto` lets it act
+    /// without interactive approval prompts (which it can't answer headlessly).
+    pub permission_mode: String,
+
+    /// Base URL of the OpenAI-compatible TTS API (include the `/v1`).
+    pub base_url: String,
+
+    /// Model name sent in each request (engines serving one model ignore it).
+    pub model: String,
+
+    /// Voice name. `None` lets the server use its configured default.
+    pub voice: Option<String>,
+
+    /// Audio container requested per chunk. `wav` avoids a server-side
+    /// transcode and client-side mp3 decode, for the lowest local latency.
+    pub response_format: String,
+
+    /// Playback speed (0.25–4.0).
+    pub speed: f32,
+
+    /// How much of each reply to speak.
+    pub speak_scope: crate::conversation::SpeakScope,
+
+    /// Playback volume (0.0–2.0; 1.0 = unchanged).
+    pub volume: f32,
+}
+
+impl Default for ConversationConfig {
+    fn default() -> Self {
+        Self {
+            // Master switch for the whole feature: gates both the Alt-c overlay
+            // and spoken replies. Off by default — enable it in Settings.
+            enabled: false,
+            name: "Claudette".to_string(),
+            command: "claude".to_string(),
+            permission_mode: "auto".to_string(),
+            base_url: "http://127.0.0.1:8002/v1".to_string(),
+            model: "kokoro".to_string(),
+            voice: None,
+            response_format: "wav".to_string(),
+            speed: 1.0,
+            speak_scope: crate::conversation::SpeakScope::ProseOnly,
+            volume: 1.0,
+        }
+    }
+}
+
+/// Speech-to-text (voice-input) settings.
+///
+/// Mirrors [`ConversationConfig`] for the transcription side: an
+/// OpenAI-compatible `POST {base_url}/audio/transcriptions` endpoint. The
+/// transcribed text is fed to the conversation session, so STT only does
+/// anything useful with conversation mode running.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SttConfig {
+    /// Master switch for voice input. When off, Alt-V does nothing. Off by
+    /// default.
+    pub enabled: bool,
+
+    /// Base URL of the OpenAI-compatible transcription API (include the `/v1`).
+    pub base_url: String,
+
+    /// Model name sent with each request (engines serving one model ignore it).
+    pub model: String,
+
+    /// ISO-639-1 language hint. `None` lets the server auto-detect.
+    pub language: Option<String>,
+
+    /// Optional decoding prompt (domain vocabulary / spelling hints). `None`
+    /// sends nothing.
+    pub prompt: Option<String>,
+
+    /// API key, sent as a `Bearer` header when set. `None` for local servers
+    /// that don't authenticate.
+    pub api_key: Option<String>,
+
+    /// Pause other media players while recording voice input, resuming them once
+    /// the assistant finishes its spoken reply. Best-effort via `playerctl`
+    /// (Linux) / `osascript` (macOS); a silent no-op when neither is available.
+    /// On by default.
+    pub pause_media: bool,
+}
+
+impl Default for SttConfig {
+    fn default() -> Self {
+        Self {
+            // Off by default — enable it in Settings ▸ Conversation.
+            enabled: false,
+            // Localhost placeholder, like the TTS default; override in config to
+            // point at your transcription server.
+            base_url: "http://127.0.0.1:8000/v1".to_string(),
+            model: "Systran/faster-whisper-base".to_string(),
+            language: None,
+            prompt: None,
+            api_key: None,
+            pause_media: true,
+        }
+    }
 }
 
 impl Default for Config {
@@ -223,6 +351,8 @@ impl Default for Config {
             commander_enabled: false,
             commander_program: None,
             commander_dir: None,
+            conversation: ConversationConfig::default(),
+            stt: SttConfig::default(),
         }
     }
 }
@@ -529,6 +659,85 @@ has_label = ["blocked", "waiting-on-author"]
         assert_eq!(config.max_concurrent_tmux, 16);
         assert_eq!(config.capture_cache_ttl_ms, 50);
         assert_eq!(config.ui_refresh_fps, 30);
+    }
+
+    #[test]
+    fn test_conversation_defaults() {
+        let c = ConversationConfig::default();
+        assert!(!c.enabled);
+        assert_eq!(c.base_url, "http://127.0.0.1:8002/v1");
+        assert_eq!(c.model, "kokoro");
+        assert_eq!(c.voice, None);
+        assert_eq!(c.response_format, "wav");
+        assert_eq!(c.speed, 1.0);
+        assert_eq!(c.speak_scope, crate::conversation::SpeakScope::ProseOnly);
+        assert_eq!(c.volume, 1.0);
+    }
+
+    #[test]
+    fn test_empty_toml_yields_conversation_defaults() {
+        let config: Config = toml::from_str("").expect("empty toml");
+        assert!(!config.conversation.enabled);
+        assert_eq!(config.conversation.base_url, "http://127.0.0.1:8002/v1");
+    }
+
+    #[test]
+    fn test_stt_defaults() {
+        let c = SttConfig::default();
+        assert!(!c.enabled);
+        assert_eq!(c.base_url, "http://127.0.0.1:8000/v1");
+        assert_eq!(c.model, "Systran/faster-whisper-base");
+        assert_eq!(c.language, None);
+        assert_eq!(c.prompt, None);
+        assert_eq!(c.api_key, None);
+    }
+
+    #[test]
+    fn test_empty_toml_yields_stt_defaults() {
+        let config: Config = toml::from_str("").expect("empty toml");
+        assert!(!config.stt.enabled);
+        assert_eq!(config.stt.base_url, "http://127.0.0.1:8000/v1");
+    }
+
+    #[test]
+    fn test_stt_toml_roundtrip() {
+        let toml_src = r#"
+[stt]
+enabled = true
+base_url = "http://192.168.1.10:8080/v1"
+model = "large-v3-turbo"
+language = "en"
+"#;
+        let config: Config = toml::from_str(toml_src).expect("toml parse");
+        assert!(config.stt.enabled);
+        assert_eq!(config.stt.base_url, "http://192.168.1.10:8080/v1");
+        assert_eq!(config.stt.model, "large-v3-turbo");
+        assert_eq!(config.stt.language.as_deref(), Some("en"));
+        // Unspecified fields keep their defaults.
+        assert_eq!(config.stt.prompt, None);
+    }
+
+    #[test]
+    fn test_conversation_toml_roundtrip() {
+        let toml_src = r#"
+[conversation]
+enabled = true
+base_url = "http://host:9000/v1"
+voice = "bm_fable"
+speak_scope = "final_summary"
+speed = 1.25
+"#;
+        let config: Config = toml::from_str(toml_src).expect("toml parse");
+        assert!(config.conversation.enabled);
+        assert_eq!(config.conversation.base_url, "http://host:9000/v1");
+        assert_eq!(config.conversation.voice.as_deref(), Some("bm_fable"));
+        assert_eq!(
+            config.conversation.speak_scope,
+            crate::conversation::SpeakScope::FinalSummary
+        );
+        assert_eq!(config.conversation.speed, 1.25);
+        // Unspecified fields keep their defaults.
+        assert_eq!(config.conversation.model, "kokoro");
     }
 
     #[test]

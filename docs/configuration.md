@@ -135,6 +135,35 @@ state_sync_interval_ms = 2000
 # Working directory for the commander; defaults to <data dir>/commander.
 # commander_dir = "/path/to/commander"
 
+# Conversation mode: a full-screen chat (open with `Alt-c`) backed by a
+# dedicated headless Claude session, whose replies stream in and are spoken
+# aloud via an OpenAI-compatible TTS engine. See "Conversation mode" below.
+# [conversation]
+# enabled = true                          # master switch: Alt-c overlay + spoken replies (off by default)
+# name = "Claudette"                       # assistant's display name / nickname
+# command = "claude"                       # binary for the conversation session
+# permission_mode = "auto"                 # --permission-mode for the agent (acts without approval prompts)
+# base_url = "http://127.0.0.1:8002/v1"   # OpenAI-compatible TTS endpoint (include /v1)
+# model = "kokoro"                         # TTS model name (engines serving one model ignore it)
+# voice = "af_sky"                         # omit to use the server's default voice
+# response_format = "wav"                  # wav | mp3 | opus | flac (wav = lowest local latency)
+# speed = 1.0                              # 0.25–4.0
+# speak_scope = "prose_only"               # prose_only | verbatim (per-sentence, streamed)
+# volume = 1.0                             # 0.0–2.0
+
+# Voice input (speech-to-text): hold a conversation by talking. Toggle recording
+# with `Alt-v`, then it's transcribed via an OpenAI-compatible STT engine and sent
+# to the conversation agent. See "Voice input (STT)" below.
+# [stt]
+# enabled = true                          # master switch for Alt-v voice input (off by default)
+# base_url = "http://127.0.0.1:8000/v1"   # OpenAI-compatible transcription endpoint (include /v1)
+# model = "Systran/faster-whisper-base"    # transcription model name
+# language = "en"                          # ISO-639-1 hint; omit to auto-detect
+# prompt = "..."                           # optional decoding prompt (domain vocab / spelling)
+# api_key = "..."                          # sent as a Bearer header; omit for local servers
+# pause_media = true                       # pause other players while recording, resume after the
+#                                          # reply (best-effort via playerctl/osascript; on by default)
+
 # Custom key bindings — override any default key with one or more alternatives
 # [keybindings]
 # navigate_up = ["k", "Up"]
@@ -145,6 +174,114 @@ state_sync_interval_ms = 2000
 # quit = ["q", "Ctrl-c"]
 # toggle_pane = ["Tab"]
 ```
+
+## Conversation mode (TTS)
+
+Press **`Alt-c`** to open a full-screen **conversation overlay** — a chat with a dedicated
+Claude session whose replies **stream in and are spoken aloud** through any **OpenAI-compatible**
+TTS engine (it posts to `{base_url}/audio/speech`). Type a message, press Enter; the reply is
+spoken sentence-by-sentence *as it's generated*. Closing the overlay (Esc / `Alt-c`) leaves the
+session running, so the conversation continues where you left off.
+
+This session is **separate from the commander** (`Shift-C`) and unrelated to it. It's driven over
+Claude Code's stream-json protocol (`claude -p --input-format stream-json --output-format
+stream-json --include-partial-messages`), which is the supported way to get clean token-level
+text — so TTS can start within a sentence of Claude beginning to type, rather than waiting for the
+whole reply. A new message interrupts in-flight speech. If the TTS server is unreachable, the chat
+still works (text-only) and never blocks the UI.
+
+`enabled` is the master switch for the whole feature and is **off by default** — set it (in
+Settings ▸ Conversation or config) before `Alt-c` will open the overlay. We develop against a
+local [Kokoro](https://github.com/sizeak/kokoro-tts-rocm) container (default
+`http://127.0.0.1:8002/v1`), but any OpenAI-compatible endpoint works.
+
+```toml
+[conversation]
+enabled = true                          # speak replies via TTS (off = text-only chat)
+command = "claude"                       # binary for the conversation session
+base_url = "http://127.0.0.1:8002/v1"   # OpenAI-compatible TTS endpoint (include /v1)
+model = "kokoro"                         # TTS model name (engines serving one model ignore it)
+voice = "af_sky"                         # omit to use the server's default voice
+response_format = "wav"                  # wav | mp3 | opus | flac (wav = lowest local latency)
+speed = 1.0                              # 0.25–4.0
+speak_scope = "prose_only"               # prose_only | verbatim
+volume = 1.0                             # 0.0–2.0
+```
+
+`speak_scope` controls what's spoken (applied per sentence as it streams):
+
+| Value | Behaviour |
+|-------|-----------|
+| `prose_only` (default) | Strip code blocks and markdown; speak the natural-language prose |
+| `verbatim` | Speak the text unchanged |
+
+> **Build note:** in-process playback uses `rodio`, which links **ALSA** on Linux. Building from
+> source needs the ALSA development headers (`libasound2-dev` on Debian/Ubuntu, `alsa-lib` on
+> Arch). The Nix dev shell provides them automatically.
+
+## Voice input (STT)
+
+Press **`Alt-v`** to talk to the conversation agent. It's a **toggle**: the first press starts
+recording the microphone, the next press stops it, transcribes the audio through any
+**OpenAI-compatible** speech-to-text engine (it posts a WAV to `{base_url}/audio/transcriptions`),
+and sends the resulting text to the conversation session — exactly as if you'd typed it. The reply
+then streams back and is spoken aloud (if TTS is enabled). Voice input works **whether the overlay
+is open or not**, mirroring spoken replies.
+
+`stt.enabled` is a separate switch from `conversation.enabled` and is **off by default**. Voice
+input feeds the conversation session, so it's only useful alongside conversation mode. Microphone
+capture uses `cpal` (also ALSA on Linux — see the build note above). If no microphone is available
+or the STT server is unreachable, voice input degrades gracefully (a status message) and never
+blocks the UI.
+
+```toml
+[stt]
+enabled = true                          # master switch for Alt-v voice input (off = no voice input)
+base_url = "http://127.0.0.1:8000/v1"   # OpenAI-compatible transcription endpoint (include /v1)
+model = "Systran/faster-whisper-base"    # transcription model name
+language = "en"                          # ISO-639-1 hint; omit to auto-detect
+# prompt = "Vitest, Kotlin, ..."         # optional decoding prompt (domain vocab / spelling hints)
+# api_key = "..."                        # sent as a Bearer header; omit for local servers
+pause_media = true                       # pause other players while recording, resume after the reply
+```
+
+While you're recording (and until the assistant has finished its spoken reply), `pause_media`
+pauses any other media players so they don't talk over the conversation, then resumes whatever was
+playing once things go quiet. It's best-effort — `playerctl` on Linux, `osascript` (Spotify/Music)
+on macOS — and a silent no-op when neither is available, so it never blocks or breaks voice input.
+On by default; set to `false` to leave your media alone.
+
+Audio is captured at the microphone's native rate, downmixed to mono, and encoded as 16-bit PCM
+WAV; the server resamples as needed. Recording isn't chunked yet — the whole utterance is uploaded
+when you stop — so very long dictations wait until the end to transcribe.
+
+### Global voice hotkey
+
+`Alt-v` only fires when the terminal window is focused — a terminal app can't read key events
+otherwise. To toggle voice input from **anywhere on the desktop**, bind a desktop-level global
+shortcut to the `listen-toggle` command:
+
+```sh
+claude-commander listen-toggle          # toggle (also: --start / --stop)
+```
+
+This connects to the running TUI over a per-user Unix socket
+(`$XDG_RUNTIME_DIR/claude-commander.sock`, falling back to the OS temp dir on macOS) and toggles
+recording exactly as `Alt-v` would — and it works even while you're attached to a session. The
+socket server starts automatically when the TUI launches with `stt.enabled = true`; the command
+prints `recording`/`stopped` and exits non-zero (with a message) if no TUI is running.
+
+- **KDE Plasma / Linux:** System Settings ▸ Shortcuts ▸ **Add ▸ Command or Script**, set the command
+  to `claude-commander listen-toggle`, and assign your key. Pick a combo **different from `Alt-v`** so
+  the global grab doesn't shadow the in-app binding.
+- **macOS:** bind the same command via skhd, Karabiner-Elements, Raycast, or Shortcuts.app.
+
+> A command shortcut is used (rather than the in-process XDG `GlobalShortcuts` portal) because the
+> portal can't assign a non-sandboxed terminal binary a stable app identity, so the compositor never
+> persists a reliably-bindable shortcut for it. The command route has no such limitation.
+
+Both this and in-app `Alt-v` feed the same recording state, so they stay consistent. Only one running
+TUI instance owns the socket; a second instance logs and skips.
 
 ## Theme Presets
 

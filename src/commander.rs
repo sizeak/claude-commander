@@ -58,8 +58,9 @@ pub fn claude_md_content(cmd: &clap::Command) -> String {
 
 /// Render a markdown CLI reference by walking the clap command tree and
 /// emitting each visible subcommand's long help verbatim. Hidden subcommands
-/// (e.g. internal popup helpers) are skipped.
-fn generate_cli_reference(cmd: &clap::Command) -> String {
+/// (e.g. internal popup helpers) are skipped. Shared with the conversation
+/// session so it documents the same CLI.
+pub fn generate_cli_reference(cmd: &clap::Command) -> String {
     let bin = cmd.get_name().to_string();
     let mut out = String::new();
     for sub in cmd.get_subcommands() {

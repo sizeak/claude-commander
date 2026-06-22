@@ -58,6 +58,7 @@ use crate::tmux::AgentStateDetector;
 
 mod actions;
 mod background;
+mod conversation;
 mod event_loop;
 mod input;
 mod modals;
@@ -315,6 +316,10 @@ pub enum Modal {
     },
     /// Full-screen review-diff-and-comment view.
     ReviewDiff(Box<DiffReviewState>),
+    /// Full-screen conversation overlay (view onto the headless `claude`
+    /// session). View-only state; the session itself lives on `App`, so closing
+    /// this leaves the conversation running.
+    Conversation { input: Input, scroll: u16 },
 }
 
 /// A session match in the quick-switch modal
@@ -394,14 +399,16 @@ pub struct BranchEntry {
 pub enum SettingsTab {
     #[default]
     General,
+    Conversation,
     Keybindings,
     Theme,
     Sections,
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 4] = [
+    const ALL: [SettingsTab; 5] = [
         Self::General,
+        Self::Conversation,
         Self::Keybindings,
         Self::Theme,
         Self::Sections,
@@ -410,6 +417,7 @@ impl SettingsTab {
     fn label(self) -> &'static str {
         match self {
             Self::General => "General",
+            Self::Conversation => "Conversation",
             Self::Keybindings => "Keybindings",
             Self::Theme => "Theme",
             Self::Sections => "Sections",
@@ -418,7 +426,8 @@ impl SettingsTab {
 
     fn next(self) -> Self {
         match self {
-            Self::General => Self::Keybindings,
+            Self::General => Self::Conversation,
+            Self::Conversation => Self::Keybindings,
             Self::Keybindings => Self::Theme,
             Self::Theme => Self::Sections,
             Self::Sections => Self::General,
@@ -428,7 +437,8 @@ impl SettingsTab {
     fn prev(self) -> Self {
         match self {
             Self::General => Self::Sections,
-            Self::Keybindings => Self::General,
+            Self::Conversation => Self::General,
+            Self::Keybindings => Self::Conversation,
             Self::Theme => Self::Keybindings,
             Self::Sections => Self::Theme,
         }
@@ -906,6 +916,9 @@ pub struct App {
     suppress_keys_until: Instant,
     /// Two-digit session number accumulator with debounce
     digit_accumulator: super::digit_accumulator::DigitAccumulator,
+    /// Conversation mode runtime (headless streaming `claude` session + TTS).
+    /// Lives here, not in the overlay modal, so it keeps running while closed.
+    conversation: conversation::ConversationRuntime,
     /// Terminal graphics capability for the review image view, probed ONCE
     /// before the input reader starts (see `run`); `None` until then. Kept on
     /// `App` rather than in `DiffReviewState` because the protocol cache below
@@ -948,6 +961,7 @@ impl App {
             theme,
             suppress_keys_until: Instant::now(),
             digit_accumulator: super::digit_accumulator::DigitAccumulator::new(debounce),
+            conversation: conversation::ConversationRuntime::default(),
             picker: None,
             review_images: RefCell::new(HashMap::new()),
             review_image_gen: Cell::new(0),
@@ -1118,6 +1132,15 @@ impl App {
         // Surface any pending review comments left from a previous run.
         self.refresh_comment_indicators().await;
 
+        // Bring the mic listener up eagerly (when STT is enabled) so a global
+        // hotkey can toggle recording even before the conversation is opened.
+        // The heavy headless session stays lazy — the listener spawns it on the
+        // first transcript. Then start the external IPC trigger(s).
+        if self.config.stt.enabled {
+            self.ensure_listener_started().await;
+            self.spawn_listen_ipc();
+        }
+
         loop {
             // Setup terminal for TUI
             let mut terminal = self.setup_terminal()?;
@@ -1185,6 +1208,13 @@ impl App {
                         // so not necessarily the one they entered with.
                         let mut final_session: Option<String> = None;
                         if !session_name.is_empty() {
+                            // Pre-warm the conversation runtime so voice input
+                            // (Alt-V) works immediately while attached — the mic
+                            // listener only exists once the conversation has been
+                            // started. Idempotent; no-op after the first attach.
+                            if self.config.stt.enabled {
+                                self.ensure_conversation_started().await;
+                            }
                             let mut current_session = session_name.clone();
                             let mut consecutive_ends: u8 = 0;
 
@@ -1212,6 +1242,20 @@ impl App {
                                 } else {
                                     Vec::new()
                                 };
+                                // Voice input (Alt-V) is toggled in-place mid-
+                                // attach; only meaningful for Claude sessions
+                                // with STT enabled and a listener running.
+                                let (voice_triggers, voice_listener) =
+                                    if intercept_ctrl_z && self.config.stt.enabled {
+                                        (
+                                            crate::config::keybindings::voice_trigger_bytes(
+                                                &self.config.keybindings,
+                                            ),
+                                            self.conversation.listener.clone(),
+                                        )
+                                    } else {
+                                        (Vec::new(), None)
+                                    };
 
                                 // Stamp last_attached_at so the in-tmux
                                 // switcher can sort Alt+Tab-style by MRU.
@@ -1237,6 +1281,9 @@ impl App {
                                     &current_session,
                                     editor_triggers,
                                     review_triggers,
+                                    voice_triggers,
+                                    voice_listener,
+                                    self.conversation.recording.clone(),
                                     intercept_ctrl_z,
                                 )
                                 .await
@@ -1251,6 +1298,10 @@ impl App {
                                         break;
                                     }
                                 };
+
+                                // `conversation.recording` is shared (`Arc`) with
+                                // the attach loop, so a mid-attach Alt-V toggle is
+                                // already reflected — no readback needed.
 
                                 // The in-session switcher may have run `tmux switch-client`
                                 // mid-attach, so the session we exited from isn't

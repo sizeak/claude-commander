@@ -45,6 +45,9 @@ impl App {
         match &self.ui_state.modal {
             Modal::None => {}
 
+            // Full-screen takeovers are rendered directly in `render()`, not here.
+            Modal::Conversation { .. } => {}
+
             Modal::ReviewDiff(state) => self.render_review_modal(frame, area, state),
 
             Modal::Input {
@@ -640,6 +643,20 @@ impl App {
         lines.push(Line::from(format!(
             "  {:<width$}Filter palette to commands only",
             ">",
+            width = key_col_width,
+        )));
+
+        // Global voice hotkey (a desktop shortcut, not an in-app keybinding).
+        lines.push(Line::from(""));
+        lines.push(Line::from("Global Voice Hotkey:"));
+        lines.push(Line::from(format!(
+            "  {:<width$}Toggle voice input system-wide: bind a desktop",
+            "system-wide",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}shortcut to `claude-commander listen-toggle`",
+            "",
             width = key_col_width,
         )));
 
