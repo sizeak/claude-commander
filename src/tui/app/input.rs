@@ -954,7 +954,7 @@ impl App {
                 );
             }
             UserCommand::DeleteSession => {
-                self.handle_delete_session();
+                self.handle_delete_session().await;
             }
             UserCommand::DeleteMergedPrSessions => {
                 self.handle_delete_merged_pr_sessions().await;
