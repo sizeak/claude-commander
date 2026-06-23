@@ -13,6 +13,20 @@ const PR_FANOUT_CONCURRENCY: usize = 8;
 /// doesn't spawn one `git fetch` per project at the same instant.
 const PROJECT_PULL_FANOUT_CONCURRENCY: usize = 4;
 
+/// Minimum gap between PR-status fan-outs. Debounces rapid manual triggers
+/// (e.g. double-enter on the palette "Refresh PR status" action) so we don't
+/// launch several concurrent `gh pr list` sweeps at once. It sits far below
+/// `pr_check_interval_secs`, so a manual refresh is still effectively immediate
+/// — and the periodic caller already gates on that longer cadence, so this only
+/// bites bursts.
+const PR_CHECK_DEBOUNCE: Duration = Duration::from_secs(2);
+
+/// Whether enough time has elapsed since the last PR-status check to spawn
+/// another (see [`PR_CHECK_DEBOUNCE`]). `None` (never checked) always passes.
+fn pr_check_debounce_passed(last_check: Option<Instant>, now: Instant, debounce: Duration) -> bool {
+    last_check.is_none_or(|t| now.saturating_duration_since(t) >= debounce)
+}
+
 impl App {
     /// Spawn a background task to fetch preview/diff/shell data.
     ///
@@ -142,6 +156,17 @@ impl App {
 
     /// Spawn a background task to check PR status for all sessions
     pub(super) fn spawn_pr_status_check(&mut self) {
+        // Debounce rapid re-triggers so we don't fan out several concurrent
+        // `gh pr list` sweeps (e.g. double-enter on the palette action). The
+        // periodic caller already gates on the much longer
+        // `pr_check_interval_secs`, so in practice this only collapses bursts.
+        if !pr_check_debounce_passed(
+            self.ui_state.last_pr_check,
+            Instant::now(),
+            PR_CHECK_DEBOUNCE,
+        ) {
+            return;
+        }
         self.ui_state.last_pr_check = Some(Instant::now());
 
         let store = self.service.store().clone();
@@ -503,5 +528,45 @@ pub(super) async fn cleanup_session_tmux(
                 }))
                 .await;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pr_check_debounce_allows_first_check_and_blocks_bursts() {
+        let base = Instant::now();
+        let debounce = Duration::from_secs(2);
+
+        // Never checked before → always allowed.
+        assert!(pr_check_debounce_passed(None, base, debounce));
+
+        // Re-trigger inside the window → blocked (the burst case).
+        assert!(!pr_check_debounce_passed(
+            Some(base),
+            base + Duration::from_millis(500),
+            debounce
+        ));
+        // Just shy of the threshold → still blocked.
+        assert!(!pr_check_debounce_passed(
+            Some(base),
+            base + Duration::from_millis(1_999),
+            debounce
+        ));
+
+        // At the threshold → allowed.
+        assert!(pr_check_debounce_passed(
+            Some(base),
+            base + Duration::from_secs(2),
+            debounce
+        ));
+        // Well past it (e.g. the periodic cadence) → allowed.
+        assert!(pr_check_debounce_passed(
+            Some(base),
+            base + Duration::from_secs(120),
+            debounce
+        ));
     }
 }

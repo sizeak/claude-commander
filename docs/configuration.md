@@ -62,6 +62,8 @@ ui_refresh_fps = 30
 # editor_gui = true
 
 # Interval in seconds between GitHub PR checks (0 = disabled)
+# Run "Refresh PR status" from the command palette to force an immediate
+# re-check without waiting for this interval to elapse.
 pr_check_interval_secs = 120
 
 # Periodically fast-forward each project's main branch from origin.

@@ -214,6 +214,8 @@ pub enum UserCommand {
     OpenInEditor,
     /// Open the selected session's PR URL in a web browser
     OpenPullRequest,
+    /// Force an immediate PR-status re-check for all sessions (palette-only)
+    RefreshPrStatus,
     /// Open (creating if needed) the persistent commander session
     OpenCommander,
     /// Open/close the full-screen conversation overlay (TTS conversation mode)
@@ -322,6 +324,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::RemoveProject => Self::RemoveProject,
             BindableAction::OpenInEditor => Self::OpenInEditor,
             BindableAction::OpenPullRequest => Self::OpenPullRequest,
+            BindableAction::RefreshPrStatus => Self::RefreshPrStatus,
             BindableAction::OpenCommander => Self::OpenCommander,
             BindableAction::ToggleConversationOverlay => Self::ToggleConversationOverlay,
             BindableAction::ToggleVoiceInput => Self::ToggleVoiceInput,
@@ -824,6 +827,16 @@ mod tests {
             state: KeyEventState::empty(),
         };
         assert!(UserCommand::from_key(key, &b).is_none());
+    }
+
+    #[test]
+    fn test_refresh_pr_status_maps_from_palette_action() {
+        // Palette-only command: reachable only via the BindableAction → UserCommand
+        // conversion the palette uses, never from a key (it has no binding).
+        assert!(matches!(
+            UserCommand::from(BindableAction::RefreshPrStatus),
+            UserCommand::RefreshPrStatus
+        ));
     }
 
     #[test]
