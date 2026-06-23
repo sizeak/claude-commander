@@ -16,7 +16,8 @@ use std::time::Instant;
 use super::*;
 use crate::conversation::{
     ConversationEvent, ConversationSession, ListenAction, ListenerCommand, MediaSignal,
-    apply_listen_action, media_signal, spawn_listener, spawn_media_gate, spawn_speaker,
+    SpeakerCommand, SpeakerHandle, apply_listen_action, media_signal, spawn_listener,
+    spawn_media_gate, spawn_speaker,
 };
 
 /// Canonical project spinner frames (advanced every 3 render ticks).
@@ -258,6 +259,11 @@ pub struct ConversationRuntime {
     /// Media-gate signal channel: pauses other players for the voice turn and
     /// resumes them after the reply. `None` when the feature is disabled.
     pub gate: Option<tokio::sync::mpsc::UnboundedSender<MediaSignal>>,
+    /// Respawn-stable handle to the current session's TTS speaker. Held here so
+    /// the long-lived listener (interrupt on record-start) and the submit path
+    /// (resume for the new reply) reach the speaker even as it's recreated on
+    /// each session respawn.
+    pub speaker: SpeakerHandle,
 }
 
 impl ConversationRuntime {
@@ -281,6 +287,7 @@ impl ConversationRuntime {
 async fn submit_to_session(
     session: &Arc<tokio::sync::Mutex<Option<ConversationSession>>>,
     view: &Arc<Mutex<ConversationView>>,
+    speaker: &SpeakerHandle,
     text: String,
 ) -> bool {
     let mut guard = session.lock().await;
@@ -291,6 +298,9 @@ async fn submit_to_session(
         Ok(()) => {
             drop(guard);
             view.lock().unwrap().push_user(text);
+            // The new query is in — lift any mute set when the user started
+            // recording, so its reply (not the interrupted one) is spoken.
+            speaker.send(SpeakerCommand::Resume);
             true
         }
         Err(e) => {
@@ -310,6 +320,7 @@ async fn spawn_session_runtime(
     gate: Option<tokio::sync::mpsc::UnboundedSender<MediaSignal>>,
     session: &Arc<tokio::sync::Mutex<Option<ConversationSession>>>,
     view: &Arc<Mutex<ConversationView>>,
+    speaker_handle: &SpeakerHandle,
 ) {
     if session.lock().await.is_some() {
         return;
@@ -353,6 +364,9 @@ async fn spawn_session_runtime(
     } else {
         None
     };
+    // Publish the (possibly None) speaker so the long-lived listener/submit paths
+    // reach this session's speaker; overwrites any prior speaker on respawn.
+    speaker_handle.set(speaker.clone());
 
     let (ev_tx, mut ev_rx) = tokio::sync::mpsc::unbounded_channel::<ConversationEvent>();
     // Resume the previous conversation if we have a stored session id, so the
@@ -445,6 +459,7 @@ impl App {
             gate,
             &self.conversation.session,
             &self.conversation.view,
+            &self.conversation.speaker,
         )
         .await;
     }
@@ -469,8 +484,14 @@ impl App {
         }
         let gate = self.conversation.gate.clone();
 
+        let speaker = self.conversation.speaker.clone();
         let (tx_text, mut rx_text) = tokio::sync::mpsc::unbounded_channel::<String>();
-        match spawn_listener(self.config.stt.clone(), tx_text, gate.clone()) {
+        match spawn_listener(
+            self.config.stt.clone(),
+            tx_text,
+            gate.clone(),
+            speaker.clone(),
+        ) {
             Ok(tx) => {
                 self.conversation.listener = Some(tx);
                 let session = self.conversation.session.clone();
@@ -486,9 +507,10 @@ impl App {
                         // even while the main loop is parked in a tmux attach. If
                         // no session is up yet (transcript arrived before the
                         // overlay was opened), spawn one and retry once.
-                        if !submit_to_session(&session, &view, text.clone()).await {
-                            spawn_session_runtime(&conv, gate.clone(), &session, &view).await;
-                            submit_to_session(&session, &view, text).await;
+                        if !submit_to_session(&session, &view, &speaker, text.clone()).await {
+                            spawn_session_runtime(&conv, gate.clone(), &session, &view, &speaker)
+                                .await;
+                            submit_to_session(&session, &view, &speaker, text).await;
                         }
                     }
                 });
@@ -523,6 +545,7 @@ impl App {
         if submit_to_session(
             &self.conversation.session,
             &self.conversation.view,
+            &self.conversation.speaker,
             text.clone(),
         )
         .await
@@ -532,7 +555,14 @@ impl App {
         // Session likely exited (idle timeout / crash) — respawn and retry once.
         *self.conversation.session.lock().await = None;
         self.ensure_conversation_started().await;
-        if !submit_to_session(&self.conversation.session, &self.conversation.view, text).await {
+        if !submit_to_session(
+            &self.conversation.session,
+            &self.conversation.view,
+            &self.conversation.speaker,
+            text,
+        )
+        .await
+        {
             self.conversation
                 .view
                 .lock()
