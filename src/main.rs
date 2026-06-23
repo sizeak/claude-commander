@@ -2,6 +2,8 @@
 //!
 //! Run with `claude-commander` or `claude-commander --help` for usage.
 
+use std::io::{IsTerminal, Write};
+
 use clap::Parser;
 use color_eyre::eyre::Result;
 use tracing::info;
@@ -255,6 +257,48 @@ async fn main() -> Result<()> {
             } else {
                 println!("{}", claude_commander::cli::format_status_human(&entry));
             }
+        }
+
+        Some(Commands::Delete { session, force }) => {
+            setup_logging(cli.debug, false)?;
+
+            let service = claude_commander::api::CommanderService::for_cli(config)?;
+
+            let info = match service.find_session(&session).await? {
+                Some(i) => i,
+                None => {
+                    eprintln!("Session not found: {}", session);
+                    eprintln!("Use 'claude-commander list' to see available sessions.");
+                    std::process::exit(1);
+                }
+            };
+
+            match claude_commander::cli::delete_guard(force, std::io::stdin().is_terminal()) {
+                claude_commander::cli::DeleteGuard::RequireForce => {
+                    eprintln!(
+                        "Refusing to delete \"{}\" without confirmation. Re-run with --force.",
+                        info.title
+                    );
+                    std::process::exit(1);
+                }
+                claude_commander::cli::DeleteGuard::Prompt => {
+                    print!(
+                        "Delete \"{}\"? This kills its tmux session and removes the worktree. [y/N] ",
+                        info.title
+                    );
+                    std::io::stdout().flush()?;
+                    let mut answer = String::new();
+                    std::io::stdin().read_line(&mut answer)?;
+                    if !claude_commander::cli::parse_yes_no(&answer) {
+                        println!("Aborted.");
+                        return Ok(());
+                    }
+                }
+                claude_commander::cli::DeleteGuard::Proceed => {}
+            }
+
+            service.delete_session(&info.session_id).await?;
+            println!("Session deleted: {}", info.title);
         }
 
         Some(Commands::Log { session, lines }) => {

@@ -40,6 +40,35 @@ pub fn clamp_log_lines(requested: usize) -> usize {
     requested.clamp(1, LOG_MAX_LINES)
 }
 
+/// What the `delete` command should do before mutating, given the `--force`
+/// flag and whether stdin is an interactive terminal.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DeleteGuard {
+    /// `--force` was given: delete without asking.
+    Proceed,
+    /// Interactive terminal: prompt the user for confirmation.
+    Prompt,
+    /// Non-interactive stdin without `--force`: refuse to delete.
+    RequireForce,
+}
+
+/// Decide how the `delete` command should guard against accidental deletion.
+pub fn delete_guard(force: bool, stdin_is_tty: bool) -> DeleteGuard {
+    if force {
+        DeleteGuard::Proceed
+    } else if stdin_is_tty {
+        DeleteGuard::Prompt
+    } else {
+        DeleteGuard::RequireForce
+    }
+}
+
+/// Parse a yes/no confirmation answer. Only `y`/`yes` (case-insensitive,
+/// surrounding whitespace ignored) count as yes; everything else is no.
+pub fn parse_yes_no(input: &str) -> bool {
+    matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
+}
+
 /// JSON-serializable session entry for CLI output.
 #[derive(Debug, Serialize)]
 pub struct SessionJsonEntry {
@@ -559,5 +588,35 @@ mod tests {
         assert!(!output.contains("PR:"));
         assert!(!output.contains("Review:"));
         assert!(!output.contains("Labels:"));
+    }
+
+    #[test]
+    fn delete_guard_force_always_proceeds() {
+        assert_eq!(delete_guard(true, true), DeleteGuard::Proceed);
+        assert_eq!(delete_guard(true, false), DeleteGuard::Proceed);
+    }
+
+    #[test]
+    fn delete_guard_interactive_prompts() {
+        assert_eq!(delete_guard(false, true), DeleteGuard::Prompt);
+    }
+
+    #[test]
+    fn delete_guard_non_tty_requires_force() {
+        assert_eq!(delete_guard(false, false), DeleteGuard::RequireForce);
+    }
+
+    #[test]
+    fn parse_yes_no_accepts_yes_variants() {
+        for input in ["y", "Y", "yes", "YES", " yes\n", "  y  "] {
+            assert!(parse_yes_no(input), "expected {input:?} to be yes");
+        }
+    }
+
+    #[test]
+    fn parse_yes_no_rejects_everything_else() {
+        for input in ["", "n", "no", "x", "yep", "\n"] {
+            assert!(!parse_yes_no(input), "expected {input:?} to be no");
+        }
     }
 }
