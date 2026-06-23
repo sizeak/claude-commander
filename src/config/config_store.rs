@@ -192,13 +192,12 @@ impl ConfigStore {
         use crate::error::ConfigError;
         use figment::{
             Figment,
-            providers::{Env, Format, Serialized, Toml},
+            providers::{Format, Serialized, Toml},
         };
 
         let config: Config = Figment::new()
             .merge(Serialized::defaults(Config::default()))
             .merge(Toml::file(&self.config_path))
-            .merge(Env::prefixed("CC_").split("_"))
             .extract()
             .map_err(|e| ConfigError::LoadFailed(e.to_string()))?;
         Ok(config)

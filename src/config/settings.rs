@@ -1,6 +1,6 @@
 //! User configuration settings
 //!
-//! Layered configuration: environment variables → config file → CLI args
+//! Layered configuration: defaults → config file
 
 use std::path::PathBuf;
 
@@ -8,7 +8,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use directories::ProjectDirs;
 use figment::{
     Figment,
-    providers::{Env, Format, Serialized, Toml},
+    providers::{Format, Serialized, Toml},
 };
 use serde::{Deserialize, Serialize};
 
@@ -379,8 +379,6 @@ impl Config {
             .merge(Serialized::defaults(Config::default()))
             // Layer config file if it exists
             .merge(Toml::file(&config_path))
-            // Layer environment variables (CC_DEFAULT_PROGRAM, etc.)
-            .merge(Env::prefixed("CC_").split("_"))
             .extract()
             .map_err(|e| ConfigError::LoadFailed(e.to_string()))?;
 

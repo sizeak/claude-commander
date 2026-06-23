@@ -9,8 +9,6 @@ Configuration file location depends on your platform:
 - **macOS**: `~/Library/Application Support/com.claude-commander.claude-commander/config.toml`
 - **Linux**: `~/.config/claude-commander/config.toml`
 
-All settings can also be set via environment variables with the `CC_` prefix (e.g. `CC_EDITOR=code`).
-
 ```toml
 # Default program to run in new sessions
 default_program = "claude"

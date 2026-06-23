@@ -92,8 +92,6 @@ the summary section shows a placeholder instead.
 | `ai_summary_enabled` | `true` | Set to `false` to disable AI summaries entirely |
 | `ai_summary_model` | `claude-haiku-4-5-20251001` | Claude model used for summaries (Haiku recommended for cost efficiency) |
 
-Environment variable overrides: `CC_AI_SUMMARY_ENABLED`, `CC_AI_SUMMARY_MODEL`.
-
 ## Reviewing & commenting on changes
 
 Press **`r`** on a selected session (or open the **command palette** with
