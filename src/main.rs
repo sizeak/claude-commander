@@ -264,10 +264,18 @@ async fn main() -> Result<()> {
 
             let service = claude_commander::api::CommanderService::for_cli(config)?;
 
-            let info = match service.find_session(&session).await? {
-                Some(i) => i,
-                None => {
+            let info = match service.find_session_exact(&session).await? {
+                claude_commander::cli::SessionLookup::Found(i) => i,
+                claude_commander::cli::SessionLookup::NotFound => {
                     eprintln!("Session not found: {}", session);
+                    eprintln!("Use 'claude-commander list' to see available sessions.");
+                    std::process::exit(1);
+                }
+                claude_commander::cli::SessionLookup::Ambiguous(n) => {
+                    eprintln!(
+                        "\"{}\" matches {} sessions. Use the exact title or full ID to delete.",
+                        session, n
+                    );
                     eprintln!("Use 'claude-commander list' to see available sessions.");
                     std::process::exit(1);
                 }

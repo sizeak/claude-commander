@@ -32,6 +32,44 @@ pub fn find_session<'a>(state: &'a AppState, query: &str) -> Option<&'a Worktree
         .find(|s| s.id.to_string().starts_with(query))
 }
 
+/// Outcome of resolving a session by an *exact* identifier.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SessionLookup<T> {
+    /// Exactly one session matched.
+    Found(T),
+    /// No session matched the query.
+    NotFound,
+    /// More than one session matched (the count of matches).
+    Ambiguous(usize),
+}
+
+/// Resolve a session by an *exact* identifier: a case-insensitive exact title
+/// match or a full session-ID match.
+///
+/// Unlike [`find_session`], this performs no prefix matching, so a destructive
+/// command can never act on the wrong session merely because the query was a
+/// prefix shared by several IDs (or an empty string, which prefixes every ID).
+/// Returns [`SessionLookup::Ambiguous`] when more than one session matches
+/// (e.g. two sessions share a title) rather than picking one arbitrarily.
+pub fn find_session_exact<'a>(
+    state: &'a AppState,
+    query: &str,
+) -> SessionLookup<&'a WorktreeSession> {
+    let query_lower = query.to_lowercase();
+    let mut matches = state
+        .sessions
+        .values()
+        .filter(|s| s.title.to_lowercase() == query_lower || s.id.to_string() == query);
+
+    let Some(first) = matches.next() else {
+        return SessionLookup::NotFound;
+    };
+    match matches.count() {
+        0 => SessionLookup::Found(first),
+        extra => SessionLookup::Ambiguous(extra + 1),
+    }
+}
+
 /// Maximum lines allowed for the `log` command's `--lines` flag.
 pub const LOG_MAX_LINES: usize = 10_000;
 
@@ -349,6 +387,70 @@ mod tests {
     fn returns_none_on_empty_state() {
         let state = AppState::new();
         assert!(find_session(&state, "anything").is_none());
+    }
+
+    // -- find_session_exact tests --
+
+    #[test]
+    fn exact_matches_full_title_case_insensitive() {
+        let s = make_session("Fix-Auth");
+        let state = make_state(vec![s.clone()]);
+        match find_session_exact(&state, "fix-auth") {
+            SessionLookup::Found(found) => assert_eq!(found.id, s.id),
+            other => panic!("expected Found, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exact_matches_full_id() {
+        let s = make_session("my-session");
+        let full_id = s.id.to_string();
+        let state = make_state(vec![s.clone()]);
+        match find_session_exact(&state, &full_id) {
+            SessionLookup::Found(found) => assert_eq!(found.id, s.id),
+            other => panic!("expected Found, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn exact_does_not_match_id_prefix() {
+        // The dangerous case the loose `find_session` allowed: a prefix of an
+        // ID must NOT resolve for a destructive command.
+        let s = make_session("my-session");
+        let id_prefix = &s.id.to_string()[..4];
+        let state = make_state(vec![s]);
+        assert!(matches!(
+            find_session_exact(&state, id_prefix),
+            SessionLookup::NotFound
+        ));
+    }
+
+    #[test]
+    fn exact_empty_query_is_not_found() {
+        // An empty string is a prefix of every ID; it must never resolve.
+        let state = make_state(vec![make_session("a"), make_session("b")]);
+        assert!(matches!(
+            find_session_exact(&state, ""),
+            SessionLookup::NotFound
+        ));
+    }
+
+    #[test]
+    fn exact_reports_ambiguity_on_duplicate_titles() {
+        let state = make_state(vec![make_session("dup"), make_session("dup")]);
+        assert!(matches!(
+            find_session_exact(&state, "dup"),
+            SessionLookup::Ambiguous(2)
+        ));
+    }
+
+    #[test]
+    fn exact_returns_not_found_when_no_match() {
+        let state = make_state(vec![make_session("something")]);
+        assert!(matches!(
+            find_session_exact(&state, "nonexistent"),
+            SessionLookup::NotFound
+        ));
     }
 
     // -- clamp_log_lines tests --
