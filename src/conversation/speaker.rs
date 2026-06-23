@@ -70,8 +70,79 @@ pub enum SpeakerCommand {
     Chunk(String),
     /// The turn finished — speak any buffered remainder.
     Flush,
-    /// Stop playback and discard buffered text (e.g. a new user turn).
+    /// Stop playback, discard buffered text, and mute until [`Resume`](Self::Resume)
+    /// (the user started a new message — don't resume the old reply).
     Interrupt,
+    /// Unmute: the new query has been submitted, so speak its reply.
+    Resume,
+}
+
+/// What [`SpeakerCommand`] should make the speaker task do, given the current
+/// mute state. Split out as a pure state machine (like [`crate::conversation::media::MediaGate`])
+/// so the mute logic is unit-testable without an audio device.
+#[derive(Debug, PartialEq, Eq)]
+pub enum SpeakerEffect {
+    /// Append the chunk's text to the accumulator and queue any complete sentences.
+    Accumulate,
+    /// Speak the buffered remainder.
+    FlushBuffer,
+    /// Stop playback, clear the buffer/queue/in-flight synth, and mute.
+    InterruptAndMute,
+    /// Clear the mute.
+    Unmute,
+    /// Drop the command (muted, or a no-op).
+    Ignore,
+}
+
+/// Mute state for the speaker. Once interrupted (the user began a new message),
+/// streamed chunks are dropped until [`SpeakerCommand::Resume`] arrives — so the
+/// interrupted reply never resumes speaking.
+#[derive(Debug, Default)]
+pub struct SpeakerState {
+    muted: bool,
+}
+
+impl SpeakerState {
+    /// Decide what a command should do, updating the mute flag.
+    pub fn on(&mut self, cmd: &SpeakerCommand) -> SpeakerEffect {
+        match cmd {
+            SpeakerCommand::Chunk(_) | SpeakerCommand::Flush if self.muted => SpeakerEffect::Ignore,
+            SpeakerCommand::Chunk(_) => SpeakerEffect::Accumulate,
+            SpeakerCommand::Flush => SpeakerEffect::FlushBuffer,
+            SpeakerCommand::Interrupt => {
+                self.muted = true;
+                SpeakerEffect::InterruptAndMute
+            }
+            SpeakerCommand::Resume => {
+                self.muted = false;
+                SpeakerEffect::Unmute
+            }
+        }
+    }
+}
+
+/// Respawn-stable handle to the current session's TTS speaker. The speaker is
+/// recreated on each session (re)spawn, but the listener (which interrupts on
+/// record-start) and the submit path (which resumes for the new reply) are
+/// long-lived — they hold this handle and it's repointed at the live speaker.
+/// Sends are best-effort: a no-op when no speaker is up.
+#[derive(Clone, Default)]
+pub struct SpeakerHandle(
+    std::sync::Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<SpeakerCommand>>>>,
+);
+
+impl SpeakerHandle {
+    /// Point at the current speaker (or `None` when TTS is off / no session).
+    pub fn set(&self, tx: Option<mpsc::UnboundedSender<SpeakerCommand>>) {
+        *self.0.lock().unwrap() = tx;
+    }
+
+    /// Deliver a command to the current speaker, if any (best-effort no-op).
+    pub fn send(&self, cmd: SpeakerCommand) {
+        if let Some(tx) = self.0.lock().unwrap().as_ref() {
+            let _ = tx.send(cmd);
+        }
+    }
 }
 
 /// Map a session event to the speaker command it drives (if any). Pure, so the
@@ -115,6 +186,9 @@ pub fn spawn_speaker(
         // Whether we've told the gate the reply is being spoken (and not yet that
         // it finished). Tracks contiguous-plus-gapped playback as one logical span.
         let mut speaking = false;
+        // Mute state: after an Interrupt (new user message) we drop streamed text
+        // until Resume, so the interrupted reply never resumes speaking.
+        let mut state = SpeakerState::default();
         loop {
             // Keep at most MAX_INFLIGHT requests running: enough to stay ahead
             // of playback, few enough not to overload the TTS server (which
@@ -152,20 +226,27 @@ pub fn spawn_speaker(
                     _ => {}
                 },
                 cmd = rx.recv() => match cmd {
-                    Some(SpeakerCommand::Chunk(text)) => {
-                        queue.extend(acc.push(&text));
-                    }
-                    Some(SpeakerCommand::Flush) => {
-                        if let Some(remainder) = acc.flush() {
-                            queue.push_back(remainder);
+                    Some(cmd) => match state.on(&cmd) {
+                        SpeakerEffect::Accumulate => {
+                            if let SpeakerCommand::Chunk(text) = &cmd {
+                                queue.extend(acc.push(text));
+                            }
                         }
-                    }
-                    Some(SpeakerCommand::Interrupt) => {
-                        acc.clear();
-                        queue.clear();
-                        pending = FuturesOrdered::new(); // cancel in-flight synth
-                        player.stop();
-                    }
+                        SpeakerEffect::FlushBuffer => {
+                            if let Some(remainder) = acc.flush() {
+                                queue.push_back(remainder);
+                            }
+                        }
+                        SpeakerEffect::InterruptAndMute => {
+                            acc.clear();
+                            queue.clear();
+                            pending = FuturesOrdered::new(); // cancel in-flight synth
+                            player.stop();
+                        }
+                        // Unmute (Resume) and Ignore (dropped while muted) need no
+                        // side effects — the state flag is already updated.
+                        SpeakerEffect::Unmute | SpeakerEffect::Ignore => {}
+                    },
                     None => break, // sender dropped → end the task (and audio)
                 },
             }
@@ -304,6 +385,77 @@ mod tests {
             None
         );
         assert_eq!(speaker_command_for(&E::Exited), None);
+    }
+
+    #[test]
+    fn mute_drops_chunks_until_resume() {
+        let mut s = SpeakerState::default();
+        // Normal streaming accumulates and flushes.
+        assert_eq!(
+            s.on(&SpeakerCommand::Chunk("hi".into())),
+            SpeakerEffect::Accumulate
+        );
+        // The user interjects: stop + mute.
+        assert_eq!(
+            s.on(&SpeakerCommand::Interrupt),
+            SpeakerEffect::InterruptAndMute
+        );
+        // Trailing deltas of the old reply are dropped while muted.
+        assert_eq!(
+            s.on(&SpeakerCommand::Chunk("more".into())),
+            SpeakerEffect::Ignore
+        );
+        assert_eq!(s.on(&SpeakerCommand::Flush), SpeakerEffect::Ignore);
+        // The new query is submitted → unmute.
+        assert_eq!(s.on(&SpeakerCommand::Resume), SpeakerEffect::Unmute);
+        // The new reply speaks normally.
+        assert_eq!(
+            s.on(&SpeakerCommand::Chunk("new".into())),
+            SpeakerEffect::Accumulate
+        );
+    }
+
+    #[test]
+    fn interrupt_then_resume_clears_mute() {
+        let mut s = SpeakerState::default();
+        assert_eq!(
+            s.on(&SpeakerCommand::Interrupt),
+            SpeakerEffect::InterruptAndMute
+        );
+        assert_eq!(s.on(&SpeakerCommand::Resume), SpeakerEffect::Unmute);
+        // Flush is honoured again once unmuted.
+        assert_eq!(s.on(&SpeakerCommand::Flush), SpeakerEffect::FlushBuffer);
+    }
+
+    #[test]
+    fn resume_without_interrupt_is_noop() {
+        let mut s = SpeakerState::default();
+        // Resume on a fresh (unmuted) state just clears the (already-clear) flag.
+        assert_eq!(s.on(&SpeakerCommand::Resume), SpeakerEffect::Unmute);
+        assert_eq!(
+            s.on(&SpeakerCommand::Chunk("hi".into())),
+            SpeakerEffect::Accumulate
+        );
+    }
+
+    #[test]
+    fn interrupt_while_idle_is_safe() {
+        let mut s = SpeakerState::default();
+        // Interrupting with nothing playing still mutes (the loop's clear/stop are
+        // no-ops on empty state); a later Resume restores normal accumulation.
+        assert_eq!(
+            s.on(&SpeakerCommand::Interrupt),
+            SpeakerEffect::InterruptAndMute
+        );
+        assert_eq!(
+            s.on(&SpeakerCommand::Chunk("x".into())),
+            SpeakerEffect::Ignore
+        );
+        assert_eq!(s.on(&SpeakerCommand::Resume), SpeakerEffect::Unmute);
+        assert_eq!(
+            s.on(&SpeakerCommand::Chunk("y".into())),
+            SpeakerEffect::Accumulate
+        );
     }
 
     #[test]

@@ -16,6 +16,7 @@ use tracing::{debug, warn};
 use crate::config::SttConfig;
 use crate::conversation::media::{MediaSignal, signal as media_signal};
 use crate::conversation::recorder::Recorder;
+use crate::conversation::speaker::{SpeakerCommand, SpeakerHandle};
 use crate::conversation::stt::SttClient;
 use crate::error::TtsError;
 
@@ -78,6 +79,7 @@ pub fn spawn_listener(
     cfg: SttConfig,
     transcript_tx: mpsc::UnboundedSender<String>,
     gate: Option<mpsc::UnboundedSender<MediaSignal>>,
+    speaker: SpeakerHandle,
 ) -> Result<mpsc::UnboundedSender<ListenerCommand>, TtsError> {
     let (wav_tx, mut wav_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let recorder = Recorder::new(wav_tx)?;
@@ -114,16 +116,25 @@ pub fn spawn_listener(
                                 t0.elapsed().as_millis()
                             );
                             media_signal(&gate, MediaSignal::Silence);
+                            // Nothing was said, so no new message will be submitted
+                            // to lift the mute set on record-start — clear it here.
+                            speaker.send(SpeakerCommand::Resume);
                         }
                         Err(e) => {
                             warn!("STT transcription failed: {e}");
                             // Failed round-trip → no reply either; don't strand media.
                             media_signal(&gate, MediaSignal::Silence);
+                            // No submit will follow to unmute the speaker — do it here.
+                            speaker.send(SpeakerCommand::Resume);
                         }
                     }
                 },
                 cmd = rx.recv() => match cmd {
                     Some(ListenerCommand::Start) => {
+                        // The user is starting a new message — stop speaking the
+                        // current reply at once and stay muted until the new query
+                        // is submitted (a no-op when nothing is speaking).
+                        speaker.send(SpeakerCommand::Interrupt);
                         // Signal *before* opening the mic: the gate snapshots the
                         // playing players concurrently, and on Bluetooth the mic
                         // opening only pauses playback ~300ms later — so the
