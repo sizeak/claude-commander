@@ -1309,7 +1309,9 @@ impl App {
             return;
         }
 
-        match key.code {
+        // Ctrl-n / Ctrl-p mirror the arrow keys (and j/k) for navigation,
+        // matching the convention used by the other list modals.
+        match review_nav_keycode(key) {
             // Esc cancels an in-progress selection first; otherwise closes.
             KeyCode::Esc if state.visual_anchor.is_none() => return,
             KeyCode::Esc => state.visual_anchor = None,
@@ -1832,6 +1834,19 @@ fn human_size(size: Option<u64>) -> String {
         Some(n) if n < 1024 => format!("{n} bytes"),
         Some(n) if n < 1024 * 1024 => format!("{:.1} KiB", n as f64 / 1024.0),
         Some(n) => format!("{:.1} MiB", n as f64 / (1024.0 * 1024.0)),
+    }
+}
+
+/// Normalise a review-view key into the keycode the dispatch matches on.
+/// `Ctrl-n`/`Ctrl-p` are folded onto `Down`/`Up` so they act as navigation
+/// aliases for the arrow keys (and `j`/`k`), mirroring the other list modals;
+/// every other key passes through unchanged.
+fn review_nav_keycode(key: crossterm::event::KeyEvent) -> crossterm::event::KeyCode {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    match key.code {
+        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => KeyCode::Down,
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => KeyCode::Up,
+        other => other,
     }
 }
 
@@ -2921,6 +2936,24 @@ diff --git a/b.rs b/b.rs
             diff,
             Vec::new(),
         )
+    }
+
+    #[test]
+    fn ctrl_n_p_alias_arrow_keys_for_navigation() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        // Ctrl-n / Ctrl-p fold onto Down / Up so they navigate like the
+        // arrow keys (and j/k) regardless of focus.
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        assert_eq!(review_nav_keycode(ctrl('n')), KeyCode::Down);
+        assert_eq!(review_nav_keycode(ctrl('p')), KeyCode::Up);
+        // Without Ctrl, and for unrelated keys, the keycode passes through.
+        let plain = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+        assert_eq!(review_nav_keycode(plain('n')), KeyCode::Char('n'));
+        assert_eq!(review_nav_keycode(plain('j')), KeyCode::Char('j'));
+        assert_eq!(
+            review_nav_keycode(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            KeyCode::Esc
+        );
     }
 
     #[test]
