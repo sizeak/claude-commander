@@ -184,6 +184,9 @@ pub struct ReviewPalette {
     /// Selection highlight, matching the session list.
     pub selection_bg: Color,
     pub selection_fg: Option<Color>,
+    /// Subtle background band laid across file-tree rows marked reviewed, so a
+    /// "read" file is obvious at a glance beyond the ` ✓` check alone.
+    pub reviewed_bg: Color,
 }
 
 impl Theme {
@@ -220,6 +223,13 @@ impl Theme {
                     Color::Reset,
                 ),
             };
+        // A subtle green band reads as "done", complementing the green ✓ check.
+        // No band on 16-colour terminals — the dim + check carry it there.
+        let reviewed_bg = match self.mode {
+            ColorMode::TrueColor => fill_color(add, 0.18),
+            ColorMode::Indexed => Color::Indexed(22),
+            ColorMode::Basic => Color::Reset,
+        };
         ReviewPalette {
             add_bg,
             del_bg,
@@ -243,6 +253,7 @@ impl Theme {
             border_unfocused: self.border_unfocused,
             selection_bg: self.selection_bg,
             selection_fg: self.selection_fg,
+            reviewed_bg,
         }
     }
 }

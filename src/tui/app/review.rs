@@ -1597,6 +1597,9 @@ impl App {
         };
 
         let rows = state.visible_rows();
+        // Inner content width (pane minus the two border columns), so a reviewed
+        // row's background band can be padded to fill the full pane.
+        let inner_width = area.width.saturating_sub(2) as usize;
         let mut lines: Vec<Line> = Vec::with_capacity(rows.len());
         for (i, row) in rows.iter().enumerate() {
             let on_cursor = focused && i == state.tree_cursor;
@@ -1647,6 +1650,9 @@ impl App {
                         state.comment_count(file.display_path()),
                         &pal,
                     ));
+                    // Band reviewed rows so "read" files stand out; the cursor
+                    // selection still wins on the focused row.
+                    spans = apply_reviewed_bg(spans, reviewed, inner_width, &pal);
                     if on_cursor {
                         spans = select_spans(spans, &pal);
                     }
@@ -2026,6 +2032,32 @@ fn comment_badge_span(count: usize, pal: &ReviewPalette) -> Option<Span<'static>
 /// "done", or `None` when the file is not marked reviewed.
 fn reviewed_check_span(reviewed: bool, pal: &ReviewPalette) -> Option<Span<'static>> {
     reviewed.then(|| Span::styled(" ✓", Style::default().fg(pal.add_fg)))
+}
+
+/// Lay the subtle "read" background band across a reviewed file-tree row,
+/// padding the line out to `width` so the band fills the whole pane rather than
+/// only sitting behind the text. Returns the spans untouched when the row isn't
+/// reviewed, so unread files (where the work is) keep the default background.
+fn apply_reviewed_bg(
+    mut spans: Vec<Span<'static>>,
+    reviewed: bool,
+    width: usize,
+    pal: &ReviewPalette,
+) -> Vec<Span<'static>> {
+    if !reviewed {
+        return spans;
+    }
+    for span in &mut spans {
+        span.style = span.style.bg(pal.reviewed_bg);
+    }
+    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    if width > used {
+        spans.push(Span::styled(
+            " ".repeat(width - used),
+            Style::default().bg(pal.reviewed_bg),
+        ));
+    }
+    spans
 }
 
 /// Build the inline-rendered body for the current file: hunk headers plus each
@@ -3453,6 +3485,38 @@ diff --git a/c.rs b/c.rs
         let span = reviewed_check_span(true, &pal).expect("check for reviewed file");
         assert_eq!(span.content.as_ref(), " ✓");
         assert_eq!(span.style.fg, Some(pal.add_fg));
+    }
+
+    #[test]
+    fn reviewed_bg_unreviewed_row_unchanged() {
+        let pal = Theme::truecolor().review_palette();
+        let spans = vec![Span::raw("a.rs")];
+        let out = apply_reviewed_bg(spans, false, 20, &pal);
+        // Unreviewed rows keep the default background and no padding span.
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].style.bg, None);
+    }
+
+    #[test]
+    fn reviewed_bg_bands_and_pads_to_width() {
+        let pal = Theme::truecolor().review_palette();
+        let spans = vec![Span::raw("a.rs")]; // 4 columns
+        let out = apply_reviewed_bg(spans, true, 20, &pal);
+        // Every span carries the reviewed background...
+        assert!(out.iter().all(|s| s.style.bg == Some(pal.reviewed_bg)));
+        // ...and the band is padded out to fill the full pane width.
+        let total: usize = out.iter().map(|s| s.content.chars().count()).sum();
+        assert_eq!(total, 20);
+    }
+
+    #[test]
+    fn reviewed_bg_no_pad_when_content_exceeds_width() {
+        let pal = Theme::truecolor().review_palette();
+        let spans = vec![Span::raw("a-really-long-file-name.rs")]; // 26 columns
+        let out = apply_reviewed_bg(spans, true, 10, &pal);
+        // No padding span is added when the content already overflows the width.
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].style.bg, Some(pal.reviewed_bg));
     }
 
     #[test]
