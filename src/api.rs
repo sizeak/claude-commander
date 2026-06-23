@@ -142,6 +142,28 @@ impl CommanderService {
         Ok(find_session_info(&state, query))
     }
 
+    /// Resolve a session by an *exact* title or full ID, surfacing ambiguity
+    /// rather than picking arbitrarily. Used by destructive commands where a
+    /// loose prefix match could act on the wrong session.
+    pub async fn find_session_exact(
+        &self,
+        query: &str,
+    ) -> Result<crate::cli::SessionLookup<SessionInfo>> {
+        let state = self.store.read().await;
+        Ok(match crate::cli::find_session_exact(&state, query) {
+            crate::cli::SessionLookup::Found(session) => {
+                let project_name = state
+                    .projects
+                    .get(&session.project_id)
+                    .map(|p| p.name.as_str())
+                    .unwrap_or("unknown");
+                crate::cli::SessionLookup::Found(SessionInfo::from_session(session, project_name))
+            }
+            crate::cli::SessionLookup::NotFound => crate::cli::SessionLookup::NotFound,
+            crate::cli::SessionLookup::Ambiguous(n) => crate::cli::SessionLookup::Ambiguous(n),
+        })
+    }
+
     pub async fn get_session_detail(
         &self,
         query: &str,

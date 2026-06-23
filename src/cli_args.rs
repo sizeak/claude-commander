@@ -54,6 +54,17 @@ pub enum Commands {
         json: bool,
     },
 
+    /// Delete a session: kill its tmux session and remove the git worktree.
+    #[command(visible_alias = "rm")]
+    Delete {
+        /// Session name or ID prefix
+        session: String,
+
+        /// Delete without confirmation
+        #[arg(short, long)]
+        force: bool,
+    },
+
     /// Dump recent terminal output from a session
     Log {
         /// Session name or ID prefix
