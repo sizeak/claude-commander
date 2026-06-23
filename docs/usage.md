@@ -116,10 +116,11 @@ foreground-only colouring on 256- and 16-colour terminals.
 
 - **Navigate**: the changed files are shown as a collapsible **tree** (lazygit
   style — single-child directory chains are compressed). `Tab` switches focus
-  between the tree and the diff body; in the tree, `↑↓`/`jk` move and `Enter`
-  expands/collapses a directory; `[` / `]` jump between files; in the body,
-  `↑↓`/`jk` move the cursor and the mouse wheel scrolls. Clicking a file in the
-  tree selects it (clicking a directory expands/collapses it). `t` toggles
+  between the tree and the diff body; in the tree, `↑↓`/`jk`/`Ctrl-n`/`Ctrl-p`
+  move and `Enter` expands/collapses a directory; `[` / `]` jump between files;
+  in the body, `↑↓`/`jk`/`Ctrl-n`/`Ctrl-p` move the cursor and the mouse wheel
+  scrolls. Clicking a file in the tree selects it (clicking a directory
+  expands/collapses it). `t` toggles
   between inline and side-by-side layouts. In the inline layout, lines longer
   than the pane soft-wrap onto continuation rows (GitHub-style) so nothing runs
   off-screen; side-by-side truncates to keep its columns aligned.
