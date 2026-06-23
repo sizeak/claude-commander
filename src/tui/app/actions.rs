@@ -34,6 +34,19 @@ pub(super) fn adjust_list_scroll(selected_idx: usize, scroll: usize, visible_row
     }
 }
 
+/// Confirmation prompt for deleting a session. Names the session by its
+/// title when known so the user can tell what they're about to destroy;
+/// falls back to a generic phrasing if the title can't be resolved.
+pub(super) fn delete_confirm_message(title: Option<&str>) -> String {
+    let subject = match title {
+        Some(title) => format!("\"{title}\""),
+        None => "this session".to_string(),
+    };
+    format!(
+        "Are you sure you want to delete {subject}?\nThis will kill the tmux session and remove the worktree."
+    )
+}
+
 /// One mouse-wheel step over a list selection: move a single row, clamping
 /// at the ends rather than wrapping like keyboard navigation — a wheel tick
 /// at the bottom of a list jumping back to the top would be disorienting.
@@ -1190,14 +1203,18 @@ impl App {
     }
 
     /// Handle delete session - show confirmation
-    pub(super) fn handle_delete_session(&mut self) {
+    pub(super) async fn handle_delete_session(&mut self) {
         if self.selected_session_is_creating() {
             return;
         }
         if let Some(session_id) = self.ui_state.selected_session_id {
+            let title = {
+                let state = self.service.store().read().await;
+                state.get_session(&session_id).map(|s| s.title.clone())
+            };
             self.ui_state.modal = Modal::Confirm {
                 title: "Delete Session".to_string(),
-                message: "Are you sure you want to delete this session?\nThis will kill the tmux session and remove the worktree.".to_string(),
+                message: delete_confirm_message(title.as_deref()),
                 on_confirm: ConfirmAction::DeleteSession { session_id },
             };
         }

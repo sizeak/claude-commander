@@ -1,8 +1,25 @@
-use super::actions::adjust_list_scroll;
+use super::actions::{adjust_list_scroll, delete_confirm_message};
 use super::modals::centered_rect;
 use super::render::commander_chip_label;
 use super::selection::{session_number_to_list_index, worktree_list_index};
 use super::*;
+
+#[test]
+fn test_delete_confirm_message_names_session() {
+    let message = delete_confirm_message(Some("fix-login-bug"));
+    assert!(
+        message.contains("\"fix-login-bug\""),
+        "message should name the session: {message}"
+    );
+    assert!(message.contains("kill the tmux session"));
+}
+
+#[test]
+fn test_delete_confirm_message_falls_back_without_title() {
+    let message = delete_confirm_message(None);
+    assert!(message.contains("this session"));
+    assert!(!message.contains('"'));
+}
 
 #[test]
 fn test_centered_rect() {
