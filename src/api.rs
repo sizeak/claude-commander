@@ -190,8 +190,14 @@ impl CommanderService {
         };
 
         let diff_stat = if found.worktree_path.exists() {
-            let diff_base = found.base_commit.as_deref().unwrap_or("HEAD");
-            diff_stat_summary(&found.worktree_path, diff_base).await
+            // Resolve the base exactly as the review view does — prefer the PR
+            // target branch, then the captured fork point, then HEAD — and pass
+            // it through the merge-base so the stat counts only this branch's
+            // changes (not changes the base accrued since the fork). Keeps the
+            // CLI diffstat consistent with the review diff.
+            let base = ReviewBase::of(&found).git_ref(&found.worktree_path).await;
+            let target = crate::git::diff_target(&found.worktree_path, &base).await;
+            diff_stat_summary(&found.worktree_path, &target).await
         } else {
             None
         };

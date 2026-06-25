@@ -112,6 +112,29 @@ pub async fn import_base_commit(
         .unwrap_or_else(|| head.to_string())
 }
 
+/// Resolve the review base to record for a *managed* session at creation time.
+///
+/// A freshly generated branch is created empty off its base, so its `head` *is*
+/// the fork point — record it verbatim. But a session created by *checking out*
+/// a branch that already carries commits (the Checkout Branch flow, or a
+/// remote branch materialised locally) sits on that branch's tip, so recording
+/// `head` would make `merge-base(base, HEAD)` resolve to HEAD and the review
+/// diff come up empty — the same failure [`import_base_commit`] fixes for
+/// imported worktrees. When `branch_preexisted` is set, resolve the genuine
+/// fork point instead.
+pub async fn managed_base_commit(
+    worktree: &Path,
+    head: &str,
+    default_branch: Option<&str>,
+    branch_preexisted: bool,
+) -> String {
+    if branch_preexisted {
+        import_base_commit(worktree, head, default_branch).await
+    } else {
+        head.to_string()
+    }
+}
+
 /// Whether `refname` resolves to a commit in `worktree`.
 async fn ref_exists(worktree: &Path, refname: &str) -> bool {
     Command::new("git")
@@ -130,7 +153,7 @@ async fn ref_exists(worktree: &Path, refname: &str) -> bool {
 /// and `HEAD`, falling back to `base` verbatim when it can't be computed. Both
 /// the diff composition and binary blob reads resolve the old side through this
 /// so they always agree on which commit the "before" image comes from.
-async fn diff_target(worktree: &Path, base: &str) -> String {
+pub(crate) async fn diff_target(worktree: &Path, base: &str) -> String {
     merge_base(worktree, base)
         .await
         .unwrap_or_else(|| base.to_string())
@@ -1424,6 +1447,105 @@ index 0000000..2222222
 
         // No default branch known → leave behaviour as it was (record HEAD).
         assert_eq!(import_base_commit(p, &head, None).await, head);
+    }
+
+    #[tokio::test]
+    async fn managed_base_records_fork_point_for_checked_out_branch() {
+        let tmp = init_repo().await;
+        let p = tmp.path();
+
+        fs::write(p.join("file.txt"), "v1\n").unwrap();
+        git(p, &["add", "."]).await;
+        git(p, &["commit", "-q", "-m", "A"]).await;
+        git(p, &["branch", "-M", "main"]).await;
+        let fork = git_capture(p, &["rev-parse", "HEAD"]).await;
+
+        // An existing branch with committed work — as the Checkout Branch flow
+        // checks out into a session worktree, sitting on the branch tip.
+        git(p, &["checkout", "-q", "-b", "feature"]).await;
+        fs::write(p.join("file.txt"), "v2\n").unwrap();
+        git(p, &["add", "."]).await;
+        git(p, &["commit", "-q", "-m", "B"]).await;
+        let tip = git_capture(p, &["rev-parse", "HEAD"]).await;
+
+        // A pre-existing branch must record its fork point, not its tip.
+        // Recording the tip is the bug: `merge-base(tip, HEAD)` is HEAD, so the
+        // review diff is empty even though the branch is ahead of main.
+        let base = managed_base_commit(p, &tip, Some("main"), true).await;
+        assert_eq!(
+            base, fork,
+            "checkout base should be the merge-base with main"
+        );
+        assert_ne!(base, tip, "checkout base must not be the branch tip");
+
+        let diff = compose_review_diff(p, &base).await.unwrap();
+        assert!(
+            diff.contains("-v1") && diff.contains("+v2"),
+            "diff against fork point is empty:\n{diff}"
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_base_records_head_for_fresh_branch() {
+        let tmp = init_repo().await;
+        let p = tmp.path();
+        fs::write(p.join("file.txt"), "v1\n").unwrap();
+        git(p, &["add", "."]).await;
+        git(p, &["commit", "-q", "-m", "A"]).await;
+        git(p, &["branch", "-M", "main"]).await;
+        let head = git_capture(p, &["rev-parse", "HEAD"]).await;
+
+        // A freshly generated branch is created empty off its base, so HEAD is
+        // already the fork point — record it verbatim rather than recomputing.
+        assert_eq!(
+            managed_base_commit(p, &head, Some("main"), false).await,
+            head
+        );
+    }
+
+    #[tokio::test]
+    async fn diff_stat_against_branch_uses_merge_base_not_raw_base() {
+        let tmp = init_repo().await;
+        let p = tmp.path();
+
+        // Fork point on main.
+        fs::write(p.join("file.txt"), "v1\n").unwrap();
+        git(p, &["add", "."]).await;
+        git(p, &["commit", "-q", "-m", "A"]).await;
+        git(p, &["branch", "-M", "main"]).await;
+
+        // feature adds one file…
+        git(p, &["checkout", "-q", "-b", "feature"]).await;
+        fs::write(p.join("feature.txt"), "f\n").unwrap();
+        git(p, &["add", "."]).await;
+        git(p, &["commit", "-q", "-m", "B"]).await;
+
+        // …while main diverges with a different file.
+        git(p, &["checkout", "-q", "main"]).await;
+        fs::write(p.join("main.txt"), "m\n").unwrap();
+        git(p, &["add", "."]).await;
+        git(p, &["commit", "-q", "-m", "C"]).await;
+        git(p, &["checkout", "-q", "feature"]).await;
+
+        // Through the merge-base the stat counts only feature's own change.
+        let target = diff_target(p, "main").await;
+        let stat = crate::git::diff_stat_summary(p, &target)
+            .await
+            .expect("non-empty stat");
+        assert!(
+            stat.contains("1 file changed"),
+            "merge-base stat should count only feature's change: {stat}"
+        );
+
+        // Diffing the raw (diverged) branch tip also counts main's commit as a
+        // deletion — the inflated count the merge-base routing avoids.
+        let raw = crate::git::diff_stat_summary(p, "main")
+            .await
+            .expect("non-empty stat");
+        assert!(
+            raw.contains("2 files changed"),
+            "raw-base stat should be inflated by main's divergence: {raw}"
+        );
     }
 
     /// Minimal one-file diff with the given path, hunk ranges, and body lines.
