@@ -84,6 +84,34 @@ pub async fn prefer_remote_branch(worktree: &Path, branch: &str) -> String {
     }
 }
 
+/// Resolve the review base to record for a *checked-out* branch worktree being
+/// imported as a session.
+///
+/// A freshly created managed session records its fork point (the HEAD it was
+/// branched from) as the base, so the review diff shows every commit the
+/// session adds. An imported worktree, by contrast, is already sitting on the
+/// branch's tip — recording that tip as the base would make
+/// `merge-base(base, HEAD)` resolve to HEAD itself and the review diff come up
+/// empty even when the branch is well ahead of its target.
+///
+/// Instead compute the genuine fork point: the merge-base of the worktree's
+/// HEAD and its `default_branch` (preferring the `origin/<default_branch>`
+/// remote-tracking ref). Falls back to `head` when no default branch is known
+/// or no merge-base can be computed, leaving behaviour no worse than before.
+pub async fn import_base_commit(
+    worktree: &Path,
+    head: &str,
+    default_branch: Option<&str>,
+) -> String {
+    let Some(default_branch) = default_branch else {
+        return head.to_string();
+    };
+    let base_ref = prefer_remote_branch(worktree, default_branch).await;
+    merge_base(worktree, &base_ref)
+        .await
+        .unwrap_or_else(|| head.to_string())
+}
+
 /// Whether `refname` resolves to a commit in `worktree`.
 async fn ref_exists(worktree: &Path, refname: &str) -> bool {
     Command::new("git")
@@ -1348,6 +1376,54 @@ index 0000000..2222222
 
         // No `origin/main` remote-tracking ref → bare (local) branch name.
         assert_eq!(prefer_remote_branch(p, "main").await, "main");
+    }
+
+    #[tokio::test]
+    async fn import_base_resolves_fork_point_not_branch_tip() {
+        let tmp = init_repo().await;
+        let p = tmp.path();
+
+        // Fork point on the default branch.
+        fs::write(p.join("file.txt"), "v1\n").unwrap();
+        git(p, &["add", "."]).await;
+        git(p, &["commit", "-q", "-m", "A"]).await;
+        git(p, &["branch", "-M", "main"]).await;
+        let fork = git_capture(p, &["rev-parse", "HEAD"]).await;
+
+        // A feature branch with committed changes on top — analogous to a PR
+        // branch checked out into a worktree, then imported.
+        git(p, &["checkout", "-q", "-b", "feature"]).await;
+        fs::write(p.join("file.txt"), "v2\n").unwrap();
+        git(p, &["add", "."]).await;
+        git(p, &["commit", "-q", "-m", "B"]).await;
+        let tip = git_capture(p, &["rev-parse", "HEAD"]).await;
+
+        // Importing must record the fork point, not the branch tip. Recording
+        // the tip is the bug: `merge-base(tip, HEAD)` is HEAD, so the review
+        // diff comes up empty even though the branch is ahead of main.
+        let base = import_base_commit(p, &tip, Some("main")).await;
+        assert_eq!(base, fork, "import base should be the merge-base with main");
+        assert_ne!(base, tip, "import base must not be the branch tip");
+
+        // The committed change is visible against the resolved base.
+        let diff = compose_review_diff(p, &base).await.unwrap();
+        assert!(
+            diff.contains("-v1") && diff.contains("+v2"),
+            "diff against fork point is empty:\n{diff}"
+        );
+    }
+
+    #[tokio::test]
+    async fn import_base_falls_back_to_head_without_default_branch() {
+        let tmp = init_repo().await;
+        let p = tmp.path();
+        fs::write(p.join("file.txt"), "v1\n").unwrap();
+        git(p, &["add", "."]).await;
+        git(p, &["commit", "-q", "-m", "A"]).await;
+        let head = git_capture(p, &["rev-parse", "HEAD"]).await;
+
+        // No default branch known → leave behaviour as it was (record HEAD).
+        assert_eq!(import_base_commit(p, &head, None).await, head);
     }
 
     /// Minimal one-file diff with the given path, hunk ranges, and body lines.

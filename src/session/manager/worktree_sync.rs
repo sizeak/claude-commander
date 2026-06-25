@@ -52,6 +52,10 @@ impl SessionManager {
         let canonical_worktrees_dir = tokio::fs::canonicalize(&worktrees_dir)
             .await
             .unwrap_or_else(|_| worktrees_dir.clone());
+        // The project's default branch is the target an imported worktree's
+        // review diff should be based against. Capture it before the backend is
+        // moved into the worktree manager.
+        let default_branch = backend.detect_main_branch().ok();
         let worktree_manager = WorktreeManager::new(backend, worktrees_dir);
 
         let worktrees = match worktree_manager.list_worktrees().await {
@@ -103,7 +107,9 @@ impl SessionManager {
                 self.config_store.read().default_program.clone(),
             );
             session.set_status(SessionStatus::Stopped);
-            session.base_commit = Some(wt.head.clone());
+            session.base_commit = Some(
+                crate::git::import_base_commit(&wt.path, &wt.head, default_branch.as_deref()).await,
+            );
 
             info!(
                 "Importing unmanaged worktree as session: branch={}, path={:?}",
