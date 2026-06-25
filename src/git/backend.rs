@@ -231,6 +231,21 @@ impl GitBackend {
         Ok(reference.is_some())
     }
 
+    /// The checked-out branch's short name, or `None` when HEAD is detached.
+    ///
+    /// Unlike [`Self::current_branch`], this never returns a synthetic
+    /// `"HEAD detached at …"` / `"HEAD (no commits)"` placeholder, so callers
+    /// that need a *real* branch name (e.g. choosing a default branch to fork
+    /// or merge-base against) can't mistake a placeholder for one.
+    fn head_branch_name(&self) -> Option<String> {
+        let head = self.repo.head().ok()?;
+        match head.kind {
+            gix::head::Kind::Symbolic(reference) => Some(reference.name.shorten().to_string()),
+            gix::head::Kind::Unborn(full_name) => Some(full_name.shorten().to_string()),
+            gix::head::Kind::Detached { .. } => None,
+        }
+    }
+
     /// Get the main branch name (main or master)
     pub fn detect_main_branch(&self) -> Result<String> {
         // Prefer the remote's declared default branch
@@ -238,13 +253,18 @@ impl GitBackend {
             return Ok(branch);
         }
 
-        // Fall back to local heuristic: main -> master -> current branch
+        // Fall back to local heuristic: main -> master -> current branch.
+        // Never return a detached-HEAD placeholder as a "branch name" — it
+        // isn't a valid ref, so `git worktree add <name>` would fail and
+        // `merge-base` against it would silently degrade. Default to "main".
         if self.branch_exists("main")? {
             Ok("main".to_string())
         } else if self.branch_exists("master")? {
             Ok("master".to_string())
         } else {
-            self.current_branch()
+            Ok(self
+                .head_branch_name()
+                .unwrap_or_else(|| "main".to_string()))
         }
     }
 
@@ -350,5 +370,38 @@ mod tests {
             canonical_discovered, canonical_repo,
             "discover() from a worktree should resolve to the main repo root"
         );
+    }
+
+    #[test]
+    fn test_detect_main_branch_detached_head_does_not_leak_placeholder() {
+        fn git(dir: &Path, args: &[&str]) {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let repo_path = temp_dir.path();
+
+        // A repo whose default branch is neither main nor master, with no
+        // remote, then detach HEAD onto the commit.
+        git(repo_path, &["init", "-b", "trunk"]);
+        git(repo_path, &["config", "user.email", "test@example.com"]);
+        git(repo_path, &["config", "user.name", "Test"]);
+        git(repo_path, &["commit", "--allow-empty", "-m", "init"]);
+        git(repo_path, &["checkout", "--detach", "HEAD"]);
+
+        let backend = GitBackend::open(repo_path).unwrap();
+        let branch = backend.detect_main_branch().unwrap();
+        // The old fallback returned current_branch() = "HEAD detached at …",
+        // which is not a real ref. It must default to a usable branch name.
+        assert!(
+            !branch.starts_with("HEAD"),
+            "detached HEAD leaked a placeholder as the default branch: {branch}"
+        );
+        assert_eq!(branch, "main");
     }
 }

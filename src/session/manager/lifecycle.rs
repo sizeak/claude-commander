@@ -184,9 +184,15 @@ impl SessionManager {
                 .unwrap_or("unknown"),
         );
         let worktrees_dir = self.config_store.read().resolve_worktrees_dir(&repo_name)?;
-        let (branch_exists, start_point) = {
+        let (branch_exists, branch_preexisted, start_point) = {
             let backend = GitBackend::open(&repo_path)?;
             let exists = backend.branch_exists(&branch_name)?;
+            // Whether this session adopts a branch that may already carry
+            // commits (Checkout Branch, locally or from `origin/<branch>`),
+            // rather than a fresh branch we create empty. Drives whether
+            // `base_commit` records the fork point or HEAD (see below).
+            let preexisted =
+                exists || backend.ref_exists(&format!("refs/remotes/origin/{}", branch_name))?;
             // Fork point for the new branch. A stacked parent's branch takes
             // precedence (it exists locally thanks to its own worktree);
             // otherwise honour the CLI `--base-branch` value. Both mean "create
@@ -226,7 +232,7 @@ impl SessionManager {
                     None
                 }
             };
-            (exists, sp)
+            (exists, preexisted, sp)
         };
         let worktree_path = worktrees_dir.join(&worktree_name);
         let worktree_create_start = std::time::Instant::now();
@@ -297,11 +303,18 @@ impl SessionManager {
         let sid = *session_id;
         let wt_path = worktree_info.path.clone();
         let head = worktree_info.head.clone();
+        // A fresh branch is created empty off its base, so HEAD *is* the fork
+        // point. A checked-out branch sits on its tip, so record its genuine
+        // fork point instead — else `merge-base(base, HEAD)` is HEAD and the
+        // review diff comes up empty for a branch that is ahead of its target.
+        let base_commit =
+            crate::git::managed_base_commit(&wt_path, &head, Some(&main_branch), branch_preexisted)
+                .await;
         self.store
             .mutate(move |state| {
                 if let Some(session) = state.get_session_mut(&sid) {
                     session.worktree_path = wt_path;
-                    session.base_commit = Some(head);
+                    session.base_commit = Some(base_commit);
                     session.set_status(SessionStatus::Running);
                 }
             })
