@@ -1132,6 +1132,9 @@ index 0000000..2222222
         git(p, &["init", "-q"]).await;
         git(p, &["config", "user.email", "test@example.com"]).await;
         git(p, &["config", "user.name", "Test"]).await;
+        // Disable signing so commits don't contend on the gpg-agent and fail
+        // when the suite runs in parallel under a global commit.gpgsign=true.
+        git(p, &["config", "commit.gpgsign", "false"]).await;
         tmp
     }
 
