@@ -185,6 +185,17 @@ When attached to a session (via `Enter` or `claude-commander attach`):
 - **[Configuration](docs/configuration.md)** — all config options, theme presets, session-list sections (with optional advisory WIP limits), and data-storage paths
 - **[Contributing](CONTRIBUTING.md)** — releasing, the local dev loop, and architecture overview
 
+## Telemetry & Privacy
+
+Claude Commander reports anonymous **feature-usage** telemetry (on by default) so
+we can learn which features are used and retire the ones that aren't. It sends
+feature names, a coarse environment fingerprint (OS, terminal, shell), a
+non-sensitive config snapshot (e.g. theme), and a random install id — **never**
+typed text, prompts, session content, branch names, or paths. Opt out with
+`telemetry.enabled = false` in your config or by exporting `DO_NOT_TRACK=1`. See
+[Configuration → Usage Telemetry](docs/configuration.md#usage-telemetry) for the
+full list and self-hosting options.
+
 ## License
 
 MIT

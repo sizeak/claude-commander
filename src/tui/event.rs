@@ -296,6 +296,72 @@ impl UserCommand {
             _ => None,
         }
     }
+
+    /// The telemetry feature name to record when this command is dispatched, or
+    /// `None` to record nothing.
+    ///
+    /// `None` is returned for two cases: (1) high-frequency navigation/scroll and
+    /// modal-mechanics commands, which would be noise; and (2) commands whose
+    /// effect runs through an already-instrumented [`CommanderService`] method
+    /// (e.g. `NewSession` → `session.create`), so we don't double-count. Only
+    /// UI-level features that don't otherwise reach the service are named here.
+    pub fn telemetry_feature(&self) -> Option<&'static str> {
+        match self {
+            // -- Recorded at the service layer; skip here to avoid double count.
+            UserCommand::NewSession
+            | UserCommand::NewStackedSession
+            | UserCommand::DeleteSession
+            | UserCommand::RestartSession
+            | UserCommand::NewProject
+            | UserCommand::ScanDirectory
+            | UserCommand::OpenReviewDiff => None,
+
+            // -- Navigation / scroll / modal mechanics: pure noise.
+            UserCommand::NavigateUp
+            | UserCommand::NavigateDown
+            | UserCommand::NextGroup
+            | UserCommand::PreviousGroup
+            | UserCommand::NavigateFirst
+            | UserCommand::NavigateLast
+            | UserCommand::ScrollUp
+            | UserCommand::ScrollDown
+            | UserCommand::PageUp
+            | UserCommand::PageDown
+            | UserCommand::ShrinkLeftPane
+            | UserCommand::GrowLeftPane
+            | UserCommand::Confirm
+            | UserCommand::Cancel
+            | UserCommand::Backspace
+            | UserCommand::TextInput(_)
+            | UserCommand::Quit => None,
+
+            // -- UI-level features worth tracking.
+            UserCommand::Select => Some("session.attach"),
+            UserCommand::SelectShell => Some("session.open_shell"),
+            UserCommand::RenameSession => Some("session.rename"),
+            UserCommand::CheckoutBranch => Some("session.checkout_branch"),
+            UserCommand::DeleteMergedPrSessions => Some("session.delete_merged_prs"),
+            UserCommand::RemoveProject => Some("project.remove"),
+            UserCommand::CascadeMergeMain => Some("cascade.merge_main"),
+            UserCommand::CascadeResume => Some("cascade.resume"),
+            UserCommand::CascadeAbandon => Some("cascade.abandon"),
+            UserCommand::PushStack => Some("stack.push"),
+            UserCommand::OpenInEditor => Some("editor.open"),
+            UserCommand::OpenPullRequest => Some("pr.open"),
+            UserCommand::RefreshPrStatus => Some("pr.refresh_status"),
+            UserCommand::OpenCommander => Some("commander.open"),
+            UserCommand::ToggleConversationOverlay => Some("conversation.toggle"),
+            UserCommand::ToggleVoiceInput => Some("stt.toggle_voice"),
+            UserCommand::GenerateSummary => Some("ai_summary.generate"),
+            UserCommand::TogglePane | UserCommand::TogglePaneReverse => Some("ui.toggle_pane"),
+            UserCommand::ShowHelp => Some("ui.help"),
+            UserCommand::ShowSettings => Some("ui.settings"),
+            UserCommand::QuickSwitch => Some("ui.quick_switch"),
+            UserCommand::MoveToSection => Some("ui.move_to_section"),
+            UserCommand::ToggleSection => Some("ui.toggle_section"),
+            UserCommand::ToggleViewMode => Some("ui.toggle_view_mode"),
+        }
+    }
 }
 
 impl From<BindableAction> for UserCommand {
@@ -504,6 +570,53 @@ mod tests {
 
     fn kb() -> KeyBindings {
         KeyBindings::default()
+    }
+
+    #[test]
+    fn telemetry_feature_skips_noise_and_service_instrumented_commands() {
+        // Navigation/scroll/mechanics record nothing.
+        for cmd in [
+            UserCommand::NavigateUp,
+            UserCommand::NavigateDown,
+            UserCommand::ScrollUp,
+            UserCommand::PageDown,
+            UserCommand::Confirm,
+            UserCommand::Cancel,
+            UserCommand::Backspace,
+            UserCommand::TextInput('x'),
+            UserCommand::Quit,
+        ] {
+            assert_eq!(cmd.telemetry_feature(), None, "{cmd:?} should be silent");
+        }
+
+        // Commands recorded by the service layer must not double-count here.
+        for cmd in [
+            UserCommand::NewSession,
+            UserCommand::DeleteSession,
+            UserCommand::RestartSession,
+            UserCommand::NewProject,
+            UserCommand::OpenReviewDiff,
+        ] {
+            assert_eq!(
+                cmd.telemetry_feature(),
+                None,
+                "{cmd:?} is service-instrumented; TUI must stay silent"
+            );
+        }
+
+        // UI-level features are named.
+        assert_eq!(
+            UserCommand::OpenCommander.telemetry_feature(),
+            Some("commander.open")
+        );
+        assert_eq!(
+            UserCommand::ToggleViewMode.telemetry_feature(),
+            Some("ui.toggle_view_mode")
+        );
+        assert_eq!(
+            UserCommand::TogglePaneReverse.telemetry_feature(),
+            Some("ui.toggle_pane")
+        );
     }
 
     #[test]

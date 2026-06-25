@@ -150,6 +150,11 @@ impl App {
                             .unwrap_or_else(|| "(unlimited)".into()),
                         "in_progress_limit",
                     ),
+                    SettingsRow::toggle(
+                        "Usage Telemetry",
+                        c.telemetry.enabled,
+                        "telemetry_enabled",
+                    ),
                 ]
             }
             SettingsTab::Conversation => {
@@ -1116,6 +1121,7 @@ impl App {
             "conversation_enabled" => self.config.conversation.enabled = value,
             "stt_enabled" => self.config.stt.enabled = value,
             "stt_pause_media" => self.config.stt.pause_media = value,
+            "telemetry_enabled" => self.config.telemetry.enabled = value,
             _ => {
                 warn!("Unknown boolean setting: {}", field_key);
                 return;

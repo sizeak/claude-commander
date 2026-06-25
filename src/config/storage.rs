@@ -58,6 +58,13 @@ pub struct AppState {
     #[serde(default)]
     pub view_mode: Option<ViewMode>,
 
+    /// Anonymous, resettable install identifier for usage telemetry. Lazily
+    /// generated on first run (a random UUID) and persisted so events from the
+    /// same install can be grouped without identifying the user. Not tied to
+    /// anything personal; reset with [`AppState::reset_install_id`].
+    #[serde(default)]
+    pub install_id: Option<String>,
+
     /// Path to save state to (not serialized, set at load time)
     #[serde(skip)]
     state_path: Option<PathBuf>,
@@ -70,6 +77,23 @@ impl AppState {
             version: env!("CARGO_PKG_VERSION").to_string(),
             ..Default::default()
         }
+    }
+
+    /// Ensure an anonymous install id exists, generating one if absent or empty.
+    /// Returns `true` if a new id was generated (so the caller can persist).
+    pub fn ensure_install_id(&mut self) -> bool {
+        if self.install_id.as_deref().is_none_or(str::is_empty) {
+            self.install_id = Some(uuid::Uuid::new_v4().to_string());
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Forget the current install id; a fresh one is generated on next
+    /// [`ensure_install_id`](Self::ensure_install_id).
+    pub fn reset_install_id(&mut self) {
+        self.install_id = None;
     }
 
     /// Load state from the default location
@@ -269,6 +293,43 @@ mod tests {
 
     fn create_test_project() -> Project {
         Project::new("test-project", PathBuf::from("/tmp/test"), "main")
+    }
+
+    #[test]
+    fn ensure_install_id_generates_once_and_is_stable() {
+        let mut state = AppState::new();
+        assert!(state.install_id.is_none());
+
+        // First call generates and reports a change.
+        assert!(state.ensure_install_id());
+        let id = state.install_id.clone().unwrap();
+        assert!(!id.is_empty());
+
+        // Subsequent calls are stable and report no change.
+        assert!(!state.ensure_install_id());
+        assert_eq!(state.install_id.as_deref(), Some(id.as_str()));
+    }
+
+    #[test]
+    fn install_id_survives_save_and_reload_and_resets() {
+        let temp_dir = TempDir::new().unwrap();
+        let path = temp_dir.path().join("state.json");
+
+        let mut state = AppState::load_from(&path).unwrap();
+        state.ensure_install_id();
+        let id = state.install_id.clone().unwrap();
+        state.save_to(&path).unwrap();
+
+        // Reload from disk → same id.
+        let reloaded = AppState::load_from(&path).unwrap();
+        assert_eq!(reloaded.install_id.as_deref(), Some(id.as_str()));
+
+        // Reset → next ensure produces a different id.
+        let mut state = reloaded;
+        state.reset_install_id();
+        assert!(state.install_id.is_none());
+        assert!(state.ensure_install_id());
+        assert_ne!(state.install_id.as_deref(), Some(id.as_str()));
     }
 
     fn create_test_session(project_id: ProjectId) -> WorktreeSession {

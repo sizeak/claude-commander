@@ -79,6 +79,16 @@ impl StateStore {
         self.state.read().await
     }
 
+    /// Snapshot the persisted install id without awaiting, if the in-memory
+    /// state is immediately readable. Used during (uncontended) startup to seed
+    /// telemetry; returns `None` if absent or momentarily locked.
+    pub fn try_install_id(&self) -> Option<String> {
+        self.state
+            .try_read()
+            .ok()
+            .and_then(|s| s.install_id.clone())
+    }
+
     /// Apply a mutation to the persisted state.
     ///
     /// Acquires an exclusive file lock, re-reads the current state from disk

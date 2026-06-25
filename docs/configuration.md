@@ -411,6 +411,49 @@ Limits are advisory — they never block session creation or section transitions
 
 These are edit-`config.toml`-and-restart actions — there's no hot reload. The cached `current_section` on each session is reconciled against the new config on next startup; if the referenced section no longer exists, the session falls back to `"In Progress"` and continues forward-only from there.
 
+## Usage Telemetry
+
+Claude Commander reports anonymous **feature-usage** telemetry so we can see which
+features are used and retire the ones that aren't. It is **on by default** and
+**opt-out**.
+
+**What is sent:** the name of each feature you use (e.g. `review.open`,
+`session.create`), a coarse environment fingerprint (OS, architecture, terminal
+program, shell *name*, terminal colour mode), a non-sensitive config snapshot
+(theme preset, view mode, which optional features are enabled), the frontend
+name + version, the library version, and a random, resettable install id.
+
+**What is never sent:** typed text, prompts, Claude session content, comment
+bodies, branch/session names, repository paths, command arguments, or arbitrary
+environment variables. The event schema is a fixed set of typed fields — there
+is no code path that forwards free-form text.
+
+**To disable**, either set the config flag:
+
+```toml
+[telemetry]
+enabled = false
+
+# Self-hosters can point telemetry at their own OpenObserve instead:
+# endpoint = "https://o2.example.com/api/<org>/<stream>/_json"
+# token = "<base64 of \"email:token\">"   # HTTP Basic credential
+```
+
+…or export the standard [`DO_NOT_TRACK`](https://consoledonottrack.com/) variable
+(any non-empty, non-`0` value), which disables it regardless of config:
+
+```sh
+export DO_NOT_TRACK=1
+```
+
+The ingest credential is committed in the source tree, so **all** builds —
+including ones compiled from source — report by default. Distro packagers who
+want telemetry compiled out entirely can build with an empty token:
+
+```sh
+CC_TELEMETRY_TOKEN="" cargo build --release
+```
+
 ## Data Storage
 
 Paths are platform-specific, determined by the `directories` crate:

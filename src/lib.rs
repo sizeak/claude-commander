@@ -33,6 +33,7 @@ pub mod git;
 pub mod picker;
 pub mod reviewed;
 pub mod session;
+pub mod telemetry;
 pub mod tmux;
 pub mod tui;
 

@@ -190,6 +190,10 @@ pub struct Config {
     /// agent (Alt-V). Disabled by default.
     #[serde(default)]
     pub stt: SttConfig,
+
+    /// Usage-telemetry settings (on by default, opt-out). See [`TelemetryConfig`].
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
 }
 
 /// Conversation-mode (text-to-speech) settings.
@@ -309,6 +313,38 @@ impl Default for SttConfig {
     }
 }
 
+/// Usage-telemetry settings. Telemetry is on by default in official builds and
+/// opt-out: set `enabled = false` here or export `DO_NOT_TRACK` to disable it.
+/// Only feature-usage and a coarse, non-sensitive environment/config snapshot
+/// are sent — never typed text, prompts, session content, or paths. See the
+/// `telemetry` module for the exact schema.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TelemetryConfig {
+    /// Master switch. On by default; honoured alongside the `DO_NOT_TRACK` env
+    /// var (either being set/false disables telemetry).
+    pub enabled: bool,
+
+    /// Override the ingest endpoint (for self-hosters). `None` uses the
+    /// endpoint baked into the build.
+    pub endpoint: Option<String>,
+
+    /// Override the ingest credential — a pre-encoded HTTP Basic value,
+    /// `base64("<email>:<token>")`. `None` uses the build-time baked credential
+    /// (absent in third-party builds, which then send nothing).
+    pub token: Option<String>,
+}
+
+impl Default for TelemetryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            endpoint: None,
+            token: None,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -353,6 +389,7 @@ impl Default for Config {
             commander_dir: None,
             conversation: ConversationConfig::default(),
             stt: SttConfig::default(),
+            telemetry: TelemetryConfig::default(),
         }
     }
 }
