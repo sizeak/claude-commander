@@ -391,6 +391,7 @@ mod tests {
         git(repo_path, &["init", "-b", "trunk"]);
         git(repo_path, &["config", "user.email", "test@example.com"]);
         git(repo_path, &["config", "user.name", "Test"]);
+        git(repo_path, &["config", "commit.gpgsign", "false"]);
         git(repo_path, &["commit", "--allow-empty", "-m", "init"]);
         git(repo_path, &["checkout", "--detach", "HEAD"]);
 
