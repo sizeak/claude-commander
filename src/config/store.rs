@@ -89,6 +89,13 @@ impl StateStore {
             .and_then(|s| s.install_id.clone())
     }
 
+    /// Snapshot the persisted session-list view mode without awaiting, if the
+    /// in-memory state is immediately readable. Used at (uncontended) startup to
+    /// seed telemetry; `None` if unset or momentarily locked.
+    pub fn try_view_mode(&self) -> Option<crate::config::ViewMode> {
+        self.state.try_read().ok().and_then(|s| s.view_mode)
+    }
+
     /// Apply a mutation to the persisted state.
     ///
     /// Acquires an exclusive file lock, re-reads the current state from disk

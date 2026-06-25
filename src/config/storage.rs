@@ -79,19 +79,19 @@ impl AppState {
         }
     }
 
-    /// Ensure an anonymous install id exists, generating one if absent or empty.
-    /// Returns `true` if a new id was generated (so the caller can persist).
-    pub fn ensure_install_id(&mut self) -> bool {
+    /// Set the anonymous install id to `id` if none is currently stored (or the
+    /// stored one is empty). Returns `true` if it was set. This is the single
+    /// guard for install-id presence, shared by the telemetry seeding path.
+    pub fn set_install_id_if_absent(&mut self, id: &str) -> bool {
         if self.install_id.as_deref().is_none_or(str::is_empty) {
-            self.install_id = Some(uuid::Uuid::new_v4().to_string());
+            self.install_id = Some(id.to_string());
             true
         } else {
             false
         }
     }
 
-    /// Forget the current install id; a fresh one is generated on next
-    /// [`ensure_install_id`](Self::ensure_install_id).
+    /// Forget the current install id; a fresh one is seeded on next launch.
     pub fn reset_install_id(&mut self) {
         self.install_id = None;
     }
@@ -296,18 +296,17 @@ mod tests {
     }
 
     #[test]
-    fn ensure_install_id_generates_once_and_is_stable() {
+    fn set_install_id_if_absent_sets_once_and_keeps_first() {
         let mut state = AppState::new();
         assert!(state.install_id.is_none());
 
-        // First call generates and reports a change.
-        assert!(state.ensure_install_id());
-        let id = state.install_id.clone().unwrap();
-        assert!(!id.is_empty());
+        // First set takes effect and reports a change.
+        assert!(state.set_install_id_if_absent("install-aaa"));
+        assert_eq!(state.install_id.as_deref(), Some("install-aaa"));
 
-        // Subsequent calls are stable and report no change.
-        assert!(!state.ensure_install_id());
-        assert_eq!(state.install_id.as_deref(), Some(id.as_str()));
+        // A second set is a no-op: the first id wins.
+        assert!(!state.set_install_id_if_absent("install-bbb"));
+        assert_eq!(state.install_id.as_deref(), Some("install-aaa"));
     }
 
     #[test]
@@ -316,20 +315,19 @@ mod tests {
         let path = temp_dir.path().join("state.json");
 
         let mut state = AppState::load_from(&path).unwrap();
-        state.ensure_install_id();
-        let id = state.install_id.clone().unwrap();
+        state.set_install_id_if_absent("install-xyz");
         state.save_to(&path).unwrap();
 
         // Reload from disk → same id.
         let reloaded = AppState::load_from(&path).unwrap();
-        assert_eq!(reloaded.install_id.as_deref(), Some(id.as_str()));
+        assert_eq!(reloaded.install_id.as_deref(), Some("install-xyz"));
 
-        // Reset → next ensure produces a different id.
+        // Reset → a fresh id can be seeded again.
         let mut state = reloaded;
         state.reset_install_id();
         assert!(state.install_id.is_none());
-        assert!(state.ensure_install_id());
-        assert_ne!(state.install_id.as_deref(), Some(id.as_str()));
+        assert!(state.set_install_id_if_absent("install-new"));
+        assert_eq!(state.install_id.as_deref(), Some("install-new"));
     }
 
     fn create_test_session(project_id: ProjectId) -> WorktreeSession {

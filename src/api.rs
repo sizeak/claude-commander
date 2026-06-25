@@ -712,8 +712,8 @@ fn init_telemetry(
     let install_id = ensure_install_id(store);
     let telemetry = Telemetry::init(&config.telemetry, frontend, &install_id);
     if telemetry.is_active() {
-        let env = EnvFingerprint::collect(None);
-        let snapshot = ConfigSnapshot::from_config(&config, None);
+        let env = EnvFingerprint::collect(Some(crate::tui::theme::ColorMode::detect().name()));
+        let snapshot = ConfigSnapshot::from_config(&config, store.try_view_mode());
         telemetry.session_start(&env, &snapshot);
     }
     telemetry
@@ -728,17 +728,16 @@ fn ensure_install_id(store: &Arc<StateStore>) -> String {
         return id;
     }
     let id = Uuid::new_v4().to_string();
-    // Persist in the background so construction stays sync, but only when a
-    // runtime is present to host the task.
+    // Persist this session's id in the background (so construction stays sync),
+    // but only when a runtime is present to host the task. The presence guard
+    // lives in `AppState::set_install_id_if_absent`, so it isn't duplicated here.
     if tokio::runtime::Handle::try_current().is_ok() {
         let id_for_persist = id.clone();
         let store = store.clone();
         tokio::spawn(async move {
             let _ = store
                 .mutate(move |s| {
-                    if s.install_id.as_deref().is_none_or(str::is_empty) {
-                        s.install_id = Some(id_for_persist);
-                    }
+                    s.set_install_id_if_absent(&id_for_persist);
                 })
                 .await;
         });
