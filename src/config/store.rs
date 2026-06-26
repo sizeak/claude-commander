@@ -246,6 +246,13 @@ fn open_lock_file(lock_path: &PathBuf) -> Result<File> {
 }
 
 /// Read state from disk, returning a fresh default if the file doesn't exist.
+///
+/// Applies the same migrations as [`AppState::load_from`] — notably
+/// [`AppState::backfill_base_branch`] — because every runtime read-modify-write
+/// (`mutate`/`try_mutate`/`reload_if_changed`) flows through here and overwrites
+/// the in-memory cache with the result. Without the backfill, the first mutation
+/// after startup would strip the derived `base_branch` (which isn't persisted on
+/// older records), reverting the review diff to the stale frozen `base_commit`.
 fn read_state_from_disk(state_path: &PathBuf) -> Result<AppState> {
     if !state_path.exists() {
         return Ok(AppState::new());
@@ -254,8 +261,10 @@ fn read_state_from_disk(state_path: &PathBuf) -> Result<AppState> {
     let content = std::fs::read_to_string(state_path)
         .map_err(|e| ConfigError::LoadFailed(format!("Failed to read state file: {}", e)))?;
 
-    let state: AppState = serde_json::from_str(&content)
+    let mut state: AppState = serde_json::from_str(&content)
         .map_err(|e| ConfigError::LoadFailed(format!("Failed to parse state file: {}", e)))?;
+
+    state.backfill_base_branch();
 
     Ok(state)
 }
@@ -340,6 +349,52 @@ mod tests {
         let disk_state = AppState::load_from(&state_path).unwrap();
         assert_eq!(disk_state.project_count(), 1);
         assert!(disk_state.get_project(&project_id).is_some());
+    }
+
+    #[tokio::test]
+    async fn mutate_preserves_backfilled_base_branch() {
+        // A session persisted before `base_branch` existed carries only a frozen
+        // `base_commit`. The startup backfill derives `base_branch`, but every
+        // mutate()/reload re-reads disk and overwrites the in-memory cache — so
+        // unless the read path also backfills, the first mutation strips the
+        // derived branch and the review diff reverts to the stale frozen SHA.
+        use crate::session::WorktreeSession;
+
+        let temp_dir = TempDir::new().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+
+        // Seed disk with an "old" record: base_commit set, base_branch absent.
+        let mut seed = AppState::new();
+        let project = Project::new("p", PathBuf::from("/tmp/p"), "main");
+        let project_id = project.id;
+        seed.add_project(project);
+        let mut session = WorktreeSession::new(
+            project_id,
+            "S",
+            "feature",
+            PathBuf::from("/tmp/p/wt"),
+            "claude",
+        );
+        session.base_commit = Some("deadbeef".to_string());
+        session.base_branch = None;
+        let session_id = session.id;
+        seed.add_session(session);
+        std::fs::write(&state_path, serde_json::to_string(&seed).unwrap()).unwrap();
+
+        // A no-op mutation must not strip the derived base_branch.
+        let store = StateStore::with_path(AppState::new(), state_path.clone());
+        store.mutate(|_| {}).await.unwrap();
+
+        let state = store.read().await;
+        assert_eq!(
+            state
+                .get_session(&session_id)
+                .unwrap()
+                .base_branch
+                .as_deref(),
+            Some("main"),
+            "mutate() must re-apply the base_branch backfill, not revert to the on-disk null"
+        );
     }
 
     #[tokio::test]
