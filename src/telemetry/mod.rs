@@ -26,6 +26,7 @@ use std::sync::Arc;
 use serde_json::{Map, Value};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, MissedTickBehavior, interval};
+use tracing::{debug, warn};
 
 pub use event::{ConfigSnapshot, EnvFingerprint};
 pub use sink::{EventPayload, EventSink, HttpSink};
@@ -138,6 +139,7 @@ impl Telemetry {
             .endpoint
             .clone()
             .unwrap_or_else(|| DEFAULT_ENDPOINT.to_string());
+        debug!("telemetry active (endpoint={endpoint})");
         let sink: Arc<dyn EventSink> = Arc::new(HttpSink::new(endpoint, credential));
         Self::with_sink(frontend, install_id, sink)
     }
@@ -148,6 +150,7 @@ impl Telemetry {
         // The flush task needs a Tokio runtime to live in. Outside one (e.g. a
         // sync context), degrade to a no-op rather than panic on spawn.
         if tokio::runtime::Handle::try_current().is_err() {
+            warn!("telemetry disabled: no Tokio runtime to host the flush task");
             return Self::disabled();
         }
         let common = build_common(frontend, install_id);
@@ -230,10 +233,33 @@ fn do_not_track() -> bool {
     std::env::var_os("DO_NOT_TRACK").is_some_and(|v| !v.is_empty() && v != "0")
 }
 
+/// Why telemetry is off, for logging at the decision site. The variants are
+/// checked in declaration order, so an earlier reason wins when several apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Disabled {
+    /// `[telemetry] enabled = false` in config.
+    Config,
+    /// The `DO_NOT_TRACK` environment convention is set.
+    DoNotTrack,
+    /// No ingest credential — none configured and none baked into the build.
+    NoCredential,
+}
+
+impl Disabled {
+    fn reason(self) -> &'static str {
+        match self {
+            Disabled::Config => "config flag off",
+            Disabled::DoNotTrack => "DO_NOT_TRACK set",
+            Disabled::NoCredential => "no ingest credential baked in or configured",
+        }
+    }
+}
+
 /// Whether telemetry would be active for this config — config flag on,
 /// `DO_NOT_TRACK` unset, and a credential available (configured or baked in).
 /// Callers use this to skip telemetry-only work (e.g. install-id generation and
-/// its background persist) when telemetry is off.
+/// its background persist) when telemetry is off. Logs the reason at `debug`
+/// when off so a silent build is diagnosable from the log alone.
 pub fn would_be_enabled(config: &TelemetryConfig) -> bool {
     // Never emit during the crate's own test runs — the credential is committed,
     // so without this the suite would ship events to the live stream and the
@@ -242,13 +268,31 @@ pub fn would_be_enabled(config: &TelemetryConfig) -> bool {
         return false;
     }
     let has_credential = config.token.is_some() || baked_credential().is_some();
-    resolve_enabled(config.enabled, do_not_track(), has_credential)
+    match classify_enablement(config.enabled, do_not_track(), has_credential) {
+        Ok(()) => true,
+        Err(reason) => {
+            debug!("telemetry disabled: {}", reason.reason());
+            false
+        }
+    }
 }
 
 /// Pure enablement decision, factored out so it can be unit-tested without
-/// touching the environment.
-fn resolve_enabled(enabled_cfg: bool, do_not_track: bool, has_credential: bool) -> bool {
-    enabled_cfg && !do_not_track && has_credential
+/// touching the environment. `Ok(())` means active; `Err` carries why not.
+fn classify_enablement(
+    enabled_cfg: bool,
+    do_not_track: bool,
+    has_credential: bool,
+) -> Result<(), Disabled> {
+    if !enabled_cfg {
+        Err(Disabled::Config)
+    } else if do_not_track {
+        Err(Disabled::DoNotTrack)
+    } else if !has_credential {
+        Err(Disabled::NoCredential)
+    } else {
+        Ok(())
+    }
 }
 
 fn build_common(frontend: &FrontendInfo, install_id: &str) -> EventPayload {
@@ -325,11 +369,28 @@ mod tests {
     }
 
     #[test]
-    fn resolve_enabled_truth_table() {
-        assert!(resolve_enabled(true, false, true));
-        assert!(!resolve_enabled(false, false, true), "config off");
-        assert!(!resolve_enabled(true, true, true), "DO_NOT_TRACK");
-        assert!(!resolve_enabled(true, false, false), "no credential");
+    fn classify_enablement_truth_table() {
+        assert_eq!(classify_enablement(true, false, true), Ok(()));
+        assert_eq!(
+            classify_enablement(false, false, true),
+            Err(Disabled::Config),
+            "config off"
+        );
+        assert_eq!(
+            classify_enablement(true, true, true),
+            Err(Disabled::DoNotTrack),
+            "DO_NOT_TRACK"
+        );
+        assert_eq!(
+            classify_enablement(true, false, false),
+            Err(Disabled::NoCredential),
+            "no credential"
+        );
+        // Config-off takes precedence over a missing credential when both apply.
+        assert_eq!(
+            classify_enablement(false, false, false),
+            Err(Disabled::Config)
+        );
     }
 
     #[tokio::test]

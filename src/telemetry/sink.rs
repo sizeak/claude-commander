@@ -19,8 +19,8 @@ pub trait EventSink: Send + Sync {
 }
 
 /// Posts batches to an OpenObserve `_json` ingest endpoint using a pre-encoded
-/// HTTP Basic credential (`base64("<email>:<token>")`). Failures are logged at
-/// `debug` and otherwise ignored.
+/// HTTP Basic credential (`base64("<email>:<token>")`). Outcomes (success and
+/// failure alike) are logged at `debug`; failures are otherwise ignored.
 pub struct HttpSink {
     http: reqwest::Client,
     endpoint: String,
@@ -52,6 +52,7 @@ impl EventSink for HttpSink {
         if events.is_empty() {
             return;
         }
+        let count = events.len();
         let body = Value::Array(events.into_iter().map(Value::Object).collect());
         let request = self
             .http
@@ -67,7 +68,9 @@ impl EventSink for HttpSink {
         // timeout-less default client — this guarantees a bound regardless, so a
         // black-holed connection can never hang the single-threaded flush task.
         match tokio::time::timeout(Self::REQUEST_TIMEOUT, request).await {
-            Ok(Ok(resp)) if resp.status().is_success() => {}
+            Ok(Ok(resp)) if resp.status().is_success() => {
+                debug!("telemetry ingest ok: {count} events, {}", resp.status())
+            }
             Ok(Ok(resp)) => debug!("telemetry ingest returned {}", resp.status()),
             Ok(Err(e)) => debug!("telemetry ingest failed: {e}"),
             Err(_) => debug!("telemetry ingest timed out"),
