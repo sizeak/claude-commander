@@ -53,6 +53,15 @@ impl ColorMode {
 
         Self::Basic
     }
+
+    /// Stable lowercase identifier, used as the telemetry `color_mode` value.
+    pub fn name(self) -> &'static str {
+        match self {
+            ColorMode::Basic => "basic",
+            ColorMode::Indexed => "indexed",
+            ColorMode::TrueColor => "truecolor",
+        }
+    }
 }
 
 /// Theme configuration for the TUI

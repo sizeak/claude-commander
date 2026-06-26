@@ -937,10 +937,15 @@ pub struct App {
 }
 
 impl App {
-    /// Create a new application
-    pub fn new(config_store: Arc<ConfigStore>, store: Arc<StateStore>) -> Self {
+    /// Create a new application. `frontend` identifies this binary for
+    /// telemetry and is forwarded to [`CommanderService::new`].
+    pub fn new(
+        config_store: Arc<ConfigStore>,
+        store: Arc<StateStore>,
+        frontend: crate::telemetry::FrontendInfo,
+    ) -> Self {
         let config = config_store.read().clone();
-        let service = CommanderService::new(config_store, store);
+        let service = CommanderService::new(config_store, store, frontend);
 
         let base = config
             .theme
@@ -1509,6 +1514,9 @@ impl App {
                     None => {
                         // Save selection before quitting
                         self.save_selection().await;
+                        // Flush any queued telemetry before exit so the last
+                        // session's events aren't lost to the flush interval.
+                        self.service.telemetry().flush().await;
                         break;
                     }
                 }

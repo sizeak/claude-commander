@@ -25,6 +25,7 @@ use crate::session::{
     AgentState, ProjectId, ScanResult, SessionId, SessionManager, SessionStatus, WorktreeSession,
     program_is_claude, program_with_claude_flags,
 };
+use crate::telemetry::{ConfigSnapshot, EnvFingerprint, FrontendInfo, Telemetry};
 use crate::tmux::{AgentStateDetector, StatusBarInfo, TmuxExecutor};
 use crate::tui::theme::Theme;
 
@@ -42,10 +43,18 @@ pub struct CommanderService {
     config_store: Arc<ConfigStore>,
     comments: Arc<CommentStore>,
     reviewed: Arc<ReviewedStore>,
+    telemetry: Telemetry,
 }
 
 impl CommanderService {
-    pub fn new(config_store: Arc<ConfigStore>, store: Arc<StateStore>) -> Self {
+    /// Construct the service. `frontend` identifies the embedding application
+    /// (binary/GUI name + version) for telemetry attribution and is required —
+    /// [`FrontendInfo::new`] panics if it is not properly populated.
+    pub fn new(
+        config_store: Arc<ConfigStore>,
+        store: Arc<StateStore>,
+        frontend: FrontendInfo,
+    ) -> Self {
         let manager = SessionManager::new(
             config_store.clone(),
             store.clone(),
@@ -58,23 +67,35 @@ impl CommanderService {
         let data_dir = Config::data_dir().unwrap_or_else(|_| PathBuf::from("."));
         let comments = Arc::new(CommentStore::new(data_dir.join("comments")));
         let reviewed = Arc::new(ReviewedStore::new(data_dir.join("reviewed")));
+        let telemetry = init_telemetry(&config_store, &store, &frontend);
         Self {
             manager,
             store,
             config_store,
             comments,
             reviewed,
+            telemetry,
         }
     }
 
-    pub fn for_cli(config: crate::config::Config) -> std::result::Result<Self, crate::Error> {
+    pub fn for_cli(
+        config: crate::config::Config,
+        frontend: FrontendInfo,
+    ) -> std::result::Result<Self, crate::Error> {
         let config_store = Arc::new(ConfigStore::new(config)?);
         // A corrupt state file must propagate, not default to an empty
         // state: `list` would report no sessions and `create` would persist
         // a duplicate project alongside the unreadable original.
         let app_state = AppState::load()?;
         let store = Arc::new(StateStore::new(app_state)?);
-        Ok(Self::new(config_store, store))
+        Ok(Self::new(config_store, store, frontend))
+    }
+
+    /// Shared telemetry handle. Frontends and library code call
+    /// `service.telemetry().feature("…")` to record usage; a no-op when
+    /// telemetry is disabled.
+    pub fn telemetry(&self) -> &Telemetry {
+        &self.telemetry
     }
 
     pub fn session_manager(&self) -> &SessionManager {
@@ -112,11 +133,13 @@ impl CommanderService {
 
     /// Register a git repository as a project.
     pub async fn add_project(&self, repo_path: PathBuf) -> Result<ProjectId> {
+        self.telemetry.feature("project.add");
         self.manager.add_project(repo_path).await
     }
 
     /// Scan a directory for git repositories and register them as projects.
     pub async fn scan_directory(&self, dir: &Path) -> Result<ScanResult> {
+        self.telemetry.feature("project.scan_directory");
         self.manager.scan_directory(dir).await
     }
 
@@ -240,6 +263,7 @@ impl CommanderService {
     // -- Mutations --
 
     pub async fn create_session(&self, opts: CreateSessionOpts) -> Result<SessionId> {
+        self.telemetry.feature("session.create");
         self.manager.check_tmux().await?;
 
         let base_program = opts
@@ -317,10 +341,12 @@ impl CommanderService {
     }
 
     pub async fn restart_session(&self, id: &SessionId) -> Result<()> {
+        self.telemetry.feature("session.restart");
         self.manager.restart_session(id).await
     }
 
     pub async fn delete_session(&self, id: &SessionId) -> Result<()> {
+        self.telemetry.feature("session.delete");
         self.manager.delete_session(id).await
     }
 
@@ -331,6 +357,7 @@ impl CommanderService {
     /// (persisting any status changes). Returns the parsed diff plus the
     /// re-anchored comments.
     pub async fn open_review(&self, session_id: &SessionId) -> Result<ReviewSnapshot> {
+        self.telemetry.feature("review.open");
         let (worktree_path, review_base) = self.review_target(session_id).await?;
         let base = review_base.git_ref(&worktree_path).await;
         let raw = compose_review_diff(&worktree_path, &base).await?;
@@ -454,6 +481,7 @@ impl CommanderService {
         session_id: &SessionId,
         file: &FileDiff,
     ) -> Result<bool> {
+        self.telemetry.feature("review.toggle_reviewed");
         let mut marks = self.reviewed.load(*session_id).await?;
         let now_reviewed = crate::reviewed::toggle(&mut marks, file);
         self.reviewed.save(*session_id, &marks).await?;
@@ -475,6 +503,7 @@ impl CommanderService {
 
     /// Stage a new comment; returns its id.
     pub async fn create_comment(&self, session_id: &SessionId, draft: NewComment) -> Result<Uuid> {
+        self.telemetry.feature("review.comment.create");
         let ann = Comment::new(
             draft.file,
             draft.side,
@@ -501,6 +530,7 @@ impl CommanderService {
     /// deferred if the agent is stopped or never becomes ready. Applied
     /// comments are marked [`CommentStatus::Applied`].
     pub async fn apply_comments(&self, session_id: &SessionId) -> Result<ApplyOutcome> {
+        self.telemetry.feature("review.apply_comments");
         let (worktree_path, review_base, title, tmux_name, is_active) = {
             let state = self.store.read().await;
             let s = state
@@ -668,6 +698,62 @@ impl CreateSessionOpts {
         }
         Ok(())
     }
+}
+
+/// Build the telemetry handle for a freshly-constructed service: resolve the
+/// install id, construct the handle from config, and emit the once-per-launch
+/// `session_start` event. A no-op handle is returned when telemetry is disabled.
+fn init_telemetry(
+    config_store: &Arc<ConfigStore>,
+    store: &Arc<StateStore>,
+    frontend: &FrontendInfo,
+) -> Telemetry {
+    let config = config_store.read().clone();
+    // Skip install-id generation (and its background persist spawn) entirely
+    // when telemetry is off — keeps disabled/sync contexts (e.g. unit tests)
+    // from needing a Tokio runtime.
+    if !crate::telemetry::would_be_enabled(&config.telemetry) {
+        return Telemetry::disabled();
+    }
+    let install_id = ensure_install_id(store);
+    let telemetry = Telemetry::init(&config.telemetry, frontend, &install_id);
+    if telemetry.is_active() {
+        let env = EnvFingerprint::collect(Some(crate::tui::theme::ColorMode::detect().name()));
+        let snapshot = ConfigSnapshot::from_config(&config, store.try_view_mode());
+        telemetry.session_start(&env, &snapshot);
+    }
+    telemetry
+}
+
+/// Return the anonymous install id, generating one if none is stored yet.
+///
+/// The in-memory read is uncontended at startup, so it normally reflects disk:
+/// when genuinely absent, the fresh id is persisted (via the flocked
+/// `set_install_id_if_absent`) and reused on every future launch. In the rare
+/// case the read missed because the lock was momentarily held — i.e. an id
+/// already exists — the persist leaves that existing id untouched, so this one
+/// session uses a throwaway id that won't match the persisted one. That's an
+/// acceptable edge case; we never clobber an existing id.
+fn ensure_install_id(store: &Arc<StateStore>) -> String {
+    if let Some(id) = store.try_install_id() {
+        return id;
+    }
+    let id = Uuid::new_v4().to_string();
+    // Persist this session's id in the background (so construction stays sync),
+    // but only when a runtime is present to host the task. The presence guard
+    // lives in `AppState::set_install_id_if_absent`, so it isn't duplicated here.
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let id_for_persist = id.clone();
+        let store = store.clone();
+        tokio::spawn(async move {
+            let _ = store
+                .mutate(move |s| {
+                    s.set_install_id_if_absent(&id_for_persist);
+                })
+                .await;
+        });
+    }
+    id
 }
 
 // -- Response types --

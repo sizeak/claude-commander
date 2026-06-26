@@ -17,6 +17,12 @@ use claude_commander::{
     tui::App,
 };
 
+/// Identify this binary to the telemetry layer. Required by
+/// `CommanderService`/`App` — they panic if a frontend isn't supplied.
+fn frontend() -> claude_commander::telemetry::FrontendInfo {
+    claude_commander::telemetry::FrontendInfo::new(claude_commander::APP_NAME, VERSION)
+}
+
 fn setup_logging(debug: bool, to_file: bool) -> Result<()> {
     let filter = if debug {
         EnvFilter::new("debug")
@@ -169,7 +175,7 @@ async fn main() -> Result<()> {
             let config_store = std::sync::Arc::new(ConfigStore::new(config.clone())?);
             let app_state = AppState::load_or_exit();
             let store = std::sync::Arc::new(StateStore::new(app_state)?);
-            let mut app = App::new(config_store, store);
+            let mut app = App::new(config_store, store, frontend());
             app.run().await?;
         }
 
@@ -177,7 +183,7 @@ async fn main() -> Result<()> {
             setup_logging(cli.debug, false)?;
 
             if json {
-                let service = claude_commander::api::CommanderService::for_cli(config)?;
+                let service = claude_commander::api::CommanderService::for_cli(config, frontend())?;
                 let sessions = service.list_sessions(all).await?;
                 let entries: Vec<_> = sessions
                     .iter()
@@ -240,7 +246,7 @@ async fn main() -> Result<()> {
         Some(Commands::Status { session, json }) => {
             setup_logging(cli.debug, false)?;
 
-            let service = claude_commander::api::CommanderService::for_cli(config)?;
+            let service = claude_commander::api::CommanderService::for_cli(config, frontend())?;
             let detail = match service.get_session_detail(&session, None).await? {
                 Some(d) => d,
                 None => {
@@ -262,7 +268,7 @@ async fn main() -> Result<()> {
         Some(Commands::Delete { session, force }) => {
             setup_logging(cli.debug, false)?;
 
-            let service = claude_commander::api::CommanderService::for_cli(config)?;
+            let service = claude_commander::api::CommanderService::for_cli(config, frontend())?;
 
             let info = match service.find_session_exact(&session).await? {
                 claude_commander::cli::SessionLookup::Found(i) => i,
@@ -312,7 +318,7 @@ async fn main() -> Result<()> {
         Some(Commands::Log { session, lines }) => {
             setup_logging(cli.debug, false)?;
 
-            let service = claude_commander::api::CommanderService::for_cli(config)?;
+            let service = claude_commander::api::CommanderService::for_cli(config, frontend())?;
             match service.get_pane_content(&session, Some(lines)).await? {
                 Some(content) => {
                     if content.ends_with('\n') {
@@ -341,7 +347,7 @@ async fn main() -> Result<()> {
         }) => {
             setup_logging(cli.debug, false)?;
 
-            let service = claude_commander::api::CommanderService::for_cli(config)?;
+            let service = claude_commander::api::CommanderService::for_cli(config, frontend())?;
 
             println!("Creating session '{}'...", name);
             let session_id = match service

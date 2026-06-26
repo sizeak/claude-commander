@@ -772,7 +772,11 @@ fn make_test_app() -> App {
     let store = Arc::new(StateStore::with_path(AppState::new(), state_path));
     // Leak the TempDir so paths stay valid for the lifetime of the test.
     std::mem::forget(tmp);
-    App::new(config_store, store)
+    App::new(
+        config_store,
+        store,
+        crate::telemetry::FrontendInfo::new("test", "0.0.0"),
+    )
 }
 
 #[test]
