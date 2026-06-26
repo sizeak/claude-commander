@@ -639,22 +639,48 @@ async fn wait_until_ready(detector: &mut AgentStateDetector, tmux_name: &str) ->
 /// The logical base a session's review diff is computed against.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ReviewBase {
-    /// The PR's target branch. Resolved to its `origin/<branch>` remote-tracking
-    /// ref when present, so the diff reflects the pushed upstream rather than a
-    /// possibly-stale local branch; falls back to the local branch otherwise.
-    Branch(String),
-    /// The fork-point commit captured at session creation (a fixed SHA).
+    /// A target *branch*, with the frozen fork-point SHA as a fallback. The
+    /// branch resolves to its `origin/<branch>` remote-tracking ref when present
+    /// (so the diff reflects the pushed upstream rather than a possibly-stale
+    /// local branch), giving `merge-base(branch, HEAD)..working-tree` recomputed
+    /// against the branch's *live* tip — the GitHub PR model. If the branch can
+    /// no longer be resolved at all, the `fallback` SHA is used instead.
+    Branch {
+        name: String,
+        fallback: Option<String>,
+    },
+    /// The fork-point commit captured at session creation (a fixed SHA). Only
+    /// reached when no target branch was ever recorded.
     Commit(String),
     /// No base known; diff the working tree against `HEAD`.
     Head,
 }
 
 impl ReviewBase {
-    /// Classify a session's base: the PR target branch if known, else the
-    /// fork-point commit captured at creation, else `HEAD`.
+    /// Classify a session's base, preferring a *live branch* over a frozen SHA:
+    ///
+    /// 1. the PR's target branch (GitHub is authoritative once a PR exists);
+    /// 2. else the branch captured at creation ([`WorktreeSession::base_branch`]
+    ///    — a stack parent's branch, an explicit `--base-branch`, or main),
+    ///    which keeps the diff correct as that branch advances;
+    /// 3. else the frozen fork-point commit ([`WorktreeSession::base_commit`]),
+    ///    used only when no branch was recorded;
+    /// 4. else `HEAD`.
+    ///
+    /// In the branch cases the frozen `base_commit` rides along as a fallback,
+    /// used by [`Self::git_ref`] only if the branch itself fails to resolve.
     fn of(session: &WorktreeSession) -> Self {
+        let fallback = session.base_commit.clone();
         if let Some(branch) = session.pr_base_branch.clone() {
-            ReviewBase::Branch(branch)
+            ReviewBase::Branch {
+                name: branch,
+                fallback,
+            }
+        } else if let Some(branch) = session.base_branch.clone() {
+            ReviewBase::Branch {
+                name: branch,
+                fallback,
+            }
         } else if let Some(commit) = session.base_commit.clone() {
             ReviewBase::Commit(commit)
         } else {
@@ -662,11 +688,22 @@ impl ReviewBase {
         }
     }
 
-    /// The git commit-ish to diff against. Only a branch base prefers its
-    /// remote-tracking ref; a commit SHA and `HEAD` are used verbatim.
+    /// The git commit-ish to diff against. A branch base prefers its
+    /// remote-tracking ref; if neither the remote nor local branch resolves it
+    /// drops to the frozen `fallback` SHA, then to the branch name verbatim. A
+    /// commit SHA and `HEAD` are used verbatim.
     async fn git_ref(self, worktree: &Path) -> String {
         match self {
-            ReviewBase::Branch(branch) => prefer_remote_branch(worktree, &branch).await,
+            ReviewBase::Branch { name, fallback } => {
+                let candidate = prefer_remote_branch(worktree, &name).await;
+                if crate::git::ref_resolves(worktree, &candidate).await {
+                    candidate
+                } else if let Some(sha) = fallback {
+                    sha
+                } else {
+                    candidate
+                }
+            }
             ReviewBase::Commit(commit) => commit,
             ReviewBase::Head => "HEAD".to_string(),
         }
@@ -1067,16 +1104,32 @@ mod tests {
     }
 
     #[test]
-    fn review_base_classifies_pr_base_then_fork_then_head() {
+    fn review_base_prefers_live_branch_then_falls_back_to_commit_then_head() {
         let mut s = make_session_for_project("t", ProjectId::new());
-        // No PR base or fork point recorded yet → HEAD.
+        // Nothing recorded yet → HEAD.
         assert_eq!(ReviewBase::of(&s), ReviewBase::Head);
-        // Fork-point commit captured at creation.
+        // Only a frozen fork-point commit → use it as a last resort.
         s.base_commit = Some("abc123".to_string());
         assert_eq!(ReviewBase::of(&s), ReviewBase::Commit("abc123".to_string()));
-        // PR's target branch takes precedence once known.
+        // The branch captured at creation wins over the frozen SHA, which rides
+        // along as a fallback for when the branch can't be resolved.
+        s.base_branch = Some("parent-feature".to_string());
+        assert_eq!(
+            ReviewBase::of(&s),
+            ReviewBase::Branch {
+                name: "parent-feature".to_string(),
+                fallback: Some("abc123".to_string()),
+            }
+        );
+        // The PR's target branch is authoritative once known, over both.
         s.pr_base_branch = Some("main".to_string());
-        assert_eq!(ReviewBase::of(&s), ReviewBase::Branch("main".to_string()));
+        assert_eq!(
+            ReviewBase::of(&s),
+            ReviewBase::Branch {
+                name: "main".to_string(),
+                fallback: Some("abc123".to_string()),
+            }
+        );
     }
 
     #[test]

@@ -135,6 +135,14 @@ pub async fn managed_base_commit(
     }
 }
 
+/// Whether `refname` resolves to a commit in `worktree`. Exposed as
+/// [`ref_resolves`] for the review-base resolver, which uses it to decide
+/// whether a captured target branch is still usable before falling back to a
+/// frozen SHA.
+pub(crate) async fn ref_resolves(worktree: &Path, refname: &str) -> bool {
+    ref_exists(worktree, refname).await
+}
+
 /// Whether `refname` resolves to a commit in `worktree`.
 async fn ref_exists(worktree: &Path, refname: &str) -> bool {
     Command::new("git")

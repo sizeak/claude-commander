@@ -251,9 +251,18 @@ pub struct WorktreeSession {
     pub last_active_at: DateTime<Utc>,
     /// Tmux session name (for tmux commands)
     pub tmux_session_name: String,
-    /// Base commit for diff computation (branch point)
+    /// Base commit for diff computation (branch point). A *frozen* SHA captured
+    /// at creation — kept only as a last-resort fallback for [`base_branch`].
     #[serde(default)]
     pub base_commit: Option<String>,
+    /// The branch this session was forked from (a stack parent's branch, an
+    /// explicit `--base-branch`, or the project's main branch). The review diff
+    /// resolves its base against the *live* tip of this branch — mirroring how a
+    /// GitHub PR diffs against the current state of its target — so the diff
+    /// stays correct as the target advances or is merged back in. Falls back to
+    /// the frozen [`base_commit`] when the branch can no longer be resolved.
+    #[serde(default)]
+    pub base_branch: Option<String>,
     /// Shell tmux session name (for secondary shell sessions)
     #[serde(default)]
     pub shell_tmux_session_name: Option<String>,
@@ -343,6 +352,7 @@ impl WorktreeSession {
             last_active_at: now,
             tmux_session_name,
             base_commit: None,
+            base_branch: None,
             shell_tmux_session_name: None,
             pr_number: None,
             pr_url: None,
@@ -389,6 +399,7 @@ impl WorktreeSession {
             last_active_at: now,
             tmux_session_name,
             base_commit: None,
+            base_branch: None,
             shell_tmux_session_name: None,
             pr_number: None,
             pr_url: None,

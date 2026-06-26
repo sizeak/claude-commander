@@ -164,8 +164,51 @@ impl AppState {
         // Update version and remember path
         state.version = env!("CARGO_PKG_VERSION").to_string();
         state.state_path = Some(path.clone());
+        state.backfill_base_branch();
 
         Ok(state)
+    }
+
+    /// Populate [`WorktreeSession::base_branch`] for sessions persisted before
+    /// the field existed, so the review diff resolves its base against a *live*
+    /// branch instead of the frozen `base_commit` SHA.
+    ///
+    /// Derives the branch the session was forked from: the PR target branch if
+    /// known, else the stack parent's branch (so a stacked session diffs against
+    /// its parent, not main), else the project's main branch. Sessions that
+    /// already carry `base_branch` are left untouched.
+    fn backfill_base_branch(&mut self) {
+        let mut assignments: Vec<(SessionId, String)> = Vec::new();
+        for project in self.projects.values() {
+            let project_sessions: Vec<&WorktreeSession> = project
+                .worktrees
+                .iter()
+                .filter_map(|id| self.sessions.get(id))
+                .collect();
+            for s in &project_sessions {
+                if s.base_branch.is_some() {
+                    continue;
+                }
+                let derived = if let Some(pr_base) = s.pr_base_branch.clone() {
+                    pr_base
+                } else if let Some(parent_id) =
+                    crate::session::resolve_stack_parent(s, &project_sessions)
+                {
+                    match project_sessions.iter().find(|p| p.id == parent_id) {
+                        Some(parent) => parent.branch.clone(),
+                        None => project.main_branch.clone(),
+                    }
+                } else {
+                    project.main_branch.clone()
+                };
+                assignments.push((s.id, derived));
+            }
+        }
+        for (id, branch) in assignments {
+            if let Some(s) = self.sessions.get_mut(&id) {
+                s.base_branch = Some(branch);
+            }
+        }
     }
 
     /// Save state to the remembered location (or default if none)
@@ -355,6 +398,79 @@ mod tests {
         assert!(state.projects.is_empty());
         assert!(state.sessions.is_empty());
         assert!(!state.seen_help);
+    }
+
+    #[test]
+    fn backfill_base_branch_derives_parent_for_stacked_and_main_for_root() {
+        // Sessions persisted before `base_branch` existed carry only a frozen
+        // `base_commit`. Backfill must derive the *branch* each was forked from
+        // so the review diff resolves against its live tip: a stacked session
+        // against its parent's branch, a root session against main. Without the
+        // backfill the stacked child would fall back to the frozen SHA, which
+        // drifts stale and re-includes the parent's later commits.
+        let mut state = AppState::new();
+        let project = create_test_project(); // main_branch = "main"
+        let project_id = project.id;
+        state.add_project(project);
+
+        // Root session, no PR, no base_branch.
+        let mut root = WorktreeSession::new(
+            project_id,
+            "Root",
+            "root-feature",
+            PathBuf::from("/tmp/root"),
+            "claude",
+        );
+        root.base_commit = Some("rootsha".to_string());
+        let root_id = root.id;
+        state.add_session(root);
+
+        // Stacked child pointing at the root via the local hint, no PR yet.
+        let mut child = WorktreeSession::new(
+            project_id,
+            "Child",
+            "child-feature",
+            PathBuf::from("/tmp/child"),
+            "claude",
+        );
+        child.base_commit = Some("childsha".to_string());
+        child.stack_parent_session_id = Some(root_id);
+        let child_id = child.id;
+        state.add_session(child);
+
+        // Pre-existing field must not be clobbered.
+        let mut explicit = WorktreeSession::new(
+            project_id,
+            "Explicit",
+            "explicit-feature",
+            PathBuf::from("/tmp/explicit"),
+            "claude",
+        );
+        explicit.base_branch = Some("develop".to_string());
+        let explicit_id = explicit.id;
+        state.add_session(explicit);
+
+        state.backfill_base_branch();
+
+        assert_eq!(
+            state.get_session(&root_id).unwrap().base_branch.as_deref(),
+            Some("main"),
+            "root session should diff against main"
+        );
+        assert_eq!(
+            state.get_session(&child_id).unwrap().base_branch.as_deref(),
+            Some("root-feature"),
+            "stacked child should diff against its parent's branch, not main"
+        );
+        assert_eq!(
+            state
+                .get_session(&explicit_id)
+                .unwrap()
+                .base_branch
+                .as_deref(),
+            Some("develop"),
+            "existing base_branch must be preserved"
+        );
     }
 
     #[test]
