@@ -572,16 +572,14 @@ impl SessionManager {
             }
         }
 
-        // Plan any PR-base retargets for stacked children *before* removal,
-        // while the deleted session still resolves the stack topology.
-        let pr_retargets = self.store.read().await.pr_retargets_for_delete(session_id);
-
-        // Remove from state (also re-points stacked children onto the parent).
+        // Remove from state, re-pointing stacked children onto the parent and
+        // returning the durable PR-base edits — planned atomically with the
+        // removal inside the same mutate, so no concurrent task can invalidate
+        // the plan between read and remove.
         let sid = *session_id;
-        self.store
-            .mutate(move |state| {
-                state.remove_session(&sid);
-            })
+        let pr_retargets = self
+            .store
+            .mutate(move |state| state.remove_session_retargeting_children(&sid).1)
             .await?;
 
         // Durably retarget child PRs on GitHub (best-effort, non-fatal).

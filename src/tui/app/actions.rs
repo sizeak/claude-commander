@@ -1291,9 +1291,9 @@ impl App {
         &mut self,
         session_id: SessionId,
     ) -> crate::error::Result<()> {
-        let (cleanup_data, pr_retargets) = {
+        let cleanup_data = {
             let state = self.service.store().read().await;
-            let cleanup_data = state.get_session(&session_id).map(|s| {
+            state.get_session(&session_id).map(|s| {
                 let repo_path = state
                     .get_project(&s.project_id)
                     .map(|p| p.repo_path.clone());
@@ -1303,17 +1303,16 @@ impl App {
                     s.worktree_path.clone(),
                     repo_path,
                 )
-            });
-            // Plan PR-base retargets for stacked children before removal, while
-            // the deleted session still resolves the stack topology.
-            (cleanup_data, state.pr_retargets_for_delete(&session_id))
+            })
         };
 
-        self.service
+        // Remove from state, re-pointing stacked children onto the parent and
+        // returning the durable PR-base edits — planned atomically with the
+        // removal inside the mutate closure.
+        let pr_retargets = self
+            .service
             .store()
-            .mutate(move |state| {
-                state.remove_session(&session_id);
-            })
+            .mutate(move |state| state.remove_session_retargeting_children(&session_id).1)
             .await?;
 
         // Durably retarget child PRs on GitHub off the UI thread (best-effort).
