@@ -177,7 +177,7 @@ impl AppState {
     /// known, else the stack parent's branch (so a stacked session diffs against
     /// its parent, not main), else the project's main branch. Sessions that
     /// already carry `base_branch` are left untouched.
-    fn backfill_base_branch(&mut self) {
+    pub(crate) fn backfill_base_branch(&mut self) {
         let mut assignments: Vec<(SessionId, String)> = Vec::new();
         for project in self.projects.values() {
             let project_sessions: Vec<&WorktreeSession> = project
