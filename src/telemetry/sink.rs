@@ -53,7 +53,7 @@ impl EventSink for HttpSink {
             return;
         }
         let body = Value::Array(events.into_iter().map(Value::Object).collect());
-        let result = self
+        let request = self
             .http
             .post(&self.endpoint)
             .header(
@@ -61,12 +61,16 @@ impl EventSink for HttpSink {
                 format!("Basic {}", self.basic_credential),
             )
             .json(&body)
-            .send()
-            .await;
-        match result {
-            Ok(resp) if resp.status().is_success() => {}
-            Ok(resp) => debug!("telemetry ingest returned {}", resp.status()),
-            Err(e) => debug!("telemetry ingest failed: {e}"),
+            .send();
+        // Backstop the request with an explicit timeout. The client is built
+        // with `REQUEST_TIMEOUT`, but on a builder failure `new` falls back to a
+        // timeout-less default client — this guarantees a bound regardless, so a
+        // black-holed connection can never hang the single-threaded flush task.
+        match tokio::time::timeout(Self::REQUEST_TIMEOUT, request).await {
+            Ok(Ok(resp)) if resp.status().is_success() => {}
+            Ok(Ok(resp)) => debug!("telemetry ingest returned {}", resp.status()),
+            Ok(Err(e)) => debug!("telemetry ingest failed: {e}"),
+            Err(_) => debug!("telemetry ingest timed out"),
         }
     }
 }

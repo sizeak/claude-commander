@@ -719,10 +719,15 @@ fn init_telemetry(
     telemetry
 }
 
-/// Return the persisted anonymous install id, generating + persisting one in the
-/// background if absent. The in-memory read is uncontended at startup; on the
-/// rare miss we use a fresh id this session and the background `mutate` persists
-/// the same value for next launch.
+/// Return the anonymous install id, generating one if none is stored yet.
+///
+/// The in-memory read is uncontended at startup, so it normally reflects disk:
+/// when genuinely absent, the fresh id is persisted (via the flocked
+/// `set_install_id_if_absent`) and reused on every future launch. In the rare
+/// case the read missed because the lock was momentarily held — i.e. an id
+/// already exists — the persist leaves that existing id untouched, so this one
+/// session uses a throwaway id that won't match the persisted one. That's an
+/// acceptable edge case; we never clobber an existing id.
 fn ensure_install_id(store: &Arc<StateStore>) -> String {
     if let Some(id) = store.try_install_id() {
         return id;

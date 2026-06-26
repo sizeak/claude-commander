@@ -28,9 +28,10 @@ pub struct EnvFingerprint {
 }
 
 impl EnvFingerprint {
-    /// Collect the fingerprint from the live environment. `color_mode` is passed
-    /// in by the caller (the TUI already detects it; non-TUI frontends pass
-    /// `None`).
+    /// Collect the fingerprint from the live environment. `color_mode` is
+    /// supplied by the caller when available (the service detects it via
+    /// `ColorMode::detect`); pass `None` when no terminal colour capability is
+    /// known.
     pub fn collect(color_mode: Option<&str>) -> Self {
         let terminal = std::env::var("TERM_PROGRAM")
             .ok()
