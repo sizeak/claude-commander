@@ -572,7 +572,11 @@ impl SessionManager {
             }
         }
 
-        // Remove from state
+        // Plan any PR-base retargets for stacked children *before* removal,
+        // while the deleted session still resolves the stack topology.
+        let pr_retargets = self.store.read().await.pr_retargets_for_delete(session_id);
+
+        // Remove from state (also re-points stacked children onto the parent).
         let sid = *session_id;
         self.store
             .mutate(move |state| {
@@ -580,8 +584,21 @@ impl SessionManager {
             })
             .await?;
 
+        // Durably retarget child PRs on GitHub (best-effort, non-fatal).
+        Self::retarget_child_prs(pr_retargets).await;
+
         info!("Deleted session {}", session_id);
         Ok(())
+    }
+
+    /// Run the planned GitHub PR-base edits for a stack deletion. Best-effort:
+    /// each `gh pr edit` failure is logged and skipped — the local metadata
+    /// retarget already keeps the UI correct. Shared by the CLI and TUI delete
+    /// paths.
+    pub async fn retarget_child_prs(retargets: Vec<crate::config::PrBaseRetarget>) {
+        for r in retargets {
+            crate::git::retarget_pr_base(&r.repo_path, r.pr_number, &r.new_base_branch).await;
+        }
     }
 }
 

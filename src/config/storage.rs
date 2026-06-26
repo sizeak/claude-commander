@@ -13,6 +13,20 @@ use crate::session::{Project, ProjectId, SessionId, WorktreeSession};
 use super::Config;
 use super::view_mode::ViewMode;
 
+/// A pending GitHub PR base-branch retarget, produced when deleting a session
+/// that has PR-stacked children. The async delete path runs `gh pr edit` for
+/// each so the retarget survives the next PR sync.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrBaseRetarget {
+    /// PR number of the child whose base branch should change.
+    pub pr_number: u32,
+    /// Repository the `gh pr edit` runs against.
+    pub repo_path: PathBuf,
+    /// The branch the PR should now target (the deleted session's parent, or
+    /// the project's main branch when the deleted session was the stack root).
+    pub new_base_branch: String,
+}
+
 /// Persistent application state
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppState {
@@ -211,6 +225,147 @@ impl AppState {
         }
     }
 
+    /// Compute where a deleted session's *direct* children should be
+    /// retargeted: the deleted session's own parent (and that parent's branch),
+    /// or `None` + the project's main branch when the deleted session was the
+    /// stack root.
+    fn retarget_destination(
+        deleted: &WorktreeSession,
+        project_sessions: &[&WorktreeSession],
+        main_branch: &str,
+    ) -> (Option<SessionId>, String) {
+        let new_parent_id = crate::session::resolve_stack_parent(deleted, project_sessions);
+        let new_base_branch = new_parent_id
+            .and_then(|pid| project_sessions.iter().find(|s| s.id == pid))
+            .map(|p| p.branch.clone())
+            .unwrap_or_else(|| main_branch.to_string());
+        (new_parent_id, new_base_branch)
+    }
+
+    /// When a session is deleted, re-point its *direct* stacked children onto
+    /// the deleted session's own parent (or the project's main branch when it
+    /// was the stack root), so they stay stacked instead of orphaning into
+    /// top-level roots.
+    ///
+    /// Metadata-only: updates each child's `stack_parent_session_id`,
+    /// `base_branch`, and — for children stacked via a live PR pointing at the
+    /// deleted branch — the local `pr_base_branch` mirror so the tree re-stacks
+    /// immediately. The durable GitHub PR edit is handled separately by the
+    /// async delete path via [`AppState::pr_retargets_for_delete`].
+    fn retarget_stack_children(&mut self, deleted_id: &SessionId) {
+        let (project_id, deleted_branch) = match self.sessions.get(deleted_id) {
+            Some(s) => (s.project_id, s.branch.clone()),
+            None => return,
+        };
+        let main_branch = match self.projects.get(&project_id) {
+            Some(p) => p.main_branch.clone(),
+            None => return,
+        };
+
+        let (new_parent_id, new_base_branch, child_ids) = {
+            let project_sessions: Vec<&WorktreeSession> = self
+                .sessions
+                .values()
+                .filter(|s| s.project_id == project_id)
+                .collect();
+            let Some(deleted) = project_sessions.iter().find(|s| s.id == *deleted_id) else {
+                return;
+            };
+            let (new_parent_id, new_base_branch) =
+                Self::retarget_destination(deleted, &project_sessions, &main_branch);
+            let child_ids: Vec<SessionId> = project_sessions
+                .iter()
+                .filter(|s| {
+                    crate::session::resolve_stack_parent(s, &project_sessions) == Some(*deleted_id)
+                })
+                .map(|s| s.id)
+                .collect();
+            (new_parent_id, new_base_branch, child_ids)
+        };
+
+        for child_id in child_ids {
+            if let Some(child) = self.sessions.get_mut(&child_id) {
+                child.stack_parent_session_id = new_parent_id;
+                child.base_branch = Some(new_base_branch.clone());
+                // A child stacked via a live PR resolves its parent by branch
+                // name, ignoring the local hint — mirror the new base locally so
+                // it re-stacks before the next PR sync overwrites it.
+                if child.pr_base_branch.as_deref() == Some(deleted_branch.as_str()) {
+                    child.pr_base_branch = Some(new_base_branch.clone());
+                }
+            }
+        }
+    }
+
+    /// Preview the stack-retarget that deleting `session_id` would trigger:
+    /// `(number of direct stacked children, branch they'd be retargeted onto)`.
+    ///
+    /// Returns `None` when the session has no direct stacked children, so the
+    /// delete confirmation only mentions retargeting when it actually applies.
+    pub fn stack_retarget_preview(&self, session_id: &SessionId) -> Option<(usize, String)> {
+        let deleted = self.sessions.get(session_id)?;
+        let project_id = deleted.project_id;
+        let main_branch = self.projects.get(&project_id)?.main_branch.clone();
+        let project_sessions: Vec<&WorktreeSession> = self
+            .sessions
+            .values()
+            .filter(|s| s.project_id == project_id)
+            .collect();
+        let count = project_sessions
+            .iter()
+            .filter(|s| {
+                crate::session::resolve_stack_parent(s, &project_sessions) == Some(*session_id)
+            })
+            .count();
+        if count == 0 {
+            return None;
+        }
+        let (_, new_base) = Self::retarget_destination(deleted, &project_sessions, &main_branch);
+        Some((count, new_base))
+    }
+
+    /// Plan the durable GitHub PR-base edits needed when deleting `deleted_id`.
+    ///
+    /// For each *direct* child that is stacked via a live PR (its
+    /// `pr_base_branch` matches the deleted session's branch) and has a known PR
+    /// number, returns a [`PrBaseRetarget`] pointing the PR at the deleted
+    /// session's new base branch. Computed from the current snapshot *before*
+    /// removal so the async delete path can run `gh pr edit` afterwards.
+    pub fn pr_retargets_for_delete(&self, deleted_id: &SessionId) -> Vec<PrBaseRetarget> {
+        let Some(deleted) = self.sessions.get(deleted_id) else {
+            return Vec::new();
+        };
+        let project_id = deleted.project_id;
+        let deleted_branch = deleted.branch.clone();
+        let Some(project) = self.projects.get(&project_id) else {
+            return Vec::new();
+        };
+        let repo_path = project.repo_path.clone();
+
+        let project_sessions: Vec<&WorktreeSession> = self
+            .sessions
+            .values()
+            .filter(|s| s.project_id == project_id)
+            .collect();
+        let (_, new_base_branch) =
+            Self::retarget_destination(deleted, &project_sessions, &project.main_branch);
+
+        project_sessions
+            .iter()
+            .filter_map(|s| {
+                let stacked_via_pr = s.pr_base_branch.as_deref() == Some(deleted_branch.as_str());
+                match (stacked_via_pr, s.pr_number) {
+                    (true, Some(pr_number)) => Some(PrBaseRetarget {
+                        pr_number,
+                        repo_path: repo_path.clone(),
+                        new_base_branch: new_base_branch.clone(),
+                    }),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
     /// Save state to the remembered location (or default if none)
     pub fn save(&self) -> Result<()> {
         let path = match &self.state_path {
@@ -280,6 +435,9 @@ impl AppState {
 
     /// Remove a session
     pub fn remove_session(&mut self, session_id: &SessionId) -> Option<WorktreeSession> {
+        // Re-point any stacked children onto this session's parent before it
+        // disappears, so they don't orphan into top-level roots.
+        self.retarget_stack_children(session_id);
         if let Some(session) = self.sessions.remove(session_id) {
             // Remove from parent project
             if let Some(project) = self.projects.get_mut(&session.project_id) {
@@ -471,6 +629,192 @@ mod tests {
             Some("develop"),
             "existing base_branch must be preserved"
         );
+    }
+
+    /// Build `count` sessions linked into a chain via the local
+    /// `stack_parent_session_id` hint: returned[0] is the root, each subsequent
+    /// session is stacked on the previous one. `base_branch` is seeded to mirror
+    /// what creation would set (parent's branch / main for the root).
+    fn build_local_stack(
+        state: &mut AppState,
+        project_id: ProjectId,
+        branches: &[&str],
+    ) -> Vec<SessionId> {
+        let main_branch = state.get_project(&project_id).unwrap().main_branch.clone();
+        let mut ids = Vec::new();
+        for (i, branch) in branches.iter().enumerate() {
+            let mut s = WorktreeSession::new(
+                project_id,
+                format!("S{i}"),
+                *branch,
+                PathBuf::from(format!("/tmp/{branch}")),
+                "claude",
+            );
+            if i == 0 {
+                s.base_branch = Some(main_branch.clone());
+            } else {
+                s.stack_parent_session_id = Some(ids[i - 1]);
+                s.base_branch = Some(branches[i - 1].to_string());
+            }
+            ids.push(s.id);
+            state.add_session(s);
+        }
+        ids
+    }
+
+    #[test]
+    fn deleting_mid_stack_retargets_child_onto_grandparent() {
+        // A <- B <- C <- D; deleting C should re-point D onto B (not orphan it).
+        let mut state = AppState::new();
+        let project = create_test_project(); // main_branch = "main"
+        let project_id = project.id;
+        state.add_project(project);
+        let ids = build_local_stack(&mut state, project_id, &["a", "b", "c", "d"]);
+        let (b, c, d) = (ids[1], ids[2], ids[3]);
+
+        state.remove_session(&c);
+
+        let dsn = state.get_session(&d).unwrap();
+        assert_eq!(
+            dsn.stack_parent_session_id,
+            Some(b),
+            "D should re-stack onto B"
+        );
+        assert_eq!(
+            dsn.base_branch.as_deref(),
+            Some("b"),
+            "D should now diff against B's branch"
+        );
+    }
+
+    #[test]
+    fn deleting_root_drops_child_to_top_level_against_main() {
+        // A <- B; deleting the root A leaves B unstacked against main.
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let project_id = project.id;
+        state.add_project(project);
+        let ids = build_local_stack(&mut state, project_id, &["a", "b"]);
+        let (a, b) = (ids[0], ids[1]);
+
+        state.remove_session(&a);
+
+        let bsn = state.get_session(&b).unwrap();
+        assert_eq!(bsn.stack_parent_session_id, None, "B should become a root");
+        assert_eq!(
+            bsn.base_branch.as_deref(),
+            Some("main"),
+            "B should diff against main"
+        );
+    }
+
+    #[test]
+    fn deleting_mid_stack_retargets_all_direct_children_but_not_grandchildren() {
+        // A <- B <- C, with C having two direct children D and E, and E having a
+        // grandchild F. Deleting C retargets D and E onto B; F stays on E.
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let project_id = project.id;
+        state.add_project(project);
+        let ids = build_local_stack(&mut state, project_id, &["a", "b", "c"]);
+        let (b, c) = (ids[1], ids[2]);
+
+        // Second direct child of C.
+        let mut e = WorktreeSession::new(project_id, "E", "e", PathBuf::from("/tmp/e"), "claude");
+        e.stack_parent_session_id = Some(c);
+        e.base_branch = Some("c".to_string());
+        let e_id = e.id;
+        state.add_session(e);
+        // First direct child of C.
+        let mut d = WorktreeSession::new(project_id, "D", "d", PathBuf::from("/tmp/d"), "claude");
+        d.stack_parent_session_id = Some(c);
+        d.base_branch = Some("c".to_string());
+        let d_id = d.id;
+        state.add_session(d);
+        // Grandchild stacked on E.
+        let mut f = WorktreeSession::new(project_id, "F", "f", PathBuf::from("/tmp/f"), "claude");
+        f.stack_parent_session_id = Some(e_id);
+        f.base_branch = Some("e".to_string());
+        let f_id = f.id;
+        state.add_session(f);
+
+        state.remove_session(&c);
+
+        for child in [d_id, e_id] {
+            let s = state.get_session(&child).unwrap();
+            assert_eq!(
+                s.stack_parent_session_id,
+                Some(b),
+                "direct child re-stacks onto B"
+            );
+            assert_eq!(s.base_branch.as_deref(), Some("b"));
+        }
+        let fsn = state.get_session(&f_id).unwrap();
+        assert_eq!(
+            fsn.stack_parent_session_id,
+            Some(e_id),
+            "grandchild untouched"
+        );
+        assert_eq!(fsn.base_branch.as_deref(), Some("e"));
+    }
+
+    #[test]
+    fn deleting_mid_stack_rewrites_pr_stacked_child_base_locally() {
+        // D is stacked on C via a live PR (pr_base_branch == C.branch), not the
+        // local hint. Deleting C must mirror the new base onto pr_base_branch so
+        // the tree re-stacks immediately.
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let project_id = project.id;
+        state.add_project(project);
+        let ids = build_local_stack(&mut state, project_id, &["a", "b", "c"]);
+        let (b, c) = (ids[1], ids[2]);
+
+        let mut d = WorktreeSession::new(project_id, "D", "d", PathBuf::from("/tmp/d"), "claude");
+        d.pr_base_branch = Some("c".to_string());
+        d.pr_number = Some(42);
+        d.base_branch = Some("c".to_string());
+        let d_id = d.id;
+        state.add_session(d);
+
+        // Plan the PR edits before removal, then remove.
+        let plan = state.pr_retargets_for_delete(&c);
+        state.remove_session(&c);
+
+        let dsn = state.get_session(&d_id).unwrap();
+        assert_eq!(
+            dsn.pr_base_branch.as_deref(),
+            Some("b"),
+            "PR-stacked child should now point at B's branch"
+        );
+        assert_eq!(dsn.stack_parent_session_id, Some(b));
+        assert_eq!(
+            plan,
+            vec![PrBaseRetarget {
+                pr_number: 42,
+                repo_path: state.get_project(&project_id).unwrap().repo_path.clone(),
+                new_base_branch: "b".to_string(),
+            }],
+            "should plan a gh pr edit retargeting PR #42 onto B"
+        );
+    }
+
+    #[test]
+    fn deleting_unstacked_session_is_a_noop_for_others() {
+        // Lone session with no children: deletion touches nothing else.
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let project_id = project.id;
+        state.add_project(project);
+        let ids = build_local_stack(&mut state, project_id, &["a", "b"]);
+        let (a, b) = (ids[0], ids[1]);
+
+        // Delete the leaf B (no children) — A is unaffected.
+        state.remove_session(&b);
+        let asn = state.get_session(&a).unwrap();
+        assert_eq!(asn.stack_parent_session_id, None);
+        assert_eq!(asn.base_branch.as_deref(), Some("main"));
+        assert!(state.pr_retargets_for_delete(&a).is_empty());
     }
 
     #[test]
