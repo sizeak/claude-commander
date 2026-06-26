@@ -187,6 +187,40 @@ pub async fn is_gh_available() -> bool {
     }
 }
 
+/// Retarget an existing PR's base branch via `gh pr edit <number> --base <branch>`.
+///
+/// Used when a mid-stack session is deleted: PR-stacked children must have their
+/// PR base re-pointed at the deleted session's parent so the retarget survives
+/// the next PR sync. Returns `true` on success; failures (gh missing, auth,
+/// network) are logged and non-fatal — the local metadata retarget already keeps
+/// the UI correct.
+pub async fn retarget_pr_base(repo_path: &Path, pr_number: u32, new_base: &str) -> bool {
+    let output = match Command::new("gh")
+        .args(["pr", "edit", &pr_number.to_string(), "--base", new_base])
+        .current_dir(repo_path)
+        .output()
+        .await
+    {
+        Ok(output) => output,
+        Err(e) => {
+            debug!("gh pr edit #{} spawn failed: {}", pr_number, e);
+            return false;
+        }
+    };
+    if output.status.success() {
+        debug!("retargeted PR #{} base to {}", pr_number, new_base);
+        true
+    } else {
+        tracing::warn!(
+            "gh pr edit #{} --base {} failed: {}",
+            pr_number,
+            new_base,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        false
+    }
+}
+
 /// Check whether `branch` has a PR (any state) in the repo at `repo_path`.
 ///
 /// Returns a three-way result: `Found` when a PR matched, `NotFound` when gh

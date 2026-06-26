@@ -6,19 +6,38 @@ use super::*;
 
 #[test]
 fn test_delete_confirm_message_names_session() {
-    let message = delete_confirm_message(Some("fix-login-bug"));
+    let message = delete_confirm_message(Some("fix-login-bug"), None);
     assert!(
         message.contains("\"fix-login-bug\""),
         "message should name the session: {message}"
     );
     assert!(message.contains("kill the tmux session"));
+    assert!(
+        !message.contains("retargeted"),
+        "no retarget note when there are no stacked children: {message}"
+    );
 }
 
 #[test]
 fn test_delete_confirm_message_falls_back_without_title() {
-    let message = delete_confirm_message(None);
+    let message = delete_confirm_message(None, None);
     assert!(message.contains("this session"));
     assert!(!message.contains('"'));
+}
+
+#[test]
+fn test_delete_confirm_message_notes_stacked_child_retarget() {
+    // Singular and plural phrasing, naming the branch children move onto.
+    let one = delete_confirm_message(Some("c"), Some((1, "b")));
+    assert!(
+        one.contains("1 stacked session will be retargeted onto \"b\"."),
+        "singular retarget note: {one}"
+    );
+    let many = delete_confirm_message(Some("c"), Some((3, "main")));
+    assert!(
+        many.contains("3 stacked sessions will be retargeted onto \"main\"."),
+        "plural retarget note: {many}"
+    );
 }
 
 #[test]

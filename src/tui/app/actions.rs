@@ -37,14 +37,24 @@ pub(super) fn adjust_list_scroll(selected_idx: usize, scroll: usize, visible_row
 /// Confirmation prompt for deleting a session. Names the session by its
 /// title when known so the user can tell what they're about to destroy;
 /// falls back to a generic phrasing if the title can't be resolved.
-pub(super) fn delete_confirm_message(title: Option<&str>) -> String {
+pub(super) fn delete_confirm_message(
+    title: Option<&str>,
+    retarget: Option<(usize, &str)>,
+) -> String {
     let subject = match title {
         Some(title) => format!("\"{title}\""),
         None => "this session".to_string(),
     };
-    format!(
+    let mut message = format!(
         "Are you sure you want to delete {subject}?\nThis will kill the tmux session and remove the worktree."
-    )
+    );
+    if let Some((count, new_base)) = retarget {
+        let plural = if count == 1 { "session" } else { "sessions" };
+        message.push_str(&format!(
+            "\n{count} stacked {plural} will be retargeted onto \"{new_base}\"."
+        ));
+    }
+    message
 }
 
 /// One mouse-wheel step over a list selection: move a single row, clamping
@@ -1208,13 +1218,17 @@ impl App {
             return;
         }
         if let Some(session_id) = self.ui_state.selected_session_id {
-            let title = {
+            let (title, retarget) = {
                 let state = self.service.store().read().await;
-                state.get_session(&session_id).map(|s| s.title.clone())
+                let title = state.get_session(&session_id).map(|s| s.title.clone());
+                (title, state.stack_retarget_preview(&session_id))
             };
             self.ui_state.modal = Modal::Confirm {
                 title: "Delete Session".to_string(),
-                message: delete_confirm_message(title.as_deref()),
+                message: delete_confirm_message(
+                    title.as_deref(),
+                    retarget.as_ref().map(|(n, b)| (*n, b.as_str())),
+                ),
                 on_confirm: ConfirmAction::DeleteSession { session_id },
             };
         }
@@ -1277,9 +1291,9 @@ impl App {
         &mut self,
         session_id: SessionId,
     ) -> crate::error::Result<()> {
-        let cleanup_data = {
+        let (cleanup_data, pr_retargets) = {
             let state = self.service.store().read().await;
-            state.get_session(&session_id).map(|s| {
+            let cleanup_data = state.get_session(&session_id).map(|s| {
                 let repo_path = state
                     .get_project(&s.project_id)
                     .map(|p| p.repo_path.clone());
@@ -1289,7 +1303,10 @@ impl App {
                     s.worktree_path.clone(),
                     repo_path,
                 )
-            })
+            });
+            // Plan PR-base retargets for stacked children before removal, while
+            // the deleted session still resolves the stack topology.
+            (cleanup_data, state.pr_retargets_for_delete(&session_id))
         };
 
         self.service
@@ -1298,6 +1315,13 @@ impl App {
                 state.remove_session(&session_id);
             })
             .await?;
+
+        // Durably retarget child PRs on GitHub off the UI thread (best-effort).
+        if !pr_retargets.is_empty() {
+            tokio::spawn(crate::session::SessionManager::retarget_child_prs(
+                pr_retargets,
+            ));
+        }
 
         if self.ui_state.selected_session_id == Some(session_id) {
             self.ui_state.selected_session_id = None;
