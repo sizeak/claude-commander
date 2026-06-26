@@ -310,11 +310,21 @@ impl SessionManager {
         let base_commit =
             crate::git::managed_base_commit(&wt_path, &head, Some(&main_branch), branch_preexisted)
                 .await;
+        // The branch this session forked from, recorded so the review diff can
+        // resolve its base against that branch's *live* tip rather than the
+        // frozen `base_commit`: a stack parent's branch, an explicit
+        // `--base-branch`, or the project's main branch.
+        let base_branch = stack_parent_branch
+            .as_deref()
+            .or(base_branch.as_deref())
+            .unwrap_or(&main_branch)
+            .to_string();
         self.store
             .mutate(move |state| {
                 if let Some(session) = state.get_session_mut(&sid) {
                     session.worktree_path = wt_path;
                     session.base_commit = Some(base_commit);
+                    session.base_branch = Some(base_branch);
                     session.set_status(SessionStatus::Running);
                 }
             })

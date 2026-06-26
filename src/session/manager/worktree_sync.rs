@@ -110,6 +110,9 @@ impl SessionManager {
             session.base_commit = Some(
                 crate::git::import_base_commit(&wt.path, &wt.head, default_branch.as_deref()).await,
             );
+            // An imported worktree's review base is the project's default branch
+            // (its fork point), resolved live so the diff tracks that branch.
+            session.base_branch = default_branch.clone();
 
             info!(
                 "Importing unmanaged worktree as session: branch={}, path={:?}",
