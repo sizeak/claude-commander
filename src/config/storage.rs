@@ -27,6 +27,27 @@ pub struct PrBaseRetarget {
     pub new_base_branch: String,
 }
 
+/// The computed plan for retargeting a deleted session's *direct* stacked
+/// children. Built once by [`AppState::plan_stack_retarget`] and shared by the
+/// delete-confirm preview, the durable PR-edit planner, and the local metadata
+/// retarget, so all three agree on the destination and the affected child set
+/// rather than recomputing it three ways.
+struct StackRetargetPlan {
+    /// New stack parent for each direct child — `None` when the deleted session
+    /// was the stack root, so children become top-level roots.
+    new_parent_id: Option<SessionId>,
+    /// Branch the children should now be based on: the new parent's branch, or
+    /// the project's main branch when the deleted session was the stack root.
+    new_base_branch: String,
+    /// The deleted session's branch, used to spot children stacked via a live
+    /// PR pointing at it.
+    deleted_branch: String,
+    /// Repository the children's `gh pr edit` retargets run against.
+    repo_path: PathBuf,
+    /// The deleted session's direct stacked children.
+    child_ids: Vec<SessionId>,
+}
+
 /// Persistent application state
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppState {
@@ -225,76 +246,92 @@ impl AppState {
         }
     }
 
-    /// Compute where a deleted session's *direct* children should be
-    /// retargeted: the deleted session's own parent (and that parent's branch),
-    /// or `None` + the project's main branch when the deleted session was the
-    /// stack root.
-    fn retarget_destination(
-        deleted: &WorktreeSession,
-        project_sessions: &[&WorktreeSession],
-        main_branch: &str,
-    ) -> (Option<SessionId>, String) {
-        let new_parent_id = crate::session::resolve_stack_parent(deleted, project_sessions);
+    /// Compute the single source-of-truth plan for retargeting `deleted_id`'s
+    /// *direct* stacked children: where they move (the deleted session's own
+    /// parent and that parent's branch, or `None` + the project's main branch
+    /// when the deleted session was the stack root) and which sessions are
+    /// affected. Returns `None` only when the session or its project is missing;
+    /// an empty `child_ids` is a valid plan (nothing to retarget).
+    ///
+    /// The preview, the PR-edit planner, and the local metadata retarget all
+    /// build on this so they can never disagree on the destination or the set
+    /// of children.
+    fn plan_stack_retarget(&self, deleted_id: &SessionId) -> Option<StackRetargetPlan> {
+        let project_id = self.sessions.get(deleted_id)?.project_id;
+        let (main_branch, repo_path) = {
+            let project = self.projects.get(&project_id)?;
+            (project.main_branch.clone(), project.repo_path.clone())
+        };
+        let project_sessions = self.get_project_sessions(&project_id);
+        let deleted = project_sessions.iter().find(|s| s.id == *deleted_id)?;
+        let deleted_branch = deleted.branch.clone();
+
+        let new_parent_id = crate::session::resolve_stack_parent(deleted, &project_sessions);
         let new_base_branch = new_parent_id
             .and_then(|pid| project_sessions.iter().find(|s| s.id == pid))
             .map(|p| p.branch.clone())
-            .unwrap_or_else(|| main_branch.to_string());
-        (new_parent_id, new_base_branch)
+            .unwrap_or(main_branch);
+        let child_ids = project_sessions
+            .iter()
+            .filter(|s| {
+                crate::session::resolve_stack_parent(s, &project_sessions) == Some(*deleted_id)
+            })
+            .map(|s| s.id)
+            .collect();
+
+        Some(StackRetargetPlan {
+            new_parent_id,
+            new_base_branch,
+            deleted_branch,
+            repo_path,
+            child_ids,
+        })
     }
 
-    /// When a session is deleted, re-point its *direct* stacked children onto
-    /// the deleted session's own parent (or the project's main branch when it
-    /// was the stack root), so they stay stacked instead of orphaning into
-    /// top-level roots.
+    /// Apply a precomputed retarget plan to the deleted session's *direct*
+    /// children: re-point each onto the new parent/base so they stay stacked
+    /// instead of orphaning into top-level roots.
     ///
     /// Metadata-only: updates each child's `stack_parent_session_id`,
     /// `base_branch`, and — for children stacked via a live PR pointing at the
     /// deleted branch — the local `pr_base_branch` mirror so the tree re-stacks
-    /// immediately. The durable GitHub PR edit is handled separately by the
-    /// async delete path via [`AppState::pr_retargets_for_delete`].
-    fn retarget_stack_children(&mut self, deleted_id: &SessionId) {
-        let (project_id, deleted_branch) = match self.sessions.get(deleted_id) {
-            Some(s) => (s.project_id, s.branch.clone()),
-            None => return,
-        };
-        let main_branch = match self.projects.get(&project_id) {
-            Some(p) => p.main_branch.clone(),
-            None => return,
-        };
-
-        let (new_parent_id, new_base_branch, child_ids) = {
-            let project_sessions: Vec<&WorktreeSession> = self
-                .sessions
-                .values()
-                .filter(|s| s.project_id == project_id)
-                .collect();
-            let Some(deleted) = project_sessions.iter().find(|s| s.id == *deleted_id) else {
-                return;
-            };
-            let (new_parent_id, new_base_branch) =
-                Self::retarget_destination(deleted, &project_sessions, &main_branch);
-            let child_ids: Vec<SessionId> = project_sessions
-                .iter()
-                .filter(|s| {
-                    crate::session::resolve_stack_parent(s, &project_sessions) == Some(*deleted_id)
-                })
-                .map(|s| s.id)
-                .collect();
-            (new_parent_id, new_base_branch, child_ids)
-        };
-
-        for child_id in child_ids {
-            if let Some(child) = self.sessions.get_mut(&child_id) {
-                child.stack_parent_session_id = new_parent_id;
-                child.base_branch = Some(new_base_branch.clone());
+    /// immediately. The durable GitHub PR edit is handled separately via
+    /// [`AppState::pr_retargets_from_plan`].
+    fn apply_stack_retarget(&mut self, plan: &StackRetargetPlan) {
+        for child_id in &plan.child_ids {
+            if let Some(child) = self.sessions.get_mut(child_id) {
+                child.stack_parent_session_id = plan.new_parent_id;
+                child.base_branch = Some(plan.new_base_branch.clone());
                 // A child stacked via a live PR resolves its parent by branch
                 // name, ignoring the local hint — mirror the new base locally so
                 // it re-stacks before the next PR sync overwrites it.
-                if child.pr_base_branch.as_deref() == Some(deleted_branch.as_str()) {
-                    child.pr_base_branch = Some(new_base_branch.clone());
+                if child.pr_base_branch.as_deref() == Some(plan.deleted_branch.as_str()) {
+                    child.pr_base_branch = Some(plan.new_base_branch.clone());
                 }
             }
         }
+    }
+
+    /// Durable GitHub PR-base edits implied by a plan: for each *direct* child
+    /// stacked via a live PR (its `pr_base_branch` matches the deleted branch)
+    /// with a known PR number, a [`PrBaseRetarget`] pointing the PR at the new
+    /// base branch.
+    ///
+    /// Must be read from the *pre-retarget* child state — call before
+    /// [`AppState::apply_stack_retarget`] rewrites `pr_base_branch`.
+    fn pr_retargets_from_plan(&self, plan: &StackRetargetPlan) -> Vec<PrBaseRetarget> {
+        plan.child_ids
+            .iter()
+            .filter_map(|id| self.sessions.get(id))
+            .filter(|s| s.pr_base_branch.as_deref() == Some(plan.deleted_branch.as_str()))
+            .filter_map(|s| {
+                s.pr_number.map(|pr_number| PrBaseRetarget {
+                    pr_number,
+                    repo_path: plan.repo_path.clone(),
+                    new_base_branch: plan.new_base_branch.clone(),
+                })
+            })
+            .collect()
     }
 
     /// Preview the stack-retarget that deleting `session_id` would trigger:
@@ -303,67 +340,20 @@ impl AppState {
     /// Returns `None` when the session has no direct stacked children, so the
     /// delete confirmation only mentions retargeting when it actually applies.
     pub fn stack_retarget_preview(&self, session_id: &SessionId) -> Option<(usize, String)> {
-        let deleted = self.sessions.get(session_id)?;
-        let project_id = deleted.project_id;
-        let main_branch = self.projects.get(&project_id)?.main_branch.clone();
-        let project_sessions: Vec<&WorktreeSession> = self
-            .sessions
-            .values()
-            .filter(|s| s.project_id == project_id)
-            .collect();
-        let count = project_sessions
-            .iter()
-            .filter(|s| {
-                crate::session::resolve_stack_parent(s, &project_sessions) == Some(*session_id)
-            })
-            .count();
-        if count == 0 {
+        let plan = self.plan_stack_retarget(session_id)?;
+        if plan.child_ids.is_empty() {
             return None;
         }
-        let (_, new_base) = Self::retarget_destination(deleted, &project_sessions, &main_branch);
-        Some((count, new_base))
+        Some((plan.child_ids.len(), plan.new_base_branch))
     }
 
-    /// Plan the durable GitHub PR-base edits needed when deleting `deleted_id`.
-    ///
-    /// For each *direct* child that is stacked via a live PR (its
-    /// `pr_base_branch` matches the deleted session's branch) and has a known PR
-    /// number, returns a [`PrBaseRetarget`] pointing the PR at the deleted
-    /// session's new base branch. Computed from the current snapshot *before*
-    /// removal so the async delete path can run `gh pr edit` afterwards.
+    /// Plan the durable GitHub PR-base edits needed when deleting `deleted_id`,
+    /// computed from the current snapshot *before* removal so the async delete
+    /// path can run `gh pr edit` afterwards. See [`AppState::pr_retargets_from_plan`].
     pub fn pr_retargets_for_delete(&self, deleted_id: &SessionId) -> Vec<PrBaseRetarget> {
-        let Some(deleted) = self.sessions.get(deleted_id) else {
-            return Vec::new();
-        };
-        let project_id = deleted.project_id;
-        let deleted_branch = deleted.branch.clone();
-        let Some(project) = self.projects.get(&project_id) else {
-            return Vec::new();
-        };
-        let repo_path = project.repo_path.clone();
-
-        let project_sessions: Vec<&WorktreeSession> = self
-            .sessions
-            .values()
-            .filter(|s| s.project_id == project_id)
-            .collect();
-        let (_, new_base_branch) =
-            Self::retarget_destination(deleted, &project_sessions, &project.main_branch);
-
-        project_sessions
-            .iter()
-            .filter_map(|s| {
-                let stacked_via_pr = s.pr_base_branch.as_deref() == Some(deleted_branch.as_str());
-                match (stacked_via_pr, s.pr_number) {
-                    (true, Some(pr_number)) => Some(PrBaseRetarget {
-                        pr_number,
-                        repo_path: repo_path.clone(),
-                        new_base_branch: new_base_branch.clone(),
-                    }),
-                    _ => None,
-                }
-            })
-            .collect()
+        self.plan_stack_retarget(deleted_id)
+            .map(|plan| self.pr_retargets_from_plan(&plan))
+            .unwrap_or_default()
     }
 
     /// Save state to the remembered location (or default if none)
@@ -433,11 +423,13 @@ impl AppState {
         }
     }
 
-    /// Remove a session
+    /// Remove a session. Pure removal: drops the session and unlinks it from its
+    /// project, touching nothing else. Crash-recovery cleanup of half-created
+    /// sessions uses this directly so it never rewrites surviving siblings.
+    ///
+    /// A user-initiated delete should call [`AppState::remove_session_retargeting_children`]
+    /// instead, which also re-points the deleted session's stacked children.
     pub fn remove_session(&mut self, session_id: &SessionId) -> Option<WorktreeSession> {
-        // Re-point any stacked children onto this session's parent before it
-        // disappears, so they don't orphan into top-level roots.
-        self.retarget_stack_children(session_id);
         if let Some(session) = self.sessions.remove(session_id) {
             // Remove from parent project
             if let Some(project) = self.projects.get_mut(&session.project_id) {
@@ -447,6 +439,31 @@ impl AppState {
         } else {
             None
         }
+    }
+
+    /// Remove a session as a user-initiated delete: re-point its *direct*
+    /// stacked children onto the deleted session's parent (or the project's main
+    /// branch when it was the stack root), then remove it. Returns the removed
+    /// session together with the durable GitHub PR-base edits the async caller
+    /// must run so the retarget survives the next PR sync.
+    ///
+    /// The local metadata retarget and the removal happen here as one step, and
+    /// the PR-edit plan is handed back, so the two halves of the delete stay
+    /// co-located and can't drift apart. Computing the plan inside the same
+    /// `mutate` closure as the removal also keeps it atomic — there is no
+    /// read-then-remove window for a concurrent task to invalidate.
+    pub fn remove_session_retargeting_children(
+        &mut self,
+        session_id: &SessionId,
+    ) -> (Option<WorktreeSession>, Vec<PrBaseRetarget>) {
+        let Some(plan) = self.plan_stack_retarget(session_id) else {
+            return (self.remove_session(session_id), Vec::new());
+        };
+        // Read the PR-edit plan from the pre-retarget child state, then apply the
+        // local retarget and remove the session.
+        let pr_retargets = self.pr_retargets_from_plan(&plan);
+        self.apply_stack_retarget(&plan);
+        (self.remove_session(session_id), pr_retargets)
     }
 
     /// Get a session by ID
@@ -672,7 +689,7 @@ mod tests {
         let ids = build_local_stack(&mut state, project_id, &["a", "b", "c", "d"]);
         let (b, c, d) = (ids[1], ids[2], ids[3]);
 
-        state.remove_session(&c);
+        state.remove_session_retargeting_children(&c);
 
         let dsn = state.get_session(&d).unwrap();
         assert_eq!(
@@ -697,7 +714,7 @@ mod tests {
         let ids = build_local_stack(&mut state, project_id, &["a", "b"]);
         let (a, b) = (ids[0], ids[1]);
 
-        state.remove_session(&a);
+        state.remove_session_retargeting_children(&a);
 
         let bsn = state.get_session(&b).unwrap();
         assert_eq!(bsn.stack_parent_session_id, None, "B should become a root");
@@ -738,7 +755,7 @@ mod tests {
         let f_id = f.id;
         state.add_session(f);
 
-        state.remove_session(&c);
+        state.remove_session_retargeting_children(&c);
 
         for child in [d_id, e_id] {
             let s = state.get_session(&child).unwrap();
@@ -777,9 +794,9 @@ mod tests {
         let d_id = d.id;
         state.add_session(d);
 
-        // Plan the PR edits before removal, then remove.
-        let plan = state.pr_retargets_for_delete(&c);
-        state.remove_session(&c);
+        // The user-delete path retargets children and hands back the PR-edit
+        // plan in one atomic step.
+        let (_, plan) = state.remove_session_retargeting_children(&c);
 
         let dsn = state.get_session(&d_id).unwrap();
         assert_eq!(
@@ -810,11 +827,39 @@ mod tests {
         let (a, b) = (ids[0], ids[1]);
 
         // Delete the leaf B (no children) — A is unaffected.
-        state.remove_session(&b);
+        state.remove_session_retargeting_children(&b);
         let asn = state.get_session(&a).unwrap();
         assert_eq!(asn.stack_parent_session_id, None);
         assert_eq!(asn.base_branch.as_deref(), Some("main"));
         assert!(state.pr_retargets_for_delete(&a).is_empty());
+    }
+
+    #[test]
+    fn plain_remove_session_does_not_retarget_children() {
+        // The pure removal primitive (used by crash-recovery cleanup of stale
+        // Creating sessions) must NOT rewrite surviving siblings — only the
+        // user-delete path retargets. Deleting B via remove_session leaves C's
+        // stack metadata untouched (C orphans rather than re-stacking onto A).
+        let mut state = AppState::new();
+        let project = create_test_project();
+        let project_id = project.id;
+        state.add_project(project);
+        let ids = build_local_stack(&mut state, project_id, &["a", "b", "c"]);
+        let (b, c) = (ids[1], ids[2]);
+
+        state.remove_session(&b);
+
+        let csn = state.get_session(&c).unwrap();
+        assert_eq!(
+            csn.stack_parent_session_id,
+            Some(b),
+            "pure removal must not re-point C onto A"
+        );
+        assert_eq!(
+            csn.base_branch.as_deref(),
+            Some("b"),
+            "pure removal must not rewrite C's base branch"
+        );
     }
 
     #[test]
