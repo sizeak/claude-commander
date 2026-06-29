@@ -996,20 +996,55 @@ impl DiffReviewState {
         })
     }
 
+    /// Selectable-line index a non-applied comment anchors to in the current
+    /// file: the line whose gutter number equals the end of the comment's
+    /// range, or — when that line is no longer present in the diff (a drifted
+    /// comment whose range fell outside the current hunks) — the file's last
+    /// selectable line. Pinning orphans to the last line keeps them visible
+    /// and deletable instead of silently dropping them. `None` only when the
+    /// file has no selectable lines at all.
+    fn comment_anchor_index(&self, ann: &Comment, lines: &[&DiffLine]) -> Option<usize> {
+        if lines.is_empty() {
+            return None;
+        }
+        let end = ann.line_range.1;
+        let matched = lines.iter().position(|line| {
+            let lineno = match ann.side {
+                CommentSide::New => line.new_lineno,
+                CommentSide::Old => line.old_lineno,
+            };
+            lineno == Some(end)
+        });
+        Some(matched.unwrap_or(lines.len() - 1))
+    }
+
+    /// Whether non-applied comment `ann` is reachable at selectable index
+    /// `idx`: either `idx`'s gutter line falls within the comment's range, or
+    /// `idx` is the comment's drift-fallback anchor line. The fallback only
+    /// fires for the file's last selectable line, so a drifted comment whose
+    /// range left the diff stays selectable (and thus deletable).
+    fn comment_touches_index(&self, ann: &Comment, idx: usize, lines: &[&DiffLine]) -> bool {
+        if let Some(line) = lines.get(idx) {
+            let lineno = match ann.side {
+                CommentSide::New => line.new_lineno,
+                CommentSide::Old => line.old_lineno,
+            };
+            if lineno.is_some_and(|n| ann.line_range.0 <= n && n <= ann.line_range.1) {
+                return true;
+            }
+        }
+        idx + 1 == lines.len() && self.comment_anchor_index(ann, lines) == Some(idx)
+    }
+
     /// Id of a not-yet-applied comment covering the cursor line, if any.
     fn comment_at_cursor(&self) -> Option<uuid::Uuid> {
         let file = self.current_file()?;
-        let line = *self.selectable_lines().get(self.cursor)?;
+        let display = file.display_path();
+        let lines = self.selectable_lines();
         self.comments
             .iter()
-            .filter(|a| a.status != CommentStatus::Applied && a.file == file.display_path())
-            .find(|a| {
-                let lineno = match a.side {
-                    CommentSide::New => line.new_lineno,
-                    CommentSide::Old => line.old_lineno,
-                };
-                lineno.is_some_and(|n| a.line_range.0 <= n && n <= a.line_range.1)
-            })
+            .filter(|a| a.status != CommentStatus::Applied && a.file == display)
+            .find(|a| self.comment_touches_index(a, self.cursor, &lines))
             .map(|a| a.id)
     }
 
@@ -1017,19 +1052,16 @@ impl DiffReviewState {
     /// and whether any such comment is drifted.
     fn comment_marker(&self, idx: usize) -> Option<bool> {
         let file = self.current_file()?;
-        let line = *self.selectable_lines().get(idx)?;
+        let display = file.display_path();
+        let lines = self.selectable_lines();
         let mut drifted = false;
         let mut found = false;
         for a in self
             .comments
             .iter()
-            .filter(|a| a.status != CommentStatus::Applied && a.file == file.display_path())
+            .filter(|a| a.status != CommentStatus::Applied && a.file == display)
         {
-            let lineno = match a.side {
-                CommentSide::New => line.new_lineno,
-                CommentSide::Old => line.old_lineno,
-            };
-            if lineno.is_some_and(|n| a.line_range.0 <= n && n <= a.line_range.1) {
+            if self.comment_touches_index(a, idx, &lines) {
                 found = true;
                 drifted |= a.status == CommentStatus::Drifted;
             }
@@ -1137,16 +1169,8 @@ impl DiffReviewState {
             .iter()
             .filter(|a| a.status != CommentStatus::Applied && a.file == display)
         {
-            let end = ann.line_range.1;
-            for (i, line) in lines.iter().enumerate() {
-                let lineno = match ann.side {
-                    CommentSide::New => line.new_lineno,
-                    CommentSide::Old => line.old_lineno,
-                };
-                if lineno == Some(end) {
-                    map.entry(i).or_default().push(ann);
-                    break;
-                }
+            if let Some(idx) = self.comment_anchor_index(ann, &lines) {
+                map.entry(idx).or_default().push(ann);
             }
         }
         map
@@ -3687,6 +3711,32 @@ diff --git a/c.rs b/c.rs
         let anchors = s.comment_anchors();
         assert_eq!(anchors.get(&1).map(|v| v.len()), Some(1));
         assert!(!anchors.contains_key(&0));
+    }
+
+    #[test]
+    fn orphaned_drifted_comment_pins_to_last_line_and_stays_reachable() {
+        // Regression: a drifted comment whose anchor line no longer exists in
+        // the diff (the code drifted away) used to render nowhere — invisible
+        // and impossible to delete, yet still counted as pending and blocking
+        // Apply. It must pin to the file's last selectable line so it stays
+        // visible, gutter-marked, and selectable for deletion.
+        let mut s = state_with_two_files();
+        // a.rs has 3 selectable lines (indices 0..=2); new line 99 is gone.
+        let mut ann = Comment::new("a.rs", CommentSide::New, (99, 99), "vanished", "note");
+        ann.status = CommentStatus::Drifted;
+        s.comments.push(ann);
+        s.focus = ReviewFocus::Body;
+
+        // The box anchors to the last selectable line rather than being dropped.
+        let anchors = s.comment_anchors();
+        assert_eq!(anchors.get(&2).map(|v| v.len()), Some(1));
+
+        // The last line carries a drift-flagged gutter marker...
+        assert_eq!(s.comment_marker(2), Some(true));
+
+        // ...and the cursor there resolves to the comment so `d` can delete it.
+        s.cursor = 2;
+        assert!(s.comment_at_cursor().is_some());
     }
 
     #[test]
