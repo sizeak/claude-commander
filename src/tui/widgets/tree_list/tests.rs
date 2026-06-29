@@ -241,6 +241,58 @@ fn test_navigation_skips_unselectable_rows() {
 }
 
 #[test]
+fn test_select_nearest_lands_on_row_that_slid_up() {
+    // Deleting the row at index 2 shifts the list down to 4 rows; selecting
+    // the old index 2 lands on whatever moved into that slot (the next
+    // sibling), not the top.
+    let mut state = TreeListState::new();
+    state.set_item_count(4);
+    state.select_nearest(2);
+    assert_eq!(state.selected(), Some(2));
+}
+
+#[test]
+fn test_select_nearest_falls_back_to_previous_when_last_removed() {
+    // Deleting the last row leaves 3 rows; the old index 3 is now past the
+    // end, so the cursor falls back to the closest selectable row before it.
+    let mut state = TreeListState::new();
+    state.set_item_count(3);
+    state.select_nearest(3);
+    assert_eq!(state.selected(), Some(2));
+}
+
+#[test]
+fn test_select_nearest_skips_unselectable_at_and_after_index() {
+    // After a rebuild the old index lands on a spacer/header; prefer the
+    // next selectable row below it rather than snapping to the top.
+    let mut state = TreeListState::new();
+    // index 2 unselectable (e.g. a spacer), index 3 selectable.
+    state.set_selectable(vec![true, true, false, true, true]);
+    state.select_nearest(2);
+    assert_eq!(state.selected(), Some(3));
+}
+
+#[test]
+fn test_select_nearest_falls_back_upward_past_trailing_unselectable() {
+    // Everything at and after the old index is unselectable (deleted the
+    // last sibling, leaving a trailing spacer) — fall back to the closest
+    // selectable row above.
+    let mut state = TreeListState::new();
+    state.set_selectable(vec![true, true, false]);
+    state.select_nearest(2);
+    assert_eq!(state.selected(), Some(1));
+}
+
+#[test]
+fn test_select_nearest_clears_selection_when_nothing_selectable() {
+    let mut state = TreeListState::new();
+    state.set_selectable(vec![false, false, false]);
+    state.select(Some(1));
+    state.select_nearest(1);
+    assert_eq!(state.selected(), None);
+}
+
+#[test]
 fn test_tree_list_state_empty() {
     let mut state = TreeListState::new();
     state.set_item_count(0);
