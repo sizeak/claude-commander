@@ -1311,7 +1311,14 @@ impl App {
 
         // Ctrl-n / Ctrl-p mirror the arrow keys (and j/k) for navigation,
         // matching the convention used by the other list modals.
-        match review_nav_keycode(key) {
+        let nav_code = review_nav_keycode(key);
+        // Record UI-only review features (layout/fold/image/visual/refresh) that
+        // don't flow through an instrumented service method. Comment create /
+        // delete / apply and reviewed-toggle are recorded at the service layer.
+        if let Some(feature) = review_key_feature(nav_code, state.focus) {
+            self.service.telemetry().feature(feature);
+        }
+        match nav_code {
             // Esc cancels an in-progress selection first; otherwise closes.
             KeyCode::Esc if state.visual_anchor.is_none() => return,
             KeyCode::Esc => state.visual_anchor = None,
@@ -1847,6 +1854,27 @@ fn human_size(size: Option<u64>) -> String {
 /// `Ctrl-n`/`Ctrl-p` are folded onto `Down`/`Up` so they act as navigation
 /// aliases for the arrow keys (and `j`/`k`), mirroring the other list modals;
 /// every other key passes through unchanged.
+/// Telemetry feature name for a review-view key, or `None` for keys with no
+/// tracked feature (navigation, scroll, file movement — pure noise).
+///
+/// These are UI-only actions handled directly in [`Self::handle_review_key`];
+/// unlike the comment create/delete/apply mutations they never reach an
+/// instrumented [`CommanderService`] method, so they are recorded inline. The
+/// `code` is the navigation-normalised keycode (post [`review_nav_keycode`]),
+/// and `focus` gates `v`, which only enters visual mode in the body. Kept pure
+/// and free-standing so it is unit-testable without driving the async handler.
+fn review_key_feature(code: crossterm::event::KeyCode, focus: ReviewFocus) -> Option<&'static str> {
+    use crossterm::event::KeyCode;
+    match code {
+        KeyCode::Char('t') => Some("review.toggle_layout"),
+        KeyCode::Char('o') => Some("review.toggle_image_side"),
+        KeyCode::Char('z') => Some("review.toggle_fold"),
+        KeyCode::Char('r') => Some("review.refresh"),
+        KeyCode::Char('v') if focus == ReviewFocus::Body => Some("review.visual_select"),
+        _ => None,
+    }
+}
+
 fn review_nav_keycode(key: crossterm::event::KeyEvent) -> crossterm::event::KeyCode {
     use crossterm::event::{KeyCode, KeyModifiers};
     match key.code {
@@ -2968,6 +2996,53 @@ diff --git a/b.rs b/b.rs
             diff,
             Vec::new(),
         )
+    }
+
+    #[test]
+    fn review_key_feature_maps_tracked_actions() {
+        use crossterm::event::KeyCode;
+        // The UI-only toggles each record a feature regardless of focus.
+        for (code, feature) in [
+            (KeyCode::Char('t'), "review.toggle_layout"),
+            (KeyCode::Char('o'), "review.toggle_image_side"),
+            (KeyCode::Char('z'), "review.toggle_fold"),
+            (KeyCode::Char('r'), "review.refresh"),
+        ] {
+            assert_eq!(
+                review_key_feature(code, ReviewFocus::FileList),
+                Some(feature)
+            );
+            assert_eq!(review_key_feature(code, ReviewFocus::Body), Some(feature));
+        }
+        // `v` only enters visual selection (and records) in the body.
+        assert_eq!(
+            review_key_feature(KeyCode::Char('v'), ReviewFocus::Body),
+            Some("review.visual_select")
+        );
+        assert_eq!(
+            review_key_feature(KeyCode::Char('v'), ReviewFocus::FileList),
+            None
+        );
+        // Navigation / scroll / file-movement keys are noise — never recorded.
+        for code in [
+            KeyCode::Down,
+            KeyCode::Up,
+            KeyCode::Char('j'),
+            KeyCode::Char('k'),
+            KeyCode::Char('['),
+            KeyCode::Char(']'),
+            KeyCode::Tab,
+            KeyCode::Enter,
+            KeyCode::Char('m'),
+            KeyCode::Char('a'),
+            KeyCode::Char('d'),
+        ] {
+            assert_eq!(
+                review_key_feature(code, ReviewFocus::Body),
+                None,
+                "{code:?}"
+            );
+        }
     }
 
     #[test]
