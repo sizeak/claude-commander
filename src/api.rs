@@ -518,6 +518,7 @@ impl CommanderService {
 
     /// Delete a staged comment by id (no-op if absent).
     pub async fn delete_comment(&self, session_id: &SessionId, id: Uuid) -> Result<()> {
+        self.telemetry.feature("review.comment.delete");
         self.comments.delete(*session_id, id).await
     }
 
