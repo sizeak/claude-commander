@@ -1,6 +1,8 @@
 use super::*;
 use crate::git::PrState;
 use crate::session::{ProjectId, SessionId};
+use ratatui::buffer::Buffer;
+use ratatui::style::{Color, Style};
 use ratatui::{Terminal, backend::TestBackend, widgets::ListState};
 use std::path::PathBuf;
 
@@ -57,6 +59,23 @@ fn render_tree_with<F>(
 where
     F: for<'a> FnOnce(TreeList<'a>) -> TreeList<'a>,
 {
+    let buf = draw_tree_buffer(items, width, height, configure);
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        })
+        .collect()
+}
+
+/// Shared draw step for the rendering helpers below: builds a `TestBackend`
+/// of the requested size, renders the (optionally configured) `TreeList`, and
+/// returns the resulting buffer for the caller to extract symbols or styles.
+fn draw_tree_buffer<F>(items: &[SessionListItem], width: u16, height: u16, configure: F) -> Buffer
+where
+    F: for<'a> FnOnce(TreeList<'a>) -> TreeList<'a>,
+{
     let theme = Theme::basic();
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -66,14 +85,7 @@ where
             frame.render_stateful_widget(tree, frame.area(), &mut ListState::default());
         })
         .unwrap();
-    let buf = terminal.backend().buffer();
-    (0..height)
-        .map(|y| {
-            (0..width)
-                .map(|x| buf[(x, y)].symbol().to_string())
-                .collect::<String>()
-        })
-        .collect()
+    terminal.backend().buffer().clone()
 }
 
 fn make_worktree_with_program(title: &str, program: &str) -> SessionListItem {
@@ -966,6 +978,73 @@ fn test_section_header_shows_count_under_limit_when_max_sessions_set() {
         "Expected count/limit display when under limit: {:?}",
         lines[0]
     );
+}
+
+/// Render the tree and return per-cell `(symbol, style)` pairs for every row.
+/// Unlike `render_tree`, this preserves cell styles so tests can assert on
+/// foreground colours.
+fn render_tree_styles(
+    items: &[SessionListItem],
+    width: u16,
+    height: u16,
+) -> Vec<Vec<(String, Style)>> {
+    let buf = draw_tree_buffer(items, width, height, |t| t);
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| {
+                    let cell = &buf[(x, y)];
+                    (cell.symbol().to_string(), cell.style())
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Return the foreground colour of the cell containing the first `(` in `row`,
+/// which marks the start of the `(count/limit)` suffix on a section header.
+fn count_suffix_fg(row: &[(String, Style)]) -> Color {
+    let (_, style) = row
+        .iter()
+        .find(|(sym, _)| sym == "(")
+        .expect("expected '(' in section header row");
+    style.fg.expect("count suffix should have an explicit fg")
+}
+
+#[test]
+fn section_header_under_limit_uses_secondary_colour() {
+    let item = SessionListItem::SectionHeader {
+        name: "Review".to_string(),
+        count: 1,
+        collapsed: false,
+        max_sessions: Some(5),
+    };
+    let rows = render_tree_styles(&[item], 60, 2);
+    assert_eq!(count_suffix_fg(&rows[0]), Theme::basic().text_secondary);
+}
+
+#[test]
+fn section_header_at_limit_uses_warning_colour() {
+    let item = SessionListItem::SectionHeader {
+        name: "Review".to_string(),
+        count: 2,
+        collapsed: false,
+        max_sessions: Some(2),
+    };
+    let rows = render_tree_styles(&[item], 60, 2);
+    assert_eq!(count_suffix_fg(&rows[0]), Theme::basic().modal_warning);
+}
+
+#[test]
+fn section_header_over_limit_uses_error_colour() {
+    let item = SessionListItem::SectionHeader {
+        name: "Review".to_string(),
+        count: 3,
+        collapsed: false,
+        max_sessions: Some(2),
+    };
+    let rows = render_tree_styles(&[item], 60, 2);
+    assert_eq!(count_suffix_fg(&rows[0]), Theme::basic().modal_error);
 }
 
 #[test]
