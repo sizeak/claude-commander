@@ -482,6 +482,20 @@ impl DiffReviewState {
         };
     }
 
+    /// Whether flipping the image side actually does something: the current
+    /// file is a *modified* binary image (added/deleted images show only their
+    /// one side). Gates both the footer hint and the `o` telemetry, so no-op
+    /// presses on text/added/deleted files aren't counted.
+    pub(super) fn can_toggle_image_side(&self) -> bool {
+        self.current_file().is_some_and(|f| {
+            f.status == FileStatus::Modified
+                && matches!(
+                    f.binary.as_ref().map(|b| &b.kind),
+                    Some(crate::git::BinaryKind::Image { .. })
+                )
+        })
+    }
+
     /// The current file's diff lines in render order (selection operates over
     /// these; hunk headers are not selectable).
     fn selectable_lines(&self) -> Vec<&DiffLine> {
@@ -1340,7 +1354,14 @@ impl App {
             KeyCode::Char('t') => state.toggle_layout(),
             // Flip the before/after side of a binary image (no-op for non-image
             // files and for added/deleted files, which have only one side).
-            KeyCode::Char('o') => state.toggle_image_side(),
+            // Record only when it does something, so no-op presses on text
+            // files don't inflate the metric.
+            KeyCode::Char('o') => {
+                if state.can_toggle_image_side() {
+                    self.service.telemetry().feature("review.toggle_image_side");
+                }
+                state.toggle_image_side();
+            }
             KeyCode::Char('z') => state.toggle_comment_fold(),
             KeyCode::Char('v') if state.focus == ReviewFocus::Body => state.toggle_visual(),
             // Enter: toggle a directory in the tree, or open the comment box in
@@ -1570,17 +1591,10 @@ impl App {
         } else {
             // Offer the image side-toggle only when it does something: a binary
             // image with two sides (a modification).
-            let image_toggle = match state.current_file() {
-                Some(f)
-                    if f.status == FileStatus::Modified
-                        && matches!(
-                            f.binary.as_ref().map(|b| &b.kind),
-                            Some(crate::git::BinaryKind::Image { .. })
-                        ) =>
-                {
-                    "o before/after · "
-                }
-                _ => "",
+            let image_toggle = if state.can_toggle_image_side() {
+                "o before/after · "
+            } else {
+                ""
             };
             format!(
                 " ↑↓/jk move · v select · Enter comment · z fold · d delete · m reviewed · a apply · r refresh · t layout · {image_toggle}{toggle}^Q/Esc close "
@@ -1863,11 +1877,15 @@ fn human_size(size: Option<u64>) -> String {
 /// `code` is the navigation-normalised keycode (post [`review_nav_keycode`]),
 /// and `focus` gates `v`, which only enters visual mode in the body. Kept pure
 /// and free-standing so it is unit-testable without driving the async handler.
+///
+/// `o` (image-side toggle) is recorded separately in the handler because
+/// whether it does anything depends on the current file (see
+/// [`DiffReviewState::can_toggle_image_side`]), which this key-only mapping
+/// can't see — counting every `o` would inflate the metric with no-op presses.
 fn review_key_feature(code: crossterm::event::KeyCode, focus: ReviewFocus) -> Option<&'static str> {
     use crossterm::event::KeyCode;
     match code {
         KeyCode::Char('t') => Some("review.toggle_layout"),
-        KeyCode::Char('o') => Some("review.toggle_image_side"),
         KeyCode::Char('z') => Some("review.toggle_fold"),
         KeyCode::Char('r') => Some("review.refresh"),
         KeyCode::Char('v') if focus == ReviewFocus::Body => Some("review.visual_select"),
@@ -3002,9 +3020,10 @@ diff --git a/b.rs b/b.rs
     fn review_key_feature_maps_tracked_actions() {
         use crossterm::event::KeyCode;
         // The UI-only toggles each record a feature regardless of focus.
+        // `o` is intentionally absent: it's gated on file type in the handler
+        // (see can_toggle_image_side) so no-op presses aren't counted.
         for (code, feature) in [
             (KeyCode::Char('t'), "review.toggle_layout"),
-            (KeyCode::Char('o'), "review.toggle_image_side"),
             (KeyCode::Char('z'), "review.toggle_fold"),
             (KeyCode::Char('r'), "review.refresh"),
         ] {
@@ -3024,6 +3043,7 @@ diff --git a/b.rs b/b.rs
             None
         );
         // Navigation / scroll / file-movement keys are noise — never recorded.
+        // `o` is here too: it's recorded inline (gated), not via this mapping.
         for code in [
             KeyCode::Down,
             KeyCode::Up,
@@ -3036,6 +3056,7 @@ diff --git a/b.rs b/b.rs
             KeyCode::Char('m'),
             KeyCode::Char('a'),
             KeyCode::Char('d'),
+            KeyCode::Char('o'),
         ] {
             assert_eq!(
                 review_key_feature(code, ReviewFocus::Body),
@@ -3043,6 +3064,35 @@ diff --git a/b.rs b/b.rs
                 "{code:?}"
             );
         }
+    }
+
+    #[test]
+    fn can_toggle_image_side_gates_on_modified_image() {
+        use crate::git::{BinaryInfo, BinaryKind};
+
+        let mut state = state_with_two_files();
+        // a.rs is a modified *text* file — the image toggle does nothing.
+        assert!(!state.can_toggle_image_side());
+
+        // Make the current file a binary image.
+        let file = &mut state.diff.files[state.selected_file];
+        file.binary = Some(BinaryInfo {
+            kind: BinaryKind::Image {
+                mime: "image/png".to_string(),
+            },
+            old_oid: None,
+            new_oid: None,
+            old_size: None,
+            new_size: None,
+        });
+
+        // A modified binary image has two sides: the toggle is meaningful.
+        file.status = FileStatus::Modified;
+        assert!(state.can_toggle_image_side());
+
+        // An added image shows only its one side — no-op, not counted.
+        state.diff.files[state.selected_file].status = FileStatus::Added;
+        assert!(!state.can_toggle_image_side());
     }
 
     #[test]
