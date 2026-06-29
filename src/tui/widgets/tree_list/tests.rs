@@ -72,12 +72,7 @@ where
 /// Shared draw step for the rendering helpers below: builds a `TestBackend`
 /// of the requested size, renders the (optionally configured) `TreeList`, and
 /// returns the resulting buffer for the caller to extract symbols or styles.
-fn draw_tree_buffer<F>(
-    items: &[SessionListItem],
-    width: u16,
-    height: u16,
-    configure: F,
-) -> Buffer
+fn draw_tree_buffer<F>(items: &[SessionListItem], width: u16, height: u16, configure: F) -> Buffer
 where
     F: for<'a> FnOnce(TreeList<'a>) -> TreeList<'a>,
 {
