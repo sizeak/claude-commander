@@ -47,6 +47,14 @@ branch_prefix = ""
 # Fetch latest changes from origin before creating a new session
 fetch_before_create = true
 
+# Skip git-LFS smudging during `git worktree add` so session creation is fast on
+# LFS repos (the checkout leaves cheap pointer files). The real LFS content is
+# fetched afterwards with `git lfs pull` — asynchronously in the TUI (with a
+# `⇣ LFS` indicator on the session row) or synchronously on the CLI. While the
+# background pull runs, the agent briefly sees pointer files rather than real
+# content. Set to false to smudge during checkout as before.
+skip_lfs_smudge = true
+
 # Pass `--resume` when restarting/recreating a session so the agent picks up
 # where it left off. Set to false to start the program fresh each time.
 resume_session = true

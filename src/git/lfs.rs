@@ -111,6 +111,33 @@ async fn smudge(worktree: &Path, path: &str, pointer: &[u8]) -> Result<Vec<u8>> 
     Ok(out.stdout)
 }
 
+/// Fetch and check out the real content for every LFS-tracked file in
+/// `worktree`, replacing the pointer files left behind when the worktree was
+/// created with `GIT_LFS_SKIP_SMUDGE=1`.
+///
+/// Best-effort: a non-zero exit (git-lfs not installed, network failure, repo
+/// not using LFS) is returned as an error for the caller to log; it is not
+/// fatal to the session. On a non-LFS repo this is a near no-op.
+pub async fn pull(worktree: &Path) -> Result<()> {
+    let output = Command::new("git")
+        .current_dir(worktree)
+        .args(["lfs", "pull"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .await
+        .map_err(|e| GitError::OperationFailed(e.to_string()))?;
+    if !output.status.success() {
+        return Err(GitError::OperationFailed(format!(
+            "git lfs pull: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 /// If `bytes` is an LFS pointer, resolve it to the real blob; otherwise return
 /// `bytes` unchanged. Best-effort: a smudge failure (LFS not installed, object
 /// not pulled) is logged and the original pointer bytes are returned so the

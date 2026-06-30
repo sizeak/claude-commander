@@ -236,6 +236,7 @@ impl SessionManager {
             (exists, preexisted, sp)
         };
         let worktree_path = worktrees_dir.join(&worktree_name);
+        let skip_lfs_smudge = self.config_store.read().skip_lfs_smudge;
         let worktree_create_start = std::time::Instant::now();
         let worktree_info = WorktreeManager::run_create_worktree(
             worktrees_dir,
@@ -244,6 +245,7 @@ impl SessionManager {
             branch_name.clone(),
             branch_exists,
             start_point,
+            skip_lfs_smudge,
         )
         .await?;
         info!(

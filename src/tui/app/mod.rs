@@ -775,6 +775,10 @@ pub struct AppUiState {
     pub project_pull_blocked: HashMap<ProjectId, BlockReason>,
     /// Projects with a pull task currently in flight, so we don't double-spawn.
     pub project_pull_in_flight: std::collections::HashSet<ProjectId>,
+    /// Sessions with a background `git lfs pull` in flight (worktree created
+    /// with smudging skipped). Drives the `⇣ LFS` row marker; an id is added
+    /// when the pull is spawned and removed on `LfsPullFinished`.
+    pub lfs_pull_in_flight: std::collections::HashSet<SessionId>,
     /// When the app launched. Used to give the background pull task a short
     /// grace period before its first fire after startup.
     pub started_at: Instant,
@@ -834,6 +838,7 @@ impl Default for AppUiState {
             last_project_pull: HashMap::new(),
             project_pull_blocked: HashMap::new(),
             project_pull_in_flight: std::collections::HashSet::new(),
+            lfs_pull_in_flight: std::collections::HashSet::new(),
             started_at: Instant::now(),
             last_project_pull_sweep: None,
         }
