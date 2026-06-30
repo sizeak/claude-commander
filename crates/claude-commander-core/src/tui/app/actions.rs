@@ -1322,10 +1322,20 @@ impl App {
             ));
         }
 
-        if self.ui_state.selected_session_id == Some(session_id) {
+        // When deleting the session under the cursor, remember its row so we
+        // can land the cursor on whatever slides up into that slot (nearest
+        // selectable) once the list is rebuilt, rather than snapping to the
+        // top. Bulk callers deleting a non-selected session leave the cursor
+        // alone.
+        let deleting_selected = self.ui_state.selected_session_id == Some(session_id);
+        let prev_idx = self.ui_state.list_state.selected();
+        if deleting_selected {
             self.ui_state.selected_session_id = None;
         }
         self.refresh_list_items().await;
+        if deleting_selected && let Some(idx) = prev_idx {
+            self.ui_state.list_state.select_nearest(idx);
+        }
 
         if let Some((tmux_name, shell_tmux_name, worktree_path, repo_path)) = cleanup_data {
             let tmux = self.service.session_manager().tmux.clone();

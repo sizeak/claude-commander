@@ -434,9 +434,18 @@ impl DiffReviewState {
                 self.collapsed.insert(path.clone());
             }
             // The toggled dir keeps its index; clamp just in case.
-            let len = self.visible_rows().len();
-            self.tree_cursor = self.tree_cursor.min(len.saturating_sub(1));
+            self.clamp_tree_cursor();
         }
+    }
+
+    /// Clamp the tree cursor into the current visible rows and re-anchor the
+    /// scroll so the cursor stays on-screen. Call after anything that can shrink
+    /// the visible-row count (collapsing directories) — otherwise a stale
+    /// `tree_scroll` left past the new end renders the file pane blank.
+    fn clamp_tree_cursor(&mut self) {
+        let len = self.visible_rows().len();
+        self.tree_cursor = self.tree_cursor.min(len.saturating_sub(1));
+        self.follow_tree_cursor(len);
     }
 
     /// Keep the tree cursor within the (approximate) file-pane viewport.
@@ -550,6 +559,26 @@ impl DiffReviewState {
         } else {
             self.reviewed.remove(&path);
         }
+    }
+
+    /// Fold away any ancestor directory of `reviewed_path` whose entire file
+    /// subtree is now reviewed, so a directory collapses automatically once its
+    /// last file is marked read. Only directories on the path of the
+    /// just-reviewed file are considered, so unrelated directories elsewhere in
+    /// the tree are never touched.
+    fn collapse_completed_dirs(&mut self, reviewed_path: &str) {
+        let mut completed = Vec::new();
+        collect_completed_dirs(
+            &self.file_tree,
+            reviewed_path,
+            &self.reviewed,
+            &mut completed,
+        );
+        for path in completed {
+            self.collapsed.insert(path);
+        }
+        // Collapsing shrinks the visible rows; keep the cursor (and scroll) in range.
+        self.clamp_tree_cursor();
     }
 
     /// Jump the body to the next unreviewed file after the current one (in
@@ -1415,8 +1444,10 @@ impl App {
                         .await
                     {
                         Ok(now_reviewed) => {
-                            state.set_reviewed(file.display_path().to_string(), now_reviewed);
+                            let path = file.display_path().to_string();
+                            state.set_reviewed(path.clone(), now_reviewed);
                             if now_reviewed {
+                                state.collapse_completed_dirs(&path);
                                 state.advance_to_next_unreviewed();
                             }
                         }
@@ -2051,6 +2082,47 @@ fn flatten_tree(
                 }
             }
         }
+    }
+}
+
+/// Whether every file in `node`'s subtree is marked reviewed. A leaf node's
+/// `path` is its `display_path` (built from the same segments), which is the key
+/// `reviewed` stores, so it can be checked directly without the file list.
+fn subtree_all_reviewed(node: &TreeNode, reviewed: &HashSet<String>) -> bool {
+    match node.file_index {
+        Some(_) => reviewed.contains(&node.path),
+        None => node
+            .children
+            .iter()
+            .all(|c| subtree_all_reviewed(c, reviewed)),
+    }
+}
+
+/// Collect the paths of directory nodes that contain `target` and whose entire
+/// file subtree is reviewed — the directories that should auto-collapse once
+/// `target` was marked read.
+fn collect_completed_dirs(
+    nodes: &[TreeNode],
+    target: &str,
+    reviewed: &HashSet<String>,
+    out: &mut Vec<String>,
+) {
+    for node in nodes {
+        if node.file_index.is_some() {
+            continue;
+        }
+        // `target` is under this dir when stripping the dir path leaves a
+        // `/`-rooted remainder; the leading slash stops "dir" matching "dir2/…".
+        if !target
+            .strip_prefix(node.path.as_str())
+            .is_some_and(|rest| rest.starts_with('/'))
+        {
+            continue;
+        }
+        if subtree_all_reviewed(node, reviewed) {
+            out.push(node.path.clone());
+        }
+        collect_completed_dirs(&node.children, target, reviewed, out);
     }
 }
 
@@ -3494,6 +3566,106 @@ diff --git a/c.rs b/c.rs
         // Expanding restores the files.
         s.tree_activate();
         assert_eq!(s.visible_rows().len(), 3);
+    }
+
+    #[test]
+    fn marking_last_file_in_dir_auto_collapses_it() {
+        let diff = ParsedDiff {
+            files: vec![file("dir/a.ts"), file("dir/b.ts"), file("other.ts")],
+        };
+        let mut s = DiffReviewState::new(
+            SessionId::new(),
+            "t".to_string(),
+            "main".to_string(),
+            diff,
+            Vec::new(),
+        );
+        let file_rows = |s: &DiffReviewState| {
+            s.visible_rows()
+                .iter()
+                .filter(|r| matches!(r, TreeRow::File { .. }))
+                .count()
+        };
+
+        // One of two files in `dir` reviewed: incomplete, stays expanded.
+        s.set_reviewed("dir/a.ts".to_string(), true);
+        s.collapse_completed_dirs("dir/a.ts");
+        assert_eq!(
+            file_rows(&s),
+            3,
+            "dir stays open while it has unreviewed files"
+        );
+
+        // Last file in `dir` reviewed: the directory folds away automatically.
+        s.set_reviewed("dir/b.ts".to_string(), true);
+        s.collapse_completed_dirs("dir/b.ts");
+        let rows = s.visible_rows();
+        assert!(
+            rows.iter().any(
+                |r| matches!(r, TreeRow::Dir { path, collapsed, .. } if path == "dir" && *collapsed)
+            ),
+            "fully-reviewed dir is collapsed"
+        );
+        // Its two files are hidden; the unrelated root-level file remains.
+        assert_eq!(file_rows(&s), 1, "only the root-level file row is left");
+    }
+
+    #[test]
+    fn auto_collapse_reanchors_scroll_when_rows_vanish() {
+        // Enough files under one dir to push the file pane past its viewport.
+        let files: Vec<FileDiff> = (0..30).map(|i| file(&format!("dir/f{i:02}.ts"))).collect();
+        let mut s = DiffReviewState::new(
+            SessionId::new(),
+            "t".to_string(),
+            "main".to_string(),
+            ParsedDiff { files },
+            Vec::new(),
+        );
+        // All files reviewed, cursor/scroll parked deep in the list.
+        for i in 0..30 {
+            s.set_reviewed(format!("dir/f{i:02}.ts"), true);
+        }
+        s.tree_cursor = 30;
+        s.tree_scroll = 20;
+
+        // Marking the last file folds the whole dir down to a single row.
+        s.collapse_completed_dirs("dir/f29.ts");
+        assert_eq!(
+            s.visible_rows().len(),
+            1,
+            "the collapsed dir leaves one row"
+        );
+        // Scroll must follow, or the pane renders blank past the new end.
+        assert_eq!(s.tree_scroll, 0, "scroll re-anchors onto the surviving row");
+        assert_eq!(s.tree_cursor, 0, "cursor clamps into range");
+    }
+
+    #[test]
+    fn auto_collapse_folds_nested_completed_dirs() {
+        let diff = ParsedDiff {
+            files: vec![file("a/b/x.ts")],
+        };
+        let mut s = DiffReviewState::new(
+            SessionId::new(),
+            "t".to_string(),
+            "main".to_string(),
+            diff,
+            Vec::new(),
+        );
+        // The single-child chain compresses to one "a/b" node holding x.ts.
+        s.set_reviewed("a/b/x.ts".to_string(), true);
+        s.collapse_completed_dirs("a/b/x.ts");
+        let rows = s.visible_rows();
+        assert!(
+            rows.iter().any(
+                |r| matches!(r, TreeRow::Dir { path, collapsed, .. } if path == "a/b" && *collapsed)
+            ),
+            "the compressed ancestor dir collapses once its only file is reviewed"
+        );
+        assert!(
+            !rows.iter().any(|r| matches!(r, TreeRow::File { .. })),
+            "the reviewed file is hidden under the collapsed dir"
+        );
     }
 
     #[test]

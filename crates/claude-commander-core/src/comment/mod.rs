@@ -256,24 +256,35 @@ pub fn reanchor(ann: &Comment, diff: &ParsedDiff) -> AnchorResult {
     }
 
     let norm = str::trim_end;
-    let mut found: Option<(usize, usize)> = None;
+    let mut matches: Vec<(usize, usize)> = Vec::new();
     for start in 0..=(hay.len() - needle.len()) {
-        let matches = (0..needle.len()).all(|i| norm(hay[start + i].1) == norm(needle[i]));
-        if matches {
-            if found.is_some() {
-                // Ambiguous — more than one match.
-                return AnchorResult::Drifted;
-            }
-            found = Some((hay[start].0, hay[start + needle.len() - 1].0));
+        if (0..needle.len()).all(|i| norm(hay[start + i].1) == norm(needle[i])) {
+            matches.push((hay[start].0, hay[start + needle.len() - 1].0));
         }
     }
 
-    match found {
-        Some(line_range) => AnchorResult::Located {
-            side: ann.side,
-            line_range,
-        },
-        None => AnchorResult::Drifted,
+    let located = |line_range| AnchorResult::Located {
+        side: ann.side,
+        line_range,
+    };
+    match matches.as_slice() {
+        [] => AnchorResult::Drifted,
+        [only] => located(*only),
+        _ => {
+            // The snippet occurs more than once — e.g. a short, repeated line
+            // such as a parameter shared by two signatures. A plain "more than
+            // one match → drifted" rule would falsely drift a comment that is
+            // still sitting exactly on its line. Disambiguate by locality:
+            // keep the occurrence nearest the comment's current anchor, and
+            // only call it drifted when the nearest is a genuine tie.
+            let target = ann.line_range.0;
+            let nearest = matches.iter().map(|r| r.0.abs_diff(target)).min().unwrap();
+            let mut closest = matches.iter().filter(|r| r.0.abs_diff(target) == nearest);
+            match (closest.next(), closest.next()) {
+                (Some(&line_range), None) => located(line_range),
+                _ => AnchorResult::Drifted,
+            }
+        }
     }
 }
 
@@ -484,18 +495,62 @@ diff --git a/a.rs b/a.rs
 
     #[test]
     fn reanchor_ambiguous_match_is_drifted() {
+        // The snippet repeats and the comment's anchor is equidistant from two
+        // occurrences (lines 1 and 3, anchored at 2): a genuine tie that
+        // locality can't break, so it drifts.
         let diff = parse_unified_diff(
             "\
 diff --git a/d.rs b/d.rs
 --- /dev/null
 +++ b/d.rs
-@@ -0,0 +1,2 @@
+@@ -0,0 +1,3 @@
 +dup
++mid
 +dup
 ",
         );
-        let a = ann("d.rs", CommentSide::New, (1, 1), "dup");
+        let a = ann("d.rs", CommentSide::New, (2, 2), "dup");
         assert_eq!(reanchor(&a, &diff), AnchorResult::Drifted);
+    }
+
+    #[test]
+    fn reanchor_repeated_snippet_keeps_nearest_anchor() {
+        // Regression: a short line that legitimately repeats in the file (here
+        // a `startSec` parameter shared by two signatures) must not drift a
+        // comment that is sitting exactly on its line. The stored line_range
+        // disambiguates to the nearest occurrence rather than flagging drift.
+        let diff = parse_unified_diff(
+            "\
+diff --git a/x.ts b/x.ts
+--- /dev/null
++++ b/x.ts
+@@ -0,0 +1,6 @@
++const a = (
++  startSec: number,
++) => {}
++const b = (
++  startSec: number,
++) => {}
+",
+        );
+        // First occurrence (new line 2) and second (new line 5) each anchor to
+        // themselves, not to the other and not to drift.
+        let first = ann("x.ts", CommentSide::New, (2, 2), "  startSec: number,");
+        assert_eq!(
+            reanchor(&first, &diff),
+            AnchorResult::Located {
+                side: CommentSide::New,
+                line_range: (2, 2),
+            }
+        );
+        let second = ann("x.ts", CommentSide::New, (5, 5), "  startSec: number,");
+        assert_eq!(
+            reanchor(&second, &diff),
+            AnchorResult::Located {
+                side: CommentSide::New,
+                line_range: (5, 5),
+            }
+        );
     }
 
     #[test]
