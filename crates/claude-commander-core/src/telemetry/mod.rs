@@ -77,7 +77,7 @@ pub struct FrontendInfo {
 impl FrontendInfo {
     /// Construct a frontend identity. **Panics** (like `expect`) if `name` or
     /// `version` is empty — the consuming application is required to identify
-    /// itself, e.g. `FrontendInfo::new("claude-commander", claude_commander::VERSION)`.
+    /// itself, e.g. `FrontendInfo::new("claude-commander", claude_commander_core::VERSION)`.
     pub fn new(name: impl Into<String>, version: impl Into<String>) -> Self {
         let name = name.into();
         let version = version.into();
@@ -85,7 +85,7 @@ impl FrontendInfo {
             !name.trim().is_empty(),
             "telemetry: FrontendInfo name must not be empty — the embedding \
              application must identify itself, e.g. \
-             FrontendInfo::new(\"claude-commander\", claude_commander::VERSION)"
+             FrontendInfo::new(\"claude-commander\", claude_commander_core::VERSION)"
         );
         assert!(
             !version.trim().is_empty(),

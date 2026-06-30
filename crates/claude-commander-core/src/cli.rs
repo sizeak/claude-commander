@@ -7,11 +7,25 @@ use crate::config::AppState;
 use crate::git::{PrState, ReviewDecision, effective_pr_state};
 use crate::session::{AgentState, WorktreeSession};
 
-/// Find a session by title (case-insensitive) or ID prefix.
+/// Whether `query` identifies `session`: a full-UUID match, an 8-char
+/// display-prefix match, or (handled by callers) a title match.
+///
+/// `SessionId`'s `Display` is an 8-char prefix of the UUID, but the HTTP API
+/// hands clients the full 36-char UUID. Matching on either keeps both the
+/// CLI/TUI (which show the prefix) and API clients (which echo the full id)
+/// working through the same resolution path.
+fn id_matches(session: &WorktreeSession, query: &str) -> bool {
+    // Full UUID is exact and unambiguous; the 8-char display is a prefix match.
+    session.id.as_uuid().to_string() == query || session.id.to_string().starts_with(query)
+}
+
+/// Find a session by title (case-insensitive), full ID, or ID prefix.
 ///
 /// Title match takes priority: if a session's title matches exactly
 /// (case-insensitive), it is returned even if another session's ID
-/// happens to start with the query string.
+/// happens to start with the query string. The ID fallback accepts either the
+/// full UUID (as returned by the HTTP API) or the 8-char display prefix (as
+/// shown in the CLI/TUI).
 pub fn find_session<'a>(state: &'a AppState, query: &str) -> Option<&'a WorktreeSession> {
     let query_lower = query.to_lowercase();
 
@@ -25,11 +39,8 @@ pub fn find_session<'a>(state: &'a AppState, query: &str) -> Option<&'a Worktree
         return by_title;
     }
 
-    // Fall back to ID prefix match
-    state
-        .sessions
-        .values()
-        .find(|s| s.id.to_string().starts_with(query))
+    // Fall back to ID match (full UUID or display prefix)
+    state.sessions.values().find(|s| id_matches(s, query))
 }
 
 /// Outcome of resolving a session by an *exact* identifier.
@@ -59,7 +70,7 @@ pub fn find_session_exact<'a>(
     let mut matches = state
         .sessions
         .values()
-        .filter(|s| s.title.to_lowercase() == query_lower || s.id.to_string() == query);
+        .filter(|s| s.title.to_lowercase() == query_lower || s.id.as_uuid().to_string() == query);
 
     let Some(first) = matches.next() else {
         return SessionLookup::NotFound;
@@ -367,6 +378,21 @@ mod tests {
     }
 
     #[test]
+    fn finds_by_full_uuid() {
+        // The HTTP API hands clients the full 36-char UUID, not the 8-char
+        // display. `find_session` must resolve it (B1 regression).
+        let s = make_session("my-session");
+        let full_uuid = s.id.as_uuid().to_string();
+        assert!(
+            full_uuid.len() > 8,
+            "full uuid should be longer than display"
+        );
+        let state = make_state(vec![s.clone()]);
+        let found = find_session(&state, &full_uuid).unwrap();
+        assert_eq!(found.id, s.id);
+    }
+
+    #[test]
     fn returns_none_when_no_match() {
         let state = make_state(vec![make_session("something")]);
         assert!(find_session(&state, "nonexistent").is_none());
@@ -404,7 +430,9 @@ mod tests {
     #[test]
     fn exact_matches_full_id() {
         let s = make_session("my-session");
-        let full_id = s.id.to_string();
+        // The full 36-char UUID, as the HTTP API returns it — not the 8-char
+        // `Display` prefix.
+        let full_id = s.id.as_uuid().to_string();
         let state = make_state(vec![s.clone()]);
         match find_session_exact(&state, &full_id) {
             SessionLookup::Found(found) => assert_eq!(found.id, s.id),

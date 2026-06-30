@@ -1,0 +1,130 @@
+[package]
+name = "claude-commander-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Core library for managing Claude coding sessions via tmux and git worktrees"
+keywords = ["claude", "ai", "terminal", "tui", "tmux"]
+categories = ["command-line-utilities", "development-tools"]
+
+# Only the `claude-commander` bin crate drives the release (single shared tag).
+# Without this, cargo-release would try to create the same `vX.Y.Z` tag once per
+# member and the second attempt fails.
+[package.metadata.release]
+release = false
+
+[lib]
+name = "claude_commander_core"
+path = "src/lib.rs"
+
+[dependencies]
+# Async runtime
+tokio = { workspace = true }
+futures = "0.3"
+
+# CLI (derive macros - idiomatic Rust)
+clap = { version = "4.5", features = ["derive"] }
+
+# TUI
+ratatui = "0.30"
+crossterm = { version = "0.29", features = ["event-stream"] }
+ansi-to-tui = "8"
+# Text-input buffer (cursor/editing) for the review comment box.
+tui-input = "0.15"
+
+# Git (pure Rust)
+gix = { version = "0.68", default-features = false, features = [
+    "worktree-mutation",
+    "revision",
+    "status",
+    "dirwalk",
+    "index",
+] }
+
+# Configuration (layered: env -> file -> CLI)
+figment = { version = "0.10", features = ["toml", "env"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "0.8"
+
+# Error handling
+thiserror = { workspace = true }
+anyhow = "1.0"
+color-eyre = "0.6"
+
+# Observability
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Syntax highlighting for the review diff view (fancy-regex backend — pure
+# Rust, no C/oniguruma dependency). `two-face` supplies an extended syntax set
+# (the bat language set, incl. TypeScript/TSX/TOML/…) that syntect's bundled
+# defaults lack.
+syntect = { version = "5.2", default-features = false, features = [
+    "default-fancy",
+] }
+two-face = { version = "0.4", default-features = false, features = [
+    "syntect-fancy",
+] }
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1.0", features = ["v4", "serde"] }
+directories = "5.0"
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+regex = "1.10"
+
+# Async utilities
+async-trait = "0.1"
+
+# PTY for terminal attachment
+pty-process = { version = "0.5", features = ["async"] }
+
+# Unix system calls (safe wrappers)
+nix = { version = "0.29", features = ["term", "poll", "fs"] }
+
+# Throbber/spinner widget
+throbber-widgets-tui = "0.11"
+
+# Fuzzy matching for the quick-select palette
+fuzzy-matcher = "0.3"
+rayon = "1.12.0"
+# default features include `chafa-dyn`, which needs the chafa C lib via
+# pkg-config; we only need the built-in protocols + crossterm integration.
+ratatui-image = { version = "11.0.4", default-features = false, features = [
+    "crossterm",
+    "image-defaults",
+] }
+image = "0.25"
+
+# Conversation mode (TTS + STT): HTTP client for the OpenAI-compatible TTS/STT
+# endpoints (rustls to avoid an OpenSSL C dependency, consistent with the
+# pure-Rust lean; `multipart` for the STT audio upload), in-process audio
+# playback (rodio) and microphone capture (cpal). Both rodio's backend and cpal
+# link ALSA on Linux — the build host needs alsa-lib (see flake.nix /
+# CONTRIBUTING). `cpal` is pinned to the version rodio already resolves so ALSA
+# isn't linked twice; `hound` encodes captured PCM to WAV for upload.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "multipart",
+    "rustls-tls",
+] }
+rodio = { version = "0.19", default-features = false, features = ["wav", "mp3"] }
+cpal = "0.15"
+hound = "3.5"
+
+[dev-dependencies]
+# Property-based testing
+proptest = "1.4"
+# Async test utilities
+tokio-test = "0.4"
+# Temp directories for integration tests
+tempfile = "3.10"
+# Test assertions
+pretty_assertions = "1.4"
+# Snapshot testing
+insta = "1.41"

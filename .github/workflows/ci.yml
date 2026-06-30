@@ -49,7 +49,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run Clippy
-        run: nix develop -c cargo clippy --all-targets -- -D warnings
+        run: nix develop -c cargo clippy --workspace --all-targets -- -D warnings
 
   nix:
     name: Nix Build
@@ -110,7 +110,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: nix develop -c cargo build --all-targets
+        run: nix develop -c cargo build --workspace --all-targets
 
       - name: Run Tests
-        run: nix develop -c cargo test
+        run: nix develop -c cargo test --workspace
