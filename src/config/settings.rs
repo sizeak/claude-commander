@@ -120,8 +120,8 @@ pub struct Config {
     /// Show the program running in each session as a `(program)` suffix in
     /// the session list. Only rendered when sessions use more than one
     /// distinct program, so enabling this for a single-program setup is a
-    /// no-op. Default true.
-    #[serde(default = "default_true")]
+    /// no-op. Default false. (Inherits the struct-level `#[serde(default)]`,
+    /// so an omitted field resolves to `Config::default()`'s `false`.)
     pub show_session_program: bool,
 
     /// Dim the right pane (preview/diff/shell) when the session list is focused
@@ -389,7 +389,7 @@ impl Default for Config {
             state_sync_interval_ms: 2000,
             agent_state_poll_interval_ms: 3000,
             invert_pr_label_color: false,
-            show_session_program: true,
+            show_session_program: false,
             dim_unfocused_preview: true,
             dim_unfocused_opacity: 0.4,
             leader_key: " ".to_string(),
@@ -945,16 +945,16 @@ speed = 1.25
         assert_eq!(config.agent_state_poll_interval_ms, 3000);
         assert!(config.ai_summary_enabled);
         assert_eq!(config.ai_summary_model, "claude-haiku-4-5-20251001");
-        assert!(config.show_session_program);
+        assert!(!config.show_session_program);
         // Review cache precompute is on by default.
         assert!(config.precompute_review_caches);
     }
 
     #[test]
     fn test_session_list_flags_deserialise() {
-        // Missing → default true.
+        // Missing → default false.
         let cfg: Config = toml::from_str("").unwrap();
-        assert!(cfg.show_session_program);
+        assert!(!cfg.show_session_program);
 
         // Explicit false survives round trip.
         let cfg: Config = toml::from_str(

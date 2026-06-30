@@ -134,8 +134,8 @@ dim_unfocused_opacity = 0.4
 
 # Show the running program as a "(program)" suffix on session rows. Only
 # renders when sessions use more than one distinct program, so it's a no-op
-# for a single-program setup. Set to false to always hide it.
-# show_session_program = true
+# for a single-program setup. Disabled by default; set to true to show it.
+# show_session_program = false
 
 # Debounce delay in ms when typing multi-digit session numbers
 # session_number_debounce_ms = 250

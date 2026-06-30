@@ -47,6 +47,14 @@ const CODEX_APPROVAL_MARKERS: [&str; 5] = [
     "needs your approval.",
 ];
 
+/// Pane-content substring Codex renders in its status line while a task is
+/// actively running — the interrupt hint in `• Working (12s • esc to interrupt)`.
+/// A durable `Working` signal that survives a user customising the terminal
+/// title (e.g. dropping the spinner via `/title`), so working sessions aren't
+/// mislabelled `Idle` when the title check can't see a spinner. Distinct from
+/// the approval footer, which reads "esc to cancel".
+const CODEX_WORKING_MARKER: &str = "esc to interrupt";
+
 /// The agent CLI harness backing a session, derived from its `program` command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentKind {
@@ -173,16 +181,20 @@ fn claude_content_state(content: &str) -> AgentState {
     AgentState::Idle
 }
 
-/// Codex content patterns: the approval overlay's question text is rendered in
-/// the visible pane whenever Codex is blocked on the user. Scanning the whole
-/// visible pane (which `capture-pane -p` already bounds to the current screen)
-/// is robust to the overlay's variable height.
+/// Codex content patterns. The approval overlay's question text is rendered in
+/// the visible pane whenever Codex is blocked on the user; the interrupt hint is
+/// rendered while a task runs. Scanning the whole visible pane (which
+/// `capture-pane -p` already bounds to the current screen) is robust to the
+/// overlay's variable height. Approval takes precedence over working.
 fn codex_content_state(content: &str) -> AgentState {
     if CODEX_APPROVAL_MARKERS
         .iter()
         .any(|marker| content.contains(marker))
     {
         return AgentState::WaitingForInput;
+    }
+    if content.contains(CODEX_WORKING_MARKER) {
+        return AgentState::Working;
     }
     AgentState::Idle
 }
@@ -373,6 +385,35 @@ mod tests {
             AgentState::Idle
         );
         assert_eq!(AgentKind::Codex.content_state(""), AgentState::Idle);
+    }
+
+    #[test]
+    fn codex_content_working_from_interrupt_hint() {
+        // Real status-line shape captured from a live Codex session. The
+        // interrupt hint is a durable Working signal independent of the
+        // (user-configurable) terminal-title spinner.
+        let content = "› Create a file…\n• Working (13s • esc to interrupt)\n";
+        assert_eq!(AgentKind::Codex.content_state(content), AgentState::Working);
+    }
+
+    #[test]
+    fn codex_content_approval_takes_precedence_over_working() {
+        // If both a working hint and an approval question are visible, the
+        // pending approval (needs-attention) must win.
+        let content =
+            "• Working (2s • esc to interrupt)\nWould you like to run the following command?\n";
+        assert_eq!(
+            AgentKind::Codex.content_state(content),
+            AgentState::WaitingForInput
+        );
+    }
+
+    #[test]
+    fn codex_content_approval_footer_is_not_working() {
+        // The approval footer reads "esc to cancel", not "esc to interrupt",
+        // so it must not be mistaken for the working hint.
+        let content = "Press enter to confirm or esc to cancel\n";
+        assert_eq!(AgentKind::Codex.content_state(content), AgentState::Idle);
     }
 
     #[test]
