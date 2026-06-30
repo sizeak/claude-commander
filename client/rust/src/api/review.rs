@@ -15,6 +15,9 @@
 //! convert into the plain-struct / unit-enum DTOs defined below before handing
 //! them to frb.
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use claude_commander_protocol::api::{NewComment, ReviewSnapshot};
@@ -165,8 +168,8 @@ impl From<Hunk> for ReviewHunkDto {
 }
 
 /// All changes to a single file. `BinaryKind`/`BinaryInfo` are flattened onto
-/// `is_binary` + `binary_mime` (the blob bytes are fetched lazily — TODO, not
-/// wired in this first cut).
+/// `is_binary` + `binary_mime`; the blob bytes are fetched lazily via
+/// [`fetch_blob`].
 pub struct ReviewFileDto {
     /// Path to show in the file list (new path, or old path for deletions).
     pub display_path: String,
@@ -352,6 +355,7 @@ pub fn open_review(
     let snapshot = ok_or_status(resp, "open_review")?
         .json::<ReviewSnapshot>()
         .context("response did not match the ReviewSnapshot contract")?;
+    cache_files(&session_id, &snapshot.diff.files);
     Ok(snapshot.into())
 }
 
@@ -383,6 +387,7 @@ pub fn refresh_review(
     let snapshot = ok_or_status(resp, "refresh_review")?
         .json::<ReviewSnapshot>()
         .context("response did not match the ReviewSnapshot contract")?;
+    cache_files(&session_id, &snapshot.diff.files);
     Ok(Some(snapshot.into()))
 }
 
@@ -493,10 +498,90 @@ pub fn apply_comments(base_url: String, token: String, session_id: String) -> Re
     Ok(outcome.into())
 }
 
-// TODO: the binary-blob endpoint (`GET /sessions/{id}/blob`) and
-// `toggle_file_reviewed` (`POST /sessions/{id}/files/reviewed`) are not wired in
-// this first cut. Binary files render as a placeholder; reviewed marks are
-// read-only (shown but not togglable from the client yet).
+/// `GET {base_url}/api/sessions/{session_id}/blob?side=&path=` → the raw file
+/// bytes for one side of a (binary) diff. `side` is `"old"` or `"new"`; `path`
+/// is the file's display path. Used to render binary images in the review view.
+pub fn fetch_blob(
+    base_url: String,
+    token: String,
+    session_id: String,
+    side: String,
+    path: String,
+) -> Result<Vec<u8>> {
+    let resp = client()
+        .get(format!(
+            "{}/api/sessions/{}/blob",
+            base(&base_url),
+            session_id
+        ))
+        .query(&[("side", side.as_str()), ("path", path.as_str())])
+        .bearer_auth(token)
+        .send()
+        .context("fetch_blob request failed")?;
+    let bytes = ok_or_status(resp, "fetch_blob")?
+        .bytes()
+        .context("could not read blob bytes")?;
+    Ok(bytes.to_vec())
+}
+
+/// `POST {base_url}/api/sessions/{session_id}/files/reviewed` → toggle a file's
+/// reviewed mark, returning the new state. The server keys the mark on the
+/// exact `FileDiff` (path + a content hash), so we replay the raw `FileDiff`
+/// JSON cached from the last `open_review`/`refresh_review` for `display_path`.
+pub fn toggle_file_reviewed(
+    base_url: String,
+    token: String,
+    session_id: String,
+    display_path: String,
+) -> Result<bool> {
+    let raw = file_cache()
+        .lock()
+        .expect("file cache poisoned")
+        .get(&(session_id.clone(), display_path.clone()))
+        .cloned()
+        .context("file not in the last-opened review; open the review first")?;
+    let resp = client()
+        .post(format!(
+            "{}/api/sessions/{}/files/reviewed",
+            base(&base_url),
+            session_id
+        ))
+        .bearer_auth(token)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(raw)
+        .send()
+        .context("toggle_file_reviewed request failed")?;
+    let value: serde_json::Value = ok_or_status(resp, "toggle_file_reviewed")?
+        .json()
+        .context("could not read toggle_file_reviewed response body")?;
+    Ok(value
+        .get("reviewed")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false))
+}
+
+/// Raw `FileDiff` JSON keyed by `(session_id, display_path)`, populated by
+/// `open_review`/`refresh_review` so `toggle_file_reviewed` can replay the exact
+/// `FileDiff` the server hashed (a reconstructed one would hash differently and
+/// orphan the mark).
+fn file_cache() -> &'static Mutex<HashMap<(String, String), String>> {
+    static CACHE: OnceLock<Mutex<HashMap<(String, String), String>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Replace the cached files for `session_id` with the snapshot's current set.
+fn cache_files(session_id: &str, files: &[FileDiff]) {
+    let mut cache = file_cache().lock().expect("file cache poisoned");
+    cache.retain(|(sid, _), _| sid != session_id);
+    for f in files {
+        if let Ok(json) = serde_json::to_string(f) {
+            cache.insert(
+                (session_id.to_string(), f.display_path().to_string()),
+                json,
+            );
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -553,6 +638,32 @@ mod tests {
         };
         let dto: ReviewSnapshotDto = snap.into();
         assert_eq!(dto.content_hash, u64::MAX.to_string());
+    }
+
+    #[test]
+    fn cache_files_stores_lossless_filediff_by_display_path() {
+        // Uses a unique session id so it doesn't race other tests sharing the
+        // process-global cache.
+        let f = FileDiff {
+            old_path: "src/a.rs".into(),
+            new_path: "src/a.rs".into(),
+            status: FileStatus::Modified,
+            added: 1,
+            removed: 0,
+            hunks: vec![],
+            binary: None,
+        };
+        cache_files("sess-cache-test", std::slice::from_ref(&f));
+        let raw = file_cache()
+            .lock()
+            .unwrap()
+            .get(&("sess-cache-test".to_string(), "src/a.rs".to_string()))
+            .cloned()
+            .expect("file should be cached by display_path");
+        // The cached JSON must round-trip to the identical FileDiff so the
+        // server hashes the same value for the reviewed mark.
+        let back: FileDiff = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back, f);
     }
 
     #[test]

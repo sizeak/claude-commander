@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `base`, `client`, `ok_or_status`
+// These functions are ignored because they are not marked as `pub`: `base`, `cache_files`, `client`, `file_cache`, `ok_or_status`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ReviewDiffDto`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
 
@@ -96,6 +96,39 @@ Future<ApplyResult> applyComments({
   baseUrl: baseUrl,
   token: token,
   sessionId: sessionId,
+);
+
+/// `GET {base_url}/api/sessions/{session_id}/blob?side=&path=` → the raw file
+/// bytes for one side of a (binary) diff. `side` is `"old"` or `"new"`; `path`
+/// is the file's display path. Used to render binary images in the review view.
+Future<Uint8List> fetchBlob({
+  required String baseUrl,
+  required String token,
+  required String sessionId,
+  required String side,
+  required String path,
+}) => RustLib.instance.api.crateApiReviewFetchBlob(
+  baseUrl: baseUrl,
+  token: token,
+  sessionId: sessionId,
+  side: side,
+  path: path,
+);
+
+/// `POST {base_url}/api/sessions/{session_id}/files/reviewed` → toggle a file's
+/// reviewed mark, returning the new state. The server keys the mark on the
+/// exact `FileDiff` (path + a content hash), so we replay the raw `FileDiff`
+/// JSON cached from the last `open_review`/`refresh_review` for `display_path`.
+Future<bool> toggleFileReviewed({
+  required String baseUrl,
+  required String token,
+  required String sessionId,
+  required String displayPath,
+}) => RustLib.instance.api.crateApiReviewToggleFileReviewed(
+  baseUrl: baseUrl,
+  token: token,
+  sessionId: sessionId,
+  displayPath: displayPath,
 );
 
 /// Outcome of applying a session's staged comments — a tagged struct (not a
@@ -212,8 +245,8 @@ enum ReviewCommentSide { old, new_ }
 enum ReviewCommentStatus { staged, drifted, applied }
 
 /// All changes to a single file. `BinaryKind`/`BinaryInfo` are flattened onto
-/// `is_binary` + `binary_mime` (the blob bytes are fetched lazily — TODO, not
-/// wired in this first cut).
+/// `is_binary` + `binary_mime`; the blob bytes are fetched lazily via
+/// [`fetch_blob`].
 class ReviewFileDto {
   /// Path to show in the file list (new path, or old path for deletions).
   final String displayPath;

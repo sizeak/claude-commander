@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1614246173;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 752598176;
 
 // Section: executor
 
@@ -358,6 +358,51 @@ fn wire__crate__api__simple__delete_session_impl(
                     (move || {
                         let output_ok =
                             crate::api::simple::delete_session(api_base_url, api_token, api_id)?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__review__fetch_blob_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "fetch_blob",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_base_url = <String>::sse_decode(&mut deserializer);
+            let api_token = <String>::sse_decode(&mut deserializer);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            let api_side = <String>::sse_decode(&mut deserializer);
+            let api_path = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok = crate::api::review::fetch_blob(
+                            api_base_url,
+                            api_token,
+                            api_session_id,
+                            api_side,
+                            api_path,
+                        )?;
                         Ok(output_ok)
                     })(),
                 )
@@ -902,6 +947,49 @@ fn wire__crate__api__terminal__terminal_send_input_impl(
                     })?;
                     Ok(output_ok)
                 })())
+            }
+        },
+    )
+}
+fn wire__crate__api__review__toggle_file_reviewed_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "toggle_file_reviewed",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_base_url = <String>::sse_decode(&mut deserializer);
+            let api_token = <String>::sse_decode(&mut deserializer);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            let api_display_path = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok = crate::api::review::toggle_file_reviewed(
+                            api_base_url,
+                            api_token,
+                            api_session_id,
+                            api_display_path,
+                        )?;
+                        Ok(output_ok)
+                    })(),
+                )
             }
         },
     )
@@ -1563,21 +1651,25 @@ fn pde_ffi_dispatcher_primary_impl(
         5 => wire__crate__api__simple__create_session_impl(port, ptr, rust_vec_len, data_len),
         6 => wire__crate__api__review__delete_comment_impl(port, ptr, rust_vec_len, data_len),
         7 => wire__crate__api__simple__delete_session_impl(port, ptr, rust_vec_len, data_len),
-        8 => wire__crate__api__simple__get_pane_impl(port, ptr, rust_vec_len, data_len),
-        9 => wire__crate__api__simple__get_session_detail_impl(port, ptr, rust_vec_len, data_len),
-        10 => wire__crate__api__simple__health_impl(port, ptr, rust_vec_len, data_len),
-        11 => wire__crate__api__simple__health_tmux_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__simple__init_app_impl(port, ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__simple__kill_session_impl(port, ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__review__list_comments_impl(port, ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__simple__list_sessions_impl(port, ptr, rust_vec_len, data_len),
-        16 => wire__crate__api__review__open_review_impl(port, ptr, rust_vec_len, data_len),
-        17 => wire__crate__api__review__refresh_review_impl(port, ptr, rust_vec_len, data_len),
-        18 => wire__crate__api__simple__restart_session_impl(port, ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__terminal__terminal_detach_impl(port, ptr, rust_vec_len, data_len),
-        20 => wire__crate__api__terminal__terminal_resize_impl(port, ptr, rust_vec_len, data_len),
-        21 => {
+        8 => wire__crate__api__review__fetch_blob_impl(port, ptr, rust_vec_len, data_len),
+        9 => wire__crate__api__simple__get_pane_impl(port, ptr, rust_vec_len, data_len),
+        10 => wire__crate__api__simple__get_session_detail_impl(port, ptr, rust_vec_len, data_len),
+        11 => wire__crate__api__simple__health_impl(port, ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__simple__health_tmux_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__simple__init_app_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__simple__kill_session_impl(port, ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__review__list_comments_impl(port, ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__simple__list_sessions_impl(port, ptr, rust_vec_len, data_len),
+        17 => wire__crate__api__review__open_review_impl(port, ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__review__refresh_review_impl(port, ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__simple__restart_session_impl(port, ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__terminal__terminal_detach_impl(port, ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__terminal__terminal_resize_impl(port, ptr, rust_vec_len, data_len),
+        22 => {
             wire__crate__api__terminal__terminal_send_input_impl(port, ptr, rust_vec_len, data_len)
+        }
+        23 => {
+            wire__crate__api__review__toggle_file_reviewed_impl(port, ptr, rust_vec_len, data_len)
         }
         _ => unreachable!(),
     }

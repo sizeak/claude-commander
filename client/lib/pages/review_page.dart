@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 
 import '../server_config.dart';
@@ -25,6 +27,10 @@ class _ReviewPageState extends State<ReviewPage> {
   bool _loading = true;
   bool _busy = false;
 
+  /// Display paths currently marked reviewed; mutated optimistically by
+  /// [_toggleReviewed] and re-synced from each snapshot.
+  final Set<String> _reviewed = {};
+
   String get _id => widget.session.id;
 
   @override
@@ -44,6 +50,9 @@ class _ReviewPageState extends State<ReviewPage> {
       if (!mounted) return;
       setState(() {
         _snapshot = snap;
+        _reviewed
+          ..clear()
+          ..addAll(snap.reviewed);
         _error = null;
         _loading = false;
       });
@@ -70,7 +79,12 @@ class _ReviewPageState extends State<ReviewPage> {
       );
       if (!mounted) return;
       setState(() {
-        if (snap != null) _snapshot = snap;
+        if (snap != null) {
+          _snapshot = snap;
+          _reviewed
+            ..clear()
+            ..addAll(snap.reviewed);
+        }
         _busy = false;
       });
       if (snap == null) {
@@ -118,6 +132,35 @@ class _ReviewPageState extends State<ReviewPage> {
       _snack('Apply failed: $e');
     }
   }
+
+  Future<void> _toggleReviewed(String displayPath) async {
+    try {
+      final nowReviewed = await rust.toggleFileReviewed(
+        baseUrl: widget.config.baseUrl,
+        token: widget.config.token,
+        sessionId: _id,
+        displayPath: displayPath,
+      );
+      if (!mounted) return;
+      setState(() {
+        if (nowReviewed) {
+          _reviewed.add(displayPath);
+        } else {
+          _reviewed.remove(displayPath);
+        }
+      });
+    } catch (e) {
+      _snack('Toggle reviewed failed: $e');
+    }
+  }
+
+  Future<Uint8List> _loadBlob(String side, String path) => rust.fetchBlob(
+    baseUrl: widget.config.baseUrl,
+    token: widget.config.token,
+    sessionId: _id,
+    side: side,
+    path: path,
+  );
 
   String _applyMessage(rust.ApplyResult r) => switch (r.kind) {
     rust.ApplyResultKind.nothing => 'Nothing to apply',
@@ -251,7 +294,9 @@ class _ReviewPageState extends State<ReviewPage> {
           ...snap.files.map(
             (f) => _FileCard(
               file: f,
-              reviewed: snap.reviewed.contains(f.displayPath),
+              reviewed: _reviewed.contains(f.displayPath),
+              onToggleReviewed: _busy ? null : () => _toggleReviewed(f.displayPath),
+              onLoadImage: _loadBlob,
               onAddComment: _busy ? null : _addComment,
             ),
           ),
@@ -319,6 +364,12 @@ class _FileCard extends StatelessWidget {
   final rust.ReviewFileDto file;
   final bool reviewed;
 
+  /// Toggle this file's reviewed mark; null while busy.
+  final VoidCallback? onToggleReviewed;
+
+  /// Fetch raw bytes for one side of a (binary) file: `(side, path) → bytes`.
+  final Future<Uint8List> Function(String side, String path) onLoadImage;
+
   /// Stage a comment for a selected line range; null while busy.
   final Future<void> Function({
     required String file,
@@ -331,14 +382,28 @@ class _FileCard extends StatelessWidget {
   const _FileCard({
     required this.file,
     required this.reviewed,
+    required this.onToggleReviewed,
+    required this.onLoadImage,
     required this.onAddComment,
   });
+
+  /// Which side's blob to render: deletions only have an old side; everything
+  /// else shows the new (working-tree) side.
+  String get _imageSide =>
+      file.status == rust.ReviewFileStatus.deleted ? 'old' : 'new';
+
+  bool get _isImage => file.isBinary && (file.binaryMime?.startsWith('image/') ?? false);
 
   @override
   Widget build(BuildContext context) {
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       child: ExpansionTile(
+        leading: Checkbox(
+          value: reviewed,
+          onChanged:
+              onToggleReviewed == null ? null : (_) => onToggleReviewed!(),
+        ),
         title: Text(
           file.displayPath,
           style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
@@ -357,22 +422,25 @@ class _FileCard extends StatelessWidget {
               '-${file.removed}',
               style: const TextStyle(color: Colors.red, fontSize: 12),
             ),
-            if (reviewed) ...[
-              const SizedBox(width: 8),
-              const Icon(Icons.check_circle, size: 14, color: Colors.green),
-            ],
           ],
         ),
         children: [
           if (file.isBinary)
             Padding(
               padding: const EdgeInsets.all(16),
-              child: Text(
-                file.binaryMime != null
-                    ? 'Binary file (${file.binaryMime})'
-                    : 'Binary file',
-                style: Theme.of(context).textTheme.bodySmall,
-              ),
+              child: _isImage
+                  ? _BinaryImageView(
+                      side: _imageSide,
+                      path: file.displayPath,
+                      mime: file.binaryMime!,
+                      load: onLoadImage,
+                    )
+                  : Text(
+                      file.binaryMime != null
+                          ? 'Binary file (${file.binaryMime})'
+                          : 'Binary file',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
             )
           else
             ...file.hunks.map(
@@ -687,6 +755,101 @@ class _CommentDialogState extends State<_CommentDialog> {
         FilledButton(
           onPressed: () => Navigator.of(context).pop(_controller.text),
           child: const Text('Add'),
+        ),
+      ],
+    );
+  }
+}
+
+/// Lazily fetches and renders a binary image blob — a tap to load, so opening a
+/// diff with many images doesn't eagerly download them all.
+class _BinaryImageView extends StatefulWidget {
+  final String side;
+  final String path;
+  final String mime;
+  final Future<Uint8List> Function(String side, String path) load;
+
+  const _BinaryImageView({
+    required this.side,
+    required this.path,
+    required this.mime,
+    required this.load,
+  });
+
+  @override
+  State<_BinaryImageView> createState() => _BinaryImageViewState();
+}
+
+class _BinaryImageViewState extends State<_BinaryImageView> {
+  Uint8List? _bytes;
+  bool _loading = false;
+  String? _error;
+
+  Future<void> _fetch() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final bytes = await widget.load(widget.side, widget.path);
+      if (!mounted) return;
+      setState(() {
+        _bytes = bytes;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _error = e.toString();
+        _loading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_bytes != null) {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '${widget.mime} · ${widget.side} side',
+            style: Theme.of(context).textTheme.labelSmall,
+          ),
+          const SizedBox(height: 8),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 320),
+            child: Image.memory(
+              _bytes!,
+              fit: BoxFit.contain,
+              errorBuilder: (_, _, _) => const Text('Could not decode image'),
+            ),
+          ),
+        ],
+      );
+    }
+    if (_loading) {
+      return const Center(
+        child: Padding(
+          padding: EdgeInsets.all(8),
+          child: CircularProgressIndicator(),
+        ),
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (_error != null) ...[
+          Text(
+            'Failed: $_error',
+            style: TextStyle(color: Theme.of(context).colorScheme.error),
+          ),
+          const SizedBox(height: 8),
+        ],
+        OutlinedButton.icon(
+          onPressed: _fetch,
+          icon: const Icon(Icons.image, size: 16),
+          label: Text('Load image (${widget.mime})'),
         ),
       ],
     );
