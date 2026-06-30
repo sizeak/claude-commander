@@ -280,7 +280,7 @@ impl WorktreeManager {
     }
 }
 
-/// Build the `git worktree add` command (args + env only).
+/// Build the `git worktree add` command (working dir, args, and env — no stdio).
 ///
 /// Returns a `std::process::Command` so callers can inspect args/env in tests;
 /// `run_create_worktree` converts it to a `tokio` command and adds stdio.
