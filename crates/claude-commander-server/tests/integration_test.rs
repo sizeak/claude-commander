@@ -70,10 +70,13 @@ async fn create_test_repo() -> (TempDir, PathBuf) {
 /// Build a hermetic [`AppState`] (empty core state under `data_dir`, a temp
 /// worktrees dir, auth disabled) wrapping a real `CommanderService`.
 fn test_state(data_dir: &TempDir, worktrees_dir: &TempDir) -> AppState {
-    let config = Config {
+    let mut config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
         ..Config::default()
     };
+    // Telemetry is opt-out by default with a baked ingest token; disable it so
+    // the test suite (incl. CI) never posts events to production OpenObserve.
+    config.telemetry.enabled = false;
     let config_store = Arc::new(ConfigStore::with_path(
         config,
         data_dir.path().join("config.toml"),

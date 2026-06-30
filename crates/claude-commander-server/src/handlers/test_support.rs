@@ -30,8 +30,13 @@ use crate::state::AppState;
 
 /// Build a hermetic [`AppState`] backed by empty core state under `dir`.
 pub fn test_state(dir: &TempDir) -> AppState {
+    // Telemetry is opt-out by default with a baked ingest token, so a plain
+    // `CommanderService::new` would post events to the production OpenObserve
+    // instance from the test suite (incl. CI). Disable it for tests.
+    let mut config = Config::default();
+    config.telemetry.enabled = false;
     let config_store = Arc::new(ConfigStore::with_path(
-        Config::default(),
+        config,
         dir.path().join("config.toml"),
     ));
     let store = Arc::new(StateStore::with_path(
@@ -64,4 +69,18 @@ pub fn json<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> T {
             String::from_utf8_lossy(bytes)
         )
     })
+}
+
+/// Guard: the test fixture must NOT emit telemetry. Telemetry is opt-out by
+/// default with a baked ingest token, so an un-disabled test service would post
+/// events to the production OpenObserve instance from `cargo test` / CI. This
+/// fails if someone re-enables it.
+#[tokio::test]
+async fn test_state_disables_telemetry() {
+    let dir = TempDir::new().unwrap();
+    let state = test_state(&dir);
+    assert!(
+        !state.service.telemetry().is_active(),
+        "test fixtures must not emit telemetry (would pollute production OpenObserve)"
+    );
 }
