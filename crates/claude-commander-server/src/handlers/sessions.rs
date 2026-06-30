@@ -15,7 +15,6 @@ use claude_commander_core::api::{CreateSessionOpts, SessionInfo};
 use claude_commander_core::cli::SessionLookup;
 use serde::Deserialize;
 use serde_json::json;
-use std::path::PathBuf;
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -104,47 +103,14 @@ pub async fn pane(
     }
 }
 
-/// Request body for `POST /sessions`. Mirrors [`CreateSessionOpts`], which is
-/// not itself `Deserialize`.
-#[derive(Debug, Deserialize)]
-pub struct CreateSessionBody {
-    pub project_path: PathBuf,
-    pub title: String,
-    #[serde(default)]
-    pub program: Option<String>,
-    #[serde(default)]
-    pub initial_prompt: Option<String>,
-    #[serde(default)]
-    pub effort: Option<String>,
-    #[serde(default)]
-    pub mode: Option<String>,
-    #[serde(default)]
-    pub base_branch: Option<String>,
-    #[serde(default)]
-    pub section: Option<String>,
-}
-
-impl From<CreateSessionBody> for CreateSessionOpts {
-    fn from(b: CreateSessionBody) -> Self {
-        CreateSessionOpts {
-            project_path: b.project_path,
-            title: b.title,
-            program: b.program,
-            initial_prompt: b.initial_prompt,
-            effort: b.effort,
-            mode: b.mode,
-            base_branch: b.base_branch,
-            section: b.section,
-        }
-    }
-}
-
 /// `POST /sessions` → `create_session` → 201 `{ "id": ... }`.
+///
+/// The body deserializes straight into [`CreateSessionOpts`] (a shared wire type
+/// in `claude-commander-protocol`) — no server-side mirror DTO.
 pub async fn create(
     State(state): State<AppState>,
-    Json(body): Json<CreateSessionBody>,
+    Json(opts): Json<CreateSessionOpts>,
 ) -> Result<Response, ApiError> {
-    let opts = body.into();
     // `create_session` builds a `gix::Repository` (non-`Send`) across an await.
     let id = run_local(move || async move { state.service.create_session(opts).await }).await?;
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))).into_response())

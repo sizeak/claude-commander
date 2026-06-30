@@ -20,6 +20,10 @@ name = "claude_commander_core"
 path = "src/lib.rs"
 
 [dependencies]
+# Shared wire types (DTOs + WS protocol) — also consumed by the server and the
+# mobile/desktop clients, so the serde shape has a single source of truth.
+claude-commander-protocol = { path = "../claude-commander-protocol" }
+
 # Async runtime
 tokio = { workspace = true }
 futures = "0.3"

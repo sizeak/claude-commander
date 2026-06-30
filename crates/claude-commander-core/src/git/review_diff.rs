@@ -13,7 +13,6 @@
 use std::path::Path;
 use std::process::Stdio;
 
-use serde::Serialize;
 use tokio::process::Command;
 use xxhash_rust::xxh3::Xxh3;
 
@@ -274,101 +273,14 @@ async fn merge_base(worktree: &Path, base: &str) -> Option<String> {
     (!sha.is_empty()).then_some(sha)
 }
 
-/// Origin of a single diff line.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum LineOrigin {
-    Context,
-    Addition,
-    Deletion,
-}
-
-/// A single line within a hunk, with resolved old/new line numbers.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct DiffLine {
-    pub origin: LineOrigin,
-    /// Line number on the old side (`None` for additions).
-    pub old_lineno: Option<usize>,
-    /// Line number on the new side (`None` for deletions).
-    pub new_lineno: Option<usize>,
-    /// Line content without the leading `+`/`-`/space marker.
-    pub content: String,
-}
-
-/// A contiguous block of changes (one `@@ ... @@` section).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Hunk {
-    pub old_start: usize,
-    pub old_lines: usize,
-    pub new_start: usize,
-    pub new_lines: usize,
-    /// Text following the closing `@@` (the section heading), if any.
-    pub header: String,
-    pub lines: Vec<DiffLine>,
-}
-
-/// How a file changed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FileStatus {
-    Added,
-    Deleted,
-    Modified,
-    Renamed,
-}
-
-/// What kind of binary a file is, for consumers deciding how to render it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", tag = "kind")]
-pub enum BinaryKind {
-    /// A raster image we can render, tagged with its MIME type (e.g.
-    /// `image/png`) so a GUI can build a `data:` URL directly.
-    Image { mime: String },
-    /// Any other binary blob (rendered as a placeholder, not an image).
-    Other,
-}
-
-/// Metadata for a binary file's diff. The bytes themselves are NOT inlined
-/// here — consumers lazy-load them via `CommanderService::fetch_diff_blob`
-/// keyed by `(side, path)`. `old_*`/`new_*` are `None` on the side that does
-/// not exist (added files have no old side; deleted files have no new side).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct BinaryInfo {
-    pub kind: BinaryKind,
-    /// Base-side blob oid (from the diff `index` line), if present.
-    pub old_oid: Option<String>,
-    /// Working-tree-side blob oid (from the diff `index` line), if present.
-    pub new_oid: Option<String>,
-    /// Base-side blob size in bytes, filled in by `open_review` (not the parser).
-    pub old_size: Option<u64>,
-    /// Working-tree-side size in bytes, filled in by `open_review`.
-    pub new_size: Option<u64>,
-}
-
-/// All changes to a single file.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct FileDiff {
-    pub old_path: String,
-    pub new_path: String,
-    pub status: FileStatus,
-    pub added: usize,
-    pub removed: usize,
-    pub hunks: Vec<Hunk>,
-    /// `Some` when this file is binary (no textual hunks); `None` for text.
-    pub binary: Option<BinaryInfo>,
-}
-
-impl FileDiff {
-    /// Path to show in the file list: the new path, except for deletions where
-    /// only the old path is meaningful.
-    pub fn display_path(&self) -> &str {
-        if self.status == FileStatus::Deleted {
-            &self.old_path
-        } else {
-            &self.new_path
-        }
-    }
-}
+// The structured diff model is the network wire shape, so it lives in the
+// shared `claude-commander-protocol` crate (`Serialize + Deserialize`, no git
+// deps, mobile-safe). Re-exported here so existing `crate::git::{FileDiff,
+// Hunk, ...}` paths — and the parser/hashing logic below, which operate on
+// these types — keep working unchanged.
+pub use claude_commander_protocol::diff::{
+    BinaryInfo, BinaryKind, DiffLine, FileDiff, FileStatus, Hunk, LineOrigin, ParsedDiff,
+};
 
 /// Stable content hash of a file's diff: xxh3_64 over a canonical byte
 /// rendering of its hunks. Changes whenever any hunk header (position) or
@@ -395,18 +307,6 @@ pub fn file_diff_hash(file: &FileDiff) -> u64 {
         }
     }
     h.digest()
-}
-
-/// A parsed unified diff: an ordered list of changed files.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
-pub struct ParsedDiff {
-    pub files: Vec<FileDiff>,
-}
-
-impl ParsedDiff {
-    pub fn is_empty(&self) -> bool {
-        self.files.is_empty()
-    }
 }
 
 /// Parse a unified diff (the output of `git diff`) into a [`ParsedDiff`].

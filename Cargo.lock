@@ -738,6 +738,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
+ "claude-commander-protocol",
  "color-eyre",
  "cpal",
  "crossterm",
@@ -777,6 +778,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "claude-commander-protocol"
+version = "0.21.2"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "claude-commander-server"
 version = "0.21.2"
 dependencies = [
@@ -784,6 +795,7 @@ dependencies = [
  "axum-server",
  "clap",
  "claude-commander-core",
+ "claude-commander-protocol",
  "figment",
  "futures",
  "http-body-util",

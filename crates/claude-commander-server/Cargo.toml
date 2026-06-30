@@ -24,6 +24,7 @@ path = "src/main.rs"
 
 [dependencies]
 claude-commander-core = { path = "../claude-commander-core" }
+claude-commander-protocol = { path = "../claude-commander-protocol" }
 
 # Async runtime
 tokio = { workspace = true }
