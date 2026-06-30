@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1529098527;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -1614246173;
 
 // Section: executor
 
@@ -45,6 +45,47 @@ flutter_rust_bridge::frb_generated_default_handler!();
 
 // Section: wire_funcs
 
+fn wire__crate__api__review__apply_comments_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "apply_comments",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_base_url = <String>::sse_decode(&mut deserializer);
+            let api_token = <String>::sse_decode(&mut deserializer);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok = crate::api::review::apply_comments(
+                            api_base_url,
+                            api_token,
+                            api_session_id,
+                        )?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__terminal__attach_terminal_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -137,6 +178,59 @@ fn wire__crate__api__terminal__bench_terminal_stream_impl(
         },
     )
 }
+fn wire__crate__api__review__create_comment_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "create_comment",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_base_url = <String>::sse_decode(&mut deserializer);
+            let api_token = <String>::sse_decode(&mut deserializer);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            let api_file = <String>::sse_decode(&mut deserializer);
+            let api_side = <String>::sse_decode(&mut deserializer);
+            let api_line_start = <u32>::sse_decode(&mut deserializer);
+            let api_line_end = <u32>::sse_decode(&mut deserializer);
+            let api_snippet = <String>::sse_decode(&mut deserializer);
+            let api_comment = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok = crate::api::review::create_comment(
+                            api_base_url,
+                            api_token,
+                            api_session_id,
+                            api_file,
+                            api_side,
+                            api_line_start,
+                            api_line_end,
+                            api_snippet,
+                            api_comment,
+                        )?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__simple__create_session_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -182,6 +276,49 @@ fn wire__crate__api__simple__create_session_impl(
                             api_effort,
                             api_mode,
                             api_base_branch,
+                        )?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__review__delete_comment_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "delete_comment",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_base_url = <String>::sse_decode(&mut deserializer);
+            let api_token = <String>::sse_decode(&mut deserializer);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            let api_comment_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok = crate::api::review::delete_comment(
+                            api_base_url,
+                            api_token,
+                            api_session_id,
+                            api_comment_id,
                         )?;
                         Ok(output_ok)
                     })(),
@@ -457,6 +594,47 @@ fn wire__crate__api__simple__kill_session_impl(
         },
     )
 }
+fn wire__crate__api__review__list_comments_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "list_comments",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_base_url = <String>::sse_decode(&mut deserializer);
+            let api_token = <String>::sse_decode(&mut deserializer);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok = crate::api::review::list_comments(
+                            api_base_url,
+                            api_token,
+                            api_session_id,
+                        )?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
 fn wire__crate__api__simple__list_sessions_impl(
     port_: flutter_rust_bridge::for_generated::MessagePort,
     ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
@@ -490,6 +668,90 @@ fn wire__crate__api__simple__list_sessions_impl(
                             api_base_url,
                             api_token,
                             api_include_stopped,
+                        )?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__review__open_review_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "open_review",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_base_url = <String>::sse_decode(&mut deserializer);
+            let api_token = <String>::sse_decode(&mut deserializer);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok = crate::api::review::open_review(
+                            api_base_url,
+                            api_token,
+                            api_session_id,
+                        )?;
+                        Ok(output_ok)
+                    })(),
+                )
+            }
+        },
+    )
+}
+fn wire__crate__api__review__refresh_review_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "refresh_review",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            let api_base_url = <String>::sse_decode(&mut deserializer);
+            let api_token = <String>::sse_decode(&mut deserializer);
+            let api_session_id = <String>::sse_decode(&mut deserializer);
+            let api_prev_hash = <String>::sse_decode(&mut deserializer);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, flutter_rust_bridge::for_generated::anyhow::Error>(
+                    (move || {
+                        let output_ok = crate::api::review::refresh_review(
+                            api_base_url,
+                            api_token,
+                            api_session_id,
+                            api_prev_hash,
                         )?;
                         Ok(output_ok)
                     })(),
@@ -751,10 +1013,66 @@ impl SseDecode for crate::api::mirrors::AgentState {
     }
 }
 
+impl SseDecode for crate::api::review::ApplyResult {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_kind = <crate::api::review::ApplyResultKind>::sse_decode(deserializer);
+        let mut var_driftedIds = <Vec<String>>::sse_decode(deserializer);
+        let mut var_path = <Option<String>>::sse_decode(deserializer);
+        let mut var_count = <u32>::sse_decode(deserializer);
+        return crate::api::review::ApplyResult {
+            kind: var_kind,
+            drifted_ids: var_driftedIds,
+            path: var_path,
+            count: var_count,
+        };
+    }
+}
+
+impl SseDecode for crate::api::review::ApplyResultKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::review::ApplyResultKind::Nothing,
+            1 => crate::api::review::ApplyResultKind::Blocked,
+            2 => crate::api::review::ApplyResultKind::Applied,
+            3 => crate::api::review::ApplyResultKind::Deferred,
+            _ => unreachable!("Invalid variant for ApplyResultKind: {}", inner),
+        };
+    }
+}
+
 impl SseDecode for bool {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         deserializer.cursor.read_u8().unwrap() != 0
+    }
+}
+
+impl SseDecode for crate::api::review::CommentDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_id = <String>::sse_decode(deserializer);
+        let mut var_file = <String>::sse_decode(deserializer);
+        let mut var_side = <crate::api::review::ReviewCommentSide>::sse_decode(deserializer);
+        let mut var_lineStart = <u32>::sse_decode(deserializer);
+        let mut var_lineEnd = <u32>::sse_decode(deserializer);
+        let mut var_snippet = <String>::sse_decode(deserializer);
+        let mut var_comment = <String>::sse_decode(deserializer);
+        let mut var_status = <crate::api::review::ReviewCommentStatus>::sse_decode(deserializer);
+        let mut var_createdAt = <chrono::DateTime<chrono::Utc>>::sse_decode(deserializer);
+        return crate::api::review::CommentDto {
+            id: var_id,
+            file: var_file,
+            side: var_side,
+            line_start: var_lineStart,
+            line_end: var_lineEnd,
+            snippet: var_snippet,
+            comment: var_comment,
+            status: var_status,
+            created_at: var_createdAt,
+        };
     }
 }
 
@@ -784,6 +1102,18 @@ impl SseDecode for Vec<String> {
     }
 }
 
+impl SseDecode for Vec<crate::api::review::CommentDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::review::CommentDto>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
 impl SseDecode for Vec<u8> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -791,6 +1121,48 @@ impl SseDecode for Vec<u8> {
         let mut ans_ = vec![];
         for idx_ in 0..len_ {
             ans_.push(<u8>::sse_decode(deserializer));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::review::ReviewFileDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::review::ReviewFileDto>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::review::ReviewHunkDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::review::ReviewHunkDto>::sse_decode(
+                deserializer,
+            ));
+        }
+        return ans_;
+    }
+}
+
+impl SseDecode for Vec<crate::api::review::ReviewLineDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut len_ = <i32>::sse_decode(deserializer);
+        let mut ans_ = vec![];
+        for idx_ in 0..len_ {
+            ans_.push(<crate::api::review::ReviewLineDto>::sse_decode(
+                deserializer,
+            ));
         }
         return ans_;
     }
@@ -824,6 +1196,19 @@ impl SseDecode for Option<crate::api::mirrors::ReviewDecision> {
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
         if (<bool>::sse_decode(deserializer)) {
             return Some(<crate::api::mirrors::ReviewDecision>::sse_decode(
+                deserializer,
+            ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::review::ReviewSnapshotDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::review::ReviewSnapshotDto>::sse_decode(
                 deserializer,
             ));
         } else {
@@ -877,6 +1262,31 @@ impl SseDecode for crate::api::mirrors::ProjectId {
     }
 }
 
+impl SseDecode for crate::api::review::ReviewCommentSide {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::review::ReviewCommentSide::Old,
+            1 => crate::api::review::ReviewCommentSide::New,
+            _ => unreachable!("Invalid variant for ReviewCommentSide: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::review::ReviewCommentStatus {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::review::ReviewCommentStatus::Staged,
+            1 => crate::api::review::ReviewCommentStatus::Drifted,
+            2 => crate::api::review::ReviewCommentStatus::Applied,
+            _ => unreachable!("Invalid variant for ReviewCommentStatus: {}", inner),
+        };
+    }
+}
+
 impl SseDecode for crate::api::mirrors::ReviewDecision {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -886,6 +1296,113 @@ impl SseDecode for crate::api::mirrors::ReviewDecision {
             1 => crate::api::mirrors::ReviewDecision::Approved,
             2 => crate::api::mirrors::ReviewDecision::ChangesRequested,
             _ => unreachable!("Invalid variant for ReviewDecision: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::review::ReviewFileDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_displayPath = <String>::sse_decode(deserializer);
+        let mut var_oldPath = <String>::sse_decode(deserializer);
+        let mut var_newPath = <String>::sse_decode(deserializer);
+        let mut var_status = <crate::api::review::ReviewFileStatus>::sse_decode(deserializer);
+        let mut var_added = <u32>::sse_decode(deserializer);
+        let mut var_removed = <u32>::sse_decode(deserializer);
+        let mut var_hunks = <Vec<crate::api::review::ReviewHunkDto>>::sse_decode(deserializer);
+        let mut var_isBinary = <bool>::sse_decode(deserializer);
+        let mut var_binaryMime = <Option<String>>::sse_decode(deserializer);
+        return crate::api::review::ReviewFileDto {
+            display_path: var_displayPath,
+            old_path: var_oldPath,
+            new_path: var_newPath,
+            status: var_status,
+            added: var_added,
+            removed: var_removed,
+            hunks: var_hunks,
+            is_binary: var_isBinary,
+            binary_mime: var_binaryMime,
+        };
+    }
+}
+
+impl SseDecode for crate::api::review::ReviewFileStatus {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::review::ReviewFileStatus::Added,
+            1 => crate::api::review::ReviewFileStatus::Deleted,
+            2 => crate::api::review::ReviewFileStatus::Modified,
+            3 => crate::api::review::ReviewFileStatus::Renamed,
+            _ => unreachable!("Invalid variant for ReviewFileStatus: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::review::ReviewHunkDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_oldStart = <u32>::sse_decode(deserializer);
+        let mut var_oldLines = <u32>::sse_decode(deserializer);
+        let mut var_newStart = <u32>::sse_decode(deserializer);
+        let mut var_newLines = <u32>::sse_decode(deserializer);
+        let mut var_header = <String>::sse_decode(deserializer);
+        let mut var_lines = <Vec<crate::api::review::ReviewLineDto>>::sse_decode(deserializer);
+        return crate::api::review::ReviewHunkDto {
+            old_start: var_oldStart,
+            old_lines: var_oldLines,
+            new_start: var_newStart,
+            new_lines: var_newLines,
+            header: var_header,
+            lines: var_lines,
+        };
+    }
+}
+
+impl SseDecode for crate::api::review::ReviewLineDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_origin = <crate::api::review::ReviewLineOrigin>::sse_decode(deserializer);
+        let mut var_oldLineno = <Option<u32>>::sse_decode(deserializer);
+        let mut var_newLineno = <Option<u32>>::sse_decode(deserializer);
+        let mut var_content = <String>::sse_decode(deserializer);
+        return crate::api::review::ReviewLineDto {
+            origin: var_origin,
+            old_lineno: var_oldLineno,
+            new_lineno: var_newLineno,
+            content: var_content,
+        };
+    }
+}
+
+impl SseDecode for crate::api::review::ReviewLineOrigin {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut inner = <i32>::sse_decode(deserializer);
+        return match inner {
+            0 => crate::api::review::ReviewLineOrigin::Context,
+            1 => crate::api::review::ReviewLineOrigin::Addition,
+            2 => crate::api::review::ReviewLineOrigin::Deletion,
+            _ => unreachable!("Invalid variant for ReviewLineOrigin: {}", inner),
+        };
+    }
+}
+
+impl SseDecode for crate::api::review::ReviewSnapshotDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        let mut var_base = <String>::sse_decode(deserializer);
+        let mut var_contentHash = <String>::sse_decode(deserializer);
+        let mut var_files = <Vec<crate::api::review::ReviewFileDto>>::sse_decode(deserializer);
+        let mut var_comments = <Vec<crate::api::review::CommentDto>>::sse_decode(deserializer);
+        let mut var_reviewed = <Vec<String>>::sse_decode(deserializer);
+        return crate::api::review::ReviewSnapshotDto {
+            base: var_base,
+            content_hash: var_contentHash,
+            files: var_files,
+            comments: var_comments,
+            reviewed: var_reviewed,
         };
     }
 }
@@ -1034,26 +1551,32 @@ fn pde_ffi_dispatcher_primary_impl(
 ) {
     // Codec=Pde (Serialization + dispatch), see doc to use other codecs
     match func_id {
-        1 => wire__crate__api__terminal__attach_terminal_impl(port, ptr, rust_vec_len, data_len),
-        2 => wire__crate__api__terminal__bench_terminal_stream_impl(
+        1 => wire__crate__api__review__apply_comments_impl(port, ptr, rust_vec_len, data_len),
+        2 => wire__crate__api__terminal__attach_terminal_impl(port, ptr, rust_vec_len, data_len),
+        3 => wire__crate__api__terminal__bench_terminal_stream_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        3 => wire__crate__api__simple__create_session_impl(port, ptr, rust_vec_len, data_len),
-        4 => wire__crate__api__simple__delete_session_impl(port, ptr, rust_vec_len, data_len),
-        5 => wire__crate__api__simple__get_pane_impl(port, ptr, rust_vec_len, data_len),
-        6 => wire__crate__api__simple__get_session_detail_impl(port, ptr, rust_vec_len, data_len),
-        7 => wire__crate__api__simple__health_impl(port, ptr, rust_vec_len, data_len),
-        8 => wire__crate__api__simple__health_tmux_impl(port, ptr, rust_vec_len, data_len),
-        9 => wire__crate__api__simple__init_app_impl(port, ptr, rust_vec_len, data_len),
-        10 => wire__crate__api__simple__kill_session_impl(port, ptr, rust_vec_len, data_len),
-        11 => wire__crate__api__simple__list_sessions_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__simple__restart_session_impl(port, ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__terminal__terminal_detach_impl(port, ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__terminal__terminal_resize_impl(port, ptr, rust_vec_len, data_len),
-        15 => {
+        4 => wire__crate__api__review__create_comment_impl(port, ptr, rust_vec_len, data_len),
+        5 => wire__crate__api__simple__create_session_impl(port, ptr, rust_vec_len, data_len),
+        6 => wire__crate__api__review__delete_comment_impl(port, ptr, rust_vec_len, data_len),
+        7 => wire__crate__api__simple__delete_session_impl(port, ptr, rust_vec_len, data_len),
+        8 => wire__crate__api__simple__get_pane_impl(port, ptr, rust_vec_len, data_len),
+        9 => wire__crate__api__simple__get_session_detail_impl(port, ptr, rust_vec_len, data_len),
+        10 => wire__crate__api__simple__health_impl(port, ptr, rust_vec_len, data_len),
+        11 => wire__crate__api__simple__health_tmux_impl(port, ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__simple__init_app_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__simple__kill_session_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__review__list_comments_impl(port, ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__simple__list_sessions_impl(port, ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__review__open_review_impl(port, ptr, rust_vec_len, data_len),
+        17 => wire__crate__api__review__refresh_review_impl(port, ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__simple__restart_session_impl(port, ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__terminal__terminal_detach_impl(port, ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__terminal__terminal_resize_impl(port, ptr, rust_vec_len, data_len),
+        21 => {
             wire__crate__api__terminal__terminal_send_input_impl(port, ptr, rust_vec_len, data_len)
         }
         _ => unreachable!(),
@@ -1098,6 +1621,80 @@ impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::mirrors::AgentStat
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::review::ApplyResult {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.kind.into_into_dart().into_dart(),
+            self.drifted_ids.into_into_dart().into_dart(),
+            self.path.into_into_dart().into_dart(),
+            self.count.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::review::ApplyResult
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::review::ApplyResult>
+    for crate::api::review::ApplyResult
+{
+    fn into_into_dart(self) -> crate::api::review::ApplyResult {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::review::ApplyResultKind {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Nothing => 0.into_dart(),
+            Self::Blocked => 1.into_dart(),
+            Self::Applied => 2.into_dart(),
+            Self::Deferred => 3.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::review::ApplyResultKind
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::review::ApplyResultKind>
+    for crate::api::review::ApplyResultKind
+{
+    fn into_into_dart(self) -> crate::api::review::ApplyResultKind {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::review::CommentDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.id.into_into_dart().into_dart(),
+            self.file.into_into_dart().into_dart(),
+            self.side.into_into_dart().into_dart(),
+            self.line_start.into_into_dart().into_dart(),
+            self.line_end.into_into_dart().into_dart(),
+            self.snippet.into_into_dart().into_dart(),
+            self.comment.into_into_dart().into_dart(),
+            self.status.into_into_dart().into_dart(),
+            self.created_at.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::review::CommentDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::review::CommentDto>
+    for crate::api::review::CommentDto
+{
+    fn into_into_dart(self) -> crate::api::review::CommentDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::mirrors::PrState> {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         match self.0 {
@@ -1137,6 +1734,49 @@ impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::mirrors::ProjectId
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::review::ReviewCommentSide {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Old => 0.into_dart(),
+            Self::New => 1.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::review::ReviewCommentSide
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::review::ReviewCommentSide>
+    for crate::api::review::ReviewCommentSide
+{
+    fn into_into_dart(self) -> crate::api::review::ReviewCommentSide {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::review::ReviewCommentStatus {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Staged => 0.into_dart(),
+            Self::Drifted => 1.into_dart(),
+            Self::Applied => 2.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::review::ReviewCommentStatus
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::review::ReviewCommentStatus>
+    for crate::api::review::ReviewCommentStatus
+{
+    fn into_into_dart(self) -> crate::api::review::ReviewCommentStatus {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
 impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::mirrors::ReviewDecision> {
     fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
         match self.0 {
@@ -1156,6 +1796,151 @@ impl flutter_rust_bridge::IntoIntoDart<FrbWrapper<crate::api::mirrors::ReviewDec
 {
     fn into_into_dart(self) -> FrbWrapper<crate::api::mirrors::ReviewDecision> {
         self.into()
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::review::ReviewFileDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.display_path.into_into_dart().into_dart(),
+            self.old_path.into_into_dart().into_dart(),
+            self.new_path.into_into_dart().into_dart(),
+            self.status.into_into_dart().into_dart(),
+            self.added.into_into_dart().into_dart(),
+            self.removed.into_into_dart().into_dart(),
+            self.hunks.into_into_dart().into_dart(),
+            self.is_binary.into_into_dart().into_dart(),
+            self.binary_mime.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::review::ReviewFileDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::review::ReviewFileDto>
+    for crate::api::review::ReviewFileDto
+{
+    fn into_into_dart(self) -> crate::api::review::ReviewFileDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::review::ReviewFileStatus {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Added => 0.into_dart(),
+            Self::Deleted => 1.into_dart(),
+            Self::Modified => 2.into_dart(),
+            Self::Renamed => 3.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::review::ReviewFileStatus
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::review::ReviewFileStatus>
+    for crate::api::review::ReviewFileStatus
+{
+    fn into_into_dart(self) -> crate::api::review::ReviewFileStatus {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::review::ReviewHunkDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.old_start.into_into_dart().into_dart(),
+            self.old_lines.into_into_dart().into_dart(),
+            self.new_start.into_into_dart().into_dart(),
+            self.new_lines.into_into_dart().into_dart(),
+            self.header.into_into_dart().into_dart(),
+            self.lines.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::review::ReviewHunkDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::review::ReviewHunkDto>
+    for crate::api::review::ReviewHunkDto
+{
+    fn into_into_dart(self) -> crate::api::review::ReviewHunkDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::review::ReviewLineDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.origin.into_into_dart().into_dart(),
+            self.old_lineno.into_into_dart().into_dart(),
+            self.new_lineno.into_into_dart().into_dart(),
+            self.content.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::review::ReviewLineDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::review::ReviewLineDto>
+    for crate::api::review::ReviewLineDto
+{
+    fn into_into_dart(self) -> crate::api::review::ReviewLineDto {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::review::ReviewLineOrigin {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        match self {
+            Self::Context => 0.into_dart(),
+            Self::Addition => 1.into_dart(),
+            Self::Deletion => 2.into_dart(),
+            _ => unreachable!(),
+        }
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::review::ReviewLineOrigin
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::review::ReviewLineOrigin>
+    for crate::api::review::ReviewLineOrigin
+{
+    fn into_into_dart(self) -> crate::api::review::ReviewLineOrigin {
+        self
+    }
+}
+// Codec=Dco (DartCObject based), see doc to use other codecs
+impl flutter_rust_bridge::IntoDart for crate::api::review::ReviewSnapshotDto {
+    fn into_dart(self) -> flutter_rust_bridge::for_generated::DartAbi {
+        [
+            self.base.into_into_dart().into_dart(),
+            self.content_hash.into_into_dart().into_dart(),
+            self.files.into_into_dart().into_dart(),
+            self.comments.into_into_dart().into_dart(),
+            self.reviewed.into_into_dart().into_dart(),
+        ]
+        .into_dart()
+    }
+}
+impl flutter_rust_bridge::for_generated::IntoDartExceptPrimitive
+    for crate::api::review::ReviewSnapshotDto
+{
+}
+impl flutter_rust_bridge::IntoIntoDart<crate::api::review::ReviewSnapshotDto>
+    for crate::api::review::ReviewSnapshotDto
+{
+    fn into_into_dart(self) -> crate::api::review::ReviewSnapshotDto {
+        self
     }
 }
 // Codec=Dco (DartCObject based), see doc to use other codecs
@@ -1362,10 +2147,53 @@ impl SseEncode for crate::api::mirrors::AgentState {
     }
 }
 
+impl SseEncode for crate::api::review::ApplyResult {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::review::ApplyResultKind>::sse_encode(self.kind, serializer);
+        <Vec<String>>::sse_encode(self.drifted_ids, serializer);
+        <Option<String>>::sse_encode(self.path, serializer);
+        <u32>::sse_encode(self.count, serializer);
+    }
+}
+
+impl SseEncode for crate::api::review::ApplyResultKind {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::review::ApplyResultKind::Nothing => 0,
+                crate::api::review::ApplyResultKind::Blocked => 1,
+                crate::api::review::ApplyResultKind::Applied => 2,
+                crate::api::review::ApplyResultKind::Deferred => 3,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
 impl SseEncode for bool {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         serializer.cursor.write_u8(self as _).unwrap();
+    }
+}
+
+impl SseEncode for crate::api::review::CommentDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.id, serializer);
+        <String>::sse_encode(self.file, serializer);
+        <crate::api::review::ReviewCommentSide>::sse_encode(self.side, serializer);
+        <u32>::sse_encode(self.line_start, serializer);
+        <u32>::sse_encode(self.line_end, serializer);
+        <String>::sse_encode(self.snippet, serializer);
+        <String>::sse_encode(self.comment, serializer);
+        <crate::api::review::ReviewCommentStatus>::sse_encode(self.status, serializer);
+        <chrono::DateTime<chrono::Utc>>::sse_encode(self.created_at, serializer);
     }
 }
 
@@ -1393,12 +2221,52 @@ impl SseEncode for Vec<String> {
     }
 }
 
+impl SseEncode for Vec<crate::api::review::CommentDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::review::CommentDto>::sse_encode(item, serializer);
+        }
+    }
+}
+
 impl SseEncode for Vec<u8> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
         <i32>::sse_encode(self.len() as _, serializer);
         for item in self {
             <u8>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::review::ReviewFileDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::review::ReviewFileDto>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::review::ReviewHunkDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::review::ReviewHunkDto>::sse_encode(item, serializer);
+        }
+    }
+}
+
+impl SseEncode for Vec<crate::api::review::ReviewLineDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(self.len() as _, serializer);
+        for item in self {
+            <crate::api::review::ReviewLineDto>::sse_encode(item, serializer);
         }
     }
 }
@@ -1429,6 +2297,16 @@ impl SseEncode for Option<crate::api::mirrors::ReviewDecision> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::mirrors::ReviewDecision>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::review::ReviewSnapshotDto> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::review::ReviewSnapshotDto>::sse_encode(value, serializer);
         }
     }
 }
@@ -1477,6 +2355,39 @@ impl SseEncode for crate::api::mirrors::ProjectId {
     }
 }
 
+impl SseEncode for crate::api::review::ReviewCommentSide {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::review::ReviewCommentSide::Old => 0,
+                crate::api::review::ReviewCommentSide::New => 1,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::review::ReviewCommentStatus {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::review::ReviewCommentStatus::Staged => 0,
+                crate::api::review::ReviewCommentStatus::Drifted => 1,
+                crate::api::review::ReviewCommentStatus::Applied => 2,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
 impl SseEncode for crate::api::mirrors::ReviewDecision {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -1491,6 +2402,89 @@ impl SseEncode for crate::api::mirrors::ReviewDecision {
             },
             serializer,
         );
+    }
+}
+
+impl SseEncode for crate::api::review::ReviewFileDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.display_path, serializer);
+        <String>::sse_encode(self.old_path, serializer);
+        <String>::sse_encode(self.new_path, serializer);
+        <crate::api::review::ReviewFileStatus>::sse_encode(self.status, serializer);
+        <u32>::sse_encode(self.added, serializer);
+        <u32>::sse_encode(self.removed, serializer);
+        <Vec<crate::api::review::ReviewHunkDto>>::sse_encode(self.hunks, serializer);
+        <bool>::sse_encode(self.is_binary, serializer);
+        <Option<String>>::sse_encode(self.binary_mime, serializer);
+    }
+}
+
+impl SseEncode for crate::api::review::ReviewFileStatus {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::review::ReviewFileStatus::Added => 0,
+                crate::api::review::ReviewFileStatus::Deleted => 1,
+                crate::api::review::ReviewFileStatus::Modified => 2,
+                crate::api::review::ReviewFileStatus::Renamed => 3,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::review::ReviewHunkDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <u32>::sse_encode(self.old_start, serializer);
+        <u32>::sse_encode(self.old_lines, serializer);
+        <u32>::sse_encode(self.new_start, serializer);
+        <u32>::sse_encode(self.new_lines, serializer);
+        <String>::sse_encode(self.header, serializer);
+        <Vec<crate::api::review::ReviewLineDto>>::sse_encode(self.lines, serializer);
+    }
+}
+
+impl SseEncode for crate::api::review::ReviewLineDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <crate::api::review::ReviewLineOrigin>::sse_encode(self.origin, serializer);
+        <Option<u32>>::sse_encode(self.old_lineno, serializer);
+        <Option<u32>>::sse_encode(self.new_lineno, serializer);
+        <String>::sse_encode(self.content, serializer);
+    }
+}
+
+impl SseEncode for crate::api::review::ReviewLineOrigin {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <i32>::sse_encode(
+            match self {
+                crate::api::review::ReviewLineOrigin::Context => 0,
+                crate::api::review::ReviewLineOrigin::Addition => 1,
+                crate::api::review::ReviewLineOrigin::Deletion => 2,
+                _ => {
+                    unimplemented!("");
+                }
+            },
+            serializer,
+        );
+    }
+}
+
+impl SseEncode for crate::api::review::ReviewSnapshotDto {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <String>::sse_encode(self.base, serializer);
+        <String>::sse_encode(self.content_hash, serializer);
+        <Vec<crate::api::review::ReviewFileDto>>::sse_encode(self.files, serializer);
+        <Vec<crate::api::review::CommentDto>>::sse_encode(self.comments, serializer);
+        <Vec<String>>::sse_encode(self.reviewed, serializer);
     }
 }
 

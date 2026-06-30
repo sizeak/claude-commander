@@ -4,6 +4,7 @@
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
 import 'api/mirrors.dart';
+import 'api/review.dart';
 import 'api/simple.dart';
 import 'api/terminal.dart';
 import 'dart:async';
@@ -42,16 +43,28 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AgentState dco_decode_agent_state(dynamic raw);
 
   @protected
+  ApplyResult dco_decode_apply_result(dynamic raw);
+
+  @protected
+  ApplyResultKind dco_decode_apply_result_kind(dynamic raw);
+
+  @protected
   bool dco_decode_bool(dynamic raw);
 
   @protected
   ReviewDecision dco_decode_box_autoadd_review_decision(dynamic raw);
 
   @protected
+  ReviewSnapshotDto dco_decode_box_autoadd_review_snapshot_dto(dynamic raw);
+
+  @protected
   SessionDetail dco_decode_box_autoadd_session_detail(dynamic raw);
 
   @protected
   int dco_decode_box_autoadd_u_32(dynamic raw);
+
+  @protected
+  CommentDto dco_decode_comment_dto(dynamic raw);
 
   @protected
   int dco_decode_i_32(dynamic raw);
@@ -63,10 +76,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<String> dco_decode_list_String(dynamic raw);
 
   @protected
+  List<CommentDto> dco_decode_list_comment_dto(dynamic raw);
+
+  @protected
   List<int> dco_decode_list_prim_u_8_loose(dynamic raw);
 
   @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  List<ReviewFileDto> dco_decode_list_review_file_dto(dynamic raw);
+
+  @protected
+  List<ReviewHunkDto> dco_decode_list_review_hunk_dto(dynamic raw);
+
+  @protected
+  List<ReviewLineDto> dco_decode_list_review_line_dto(dynamic raw);
 
   @protected
   List<SessionInfo> dco_decode_list_session_info(dynamic raw);
@@ -76,6 +101,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ReviewDecision? dco_decode_opt_box_autoadd_review_decision(dynamic raw);
+
+  @protected
+  ReviewSnapshotDto? dco_decode_opt_box_autoadd_review_snapshot_dto(
+    dynamic raw,
+  );
 
   @protected
   SessionDetail? dco_decode_opt_box_autoadd_session_detail(dynamic raw);
@@ -90,7 +120,31 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ProjectId dco_decode_project_id(dynamic raw);
 
   @protected
+  ReviewCommentSide dco_decode_review_comment_side(dynamic raw);
+
+  @protected
+  ReviewCommentStatus dco_decode_review_comment_status(dynamic raw);
+
+  @protected
   ReviewDecision dco_decode_review_decision(dynamic raw);
+
+  @protected
+  ReviewFileDto dco_decode_review_file_dto(dynamic raw);
+
+  @protected
+  ReviewFileStatus dco_decode_review_file_status(dynamic raw);
+
+  @protected
+  ReviewHunkDto dco_decode_review_hunk_dto(dynamic raw);
+
+  @protected
+  ReviewLineDto dco_decode_review_line_dto(dynamic raw);
+
+  @protected
+  ReviewLineOrigin dco_decode_review_line_origin(dynamic raw);
+
+  @protected
+  ReviewSnapshotDto dco_decode_review_snapshot_dto(dynamic raw);
 
   @protected
   SessionDetail dco_decode_session_detail(dynamic raw);
@@ -143,10 +197,21 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AgentState sse_decode_agent_state(SseDeserializer deserializer);
 
   @protected
+  ApplyResult sse_decode_apply_result(SseDeserializer deserializer);
+
+  @protected
+  ApplyResultKind sse_decode_apply_result_kind(SseDeserializer deserializer);
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
   ReviewDecision sse_decode_box_autoadd_review_decision(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ReviewSnapshotDto sse_decode_box_autoadd_review_snapshot_dto(
     SseDeserializer deserializer,
   );
 
@@ -159,6 +224,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
+  CommentDto sse_decode_comment_dto(SseDeserializer deserializer);
+
+  @protected
   int sse_decode_i_32(SseDeserializer deserializer);
 
   @protected
@@ -168,10 +236,28 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<String> sse_decode_list_String(SseDeserializer deserializer);
 
   @protected
+  List<CommentDto> sse_decode_list_comment_dto(SseDeserializer deserializer);
+
+  @protected
   List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer);
 
   @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  List<ReviewFileDto> sse_decode_list_review_file_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<ReviewHunkDto> sse_decode_list_review_hunk_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<ReviewLineDto> sse_decode_list_review_line_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<SessionInfo> sse_decode_list_session_info(SseDeserializer deserializer);
@@ -181,6 +267,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ReviewDecision? sse_decode_opt_box_autoadd_review_decision(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ReviewSnapshotDto? sse_decode_opt_box_autoadd_review_snapshot_dto(
     SseDeserializer deserializer,
   );
 
@@ -199,7 +290,37 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ProjectId sse_decode_project_id(SseDeserializer deserializer);
 
   @protected
+  ReviewCommentSide sse_decode_review_comment_side(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ReviewCommentStatus sse_decode_review_comment_status(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ReviewDecision sse_decode_review_decision(SseDeserializer deserializer);
+
+  @protected
+  ReviewFileDto sse_decode_review_file_dto(SseDeserializer deserializer);
+
+  @protected
+  ReviewFileStatus sse_decode_review_file_status(SseDeserializer deserializer);
+
+  @protected
+  ReviewHunkDto sse_decode_review_hunk_dto(SseDeserializer deserializer);
+
+  @protected
+  ReviewLineDto sse_decode_review_line_dto(SseDeserializer deserializer);
+
+  @protected
+  ReviewLineOrigin sse_decode_review_line_origin(SseDeserializer deserializer);
+
+  @protected
+  ReviewSnapshotDto sse_decode_review_snapshot_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   SessionDetail sse_decode_session_detail(SseDeserializer deserializer);
@@ -258,11 +379,26 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_agent_state(AgentState self, SseSerializer serializer);
 
   @protected
+  void sse_encode_apply_result(ApplyResult self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_apply_result_kind(
+    ApplyResultKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_review_decision(
     ReviewDecision self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_review_snapshot_dto(
+    ReviewSnapshotDto self,
     SseSerializer serializer,
   );
 
@@ -276,6 +412,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
 
   @protected
+  void sse_encode_comment_dto(CommentDto self, SseSerializer serializer);
+
+  @protected
   void sse_encode_i_32(int self, SseSerializer serializer);
 
   @protected
@@ -285,11 +424,35 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_list_String(List<String> self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_comment_dto(
+    List<CommentDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_prim_u_8_loose(List<int> self, SseSerializer serializer);
 
   @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_review_file_dto(
+    List<ReviewFileDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_review_hunk_dto(
+    List<ReviewHunkDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_review_line_dto(
+    List<ReviewLineDto> self,
     SseSerializer serializer,
   );
 
@@ -309,6 +472,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_review_snapshot_dto(
+    ReviewSnapshotDto? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_session_detail(
     SessionDetail? self,
     SseSerializer serializer,
@@ -324,8 +493,47 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_project_id(ProjectId self, SseSerializer serializer);
 
   @protected
+  void sse_encode_review_comment_side(
+    ReviewCommentSide self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_review_comment_status(
+    ReviewCommentStatus self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_review_decision(
     ReviewDecision self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_review_file_dto(ReviewFileDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_review_file_status(
+    ReviewFileStatus self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_review_hunk_dto(ReviewHunkDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_review_line_dto(ReviewLineDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_review_line_origin(
+    ReviewLineOrigin self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_review_snapshot_dto(
+    ReviewSnapshotDto self,
     SseSerializer serializer,
   );
 

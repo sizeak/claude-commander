@@ -4,6 +4,7 @@
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
 import 'api/mirrors.dart';
+import 'api/review.dart';
 import 'api/simple.dart';
 import 'api/terminal.dart';
 import 'dart:async';
@@ -69,7 +70,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => -1529098527;
+  int get rustContentHash => -1614246173;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -80,6 +81,12 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
 }
 
 abstract class RustLibApi extends BaseApi {
+  Future<ApplyResult> crateApiReviewApplyComments({
+    required String baseUrl,
+    required String token,
+    required String sessionId,
+  });
+
   Stream<TerminalEvent> crateApiTerminalAttachTerminal({
     required String handle,
     required String baseUrl,
@@ -92,6 +99,18 @@ abstract class RustLibApi extends BaseApi {
     required int chunkBytes,
   });
 
+  Future<String> crateApiReviewCreateComment({
+    required String baseUrl,
+    required String token,
+    required String sessionId,
+    required String file,
+    required String side,
+    required int lineStart,
+    required int lineEnd,
+    required String snippet,
+    required String comment,
+  });
+
   Future<String> crateApiSimpleCreateSession({
     required String baseUrl,
     required String token,
@@ -102,6 +121,13 @@ abstract class RustLibApi extends BaseApi {
     String? effort,
     String? mode,
     String? baseBranch,
+  });
+
+  Future<void> crateApiReviewDeleteComment({
+    required String baseUrl,
+    required String token,
+    required String sessionId,
+    required String commentId,
   });
 
   Future<void> crateApiSimpleDeleteSession({
@@ -139,10 +165,29 @@ abstract class RustLibApi extends BaseApi {
     required String id,
   });
 
+  Future<List<CommentDto>> crateApiReviewListComments({
+    required String baseUrl,
+    required String token,
+    required String sessionId,
+  });
+
   Future<List<SessionInfo>> crateApiSimpleListSessions({
     required String baseUrl,
     required String token,
     required bool includeStopped,
+  });
+
+  Future<ReviewSnapshotDto> crateApiReviewOpenReview({
+    required String baseUrl,
+    required String token,
+    required String sessionId,
+  });
+
+  Future<ReviewSnapshotDto?> crateApiReviewRefreshReview({
+    required String baseUrl,
+    required String token,
+    required String sessionId,
+    required String prevHash,
   });
 
   Future<void> crateApiSimpleRestartSession({
@@ -174,6 +219,43 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   });
 
   @override
+  Future<ApplyResult> crateApiReviewApplyComments({
+    required String baseUrl,
+    required String token,
+    required String sessionId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(baseUrl, serializer);
+          sse_encode_String(token, serializer);
+          sse_encode_String(sessionId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 1,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_apply_result,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiReviewApplyCommentsConstMeta,
+        argValues: [baseUrl, token, sessionId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiReviewApplyCommentsConstMeta =>
+      const TaskConstMeta(
+        debugName: "apply_comments",
+        argNames: ["baseUrl", "token", "sessionId"],
+      );
+
+  @override
   Stream<TerminalEvent> crateApiTerminalAttachTerminal({
     required String handle,
     required String baseUrl,
@@ -194,7 +276,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 1,
+              funcId: 2,
               port: port_,
             );
           },
@@ -234,7 +316,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
             pdeCallFfi(
               generalizedFrbRustBinding,
               serializer,
-              funcId: 2,
+              funcId: 3,
               port: port_,
             );
           },
@@ -255,6 +337,75 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(
         debugName: "bench_terminal_stream",
         argNames: ["chunks", "chunkBytes", "sink"],
+      );
+
+  @override
+  Future<String> crateApiReviewCreateComment({
+    required String baseUrl,
+    required String token,
+    required String sessionId,
+    required String file,
+    required String side,
+    required int lineStart,
+    required int lineEnd,
+    required String snippet,
+    required String comment,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(baseUrl, serializer);
+          sse_encode_String(token, serializer);
+          sse_encode_String(sessionId, serializer);
+          sse_encode_String(file, serializer);
+          sse_encode_String(side, serializer);
+          sse_encode_u_32(lineStart, serializer);
+          sse_encode_u_32(lineEnd, serializer);
+          sse_encode_String(snippet, serializer);
+          sse_encode_String(comment, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 4,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiReviewCreateCommentConstMeta,
+        argValues: [
+          baseUrl,
+          token,
+          sessionId,
+          file,
+          side,
+          lineStart,
+          lineEnd,
+          snippet,
+          comment,
+        ],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiReviewCreateCommentConstMeta =>
+      const TaskConstMeta(
+        debugName: "create_comment",
+        argNames: [
+          "baseUrl",
+          "token",
+          "sessionId",
+          "file",
+          "side",
+          "lineStart",
+          "lineEnd",
+          "snippet",
+          "comment",
+        ],
       );
 
   @override
@@ -285,7 +436,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 3,
+            funcId: 5,
             port: port_,
           );
         },
@@ -327,6 +478,45 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<void> crateApiReviewDeleteComment({
+    required String baseUrl,
+    required String token,
+    required String sessionId,
+    required String commentId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(baseUrl, serializer);
+          sse_encode_String(token, serializer);
+          sse_encode_String(sessionId, serializer);
+          sse_encode_String(commentId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 6,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiReviewDeleteCommentConstMeta,
+        argValues: [baseUrl, token, sessionId, commentId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiReviewDeleteCommentConstMeta =>
+      const TaskConstMeta(
+        debugName: "delete_comment",
+        argNames: ["baseUrl", "token", "sessionId", "commentId"],
+      );
+
+  @override
   Future<void> crateApiSimpleDeleteSession({
     required String baseUrl,
     required String token,
@@ -342,7 +532,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 4,
+            funcId: 7,
             port: port_,
           );
         },
@@ -381,7 +571,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 5,
+            funcId: 8,
             port: port_,
           );
         },
@@ -419,7 +609,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 6,
+            funcId: 9,
             port: port_,
           );
         },
@@ -450,7 +640,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 7,
+            funcId: 10,
             port: port_,
           );
         },
@@ -482,7 +672,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 8,
+            funcId: 11,
             port: port_,
           );
         },
@@ -511,7 +701,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 9,
+            funcId: 12,
             port: port_,
           );
         },
@@ -545,7 +735,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 10,
+            funcId: 13,
             port: port_,
           );
         },
@@ -566,6 +756,42 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   );
 
   @override
+  Future<List<CommentDto>> crateApiReviewListComments({
+    required String baseUrl,
+    required String token,
+    required String sessionId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(baseUrl, serializer);
+          sse_encode_String(token, serializer);
+          sse_encode_String(sessionId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 14,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_list_comment_dto,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiReviewListCommentsConstMeta,
+        argValues: [baseUrl, token, sessionId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiReviewListCommentsConstMeta => const TaskConstMeta(
+    debugName: "list_comments",
+    argNames: ["baseUrl", "token", "sessionId"],
+  );
+
+  @override
   Future<List<SessionInfo>> crateApiSimpleListSessions({
     required String baseUrl,
     required String token,
@@ -581,7 +807,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 11,
+            funcId: 15,
             port: port_,
           );
         },
@@ -602,6 +828,81 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   );
 
   @override
+  Future<ReviewSnapshotDto> crateApiReviewOpenReview({
+    required String baseUrl,
+    required String token,
+    required String sessionId,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(baseUrl, serializer);
+          sse_encode_String(token, serializer);
+          sse_encode_String(sessionId, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 16,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_review_snapshot_dto,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiReviewOpenReviewConstMeta,
+        argValues: [baseUrl, token, sessionId],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiReviewOpenReviewConstMeta => const TaskConstMeta(
+    debugName: "open_review",
+    argNames: ["baseUrl", "token", "sessionId"],
+  );
+
+  @override
+  Future<ReviewSnapshotDto?> crateApiReviewRefreshReview({
+    required String baseUrl,
+    required String token,
+    required String sessionId,
+    required String prevHash,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(baseUrl, serializer);
+          sse_encode_String(token, serializer);
+          sse_encode_String(sessionId, serializer);
+          sse_encode_String(prevHash, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 17,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_box_autoadd_review_snapshot_dto,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiReviewRefreshReviewConstMeta,
+        argValues: [baseUrl, token, sessionId, prevHash],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiReviewRefreshReviewConstMeta =>
+      const TaskConstMeta(
+        debugName: "refresh_review",
+        argNames: ["baseUrl", "token", "sessionId", "prevHash"],
+      );
+
+  @override
   Future<void> crateApiSimpleRestartSession({
     required String baseUrl,
     required String token,
@@ -617,7 +918,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 12,
+            funcId: 18,
             port: port_,
           );
         },
@@ -648,7 +949,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 13,
+            funcId: 19,
             port: port_,
           );
         },
@@ -682,7 +983,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 14,
+            funcId: 20,
             port: port_,
           );
         },
@@ -717,7 +1018,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 15,
+            funcId: 21,
             port: port_,
           );
         },
@@ -777,6 +1078,26 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ApplyResult dco_decode_apply_result(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return ApplyResult(
+      kind: dco_decode_apply_result_kind(arr[0]),
+      driftedIds: dco_decode_list_String(arr[1]),
+      path: dco_decode_opt_String(arr[2]),
+      count: dco_decode_u_32(arr[3]),
+    );
+  }
+
+  @protected
+  ApplyResultKind dco_decode_apply_result_kind(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return ApplyResultKind.values[raw as int];
+  }
+
+  @protected
   bool dco_decode_bool(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as bool;
@@ -789,6 +1110,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ReviewSnapshotDto dco_decode_box_autoadd_review_snapshot_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_review_snapshot_dto(raw);
+  }
+
+  @protected
   SessionDetail dco_decode_box_autoadd_session_detail(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_session_detail(raw);
@@ -798,6 +1125,25 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   int dco_decode_box_autoadd_u_32(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as int;
+  }
+
+  @protected
+  CommentDto dco_decode_comment_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 9)
+      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
+    return CommentDto(
+      id: dco_decode_String(arr[0]),
+      file: dco_decode_String(arr[1]),
+      side: dco_decode_review_comment_side(arr[2]),
+      lineStart: dco_decode_u_32(arr[3]),
+      lineEnd: dco_decode_u_32(arr[4]),
+      snippet: dco_decode_String(arr[5]),
+      comment: dco_decode_String(arr[6]),
+      status: dco_decode_review_comment_status(arr[7]),
+      createdAt: dco_decode_Chrono_Utc(arr[8]),
+    );
   }
 
   @protected
@@ -819,6 +1165,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<CommentDto> dco_decode_list_comment_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_comment_dto).toList();
+  }
+
+  @protected
   List<int> dco_decode_list_prim_u_8_loose(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as List<int>;
@@ -828,6 +1180,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as Uint8List;
+  }
+
+  @protected
+  List<ReviewFileDto> dco_decode_list_review_file_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_review_file_dto).toList();
+  }
+
+  @protected
+  List<ReviewHunkDto> dco_decode_list_review_hunk_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_review_hunk_dto).toList();
+  }
+
+  @protected
+  List<ReviewLineDto> dco_decode_list_review_line_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_review_line_dto).toList();
   }
 
   @protected
@@ -846,6 +1216,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ReviewDecision? dco_decode_opt_box_autoadd_review_decision(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_review_decision(raw);
+  }
+
+  @protected
+  ReviewSnapshotDto? dco_decode_opt_box_autoadd_review_snapshot_dto(
+    dynamic raw,
+  ) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_review_snapshot_dto(raw);
   }
 
   @protected
@@ -876,9 +1254,97 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ReviewCommentSide dco_decode_review_comment_side(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return ReviewCommentSide.values[raw as int];
+  }
+
+  @protected
+  ReviewCommentStatus dco_decode_review_comment_status(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return ReviewCommentStatus.values[raw as int];
+  }
+
+  @protected
   ReviewDecision dco_decode_review_decision(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return ReviewDecision.values[raw as int];
+  }
+
+  @protected
+  ReviewFileDto dco_decode_review_file_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 9)
+      throw Exception('unexpected arr length: expect 9 but see ${arr.length}');
+    return ReviewFileDto(
+      displayPath: dco_decode_String(arr[0]),
+      oldPath: dco_decode_String(arr[1]),
+      newPath: dco_decode_String(arr[2]),
+      status: dco_decode_review_file_status(arr[3]),
+      added: dco_decode_u_32(arr[4]),
+      removed: dco_decode_u_32(arr[5]),
+      hunks: dco_decode_list_review_hunk_dto(arr[6]),
+      isBinary: dco_decode_bool(arr[7]),
+      binaryMime: dco_decode_opt_String(arr[8]),
+    );
+  }
+
+  @protected
+  ReviewFileStatus dco_decode_review_file_status(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return ReviewFileStatus.values[raw as int];
+  }
+
+  @protected
+  ReviewHunkDto dco_decode_review_hunk_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
+    return ReviewHunkDto(
+      oldStart: dco_decode_u_32(arr[0]),
+      oldLines: dco_decode_u_32(arr[1]),
+      newStart: dco_decode_u_32(arr[2]),
+      newLines: dco_decode_u_32(arr[3]),
+      header: dco_decode_String(arr[4]),
+      lines: dco_decode_list_review_line_dto(arr[5]),
+    );
+  }
+
+  @protected
+  ReviewLineDto dco_decode_review_line_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return ReviewLineDto(
+      origin: dco_decode_review_line_origin(arr[0]),
+      oldLineno: dco_decode_opt_box_autoadd_u_32(arr[1]),
+      newLineno: dco_decode_opt_box_autoadd_u_32(arr[2]),
+      content: dco_decode_String(arr[3]),
+    );
+  }
+
+  @protected
+  ReviewLineOrigin dco_decode_review_line_origin(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return ReviewLineOrigin.values[raw as int];
+  }
+
+  @protected
+  ReviewSnapshotDto dco_decode_review_snapshot_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 5)
+      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    return ReviewSnapshotDto(
+      base: dco_decode_String(arr[0]),
+      contentHash: dco_decode_String(arr[1]),
+      files: dco_decode_list_review_file_dto(arr[2]),
+      comments: dco_decode_list_comment_dto(arr[3]),
+      reviewed: dco_decode_list_String(arr[4]),
+    );
   }
 
   @protected
@@ -1023,6 +1489,28 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ApplyResult sse_decode_apply_result(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_kind = sse_decode_apply_result_kind(deserializer);
+    var var_driftedIds = sse_decode_list_String(deserializer);
+    var var_path = sse_decode_opt_String(deserializer);
+    var var_count = sse_decode_u_32(deserializer);
+    return ApplyResult(
+      kind: var_kind,
+      driftedIds: var_driftedIds,
+      path: var_path,
+      count: var_count,
+    );
+  }
+
+  @protected
+  ApplyResultKind sse_decode_apply_result_kind(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return ApplyResultKind.values[inner];
+  }
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getUint8() != 0;
@@ -1037,6 +1525,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ReviewSnapshotDto sse_decode_box_autoadd_review_snapshot_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_review_snapshot_dto(deserializer));
+  }
+
+  @protected
   SessionDetail sse_decode_box_autoadd_session_detail(
     SseDeserializer deserializer,
   ) {
@@ -1048,6 +1544,31 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   int sse_decode_box_autoadd_u_32(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_u_32(deserializer));
+  }
+
+  @protected
+  CommentDto sse_decode_comment_dto(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_id = sse_decode_String(deserializer);
+    var var_file = sse_decode_String(deserializer);
+    var var_side = sse_decode_review_comment_side(deserializer);
+    var var_lineStart = sse_decode_u_32(deserializer);
+    var var_lineEnd = sse_decode_u_32(deserializer);
+    var var_snippet = sse_decode_String(deserializer);
+    var var_comment = sse_decode_String(deserializer);
+    var var_status = sse_decode_review_comment_status(deserializer);
+    var var_createdAt = sse_decode_Chrono_Utc(deserializer);
+    return CommentDto(
+      id: var_id,
+      file: var_file,
+      side: var_side,
+      lineStart: var_lineStart,
+      lineEnd: var_lineEnd,
+      snippet: var_snippet,
+      comment: var_comment,
+      status: var_status,
+      createdAt: var_createdAt,
+    );
   }
 
   @protected
@@ -1075,6 +1596,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  List<CommentDto> sse_decode_list_comment_dto(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <CommentDto>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_comment_dto(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
   List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
@@ -1086,6 +1619,48 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var len_ = sse_decode_i_32(deserializer);
     return deserializer.buffer.getUint8List(len_);
+  }
+
+  @protected
+  List<ReviewFileDto> sse_decode_list_review_file_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <ReviewFileDto>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_review_file_dto(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<ReviewHunkDto> sse_decode_list_review_hunk_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <ReviewHunkDto>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_review_hunk_dto(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<ReviewLineDto> sse_decode_list_review_line_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <ReviewLineDto>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_review_line_dto(deserializer));
+    }
+    return ans_;
   }
 
   @protected
@@ -1119,6 +1694,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_review_decision(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  ReviewSnapshotDto? sse_decode_opt_box_autoadd_review_snapshot_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_review_snapshot_dto(deserializer));
     } else {
       return null;
     }
@@ -1163,10 +1751,120 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ReviewCommentSide sse_decode_review_comment_side(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return ReviewCommentSide.values[inner];
+  }
+
+  @protected
+  ReviewCommentStatus sse_decode_review_comment_status(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return ReviewCommentStatus.values[inner];
+  }
+
+  @protected
   ReviewDecision sse_decode_review_decision(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_i_32(deserializer);
     return ReviewDecision.values[inner];
+  }
+
+  @protected
+  ReviewFileDto sse_decode_review_file_dto(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_displayPath = sse_decode_String(deserializer);
+    var var_oldPath = sse_decode_String(deserializer);
+    var var_newPath = sse_decode_String(deserializer);
+    var var_status = sse_decode_review_file_status(deserializer);
+    var var_added = sse_decode_u_32(deserializer);
+    var var_removed = sse_decode_u_32(deserializer);
+    var var_hunks = sse_decode_list_review_hunk_dto(deserializer);
+    var var_isBinary = sse_decode_bool(deserializer);
+    var var_binaryMime = sse_decode_opt_String(deserializer);
+    return ReviewFileDto(
+      displayPath: var_displayPath,
+      oldPath: var_oldPath,
+      newPath: var_newPath,
+      status: var_status,
+      added: var_added,
+      removed: var_removed,
+      hunks: var_hunks,
+      isBinary: var_isBinary,
+      binaryMime: var_binaryMime,
+    );
+  }
+
+  @protected
+  ReviewFileStatus sse_decode_review_file_status(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return ReviewFileStatus.values[inner];
+  }
+
+  @protected
+  ReviewHunkDto sse_decode_review_hunk_dto(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_oldStart = sse_decode_u_32(deserializer);
+    var var_oldLines = sse_decode_u_32(deserializer);
+    var var_newStart = sse_decode_u_32(deserializer);
+    var var_newLines = sse_decode_u_32(deserializer);
+    var var_header = sse_decode_String(deserializer);
+    var var_lines = sse_decode_list_review_line_dto(deserializer);
+    return ReviewHunkDto(
+      oldStart: var_oldStart,
+      oldLines: var_oldLines,
+      newStart: var_newStart,
+      newLines: var_newLines,
+      header: var_header,
+      lines: var_lines,
+    );
+  }
+
+  @protected
+  ReviewLineDto sse_decode_review_line_dto(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_origin = sse_decode_review_line_origin(deserializer);
+    var var_oldLineno = sse_decode_opt_box_autoadd_u_32(deserializer);
+    var var_newLineno = sse_decode_opt_box_autoadd_u_32(deserializer);
+    var var_content = sse_decode_String(deserializer);
+    return ReviewLineDto(
+      origin: var_origin,
+      oldLineno: var_oldLineno,
+      newLineno: var_newLineno,
+      content: var_content,
+    );
+  }
+
+  @protected
+  ReviewLineOrigin sse_decode_review_line_origin(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return ReviewLineOrigin.values[inner];
+  }
+
+  @protected
+  ReviewSnapshotDto sse_decode_review_snapshot_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_base = sse_decode_String(deserializer);
+    var var_contentHash = sse_decode_String(deserializer);
+    var var_files = sse_decode_list_review_file_dto(deserializer);
+    var var_comments = sse_decode_list_comment_dto(deserializer);
+    var var_reviewed = sse_decode_list_String(deserializer);
+    return ReviewSnapshotDto(
+      base: var_base,
+      contentHash: var_contentHash,
+      files: var_files,
+      comments: var_comments,
+      reviewed: var_reviewed,
+    );
   }
 
   @protected
@@ -1334,6 +2032,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_apply_result(ApplyResult self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_apply_result_kind(self.kind, serializer);
+    sse_encode_list_String(self.driftedIds, serializer);
+    sse_encode_opt_String(self.path, serializer);
+    sse_encode_u_32(self.count, serializer);
+  }
+
+  @protected
+  void sse_encode_apply_result_kind(
+    ApplyResultKind self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
   void sse_encode_bool(bool self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putUint8(self ? 1 : 0);
@@ -1349,6 +2065,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_review_snapshot_dto(
+    ReviewSnapshotDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_review_snapshot_dto(self, serializer);
+  }
+
+  @protected
   void sse_encode_box_autoadd_session_detail(
     SessionDetail self,
     SseSerializer serializer,
@@ -1361,6 +2086,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_u_32(self, serializer);
+  }
+
+  @protected
+  void sse_encode_comment_dto(CommentDto self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.id, serializer);
+    sse_encode_String(self.file, serializer);
+    sse_encode_review_comment_side(self.side, serializer);
+    sse_encode_u_32(self.lineStart, serializer);
+    sse_encode_u_32(self.lineEnd, serializer);
+    sse_encode_String(self.snippet, serializer);
+    sse_encode_String(self.comment, serializer);
+    sse_encode_review_comment_status(self.status, serializer);
+    sse_encode_Chrono_Utc(self.createdAt, serializer);
   }
 
   @protected
@@ -1385,6 +2124,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_list_comment_dto(
+    List<CommentDto> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_comment_dto(item, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_list_prim_u_8_loose(
     List<int> self,
     SseSerializer serializer,
@@ -1404,6 +2155,42 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.length, serializer);
     serializer.buffer.putUint8List(self);
+  }
+
+  @protected
+  void sse_encode_list_review_file_dto(
+    List<ReviewFileDto> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_review_file_dto(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_review_hunk_dto(
+    List<ReviewHunkDto> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_review_hunk_dto(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_review_line_dto(
+    List<ReviewLineDto> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_review_line_dto(item, serializer);
+    }
   }
 
   @protected
@@ -1438,6 +2225,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_review_decision(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_review_snapshot_dto(
+    ReviewSnapshotDto? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_review_snapshot_dto(self, serializer);
     }
   }
 
@@ -1477,12 +2277,104 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_review_comment_side(
+    ReviewCommentSide self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_review_comment_status(
+    ReviewCommentStatus self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
   void sse_encode_review_decision(
     ReviewDecision self,
     SseSerializer serializer,
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_review_file_dto(
+    ReviewFileDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.displayPath, serializer);
+    sse_encode_String(self.oldPath, serializer);
+    sse_encode_String(self.newPath, serializer);
+    sse_encode_review_file_status(self.status, serializer);
+    sse_encode_u_32(self.added, serializer);
+    sse_encode_u_32(self.removed, serializer);
+    sse_encode_list_review_hunk_dto(self.hunks, serializer);
+    sse_encode_bool(self.isBinary, serializer);
+    sse_encode_opt_String(self.binaryMime, serializer);
+  }
+
+  @protected
+  void sse_encode_review_file_status(
+    ReviewFileStatus self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_review_hunk_dto(
+    ReviewHunkDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_u_32(self.oldStart, serializer);
+    sse_encode_u_32(self.oldLines, serializer);
+    sse_encode_u_32(self.newStart, serializer);
+    sse_encode_u_32(self.newLines, serializer);
+    sse_encode_String(self.header, serializer);
+    sse_encode_list_review_line_dto(self.lines, serializer);
+  }
+
+  @protected
+  void sse_encode_review_line_dto(
+    ReviewLineDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_review_line_origin(self.origin, serializer);
+    sse_encode_opt_box_autoadd_u_32(self.oldLineno, serializer);
+    sse_encode_opt_box_autoadd_u_32(self.newLineno, serializer);
+    sse_encode_String(self.content, serializer);
+  }
+
+  @protected
+  void sse_encode_review_line_origin(
+    ReviewLineOrigin self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_review_snapshot_dto(
+    ReviewSnapshotDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.base, serializer);
+    sse_encode_String(self.contentHash, serializer);
+    sse_encode_list_review_file_dto(self.files, serializer);
+    sse_encode_list_comment_dto(self.comments, serializer);
+    sse_encode_list_String(self.reviewed, serializer);
   }
 
   @protected

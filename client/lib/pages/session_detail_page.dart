@@ -6,6 +6,7 @@ import '../server_config.dart';
 import '../src/rust/api/mirrors.dart';
 import '../src/rust/api/simple.dart' as rust;
 import '../widgets/session_chips.dart';
+import 'review_page.dart';
 import 'terminal_page.dart';
 
 /// Detail view for a single session: live agent state, diff summary, and a
@@ -177,6 +178,14 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
     );
   }
 
+  void _openReview(SessionInfo info) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ReviewPage(config: widget.config, session: info),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     // Prefer the freshest info from polling, falling back to what the list gave us.
@@ -185,6 +194,11 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
       appBar: AppBar(
         title: Text(info.title, overflow: TextOverflow.ellipsis),
         actions: [
+          IconButton(
+            onPressed: () => _openReview(info),
+            icon: const Icon(Icons.rate_review),
+            tooltip: 'Review changes',
+          ),
           IconButton(
             onPressed: () => _openTerminal(info),
             icon: const Icon(Icons.terminal),
