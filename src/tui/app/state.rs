@@ -1035,10 +1035,6 @@ fn build_stacked_section_items(
                 // (naming a section no longer in config) is ignored — same as
                 // `assign_section` — so the session falls back to its
                 // `current_section` instead of being dumped into In Progress.
-                // Only a *valid* override stops the walk. A stale override
-                // (naming a section no longer in config) is ignored — same as
-                // `assign_section` — so the session falls back to its
-                // `current_section` instead of being dumped into In Progress.
                 if let Some(ovr) = &cur.section_override
                     && valid_section(ovr)
                 {
