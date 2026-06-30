@@ -30,8 +30,9 @@ android {
     }
 
     // Bumping the plugin compileSdkVersion requires all clients of this plugin
-    // to bump the version in their app.
-    compileSdkVersion 33
+    // to bump the version in their app. Use a platform the Nix dev shell
+    // provides (read-only SDK can't auto-install platform 33).
+    compileSdkVersion 35
 
     // Pin to the Nix-provided NDK (exported as ANDROID_NDK_VERSION by
     // devShells.client) so cargokit/AGP use the present NDK instead of trying to
