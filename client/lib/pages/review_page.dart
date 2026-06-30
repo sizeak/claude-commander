@@ -31,6 +31,10 @@ class _ReviewPageState extends State<ReviewPage> {
   /// [_toggleReviewed] and re-synced from each snapshot.
   final Set<String> _reviewed = {};
 
+  /// Display paths with an in-flight reviewed toggle, so rapid re-taps don't
+  /// fire overlapping flips that desync the optimistic [_reviewed] set.
+  final Set<String> _toggling = {};
+
   String get _id => widget.session.id;
 
   @override
@@ -55,12 +59,17 @@ class _ReviewPageState extends State<ReviewPage> {
           ..addAll(snap.reviewed);
         _error = null;
         _loading = false;
+        // _open() is the "now idle" point for every action that ends by
+        // re-opening (apply/delete/add comment), so clear the busy gate here —
+        // otherwise the page's controls stay disabled after a successful action.
+        _busy = false;
       });
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _error = e.toString();
         _loading = false;
+        _busy = false;
       });
     }
   }
@@ -134,6 +143,8 @@ class _ReviewPageState extends State<ReviewPage> {
   }
 
   Future<void> _toggleReviewed(String displayPath) async {
+    if (_toggling.contains(displayPath)) return;
+    setState(() => _toggling.add(displayPath));
     try {
       final nowReviewed = await rust.toggleFileReviewed(
         baseUrl: widget.config.baseUrl,
@@ -151,6 +162,8 @@ class _ReviewPageState extends State<ReviewPage> {
       });
     } catch (e) {
       _snack('Toggle reviewed failed: $e');
+    } finally {
+      if (mounted) setState(() => _toggling.remove(displayPath));
     }
   }
 
@@ -295,7 +308,9 @@ class _ReviewPageState extends State<ReviewPage> {
             (f) => _FileCard(
               file: f,
               reviewed: _reviewed.contains(f.displayPath),
-              onToggleReviewed: _busy ? null : () => _toggleReviewed(f.displayPath),
+              onToggleReviewed: (_busy || _toggling.contains(f.displayPath))
+                  ? null
+                  : () => _toggleReviewed(f.displayPath),
               onLoadImage: _loadBlob,
               onAddComment: _busy ? null : _addComment,
             ),

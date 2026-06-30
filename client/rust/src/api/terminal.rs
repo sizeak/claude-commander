@@ -14,7 +14,8 @@
 //! JSON *text* frames.
 
 use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use anyhow::Context;
 use claude_commander_protocol::ws::{ClientControl, ServerControl};
@@ -90,11 +91,38 @@ fn runtime() -> &'static Runtime {
     })
 }
 
-/// Live attaches keyed by the Dart-supplied handle, holding each one's outbound
-/// channel. Entries are removed when the attach task ends.
-fn registry() -> &'static Mutex<HashMap<String, mpsc::UnboundedSender<Outbound>>> {
-    static REG: OnceLock<Mutex<HashMap<String, mpsc::UnboundedSender<Outbound>>>> = OnceLock::new();
+/// Monotonic token distinguishing successive attaches that reuse the same
+/// handle (e.g. a reconnect): a finished task only removes its *own* entry, not
+/// one a newer attach just installed under the same handle.
+static NEXT_GEN: AtomicU64 = AtomicU64::new(0);
+
+type Registry = HashMap<String, (u64, mpsc::UnboundedSender<Outbound>)>;
+
+/// Live attaches keyed by the Dart-supplied handle; each entry is the attach's
+/// generation token plus its outbound channel.
+fn registry() -> &'static Mutex<Registry> {
+    static REG: OnceLock<Mutex<Registry>> = OnceLock::new();
     REG.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Lock the registry, recovering from a poisoned mutex instead of panicking
+/// across the FFI boundary. The critical sections are tiny and panic-free, so a
+/// poisoned lock would only ever follow an unrelated panic.
+fn lock_registry() -> MutexGuard<'static, Registry> {
+    registry().lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Remove `handle`'s entry only if it still carries `generation` — i.e. a newer
+/// attach reusing the same handle hasn't already replaced it. Returns whether an
+/// entry was actually removed.
+fn remove_if_current(handle: &str, generation: u64) -> bool {
+    let mut reg = lock_registry();
+    if reg.get(handle).map(|(g, _)| *g) == Some(generation) {
+        reg.remove(handle);
+        true
+    } else {
+        false
+    }
 }
 
 /// Turn the HTTP base URL into the `/ws/attach` WebSocket URL.
@@ -121,75 +149,38 @@ pub fn attach_terminal(
     sink: StreamSink<TerminalEvent>,
 ) {
     let (tx, rx) = mpsc::unbounded_channel();
-    registry()
-        .lock()
-        .expect("registry mutex poisoned")
-        .insert(handle.clone(), tx);
+    let generation = NEXT_GEN.fetch_add(1, Ordering::Relaxed);
+    lock_registry().insert(handle.clone(), (generation, tx));
     let url = ws_url(&base_url);
     runtime().spawn(async move {
         run_attach(&url, token, session_id, &sink, rx).await;
-        registry()
-            .lock()
-            .expect("registry mutex poisoned")
-            .remove(&handle);
+        // Only drop the entry if it's still ours: a reconnect reusing this
+        // handle may have replaced it with a newer attach, whose channel we
+        // must not delete.
+        remove_if_current(&handle, generation);
     });
 }
 
 /// Send keystrokes / raw input bytes to an attached terminal. No-op if the
 /// handle isn't attached (e.g. already detached).
 pub fn terminal_send_input(handle: String, bytes: Vec<u8>) {
-    if let Some(tx) = registry()
-        .lock()
-        .expect("registry mutex poisoned")
-        .get(&handle)
-    {
+    if let Some((_, tx)) = lock_registry().get(&handle) {
         let _ = tx.send(Outbound::Input(bytes));
     }
 }
 
 /// Tell the remote PTY the viewport changed.
 pub fn terminal_resize(handle: String, cols: u16, rows: u16) {
-    if let Some(tx) = registry()
-        .lock()
-        .expect("registry mutex poisoned")
-        .get(&handle)
-    {
+    if let Some((_, tx)) = lock_registry().get(&handle) {
         let _ = tx.send(Outbound::Resize { cols, rows });
     }
 }
 
 /// Detach (leaves the tmux session running server-side).
 pub fn terminal_detach(handle: String) {
-    if let Some(tx) = registry()
-        .lock()
-        .expect("registry mutex poisoned")
-        .get(&handle)
-    {
+    if let Some((_, tx)) = lock_registry().get(&handle) {
         let _ = tx.send(Outbound::Detach);
     }
-}
-
-/// Spike benchmark: flood the same event-stream path with `chunks` chunks of
-/// `chunk_bytes` of synthetic printable PTY output, as fast as the bridge
-/// accepts them. Lets Dart measure end-to-end frb → decode → terminal-render
-/// throughput with no server or socket. Not part of the real terminal feature.
-pub fn bench_terminal_stream(chunks: u32, chunk_bytes: u32, sink: StreamSink<TerminalEvent>) {
-    runtime().spawn(async move {
-        // One reusable chunk of printable ASCII with periodic newlines, so the
-        // emulator does realistic wrapping/scrolling rather than one long line.
-        let chunk: Vec<u8> = (0..chunk_bytes)
-            .map(|i| {
-                let m = (i % 64) as u8;
-                if m == 63 { b'\n' } else { 0x20 + m }
-            })
-            .collect();
-        for _ in 0..chunks {
-            if sink.add(TerminalEvent::output(chunk.clone())).is_err() {
-                break;
-            }
-        }
-        let _ = sink.add(TerminalEvent::detached("bench_complete".to_string()));
-    });
 }
 
 /// Run the attach to completion, emitting any terminal error to the sink so the
@@ -297,5 +288,27 @@ mod tests {
         assert_eq!(ws_url("https://host:8080/"), "wss://host:8080/ws/attach");
         // Unknown scheme is left as-is, path still appended.
         assert_eq!(ws_url("host:8080"), "host:8080/ws/attach");
+    }
+
+    /// Reconnect race: a re-attach reuses the same handle and replaces the
+    /// registry entry; the *old* task finishing must not delete the *new*
+    /// task's channel. (Unique handle so it doesn't race the shared registry.)
+    #[test]
+    fn finished_attach_only_removes_its_own_generation() {
+        let h = "reconnect-race-test".to_string();
+        let (tx0, _rx0) = mpsc::unbounded_channel();
+        let (tx1, _rx1) = mpsc::unbounded_channel();
+
+        // Attach gen 0, then a reconnect (same handle) installs gen 1.
+        lock_registry().insert(h.clone(), (0, tx0));
+        lock_registry().insert(h.clone(), (1, tx1));
+
+        // The gen-0 task ends and cleans up: must NOT remove gen 1's entry.
+        assert!(!remove_if_current(&h, 0));
+        assert!(lock_registry().contains_key(&h));
+
+        // The gen-1 task ends later and removes its own entry.
+        assert!(remove_if_current(&h, 1));
+        assert!(!lock_registry().contains_key(&h));
     }
 }

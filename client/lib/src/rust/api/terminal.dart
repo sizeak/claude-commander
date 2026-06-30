@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `attach_inner`, `detached`, `error`, `output`, `ready`, `registry`, `run_attach`, `runtime`, `ws_url`
+// These functions are ignored because they are not marked as `pub`: `attach_inner`, `detached`, `error`, `lock_registry`, `output`, `ready`, `registry`, `remove_if_current`, `run_attach`, `runtime`, `ws_url`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Outbound`
 
 /// Open a live terminal attach. `handle` is a caller-chosen id used to route
@@ -48,18 +48,6 @@ Future<void> terminalResize({
 /// Detach (leaves the tmux session running server-side).
 Future<void> terminalDetach({required String handle}) =>
     RustLib.instance.api.crateApiTerminalTerminalDetach(handle: handle);
-
-/// Spike benchmark: flood the same event-stream path with `chunks` chunks of
-/// `chunk_bytes` of synthetic printable PTY output, as fast as the bridge
-/// accepts them. Lets Dart measure end-to-end frb → decode → terminal-render
-/// throughput with no server or socket. Not part of the real terminal feature.
-Stream<TerminalEvent> benchTerminalStream({
-  required int chunks,
-  required int chunkBytes,
-}) => RustLib.instance.api.crateApiTerminalBenchTerminalStream(
-  chunks: chunks,
-  chunkBytes: chunkBytes,
-);
 
 /// An event streamed from an attached terminal to Dart.
 ///

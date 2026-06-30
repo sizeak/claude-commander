@@ -6,7 +6,7 @@
     crane.url = "github:ipetkov/crane";
     flake-utils.url = "github:numtide/flake-utils";
     # Rust toolchain with Android cross-compile targets, used ONLY by the
-    # `mobile` dev shell (see devShells.mobile). The default shell never pulls it.
+    # `client` dev shell (see devShells.client). The default shell never pulls it.
     fenix = {
       url = "github:nix-community/fenix";
       inputs.nixpkgs.follows = "nixpkgs";
@@ -215,8 +215,12 @@
             # but a debug build puts the cdylib in rust/target/debug/.  Symlink
             # release -> debug so Dart's dlopen via FRB finds the library after the
             # first `flutter build linux --debug` or `flutter_rust_bridge_codegen
-            # generate`.  The symlink is harmless for actual release builds: cargokit
-            # uses a separate target dir (build/…/plugins/…/cargokit_build).
+            # generate`.  Flutter release builds are unaffected: cargokit uses a
+            # separate target dir (build/…/plugins/…/cargokit_build).
+            # WARNING: with this symlink, a manual `cargo build --release` in
+            # client/rust writes release artefacts into target/debug, mixing
+            # profiles. Use cargokit/Flutter for release builds, or remove the
+            # symlink before building release by hand.
             if [ -d "client/rust" ]; then
               mkdir -p client/rust/target
               ln -sfT debug client/rust/target/release 2>/dev/null || true

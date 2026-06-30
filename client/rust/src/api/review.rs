@@ -33,8 +33,11 @@ fn base(base_url: &str) -> &str {
     base_url.trim_end_matches('/')
 }
 
+/// A process-wide blocking client (shared pool; `Client` is `Arc`-backed so the
+/// clone is cheap).
 fn client() -> Client {
-    Client::new()
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    CLIENT.get_or_init(Client::new).clone()
 }
 
 /// Map a response to a `Result`: a 401 becomes a friendly auth error, any other
@@ -536,7 +539,7 @@ pub fn toggle_file_reviewed(
 ) -> Result<bool> {
     let raw = file_cache()
         .lock()
-        .expect("file cache poisoned")
+        .unwrap_or_else(|e| e.into_inner())
         .get(&(session_id.clone(), display_path.clone()))
         .cloned()
         .context("file not in the last-opened review; open the review first")?;
@@ -571,7 +574,7 @@ fn file_cache() -> &'static Mutex<HashMap<(String, String), String>> {
 
 /// Replace the cached files for `session_id` with the snapshot's current set.
 fn cache_files(session_id: &str, files: &[FileDiff]) {
-    let mut cache = file_cache().lock().expect("file cache poisoned");
+    let mut cache = file_cache().lock().unwrap_or_else(|e| e.into_inner());
     cache.retain(|(sid, _), _| sid != session_id);
     for f in files {
         if let Ok(json) = serde_json::to_string(f) {

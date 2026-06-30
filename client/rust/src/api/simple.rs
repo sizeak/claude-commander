@@ -7,6 +7,7 @@
 //! Rust rather than silently in the UI.
 
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use claude_commander_protocol::api::{CreateSessionOpts, SessionDetail, SessionInfo};
@@ -24,8 +25,12 @@ fn base(base_url: &str) -> &str {
     base_url.trim_end_matches('/')
 }
 
+/// A process-wide blocking client, so repeated calls (e.g. the 2s detail poll)
+/// reuse connections instead of building a fresh pool each time. `Client` is
+/// `Arc`-backed, so the clone is cheap and shares the pool.
 fn client() -> Client {
-    Client::new()
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    CLIENT.get_or_init(Client::new).clone()
 }
 
 /// Map a response to a `Result`: a 401 becomes a friendly auth error, any other
