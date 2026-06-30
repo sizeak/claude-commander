@@ -345,19 +345,45 @@ impl App {
 
         match &mut self.ui_state.modal {
             Modal::Input {
-                value, on_submit, ..
+                value,
+                on_submit,
+                program_picker,
+                ..
             } => match key.code {
                 KeyCode::Enter => {
                     let action = on_submit.clone();
                     let value = value.value().to_string();
+                    let program = program_picker.as_ref().and_then(|p| p.selected_command());
                     self.ui_state.modal = Modal::None;
-                    self.handle_input_submit(action, value).await;
+                    self.handle_input_submit(action, value, program).await;
                 }
                 KeyCode::Esc => {
                     self.ui_state.modal = Modal::None;
                 }
+                // Tab toggles focus between the name field and the program list.
+                KeyCode::Tab => {
+                    if let Some(picker) = program_picker.as_mut() {
+                        picker.focus_program = !picker.focus_program;
+                    }
+                }
+                // Up/Down move the program selection only while the list is
+                // focused; otherwise they're inert (the name field is one line).
+                KeyCode::Up => {
+                    if let Some(picker) = program_picker.as_mut().filter(|p| p.focus_program) {
+                        picker.select_up();
+                    }
+                }
+                KeyCode::Down => {
+                    if let Some(picker) = program_picker.as_mut().filter(|p| p.focus_program) {
+                        picker.select_down();
+                    }
+                }
+                // Other keys edit the name unless the program list has focus.
                 _ => {
-                    super::edit_text_input(value, key);
+                    let name_focused = program_picker.as_ref().is_none_or(|p| !p.focus_program);
+                    if name_focused {
+                        super::edit_text_input(value, key);
+                    }
                 }
             },
 
@@ -842,7 +868,7 @@ impl App {
             _ => return,
         };
         self.ui_state.modal = Modal::None;
-        self.handle_input_submit(action, submit_value).await;
+        self.handle_input_submit(action, submit_value, None).await;
     }
 
     /// Mouse wheel while a (non-review) modal is open. List modals move the
@@ -1312,6 +1338,7 @@ mod tests {
             value: value.into(),
             on_submit: InputAction::AddProject,
             existing_branches: None,
+            program_picker: None,
         }
     }
 

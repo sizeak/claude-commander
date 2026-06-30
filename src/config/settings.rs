@@ -16,12 +16,31 @@ use crate::config::keybindings::KeyBindings;
 use crate::config::theme::ThemeOverrides;
 use crate::error::{ConfigError, Error, Result};
 
+/// A selectable agent harness in the new-session program picker: a display
+/// `label` paired with the `command` to launch (program plus any flags).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProgramEntry {
+    /// Friendly name shown in the picker (e.g. "Claude (Opus)").
+    pub label: String,
+    /// Command launched for the session (e.g. `claude --model opus`). Its first
+    /// token determines the agent harness.
+    pub command: String,
+}
+
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Default program to run in new sessions
+    /// Default program to run in new sessions. Also acts as the pre-selected
+    /// entry in the new-session program picker.
     pub default_program: String,
+
+    /// Selectable agent harnesses for the new-session program picker. Each entry
+    /// pairs a display `label` with the `command` launched (program plus any
+    /// flags). When empty, the picker offers a single entry synthesised from
+    /// `default_program`, so existing configs keep working unchanged.
+    #[serde(default)]
+    pub programs: Vec<ProgramEntry>,
 
     /// Branch name prefix for new sessions (empty string means no prefix)
     pub branch_prefix: String,
@@ -101,8 +120,8 @@ pub struct Config {
     /// Show the program running in each session as a `(program)` suffix in
     /// the session list. Only rendered when sessions use more than one
     /// distinct program, so enabling this for a single-program setup is a
-    /// no-op. Default true.
-    #[serde(default = "default_true")]
+    /// no-op. Default false. (Inherits the struct-level `#[serde(default)]`,
+    /// so an omitted field resolves to `Config::default()`'s `false`.)
     pub show_session_program: bool,
 
     /// Dim the right pane (preview/diff/shell) when the session list is focused
@@ -349,6 +368,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             default_program: "claude".to_string(),
+            programs: Vec::new(),
             branch_prefix: String::new(),
             max_concurrent_tmux: 16,
             capture_cache_ttl_ms: 50,
@@ -369,7 +389,7 @@ impl Default for Config {
             state_sync_interval_ms: 2000,
             agent_state_poll_interval_ms: 3000,
             invert_pr_label_color: false,
-            show_session_program: true,
+            show_session_program: false,
             dim_unfocused_preview: true,
             dim_unfocused_opacity: 0.4,
             leader_key: " ".to_string(),
@@ -464,6 +484,32 @@ impl Config {
         self.commander_program
             .clone()
             .unwrap_or_else(|| self.default_program.clone())
+    }
+
+    /// The non-empty list of harnesses offered in the new-session program
+    /// picker. Returns the configured `programs` verbatim, or — when none are
+    /// configured — a single entry synthesised from `default_program` (label and
+    /// command both the program), so the picker always has at least one choice.
+    pub fn program_choices(&self) -> Vec<ProgramEntry> {
+        if self.programs.is_empty() {
+            vec![ProgramEntry {
+                label: self.default_program.clone(),
+                command: self.default_program.clone(),
+            }]
+        } else {
+            self.programs.clone()
+        }
+    }
+
+    /// Index into [`Self::program_choices`] of the entry to pre-select in the
+    /// picker: the one whose `command` equals `default_program`, falling back to
+    /// the first entry when none match (or the synthesised single entry).
+    pub fn default_program_index(&self) -> usize {
+        let choices = self.program_choices();
+        choices
+            .iter()
+            .position(|e| e.command == self.default_program)
+            .unwrap_or(0)
     }
 
     /// Resolve the worktrees directory, nesting under repo name if configured.
@@ -899,16 +945,16 @@ speed = 1.25
         assert_eq!(config.agent_state_poll_interval_ms, 3000);
         assert!(config.ai_summary_enabled);
         assert_eq!(config.ai_summary_model, "claude-haiku-4-5-20251001");
-        assert!(config.show_session_program);
+        assert!(!config.show_session_program);
         // Review cache precompute is on by default.
         assert!(config.precompute_review_caches);
     }
 
     #[test]
     fn test_session_list_flags_deserialise() {
-        // Missing → default true.
+        // Missing → default false.
         let cfg: Config = toml::from_str("").unwrap();
-        assert!(cfg.show_session_program);
+        assert!(!cfg.show_session_program);
 
         // Explicit false survives round trip.
         let cfg: Config = toml::from_str(
@@ -983,6 +1029,83 @@ show_session_program = false
             ..Config::default()
         };
         assert_eq!(config.commander_program(), "claude --model opus-4-7");
+    }
+
+    #[test]
+    fn test_program_choices_synthesises_from_default_when_empty() {
+        let config = Config {
+            default_program: "codex".to_string(),
+            programs: Vec::new(),
+            ..Config::default()
+        };
+        let choices = config.program_choices();
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].label, "codex");
+        assert_eq!(choices[0].command, "codex");
+        // Synthesised single entry is the default selection.
+        assert_eq!(config.default_program_index(), 0);
+    }
+
+    #[test]
+    fn test_program_choices_returns_configured_list() {
+        let config = Config {
+            default_program: "codex".to_string(),
+            programs: vec![
+                ProgramEntry {
+                    label: "Claude".to_string(),
+                    command: "claude".to_string(),
+                },
+                ProgramEntry {
+                    label: "Codex".to_string(),
+                    command: "codex".to_string(),
+                },
+            ],
+            ..Config::default()
+        };
+        let choices = config.program_choices();
+        assert_eq!(choices.len(), 2);
+        // default_program points the picker at the matching entry.
+        assert_eq!(config.default_program_index(), 1);
+    }
+
+    #[test]
+    fn test_default_program_index_falls_back_to_first_when_unmatched() {
+        let config = Config {
+            default_program: "aider".to_string(),
+            programs: vec![
+                ProgramEntry {
+                    label: "Claude".to_string(),
+                    command: "claude".to_string(),
+                },
+                ProgramEntry {
+                    label: "Codex".to_string(),
+                    command: "codex".to_string(),
+                },
+            ],
+            ..Config::default()
+        };
+        assert_eq!(config.default_program_index(), 0);
+    }
+
+    #[test]
+    fn test_programs_deserialise_from_toml() {
+        let toml = "\
+default_program = \"codex\"
+
+[[programs]]
+label = \"Claude\"
+command = \"claude\"
+
+[[programs]]
+label = \"Codex\"
+command = \"codex -m gpt-5\"
+";
+        let cfg: Config = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.programs.len(), 2);
+        assert_eq!(cfg.programs[1].command, "codex -m gpt-5");
+        // Empty config still deserialises to an empty list (back-compat).
+        let empty: Config = toml::from_str("").unwrap();
+        assert!(empty.programs.is_empty());
     }
 
     #[test]

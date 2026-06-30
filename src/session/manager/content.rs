@@ -55,10 +55,13 @@ impl SessionManager {
         };
 
         if needs_recreate {
-            // Recreate the tmux session, adding --resume if configured so the
-            // agent picks up where it left off
+            // Recreate the tmux session, resuming the prior agent session if
+            // configured so the agent picks up where it left off. Resume syntax
+            // is harness-specific; an unrecognised program launches fresh.
             let resume_program = if self.config_store.read().resume_session {
-                format!("{} --resume", program)
+                crate::agent::AgentKind::from_program(&program)
+                    .resume_command(&program)
+                    .unwrap_or_else(|| program.clone())
             } else {
                 program.clone()
             };

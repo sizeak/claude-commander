@@ -1728,3 +1728,38 @@ async fn mouse_file_click_kicks_off_image_fetch() {
         "clicking an image file in the tree should kick off its image fetch"
     );
 }
+
+// --- ProgramPicker (new-session program selection) ---
+
+fn picker(commands: &[&str], selected: usize) -> ProgramPicker {
+    ProgramPicker {
+        choices: commands
+            .iter()
+            .map(|c| crate::config::ProgramEntry {
+                label: c.to_string(),
+                command: c.to_string(),
+            })
+            .collect(),
+        selected,
+        focus_program: true,
+    }
+}
+
+#[test]
+fn program_picker_selected_command_reads_highlight() {
+    let p = picker(&["claude", "codex"], 1);
+    assert_eq!(p.selected_command().as_deref(), Some("codex"));
+}
+
+#[test]
+fn program_picker_navigation_saturates_at_ends() {
+    let mut p = picker(&["claude", "codex"], 0);
+    // Up at the top stays put.
+    p.select_up();
+    assert_eq!(p.selected, 0);
+    // Down advances, then saturates at the last entry.
+    p.select_down();
+    assert_eq!(p.selected, 1);
+    p.select_down();
+    assert_eq!(p.selected, 1);
+}
