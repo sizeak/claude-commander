@@ -10,8 +10,36 @@ Configuration file location depends on your platform:
 - **Linux**: `~/.config/claude-commander/config.toml`
 
 ```toml
-# Default program to run in new sessions
+# Default program to run in new sessions. Also the entry pre-selected in the
+# New Session program picker.
 default_program = "claude"
+
+# Selectable agent harnesses for the New Session dialog's program picker. Each
+# entry pairs a display `label` with the `command` launched (program plus any
+# flags); the command's first token determines the harness, so Claude Code
+# (`claude`) and OpenAI Codex (`codex`) are both recognised and get the right
+# launch, resume, and working/waiting detection. The picker pre-selects the
+# entry whose `command` matches `default_program`. When `programs` is omitted,
+# the picker offers a single entry synthesised from `default_program`.
+#
+# In the New Session dialog, press Tab to move between the name field and the
+# picker, then ↑/↓ to choose.
+#
+# [[programs]]
+# label = "Claude"
+# command = "claude"
+#
+# [[programs]]
+# label = "Claude (Opus, plan mode)"
+# command = "claude --model opus --permission-mode plan"
+#
+# [[programs]]
+# label = "Codex"
+# command = "codex"
+#
+# [[programs]]
+# label = "Codex (full auto)"
+# command = "codex --full-auto"
 
 # Branch name prefix for new sessions (empty = no prefix)
 branch_prefix = ""

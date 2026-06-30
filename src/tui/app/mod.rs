@@ -244,6 +244,10 @@ pub enum Modal {
         /// (i.e. remote-only `origin/<x>` is stored as just `<x>` to match
         /// `finalize_session`'s resolution logic).
         existing_branches: Option<Vec<String>>,
+        /// When `Some`, the dialog renders a program picker beneath the name
+        /// field and the chosen entry's command launches the session. `None`
+        /// for Input flows that don't create sessions (Rename, AddProject…).
+        program_picker: Option<ProgramPicker>,
     },
     /// Confirmation modal
     Confirm {
@@ -589,6 +593,38 @@ pub enum SettingsEditing {
         options: Vec<String>,
         selected: usize,
     },
+}
+
+/// Program-picker state embedded in the New Session input modal: the
+/// selectable harnesses, the highlighted index, and which field has focus.
+#[derive(Debug, Clone)]
+pub struct ProgramPicker {
+    /// Selectable harnesses, from `Config::program_choices`.
+    pub choices: Vec<crate::config::ProgramEntry>,
+    /// Index into `choices` of the highlighted entry.
+    pub selected: usize,
+    /// `true` when the program list has focus (Up/Down change the selection);
+    /// `false` when the name field has focus (keys edit text). Tab toggles it.
+    pub focus_program: bool,
+}
+
+impl ProgramPicker {
+    /// The launch command of the highlighted entry, if any.
+    pub fn selected_command(&self) -> Option<String> {
+        self.choices.get(self.selected).map(|e| e.command.clone())
+    }
+
+    /// Move the highlight up one entry (saturating at the top).
+    pub fn select_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    /// Move the highlight down one entry (saturating at the bottom).
+    pub fn select_down(&mut self) {
+        if self.selected + 1 < self.choices.len() {
+            self.selected += 1;
+        }
+    }
 }
 
 /// Action to perform when input modal is submitted

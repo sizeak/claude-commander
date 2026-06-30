@@ -1,6 +1,7 @@
 //! Session lifecycle: create, restart, kill, and delete sessions.
 
 use super::*;
+use crate::agent::AgentKind;
 
 impl SessionManager {
     /// Prepare a placeholder session in `Creating` state.
@@ -260,12 +261,14 @@ impl SessionManager {
         };
 
         // Build a single positional prompt arg combining stack context (for
-        // stacked sessions) and any user-provided initial prompt. The Claude
-        // CLI accepts exactly one positional prompt, so both must be merged.
+        // stacked sessions) and any user-provided initial prompt. Harnesses that
+        // accept a positional prompt (Claude, Codex) take exactly one, so both
+        // parts are merged; harnesses that don't (a bare shell) get neither.
+        let accepts_prompt = AgentKind::from_program(&program).accepts_positional_prompt();
         let launch_cmd = {
             let mut prompt_parts: Vec<String> = Vec::new();
             if let Some(pb) = stack_parent_branch.as_deref()
-                && program_is_claude(&program)
+                && accepts_prompt
             {
                 prompt_parts.push(format!(
                     "This branch is stacked on `{pb}` (not main). \
@@ -274,7 +277,7 @@ impl SessionManager {
                 ));
             }
             if let Some(ref user_prompt) = initial_prompt
-                && program_is_claude(&program)
+                && accepts_prompt
             {
                 prompt_parts.push(user_prompt.clone());
             }
@@ -397,9 +400,13 @@ impl SessionManager {
         self.kill_tmux_sessions(&tmux_session_name, shell_tmux_name.as_deref())
             .await;
 
-        // Create a fresh tmux session, adding --resume if configured
+        // Create a fresh tmux session, resuming the prior agent session if
+        // configured. Each harness has its own resume syntax; an unrecognised
+        // program has none, so it launches fresh.
         let resume_program = if self.config_store.read().resume_session {
-            format!("{} --resume", program)
+            AgentKind::from_program(&program)
+                .resume_command(&program)
+                .unwrap_or_else(|| program.clone())
         } else {
             program.clone()
         };
@@ -600,13 +607,6 @@ impl SessionManager {
     }
 }
 
-/// Whether the program string starts with the `claude` CLI. Used to decide
-/// whether an appended initial-prompt arg will be understood or will break
-/// the invocation (e.g. for `bash` or `zsh` as the program).
-pub fn program_is_claude(program: &str) -> bool {
-    program.split_whitespace().next() == Some("claude")
-}
-
 /// Insert `--permission-mode <mode>` and/or `--effort <level>` into a Claude
 /// command string. Always uses long-form flags (never short flags like `-p`)
 /// because short flags on the Claude CLI can have different meanings.
@@ -621,7 +621,7 @@ pub fn program_with_claude_flags(
     mode: Option<&str>,
     effort: Option<&str>,
 ) -> String {
-    if !program_is_claude(program) || (mode.is_none() && effort.is_none()) {
+    if !AgentKind::from_program(program).is_claude() || (mode.is_none() && effort.is_none()) {
         return program.to_string();
     }
 
@@ -652,7 +652,7 @@ pub fn program_with_claude_flags(
 ///
 /// For non-claude programs the command is returned unchanged.
 pub(super) fn program_with_session_name(program: &str, session_title: &str) -> String {
-    if !program_is_claude(program) || session_title.is_empty() {
+    if !AgentKind::from_program(program).is_claude() || session_title.is_empty() {
         return program.to_string();
     }
     let escaped = shell_escape_single_quote(session_title);
@@ -671,25 +671,6 @@ pub(super) fn shell_escape_single_quote(s: &str) -> String {
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
-
-    // --- program_is_claude ---
-
-    #[test]
-    fn program_is_claude_matches_bare_command() {
-        assert!(program_is_claude("claude"));
-    }
-
-    #[test]
-    fn program_is_claude_matches_with_args() {
-        assert!(program_is_claude("claude --resume"));
-    }
-
-    #[test]
-    fn program_is_claude_rejects_other_shells() {
-        assert!(!program_is_claude("bash"));
-        assert!(!program_is_claude("zsh -l"));
-        assert!(!program_is_claude(""));
-    }
 
     // --- program_with_claude_flags ---
 
@@ -739,6 +720,11 @@ mod lifecycle_tests {
             program_with_claude_flags("bash", Some("auto"), Some("high")),
             "bash"
         );
+        // Codex has its own flag conventions — never inject Claude's flags.
+        assert_eq!(
+            program_with_claude_flags("codex", Some("auto"), Some("high")),
+            "codex"
+        );
     }
 
     #[test]
@@ -767,6 +753,9 @@ mod lifecycle_tests {
     fn session_name_skipped_for_non_claude() {
         let cmd = program_with_session_name("bash", "my session");
         assert_eq!(cmd, "bash");
+        // Codex has no `-n` session-name flag — leave its command untouched.
+        let codex = program_with_session_name("codex", "my session");
+        assert_eq!(codex, "codex");
     }
 
     #[test]
