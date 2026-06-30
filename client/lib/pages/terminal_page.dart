@@ -34,6 +34,10 @@ class _TerminalPageState extends State<TerminalPage> {
 
   String _status = 'connecting…';
 
+  /// True once the attach has ended (detach/transport/error), so the UI offers
+  /// a reconnect instead of pretending it's still live.
+  bool _ended = false;
+
   // Throughput meter: bytes this second, refreshed on a 1s tick.
   int _totalBytes = 0;
   int _windowBytes = 0;
@@ -60,19 +64,7 @@ class _TerminalPageState extends State<TerminalPage> {
       unawaited(rust.terminalResize(handle: _handle, cols: cols, rows: rows));
     };
 
-    _sub =
-        rust
-            .attachTerminal(
-              handle: _handle,
-              baseUrl: widget.config.baseUrl,
-              token: widget.config.token,
-              sessionId: widget.session.id,
-            )
-            .listen(
-              _onEvent,
-              onError: (Object e) =>
-                  setState(() => _status = 'stream error: $e'),
-            );
+    _connect();
 
     _meter = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
@@ -83,6 +75,34 @@ class _TerminalPageState extends State<TerminalPage> {
     });
   }
 
+  /// Open (or re-open) the WS attach. The same handle is reused — the cdylib
+  /// registry entry is dropped when an attach ends, so re-attaching re-inserts
+  /// it. A re-attach replays tmux's pane, so output simply continues appending.
+  void _connect() {
+    _sub?.cancel();
+    setState(() {
+      _status = 'connecting…';
+      _ended = false;
+    });
+    _sub =
+        rust
+            .attachTerminal(
+              handle: _handle,
+              baseUrl: widget.config.baseUrl,
+              token: widget.config.token,
+              sessionId: widget.session.id,
+            )
+            .listen(
+              _onEvent,
+              onError: (Object e) => setState(() {
+                _status = 'stream error: $e';
+                _ended = true;
+              }),
+            );
+  }
+
+  void _reconnect() => _connect();
+
   void _onEvent(rust.TerminalEvent e) {
     switch (e.kind) {
       case rust.TerminalEventKind.output:
@@ -92,9 +112,15 @@ class _TerminalPageState extends State<TerminalPage> {
       case rust.TerminalEventKind.ready:
         setState(() => _status = 'attached: ${e.text}');
       case rust.TerminalEventKind.detached:
-        setState(() => _status = 'detached: ${e.text}');
+        setState(() {
+          _status = 'detached: ${e.text}';
+          _ended = true;
+        });
       case rust.TerminalEventKind.error:
-        setState(() => _status = 'error: ${e.text}');
+        setState(() {
+          _status = 'error: ${e.text}';
+          _ended = true;
+        });
     }
   }
 
@@ -125,6 +151,13 @@ class _TerminalPageState extends State<TerminalPage> {
     return Scaffold(
       appBar: AppBar(
         title: Text(widget.session.title, overflow: TextOverflow.ellipsis),
+        actions: [
+          IconButton(
+            onPressed: _ended ? _reconnect : null,
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Reconnect',
+          ),
+        ],
         bottom: PreferredSize(
           preferredSize: const Size.fromHeight(20),
           child: Padding(
@@ -172,11 +205,23 @@ class _ModifierBar extends StatelessWidget {
 
   static const _esc = [0x1b];
   static const _tab = [0x09];
+  // Ctrl-<letter> is the letter's code & 0x1f.
   static const _ctrlC = [0x03];
+  static const _ctrlD = [0x04];
+  static const _ctrlZ = [0x1a];
+  static const _ctrlL = [0x0c];
+  static const _ctrlR = [0x12];
+  static const _ctrlA = [0x01];
+  static const _ctrlE = [0x05];
+  static const _ctrlU = [0x15];
   static const _up = [0x1b, 0x5b, 0x41];
   static const _down = [0x1b, 0x5b, 0x42];
   static const _right = [0x1b, 0x5b, 0x43];
   static const _left = [0x1b, 0x5b, 0x44];
+  static const _home = [0x1b, 0x5b, 0x48];
+  static const _end = [0x1b, 0x5b, 0x46];
+  static const _pgUp = [0x1b, 0x5b, 0x35, 0x7e];
+  static const _pgDn = [0x1b, 0x5b, 0x36, 0x7e];
 
   @override
   Widget build(BuildContext context) {
@@ -191,10 +236,21 @@ class _ModifierBar extends StatelessWidget {
             _key(context, 'Esc', () => onSend(_esc)),
             _key(context, 'Tab', () => onSend(_tab)),
             _key(context, '^C', () => onSend(_ctrlC)),
+            _key(context, '^D', () => onSend(_ctrlD)),
+            _key(context, '^Z', () => onSend(_ctrlZ)),
+            _key(context, '^L', () => onSend(_ctrlL)),
+            _key(context, '^R', () => onSend(_ctrlR)),
+            _key(context, '^A', () => onSend(_ctrlA)),
+            _key(context, '^E', () => onSend(_ctrlE)),
+            _key(context, '^U', () => onSend(_ctrlU)),
             _key(context, '↑', () => onSend(_up)),
             _key(context, '↓', () => onSend(_down)),
             _key(context, '←', () => onSend(_left)),
             _key(context, '→', () => onSend(_right)),
+            _key(context, 'Home', () => onSend(_home)),
+            _key(context, 'End', () => onSend(_end)),
+            _key(context, 'PgUp', () => onSend(_pgUp)),
+            _key(context, 'PgDn', () => onSend(_pgDn)),
           ],
         ),
       ),
