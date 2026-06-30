@@ -149,6 +149,10 @@
         # only client contributors pull this.
         devShells.client = clientPkgs.mkShell {
           name = "claude-commander-client";
+          # Cross-platform toolchain: Rust + Android targets, the Android SDK/NDK,
+          # JDK, and the Flutter/Dart/codegen/native-build tools. Usable on both
+          # Linux and macOS — the Linux-desktop GTK/X11 stack is appended only on
+          # Linux (macOS desktop is Cocoa, built via Xcode, not these libs).
           buildInputs = [
             clientRust
             clientAndroid.androidsdk
@@ -165,12 +169,16 @@
             pkg-config
             clang
             llvmPackages.libclang
+          ]) ++ clientPkgs.lib.optionals clientPkgs.stdenv.hostPlatform.isLinux (with clientPkgs; [
             # Linux desktop (bonus target) GTK / build deps Flutter needs.
             gtk3
             glib
             pcre2
             libepoxy
             libx11
+            # flutter_secure_storage_linux links libsecret (needs a running
+            # secret service at runtime, e.g. gnome-keyring).
+            libsecret
           ]);
 
           # Used by flutter_rust_bridge / bindgen to find libclang.

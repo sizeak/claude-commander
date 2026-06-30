@@ -8,7 +8,7 @@ import 'mirrors.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:uuid/uuid.dart';
 
-// These functions are ignored because they are not marked as `pub`: `base`
+// These functions are ignored because they are not marked as `pub`: `base`, `client`, `ok_or_status`
 
 /// Liveness probe: `GET {base_url}/health` (no auth). Returns true on a 2xx.
 Future<bool> health({required String baseUrl}) =>
@@ -32,4 +32,96 @@ Future<List<SessionInfo>> listSessions({
   baseUrl: baseUrl,
   token: token,
   includeStopped: includeStopped,
+);
+
+/// `GET {base_url}/api/sessions/{query}/detail?lines=` → a session's live
+/// detail (agent state, diff summary, pane snapshot). `query` is matched
+/// loosely server-side (a full id, branch, or title prefix). A 404 (no match)
+/// returns `None` rather than an error, so a deleted session reads as "gone".
+Future<SessionDetail?> getSessionDetail({
+  required String baseUrl,
+  required String token,
+  required String query,
+  int? lines,
+}) => RustLib.instance.api.crateApiSimpleGetSessionDetail(
+  baseUrl: baseUrl,
+  token: token,
+  query: query,
+  lines: lines,
+);
+
+/// `GET {base_url}/api/sessions/{query}/pane?lines=` → the raw captured pane
+/// text. Lighter than `get_session_detail` for polling a preview. `None` on a
+/// 404.
+Future<String?> getPane({
+  required String baseUrl,
+  required String token,
+  required String query,
+  int? lines,
+}) => RustLib.instance.api.crateApiSimpleGetPane(
+  baseUrl: baseUrl,
+  token: token,
+  query: query,
+  lines: lines,
+);
+
+/// `POST {base_url}/api/sessions` → create a session, returning the new id.
+///
+/// `project_path` is a path on the *server's* filesystem (the repo to branch
+/// from). The optional fields map straight onto [`CreateSessionOpts`]; absent
+/// ones let the server apply its defaults.
+Future<String> createSession({
+  required String baseUrl,
+  required String token,
+  required String projectPath,
+  required String title,
+  String? program,
+  String? initialPrompt,
+  String? effort,
+  String? mode,
+  String? baseBranch,
+}) => RustLib.instance.api.crateApiSimpleCreateSession(
+  baseUrl: baseUrl,
+  token: token,
+  projectPath: projectPath,
+  title: title,
+  program: program,
+  initialPrompt: initialPrompt,
+  effort: effort,
+  mode: mode,
+  baseBranch: baseBranch,
+);
+
+/// `POST {base_url}/api/sessions/{id}/kill` — stop a running session (204).
+Future<void> killSession({
+  required String baseUrl,
+  required String token,
+  required String id,
+}) => RustLib.instance.api.crateApiSimpleKillSession(
+  baseUrl: baseUrl,
+  token: token,
+  id: id,
+);
+
+/// `POST {base_url}/api/sessions/{id}/restart` — restart a session (204).
+Future<void> restartSession({
+  required String baseUrl,
+  required String token,
+  required String id,
+}) => RustLib.instance.api.crateApiSimpleRestartSession(
+  baseUrl: baseUrl,
+  token: token,
+  id: id,
+);
+
+/// `DELETE {base_url}/api/sessions/{id}` — delete a session and its worktree
+/// (204).
+Future<void> deleteSession({
+  required String baseUrl,
+  required String token,
+  required String id,
+}) => RustLib.instance.api.crateApiSimpleDeleteSession(
+  baseUrl: baseUrl,
+  token: token,
+  id: id,
 );

@@ -7,6 +7,8 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:uuid/uuid.dart';
 
+enum AgentState { working, idle, waitingForInput, unknown }
+
 enum PrState { open, closed, merged }
 
 class ProjectId {
@@ -26,6 +28,37 @@ class ProjectId {
 }
 
 enum ReviewDecision { reviewRequired, approved, changesRequested }
+
+class SessionDetail {
+  final SessionInfo info;
+  final AgentState agentState;
+  final String? diffStat;
+  final String? paneContent;
+
+  const SessionDetail({
+    required this.info,
+    required this.agentState,
+    this.diffStat,
+    this.paneContent,
+  });
+
+  @override
+  int get hashCode =>
+      info.hashCode ^
+      agentState.hashCode ^
+      diffStat.hashCode ^
+      paneContent.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SessionDetail &&
+          runtimeType == other.runtimeType &&
+          info == other.info &&
+          agentState == other.agentState &&
+          diffStat == other.diffStat &&
+          paneContent == other.paneContent;
+}
 
 class SessionId {
   final UuidValue field0;

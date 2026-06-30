@@ -68,7 +68,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 584732888;
+  int get rustContentHash => 711121728;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -79,6 +79,38 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
 }
 
 abstract class RustLibApi extends BaseApi {
+  Future<String> crateApiSimpleCreateSession({
+    required String baseUrl,
+    required String token,
+    required String projectPath,
+    required String title,
+    String? program,
+    String? initialPrompt,
+    String? effort,
+    String? mode,
+    String? baseBranch,
+  });
+
+  Future<void> crateApiSimpleDeleteSession({
+    required String baseUrl,
+    required String token,
+    required String id,
+  });
+
+  Future<String?> crateApiSimpleGetPane({
+    required String baseUrl,
+    required String token,
+    required String query,
+    int? lines,
+  });
+
+  Future<SessionDetail?> crateApiSimpleGetSessionDetail({
+    required String baseUrl,
+    required String token,
+    required String query,
+    int? lines,
+  });
+
   Future<bool> crateApiSimpleHealth({required String baseUrl});
 
   Future<bool> crateApiSimpleHealthTmux({
@@ -88,10 +120,22 @@ abstract class RustLibApi extends BaseApi {
 
   Future<void> crateApiSimpleInitApp();
 
+  Future<void> crateApiSimpleKillSession({
+    required String baseUrl,
+    required String token,
+    required String id,
+  });
+
   Future<List<SessionInfo>> crateApiSimpleListSessions({
     required String baseUrl,
     required String token,
     required bool includeStopped,
+  });
+
+  Future<void> crateApiSimpleRestartSession({
+    required String baseUrl,
+    required String token,
+    required String id,
   });
 }
 
@@ -104,6 +148,189 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   });
 
   @override
+  Future<String> crateApiSimpleCreateSession({
+    required String baseUrl,
+    required String token,
+    required String projectPath,
+    required String title,
+    String? program,
+    String? initialPrompt,
+    String? effort,
+    String? mode,
+    String? baseBranch,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(baseUrl, serializer);
+          sse_encode_String(token, serializer);
+          sse_encode_String(projectPath, serializer);
+          sse_encode_String(title, serializer);
+          sse_encode_opt_String(program, serializer);
+          sse_encode_opt_String(initialPrompt, serializer);
+          sse_encode_opt_String(effort, serializer);
+          sse_encode_opt_String(mode, serializer);
+          sse_encode_opt_String(baseBranch, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 1,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_String,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiSimpleCreateSessionConstMeta,
+        argValues: [
+          baseUrl,
+          token,
+          projectPath,
+          title,
+          program,
+          initialPrompt,
+          effort,
+          mode,
+          baseBranch,
+        ],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSimpleCreateSessionConstMeta =>
+      const TaskConstMeta(
+        debugName: "create_session",
+        argNames: [
+          "baseUrl",
+          "token",
+          "projectPath",
+          "title",
+          "program",
+          "initialPrompt",
+          "effort",
+          "mode",
+          "baseBranch",
+        ],
+      );
+
+  @override
+  Future<void> crateApiSimpleDeleteSession({
+    required String baseUrl,
+    required String token,
+    required String id,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(baseUrl, serializer);
+          sse_encode_String(token, serializer);
+          sse_encode_String(id, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 2,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiSimpleDeleteSessionConstMeta,
+        argValues: [baseUrl, token, id],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSimpleDeleteSessionConstMeta =>
+      const TaskConstMeta(
+        debugName: "delete_session",
+        argNames: ["baseUrl", "token", "id"],
+      );
+
+  @override
+  Future<String?> crateApiSimpleGetPane({
+    required String baseUrl,
+    required String token,
+    required String query,
+    int? lines,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(baseUrl, serializer);
+          sse_encode_String(token, serializer);
+          sse_encode_String(query, serializer);
+          sse_encode_opt_box_autoadd_u_32(lines, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 3,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_String,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiSimpleGetPaneConstMeta,
+        argValues: [baseUrl, token, query, lines],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSimpleGetPaneConstMeta => const TaskConstMeta(
+    debugName: "get_pane",
+    argNames: ["baseUrl", "token", "query", "lines"],
+  );
+
+  @override
+  Future<SessionDetail?> crateApiSimpleGetSessionDetail({
+    required String baseUrl,
+    required String token,
+    required String query,
+    int? lines,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(baseUrl, serializer);
+          sse_encode_String(token, serializer);
+          sse_encode_String(query, serializer);
+          sse_encode_opt_box_autoadd_u_32(lines, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 4,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_opt_box_autoadd_session_detail,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiSimpleGetSessionDetailConstMeta,
+        argValues: [baseUrl, token, query, lines],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSimpleGetSessionDetailConstMeta =>
+      const TaskConstMeta(
+        debugName: "get_session_detail",
+        argNames: ["baseUrl", "token", "query", "lines"],
+      );
+
+  @override
   Future<bool> crateApiSimpleHealth({required String baseUrl}) {
     return handler.executeNormal(
       NormalTask(
@@ -113,7 +340,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 1,
+            funcId: 5,
             port: port_,
           );
         },
@@ -145,7 +372,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 2,
+            funcId: 6,
             port: port_,
           );
         },
@@ -174,7 +401,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 3,
+            funcId: 7,
             port: port_,
           );
         },
@@ -193,6 +420,42 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       const TaskConstMeta(debugName: "init_app", argNames: []);
 
   @override
+  Future<void> crateApiSimpleKillSession({
+    required String baseUrl,
+    required String token,
+    required String id,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(baseUrl, serializer);
+          sse_encode_String(token, serializer);
+          sse_encode_String(id, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 8,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiSimpleKillSessionConstMeta,
+        argValues: [baseUrl, token, id],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSimpleKillSessionConstMeta => const TaskConstMeta(
+    debugName: "kill_session",
+    argNames: ["baseUrl", "token", "id"],
+  );
+
+  @override
   Future<List<SessionInfo>> crateApiSimpleListSessions({
     required String baseUrl,
     required String token,
@@ -208,7 +471,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 4,
+            funcId: 9,
             port: port_,
           );
         },
@@ -227,6 +490,43 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     debugName: "list_sessions",
     argNames: ["baseUrl", "token", "includeStopped"],
   );
+
+  @override
+  Future<void> crateApiSimpleRestartSession({
+    required String baseUrl,
+    required String token,
+    required String id,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_String(baseUrl, serializer);
+          sse_encode_String(token, serializer);
+          sse_encode_String(id, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 10,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_unit,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiSimpleRestartSessionConstMeta,
+        argValues: [baseUrl, token, id],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiSimpleRestartSessionConstMeta =>
+      const TaskConstMeta(
+        debugName: "restart_session",
+        argNames: ["baseUrl", "token", "id"],
+      );
 
   @protected
   AnyhowException dco_decode_AnyhowException(dynamic raw) {
@@ -253,6 +553,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  AgentState dco_decode_agent_state(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return AgentState.values[raw as int];
+  }
+
+  @protected
   bool dco_decode_bool(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw as bool;
@@ -262,6 +568,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ReviewDecision dco_decode_box_autoadd_review_decision(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_review_decision(raw);
+  }
+
+  @protected
+  SessionDetail dco_decode_box_autoadd_session_detail(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_session_detail(raw);
   }
 
   @protected
@@ -313,6 +625,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  SessionDetail? dco_decode_opt_box_autoadd_session_detail(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_session_detail(raw);
+  }
+
+  @protected
   int? dco_decode_opt_box_autoadd_u_32(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_u_32(raw);
@@ -337,6 +655,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ReviewDecision dco_decode_review_decision(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return ReviewDecision.values[raw as int];
+  }
+
+  @protected
+  SessionDetail dco_decode_session_detail(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 4)
+      throw Exception('unexpected arr length: expect 4 but see ${arr.length}');
+    return SessionDetail(
+      info: dco_decode_session_info(arr[0]),
+      agentState: dco_decode_agent_state(arr[1]),
+      diffStat: dco_decode_opt_String(arr[2]),
+      paneContent: dco_decode_opt_String(arr[3]),
+    );
   }
 
   @protected
@@ -427,6 +759,13 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  AgentState sse_decode_agent_state(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return AgentState.values[inner];
+  }
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return deserializer.buffer.getUint8() != 0;
@@ -438,6 +777,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_review_decision(deserializer));
+  }
+
+  @protected
+  SessionDetail sse_decode_box_autoadd_session_detail(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_session_detail(deserializer));
   }
 
   @protected
@@ -514,6 +861,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  SessionDetail? sse_decode_opt_box_autoadd_session_detail(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_session_detail(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
@@ -543,6 +903,21 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var inner = sse_decode_i_32(deserializer);
     return ReviewDecision.values[inner];
+  }
+
+  @protected
+  SessionDetail sse_decode_session_detail(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_info = sse_decode_session_info(deserializer);
+    var var_agentState = sse_decode_agent_state(deserializer);
+    var var_diffStat = sse_decode_opt_String(deserializer);
+    var var_paneContent = sse_decode_opt_String(deserializer);
+    return SessionDetail(
+      info: var_info,
+      agentState: var_agentState,
+      diffStat: var_diffStat,
+      paneContent: var_paneContent,
+    );
   }
 
   @protected
@@ -648,6 +1023,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_agent_state(AgentState self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
   void sse_encode_bool(bool self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     serializer.buffer.putUint8(self ? 1 : 0);
@@ -660,6 +1041,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_review_decision(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_session_detail(
+    SessionDetail self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_session_detail(self, serializer);
   }
 
   @protected
@@ -735,6 +1125,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_opt_box_autoadd_session_detail(
+    SessionDetail? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_session_detail(self, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
 
@@ -763,6 +1166,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_session_detail(SessionDetail self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_session_info(self.info, serializer);
+    sse_encode_agent_state(self.agentState, serializer);
+    sse_encode_opt_String(self.diffStat, serializer);
+    sse_encode_opt_String(self.paneContent, serializer);
   }
 
   @protected

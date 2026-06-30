@@ -3,10 +3,14 @@ import 'package:flutter/material.dart';
 import '../server_config.dart';
 import '../src/rust/api/mirrors.dart';
 import '../src/rust/api/simple.dart' as rust;
+import '../widgets/session_chips.dart';
 import 'connection_page.dart';
+import 'create_session_page.dart';
+import 'session_detail_page.dart';
 
-/// Lists the server's sessions. Pull to refresh; tapping a session is wired in
-/// Phase 2 (detail). The app bar links back to connection settings.
+/// Lists the server's sessions. Pull to refresh; tap a session for its detail
+/// view. The app bar links back to connection settings; the FAB creates a
+/// session.
 class SessionListPage extends StatefulWidget {
   final ServerConfig config;
   const SessionListPage({super.key, required this.config});
@@ -44,6 +48,26 @@ class _SessionListPageState extends State<SessionListPage> {
     );
   }
 
+  Future<void> _openDetail(SessionInfo session) async {
+    await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) =>
+            SessionDetailPage(config: widget.config, session: session),
+      ),
+    );
+    // A lifecycle action (delete/kill/restart) may have changed the list.
+    await _refresh();
+  }
+
+  Future<void> _createSession() async {
+    final id = await Navigator.of(context).push<String>(
+      MaterialPageRoute(
+        builder: (_) => CreateSessionPage(config: widget.config),
+      ),
+    );
+    if (id != null) await _refresh();
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -61,6 +85,11 @@ class _SessionListPageState extends State<SessionListPage> {
             tooltip: 'Server settings',
           ),
         ],
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _createSession,
+        tooltip: 'New session',
+        child: const Icon(Icons.add),
       ),
       body: RefreshIndicator(
         onRefresh: _refresh,
@@ -82,7 +111,10 @@ class _SessionListPageState extends State<SessionListPage> {
             }
             return ListView.builder(
               itemCount: sessions.length,
-              itemBuilder: (_, i) => _SessionTile(session: sessions[i]),
+              itemBuilder: (_, i) => _SessionTile(
+                session: sessions[i],
+                onTap: () => _openDetail(sessions[i]),
+              ),
             );
           },
         ),
@@ -105,13 +137,15 @@ class _SessionListPageState extends State<SessionListPage> {
 
 class _SessionTile extends StatelessWidget {
   final SessionInfo session;
-  const _SessionTile({required this.session});
+  final VoidCallback onTap;
+  const _SessionTile({required this.session, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       child: ListTile(
+        onTap: onTap,
         title: Text(
           session.title,
           maxLines: 1,
@@ -131,9 +165,9 @@ class _SessionTile extends StatelessWidget {
               spacing: 6,
               runSpacing: 4,
               children: [
-                _statusChip(context, session.status),
+                statusChip(context, session.status),
                 if (session.prNumber != null)
-                  _prChip(context, session.prNumber!, session.prState),
+                  prChip(context, session.prNumber!, session.prState),
               ],
             ),
           ],
@@ -143,39 +177,6 @@ class _SessionTile extends StatelessWidget {
           style: Theme.of(context).textTheme.labelSmall,
         ),
       ),
-    );
-  }
-
-  Widget _statusChip(BuildContext context, SessionStatus status) {
-    final (label, color) = switch (status) {
-      SessionStatus.creating => ('creating', Colors.blue),
-      SessionStatus.running => ('running', Colors.green),
-      SessionStatus.stopped => ('stopped', Colors.grey),
-      SessionStatus.merging => ('merging', Colors.orange),
-      SessionStatus.cascadePaused => ('cascade paused', Colors.deepOrange),
-      SessionStatus.pushing => ('pushing', Colors.teal),
-    };
-    return _chip(label, color);
-  }
-
-  Widget _prChip(BuildContext context, int number, PrState state) {
-    final color = switch (state) {
-      PrState.open => Colors.green,
-      PrState.closed => Colors.red,
-      PrState.merged => Colors.purple,
-    };
-    return _chip('PR #$number ${state.name}', color);
-  }
-
-  Widget _chip(String label, Color color) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.18),
-        borderRadius: BorderRadius.circular(6),
-        border: Border.all(color: color.withValues(alpha: 0.5)),
-      ),
-      child: Text(label, style: TextStyle(color: color, fontSize: 12)),
     );
   }
 }

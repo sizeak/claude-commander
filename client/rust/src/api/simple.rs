@@ -6,8 +6,12 @@
 //! `claude-commander-protocol` types, so any drift from the server fails here in
 //! Rust rather than silently in the UI.
 
+use std::path::PathBuf;
+
 use anyhow::{Context, Result};
-use claude_commander_protocol::api::SessionInfo;
+use claude_commander_protocol::api::{CreateSessionOpts, SessionDetail, SessionInfo};
+use reqwest::StatusCode;
+use reqwest::blocking::{Client, Response};
 
 #[flutter_rust_bridge::frb(init)]
 pub fn init_app() {
@@ -18,6 +22,21 @@ pub fn init_app() {
 /// Trim a trailing slash so `{base}/path` joins cleanly.
 fn base(base_url: &str) -> &str {
     base_url.trim_end_matches('/')
+}
+
+fn client() -> Client {
+    Client::new()
+}
+
+/// Map a response to a `Result`: a 401 becomes a friendly auth error, any other
+/// non-2xx surfaces via `error_for_status`, and a 2xx passes through. `what`
+/// labels the failing call in the error message.
+fn ok_or_status(resp: Response, what: &str) -> Result<Response> {
+    if resp.status() == StatusCode::UNAUTHORIZED {
+        anyhow::bail!("authentication failed (check your token)");
+    }
+    resp.error_for_status()
+        .with_context(|| format!("{what}: server returned an error status"))
 }
 
 /// Liveness probe: `GET {base_url}/health` (no auth). Returns true on a 2xx.
@@ -50,7 +69,7 @@ pub fn list_sessions(
     token: String,
     include_stopped: bool,
 ) -> Result<Vec<SessionInfo>> {
-    let sessions = reqwest::blocking::Client::new()
+    let resp = client()
         .get(format!(
             "{}/api/sessions?include_stopped={}",
             base(&base_url),
@@ -58,10 +77,170 @@ pub fn list_sessions(
         ))
         .bearer_auth(token)
         .send()
-        .context("list_sessions request failed")?
-        .error_for_status()
-        .context("server returned an error status")?
+        .context("list_sessions request failed")?;
+    let sessions = ok_or_status(resp, "list_sessions")?
         .json::<Vec<SessionInfo>>()
         .context("response did not match the SessionInfo contract")?;
     Ok(sessions)
+}
+
+/// `GET {base_url}/api/sessions/{query}/detail?lines=` → a session's live
+/// detail (agent state, diff summary, pane snapshot). `query` is matched
+/// loosely server-side (a full id, branch, or title prefix). A 404 (no match)
+/// returns `None` rather than an error, so a deleted session reads as "gone".
+pub fn get_session_detail(
+    base_url: String,
+    token: String,
+    query: String,
+    lines: Option<u32>,
+) -> Result<Option<SessionDetail>> {
+    let mut url = format!("{}/api/sessions/{}/detail", base(&base_url), query);
+    if let Some(n) = lines {
+        url.push_str(&format!("?lines={n}"));
+    }
+    let resp = client()
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .context("get_session_detail request failed")?;
+    if resp.status() == StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let detail = ok_or_status(resp, "get_session_detail")?
+        .json::<SessionDetail>()
+        .context("response did not match the SessionDetail contract")?;
+    Ok(Some(detail))
+}
+
+/// `GET {base_url}/api/sessions/{query}/pane?lines=` → the raw captured pane
+/// text. Lighter than `get_session_detail` for polling a preview. `None` on a
+/// 404.
+pub fn get_pane(
+    base_url: String,
+    token: String,
+    query: String,
+    lines: Option<u32>,
+) -> Result<Option<String>> {
+    let mut url = format!("{}/api/sessions/{}/pane", base(&base_url), query);
+    if let Some(n) = lines {
+        url.push_str(&format!("?lines={n}"));
+    }
+    let resp = client()
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .context("get_pane request failed")?;
+    if resp.status() == StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    let text = ok_or_status(resp, "get_pane")?
+        .text()
+        .context("could not read pane response body")?;
+    Ok(Some(text))
+}
+
+/// `POST {base_url}/api/sessions` → create a session, returning the new id.
+///
+/// `project_path` is a path on the *server's* filesystem (the repo to branch
+/// from). The optional fields map straight onto [`CreateSessionOpts`]; absent
+/// ones let the server apply its defaults.
+#[allow(clippy::too_many_arguments)]
+pub fn create_session(
+    base_url: String,
+    token: String,
+    project_path: String,
+    title: String,
+    program: Option<String>,
+    initial_prompt: Option<String>,
+    effort: Option<String>,
+    mode: Option<String>,
+    base_branch: Option<String>,
+) -> Result<String> {
+    let opts = CreateSessionOpts {
+        project_path: PathBuf::from(project_path),
+        title,
+        program,
+        initial_prompt,
+        effort,
+        mode,
+        base_branch,
+        section: None,
+    };
+    let resp = client()
+        .post(format!("{}/api/sessions", base(&base_url)))
+        .bearer_auth(token)
+        .json(&opts)
+        .send()
+        .context("create_session request failed")?;
+    let body: serde_json::Value = ok_or_status(resp, "create_session")?
+        .json()
+        .context("could not read create_session response body")?;
+    parse_created_id(&body)
+}
+
+/// Pull the new session id out of `POST /sessions`'s `{ "id": ... }` body.
+fn parse_created_id(body: &serde_json::Value) -> Result<String> {
+    body.get("id")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .context("create_session response was missing the new session id")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base_trims_trailing_slash() {
+        assert_eq!(base("http://host:1234/"), "http://host:1234");
+        assert_eq!(base("http://host:1234"), "http://host:1234");
+    }
+
+    #[test]
+    fn parse_created_id_extracts_id() {
+        let body = serde_json::json!({ "id": "abc-123" });
+        assert_eq!(parse_created_id(&body).unwrap(), "abc-123");
+    }
+
+    #[test]
+    fn parse_created_id_missing_field_errors() {
+        // A success body without an `id` (or with a non-string id) is a contract
+        // violation, not a silent empty string.
+        assert!(parse_created_id(&serde_json::json!({})).is_err());
+        assert!(parse_created_id(&serde_json::json!({ "id": 42 })).is_err());
+    }
+}
+
+/// `POST {base_url}/api/sessions/{id}/kill` — stop a running session (204).
+pub fn kill_session(base_url: String, token: String, id: String) -> Result<()> {
+    let resp = client()
+        .post(format!("{}/api/sessions/{}/kill", base(&base_url), id))
+        .bearer_auth(token)
+        .send()
+        .context("kill_session request failed")?;
+    ok_or_status(resp, "kill_session")?;
+    Ok(())
+}
+
+/// `POST {base_url}/api/sessions/{id}/restart` — restart a session (204).
+pub fn restart_session(base_url: String, token: String, id: String) -> Result<()> {
+    let resp = client()
+        .post(format!("{}/api/sessions/{}/restart", base(&base_url), id))
+        .bearer_auth(token)
+        .send()
+        .context("restart_session request failed")?;
+    ok_or_status(resp, "restart_session")?;
+    Ok(())
+}
+
+/// `DELETE {base_url}/api/sessions/{id}` — delete a session and its worktree
+/// (204).
+pub fn delete_session(base_url: String, token: String, id: String) -> Result<()> {
+    let resp = client()
+        .delete(format!("{}/api/sessions/{}", base(&base_url), id))
+        .bearer_auth(token)
+        .send()
+        .context("delete_session request failed")?;
+    ok_or_status(resp, "delete_session")?;
+    Ok(())
 }

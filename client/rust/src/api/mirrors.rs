@@ -16,9 +16,9 @@ use chrono::{DateTime, Utc};
 use flutter_rust_bridge::frb;
 use uuid::Uuid;
 
-pub use claude_commander_protocol::api::SessionInfo;
+pub use claude_commander_protocol::api::{SessionDetail, SessionInfo};
 pub use claude_commander_protocol::pr::{PrState, ReviewDecision};
-pub use claude_commander_protocol::session::{ProjectId, SessionId, SessionStatus};
+pub use claude_commander_protocol::session::{AgentState, ProjectId, SessionId, SessionStatus};
 
 // Both id newtypes are a single `Uuid`, so one mirror covers both.
 #[frb(mirror(SessionId, ProjectId))]
@@ -66,4 +66,23 @@ pub struct _SessionInfo {
     pub review_decision: Option<ReviewDecision>,
     pub pr_reviewers: Vec<String>,
     pub created_at: DateTime<Utc>,
+}
+
+// Phase 2 needs the detail shape: the session's live agent sub-state plus the
+// diff summary and a pane snapshot. The mirror matches the Rust struct
+// field-for-field (frb checks the struct, not the flattened JSON).
+#[frb(mirror(AgentState))]
+pub enum _AgentState {
+    Working,
+    Idle,
+    WaitingForInput,
+    Unknown,
+}
+
+#[frb(mirror(SessionDetail))]
+pub struct _SessionDetail {
+    pub info: SessionInfo,
+    pub agent_state: AgentState,
+    pub diff_stat: Option<String>,
+    pub pane_content: Option<String>,
 }

@@ -35,10 +35,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   UuidValue dco_decode_Uuid(dynamic raw);
 
   @protected
+  AgentState dco_decode_agent_state(dynamic raw);
+
+  @protected
   bool dco_decode_bool(dynamic raw);
 
   @protected
   ReviewDecision dco_decode_box_autoadd_review_decision(dynamic raw);
+
+  @protected
+  SessionDetail dco_decode_box_autoadd_session_detail(dynamic raw);
 
   @protected
   int dco_decode_box_autoadd_u_32(dynamic raw);
@@ -65,6 +71,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ReviewDecision? dco_decode_opt_box_autoadd_review_decision(dynamic raw);
 
   @protected
+  SessionDetail? dco_decode_opt_box_autoadd_session_detail(dynamic raw);
+
+  @protected
   int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
 
   @protected
@@ -75,6 +84,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ReviewDecision dco_decode_review_decision(dynamic raw);
+
+  @protected
+  SessionDetail dco_decode_session_detail(dynamic raw);
 
   @protected
   SessionId dco_decode_session_id(dynamic raw);
@@ -107,10 +119,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   UuidValue sse_decode_Uuid(SseDeserializer deserializer);
 
   @protected
+  AgentState sse_decode_agent_state(SseDeserializer deserializer);
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
   ReviewDecision sse_decode_box_autoadd_review_decision(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  SessionDetail sse_decode_box_autoadd_session_detail(
     SseDeserializer deserializer,
   );
 
@@ -141,6 +161,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  SessionDetail? sse_decode_opt_box_autoadd_session_detail(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   int? sse_decode_opt_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
@@ -151,6 +176,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   ReviewDecision sse_decode_review_decision(SseDeserializer deserializer);
+
+  @protected
+  SessionDetail sse_decode_session_detail(SseDeserializer deserializer);
 
   @protected
   SessionId sse_decode_session_id(SseDeserializer deserializer);
@@ -186,11 +214,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_Uuid(UuidValue self, SseSerializer serializer);
 
   @protected
+  void sse_encode_agent_state(AgentState self, SseSerializer serializer);
+
+  @protected
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_review_decision(
     ReviewDecision self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_session_detail(
+    SessionDetail self,
     SseSerializer serializer,
   );
 
@@ -228,6 +265,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_opt_box_autoadd_session_detail(
+    SessionDetail? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_u_32(int? self, SseSerializer serializer);
 
   @protected
@@ -241,6 +284,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
     ReviewDecision self,
     SseSerializer serializer,
   );
+
+  @protected
+  void sse_encode_session_detail(SessionDetail self, SseSerializer serializer);
 
   @protected
   void sse_encode_session_id(SessionId self, SseSerializer serializer);
