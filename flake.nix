@@ -5,9 +5,15 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     crane.url = "github:ipetkov/crane";
     flake-utils.url = "github:numtide/flake-utils";
+    # Rust toolchain with Android cross-compile targets, used ONLY by the
+    # `mobile` dev shell (see devShells.mobile). The default shell never pulls it.
+    fenix = {
+      url = "github:nix-community/fenix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { self, nixpkgs, crane, flake-utils }:
+  outputs = { self, nixpkgs, crane, flake-utils, fenix }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
@@ -77,6 +83,38 @@
             mainProgram = "claude-commander";
           };
         });
+        # ---- Client (Flutter + Rust) dev-shell toolchain ----
+        # Heavy Flutter + Android NDK toolchain for the in-repo `client/` app,
+        # kept entirely out of the default shell so core TUI/CLI/server
+        # contributors never pull it. nixpkgs is re-imported with unfree + Android
+        # SDK licence acceptance, scoped to this shell only. All of these bindings
+        # are lazy: `nix develop` (default) never evaluates or builds them.
+        clientPkgs = import nixpkgs {
+          inherit system;
+          config = {
+            allowUnfree = true;
+            android_sdk.accept_license = true;
+          };
+        };
+        clientRust = fenix.packages.${system}.combine [
+          fenix.packages.${system}.stable.toolchain
+          fenix.packages.${system}.targets.aarch64-linux-android.stable.rust-std
+          fenix.packages.${system}.targets.armv7-linux-androideabi.stable.rust-std
+          fenix.packages.${system}.targets.x86_64-linux-android.stable.rust-std
+          fenix.packages.${system}.targets.i686-linux-android.stable.rust-std
+        ];
+        clientAndroid = clientPkgs.androidenv.composeAndroidPackages {
+          platformVersions = [ "34" "35" ];
+          buildToolsVersions = [ "34.0.0" "35.0.0" ];
+          ndkVersions = [ "28.0.13004108" ];
+          cmakeVersions = [ "3.22.1" ];
+          includeNDK = true;
+          includeEmulator = false;
+          includeSystemImages = false;
+          cmdLineToolsVersion = "13.0";
+        };
+        clientAndroidSdkRoot = "${clientAndroid.androidsdk}/libexec/android-sdk";
+        clientNdkVersion = "28.0.13004108";
       in
       {
         checks = {
@@ -103,6 +141,52 @@
           ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             alsa-lib
           ];
+        };
+
+        # Flutter + Rust + Android NDK toolchain for the in-repo `client/` app
+        # (Android-first, iOS + desktop to follow). Enter with
+        # `nix develop .#client`. Separate from the default shell on purpose —
+        # only client contributors pull this.
+        devShells.client = clientPkgs.mkShell {
+          name = "claude-commander-client";
+          buildInputs = [
+            clientRust
+            clientAndroid.androidsdk
+            clientPkgs.jdk17
+          ] ++ (with clientPkgs; [
+            flutter
+            dart
+            cargo-ndk
+            # flutter_rust_bridge codegen — fall back to `cargo install` if this
+            # attr is ever absent from the nixpkgs pin (see client/README.md).
+            flutter_rust_bridge_codegen
+            cmake
+            ninja
+            pkg-config
+            clang
+            llvmPackages.libclang
+            # Linux desktop (bonus target) GTK / build deps Flutter needs.
+            gtk3
+            glib
+            pcre2
+            libepoxy
+            libx11
+          ]);
+
+          # Used by flutter_rust_bridge / bindgen to find libclang.
+          LIBCLANG_PATH = "${clientPkgs.llvmPackages.libclang.lib}/lib";
+
+          shellHook = ''
+            export ANDROID_HOME="${clientAndroidSdkRoot}"
+            export ANDROID_SDK_ROOT="${clientAndroidSdkRoot}"
+            export ANDROID_NDK_ROOT="${clientAndroidSdkRoot}/ndk/${clientNdkVersion}"
+            export ANDROID_NDK_HOME="$ANDROID_NDK_ROOT"
+            export JAVA_HOME="${clientPkgs.jdk17}"
+            # Point Flutter at the Nix-provided SDK and silence analytics noise.
+            flutter config --no-analytics >/dev/null 2>&1 || true
+            flutter config --android-sdk "$ANDROID_SDK_ROOT" >/dev/null 2>&1 || true
+            echo "entered claude-commander client dev shell (flutter + rust + android ndk)"
+          '';
         };
       }
     );
