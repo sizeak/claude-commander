@@ -1,0 +1,37 @@
+[package]
+name = "claude-commander"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "A high-performance terminal UI for managing Claude coding sessions"
+keywords = ["claude", "ai", "terminal", "tui", "tmux"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "claude-commander"
+path = "src/main.rs"
+
+[dependencies]
+claude-commander-core = { path = "../claude-commander-core" }
+
+# Async runtime (the `#[tokio::main]` entry point)
+tokio = { workspace = true }
+
+# CLI (derive macros - idiomatic Rust)
+clap = { version = "4.5", features = ["derive"] }
+
+# Serialization (JSON + TOML output for the CLI subcommands)
+serde_json = { workspace = true }
+toml = "0.8"
+
+# Unix system calls — raise the file-descriptor rlimit at startup
+nix = { version = "0.29", features = ["resource"] }
+
+# Error handling
+color-eyre = "0.6"
+
+# Observability
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

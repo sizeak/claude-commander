@@ -13,8 +13,11 @@
         pkgs = nixpkgs.legacyPackages.${system};
         craneLib = crane.mkLib pkgs;
 
-        # .md files must survive the source filter: src/commander_prime.md is
-        # embedded into the binary via include_str!
+        # .md files must survive the source filter:
+        # crates/claude-commander-core/src/commander_prime.md is embedded into
+        # the binary via include_str!. The src root is the whole tree, so every
+        # workspace member under crates/ is in the build sandbox;
+        # filterCargoSources keeps each crate's Rust/Cargo sources.
         src = pkgs.lib.cleanSourceWith {
           src = ./.;
           filter = path: type:
@@ -24,7 +27,19 @@
 
         commonArgs = {
           inherit src;
-          inherit (craneLib.crateNameFromCargoToml { cargoToml = ./Cargo.toml; }) pname version;
+          # The root is now a virtual workspace (no [package]), and the binary
+          # crate inherits its version from [workspace.package] via
+          # `version.workspace = true` — which crane's crateNameFromCargoToml
+          # does not resolve. So pin pname to the binary crate and read the
+          # concrete version straight from the root workspace manifest.
+          pname = "claude-commander";
+          version =
+            (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
+          # Build only the TUI/CLI binary crate; the server crate
+          # (claude-commander-server, publish = false, axum/tower/hyper) is
+          # excluded from the Nix package the same way it is from
+          # default-members.
+          cargoExtraArgs = "-p claude-commander";
           strictDeps = true;
 
           nativeBuildInputs = with pkgs; [

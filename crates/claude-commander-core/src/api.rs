@@ -60,11 +60,13 @@ impl CommanderService {
             store.clone(),
             Theme::default().tmux_status_style(),
         );
-        // Comments live beside state.json under the data dir. `data_dir()`
-        // only fails when no home directory can be resolved (effectively never
-        // on supported platforms); fall back to a relative dir to keep `new`
-        // infallible, mirroring `for_cli`'s tolerant state load.
-        let data_dir = Config::data_dir().unwrap_or_else(|_| PathBuf::from("."));
+        // Comments and reviewed marks live beside state.json under the same
+        // data dir the `StateStore` resolved — *not* a freshly recomputed
+        // `Config::data_dir()`. Routing through the store's path means a test
+        // (or any caller) that injects a `TempDir`-backed `StateStore` keeps
+        // these sibling stores off the real `~/.local/share`, preserving the
+        // project's strict test-isolation rule.
+        let data_dir = store.data_dir();
         let comments = Arc::new(CommentStore::new(data_dir.join("comments")));
         let reviewed = Arc::new(ReviewedStore::new(data_dir.join("reviewed")));
         let telemetry = init_telemetry(&config_store, &store, &frontend);
@@ -254,6 +256,15 @@ impl CommanderService {
 
         let n = lines.map(crate::cli::clamp_log_lines);
         capture_pane(&self.manager.tmux, &tmux_name, n).await
+    }
+
+    /// Resolve a session query (full UUID, ID prefix, or exact title) to its
+    /// tmux session name, or `None` if nothing matches. Used by the server's
+    /// WebSocket attach handler to spawn the tmux attach bridge for the right
+    /// session, reusing the same `find_session` matching the CLI/HTTP API use.
+    pub async fn resolve_tmux_session(&self, query: &str) -> Result<Option<String>> {
+        let state = self.store.read().await;
+        Ok(crate::cli::find_session(&state, query).map(|s| s.tmux_session_name.clone()))
     }
 
     pub async fn check_tmux(&self) -> Result<()> {
@@ -1146,5 +1157,62 @@ mod tests {
             section: None,
         };
         opts.validate_program_flags("bash").unwrap();
+    }
+
+    /// A `CommanderService` built over `TempDir`-backed stores must root its
+    /// comment/reviewed stores under that temp data dir — never the real
+    /// `Config::data_dir()`. Writing a comment proves the on-disk path is the
+    /// injected one (test-isolation regression).
+    #[tokio::test]
+    async fn comment_writes_stay_under_injected_data_dir() {
+        use crate::config::storage::AppState as CoreState;
+        use crate::config::{ConfigStore, StateStore};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        // Telemetry is opt-out by default with a baked ingest token; disable it
+        // so this test never posts events to the production OpenObserve instance.
+        let mut config = Config::default();
+        config.telemetry.enabled = false;
+        let config_store = Arc::new(ConfigStore::with_path(
+            config,
+            dir.path().join("config.toml"),
+        ));
+        let store = Arc::new(StateStore::with_path(
+            CoreState::default(),
+            dir.path().join("state.json"),
+        ));
+        let frontend = FrontendInfo::new("test", "0.0.0");
+        let service = CommanderService::new(config_store, store, frontend);
+
+        // Write a comment through the public API.
+        let session_id = SessionId::new();
+        service
+            .create_comment(
+                &session_id,
+                NewComment {
+                    file: "a.rs".to_string(),
+                    side: CommentSide::New,
+                    line_range: (1, 1),
+                    snippet: "let x = 1;".to_string(),
+                    comment: "nit".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // The comment must have landed under the injected temp dir, and the
+        // real data dir must be untouched by this write.
+        let comments_dir = dir.path().join("comments");
+        assert!(
+            comments_dir.exists(),
+            "comments should be written under the injected data dir"
+        );
+        if let Ok(real) = Config::data_dir() {
+            assert_ne!(
+                real,
+                dir.path(),
+                "temp data dir must differ from the real data dir"
+            );
+        }
     }
 }

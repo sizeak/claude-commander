@@ -9,7 +9,7 @@ use color_eyre::eyre::Result;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
-use claude_commander::{
+use claude_commander_core::{
     VERSION,
     cli_args::{Cli, Commands, cli_command},
     config::{AppState, Config, ConfigStore, StateStore},
@@ -19,8 +19,8 @@ use claude_commander::{
 
 /// Identify this binary to the telemetry layer. Required by
 /// `CommanderService`/`App` — they panic if a frontend isn't supplied.
-fn frontend() -> claude_commander::telemetry::FrontendInfo {
-    claude_commander::telemetry::FrontendInfo::new(claude_commander::APP_NAME, VERSION)
+fn frontend() -> claude_commander_core::telemetry::FrontendInfo {
+    claude_commander_core::telemetry::FrontendInfo::new(claude_commander_core::APP_NAME, VERSION)
 }
 
 fn setup_logging(debug: bool, to_file: bool) -> Result<()> {
@@ -183,11 +183,12 @@ async fn main() -> Result<()> {
             setup_logging(cli.debug, false)?;
 
             if json {
-                let service = claude_commander::api::CommanderService::for_cli(config, frontend())?;
+                let service =
+                    claude_commander_core::api::CommanderService::for_cli(config, frontend())?;
                 let sessions = service.list_sessions(all).await?;
                 let entries: Vec<_> = sessions
                     .iter()
-                    .map(claude_commander::cli::SessionJsonEntry::from_info)
+                    .map(claude_commander_core::cli::SessionJsonEntry::from_info)
                     .collect();
                 println!("{}", serde_json::to_string_pretty(&entries)?);
             } else {
@@ -216,14 +217,14 @@ async fn main() -> Result<()> {
                     } else {
                         for session in sessions {
                             let status_icon = match session.status {
-                                claude_commander::SessionStatus::Creating
-                                | claude_commander::SessionStatus::Merging
-                                | claude_commander::SessionStatus::Pushing => "⠋",
-                                claude_commander::SessionStatus::Running => "●",
-                                claude_commander::SessionStatus::Stopped => "○",
-                                claude_commander::SessionStatus::CascadePaused => "⏸",
+                                claude_commander_core::SessionStatus::Creating
+                                | claude_commander_core::SessionStatus::Merging
+                                | claude_commander_core::SessionStatus::Pushing => "⠋",
+                                claude_commander_core::SessionStatus::Running => "●",
+                                claude_commander_core::SessionStatus::Stopped => "○",
+                                claude_commander_core::SessionStatus::CascadePaused => "⏸",
                             };
-                            match claude_commander::session::display_branch(
+                            match claude_commander_core::session::display_branch(
                                 &session.title,
                                 &session.branch,
                             ) {
@@ -246,7 +247,8 @@ async fn main() -> Result<()> {
         Some(Commands::Status { session, json }) => {
             setup_logging(cli.debug, false)?;
 
-            let service = claude_commander::api::CommanderService::for_cli(config, frontend())?;
+            let service =
+                claude_commander_core::api::CommanderService::for_cli(config, frontend())?;
             let detail = match service.get_session_detail(&session, None).await? {
                 Some(d) => d,
                 None => {
@@ -256,28 +258,32 @@ async fn main() -> Result<()> {
                 }
             };
 
-            let entry = claude_commander::cli::StatusJsonEntry::from_detail(&detail);
+            let entry = claude_commander_core::cli::StatusJsonEntry::from_detail(&detail);
 
             if json {
                 println!("{}", serde_json::to_string_pretty(&entry)?);
             } else {
-                println!("{}", claude_commander::cli::format_status_human(&entry));
+                println!(
+                    "{}",
+                    claude_commander_core::cli::format_status_human(&entry)
+                );
             }
         }
 
         Some(Commands::Delete { session, force }) => {
             setup_logging(cli.debug, false)?;
 
-            let service = claude_commander::api::CommanderService::for_cli(config, frontend())?;
+            let service =
+                claude_commander_core::api::CommanderService::for_cli(config, frontend())?;
 
             let info = match service.find_session_exact(&session).await? {
-                claude_commander::cli::SessionLookup::Found(i) => i,
-                claude_commander::cli::SessionLookup::NotFound => {
+                claude_commander_core::cli::SessionLookup::Found(i) => i,
+                claude_commander_core::cli::SessionLookup::NotFound => {
                     eprintln!("Session not found: {}", session);
                     eprintln!("Use 'claude-commander list' to see available sessions.");
                     std::process::exit(1);
                 }
-                claude_commander::cli::SessionLookup::Ambiguous(n) => {
+                claude_commander_core::cli::SessionLookup::Ambiguous(n) => {
                     eprintln!(
                         "\"{}\" matches {} sessions. Use the exact title or full ID to delete.",
                         session, n
@@ -287,15 +293,15 @@ async fn main() -> Result<()> {
                 }
             };
 
-            match claude_commander::cli::delete_guard(force, std::io::stdin().is_terminal()) {
-                claude_commander::cli::DeleteGuard::RequireForce => {
+            match claude_commander_core::cli::delete_guard(force, std::io::stdin().is_terminal()) {
+                claude_commander_core::cli::DeleteGuard::RequireForce => {
                     eprintln!(
                         "Refusing to delete \"{}\" without confirmation. Re-run with --force.",
                         info.title
                     );
                     std::process::exit(1);
                 }
-                claude_commander::cli::DeleteGuard::Prompt => {
+                claude_commander_core::cli::DeleteGuard::Prompt => {
                     print!(
                         "Delete \"{}\"? This kills its tmux session and removes the worktree. [y/N] ",
                         info.title
@@ -303,12 +309,12 @@ async fn main() -> Result<()> {
                     std::io::stdout().flush()?;
                     let mut answer = String::new();
                     std::io::stdin().read_line(&mut answer)?;
-                    if !claude_commander::cli::parse_yes_no(&answer) {
+                    if !claude_commander_core::cli::parse_yes_no(&answer) {
                         println!("Aborted.");
                         return Ok(());
                     }
                 }
-                claude_commander::cli::DeleteGuard::Proceed => {}
+                claude_commander_core::cli::DeleteGuard::Proceed => {}
             }
 
             service.delete_session(&info.session_id).await?;
@@ -318,7 +324,8 @@ async fn main() -> Result<()> {
         Some(Commands::Log { session, lines }) => {
             setup_logging(cli.debug, false)?;
 
-            let service = claude_commander::api::CommanderService::for_cli(config, frontend())?;
+            let service =
+                claude_commander_core::api::CommanderService::for_cli(config, frontend())?;
             match service.get_pane_content(&session, Some(lines)).await? {
                 Some(content) => {
                     if content.ends_with('\n') {
@@ -347,11 +354,12 @@ async fn main() -> Result<()> {
         }) => {
             setup_logging(cli.debug, false)?;
 
-            let service = claude_commander::api::CommanderService::for_cli(config, frontend())?;
+            let service =
+                claude_commander_core::api::CommanderService::for_cli(config, frontend())?;
 
             println!("Creating session '{}'...", name);
             let session_id = match service
-                .create_session(claude_commander::api::CreateSessionOpts {
+                .create_session(claude_commander_core::api::CreateSessionOpts {
                     project_path: path
                         .unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
                     title: name,
@@ -365,8 +373,8 @@ async fn main() -> Result<()> {
                 .await
             {
                 Ok(id) => id,
-                Err(claude_commander::Error::Session(
-                    claude_commander::error::SessionError::InvalidProgram(msg),
+                Err(claude_commander_core::Error::Session(
+                    claude_commander_core::error::SessionError::InvalidProgram(msg),
                 )) => {
                     clap::Error::raw(clap::error::ErrorKind::ArgumentConflict, format!("{msg}\n"))
                         .exit();
@@ -384,9 +392,9 @@ async fn main() -> Result<()> {
 
             let app_state = AppState::load_or_exit();
 
-            match claude_commander::cli::find_session(&app_state, &session) {
+            match claude_commander_core::cli::find_session(&app_state, &session) {
                 Some(s) => {
-                    let triggers = claude_commander::editor_trigger_bytes(&config.keybindings);
+                    let triggers = claude_commander_core::editor_trigger_bytes(&config.keybindings);
                     execute_attach(&s.tmux_session_name, triggers).await;
                 }
                 None => {
@@ -403,16 +411,16 @@ async fn main() -> Result<()> {
             // semaphore to honour as there is in the long-lived TUI). The
             // enable gate lives in `ensure_session`, so the disabled case
             // surfaces as a typed error rather than an inline check here.
-            let tmux = claude_commander::tmux::TmuxExecutor::new();
+            let tmux = claude_commander_core::tmux::TmuxExecutor::new();
             let cmd = cli_command();
-            match claude_commander::commander::ensure_session(&config, &tmux, &cmd).await {
+            match claude_commander_core::commander::ensure_session(&config, &tmux, &cmd).await {
                 Ok(name) => {
-                    let triggers = claude_commander::editor_trigger_bytes(&config.keybindings);
+                    let triggers = claude_commander_core::editor_trigger_bytes(&config.keybindings);
                     execute_attach(&name, triggers).await;
                 }
                 Err(
-                    e @ claude_commander::Error::Session(
-                        claude_commander::error::SessionError::CommanderDisabled,
+                    e @ claude_commander_core::Error::Session(
+                        claude_commander_core::error::SessionError::CommanderDisabled,
                     ),
                 ) => {
                     eprintln!("{e}");
@@ -425,7 +433,7 @@ async fn main() -> Result<()> {
         Some(Commands::ListenToggle { start, stop }) => {
             setup_logging(cli.debug, false)?;
 
-            use claude_commander::conversation::{ListenAction, ipc};
+            use claude_commander_core::conversation::{ListenAction, ipc};
             let action = if start {
                 ListenAction::Start
             } else if stop {
@@ -447,7 +455,7 @@ async fn main() -> Result<()> {
 
         Some(Commands::PickSession { out, current }) => {
             // No logging — the popup terminal is the picker's UI.
-            claude_commander::picker::run_session_picker(&out, current.as_deref())?;
+            claude_commander_core::picker::run_session_picker(&out, current.as_deref())?;
         }
 
         Some(Commands::Config { init }) => {

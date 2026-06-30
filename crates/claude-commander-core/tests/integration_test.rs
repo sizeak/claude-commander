@@ -8,13 +8,13 @@ use std::sync::Arc;
 
 use tempfile::TempDir;
 
-use claude_commander::SessionStatus;
-use claude_commander::cli_args::cli_command;
-use claude_commander::commander::{self, COMMANDER_TMUX_NAME};
-use claude_commander::config::{AppState, Config, ConfigStore, StateStore};
-use claude_commander::git::GitBackend;
-use claude_commander::session::SessionManager;
-use claude_commander::tmux::TmuxExecutor;
+use claude_commander_core::SessionStatus;
+use claude_commander_core::cli_args::cli_command;
+use claude_commander_core::commander::{self, COMMANDER_TMUX_NAME};
+use claude_commander_core::config::{AppState, Config, ConfigStore, StateStore};
+use claude_commander_core::git::GitBackend;
+use claude_commander_core::session::SessionManager;
+use claude_commander_core::tmux::TmuxExecutor;
 
 /// Helper to create an isolated StateStore that won't pollute user data
 fn create_isolated_store(temp_dir: &TempDir) -> Arc<StateStore> {
@@ -425,7 +425,7 @@ async fn test_state_persistence() {
     {
         let mut state = AppState::new();
         let project =
-            claude_commander::Project::new("test-project", PathBuf::from("/tmp/test"), "main");
+            claude_commander_core::Project::new("test-project", PathBuf::from("/tmp/test"), "main");
         state.add_project(project);
         state.save_to(&state_path).unwrap();
     }
@@ -1151,7 +1151,7 @@ async fn read_base_blob_resolves_lfs_pointer_to_real_bytes() {
     );
 
     // read_base_blob must resolve the pointer to the real PNG bytes.
-    let base = claude_commander::git::read_base_blob(&repo, "HEAD", "img.png")
+    let base = claude_commander_core::git::read_base_blob(&repo, "HEAD", "img.png")
         .await
         .expect("read_base_blob should succeed");
     assert_eq!(
@@ -1163,7 +1163,7 @@ async fn read_base_blob_resolves_lfs_pointer_to_real_bytes() {
 
     // The working-tree file is smudged on checkout, so it's already real bytes;
     // read_worktree_file passes them through unchanged.
-    let new = claude_commander::git::read_worktree_file(&repo, "img.png")
+    let new = claude_commander_core::git::read_worktree_file(&repo, "img.png")
         .await
         .expect("read_worktree_file should succeed");
     assert_eq!(new, png, "new side should be the real image bytes");

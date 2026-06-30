@@ -4,7 +4,6 @@
 //! avoiding the need to drop and recreate the runtime for each attach operation.
 
 use std::io::Write;
-use std::os::unix::io::AsRawFd;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -15,8 +14,108 @@ use tracing::{debug, info, warn};
 
 use crate::error::Result;
 
+/// Classification of a raw stdin burst by the local attach's keystroke
+/// interception state machine. Pure — it performs no I/O and no side effects,
+/// so it can be characterization-tested in isolation. The stdin task maps each
+/// variant to the corresponding action (forward bytes / break with an
+/// [`AttachResult`] / toggle voice / open the switcher).
+///
+/// The classification order is significant and mirrors the historical inline
+/// branching exactly: popup passthrough first, then Ctrl+Q, Ctrl+\, Ctrl+Space,
+/// voice, review, editor, and finally plain forwarding (with optional Ctrl+Z
+/// stripping).
+#[derive(Debug, PartialEq, Eq)]
+enum InputAction {
+    /// Forward these bytes to the PTY verbatim and keep looping. An empty
+    /// vec means "swallow entirely, forward nothing".
+    Forward(Vec<u8>),
+    /// Ctrl+Space: open the in-session switcher popup, then forward the
+    /// remaining bytes (the 0x00 stripped out; may be empty).
+    OpenSwitcher(Vec<u8>),
+    /// A voice trigger fired: toggle the mic, then forward the remaining bytes
+    /// (trigger bytes stripped out; may be empty).
+    ToggleVoice(Vec<u8>),
+    /// Exit the attach loop with this result (Ctrl+Q, Ctrl+\, review, editor).
+    Break(AttachResult),
+}
+
+/// Classify a raw stdin burst. See [`InputAction`] for the contract; this is the
+/// single source of truth for the local attach's keystroke interception and is
+/// covered by characterization tests.
+fn classify_input(
+    data: &[u8],
+    popup_open: bool,
+    voice_triggers: &[Vec<u8>],
+    review_triggers: &[Vec<u8>],
+    editor_triggers: &[Vec<u8>],
+    intercept_ctrl_z: bool,
+) -> InputAction {
+    // While the in-session switcher popup is open, forward every byte to tmux
+    // verbatim. tmux routes keystrokes to the popup (which has its own PTY), and
+    // our hotkeys (Ctrl+Q etc.) shouldn't fire while the user is in the picker.
+    if popup_open {
+        return InputAction::Forward(data.to_vec());
+    }
+
+    // Ctrl+Q (0x11) anywhere → detach.
+    if data.contains(&0x11) {
+        return InputAction::Break(AttachResult::Detached);
+    }
+
+    // Ctrl+\ (0x1C) → toggle to the shell session.
+    if data.contains(&0x1C) {
+        return InputAction::Break(AttachResult::SwitchToShell);
+    }
+
+    // Ctrl+Space (0x00) → open the switcher popup; swallow the 0x00 byte and
+    // forward the rest.
+    if data.contains(&0x00) {
+        let filtered: Vec<u8> = data.iter().copied().filter(|b| *b != 0x00).collect();
+        return InputAction::OpenSwitcher(filtered);
+    }
+
+    // Voice-input toggle (Alt-V by default). Unlike the other triggers this does
+    // NOT exit the attach: the bytes are swallowed and the rest forwarded. The
+    // trigger is recognised whenever it is configured; whether an actual mic
+    // toggle fires depends on a listener being wired in, decided by the caller.
+    if !voice_triggers.is_empty()
+        && voice_triggers
+            .iter()
+            .any(|pat| contains_subsequence(data, pat))
+    {
+        let filtered = remove_subsequences(data, voice_triggers);
+        return InputAction::ToggleVoice(filtered);
+    }
+
+    // Review-toggle trigger (Alt-r by default). Empty `review_triggers` disables
+    // it.
+    if review_triggers
+        .iter()
+        .any(|pat| contains_subsequence(data, pat))
+    {
+        return InputAction::Break(AttachResult::SwitchToReview);
+    }
+
+    // User-configured editor trigger bytes. Empty `editor_triggers` (the
+    // default) disables this feature entirely.
+    if editor_triggers
+        .iter()
+        .any(|pat| contains_subsequence(data, pat))
+    {
+        return InputAction::Break(AttachResult::OpenEditor);
+    }
+
+    // Plain forwarding, with optional Ctrl+Z stripping for Claude sessions.
+    let stripped = if intercept_ctrl_z {
+        strip_ctrl_z(data)
+    } else {
+        None
+    };
+    InputAction::Forward(stripped.unwrap_or_else(|| data.to_vec()))
+}
+
 /// Result of a session attachment attempt
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum AttachResult {
     /// User detached with Ctrl+Q or tmux detach (Ctrl+B D)
     Detached,
@@ -71,18 +170,13 @@ pub async fn attach_to_session(
     // Get terminal size
     let (cols, rows) = terminal::size().unwrap_or((80, 24));
 
-    // Open PTY (async)
-    let (pty, pts) = pty_process::open()?;
-    pty.resize(pty_process::Size::new(rows, cols))?;
-
-    // Get the raw fd for resize operations (before we split the pty)
-    let pty_fd = pty.as_raw_fd();
-
-    // Spawn tmux attach-session
-    let cmd = pty_process::Command::new("tmux").args(["attach-session", "-t", session_name]);
-    let mut child = cmd.spawn(pts)?;
-
-    info!("Spawned tmux attach-session for {}", session_name);
+    // Spawn the transport-agnostic bridge: it opens+sizes the PTY and spawns
+    // `tmux attach-session` in it. The local adapter below layers raw-mode,
+    // SIGWINCH, and hotkey interception on top — none of which live in the
+    // bridge, so the server can reuse the same spawn.
+    let bridge = super::HeadlessAttach::spawn(session_name, cols, rows)?;
+    let resize = bridge.resize_handle();
+    let (pty_reader, pty_writer, _resize_handle, mut child_guard) = bridge.split();
 
     // Enter raw mode
     info!("Enabling raw mode for PTY session");
@@ -102,9 +196,10 @@ pub async fn attach_to_session(
     // Run the async I/O loop
     info!("Starting async I/O loop");
     let result = run_async_loop(
-        pty,
-        pty_fd,
-        &mut child,
+        pty_reader,
+        pty_writer,
+        resize,
+        &mut child_guard,
         editor_triggers,
         review_triggers,
         voice_triggers,
@@ -129,7 +224,7 @@ pub async fn attach_to_session(
 
     // Ensure child is cleaned up
     info!("Waiting for child process");
-    let _ = child.wait().await;
+    let _ = child_guard.wait().await;
     info!("Child process finished");
 
     // Flush again after child exits
@@ -253,30 +348,14 @@ pub fn flush_stdin() {
     let _ = tcflush(std::io::stdin(), FlushArg::TCIFLUSH);
 }
 
-/// Resize PTY using ioctl
-fn resize_pty(fd: i32, rows: u16, cols: u16) {
-    use nix::libc::{TIOCSWINSZ, ioctl, winsize};
-
-    let ws = winsize {
-        ws_row: rows,
-        ws_col: cols,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-
-    // SAFETY: fd is valid (from pty.as_raw_fd()), ws is valid stack pointer
-    unsafe {
-        ioctl(fd, TIOCSWINSZ, &ws);
-    }
-}
-
 // Internal plumbing for the attach I/O loop; the arguments are all distinct
 // channels/handles/policies with no natural grouping worth a struct here.
 #[allow(clippy::too_many_arguments)]
 async fn run_async_loop(
-    pty: pty_process::Pty,
-    pty_fd: i32,
-    child: &mut tokio::process::Child,
+    mut pty_reader: tokio::io::ReadHalf<pty_process::Pty>,
+    mut pty_writer: tokio::io::WriteHalf<pty_process::Pty>,
+    resize: super::ResizeHandle,
+    child: &mut super::ChildGuard,
     editor_triggers: Vec<Vec<u8>>,
     review_triggers: Vec<Vec<u8>>,
     voice_triggers: Vec<Vec<u8>>,
@@ -288,9 +367,6 @@ async fn run_async_loop(
 ) -> AttachResult {
     // Channel for shutdown signal
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<AttachResult>(1);
-
-    // Split PTY into read and write halves for concurrent access
-    let (mut pty_reader, mut pty_writer) = tokio::io::split(pty);
 
     // Task 1: PTY output -> stdout
     let stdout_shutdown = shutdown_tx.clone();
@@ -335,150 +411,105 @@ async fn run_async_loop(
                 Ok(n) => {
                     let data = &buf[..n];
 
-                    // While the in-session switcher popup is open, forward
-                    // every byte to tmux verbatim. tmux routes keystrokes to
-                    // the popup (which has its own PTY), and our hotkeys
-                    // (Ctrl+Q etc.) shouldn't fire while the user is in the
-                    // picker.
-                    if popup_open.load(Ordering::Acquire) {
-                        if pty_writer.write_all(data).await.is_err() {
+                    // Classify the burst with the pure interception state
+                    // machine; perform the matching side effect here. The order
+                    // of checks (popup passthrough → Ctrl+Q → Ctrl+\ →
+                    // Ctrl+Space → voice → review → editor → forward) lives in
+                    // `classify_input` and is characterization-tested.
+                    match classify_input(
+                        data,
+                        popup_open.load(Ordering::Acquire),
+                        &voice_triggers,
+                        &review_triggers,
+                        &editor_triggers,
+                        intercept_ctrl_z,
+                    ) {
+                        InputAction::Break(result) => {
+                            match &result {
+                                AttachResult::Detached => debug!("Ctrl+Q detected, detaching"),
+                                AttachResult::SwitchToShell => {
+                                    debug!("Ctrl+\\ detected, switching to shell")
+                                }
+                                AttachResult::SwitchToReview => {
+                                    debug!("Review trigger detected, switching to review")
+                                }
+                                AttachResult::OpenEditor => {
+                                    debug!("Editor trigger detected, opening editor")
+                                }
+                                _ => {}
+                            }
+                            let _ = stdin_shutdown.send(result).await;
                             break;
                         }
-                        let _ = pty_writer.flush().await;
-                        continue;
-                    }
-
-                    // Check for Ctrl+Q (0x11) anywhere in the input
-                    if data.contains(&0x11) {
-                        debug!("Ctrl+Q detected, detaching");
-                        let _ = stdin_shutdown.send(AttachResult::Detached).await;
-                        break;
-                    }
-
-                    // Check for Ctrl+\ (0x1C) to toggle shell
-                    if data.contains(&0x1C) {
-                        debug!("Ctrl+\\ detected, switching to shell");
-                        let _ = stdin_shutdown.send(AttachResult::SwitchToShell).await;
-                        break;
-                    }
-
-                    // Check for Ctrl+Space (0x00): open the switcher popup over
-                    // the attached pane. We swallow the byte (don't forward
-                    // it) and spawn a task that runs `tmux display-popup`
-                    // followed by `tmux switch-client` on selection. The
-                    // attach loop keeps running so the user stays "in" the
-                    // pane the whole time.
-                    if data.contains(&0x00) {
-                        if popup_open
-                            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                            .is_ok()
-                        {
-                            debug!("Ctrl+Space detected, spawning switcher popup");
-                            let popup_open = popup_open.clone();
-                            let current_session = current_session.clone();
-                            tokio::spawn(async move {
-                                run_switcher_popup(current_session, popup_open).await;
-                            });
+                        InputAction::OpenSwitcher(filtered) => {
+                            // Open the switcher popup over the attached pane and
+                            // spawn the task that runs `tmux display-popup`
+                            // followed by `tmux switch-client` on selection. The
+                            // attach loop keeps running so the user stays "in"
+                            // the pane the whole time.
+                            if popup_open
+                                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                                .is_ok()
+                            {
+                                debug!("Ctrl+Space detected, spawning switcher popup");
+                                let popup_open = popup_open.clone();
+                                let current_session = current_session.clone();
+                                tokio::spawn(async move {
+                                    run_switcher_popup(current_session, popup_open).await;
+                                });
+                            }
+                            if filtered.is_empty() {
+                                continue;
+                            }
+                            if pty_writer.write_all(&filtered).await.is_err() {
+                                break;
+                            }
+                            let _ = pty_writer.flush().await;
                         }
-                        // Skip the 0x00 byte; never forward it.
-                        let filtered: Vec<u8> =
-                            data.iter().copied().filter(|b| *b != 0x00).collect();
-                        if filtered.is_empty() {
-                            continue;
+                        InputAction::ToggleVoice(filtered) => {
+                            // Toggle the mic via the listener channel and stay in
+                            // the pane. A `tmux display-message` gives feedback
+                            // since the TUI status bar isn't visible here.
+                            if let Some(listener) = &voice_listener {
+                                let now_recording = crate::conversation::apply_listen_action(
+                                    listener,
+                                    &recording_flag,
+                                    crate::conversation::ListenAction::Toggle,
+                                );
+                                let msg = if now_recording {
+                                    "🎙 Recording… (Alt-V to send)"
+                                } else {
+                                    "Transcribing…"
+                                };
+                                let target = current_session.lock().await.clone();
+                                tokio::spawn(async move {
+                                    let _ = tokio::process::Command::new("tmux")
+                                        .args(["display-message", "-t", &target, msg])
+                                        .status()
+                                        .await;
+                                });
+                            }
+                            if filtered.is_empty() {
+                                continue;
+                            }
+                            if pty_writer.write_all(&filtered).await.is_err() {
+                                break;
+                            }
+                            let _ = pty_writer.flush().await;
                         }
-                        if pty_writer.write_all(&filtered).await.is_err() {
-                            break;
+                        InputAction::Forward(out) => {
+                            if intercept_ctrl_z && out.len() != data.len() {
+                                debug!("Ctrl+Z stripped from input");
+                            }
+                            if out.is_empty() {
+                                continue;
+                            }
+                            if pty_writer.write_all(&out).await.is_err() {
+                                break;
+                            }
+                            let _ = pty_writer.flush().await;
                         }
-                        let _ = pty_writer.flush().await;
-                        continue;
                     }
-
-                    // Check for the voice-input toggle (Alt-V by default).
-                    // Unlike every other trigger this does NOT exit the attach:
-                    // we swallow the bytes, flip the mic on/off via the listener
-                    // channel, and stay in the pane. A `tmux display-message`
-                    // gives feedback since the TUI status bar isn't visible here.
-                    if !voice_triggers.is_empty()
-                        && voice_triggers
-                            .iter()
-                            .any(|pat| contains_subsequence(data, pat))
-                    {
-                        if let Some(listener) = &voice_listener {
-                            let now_recording = crate::conversation::apply_listen_action(
-                                listener,
-                                &recording_flag,
-                                crate::conversation::ListenAction::Toggle,
-                            );
-                            let msg = if now_recording {
-                                "🎙 Recording… (Alt-V to send)"
-                            } else {
-                                "Transcribing…"
-                            };
-                            let target = current_session.lock().await.clone();
-                            tokio::spawn(async move {
-                                let _ = tokio::process::Command::new("tmux")
-                                    .args(["display-message", "-t", &target, msg])
-                                    .status()
-                                    .await;
-                            });
-                        }
-                        // Never forward the trigger bytes into the pane.
-                        let filtered = remove_subsequences(data, &voice_triggers);
-                        if filtered.is_empty() {
-                            continue;
-                        }
-                        if pty_writer.write_all(&filtered).await.is_err() {
-                            break;
-                        }
-                        let _ = pty_writer.flush().await;
-                        continue;
-                    }
-
-                    // Check for the review-toggle trigger bytes (Alt-r by
-                    // default, i.e. the `ESC r` metaSendsEscape burst). Empty
-                    // `review_triggers` disables it. Alt-r was chosen over
-                    // Ctrl-r so a shell's reverse-history-search (Ctrl-r) is
-                    // never shadowed.
-                    if review_triggers
-                        .iter()
-                        .any(|pat| contains_subsequence(data, pat))
-                    {
-                        debug!("Review trigger detected, switching to review");
-                        let _ = stdin_shutdown.send(AttachResult::SwitchToReview).await;
-                        break;
-                    }
-
-                    // Check for any user-configured editor trigger bytes.
-                    // Empty `editor_triggers` (the default) disables this
-                    // feature entirely — the user's OpenInEditor binding has
-                    // no encoding that makes sense inside a tmux attach.
-                    if editor_triggers
-                        .iter()
-                        .any(|pat| contains_subsequence(data, pat))
-                    {
-                        debug!("Editor trigger detected, opening editor");
-                        let _ = stdin_shutdown.send(AttachResult::OpenEditor).await;
-                        break;
-                    }
-
-                    let stripped = if intercept_ctrl_z {
-                        strip_ctrl_z(data)
-                    } else {
-                        None
-                    };
-                    if stripped.is_some() {
-                        debug!("Ctrl+Z stripped from input");
-                    }
-                    let data: &[u8] = stripped.as_deref().unwrap_or(data);
-                    if data.is_empty() {
-                        continue;
-                    }
-
-                    // Forward raw bytes to PTY
-                    if pty_writer.write_all(data).await.is_err() {
-                        break;
-                    }
-                    let _ = pty_writer.flush().await;
                 }
                 Err(e) => {
                     warn!("stdin read error: {}", e);
@@ -497,7 +528,7 @@ async fn run_async_loop(
             loop {
                 sigwinch.recv().await;
                 if let Ok((cols, rows)) = terminal::size() {
-                    resize_pty(pty_fd, rows, cols);
+                    resize.resize(cols, rows);
                 }
             }
         }
@@ -650,5 +681,146 @@ mod tests {
         assert_eq!(strip_ctrl_z(b"hello"), None);
         // Other control bytes must not be stripped.
         assert_eq!(strip_ctrl_z(b"\x03\x11\x1c"), None);
+    }
+
+    // -- classify_input characterization tests --
+    //
+    // These pin down the keystroke-interception state machine that the local
+    // attach relied on inline before the bridge refactor. The defaults below
+    // mirror the real triggers: Alt-V (`ESC v`) for voice, Alt-r (`ESC r`) for
+    // review, Ctrl-e (`0x05`) for an example editor binding.
+
+    fn voice() -> Vec<Vec<u8>> {
+        vec![vec![0x1b, b'v']]
+    }
+    fn review() -> Vec<Vec<u8>> {
+        vec![vec![0x1b, b'r']]
+    }
+    fn editor() -> Vec<Vec<u8>> {
+        vec![vec![0x05]]
+    }
+
+    /// Classify with the standard trigger set and Ctrl+Z interception on.
+    fn classify(data: &[u8], popup_open: bool) -> InputAction {
+        classify_input(data, popup_open, &voice(), &review(), &editor(), true)
+    }
+
+    #[test]
+    fn classify_plain_text_forwards_verbatim() {
+        assert_eq!(
+            classify(b"hello", false),
+            InputAction::Forward(b"hello".to_vec())
+        );
+    }
+
+    #[test]
+    fn classify_ctrl_q_detaches() {
+        assert_eq!(
+            classify(b"\x11", false),
+            InputAction::Break(AttachResult::Detached)
+        );
+        // Anywhere in the burst, mixed with other bytes.
+        assert_eq!(
+            classify(b"ab\x11cd", false),
+            InputAction::Break(AttachResult::Detached)
+        );
+    }
+
+    #[test]
+    fn classify_ctrl_backslash_switches_to_shell() {
+        assert_eq!(
+            classify(b"\x1c", false),
+            InputAction::Break(AttachResult::SwitchToShell)
+        );
+    }
+
+    #[test]
+    fn classify_ctrl_q_precedes_ctrl_backslash() {
+        // Ctrl+Q is checked first, so a burst containing both detaches.
+        assert_eq!(
+            classify(b"\x11\x1c", false),
+            InputAction::Break(AttachResult::Detached)
+        );
+    }
+
+    #[test]
+    fn classify_ctrl_space_opens_switcher_and_strips_nul() {
+        assert_eq!(classify(b"\x00", false), InputAction::OpenSwitcher(vec![]));
+        // Surrounding bytes survive; only the 0x00 is stripped.
+        assert_eq!(
+            classify(b"a\x00b", false),
+            InputAction::OpenSwitcher(b"ab".to_vec())
+        );
+    }
+
+    #[test]
+    fn classify_voice_trigger_toggles_and_strips() {
+        // Lone Alt-V burst toggles voice and forwards nothing.
+        assert_eq!(classify(b"\x1bv", false), InputAction::ToggleVoice(vec![]));
+        // Trigger embedded in a burst: stripped, the rest forwarded.
+        assert_eq!(
+            classify(b"x\x1bvy", false),
+            InputAction::ToggleVoice(b"xy".to_vec())
+        );
+    }
+
+    #[test]
+    fn classify_review_trigger_breaks() {
+        assert_eq!(
+            classify(b"\x1br", false),
+            InputAction::Break(AttachResult::SwitchToReview)
+        );
+    }
+
+    #[test]
+    fn classify_editor_trigger_breaks() {
+        assert_eq!(
+            classify(b"\x05", false),
+            InputAction::Break(AttachResult::OpenEditor)
+        );
+    }
+
+    #[test]
+    fn classify_popup_open_forwards_everything_verbatim() {
+        // With the popup open, even hotkeys are passed through untouched and
+        // Ctrl+Z is NOT stripped.
+        assert_eq!(
+            classify(b"\x11\x1c\x00\x1a", true),
+            InputAction::Forward(b"\x11\x1c\x00\x1a".to_vec())
+        );
+    }
+
+    #[test]
+    fn classify_strips_ctrl_z_on_plain_forward_when_enabled() {
+        assert_eq!(
+            classify(b"a\x1ab", false),
+            InputAction::Forward(b"ab".to_vec())
+        );
+        // A lone Ctrl+Z becomes an empty forward (swallowed).
+        assert_eq!(classify(b"\x1a", false), InputAction::Forward(vec![]));
+    }
+
+    #[test]
+    fn classify_keeps_ctrl_z_when_interception_disabled() {
+        let action = classify_input(b"a\x1ab", false, &voice(), &review(), &editor(), false);
+        assert_eq!(action, InputAction::Forward(b"a\x1ab".to_vec()));
+    }
+
+    #[test]
+    fn classify_empty_triggers_disable_review_and_editor() {
+        // With no review/editor triggers configured, those bytes are forwarded
+        // as ordinary input rather than intercepted.
+        let action = classify_input(b"\x1br", false, &voice(), &[], &[], true);
+        assert_eq!(action, InputAction::Forward(b"\x1br".to_vec()));
+        let action = classify_input(b"\x05", false, &voice(), &[], &[], true);
+        assert_eq!(action, InputAction::Forward(b"\x05".to_vec()));
+    }
+
+    #[test]
+    fn classify_voice_precedes_review_when_both_match() {
+        // Ordering: voice is checked before review. A burst containing both
+        // triggers toggles voice (and strips it) rather than breaking to review.
+        let action = classify_input(b"\x1bv\x1br", false, &voice(), &review(), &editor(), true);
+        assert_eq!(action, InputAction::ToggleVoice(b"\x1br".to_vec()));
     }
 }
