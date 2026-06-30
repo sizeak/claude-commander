@@ -1,64 +1,131 @@
-# Claude Commander — client
+# Claude Commander client
 
-Cross-platform client for Claude Commander, living in this monorepo alongside the
-core library, TUI, and server. It talks to the `claude-commander-server` HTTP +
-WebSocket API with a Flutter UI (including an `xterm.dart` terminal widget) over a
-Rust `cdylib` core bridged via
-[`flutter_rust_bridge`](https://github.com/fzyzcjy/flutter_rust_bridge).
+Android-first Flutter client for [claude-commander-server](../crates/claude-commander-server).
+Linux desktop is a supported bonus target. iOS/macOS are not yet implemented (need Xcode on a Mac).
 
-The Rust core takes a **path dependency** on the in-repo `claude-commander-protocol`
-crate (`../crates/claude-commander-protocol`) for the shared wire types, so the
-client stays in lockstep with the server by construction.
+The app talks to the server's HTTP REST API (`/api/…`) and its WebSocket terminal attach endpoint (`/ws/attach`).
 
-**Target order:** Android first, then iOS, with desktop (Linux/macOS/Windows) to
-follow — hence `client/`, not `mobile/`.
+## Architecture
 
-## Toolchain: the `client` dev shell
+```
+Flutter UI  ──frb──►  Rust cdylib  ──reqwest/tungstenite──►  claude-commander-server
+                            │
+                    claude-commander-protocol
+                    (shared wire types)
+```
 
-The Flutter + Android NDK toolchain is heavy and only needed by people building the
-client, so it lives in a **separate dev shell within the repo-root `flake.nix`**
-(`devShells.client`) rather than the default shell. The root `nix develop` (core
-TUI/CLI/server) stays lean and never pulls Flutter/Android.
+**Flutter UI** (`client/lib/`) — Material 3, dark theme. Six pages: connection/auth, session list, session detail + lifecycle (kill/restart/delete), create session, live terminal, and review/diff+comments.
 
-Enter it from the repo root:
+**Rust cdylib** (`client/rust/`) — `rust_lib_claude_commander_client`, compiled as both `cdylib` (Android/Linux `.so`) and `staticlib` (iOS, future). Owns all networking and auth:
+
+- `api/simple.rs` — blocking `reqwest` (rustls, no OpenSSL) for every HTTP endpoint.
+- `api/terminal.rs` — WebSocket attach bridge; a shared `tokio` multi-thread runtime drives the socket off the Dart isolate; events stream to Dart via `flutter_rust_bridge` `StreamSink`.
+- `api/review.rs` — review/diff and comments HTTP endpoints.
+- `api/mirrors.rs` — `#[frb(mirror(…))]` declarations so frb generates typed Dart classes from the protocol types (compile-checked: a field mismatch is a Rust compile error, not a runtime surprise).
+
+**`claude-commander-protocol` crate** (`crates/claude-commander-protocol`) — the single source of truth for wire types (`SessionInfo`, `SessionDetail`, `ReviewSnapshot`, `ClientControl`/`ServerControl` WS frames, etc.). Both the server and the client cdylib depend on it; neither maintains private DTO mirrors. The cdylib does **not** depend on `claude-commander-core` (tmux/gix don't cross-compile to Android).
+
+**DTO convention** — `flutter_rust_bridge` renders data-carrying Rust enums as Dart `freezed` classes, which requires the `build_runner` toolchain. The client deliberately avoids that dependency. Where the protocol types use data enums or tuples (`ApplyOutcome`, `BinaryKind`, `line_range`), the cdylib converts them into plain structs + unit enums before returning to frb. See `api/terminal.rs` (`TerminalEvent`) and `api/review.rs` (`ApplyResult`, `ReviewFileDto`, etc.) for the pattern.
+
+**Auth** — `flutter_secure_storage` stores the server URL and bearer token in the platform keystore (Android Keystore / Keychain / libsecret). The token is never written to plain shared preferences.
+
+## Dev environment
+
+Enter the client dev shell with:
 
 ```sh
 nix develop .#client
 ```
 
-Or with direnv (recommended), from this directory (`client/.envrc` points at the
-root flake's `client` shell):
+This is a separate dev shell in the root `flake.nix`; the default shell (`nix develop`) is lean and never pulls the Flutter/Android toolchain.
+
+The shell provides: Flutter/Dart, Rust (stable) + four Android cross-compile targets (`aarch64`, `armv7`, `x86_64`, `i686` Linux Android) via fenix, the Android SDK (platforms 34/35/36, build-tools, NDK r28 `28.0.13004108`, emulator + x86\_64 system images), JDK 17, `cargo-ndk`, `flutter_rust_bridge_codegen`, CMake/Ninja/Clang for the native build, and `pkg-config`/`libclang`.
+
+On Linux the shell also provides the GTK/X11 stack Flutter needs for the desktop target (`gtk3`, `glib`, `pcre2`, `libepoxy`, `libx11`, `libsecret`). macOS uses Cocoa built via Xcode — those libs are not in the shell on Darwin.
+
+**What the shellHook sets up:**
+
+- `ANDROID_HOME`, `ANDROID_SDK_ROOT`, `ANDROID_NDK_ROOT/HOME`, `ANDROID_NDK_VERSION`, `JAVA_HOME` — pointed at the Nix-provided SDK.
+- `flutter config --android-sdk` — points Flutter at the Nix SDK (read-only; no auto-install).
+- `LD_LIBRARY_PATH=/usr/lib:…` — lets Nix-built libepoxy find the system Mesa EGL at runtime (Linux desktop only).
+- `client/rust/target/release → debug` symlink — frb's `ioDirectory` looks for `release/`; the symlink means a debug build is found immediately.
+- Creates the Android AVD `cctest` (android-35, google\_apis, x86\_64, Pixel 6) on first entry if it doesn't already exist.
+
+> The Nix SDK is read-only. Every SDK component the build needs must be declared in `flake.nix` (in `platformVersions`, `buildToolsVersions`, `ndkVersions`, etc.) rather than being auto-installed by Gradle or `flutter doctor`.
+
+## Build and run
+
+### Linux desktop
 
 ```sh
-direnv allow
+cd client
+flutter run -d linux
 ```
 
-The shell provides:
+Requires a display (`DISPLAY` or `WAYLAND_DISPLAY`). The `release → debug` symlink in the shellHook means `flutter run` (debug mode) finds the cdylib without a separate `cargo build` step.
 
-- `flutter` + `dart` (nixpkgs)
-- A Rust stable toolchain (via [fenix](https://github.com/nix-community/fenix)) with the
-  Android cross-compile targets: `aarch64-linux-android`, `armv7-linux-androideabi`,
-  `x86_64-linux-android`, `i686-linux-android`
-- `cargo-ndk`, `flutter_rust_bridge_codegen`
-- Android SDK + NDK r28 (via nixpkgs `androidenv`), JDK 17
-- `cmake`, `ninja`, `pkg-config`, `clang`, and Linux GTK deps for desktop builds
+### Android emulator
 
-It exports `ANDROID_HOME` / `ANDROID_SDK_ROOT` / `ANDROID_NDK_ROOT` / `JAVA_HOME`
-and points Flutter at the Nix-provided Android SDK.
-
-### If `flutter_rust_bridge_codegen` is missing from your nixpkgs pin
-
-Remove it from the `devShells.client` package list in the root `flake.nix` and
-install it in-shell instead:
+Boot the AVD the shellHook created (KVM-accelerated, Linux only):
 
 ```sh
-cargo install flutter_rust_bridge_codegen
-# or as a Dart global tool:
-dart pub global activate flutter_rust_bridge_codegen
+emulator -avd cctest -no-window -gpu swiftshader_indirect \
+         -no-audio -no-boot-anim -accel on &
+adb wait-for-device
+until adb shell getprop sys.boot_completed 2>/dev/null | grep -q 1; do sleep 3; done
 ```
 
-## Status
+Then run:
 
-Toolchain-only. The Flutter app and Rust core have not been created yet. The Rust
-`cdylib` (once created at `client/rust/`) will be excluded from the root Cargo
-workspace so `cargo build` for the TUI/server never pulls in the client deps.
+```sh
+cd client
+flutter run -d emulator-5554
+```
+
+`cargo-ndk` cross-compiles the cdylib for the emulator's x86\_64-linux-android target; Gradle links it into the APK. The `ANDROID_NDK_VERSION` env var (set by the shellHook) pins Gradle to the Nix-provided NDK in both `android/app/build.gradle.kts` and `rust_builder/android/build.gradle`.
+
+## frb codegen loop
+
+`flutter_rust_bridge` generates the Dart FFI glue from the Rust API surface. After editing any file under `client/rust/src/api/`:
+
+```sh
+cd client
+flutter_rust_bridge_codegen generate   # regenerates lib/src/rust/* and rust/src/frb_generated.rs
+cargo build                            # verify the cdylib still compiles
+```
+
+Commit the regenerated files (`client/lib/src/rust/` and `client/rust/src/frb_generated.rs`) together with the Rust changes. The generated files are checked in so contributors without the full toolchain can still run `flutter analyze` and widget tests.
+
+> `flutter_rust_bridge_codegen` is provided by the dev shell. If it is ever absent from the nixpkgs pin, install it with `cargo install flutter_rust_bridge_codegen --version 2.11.1`.
+
+## Feature status
+
+| Phase | Feature | Status |
+|-------|---------|--------|
+| 0 | `claude-commander-protocol` crate, shared wire types | Done |
+| 1 | Connect + auth, session list | Done |
+| 2 | Session detail + lifecycle (kill/restart/delete/create) | Done |
+| 3 | Live terminal (WebSocket, `xterm.dart`) | Done |
+| 4 | Review/diff + inline comments, apply | Done |
+| 5 | iOS / macOS | Not started (needs Mac + Xcode) |
+
+**Measured throughput (Phase 3 spike, debug builds):**
+- Linux desktop: 23.7 MB/s end-to-end (frb stream → UTF-8 decode → xterm.dart VT parse/write → paint)
+- Android emulator (x86\_64, KVM): 21.6 MB/s
+
+Real PTY output sustains well under 2 MB/s, so both targets have comfortable headroom.
+
+Review images load on demand (`GET /sessions/{id}/blob`) and per-file reviewed marks are togglable (`POST /sessions/{id}/files/reviewed`). Non-image binaries still show a placeholder.
+
+## xterm.dart fork
+
+The terminal view uses a fork of xterm.dart pinned to `github.com/sizeak/xterm.dart`, branch `commander` (at the v4.0.0 commit). The upstream package is lightly maintained; the fork carries mobile/touch fixes and lets the project cherry-pick community PRs without waiting on upstream. Carry local patches on the `commander` branch and upstream them where possible.
+
+The pubspec dependency:
+
+```yaml
+xterm:
+  git:
+    url: https://github.com/sizeak/xterm.dart.git
+    ref: commander
+```
