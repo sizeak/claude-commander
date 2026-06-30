@@ -33,11 +33,12 @@ android {
     // to bump the version in their app.
     compileSdkVersion 33
 
-    // Use the NDK version
-    // declared in /android/app/build.gradle file of the Flutter project.
-    // Replace it with a version number if this plugin requires a specfic NDK version.
-    // (e.g. ndkVersion "23.1.7779620")
-    ndkVersion android.ndkVersion
+    // Pin to the Nix-provided NDK (exported as ANDROID_NDK_VERSION by
+    // devShells.client) so cargokit/AGP use the present NDK instead of trying to
+    // install Flutter's bundled default into the read-only Nix store. Library
+    // subprojects don't inherit the app's ndkVersion, so set it here too. Falls
+    // back to the default outside the Nix shell.
+    ndkVersion System.getenv("ANDROID_NDK_VERSION") ?: android.ndkVersion
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8

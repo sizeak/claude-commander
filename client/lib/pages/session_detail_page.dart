@@ -6,6 +6,7 @@ import '../server_config.dart';
 import '../src/rust/api/mirrors.dart';
 import '../src/rust/api/simple.dart' as rust;
 import '../widgets/session_chips.dart';
+import 'terminal_page.dart';
 
 /// Detail view for a single session: live agent state, diff summary, and a
 /// pane snapshot, plus kill/restart/delete lifecycle actions. Polls the detail
@@ -168,6 +169,14 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
     ),
   );
 
+  void _openTerminal(SessionInfo info) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => TerminalPage(config: widget.config, session: info),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     // Prefer the freshest info from polling, falling back to what the list gave us.
@@ -175,6 +184,13 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
     return Scaffold(
       appBar: AppBar(
         title: Text(info.title, overflow: TextOverflow.ellipsis),
+        actions: [
+          IconButton(
+            onPressed: () => _openTerminal(info),
+            icon: const Icon(Icons.terminal),
+            tooltip: 'Open live terminal',
+          ),
+        ],
       ),
       body: RefreshIndicator(
         onRefresh: _poll,
@@ -262,9 +278,10 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
                   style: Theme.of(context).textTheme.titleSmall,
                 ),
                 const Spacer(),
-                Text(
-                  'live attach in a later phase',
-                  style: Theme.of(context).textTheme.labelSmall,
+                TextButton.icon(
+                  onPressed: () => _openTerminal(_detail?.info ?? widget.session),
+                  icon: const Icon(Icons.terminal, size: 16),
+                  label: const Text('Live'),
                 ),
               ],
             ),

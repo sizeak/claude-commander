@@ -39,6 +39,10 @@ dependencies:
   flutter_rust_bridge: 2.11.1
   flutter_secure_storage: ^10.3.1
   uuid: ^4.5.3
+  # Terminal emulator widget for the live PTY view (Phase 3 spike). Upstream
+  # pub.dev release for now; a pinned sizeak/xterm.dart fork is planned post
+  # go/no-go.
+  xterm: ^4.0.0
 
 dev_dependencies:
   flutter_test:

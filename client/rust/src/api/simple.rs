@@ -186,31 +186,6 @@ fn parse_created_id(body: &serde_json::Value) -> Result<String> {
         .context("create_session response was missing the new session id")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn base_trims_trailing_slash() {
-        assert_eq!(base("http://host:1234/"), "http://host:1234");
-        assert_eq!(base("http://host:1234"), "http://host:1234");
-    }
-
-    #[test]
-    fn parse_created_id_extracts_id() {
-        let body = serde_json::json!({ "id": "abc-123" });
-        assert_eq!(parse_created_id(&body).unwrap(), "abc-123");
-    }
-
-    #[test]
-    fn parse_created_id_missing_field_errors() {
-        // A success body without an `id` (or with a non-string id) is a contract
-        // violation, not a silent empty string.
-        assert!(parse_created_id(&serde_json::json!({})).is_err());
-        assert!(parse_created_id(&serde_json::json!({ "id": 42 })).is_err());
-    }
-}
-
 /// `POST {base_url}/api/sessions/{id}/kill` — stop a running session (204).
 pub fn kill_session(base_url: String, token: String, id: String) -> Result<()> {
     let resp = client()
@@ -243,4 +218,29 @@ pub fn delete_session(base_url: String, token: String, id: String) -> Result<()>
         .context("delete_session request failed")?;
     ok_or_status(resp, "delete_session")?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base_trims_trailing_slash() {
+        assert_eq!(base("http://host:1234/"), "http://host:1234");
+        assert_eq!(base("http://host:1234"), "http://host:1234");
+    }
+
+    #[test]
+    fn parse_created_id_extracts_id() {
+        let body = serde_json::json!({ "id": "abc-123" });
+        assert_eq!(parse_created_id(&body).unwrap(), "abc-123");
+    }
+
+    #[test]
+    fn parse_created_id_missing_field_errors() {
+        // A success body without an `id` (or with a non-string id) is a contract
+        // violation, not a silent empty string.
+        assert!(parse_created_id(&serde_json::json!({})).is_err());
+        assert!(parse_created_id(&serde_json::json!({ "id": 42 })).is_err());
+    }
 }

@@ -104,13 +104,21 @@
           fenix.packages.${system}.targets.i686-linux-android.stable.rust-std
         ];
         clientAndroid = clientPkgs.androidenv.composeAndroidPackages {
-          platformVersions = [ "34" "35" ];
-          buildToolsVersions = [ "34.0.0" "35.0.0" ];
+          # Platform 36 is required by recent plugins (path_provider_android →
+          # jni_flutter compileSdk 36); the Nix SDK is read-only so every needed
+          # platform must be listed here rather than auto-installed by Gradle.
+          platformVersions = [ "34" "35" "36" ];
+          buildToolsVersions = [ "34.0.0" "35.0.0" "36.0.0" ];
           ndkVersions = [ "28.0.13004108" ];
           cmakeVersions = [ "3.22.1" ];
           includeNDK = true;
-          includeEmulator = false;
-          includeSystemImages = false;
+          includeEmulator = true;
+          includeSystemImages = true;
+          # x86_64 ABI gives full KVM hardware acceleration on Linux/x86_64
+          # hosts. On darwin the emulator isn't KVM-bootable, but these values
+          # still evaluate — androidenv downloads per-host artefacts lazily.
+          systemImageTypes = [ "google_apis" ];
+          abiVersions = [ "x86_64" ];
           cmdLineToolsVersion = "13.0";
         };
         clientAndroidSdkRoot = "${clientAndroid.androidsdk}/libexec/android-sdk";
@@ -189,10 +197,47 @@
             export ANDROID_SDK_ROOT="${clientAndroidSdkRoot}"
             export ANDROID_NDK_ROOT="${clientAndroidSdkRoot}/ndk/${clientNdkVersion}"
             export ANDROID_NDK_HOME="$ANDROID_NDK_ROOT"
+            # Gradle (android/app/build.gradle.kts) reads this so AGP uses the
+            # Nix-provided NDK rather than installing Flutter's default.
+            export ANDROID_NDK_VERSION="${clientNdkVersion}"
             export JAVA_HOME="${clientPkgs.jdk17}"
             # Point Flutter at the Nix-provided SDK and silence analytics noise.
             flutter config --no-analytics >/dev/null 2>&1 || true
             flutter config --android-sdk "$ANDROID_SDK_ROOT" >/dev/null 2>&1 || true
+
+            # ---- Linux desktop: EGL + Rust cdylib discovery ----
+            # Flutter Linux uses system Mesa EGL (libEGL_mesa.so) for display
+            # rendering.  The Nix-built libepoxy probes for EGL at runtime; it must
+            # find /usr/lib/libEGL_mesa.so (Arch system Mesa), so prepend /usr/lib.
+            # Android/iOS toolchains are unaffected by this path entry.
+            export LD_LIBRARY_PATH="/usr/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            # flutter_rust_bridge's generated ioDirectory is 'rust/target/release/',
+            # but a debug build puts the cdylib in rust/target/debug/.  Symlink
+            # release -> debug so Dart's dlopen via FRB finds the library after the
+            # first `flutter build linux --debug` or `flutter_rust_bridge_codegen
+            # generate`.  The symlink is harmless for actual release builds: cargokit
+            # uses a separate target dir (build/…/plugins/…/cargokit_build).
+            if [ -d "client/rust" ]; then
+              mkdir -p client/rust/target
+              ln -sfT debug client/rust/target/release 2>/dev/null || true
+            fi
+
+            # Create the Android emulator AVD on first use (idempotent: skipped
+            # if it already exists). x86_64 google_apis image for Android 35 →
+            # full KVM acceleration on Linux. Boot it (not done here — would
+            # block shell entry) with:
+            #   emulator -avd cctest -no-window -gpu swiftshader_indirect \
+            #            -no-audio -no-boot-anim -accel on &
+            #   adb wait-for-device
+            #   until adb shell getprop sys.boot_completed 2>/dev/null | grep -q 1; do sleep 3; done
+            if ! avdmanager list avd 2>/dev/null | grep -q 'Name: cctest'; then
+              echo "Creating Android emulator AVD 'cctest' (android-35 google_apis x86_64)..."
+              avdmanager create avd -n cctest \
+                -k "system-images;android-35;google_apis;x86_64" \
+                --device pixel_6 --force >/dev/null 2>&1 \
+                && echo "AVD 'cctest' created." \
+                || echo "AVD creation skipped (non-Linux host or no /dev/kvm — emulator needs Linux/KVM to boot)."
+            fi
             echo "entered claude-commander client dev shell (flutter + rust + android ndk)"
           '';
         };

@@ -8,7 +8,11 @@ plugins {
 android {
     namespace = "com.claudecommander.claude_commander_client"
     compileSdk = flutter.compileSdkVersion
-    ndkVersion = flutter.ndkVersion
+    // Pin to the NDK the Nix dev shell provides (exported as ANDROID_NDK_VERSION
+    // from devShells.client), so Gradle uses the already-present NDK instead of
+    // trying to install Flutter's bundled default into the read-only Nix store.
+    // Falls back to Flutter's default outside the Nix shell.
+    ndkVersion = System.getenv("ANDROID_NDK_VERSION") ?: flutter.ndkVersion
 
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
