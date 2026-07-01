@@ -22,8 +22,11 @@ default_program = "claude"
 # entry whose `command` matches `default_program`. When `programs` is omitted,
 # the picker offers a single entry synthesised from `default_program`.
 #
-# In the New Session dialog, press Tab to move between the name field and the
-# picker, then ↑/↓ to choose.
+# In the New Session dialog, press Tab (or Shift+Tab to go back) to cycle focus
+# between the name field, the project picker, and the program picker, then ↑/↓
+# to choose. The project picker defaults to the currently-selected project and
+# can be typed into to filter the list — so the usual "type a name, hit Enter"
+# flow is unchanged.
 #
 # [[programs]]
 # label = "Claude"

@@ -55,9 +55,17 @@ impl App {
                 prompt,
                 value,
                 existing_branches,
+                project_picker,
                 program_picker,
+                focus,
                 ..
             } => {
+                use super::InputFocus;
+                // Cap the visible project rows so a long list can't grow the
+                // modal off-screen; the list scrolls (via `picker.scroll`) to
+                // keep the highlight in view.
+                let max_rows = super::MAX_PROJECT_ROWS;
+
                 // Resolve the hint up-front so we know whether to reserve a
                 // line for it. Only the new-session flows populate
                 // `existing_branches`; everyone else gets the original
@@ -71,15 +79,28 @@ impl App {
                     .map(|b| format!("↳ existing branch: {} — will check out", b))
                 });
 
+                // How many project rows we'll actually draw (at least one, for
+                // the "no matches" placeholder) — the current scroll window,
+                // matching the render loop below exactly.
+                let project_rows = project_picker.as_ref().map(|p| {
+                    (p.scroll + max_rows)
+                        .min(p.filtered.len())
+                        .saturating_sub(p.scroll)
+                        .max(1)
+                });
+
                 // Base: 2 borders + prompt + blank + input = 5 rows. Add one
-                // row for the existing-branch hint, and — when a program picker
-                // is shown — a blank, a label, and one row per choice.
-                let picker_height = program_picker
+                // row for the existing-branch hint; for each picker add a blank,
+                // a label, and its rows (the project picker also gets a filter
+                // input line).
+                let project_height = project_rows.map(|rows| 3 + rows as u16).unwrap_or(0);
+                let program_height = program_picker
                     .as_ref()
                     .map(|p| 2 + p.choices.len() as u16)
                     .unwrap_or(0);
                 let modal_width = (area.width * 60 / 100).max(40);
-                let modal_height = 5u16 + u16::from(hint.is_some()) + picker_height;
+                let modal_height =
+                    5u16 + u16::from(hint.is_some()) + project_height + program_height;
                 let modal_area = Rect {
                     x: area.x + (area.width.saturating_sub(modal_width)) / 2,
                     y: area.y + (area.height.saturating_sub(modal_height)) / 2,
@@ -97,6 +118,11 @@ impl App {
                 let inner = block.inner(modal_area);
                 frame.render_widget(block, modal_area);
 
+                let selected_style = Style::default()
+                    .fg(self.theme.modal_warning)
+                    .add_modifier(Modifier::BOLD);
+                let dim_style = Style::default().add_modifier(Modifier::DIM);
+
                 let mut lines: Vec<Line> = vec![
                     Line::from(prompt.as_str()),
                     Line::from(""),
@@ -110,33 +136,59 @@ impl App {
                             .add_modifier(Modifier::ITALIC),
                     )));
                 }
-                let name_focused = program_picker.as_ref().is_none_or(|p| !p.focus_program);
-                if let Some(picker) = program_picker {
+
+                // Track the filter-input row so we can place the cursor there
+                // while the project field is focused.
+                let mut project_filter_row: Option<u16> = None;
+                if let Some(picker) = project_picker {
+                    let focused = *focus == InputFocus::Project;
                     lines.push(Line::from(""));
-                    let label_style = if picker.focus_program {
-                        Style::default()
-                            .fg(self.theme.modal_warning)
-                            .add_modifier(Modifier::BOLD)
+                    let label_style = if focused { selected_style } else { dim_style };
+                    lines.push(Line::from(vec![
+                        Span::styled("Project", label_style),
+                        Span::styled(
+                            "  (Tab to switch, ↑/↓ to choose, type to filter)",
+                            dim_style,
+                        ),
+                    ]));
+                    project_filter_row = Some(lines.len() as u16);
+                    lines.push(Line::from(format!("❯ {}", picker.filter)));
+
+                    if picker.filtered.is_empty() {
+                        lines.push(Line::from(Span::styled(
+                            "  (no matching projects)",
+                            dim_style,
+                        )));
                     } else {
-                        Style::default().add_modifier(Modifier::DIM)
-                    };
+                        // Draw the current scroll window (kept in view by
+                        // `ProjectPicker::adjust_scroll`).
+                        let start = picker.scroll;
+                        let end = (start + max_rows).min(picker.filtered.len());
+                        for row in start..end {
+                            let choice = &picker.choices[picker.filtered[row]];
+                            let selected = row == picker.selected;
+                            let marker = if selected { "❯ " } else { "  " };
+                            let style = if selected { selected_style } else { dim_style };
+                            lines.push(Line::from(Span::styled(
+                                format!("{marker}{}", choice.name),
+                                style,
+                            )));
+                        }
+                    }
+                }
+
+                if let Some(picker) = program_picker {
+                    let focused = *focus == InputFocus::Program;
+                    lines.push(Line::from(""));
+                    let label_style = if focused { selected_style } else { dim_style };
                     lines.push(Line::from(vec![
                         Span::styled("Program", label_style),
-                        Span::styled(
-                            "  (Tab to switch, ↑/↓ to choose)",
-                            Style::default().add_modifier(Modifier::DIM),
-                        ),
+                        Span::styled("  (Tab to switch, ↑/↓ to choose)", dim_style),
                     ]));
                     for (i, entry) in picker.choices.iter().enumerate() {
                         let selected = i == picker.selected;
                         let marker = if selected { "❯ " } else { "  " };
-                        let style = if selected {
-                            Style::default()
-                                .fg(self.theme.modal_warning)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().add_modifier(Modifier::DIM)
-                        };
+                        let style = if selected { selected_style } else { dim_style };
                         // Append the command in parens only when it differs from
                         // the label (the synthesised entry has label == command).
                         let text = if entry.label == entry.command {
@@ -148,16 +200,26 @@ impl App {
                     }
                 }
                 frame.render_widget(Paragraph::new(lines), inner);
-                // Input is the third line ("❯ " + value); place the real cursor
-                // there only while the name field has focus.
-                if name_focused {
-                    place_input_cursor(
+                // Place the real cursor in whichever text field has focus: the
+                // name input (third line) or the project filter input.
+                match focus {
+                    InputFocus::Name => place_input_cursor(
                         frame,
                         value,
                         inner.x + 2,
                         inner.y + 2,
                         inner.width.saturating_sub(2),
-                    );
+                    ),
+                    InputFocus::Project => {
+                        if let (Some(row), Some(picker)) = (project_filter_row, project_picker) {
+                            let x = inner.x + 2 + picker.filter.chars().count() as u16;
+                            frame.set_cursor_position((
+                                x.min(inner.x + inner.width.saturating_sub(1)),
+                                inner.y + row,
+                            ));
+                        }
+                    }
+                    InputFocus::Program => {}
                 }
             }
 

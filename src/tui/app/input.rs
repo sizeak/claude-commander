@@ -112,6 +112,25 @@ fn palette_text_char(key: &crossterm::event::KeyEvent) -> Option<char> {
     None
 }
 
+/// Re-list the highlighted project's branches so the New Session dialog's
+/// existing-branch collision hint tracks the project the user is now targeting.
+/// Results are memoized per repo path in the picker, so listing runs at most
+/// once per project rather than on every navigation keystroke.
+fn refresh_branch_hint(
+    existing_branches: &mut Option<Vec<String>>,
+    picker: &mut super::ProjectPicker,
+) {
+    let Some(path) = picker.selected_repo_path() else {
+        *existing_branches = None;
+        return;
+    };
+    *existing_branches = picker
+        .branch_cache
+        .entry(path.clone())
+        .or_insert_with(|| super::actions::existing_branch_names(&path))
+        .clone();
+}
+
 impl App {
     pub(super) async fn handle_input(&mut self, input: InputEvent) {
         match input {
@@ -347,44 +366,101 @@ impl App {
             Modal::Input {
                 value,
                 on_submit,
+                existing_branches,
+                project_picker,
                 program_picker,
+                focus,
                 ..
             } => match key.code {
                 KeyCode::Enter => {
-                    let action = on_submit.clone();
-                    let value = value.value().to_string();
-                    let program = program_picker.as_ref().and_then(|p| p.selected_command());
-                    self.ui_state.modal = Modal::None;
-                    self.handle_input_submit(action, value, program).await;
+                    // A project picker showing no matches has nothing to create
+                    // under — keep the dialog open so the user can fix the filter.
+                    let no_project = project_picker
+                        .as_ref()
+                        .is_some_and(|p| p.selected_id().is_none());
+                    if !no_project {
+                        let mut action = on_submit.clone();
+                        // A chosen project overrides the one baked in at open time.
+                        if let (InputAction::CreateSession { project_id, .. }, Some(picker)) =
+                            (&mut action, project_picker.as_ref())
+                            && let Some(chosen) = picker.selected_id()
+                        {
+                            *project_id = chosen;
+                        }
+                        let value = value.value().to_string();
+                        let program = program_picker.as_ref().and_then(|p| p.selected_command());
+                        self.ui_state.modal = Modal::None;
+                        self.handle_input_submit(action, value, program).await;
+                    }
                 }
                 KeyCode::Esc => {
                     self.ui_state.modal = Modal::None;
                 }
-                // Tab toggles focus between the name field and the program list.
+                // Tab / Shift+Tab cycle focus through the fields that are present.
                 KeyCode::Tab => {
-                    if let Some(picker) = program_picker.as_mut() {
-                        picker.focus_program = !picker.focus_program;
+                    *focus = focus.next(project_picker.is_some(), program_picker.is_some());
+                }
+                KeyCode::BackTab => {
+                    *focus = focus.prev(project_picker.is_some(), program_picker.is_some());
+                }
+                // Up/Down move the selection of whichever picker is focused;
+                // the name field is one line, so they're inert there.
+                KeyCode::Up | KeyCode::Down => {
+                    let down = key.code == KeyCode::Down;
+                    match focus {
+                        super::InputFocus::Project => {
+                            if let Some(picker) = project_picker.as_mut() {
+                                if down {
+                                    picker.select_down();
+                                } else {
+                                    picker.select_up();
+                                }
+                                refresh_branch_hint(existing_branches, picker);
+                            }
+                        }
+                        super::InputFocus::Program => {
+                            if let Some(picker) = program_picker.as_mut() {
+                                if down {
+                                    picker.select_down();
+                                } else {
+                                    picker.select_up();
+                                }
+                            }
+                        }
+                        super::InputFocus::Name => {}
                     }
                 }
-                // Up/Down move the program selection only while the list is
-                // focused; otherwise they're inert (the name field is one line).
-                KeyCode::Up => {
-                    if let Some(picker) = program_picker.as_mut().filter(|p| p.focus_program) {
-                        picker.select_up();
-                    }
-                }
-                KeyCode::Down => {
-                    if let Some(picker) = program_picker.as_mut().filter(|p| p.focus_program) {
-                        picker.select_down();
-                    }
-                }
-                // Other keys edit the name unless the program list has focus.
-                _ => {
-                    let name_focused = program_picker.as_ref().is_none_or(|p| !p.focus_program);
-                    if name_focused {
+                // Other keys edit the focused text field: the name, or the
+                // project filter. The program list isn't filterable.
+                _ => match focus {
+                    super::InputFocus::Name => {
                         super::edit_text_input(value, key);
                     }
-                }
+                    super::InputFocus::Project => {
+                        if let Some(picker) = project_picker.as_mut() {
+                            // Only editing keys change the filter; ignore the
+                            // rest so we don't re-list branches needlessly.
+                            // Allow Shift (capitals) but not Ctrl/Alt combos, so
+                            // e.g. Ctrl+W isn't typed as a literal 'w'.
+                            let changed = match key.code {
+                                KeyCode::Char(c)
+                                    if (key.modifiers - crossterm::event::KeyModifiers::SHIFT)
+                                        .is_empty() =>
+                                {
+                                    picker.filter.push(c);
+                                    true
+                                }
+                                KeyCode::Backspace => picker.filter.pop().is_some(),
+                                _ => false,
+                            };
+                            if changed {
+                                picker.apply_filter();
+                                refresh_branch_hint(existing_branches, picker);
+                            }
+                        }
+                    }
+                    super::InputFocus::Program => {}
+                },
             },
 
             Modal::PathInput {
@@ -1339,7 +1415,9 @@ mod tests {
             value: value.into(),
             on_submit: InputAction::AddProject,
             existing_branches: None,
+            project_picker: None,
             program_picker: None,
+            focus: crate::tui::app::InputFocus::Name,
         }
     }
 
