@@ -98,6 +98,42 @@ Commit the regenerated files (`client/lib/src/rust/` and `client/rust/src/frb_ge
 
 > `flutter_rust_bridge_codegen` is provided by the dev shell. If it is ever absent from the nixpkgs pin, install it with `cargo install flutter_rust_bridge_codegen --version 2.11.1`.
 
+## Testing
+
+Four layers, all runnable from the client dev shell (`nix develop .#client`, or the
+slim `.#clientCi` used by CI):
+
+| Layer | Where | What it covers |
+|-------|-------|----------------|
+| cdylib unit | `client/rust/src/api/*.rs` `#[cfg(test)]` | pure helpers (URL mapping, id/DTO parsing) |
+| cdylib ↔ server integration | `client/rust/tests/server_flows.rs` | every blocking HTTP fn against a real in-process server (connect, create/list/detail/kill, restart/delete, join-by-prefix, review round-trip) |
+| Dart widget | `client/test/*_test.dart` | each page with a hand-rolled `FakeCommanderApi` (no live bridge) |
+| Full-stack e2e | `client/integration_test/app_flows_test.dart` | the real app on `-d linux` against a hermetic server |
+
+```sh
+# Dart widget tests (fast; no Rust bridge, no server):
+cd client && flutter test
+
+# cdylib unit + integration tests (needs tmux; boots a hermetic server in-process):
+cd client/rust && cargo test
+
+# Full-stack e2e (boots a hermetic, XDG-isolated server, then drives the app on
+# the Linux desktop target). Needs a display; use xvfb-run when headless:
+client/tool/e2e.sh              # local, with a display
+xvfb-run -a client/tool/e2e.sh  # headless / CI
+```
+
+`client/tool/e2e.sh` redirects `XDG_CONFIG_HOME`/`XDG_DATA_HOME` **and** `TMUX_TMPDIR`
+into a `mktemp` dir, so the server it launches touches neither your real
+config/state/worktrees nor your default tmux server — the whole tree (including the
+isolated tmux server) is torn down on exit, even if a test fails mid-run. The
+integration harness (`crates/claude-commander-test-support`)
+is shared by the server's own integration tests and the cdylib's. CI runs all four
+layers via the `client` job in `.github/workflows/ci.yml`.
+
+The integration/e2e server tests self-skip when tmux is absent (a runtime check, not
+`#[ignore]`), so they run in CI where tmux is present.
+
 ## Feature status
 
 | Phase | Feature | Status |

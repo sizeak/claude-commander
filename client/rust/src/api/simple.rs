@@ -11,8 +11,8 @@ use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use claude_commander_protocol::api::{CreateSessionOpts, SessionDetail, SessionInfo};
-use reqwest::StatusCode;
 use reqwest::blocking::{Client, Response};
+use reqwest::StatusCode;
 
 #[flutter_rust_bridge::frb(init)]
 pub fn init_app() {

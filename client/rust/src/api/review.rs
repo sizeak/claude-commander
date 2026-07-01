@@ -25,8 +25,8 @@ use claude_commander_protocol::comment::{ApplyOutcome, Comment, CommentSide, Com
 use claude_commander_protocol::diff::{
     BinaryKind, DiffLine, FileDiff, FileStatus, Hunk, LineOrigin, ParsedDiff,
 };
-use reqwest::StatusCode;
 use reqwest::blocking::{Client, Response};
+use reqwest::StatusCode;
 
 /// Trim a trailing slash so `{base}/path` joins cleanly.
 fn base(base_url: &str) -> &str {
@@ -578,10 +578,7 @@ fn cache_files(session_id: &str, files: &[FileDiff]) {
     cache.retain(|(sid, _), _| sid != session_id);
     for f in files {
         if let Ok(json) = serde_json::to_string(f) {
-            cache.insert(
-                (session_id.to_string(), f.display_path().to_string()),
-                json,
-            );
+            cache.insert((session_id.to_string(), f.display_path().to_string()), json);
         }
     }
 }

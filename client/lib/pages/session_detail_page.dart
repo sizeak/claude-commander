@@ -3,8 +3,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../server_config.dart';
+import '../services/commander_api.dart';
 import '../src/rust/api/mirrors.dart';
-import '../src/rust/api/simple.dart' as rust;
 import '../widgets/session_chips.dart';
 import 'review_page.dart';
 import 'terminal_page.dart';
@@ -14,6 +14,7 @@ import 'terminal_page.dart';
 /// endpoint on a timer so the agent state and pane preview stay current. The
 /// live attached terminal is Phase 3 — this view shows a static snapshot.
 class SessionDetailPage extends StatefulWidget {
+  final CommanderApi api;
   final ServerConfig config;
 
   /// The session to show. The list already has this, so the page renders
@@ -22,6 +23,7 @@ class SessionDetailPage extends StatefulWidget {
 
   const SessionDetailPage({
     super.key,
+    required this.api,
     required this.config,
     required this.session,
   });
@@ -59,7 +61,7 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
   Future<void> _poll() async {
     if (_busy) return;
     try {
-      final detail = await rust.getSessionDetail(
+      final detail = await widget.api.getSessionDetail(
         baseUrl: widget.config.baseUrl,
         token: widget.config.token,
         query: _id,
@@ -135,7 +137,7 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
     confirmLabel: 'Kill',
     confirmColor: Colors.orange,
     successMessage: 'Session killed',
-    action: () => rust.killSession(
+    action: () => widget.api.killSession(
       baseUrl: widget.config.baseUrl,
       token: widget.config.token,
       id: _id,
@@ -148,7 +150,7 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
     confirmLabel: 'Restart',
     confirmColor: Colors.teal,
     successMessage: 'Session restarted',
-    action: () => rust.restartSession(
+    action: () => widget.api.restartSession(
       baseUrl: widget.config.baseUrl,
       token: widget.config.token,
       id: _id,
@@ -157,13 +159,14 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
 
   void _delete() => _runAction(
     title: 'Delete session?',
-    message: 'Removes the session, its branch, and its worktree. '
+    message:
+        'Removes the session, its branch, and its worktree. '
         'This cannot be undone.',
     confirmLabel: 'Delete',
     confirmColor: Colors.red,
     successMessage: 'Session deleted',
     popOnSuccess: true,
-    action: () => rust.deleteSession(
+    action: () => widget.api.deleteSession(
       baseUrl: widget.config.baseUrl,
       token: widget.config.token,
       id: _id,
@@ -173,7 +176,8 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
   void _openTerminal(SessionInfo info) {
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => TerminalPage(config: widget.config, session: info),
+        builder: (_) =>
+            TerminalPage(api: widget.api, config: widget.config, session: info),
       ),
     );
   }
@@ -181,7 +185,8 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
   void _openReview(SessionInfo info) {
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => ReviewPage(config: widget.config, session: info),
+        builder: (_) =>
+            ReviewPage(api: widget.api, config: widget.config, session: info),
       ),
     );
   }
@@ -234,10 +239,7 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
           style: Theme.of(context).textTheme.bodyMedium,
         ),
         const SizedBox(height: 4),
-        Text(
-          info.program,
-          style: Theme.of(context).textTheme.labelSmall,
-        ),
+        Text(info.program, style: Theme.of(context).textTheme.labelSmall),
         const SizedBox(height: 10),
         Wrap(
           spacing: 6,
@@ -266,9 +268,7 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
             Text('Changes', style: Theme.of(context).textTheme.titleSmall),
             const SizedBox(height: 6),
             Text(
-              diffStat == null || diffStat.isEmpty
-                  ? 'No changes'
-                  : diffStat,
+              diffStat == null || diffStat.isEmpty ? 'No changes' : diffStat,
               style: Theme.of(context).textTheme.bodySmall,
             ),
           ],
@@ -293,7 +293,8 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
                 ),
                 const Spacer(),
                 TextButton.icon(
-                  onPressed: () => _openTerminal(_detail?.info ?? widget.session),
+                  onPressed: () =>
+                      _openTerminal(_detail?.info ?? widget.session),
                   icon: const Icon(Icons.terminal, size: 16),
                   label: const Text('Live'),
                 ),

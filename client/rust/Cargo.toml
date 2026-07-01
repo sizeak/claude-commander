@@ -3,8 +3,12 @@ name = "rust_lib_claude_commander_client"
 version = "0.1.0"
 edition = "2021"
 
+# `rlib` is added so the crate's own integration tests (client/rust/tests) can
+# link against it as a normal Rust library; `cdylib`/`staticlib` are what
+# cargokit/flutter_rust_bridge link into the Flutter app. The extra rlib is inert
+# for the mobile build.
 [lib]
-crate-type = ["cdylib", "staticlib"]
+crate-type = ["cdylib", "staticlib", "rlib"]
 
 [dependencies]
 # `chrono`/`uuid` features enable frb's built-in codecs for the DateTime/Uuid
@@ -36,6 +40,16 @@ tokio-tungstenite = { version = "0.24", default-features = false, features = [
     "rustls-tls-webpki-roots",
 ] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+
+[dev-dependencies]
+# Host-only: the shared hermetic-server + git/tmux harness, plus core for session
+# setup/worktree lookup/cleanup. The cdylib is `exclude`d from the root workspace
+# (see root Cargo.toml), so these never enter the Android/iOS cross-build — they
+# compile only for `cargo test` on the host.
+claude-commander-test-support = { path = "../../crates/claude-commander-test-support" }
+claude-commander-core = { path = "../../crates/claude-commander-core" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tempfile = "3.10"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }

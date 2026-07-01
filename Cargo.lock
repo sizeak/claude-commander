@@ -796,6 +796,7 @@ dependencies = [
  "clap",
  "claude-commander-core",
  "claude-commander-protocol",
+ "claude-commander-test-support",
  "figment",
  "futures",
  "http-body-util",
@@ -811,6 +812,17 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "claude-commander-test-support"
+version = "0.21.2"
+dependencies = [
+ "axum",
+ "claude-commander-core",
+ "claude-commander-server",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

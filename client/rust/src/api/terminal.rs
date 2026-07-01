@@ -17,9 +17,9 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
+use crate::frb_generated::StreamSink;
 use anyhow::Context;
 use claude_commander_protocol::ws::{ClientControl, ServerControl};
-use crate::frb_generated::StreamSink;
 use futures_util::{SinkExt, StreamExt};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
@@ -58,16 +58,32 @@ pub struct TerminalEvent {
 
 impl TerminalEvent {
     fn ready(session: String) -> Self {
-        Self { kind: TerminalEventKind::Ready, bytes: Vec::new(), text: session }
+        Self {
+            kind: TerminalEventKind::Ready,
+            bytes: Vec::new(),
+            text: session,
+        }
     }
     fn output(bytes: Vec<u8>) -> Self {
-        Self { kind: TerminalEventKind::Output, bytes, text: String::new() }
+        Self {
+            kind: TerminalEventKind::Output,
+            bytes,
+            text: String::new(),
+        }
     }
     fn detached(reason: String) -> Self {
-        Self { kind: TerminalEventKind::Detached, bytes: Vec::new(), text: reason }
+        Self {
+            kind: TerminalEventKind::Detached,
+            bytes: Vec::new(),
+            text: reason,
+        }
     }
     fn error(message: String) -> Self {
-        Self { kind: TerminalEventKind::Error, bytes: Vec::new(), text: message }
+        Self {
+            kind: TerminalEventKind::Error,
+            bytes: Vec::new(),
+            text: message,
+        }
     }
 }
 
@@ -204,7 +220,9 @@ async fn attach_inner(
     sink: &StreamSink<TerminalEvent>,
     mut rx: mpsc::UnboundedReceiver<Outbound>,
 ) -> anyhow::Result<()> {
-    let (ws, _resp) = connect_async(url).await.context("websocket connect failed")?;
+    let (ws, _resp) = connect_async(url)
+        .await
+        .context("websocket connect failed")?;
     let (mut write, mut read) = ws.split();
 
     // Handshake: auth, then attach.

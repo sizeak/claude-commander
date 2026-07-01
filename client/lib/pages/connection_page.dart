@@ -1,14 +1,21 @@
 import 'package:flutter/material.dart';
 
 import '../server_config.dart';
-import '../src/rust/api/simple.dart' as rust;
+import '../services/commander_api.dart';
 import 'session_list_page.dart';
 
 /// First-run / settings screen: enter the server URL + bearer token, test the
 /// connection, and save. On save we navigate to the session list.
 class ConnectionPage extends StatefulWidget {
+  final CommanderApi api;
+  final ServerConfigStore store;
   final ServerConfig? existing;
-  const ConnectionPage({super.key, this.existing});
+  const ConnectionPage({
+    super.key,
+    required this.api,
+    required this.store,
+    this.existing,
+  });
 
   @override
   State<ConnectionPage> createState() => _ConnectionPageState();
@@ -26,7 +33,9 @@ class _ConnectionPageState extends State<ConnectionPage> {
     _urlController = TextEditingController(
       text: widget.existing?.baseUrl ?? 'http://127.0.0.1:7878',
     );
-    _tokenController = TextEditingController(text: widget.existing?.token ?? '');
+    _tokenController = TextEditingController(
+      text: widget.existing?.token ?? '',
+    );
   }
 
   @override
@@ -56,17 +65,21 @@ class _ConnectionPageState extends State<ConnectionPage> {
     setState(() => _busy = true);
     try {
       final cfg = _config;
-      final alive = await rust.health(baseUrl: cfg.baseUrl);
+      final alive = await widget.api.health(baseUrl: cfg.baseUrl);
       if (!alive) {
         _snack('Server reachable but /health did not return OK', error: true);
         return;
       }
       // Authenticated probe — surfaces a 401 as an error.
-      final tmuxOk = await rust.healthTmux(
+      final tmuxOk = await widget.api.healthTmux(
         baseUrl: cfg.baseUrl,
         token: cfg.token,
       );
-      _snack(tmuxOk ? 'Connected — auth OK, tmux healthy' : 'Auth OK, but tmux is unavailable');
+      _snack(
+        tmuxOk
+            ? 'Connected — auth OK, tmux healthy'
+            : 'Auth OK, but tmux is unavailable',
+      );
     } catch (e) {
       _snack('Connection failed: $e', error: true);
     } finally {
@@ -79,10 +92,16 @@ class _ConnectionPageState extends State<ConnectionPage> {
     setState(() => _busy = true);
     try {
       final cfg = _config;
-      await ServerConfigStore.save(cfg);
+      await widget.store.save(cfg);
       if (!mounted) return;
       Navigator.of(context).pushReplacement(
-        MaterialPageRoute(builder: (_) => SessionListPage(config: cfg)),
+        MaterialPageRoute(
+          builder: (_) => SessionListPage(
+            api: widget.api,
+            store: widget.store,
+            config: cfg,
+          ),
+        ),
       );
     } finally {
       if (mounted) setState(() => _busy = false);
@@ -105,7 +124,8 @@ class _ConnectionPageState extends State<ConnectionPage> {
                 decoration: const InputDecoration(
                   labelText: 'Server URL',
                   hintText: 'http://100.x.y.z:7878',
-                  helperText: 'Reach a 127.0.0.1 server via SSH tunnel or Tailscale',
+                  helperText:
+                      'Reach a 127.0.0.1 server via SSH tunnel or Tailscale',
                 ),
                 keyboardType: TextInputType.url,
                 autocorrect: false,

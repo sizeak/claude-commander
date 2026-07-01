@@ -245,6 +245,61 @@
             echo "entered claude-commander client dev shell (flutter + rust + android ndk)"
           '';
         };
+
+        # Slim CI shell for the client's automated tests: Flutter + host Rust +
+        # the Linux-desktop stack + tmux/git/xvfb, but WITHOUT the Android
+        # SDK/NDK/emulator. The client e2e runs on the Linux **desktop** target
+        # (`flutter test integration_test -d linux`), so Android isn't needed and
+        # would only bloat the CI image. Local contributors keep using `.#client`.
+        devShells.clientCi = clientPkgs.mkShell {
+          name = "claude-commander-client-ci";
+          buildInputs = [
+            # Host-only Rust (no Android targets): cargokit cross-builds the
+            # cdylib for the linux desktop target during the e2e bundle build.
+            fenix.packages.${system}.stable.toolchain
+          ] ++ (with clientPkgs; [
+            flutter
+            dart
+            cmake
+            ninja
+            pkg-config
+            clang
+            llvmPackages.libclang
+            # client/tool/e2e.sh runtime: the server needs tmux + git; the health
+            # poll uses curl; xvfb-run gives the linux bundle a headless display.
+            tmux
+            git
+            curl
+            xvfb-run
+            # Linux desktop GTK stack + software GL (Mesa llvmpipe) for headless
+            # rendering under xvfb.
+            gtk3
+            glib
+            pcre2
+            libepoxy
+            libx11
+            libsecret
+            mesa
+            libGL
+          ]);
+
+          LIBCLANG_PATH = "${clientPkgs.llvmPackages.libclang.lib}/lib";
+          # Force software GL so the Flutter linux bundle renders under xvfb with
+          # no GPU present (Mesa llvmpipe).
+          LIBGL_ALWAYS_SOFTWARE = "1";
+
+          shellHook = ''
+            export LD_LIBRARY_PATH="${clientPkgs.lib.makeLibraryPath [ clientPkgs.libGL clientPkgs.mesa clientPkgs.libepoxy ]}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+            flutter config --no-analytics >/dev/null 2>&1 || true
+            flutter config --enable-linux-desktop >/dev/null 2>&1 || true
+            # frb's generated ioDirectory is rust/target/release/, but a debug
+            # cdylib lands in rust/target/debug/ — symlink so dlopen finds it.
+            if [ -d "client/rust" ]; then
+              mkdir -p client/rust/target
+              ln -sfT debug client/rust/target/release 2>/dev/null || true
+            fi
+          '';
+        };
       }
     );
 }

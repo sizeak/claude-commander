@@ -6,17 +6,23 @@ import 'package:uuid/uuid.dart';
 import 'package:xterm/xterm.dart';
 
 import '../server_config.dart';
+import '../services/commander_api.dart';
 import '../src/rust/api/mirrors.dart';
-import '../src/rust/api/terminal.dart' as rust;
 
 /// Live attached terminal (Phase 3 spike). Streams raw PTY bytes from the
 /// cdylib WS bridge into an `xterm.dart` [Terminal], forwards keystrokes/resize
 /// back, offers an on-screen modifier bar for touch, and shows a live byte
 /// throughput meter so we can judge whether Flutter + xterm.dart keep up.
 class TerminalPage extends StatefulWidget {
+  final CommanderApi api;
   final ServerConfig config;
   final SessionInfo session;
-  const TerminalPage({super.key, required this.config, required this.session});
+  const TerminalPage({
+    super.key,
+    required this.api,
+    required this.config,
+    required this.session,
+  });
 
   @override
   State<TerminalPage> createState() => _TerminalPageState();
@@ -26,7 +32,7 @@ class _TerminalPageState extends State<TerminalPage> {
   // A unique id ties this attach's control calls back to its socket in Rust.
   final String _handle = const Uuid().v4();
   late final Terminal _terminal;
-  StreamSubscription<rust.TerminalEvent>? _sub;
+  StreamSubscription<TerminalEvent>? _sub;
 
   // Stateful UTF-8 decoder: PTY chunks can split a multibyte codepoint across
   // WS frames, so a chunked decoder buffers the partial tail until it completes.
@@ -48,20 +54,24 @@ class _TerminalPageState extends State<TerminalPage> {
   void initState() {
     super.initState();
     _terminal = Terminal(maxLines: 10000);
+    // Forward each decoded chunk to the terminal as it arrives. A plain
+    // `Sink<String>` emits per-`add` (unlike `StringConversionSink.withCallback`,
+    // which only fires its callback on `close`), while the chunked UTF-8 decoder
+    // still buffers a partial multibyte codepoint split across WS frames until
+    // it completes.
     _decoder = utf8.decoder.startChunkedConversion(
-      StringConversionSink.withCallback((str) => _terminal.write(str)),
+      _ChunkSink((str) => _terminal.write(str)),
     );
 
     _terminal.onOutput = (data) {
       unawaited(
-        rust.terminalSendInput(
-          handle: _handle,
-          bytes: utf8.encode(data),
-        ),
+        widget.api.terminalSendInput(handle: _handle, bytes: utf8.encode(data)),
       );
     };
     _terminal.onResize = (cols, rows, pixelWidth, pixelHeight) {
-      unawaited(rust.terminalResize(handle: _handle, cols: cols, rows: rows));
+      unawaited(
+        widget.api.terminalResize(handle: _handle, cols: cols, rows: rows),
+      );
     };
 
     _connect();
@@ -84,39 +94,38 @@ class _TerminalPageState extends State<TerminalPage> {
       _status = 'connecting…';
       _ended = false;
     });
-    _sub =
-        rust
-            .attachTerminal(
-              handle: _handle,
-              baseUrl: widget.config.baseUrl,
-              token: widget.config.token,
-              sessionId: widget.session.id,
-            )
-            .listen(
-              _onEvent,
-              onError: (Object e) => setState(() {
-                _status = 'stream error: $e';
-                _ended = true;
-              }),
-            );
+    _sub = widget.api
+        .attachTerminal(
+          handle: _handle,
+          baseUrl: widget.config.baseUrl,
+          token: widget.config.token,
+          sessionId: widget.session.id,
+        )
+        .listen(
+          _onEvent,
+          onError: (Object e) => setState(() {
+            _status = 'stream error: $e';
+            _ended = true;
+          }),
+        );
   }
 
   void _reconnect() => _connect();
 
-  void _onEvent(rust.TerminalEvent e) {
+  void _onEvent(TerminalEvent e) {
     switch (e.kind) {
-      case rust.TerminalEventKind.output:
+      case TerminalEventKind.output:
         _totalBytes += e.bytes.length;
         _windowBytes += e.bytes.length;
         _decoder.add(e.bytes);
-      case rust.TerminalEventKind.ready:
+      case TerminalEventKind.ready:
         setState(() => _status = 'attached: ${e.text}');
-      case rust.TerminalEventKind.detached:
+      case TerminalEventKind.detached:
         setState(() {
           _status = 'detached: ${e.text}';
           _ended = true;
         });
-      case rust.TerminalEventKind.error:
+      case TerminalEventKind.error:
         setState(() {
           _status = 'error: ${e.text}';
           _ended = true;
@@ -125,12 +134,12 @@ class _TerminalPageState extends State<TerminalPage> {
   }
 
   void _send(List<int> bytes) =>
-      unawaited(rust.terminalSendInput(handle: _handle, bytes: bytes));
+      unawaited(widget.api.terminalSendInput(handle: _handle, bytes: bytes));
 
   @override
   void dispose() {
     _meter?.cancel();
-    unawaited(rust.terminalDetach(handle: _handle));
+    unawaited(widget.api.terminalDetach(handle: _handle));
     _sub?.cancel();
     _decoder.close();
     super.dispose();
@@ -195,6 +204,20 @@ class _TerminalPageState extends State<TerminalPage> {
       ),
     );
   }
+}
+
+/// A minimal `Sink<String>` that forwards each decoded chunk to [onData] the
+/// moment it arrives — so terminal output renders live rather than only when
+/// the decoder is closed.
+class _ChunkSink implements Sink<String> {
+  final void Function(String chunk) onData;
+  const _ChunkSink(this.onData);
+
+  @override
+  void add(String data) => onData(data);
+
+  @override
+  void close() {}
 }
 
 /// On-screen keys for touch — the modifiers and arrows a soft keyboard can't

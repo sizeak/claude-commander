@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:flutter/material.dart';
 
 import '../server_config.dart';
+import '../services/commander_api.dart';
 import '../src/rust/api/mirrors.dart';
 import '../src/rust/api/review.dart' as rust;
 
@@ -12,10 +13,16 @@ import '../src/rust/api/review.dart' as rust;
 /// comments back to the agent. Mirrors the TUI review view, scoped to a first
 /// cut: binary files render as a placeholder, reviewed marks are read-only.
 class ReviewPage extends StatefulWidget {
+  final CommanderApi api;
   final ServerConfig config;
   final SessionInfo session;
 
-  const ReviewPage({super.key, required this.config, required this.session});
+  const ReviewPage({
+    super.key,
+    required this.api,
+    required this.config,
+    required this.session,
+  });
 
   @override
   State<ReviewPage> createState() => _ReviewPageState();
@@ -46,7 +53,7 @@ class _ReviewPageState extends State<ReviewPage> {
   Future<void> _open() async {
     setState(() => _loading = true);
     try {
-      final snap = await rust.openReview(
+      final snap = await widget.api.openReview(
         baseUrl: widget.config.baseUrl,
         token: widget.config.token,
         sessionId: _id,
@@ -80,7 +87,7 @@ class _ReviewPageState extends State<ReviewPage> {
     if (prev == null) return _open();
     setState(() => _busy = true);
     try {
-      final snap = await rust.refreshReview(
+      final snap = await widget.api.refreshReview(
         baseUrl: widget.config.baseUrl,
         token: widget.config.token,
         sessionId: _id,
@@ -109,7 +116,7 @@ class _ReviewPageState extends State<ReviewPage> {
   Future<void> _deleteComment(String commentId) async {
     setState(() => _busy = true);
     try {
-      await rust.deleteComment(
+      await widget.api.deleteComment(
         baseUrl: widget.config.baseUrl,
         token: widget.config.token,
         sessionId: _id,
@@ -126,7 +133,7 @@ class _ReviewPageState extends State<ReviewPage> {
   Future<void> _apply() async {
     setState(() => _busy = true);
     try {
-      final result = await rust.applyComments(
+      final result = await widget.api.applyComments(
         baseUrl: widget.config.baseUrl,
         token: widget.config.token,
         sessionId: _id,
@@ -146,7 +153,7 @@ class _ReviewPageState extends State<ReviewPage> {
     if (_toggling.contains(displayPath)) return;
     setState(() => _toggling.add(displayPath));
     try {
-      final nowReviewed = await rust.toggleFileReviewed(
+      final nowReviewed = await widget.api.toggleFileReviewed(
         baseUrl: widget.config.baseUrl,
         token: widget.config.token,
         sessionId: _id,
@@ -167,7 +174,7 @@ class _ReviewPageState extends State<ReviewPage> {
     }
   }
 
-  Future<Uint8List> _loadBlob(String side, String path) => rust.fetchBlob(
+  Future<Uint8List> _loadBlob(String side, String path) => widget.api.fetchBlob(
     baseUrl: widget.config.baseUrl,
     token: widget.config.token,
     sessionId: _id,
@@ -199,16 +206,13 @@ class _ReviewPageState extends State<ReviewPage> {
   }) async {
     final text = await showDialog<String>(
       context: context,
-      builder: (ctx) => _CommentDialog(
-        file: file,
-        lineStart: lineStart,
-        lineEnd: lineEnd,
-      ),
+      builder: (ctx) =>
+          _CommentDialog(file: file, lineStart: lineStart, lineEnd: lineEnd),
     );
     if (text == null || text.trim().isEmpty) return;
     setState(() => _busy = true);
     try {
-      await rust.createComment(
+      await widget.api.createComment(
         baseUrl: widget.config.baseUrl,
         token: widget.config.token,
         sessionId: _id,
@@ -230,7 +234,8 @@ class _ReviewPageState extends State<ReviewPage> {
   @override
   Widget build(BuildContext context) {
     final snap = _snapshot;
-    final stagedCount = snap?.comments
+    final stagedCount =
+        snap?.comments
             .where((c) => c.status == rust.ReviewCommentStatus.staged)
             .length ??
         0;
@@ -392,7 +397,8 @@ class _FileCard extends StatelessWidget {
     required int lineStart,
     required int lineEnd,
     required String snippet,
-  })? onAddComment;
+  })?
+  onAddComment;
 
   const _FileCard({
     required this.file,
@@ -407,7 +413,8 @@ class _FileCard extends StatelessWidget {
   String get _imageSide =>
       file.status == rust.ReviewFileStatus.deleted ? 'old' : 'new';
 
-  bool get _isImage => file.isBinary && (file.binaryMime?.startsWith('image/') ?? false);
+  bool get _isImage =>
+      file.isBinary && (file.binaryMime?.startsWith('image/') ?? false);
 
   @override
   Widget build(BuildContext context) {
@@ -416,8 +423,9 @@ class _FileCard extends StatelessWidget {
       child: ExpansionTile(
         leading: Checkbox(
           value: reviewed,
-          onChanged:
-              onToggleReviewed == null ? null : (_) => onToggleReviewed!(),
+          onChanged: onToggleReviewed == null
+              ? null
+              : (_) => onToggleReviewed!(),
         ),
         title: Text(
           file.displayPath,
@@ -493,7 +501,8 @@ class _HunkView extends StatefulWidget {
     required int lineStart,
     required int lineEnd,
     required String snippet,
-  })? onAddComment;
+  })?
+  onAddComment;
 
   const _HunkView({
     required this.file,

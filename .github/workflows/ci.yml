@@ -114,3 +114,46 @@ jobs:
 
       - name: Run Tests
         run: nix develop -c cargo test --workspace
+
+  client:
+    name: Client Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The Flutter + host-Rust + Linux-desktop toolchain comes from the slim
+      # `clientCi` dev shell in flake.nix (no Android SDK/NDK). tmux + git are
+      # present for the hermetic server the e2e boots.
+      - name: Install Nix
+        uses: nixbuild/nix-quick-install-action@v30
+        with:
+          nix_conf: |
+            keep-env-derivations = true
+            keep-outputs = true
+
+      - name: Restore Nix Store Cache
+        uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-client-${{ runner.os }}-${{ hashFiles('**/flake.lock', '**/Cargo.lock', 'client/pubspec.lock') }}
+          restore-prefixes-first-match: nix-client-${{ runner.os }}-
+
+      - name: Restore Cargo Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client/rust
+
+      - name: Fetch Flutter Packages
+        run: nix develop .#clientCi -c bash -c 'cd client && flutter pub get'
+
+      - name: Analyze Dart
+        run: nix develop .#clientCi -c bash -c 'cd client && flutter analyze lib test integration_test'
+
+      - name: Run Dart Unit Tests
+        run: nix develop .#clientCi -c bash -c 'cd client && flutter test'
+
+      - name: Run cdylib Integration Tests
+        run: nix develop .#clientCi -c bash -c 'cd client/rust && cargo test'
+
+      - name: Run Linux End-to-End Tests
+        run: nix develop .#clientCi -c xvfb-run -a client/tool/e2e.sh

@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 
 import '../server_config.dart';
+import '../services/commander_api.dart';
 import '../src/rust/api/mirrors.dart';
-import '../src/rust/api/simple.dart' as rust;
 import '../widgets/session_chips.dart';
 import 'connection_page.dart';
 import 'create_session_page.dart';
@@ -12,8 +12,18 @@ import 'session_detail_page.dart';
 /// view. The app bar links back to connection settings; the FAB creates a
 /// session.
 class SessionListPage extends StatefulWidget {
+  final CommanderApi api;
+
+  /// The config store, threaded through so the app-bar settings route can
+  /// re-open the connection page with the same (possibly in-memory) store.
+  final ServerConfigStore store;
   final ServerConfig config;
-  const SessionListPage({super.key, required this.config});
+  const SessionListPage({
+    super.key,
+    required this.api,
+    required this.store,
+    required this.config,
+  });
 
   @override
   State<SessionListPage> createState() => _SessionListPageState();
@@ -28,7 +38,7 @@ class _SessionListPageState extends State<SessionListPage> {
     _future = _load();
   }
 
-  Future<List<SessionInfo>> _load() => rust.listSessions(
+  Future<List<SessionInfo>> _load() => widget.api.listSessions(
     baseUrl: widget.config.baseUrl,
     token: widget.config.token,
     includeStopped: true,
@@ -36,14 +46,23 @@ class _SessionListPageState extends State<SessionListPage> {
 
   Future<void> _refresh() async {
     final next = _load();
-    setState(() => _future = next);
+    // Block body (not `=> _future = next`): the arrow form returns the
+    // assignment's value — a Future — which trips setState's "callback returned
+    // a Future" assertion.
+    setState(() {
+      _future = next;
+    });
     await next.catchError((_) => <SessionInfo>[]);
   }
 
   void _openSettings() {
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => ConnectionPage(existing: widget.config),
+        builder: (_) => ConnectionPage(
+          api: widget.api,
+          store: widget.store,
+          existing: widget.config,
+        ),
       ),
     );
   }
@@ -51,8 +70,11 @@ class _SessionListPageState extends State<SessionListPage> {
   Future<void> _openDetail(SessionInfo session) async {
     await Navigator.of(context).push<bool>(
       MaterialPageRoute(
-        builder: (_) =>
-            SessionDetailPage(config: widget.config, session: session),
+        builder: (_) => SessionDetailPage(
+          api: widget.api,
+          config: widget.config,
+          session: session,
+        ),
       ),
     );
     // A lifecycle action (delete/kill/restart) may have changed the list.
@@ -62,7 +84,8 @@ class _SessionListPageState extends State<SessionListPage> {
   Future<void> _createSession() async {
     final id = await Navigator.of(context).push<String>(
       MaterialPageRoute(
-        builder: (_) => CreateSessionPage(config: widget.config),
+        builder: (_) =>
+            CreateSessionPage(api: widget.api, config: widget.config),
       ),
     );
     if (id != null) await _refresh();

@@ -6,98 +6,21 @@
 //! `#[ignore]` — `#[ignore]` would make `cargo test` skip them everywhere, so
 //! they'd never execute in CI. With the runtime check, `cargo test --workspace`
 //! in the Nix dev shell (tmux present) actually runs them; on a tmux-less box
-//! they self-skip. Mirrors `claude-commander-core/tests/integration_test.rs`.
+//! they self-skip.
 //!
-//! All disk access goes through `tempfile::TempDir`; nothing touches the real
-//! filesystem. The listener binds `127.0.0.1:0` so the OS assigns a free port.
+//! The hermetic-server + git/tmux fixtures live in the shared
+//! `claude-commander-test-support` crate (also used by the Flutter cdylib's
+//! `client/rust/tests`). All disk access goes through `tempfile::TempDir`;
+//! nothing touches the real filesystem. The listener binds `127.0.0.1:0` so the
+//! OS assigns a free port.
 
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
-use claude_commander_core::api::CommanderService;
-use claude_commander_core::config::storage::AppState as CoreState;
-use claude_commander_core::config::{Config, ConfigStore, StateStore};
-use claude_commander_core::telemetry::FrontendInfo;
 use claude_commander_core::tmux::TmuxExecutor;
-use claude_commander_server::{AppState, AuthConfig, build_router};
+use claude_commander_test_support::{create_test_repo, spawn_server, test_state, tmux_available};
 use futures::{SinkExt, StreamExt};
 use tempfile::TempDir;
 use tokio_tungstenite::tungstenite::Message;
-
-/// Whether tmux is installed. Each test self-skips (early `return`) when false.
-async fn tmux_available() -> bool {
-    tokio::process::Command::new("tmux")
-        .arg("-V")
-        .output()
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
-/// Run a git command in `dir`, asserting it succeeds.
-async fn run_git(dir: &std::path::Path, args: &[&str]) {
-    let output = tokio::process::Command::new("git")
-        .current_dir(dir)
-        .args(args)
-        .output()
-        .await
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {:?} failed: {}",
-        args,
-        String::from_utf8_lossy(&output.stderr)
-    );
-}
-
-/// Create a minimal committed git repo in a fresh `TempDir`.
-async fn create_test_repo() -> (TempDir, PathBuf) {
-    let temp_dir = TempDir::new().unwrap();
-    let repo_path = temp_dir.path().to_path_buf();
-    run_git(&repo_path, &["init"]).await;
-    run_git(&repo_path, &["config", "user.email", "test@test.com"]).await;
-    run_git(&repo_path, &["config", "user.name", "Test User"]).await;
-    tokio::fs::write(repo_path.join("README.md"), "# Test Repository\n")
-        .await
-        .unwrap();
-    run_git(&repo_path, &["add", "README.md"]).await;
-    run_git(&repo_path, &["commit", "-m", "Initial commit"]).await;
-    (temp_dir, repo_path)
-}
-
-/// Build a hermetic [`AppState`] (empty core state under `data_dir`, a temp
-/// worktrees dir, auth disabled) wrapping a real `CommanderService`.
-fn test_state(data_dir: &TempDir, worktrees_dir: &TempDir) -> AppState {
-    let config = Config {
-        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
-        ..Config::default()
-    };
-    let config_store = Arc::new(ConfigStore::with_path(
-        config,
-        data_dir.path().join("config.toml"),
-    ));
-    let store = Arc::new(StateStore::with_path(
-        CoreState::default(),
-        data_dir.path().join("state.json"),
-    ));
-    let frontend = FrontendInfo::new("claude-commander-server-test", "0.0.0");
-    let service = CommanderService::new(config_store, store, frontend);
-    AppState::new(service, AuthConfig::Disabled)
-}
-
-/// Boot the router on `127.0.0.1:0` and return the bound address. The serving
-/// task is spawned and left running for the duration of the test process.
-async fn spawn_server(state: AppState) -> SocketAddr {
-    let app = build_router(state);
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    addr
-}
 
 /// HTTP round-trip through real tmux + git: register a project, create a
 /// session, then list/detail/pane/kill it over the wire.

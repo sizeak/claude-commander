@@ -1,14 +1,15 @@
 import 'package:flutter/material.dart';
 
 import '../server_config.dart';
-import '../src/rust/api/simple.dart' as rust;
+import '../services/commander_api.dart';
 
 /// Form for creating a session. `projectPath` is a path on the *server's*
 /// filesystem (the repo to branch from) — the API offers no project listing to
 /// pick from, so it's typed here. Pops with the new session id on success.
 class CreateSessionPage extends StatefulWidget {
+  final CommanderApi api;
   final ServerConfig config;
-  const CreateSessionPage({super.key, required this.config});
+  const CreateSessionPage({super.key, required this.api, required this.config});
 
   @override
   State<CreateSessionPage> createState() => _CreateSessionPageState();
@@ -38,7 +39,7 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
     if (!_formKey.currentState!.validate()) return;
     setState(() => _submitting = true);
     try {
-      final id = await rust.createSession(
+      final id = await widget.api.createSession(
         baseUrl: widget.config.baseUrl,
         token: widget.config.token,
         projectPath: _projectPath.text.trim(),
