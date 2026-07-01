@@ -1389,7 +1389,8 @@ impl App {
             // Esc cancels an in-progress selection first; otherwise closes.
             KeyCode::Esc if state.visual_anchor.is_none() => return,
             KeyCode::Esc => state.visual_anchor = None,
-            KeyCode::Tab => state.toggle_focus(),
+            // Binary focus toggle: Shift+Tab is its own reverse, same as Tab.
+            KeyCode::Tab | KeyCode::BackTab => state.toggle_focus(),
             KeyCode::Char(']') => state.next_file(),
             KeyCode::Char('[') => state.prev_file(),
             KeyCode::Down | KeyCode::Char('j') => match state.focus {

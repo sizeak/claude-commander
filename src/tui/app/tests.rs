@@ -1,6 +1,7 @@
 use super::actions::{adjust_list_scroll, delete_confirm_message};
 use super::modals::centered_rect;
 use super::render::commander_chip_label;
+use super::review::ReviewFocus;
 use super::selection::{session_number_to_list_index, worktree_list_index};
 use super::*;
 
@@ -1762,4 +1763,63 @@ fn program_picker_navigation_saturates_at_ends() {
     assert_eq!(p.selected, 1);
     p.select_down();
     assert_eq!(p.selected, 1);
+}
+
+#[tokio::test]
+async fn backtab_toggles_program_picker_focus_like_tab() {
+    let mut app = make_test_app();
+    app.ui_state.modal = Modal::Input {
+        title: String::new(),
+        prompt: String::new(),
+        value: Input::from(""),
+        on_submit: InputAction::AddProject,
+        existing_branches: None,
+        program_picker: Some(picker(&["claude", "codex"], 0)),
+    };
+
+    app.handle_modal_key(key(crossterm::event::KeyCode::BackTab))
+        .await;
+    match &app.ui_state.modal {
+        Modal::Input {
+            program_picker: Some(p),
+            ..
+        } => assert!(!p.focus_program, "BackTab should flip focus off"),
+        other => panic!("expected Modal::Input, got {other:?}"),
+    }
+
+    app.handle_modal_key(key(crossterm::event::KeyCode::BackTab))
+        .await;
+    match &app.ui_state.modal {
+        Modal::Input {
+            program_picker: Some(p),
+            ..
+        } => assert!(p.focus_program, "BackTab should flip focus back on"),
+        other => panic!("expected Modal::Input, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn backtab_toggles_review_focus_like_tab() {
+    let mut app = make_test_app();
+    let state = DiffReviewState::new(
+        SessionId::new(),
+        "t".to_string(),
+        "base".to_string(),
+        crate::git::ParsedDiff {
+            files: vec![modified_image_file("logo.png")],
+        },
+        Vec::new(),
+    );
+    assert_eq!(state.focus, ReviewFocus::FileList);
+    let key = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::BackTab,
+        crossterm::event::KeyModifiers::NONE,
+    );
+    app.handle_review_key(key, Box::new(state)).await;
+    match &app.ui_state.modal {
+        Modal::ReviewDiff(s) => {
+            assert_eq!(s.focus, ReviewFocus::Body, "BackTab should flip focus")
+        }
+        other => panic!("expected review modal to stay open, got {other:?}"),
+    }
 }
