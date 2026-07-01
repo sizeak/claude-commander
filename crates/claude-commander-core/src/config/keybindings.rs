@@ -70,49 +70,61 @@ pub enum BindableAction {
 }
 
 impl BindableAction {
-    /// All actions in display order (used for help screen sections).
+    /// All actions in display order, grouped so each [`section`](Self::section)
+    /// stays contiguous (both the help screen and the settings Keybindings tab
+    /// rely on this ordering to draw section headers).
     pub const ALL: &'static [BindableAction] = &[
+        // Navigation
         Self::NavigateUp,
         Self::NavigateDown,
         Self::NextGroup,
         Self::PreviousGroup,
         Self::NavigateFirst,
         Self::NavigateLast,
+        // Sessions
         Self::Select,
         Self::SelectShell,
         Self::NewSession,
+        Self::RenameSession,
+        Self::RestartSession,
+        Self::DeleteSession,
+        Self::OpenInEditor,
+        // Stacked & Cascade
         Self::NewStackedSession,
+        Self::PushStack,
         Self::CascadeMergeMain,
         Self::CascadeResume,
         Self::CascadeAbandon,
-        Self::PushStack,
+        // Projects
         Self::NewProject,
         Self::CheckoutBranch,
-        Self::DeleteSession,
-        Self::DeleteMergedPrSessions,
-        Self::RenameSession,
-        Self::RestartSession,
+        Self::ScanDirectory,
         Self::RemoveProject,
-        Self::OpenInEditor,
+        // Pull Requests
         Self::OpenPullRequest,
         Self::RefreshPrStatus,
+        Self::DeleteMergedPrSessions,
+        // Sections & View
+        Self::ToggleViewMode,
+        Self::MoveToSection,
+        Self::ToggleSection,
+        // Review & AI
+        Self::OpenReviewDiff,
+        Self::GenerateSummary,
         Self::OpenCommander,
         Self::ToggleConversationOverlay,
         Self::ToggleVoiceInput,
-        Self::OpenReviewDiff,
-        Self::ScanDirectory,
-        Self::MoveToSection,
-        Self::ToggleSection,
-        Self::ToggleViewMode,
+        // Layout
         Self::TogglePane,
         Self::TogglePaneReverse,
         Self::ShrinkLeftPane,
         Self::GrowLeftPane,
+        // Scrolling
         Self::ScrollUp,
         Self::ScrollDown,
         Self::PageUp,
         Self::PageDown,
-        Self::GenerateSummary,
+        // Application
         Self::ShowHelp,
         Self::ShowSettings,
         Self::Quit,
@@ -218,7 +230,66 @@ impl BindableAction {
         }
     }
 
-    /// Help screen section for grouping.
+    /// Short verb phrase for on-screen action buttons, distinct from the
+    /// longer help-screen [`description`](Self::description). Worded so the
+    /// primary hotkey char appears naturally (favouring clean inline
+    /// bracketing, e.g. `n` → "new session" renders "[n]ew session").
+    ///
+    /// Exhaustive on purpose (no wildcard): adding a `BindableAction` must
+    /// force a button label to be supplied.
+    pub fn button_label(self) -> &'static str {
+        match self {
+            Self::NavigateUp => "up",
+            Self::NavigateDown => "down",
+            Self::NextGroup => "next group",
+            Self::PreviousGroup => "prev group",
+            Self::NavigateFirst => "first",
+            Self::NavigateLast => "last",
+            Self::Select => "attach",
+            Self::SelectShell => "shell",
+            Self::NewSession => "new session",
+            Self::NewStackedSession => "stacked",
+            Self::CascadeMergeMain => "merge stack",
+            Self::CascadeResume => "resume cascade",
+            Self::CascadeAbandon => "abandon cascade",
+            Self::PushStack => "push stack",
+            Self::NewProject => "new project",
+            Self::CheckoutBranch => "checkout",
+            Self::DeleteSession => "delete",
+            Self::DeleteMergedPrSessions => "delete merged",
+            Self::RenameSession => "rename",
+            Self::RestartSession => "restart",
+            Self::RemoveProject => "remove project",
+            Self::OpenInEditor => "edit",
+            Self::OpenPullRequest => "open PR",
+            Self::RefreshPrStatus => "refresh PR",
+            Self::OpenCommander => "commander",
+            Self::ToggleConversationOverlay => "conversation",
+            Self::ToggleVoiceInput => "voice",
+            Self::OpenReviewDiff => "review",
+            Self::TogglePane => "view",
+            Self::TogglePaneReverse => "view back",
+            Self::ShrinkLeftPane => "shrink",
+            Self::GrowLeftPane => "grow",
+            Self::ShowHelp => "help",
+            Self::ShowSettings => "settings",
+            Self::Quit => "quit",
+            Self::ScrollUp => "scroll up",
+            Self::ScrollDown => "scroll down",
+            Self::PageUp => "page up",
+            Self::PageDown => "page down",
+            Self::GenerateSummary => "summary",
+            Self::ScanDirectory => "scan",
+            Self::MoveToSection => "move",
+            Self::ToggleSection => "toggle section",
+            Self::ToggleViewMode => "view mode",
+        }
+    }
+
+    /// Section this action is grouped under, for both the help screen and the
+    /// settings Keybindings tab. The [`ALL`](Self::ALL) ordering keeps every
+    /// section's actions contiguous so [`KeyBindings::sections`] can slice them
+    /// into ordered groups.
     pub fn section(self) -> &'static str {
         match self {
             Self::NavigateUp
@@ -226,40 +297,37 @@ impl BindableAction {
             | Self::NextGroup
             | Self::PreviousGroup
             | Self::NavigateFirst
-            | Self::NavigateLast
-            | Self::Select => "Navigation",
-            Self::SelectShell
+            | Self::NavigateLast => "Navigation",
+            Self::Select
+            | Self::SelectShell
             | Self::NewSession
-            | Self::NewStackedSession
-            | Self::CascadeMergeMain
-            | Self::CascadeResume
-            | Self::CascadeAbandon
-            | Self::PushStack
-            | Self::NewProject
-            | Self::CheckoutBranch
-            | Self::DeleteSession
-            | Self::DeleteMergedPrSessions
             | Self::RenameSession
             | Self::RestartSession
-            | Self::RemoveProject
-            | Self::OpenInEditor
-            | Self::OpenPullRequest
-            | Self::RefreshPrStatus
+            | Self::DeleteSession
+            | Self::OpenInEditor => "Sessions",
+            Self::NewStackedSession
+            | Self::PushStack
+            | Self::CascadeMergeMain
+            | Self::CascadeResume
+            | Self::CascadeAbandon => "Stacked & Cascade",
+            Self::NewProject | Self::CheckoutBranch | Self::ScanDirectory | Self::RemoveProject => {
+                "Projects"
+            }
+            Self::OpenPullRequest | Self::RefreshPrStatus | Self::DeleteMergedPrSessions => {
+                "Pull Requests"
+            }
+            Self::ToggleViewMode | Self::MoveToSection | Self::ToggleSection => "Sections & View",
+            Self::OpenReviewDiff
+            | Self::GenerateSummary
             | Self::OpenCommander
             | Self::ToggleConversationOverlay
-            | Self::ToggleVoiceInput
-            | Self::OpenReviewDiff
-            | Self::ScanDirectory
-            | Self::MoveToSection
-            | Self::ToggleSection
-            | Self::ToggleViewMode => "Session Management",
+            | Self::ToggleVoiceInput => "Review & AI",
             Self::TogglePane
             | Self::TogglePaneReverse
             | Self::ShrinkLeftPane
             | Self::GrowLeftPane => "Layout",
             Self::ScrollUp | Self::ScrollDown | Self::PageUp | Self::PageDown => "Scrolling",
-            Self::GenerateSummary => "Info Pane",
-            Self::ShowHelp | Self::ShowSettings | Self::Quit => "Other",
+            Self::ShowHelp | Self::ShowSettings | Self::Quit => "Application",
         }
     }
 }
@@ -933,6 +1001,27 @@ pub fn matches_review_toggle(bindings: &KeyBindings, key: &KeyEvent) -> bool {
 mod tests {
     use super::*;
 
+    // -- Button labels --
+
+    #[test]
+    fn button_label_nonempty_for_every_action() {
+        for &action in BindableAction::ALL {
+            assert!(
+                !action.button_label().is_empty(),
+                "empty button_label for {action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn button_label_distinct_from_description() {
+        // The button label is intentionally terser than the help description.
+        assert_ne!(
+            BindableAction::NewSession.button_label(),
+            BindableAction::NewSession.description()
+        );
+    }
+
     // -- KeyBinding parsing --
 
     #[test]
@@ -1327,6 +1416,35 @@ mod tests {
     }
 
     #[test]
+    fn test_sections_are_ordered_and_contiguous() {
+        // `sections()` slices `ALL` on section-boundary changes, so each section
+        // must appear exactly once — a section whose actions are scattered
+        // through `ALL` would show up as duplicate groups.
+        let kb = KeyBindings::default();
+        let names: Vec<&str> = kb.sections().iter().map(|(n, _)| *n).collect();
+        assert_eq!(
+            names,
+            vec![
+                "Navigation",
+                "Sessions",
+                "Stacked & Cascade",
+                "Projects",
+                "Pull Requests",
+                "Sections & View",
+                "Review & AI",
+                "Layout",
+                "Scrolling",
+                "Application",
+            ],
+        );
+
+        // Every action is grouped, and no group is empty.
+        let grouped: usize = kb.sections().iter().map(|(_, a)| a.len()).sum();
+        assert_eq!(grouped, BindableAction::ALL.len());
+        assert!(kb.sections().iter().all(|(_, a)| !a.is_empty()));
+    }
+
+    #[test]
     fn test_keys_display() {
         let kb = KeyBindings::default();
         let display = kb.keys_display(BindableAction::NavigateUp);
@@ -1463,23 +1581,5 @@ mod tests {
         assert!(kb.keys_for(BindableAction::RenameSession).is_empty());
         let r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);
         assert_eq!(kb.resolve(&r), Some(BindableAction::OpenReviewDiff));
-    }
-
-    #[test]
-    fn test_sections_grouping() {
-        let kb = KeyBindings::default();
-        let sections = kb.sections();
-        let section_names: Vec<&str> = sections.iter().map(|(name, _)| *name).collect();
-        assert_eq!(
-            section_names,
-            vec![
-                "Navigation",
-                "Session Management",
-                "Layout",
-                "Scrolling",
-                "Info Pane",
-                "Other"
-            ]
-        );
     }
 }

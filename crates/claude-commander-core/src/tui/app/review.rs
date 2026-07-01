@@ -35,6 +35,58 @@ pub enum ReviewFocus {
     Body,
 }
 
+/// A clickable button in the review-view footer. Review keys are matched by raw
+/// `KeyCode` in [`App::handle_review_key`] rather than routed through
+/// `BindableAction`, so a click replays the key it labels: `key` is fed
+/// straight into the same handler.
+#[derive(Debug, Clone, Copy)]
+pub struct ReviewButton {
+    pub rect: Rect,
+    pub key: KeyEvent,
+}
+
+/// One segment of the review footer: either a non-actionable key legend
+/// (`Plain`) or a clickable `Button` that replays `key` on click.
+enum FooterItem {
+    Plain(&'static str),
+    Button { label: &'static str, key: KeyEvent },
+}
+
+/// The key of the footer button containing `(col, row)`, or `None`. First
+/// match wins (buttons never overlap). Mirrors [`crate::tui::hotkey::button_at`]
+/// but yields the raw `KeyEvent` review buttons carry.
+pub(super) fn review_button_at(buttons: &[ReviewButton], col: u16, row: u16) -> Option<KeyEvent> {
+    buttons.iter().find_map(|b| {
+        let r = b.rect;
+        (col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height).then_some(b.key)
+    })
+}
+
+impl FooterItem {
+    fn button(label: &'static str, key: KeyEvent) -> Self {
+        Self::Button { label, key }
+    }
+
+    /// Styled spans plus their total display width. Buttons bracket the key
+    /// letter (or append the key when absent); plain legends render as-is.
+    fn render(&self, base: Style, accent: Style) -> (Vec<Span<'static>>, u16) {
+        match self {
+            FooterItem::Plain(text) => {
+                let span = Span::styled((*text).to_string(), base);
+                let width = span.width() as u16;
+                (vec![span], width)
+            }
+            FooterItem::Button { label, key } => {
+                let kb = crate::config::keybindings::KeyBinding::new(key.code, key.modifiers);
+                let seg = crate::tui::hotkey::segment_with_key(label, Some(&kb));
+                let spans = crate::tui::hotkey::hotkey_spans(&seg, base, accent);
+                let width = spans.iter().map(|s| s.width() as u16).sum();
+                (spans, width)
+            }
+        }
+    }
+}
+
 /// How the diff body is rendered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReviewLayout {
@@ -579,6 +631,19 @@ impl DiffReviewState {
         }
         // Collapsing shrinks the visible rows; keep the cursor (and scroll) in range.
         self.clamp_tree_cursor();
+    }
+
+    /// Select the first file not yet marked reviewed (in tree/display order),
+    /// falling back to the first file when every file is reviewed. Called once
+    /// after the reviewed set is populated so opening the view lands on the
+    /// first file still needing attention rather than always the first file.
+    pub(super) fn select_first_unreviewed(&mut self) {
+        if let Some(idx) = first_unreviewed_file_index(&self.file_tree, &self.diff, &self.reviewed)
+            .or_else(|| first_file_index(&self.file_tree))
+        {
+            self.set_body_file(idx);
+            self.sync_tree_cursor_to_file();
+        }
     }
 
     /// Jump the body to the next unreviewed file after the current one (in
@@ -1243,6 +1308,7 @@ impl App {
                     );
                     state.content_hash = content_hash;
                     state.reviewed = snapshot.reviewed.into_iter().collect();
+                    state.select_first_unreviewed();
                     self.reset_review_images();
                     self.ensure_review_image(&state).await;
                     self.ui_state.modal = Modal::ReviewDiff(Box::new(state));
@@ -1389,7 +1455,8 @@ impl App {
             // Esc cancels an in-progress selection first; otherwise closes.
             KeyCode::Esc if state.visual_anchor.is_none() => return,
             KeyCode::Esc => state.visual_anchor = None,
-            KeyCode::Tab => state.toggle_focus(),
+            // Binary focus toggle: Shift+Tab is its own reverse, same as Tab.
+            KeyCode::Tab | KeyCode::BackTab => state.toggle_focus(),
             KeyCode::Char(']') => state.next_file(),
             KeyCode::Char('[') => state.prev_file(),
             KeyCode::Down | KeyCode::Char('j') => match state.focus {
@@ -1608,13 +1675,14 @@ impl App {
         }
     }
 
-    /// Render the full-screen review view.
+    /// Render the full-screen review view. Returns the clickable footer-button
+    /// regions drawn (recorded for mouse hit-testing).
     pub(super) fn render_review_modal(
         &self,
         frame: &mut Frame,
         area: Rect,
         state: &DiffReviewState,
-    ) {
+    ) -> Vec<ReviewButton> {
         frame.render_widget(Clear, area);
 
         let rows = Layout::default()
@@ -1630,37 +1698,183 @@ impl App {
         self.render_review_file_list(frame, cols[0], state);
         self.render_review_body(frame, cols[1], state);
 
-        // Label the session toggle with its actual (rebindable) key; omit the
-        // hint entirely when no attach-capable binding exists.
-        let toggle = crate::config::keybindings::review_toggle_binding(&self.config.keybindings)
-            .map(|kb| format!("{kb} session · "))
-            .unwrap_or_default();
-        let hint = if state.comment.is_some() {
-            " type comment · ←→/Home/End move · Enter save · Esc cancel ".to_string()
+        self.render_review_footer(frame, rows[1], state)
+    }
+
+    /// Render the review view's footer — this view's status bar — as bracketed,
+    /// clickable buttons plus plain non-actionable key hints, varying by focus /
+    /// mode (comment editing, visual select, file-list, diff body). The `close`
+    /// button is pinned to the right edge so it survives when the row is narrow.
+    fn render_review_footer(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        state: &DiffReviewState,
+    ) -> Vec<ReviewButton> {
+        use crossterm::event::{KeyCode, KeyModifiers};
+
+        let base = self.theme.status_bar();
+        let accent = base.fg(self.theme.text_accent);
+
+        // The session-toggle key (default Alt-r) re-attaches; shown only when a
+        // binding exists. Cloned so it outlives the borrow.
+        let toggle_key =
+            crate::config::keybindings::review_toggle_binding(&self.config.keybindings);
+
+        let key = |code, mods| KeyEvent::new(code, mods);
+        let none = KeyModifiers::NONE;
+
+        // Ordered footer items per sub-mode. `Plain` items are non-actionable
+        // key legends; `Button`s replay the key they label on click.
+        let mut items: Vec<FooterItem> = Vec::new();
+        if state.comment.is_some() {
+            items.push(FooterItem::Plain("type comment"));
+            items.push(FooterItem::Plain("←→/Home/End move"));
+            items.push(FooterItem::button("save", key(KeyCode::Enter, none)));
+            items.push(FooterItem::button("cancel", key(KeyCode::Esc, none)));
         } else if state.visual_anchor.is_some() {
-            " ↑↓ extend · Enter/right-click comment · v/Esc cancel selection ".to_string()
+            items.push(FooterItem::Plain("↑↓ extend"));
+            items.push(FooterItem::button("comment", key(KeyCode::Enter, none)));
+            items.push(FooterItem::button(
+                "cancel selection",
+                key(KeyCode::Char('v'), none),
+            ));
         } else if state.focus == ReviewFocus::FileList {
-            format!(
-                " ↑↓/jk move · Enter expand/collapse · [ ] file · m reviewed · Tab to diff · {toggle}^Q/Esc close "
-            )
+            items.push(FooterItem::Plain("↑↓/jk move"));
+            items.push(FooterItem::button("expand", key(KeyCode::Enter, none)));
+            items.push(FooterItem::Plain("[ ] file"));
+            items.push(FooterItem::button(
+                "reviewed",
+                key(KeyCode::Char('m'), none),
+            ));
+            items.push(FooterItem::button("diff", key(KeyCode::Tab, none)));
         } else {
+            items.push(FooterItem::Plain("↑↓/jk move"));
+            items.push(FooterItem::button("select", key(KeyCode::Char('v'), none)));
+            items.push(FooterItem::button("comment", key(KeyCode::Enter, none)));
+            items.push(FooterItem::button("fold", key(KeyCode::Char('z'), none)));
+            items.push(FooterItem::button("delete", key(KeyCode::Char('d'), none)));
+            items.push(FooterItem::button(
+                "reviewed",
+                key(KeyCode::Char('m'), none),
+            ));
+            items.push(FooterItem::button("apply", key(KeyCode::Char('a'), none)));
+            items.push(FooterItem::button("refresh", key(KeyCode::Char('r'), none)));
+            items.push(FooterItem::button("layout", key(KeyCode::Char('t'), none)));
             // Offer the image side-toggle only when it does something: a binary
             // image with two sides (a modification).
-            let image_toggle = if state.can_toggle_image_side() {
-                "o before/after · "
-            } else {
-                ""
-            };
-            format!(
-                " ↑↓/jk move · v select · Enter comment · z fold · d delete · m reviewed · a apply · r refresh · t layout · {image_toggle}{toggle}^Q/Esc close "
-            )
+            if state.can_toggle_image_side() {
+                items.push(FooterItem::button(
+                    "before/after",
+                    key(KeyCode::Char('o'), none),
+                ));
+            }
+        }
+        // The session re-attach toggle is available in every non-comment mode.
+        if state.comment.is_none()
+            && let Some(kb) = &toggle_key
+        {
+            items.push(FooterItem::Button {
+                label: "session",
+                key: KeyEvent::new(kb.code, kb.modifiers),
+            });
+        }
+
+        // Close is pinned to the right edge (Ctrl-Q always closes the view) —
+        // but not while editing a comment, where keys route to the comment box
+        // (a synthesized Ctrl-Q would type into it); "cancel" (Esc) exits there.
+        let close = (state.comment.is_none())
+            .then(|| FooterItem::button("close", key(KeyCode::Char('q'), KeyModifiers::CONTROL)));
+
+        self.render_footer_items(frame, area, &items, close.as_ref(), base, accent)
+    }
+
+    /// Lay out footer `items` left-to-right (dropping any that overflow) with
+    /// `close` pinned to the right edge, recording each button's clickable rect.
+    fn render_footer_items(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        items: &[FooterItem],
+        close: Option<&FooterItem>,
+        base: Style,
+        accent: Style,
+    ) -> Vec<ReviewButton> {
+        const SEP: &str = " · ";
+        const SEP_WIDTH: u16 = 3;
+
+        let mut buttons: Vec<ReviewButton> = Vec::new();
+
+        // Reserve the right edge for the close button (when shown) so it always
+        // survives overflow; without one, items use the full width.
+        let close_rendered = close.map(|c| c.render(base, accent));
+        let close_width = close_rendered.as_ref().map_or(0, |(_, w)| *w);
+        let close_x = area.right().saturating_sub(close_width);
+        let items_right = if close.is_some() {
+            close_x.saturating_sub(SEP_WIDTH)
+        } else {
+            area.right()
         };
+
+        // Left-aligned items, dropping whole ones that would collide with the
+        // reserved close zone.
+        let mut spans: Vec<Span> = vec![Span::styled(" ", base)];
+        let mut x = area.x + 1;
+        for (i, item) in items.iter().enumerate() {
+            let (item_spans, width) = item.render(base, accent);
+            let lead = if i == 0 { 0 } else { SEP_WIDTH };
+            if x.saturating_add(lead).saturating_add(width) > items_right {
+                break;
+            }
+            if i != 0 {
+                spans.push(Span::styled(SEP, base));
+                x += SEP_WIDTH;
+            }
+            if let FooterItem::Button { key, .. } = item {
+                buttons.push(ReviewButton {
+                    rect: Rect {
+                        x,
+                        y: area.y,
+                        width,
+                        height: 1,
+                    },
+                    key: *key,
+                });
+            }
+            spans.extend(item_spans);
+            x += width;
+        }
+
         // The footer doubles as this view's status bar — styled like the app
         // status bar so it reads as a replacement, not a second bar.
-        frame.render_widget(
-            Paragraph::new(Line::from(hint)).style(self.theme.status_bar()),
-            rows[1],
-        );
+        frame.render_widget(Paragraph::new(Line::from(spans)).style(base), area);
+
+        // Render the pinned close button in its reserved right slot.
+        if let (Some((close_spans, _)), Some(FooterItem::Button { key, .. })) =
+            (close_rendered, close)
+        {
+            buttons.push(ReviewButton {
+                rect: Rect {
+                    x: close_x,
+                    y: area.y,
+                    width: close_width,
+                    height: 1,
+                },
+                key: *key,
+            });
+            let close_area = Rect {
+                x: close_x,
+                y: area.y,
+                width: close_width,
+                height: 1,
+            };
+            frame.render_widget(
+                Paragraph::new(Line::from(close_spans)).style(base),
+                close_area,
+            );
+        }
+
+        buttons
     }
 
     fn render_review_file_list(&self, frame: &mut Frame, area: Rect, state: &DiffReviewState) {
@@ -2126,17 +2340,34 @@ fn collect_completed_dirs(
     }
 }
 
-/// Index of the first file in tree order (depth-first), if any.
-fn first_file_index(nodes: &[TreeNode]) -> Option<usize> {
+/// First file index in tree order (depth-first) whose index satisfies `pred`,
+/// if any. `first_file_index` and `first_unreviewed_file_index` are thin
+/// predicate wrappers over this walker.
+fn find_file_index(nodes: &[TreeNode], pred: &impl Fn(usize) -> bool) -> Option<usize> {
     for node in nodes {
-        if let Some(i) = node.file_index {
+        if let Some(i) = node.file_index.filter(|&i| pred(i)) {
             return Some(i);
         }
-        if let Some(i) = first_file_index(&node.children) {
+        if let Some(i) = find_file_index(&node.children, pred) {
             return Some(i);
         }
     }
     None
+}
+
+/// Index of the first file in tree order (depth-first), if any.
+fn first_file_index(nodes: &[TreeNode]) -> Option<usize> {
+    find_file_index(nodes, &|_| true)
+}
+
+/// First file index (in tree display order) whose file is not marked reviewed,
+/// or `None` when every file is reviewed.
+fn first_unreviewed_file_index(
+    nodes: &[TreeNode],
+    diff: &ParsedDiff,
+    reviewed: &HashSet<String>,
+) -> Option<usize> {
+    find_file_index(nodes, &|i| !reviewed.contains(diff.files[i].display_path()))
 }
 
 /// One-character marker for a file's change status.
@@ -3084,6 +3315,43 @@ fn row_header_text(row: &SbsRow) -> String {
 mod tests {
     use super::*;
     use crate::git::parse_unified_diff;
+    use crossterm::event::{KeyCode, KeyModifiers};
+
+    fn review_btn(x: u16, w: u16, code: KeyCode) -> ReviewButton {
+        ReviewButton {
+            rect: Rect {
+                x,
+                y: 3,
+                width: w,
+                height: 1,
+            },
+            key: KeyEvent::new(code, KeyModifiers::NONE),
+        }
+    }
+
+    #[test]
+    fn review_button_at_maps_click_to_key() {
+        let buttons = vec![
+            review_btn(0, 6, KeyCode::Char('v')),
+            review_btn(9, 8, KeyCode::Char('a')),
+        ];
+        assert_eq!(
+            review_button_at(&buttons, 2, 3).map(|k| k.code),
+            Some(KeyCode::Char('v'))
+        );
+        assert_eq!(
+            review_button_at(&buttons, 10, 3).map(|k| k.code),
+            Some(KeyCode::Char('a'))
+        );
+    }
+
+    #[test]
+    fn review_button_at_misses_are_none() {
+        let buttons = vec![review_btn(0, 6, KeyCode::Char('v'))];
+        assert!(review_button_at(&buttons, 6, 3).is_none()); // just past width
+        assert!(review_button_at(&buttons, 2, 4).is_none()); // wrong row
+        assert!(review_button_at(&[], 0, 3).is_none());
+    }
 
     fn state_with_two_files() -> DiffReviewState {
         let diff = parse_unified_diff(
@@ -3454,6 +3722,25 @@ diff --git a/c.rs b/c.rs
             diff,
             Vec::new(),
         )
+    }
+
+    #[test]
+    fn opens_on_first_unreviewed_file() {
+        let mut s = state_with_three_files();
+        s.reviewed = ["a.rs".to_string()].into_iter().collect();
+        s.select_first_unreviewed();
+        assert_eq!(s.selected_file, 1, "skips reviewed a.rs, lands on b.rs");
+    }
+
+    #[test]
+    fn opens_on_first_file_when_all_reviewed() {
+        let mut s = state_with_three_files();
+        s.reviewed = ["a.rs", "b.rs", "c.rs"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        s.select_first_unreviewed();
+        assert_eq!(s.selected_file, 0, "all reviewed falls back to first file");
     }
 
     #[test]

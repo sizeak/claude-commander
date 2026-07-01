@@ -307,6 +307,7 @@ impl App {
                     let mut state = DiffReviewState::new(session_id, title, base, diff, comments);
                     state.content_hash = content_hash;
                     state.reviewed = reviewed.into_iter().collect();
+                    state.select_first_unreviewed();
                     state.prime_segments(segments);
                     self.reset_review_images();
                     self.ensure_review_image(&state).await;
@@ -1023,15 +1024,22 @@ fn build_stacked_section_items(
                 continue;
             };
 
-            // Walk leaf → root. First section_override encountered wins;
-            // overrides on off-path siblings are not considered.
+            // Walk leaf → root. First *valid* section_override encountered
+            // wins (stale ones are skipped, see below); overrides on off-path
+            // siblings are not considered.
             let mut effective: Option<String> = None;
             let mut cursor = leaf.id;
             for _ in 0..project_sessions.len() {
                 let Some(cur) = project_sessions.iter().find(|s| s.id == cursor).copied() else {
                     break;
                 };
-                if let Some(ovr) = &cur.section_override {
+                // Only a *valid* override stops the walk. A stale override
+                // (naming a section no longer in config) is ignored — same as
+                // `assign_section` — so the session falls back to its
+                // `current_section` instead of being dumped into In Progress.
+                if let Some(ovr) = &cur.section_override
+                    && valid_section(ovr)
+                {
                     effective = Some(ovr.clone());
                     break;
                 }
@@ -1537,6 +1545,48 @@ mod stack_order_tests {
             pinned_rows,
             vec![(base.id, false), (child.id, true)],
             "whole stack should land in the closest-to-leaf overridden section"
+        );
+    }
+
+    #[test]
+    fn stacked_sections_stale_override_falls_back_to_current_section() {
+        // A session pinned (section_override) to a section that no longer
+        // exists in config must fall back to its valid current_section, not
+        // be dumped into In Progress.
+        let project_id = ProjectId::new();
+        let mut s = make_session_in_section("s", "s", 0, "Open");
+        s.project_id = project_id;
+        s.section_override = Some("Deleted Section".to_string());
+
+        let state = appstate_from(vec![s.clone()]);
+        let sections = vec![section_named("Open"), section_named("Review")];
+        let items = build_stacked_section_items(
+            &state,
+            &sections,
+            None,
+            &HashMap::new(),
+            &std::collections::HashSet::new(),
+        );
+
+        // Walk items tracking the enclosing section header, then read off
+        // which header the session row landed under.
+        let mut current_header: Option<String> = None;
+        let mut landed: Option<String> = None;
+        for item in &items {
+            match item {
+                SessionListItem::SectionHeader { name, .. } => {
+                    current_header = Some(name.clone());
+                }
+                SessionListItem::Worktree { id, .. } if *id == s.id => {
+                    landed = current_header.clone();
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            landed.as_deref(),
+            Some("Open"),
+            "stale override should defer to current_section, not In Progress"
         );
     }
 

@@ -228,6 +228,20 @@ impl App {
                     let files = self.ui_state.review_file_list_rect;
                     if matches!(self.ui_state.modal, Modal::ReviewDiff(_)) {
                         let (col, row) = (mouse.column, mouse.row);
+                        // A footer button replays the key it labels through the
+                        // normal review key path (which expects the modal to be
+                        // extracted first, exactly like the keyboard dispatch).
+                        if let Some(key) =
+                            super::review::review_button_at(&self.ui_state.review_buttons, col, row)
+                        {
+                            self.ui_state.review_last_click = None;
+                            if let Modal::ReviewDiff(state) =
+                                std::mem::replace(&mut self.ui_state.modal, Modal::None)
+                            {
+                                self.handle_review_key(key, state).await;
+                            }
+                            return;
+                        }
                         let mut selected_file = false;
                         if let Modal::ReviewDiff(state) = &mut self.ui_state.modal {
                             let in_files = files.is_some_and(|r| {
@@ -345,19 +359,46 @@ impl App {
 
         match &mut self.ui_state.modal {
             Modal::Input {
-                value, on_submit, ..
+                value,
+                on_submit,
+                program_picker,
+                ..
             } => match key.code {
                 KeyCode::Enter => {
                     let action = on_submit.clone();
                     let value = value.value().to_string();
+                    let program = program_picker.as_ref().and_then(|p| p.selected_command());
                     self.ui_state.modal = Modal::None;
-                    self.handle_input_submit(action, value).await;
+                    self.handle_input_submit(action, value, program).await;
                 }
                 KeyCode::Esc => {
                     self.ui_state.modal = Modal::None;
                 }
+                // Tab toggles focus between the name field and the program list.
+                // Shift+Tab is its own reverse, same as Tab.
+                KeyCode::Tab | KeyCode::BackTab => {
+                    if let Some(picker) = program_picker.as_mut() {
+                        picker.focus_program = !picker.focus_program;
+                    }
+                }
+                // Up/Down move the program selection only while the list is
+                // focused; otherwise they're inert (the name field is one line).
+                KeyCode::Up => {
+                    if let Some(picker) = program_picker.as_mut().filter(|p| p.focus_program) {
+                        picker.select_up();
+                    }
+                }
+                KeyCode::Down => {
+                    if let Some(picker) = program_picker.as_mut().filter(|p| p.focus_program) {
+                        picker.select_down();
+                    }
+                }
+                // Other keys edit the name unless the program list has focus.
                 _ => {
-                    super::edit_text_input(value, key);
+                    let name_focused = program_picker.as_ref().is_none_or(|p| !p.focus_program);
+                    if name_focused {
+                        super::edit_text_input(value, key);
+                    }
                 }
             },
 
@@ -639,6 +680,16 @@ impl App {
     async fn handle_left_click(&mut self, col: u16, row: u16) {
         use super::selection::DOUBLE_CLICK_WINDOW;
 
+        // Status-bar action buttons sit outside the list. A hit dispatches the
+        // bound command — behaving exactly like the keypress — and consumes the
+        // click.
+        if let Some(action) = crate::tui::hotkey::button_at(&self.ui_state.action_buttons, col, row)
+        {
+            self.ui_state.last_left_click = None;
+            self.handle_command(UserCommand::from(action)).await;
+            return;
+        }
+
         let Some(idx) = self.list_index_at(col, row) else {
             self.ui_state.last_left_click = None;
             return;
@@ -842,7 +893,7 @@ impl App {
             _ => return,
         };
         self.ui_state.modal = Modal::None;
-        self.handle_input_submit(action, submit_value).await;
+        self.handle_input_submit(action, submit_value, None).await;
     }
 
     /// Mouse wheel while a (non-review) modal is open. List modals move the
@@ -1056,12 +1107,14 @@ impl App {
             }
             UserCommand::ShowSettings => {
                 let rows = self.build_settings_rows(SettingsTab::General);
+                let selected_row = super::settings::first_selectable_from(&rows, 0);
                 self.ui_state.modal = Modal::Settings(SettingsState {
                     tab: SettingsTab::General,
-                    selected_row: 0,
+                    selected_row,
                     editing: None,
                     rows,
                     sections_state: SectionsState::default(),
+                    search: None,
                 });
             }
             UserCommand::Quit => {
@@ -1312,6 +1365,7 @@ mod tests {
             value: value.into(),
             on_submit: InputAction::AddProject,
             existing_branches: None,
+            program_picker: None,
         }
     }
 
