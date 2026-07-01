@@ -58,9 +58,13 @@ resume_session = true
 # default. Enabling (and the check interval) is restart-required; the idle
 # timeout is read live.
 # hibernate_enabled = false
-# Idle duration (seconds) before an eligible session is hibernated. Minimum 60.
+# Idle duration (seconds) before an eligible session is hibernated. The in-app
+# settings editor enforces a minimum of 60; hand-edited values here are used
+# as-is.
 # hibernate_idle_timeout_secs = 1800
-# Interval (seconds) between hibernation policy checks. Minimum 10.
+# Interval (seconds) between hibernation policy checks. The in-app settings
+# editor enforces a minimum of 10; hand-edited values here are used as-is, and
+# 0 disables the loop entirely.
 # hibernate_check_interval_secs = 60
 
 # Launch sessions inside `nix develop` when the project has a `flake.nix` at
@@ -227,10 +231,11 @@ conversation is preserved) the next time you attach.
 
 A session counts as **idle** only when all of these hold:
 
-- its agent is `Idle` — a `Working` or `WaitingForInput` (pending approval)
-  session is never hibernated;
+- its agent is `Idle` — a `Working`, `WaitingForInput` (pending approval), or
+  momentarily undetectable session is never hibernated;
 - no tmux client is attached to it, and it wasn't attached within the last
-  check interval;
+  check interval or 30 seconds, whichever is longer (so recent attaches are
+  protected slightly longer when the check interval is set below 30s);
 - `keep_alive` is off for that session.
 
 **Waking is automatic**: attaching (`Enter`) recreates the tmux session and
