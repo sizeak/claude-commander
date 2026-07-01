@@ -69,6 +69,9 @@ impl CommanderService {
         let comments = Arc::new(CommentStore::new(data_dir.join("comments")));
         let reviewed = Arc::new(ReviewedStore::new(data_dir.join("reviewed")));
         let telemetry = init_telemetry(&config_store, &store, &frontend);
+        // Start the idle-hibernation policy loop. No-op unless enabled in config
+        // and a tokio runtime is present, so one-shot CLI paths are unaffected.
+        manager.spawn_hibernation_loop(telemetry.clone());
         Self {
             manager,
             store,

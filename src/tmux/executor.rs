@@ -237,6 +237,24 @@ impl TmuxExecutor {
         Ok(output.trim() == "1")
     }
 
+    /// Whether any client is currently attached to the session. Used by the
+    /// hibernation policy to avoid stopping a session the user is viewing.
+    /// `#{session_attached}` is the count of attached clients, so any non-zero
+    /// value means attached. Callers should treat an `Err` conservatively (as
+    /// attached) so a detection failure never triggers hibernation.
+    pub async fn is_session_attached(&self, session_name: &str) -> Result<bool> {
+        let output = self
+            .execute(&[
+                "display-message",
+                "-p",
+                "-t",
+                session_name,
+                "#{session_attached}",
+            ])
+            .await?;
+        Ok(output.trim().parse::<u32>().unwrap_or(0) > 0)
+    }
+
     /// Send keys to a tmux session
     pub async fn send_keys(&self, session_name: &str, keys: &str) -> Result<()> {
         self.execute(&["send-keys", "-t", session_name, keys])

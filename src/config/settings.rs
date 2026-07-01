@@ -111,6 +111,24 @@ pub struct Config {
     /// Interval in milliseconds for polling agent state (Working/Idle/Waiting) (0 = disabled)
     pub agent_state_poll_interval_ms: u64,
 
+    /// Enable automatic hibernation of idle sessions: a background loop stops
+    /// the tmux process (freeing ~400MB per idle `claude`) for sessions that
+    /// have been idle past `hibernate_idle_timeout_secs`, keeping the worktree
+    /// and metadata. The session transparently resumes on next attach.
+    /// Disabled by default.
+    #[serde(default)]
+    pub hibernate_enabled: bool,
+
+    /// Idle duration in seconds before an eligible session is hibernated. A
+    /// session counts as idle only while its agent is Idle (not Working or
+    /// WaitingForInput) and no tmux client is attached. Default 1800 (30 min).
+    #[serde(default = "default_hibernate_idle_timeout_secs")]
+    pub hibernate_idle_timeout_secs: u64,
+
+    /// Interval in seconds between hibernation policy checks. Default 60.
+    #[serde(default = "default_hibernate_check_interval_secs")]
+    pub hibernate_check_interval_secs: u64,
+
     /// When true, render PR labels as colored text on the default background
     /// (the pre-pill behavior). When false (default), PR labels render as a
     /// pill — colored background block with contrasting text — so they stand
@@ -388,6 +406,9 @@ impl Default for Config {
             nix_develop: true,
             state_sync_interval_ms: 2000,
             agent_state_poll_interval_ms: 3000,
+            hibernate_enabled: false,
+            hibernate_idle_timeout_secs: default_hibernate_idle_timeout_secs(),
+            hibernate_check_interval_secs: default_hibernate_check_interval_secs(),
             invert_pr_label_color: false,
             show_session_program: false,
             dim_unfocused_preview: true,
@@ -416,6 +437,14 @@ impl Default for Config {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_hibernate_idle_timeout_secs() -> u64 {
+    1800
+}
+
+fn default_hibernate_check_interval_secs() -> u64 {
+    60
 }
 
 fn default_pr_review_labels() -> Vec<String> {
@@ -1009,6 +1038,24 @@ show_session_program = false
         assert!(!config.commander_enabled);
         assert!(config.commander_program.is_none());
         assert!(config.commander_dir.is_none());
+    }
+
+    #[test]
+    fn test_hibernation_defaults() {
+        let config = Config::default();
+        assert!(!config.hibernate_enabled);
+        assert_eq!(config.hibernate_idle_timeout_secs, 1800);
+        assert_eq!(config.hibernate_check_interval_secs, 60);
+    }
+
+    #[test]
+    fn test_hibernation_fields_default_when_absent_from_toml() {
+        // A config file written before this feature omits the fields; they must
+        // fall back to the defaults rather than failing to parse.
+        let config: Config = toml::from_str("default_program = \"claude\"").unwrap();
+        assert!(!config.hibernate_enabled);
+        assert_eq!(config.hibernate_idle_timeout_secs, 1800);
+        assert_eq!(config.hibernate_check_interval_secs, 60);
     }
 
     #[test]
