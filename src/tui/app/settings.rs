@@ -211,17 +211,22 @@ impl App {
                 vec![]
             }
             SettingsTab::Keybindings => {
+                // Grouped into logical sections (see `BindableAction::section`),
+                // each preceded by a non-selectable header row and a blank
+                // spacer so the long list is easy to scan.
                 let kb = &self.config.keybindings;
-                BindableAction::ALL
-                    .iter()
-                    .map(|&action| {
-                        SettingsRow::text(
+                let mut rows = Vec::new();
+                for (section, actions) in kb.sections() {
+                    rows.push(SettingsRow::header(section));
+                    for (action, keys) in actions {
+                        rows.push(SettingsRow::text(
                             action.description(),
-                            kb.keys_display(action),
+                            keys,
                             action.config_name(),
-                        )
-                    })
-                    .collect()
+                        ));
+                    }
+                }
+                with_section_spacers(rows)
             }
             SettingsTab::Theme => {
                 // Show the current resolved color for each overridable field,
@@ -370,6 +375,44 @@ impl App {
         footer_area: Rect,
         state: &SettingsState,
     ) {
+        // When the Keybindings search box is focused, reserve the top line for
+        // the filter input and shrink the list below it.
+        let rows_area = if let Some(query) = &state.search {
+            let search_area = Rect {
+                height: 1,
+                ..rows_area
+            };
+            let prompt = format!("/{}", super::input_with_caret(query));
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    prompt,
+                    Style::default()
+                        .fg(self.theme.text_accent)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                search_area,
+            );
+            Rect {
+                y: rows_area.y + 1,
+                height: rows_area.height.saturating_sub(1),
+                ..rows_area
+            }
+        } else {
+            rows_area
+        };
+
+        if state.rows.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "  (no matching shortcuts)",
+                    Style::default().fg(self.theme.text_secondary),
+                )),
+                rows_area,
+            );
+            self.render_settings_footer(frame, footer_area, state);
+            return;
+        }
+
         let label_width = settings_label_width(&state.rows, rows_area.width);
         let value_width = rows_area.width.saturating_sub(label_width + 3);
 
@@ -416,6 +459,26 @@ impl App {
                 && screen_idx > picker_screen_row
                 && screen_idx < picker_screen_row + picker_row_count
             {
+                continue;
+            }
+
+            // Section headers span the full width and are never selectable.
+            if matches!(row.kind, SettingsRowKind::Header) {
+                let header_area = Rect {
+                    x: rows_area.x,
+                    y,
+                    width: rows_area.width,
+                    height: 1,
+                };
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        row.label.clone(),
+                        Style::default()
+                            .fg(self.theme.text_accent)
+                            .add_modifier(Modifier::BOLD),
+                    )),
+                    header_area,
+                );
                 continue;
             }
 
@@ -490,6 +553,8 @@ impl App {
                         }
                     }
                     SettingsRowKind::Text(text) => text.clone(),
+                    // Headers `continue` above and never reach the value column.
+                    SettingsRowKind::Header => String::new(),
                 };
 
                 let val_style = if !matches!(row.kind, SettingsRowKind::Toggle(_))
@@ -553,17 +618,26 @@ impl App {
             }
         }
 
+        self.render_settings_footer(frame, footer_area, state);
+    }
+
+    /// Footer hint line for the settings rows view.
+    fn render_settings_footer(&self, frame: &mut Frame, footer_area: Rect, state: &SettingsState) {
         let selected_is_toggle = state
             .rows
             .get(state.selected_row)
             .is_some_and(|r| matches!(r.kind, SettingsRowKind::Toggle(_)));
-        let footer_text = if state.editing.is_some() {
+        let footer_text = if state.search.is_some() {
+            "Type to filter  ↑/↓: navigate  Enter: keep  Esc: clear"
+        } else if state.editing.is_some() {
             match &state.editing {
                 Some(SettingsEditing::OptionPicker { .. }) => {
                     "j/k: navigate  Enter: select  Esc: cancel"
                 }
                 _ => "Enter: save  Esc: cancel",
             }
+        } else if state.tab == SettingsTab::Keybindings {
+            "Tab: switch tab  j/k: navigate  /: search  Esc: close"
         } else if selected_is_toggle {
             "Tab: switch tab  j/k: navigate  Space/Enter: toggle  Esc: close"
         } else {
@@ -1152,6 +1226,24 @@ impl App {
             return;
         }
 
+        // Keybindings-tab search: while the filter box is focused, typing
+        // narrows the list live and the arrows navigate the matches.
+        if state.search.is_some() {
+            self.handle_keybinding_search_key(key, state);
+            return;
+        }
+
+        // `/` opens the search box on the Keybindings tab.
+        if state.tab == SettingsTab::Keybindings
+            && state.editing.is_none()
+            && key.code == KeyCode::Char('/')
+        {
+            state.search = Some(Input::default());
+            state.selected_row = first_selectable_from(&state.rows, 0);
+            self.ui_state.modal = Modal::Settings(state);
+            return;
+        }
+
         if let Some(ref mut editing) = state.editing {
             // Currently editing a field
             match editing {
@@ -1253,19 +1345,11 @@ impl App {
 
             match self.config.keybindings.resolve(&key) {
                 Some(BindableAction::NavigateDown) => {
-                    if !state.rows.is_empty() {
-                        state.selected_row = (state.selected_row + 1) % state.rows.len();
-                    }
+                    state.selected_row = step_selectable(&state.rows, state.selected_row, true);
                     self.ui_state.modal = Modal::Settings(state);
                 }
                 Some(BindableAction::NavigateUp) => {
-                    if !state.rows.is_empty() {
-                        state.selected_row = if state.selected_row == 0 {
-                            state.rows.len() - 1
-                        } else {
-                            state.selected_row - 1
-                        };
-                    }
+                    state.selected_row = step_selectable(&state.rows, state.selected_row, false);
                     self.ui_state.modal = Modal::Settings(state);
                 }
                 Some(BindableAction::Quit) => {
@@ -1277,14 +1361,14 @@ impl App {
                     }
                     KeyCode::Tab => {
                         state.tab = state.tab.next();
-                        state.selected_row = 0;
                         state.rows = self.build_settings_rows(state.tab);
+                        state.selected_row = first_selectable_from(&state.rows, 0);
                         self.ui_state.modal = Modal::Settings(state);
                     }
                     KeyCode::BackTab => {
                         state.tab = state.tab.prev();
-                        state.selected_row = 0;
                         state.rows = self.build_settings_rows(state.tab);
+                        state.selected_row = first_selectable_from(&state.rows, 0);
                         self.ui_state.modal = Modal::Settings(state);
                     }
                     KeyCode::Enter => {
@@ -1333,6 +1417,49 @@ impl App {
                 },
             }
         }
+    }
+
+    /// Handle a keypress while the Keybindings search box is focused. Typing
+    /// filters the shortcut list live; arrows navigate the matches; `Enter`
+    /// keeps the filter and returns to browsing; `Esc` clears it.
+    fn handle_keybinding_search_key(
+        &mut self,
+        key: crossterm::event::KeyEvent,
+        mut state: SettingsState,
+    ) {
+        use crossterm::event::KeyCode;
+
+        match key.code {
+            KeyCode::Esc => {
+                // Clear the filter and restore the full grouped list.
+                state.search = None;
+                state.rows = self.build_settings_rows(state.tab);
+                state.selected_row = first_selectable_from(&state.rows, 0);
+            }
+            KeyCode::Enter => {
+                // Keep the filtered view; drop back to list navigation.
+                state.search = None;
+                state.selected_row = first_selectable_from(&state.rows, state.selected_row);
+            }
+            KeyCode::Down => {
+                state.selected_row = step_selectable(&state.rows, state.selected_row, true);
+            }
+            KeyCode::Up => {
+                state.selected_row = step_selectable(&state.rows, state.selected_row, false);
+            }
+            _ => {
+                if let Some(input) = state.search.as_mut()
+                    && super::edit_text_input(input, key)
+                {
+                    // Query changed: re-filter from the full grouped list.
+                    let query = input.value().to_string();
+                    let full = self.build_settings_rows(state.tab);
+                    state.rows = filter_keybinding_rows(full, &query);
+                    state.selected_row = first_selectable_from(&state.rows, 0);
+                }
+            }
+        }
+        self.ui_state.modal = Modal::Settings(state);
     }
 
     /// Handle a keypress while the Sections tab is active.
@@ -1842,6 +1969,9 @@ fn settings_label_width(rows: &[SettingsRow], area_width: u16) -> u16 {
 
     let longest = rows
         .iter()
+        // Section headers span the full width, so they don't drive the label
+        // column; only value-bearing rows do.
+        .filter(|r| r.is_selectable())
         .map(|r| r.label.chars().count())
         .max()
         .unwrap_or(0) as u16;
@@ -1851,6 +1981,97 @@ fn settings_label_width(rows: &[SettingsRow], area_width: u16) -> u16 {
     // the label below its floor (on a very narrow terminal labels truncate).
     let cap = area_width.saturating_sub(MIN_VALUE + GAP).max(MIN_LABEL);
     desired.min(cap)
+}
+
+/// Index of the first selectable row at or after `from`, wrapping to the start
+/// if none is found below. Returns `from` when there are no selectable rows.
+fn first_selectable_from(rows: &[SettingsRow], from: usize) -> usize {
+    rows.iter()
+        .enumerate()
+        .skip(from)
+        .find(|(_, r)| r.is_selectable())
+        .or_else(|| rows.iter().enumerate().find(|(_, r)| r.is_selectable()))
+        .map(|(i, _)| i)
+        .unwrap_or(from)
+}
+
+/// Next selectable row from `current` in the given direction, wrapping around
+/// and skipping non-selectable header rows. Returns `current` when there is no
+/// other selectable row.
+fn step_selectable(rows: &[SettingsRow], current: usize, forward: bool) -> usize {
+    let n = rows.len();
+    if n == 0 {
+        return current;
+    }
+    let mut idx = current;
+    for _ in 0..n {
+        idx = if forward {
+            (idx + 1) % n
+        } else {
+            (idx + n - 1) % n
+        };
+        if rows[idx].is_selectable() {
+            return idx;
+        }
+    }
+    current
+}
+
+/// A blank spacer row (an empty-label header) drawn between sections.
+fn is_spacer(row: &SettingsRow) -> bool {
+    matches!(row.kind, SettingsRowKind::Header) && row.label.is_empty()
+}
+
+/// Insert a blank spacer row before every section header except the first, so
+/// the grouped list breathes. Expects a spacer-free list of headers + rows.
+fn with_section_spacers(rows: Vec<SettingsRow>) -> Vec<SettingsRow> {
+    let mut out: Vec<SettingsRow> = Vec::with_capacity(rows.len() + 8);
+    for row in rows {
+        if matches!(row.kind, SettingsRowKind::Header) && !out.is_empty() {
+            out.push(SettingsRow::header(""));
+        }
+        out.push(row);
+    }
+    out
+}
+
+/// Filter grouped keybinding rows to those matching `query` (case-insensitive
+/// fuzzy match against the description and the bound keys). Section headers are
+/// kept only when at least one of their actions survives the filter, and blank
+/// spacers are re-inserted between the surviving sections. An empty query
+/// returns every binding (still grouped and spaced).
+pub(super) fn filter_keybinding_rows(rows: Vec<SettingsRow>, query: &str) -> Vec<SettingsRow> {
+    let query = query.trim();
+    // Work on the spacer-free list so the grouping logic stays simple; spacers
+    // are re-added at the end based on the surviving headers.
+    let rows: Vec<SettingsRow> = rows.into_iter().filter(|r| !is_spacer(r)).collect();
+    if query.is_empty() {
+        return with_section_spacers(rows);
+    }
+    let matches = |row: &SettingsRow| {
+        crate::fuzzy::fuzzy_score(&row.label, query).is_some()
+            || crate::fuzzy::fuzzy_score(row.text_value(), query).is_some()
+    };
+
+    let mut out: Vec<SettingsRow> = Vec::new();
+    for row in rows {
+        if row.is_selectable() {
+            if matches(&row) {
+                out.push(row);
+            }
+        } else {
+            // Drop the previous header if it ended up with no matching children.
+            if out.last().is_some_and(|r| !r.is_selectable()) {
+                out.pop();
+            }
+            out.push(row);
+        }
+    }
+    // A trailing header with no children (last section didn't match) is dropped.
+    if out.last().is_some_and(|r| !r.is_selectable()) {
+        out.pop();
+    }
+    with_section_spacers(out)
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
@@ -1947,6 +2168,94 @@ mod tests {
         assert_eq!(truncate_str("short", 10), "short");
         assert_eq!(truncate_str("longer-name", 7), "longer…");
         assert_eq!(truncate_str("ab", 1), "…");
+    }
+
+    fn keybinding_rows() -> Vec<SettingsRow> {
+        vec![
+            SettingsRow::header("Navigation"),
+            SettingsRow::text("Navigate up", "k, Up", "navigate_up"),
+            SettingsRow::text("Navigate down", "j, Down", "navigate_down"),
+            SettingsRow::header("Sessions"),
+            SettingsRow::text("Delete/kill session", "d", "delete_session"),
+        ]
+    }
+
+    #[test]
+    fn first_selectable_skips_leading_header() {
+        let rows = keybinding_rows();
+        // Row 0 is a header; the first selectable row is index 1.
+        assert_eq!(first_selectable_from(&rows, 0), 1);
+        // From a header index, the next selectable is found forward.
+        assert_eq!(first_selectable_from(&rows, 3), 4);
+    }
+
+    #[test]
+    fn step_selectable_skips_headers_and_wraps() {
+        let rows = keybinding_rows();
+        // From "Navigate down" (2), forward skips the "Sessions" header (3).
+        assert_eq!(step_selectable(&rows, 2, true), 4);
+        // Forward from the last row wraps past the leading header to row 1.
+        assert_eq!(step_selectable(&rows, 4, true), 1);
+        // Backward from row 1 wraps to the last selectable row, skipping headers.
+        assert_eq!(step_selectable(&rows, 1, false), 4);
+    }
+
+    #[test]
+    fn filter_matches_description_and_keys() {
+        // Matches on the description text.
+        let out = filter_keybinding_rows(keybinding_rows(), "delete");
+        assert_eq!(out.len(), 2); // "Sessions" header + the delete row
+        assert!(matches!(out[0].kind, SettingsRowKind::Header));
+        assert_eq!(out[0].label, "Sessions");
+        assert_eq!(out[1].field_key, "delete_session");
+
+        // Matches on the bound keys ("Up" belongs to navigate_up).
+        let out = filter_keybinding_rows(keybinding_rows(), "Up");
+        assert_eq!(out[0].label, "Navigation");
+        assert!(out.iter().any(|r| r.field_key == "navigate_up"));
+    }
+
+    #[test]
+    fn filter_drops_empty_section_headers() {
+        // A query that hits nothing yields no rows (no orphan headers).
+        let out = filter_keybinding_rows(keybinding_rows(), "zzzznomatch");
+        assert!(out.is_empty());
+
+        // A query hitting only Navigation drops the Sessions header entirely.
+        let out = filter_keybinding_rows(keybinding_rows(), "navigate");
+        assert!(out.iter().all(|r| r.label != "Sessions"));
+        assert_eq!(out[0].label, "Navigation");
+    }
+
+    #[test]
+    fn filter_empty_query_returns_all_rows() {
+        // An empty query keeps every binding; only presentational spacers are
+        // added between sections.
+        let rows = keybinding_rows();
+        let selectable = rows.iter().filter(|r| r.is_selectable()).count();
+        let out = filter_keybinding_rows(rows, "   ");
+        assert_eq!(out.iter().filter(|r| r.is_selectable()).count(), selectable);
+        // Two sections → exactly one blank spacer between them.
+        assert_eq!(out.iter().filter(|r| is_spacer(r)).count(), 1);
+    }
+
+    #[test]
+    fn spacers_separate_sections_but_not_the_first() {
+        let rows = with_section_spacers(keybinding_rows());
+        // No leading spacer.
+        assert!(!is_spacer(&rows[0]));
+        assert_eq!(rows[0].label, "Navigation");
+        // Exactly one spacer, and it sits immediately before the second header.
+        let spacer_positions: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| is_spacer(r))
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(spacer_positions.len(), 1);
+        let s = spacer_positions[0];
+        assert!(matches!(rows[s + 1].kind, SettingsRowKind::Header));
+        assert_eq!(rows[s + 1].label, "Sessions");
     }
 
     #[test]

@@ -1112,6 +1112,7 @@ impl App {
                     editing: None,
                     rows,
                     sections_state: SectionsState::default(),
+                    search: None,
                 });
             }
             UserCommand::Quit => {
