@@ -9,6 +9,7 @@
 mod app;
 mod digit_accumulator;
 mod event;
+pub mod hotkey;
 mod path_completer;
 mod syntax_highlight;
 pub mod theme;
