@@ -335,6 +335,47 @@ mod tests {
     }
 
     #[test]
+    fn test_restart_required_true_when_hibernate_fields_change() {
+        // The hibernation loop is spawned once, with a fixed interval, at
+        // construction — so enabling it or changing the check interval at
+        // runtime must surface the restart-required warning. (The idle timeout
+        // is read live and is asserted hot-reloadable below.)
+        for mutate in [
+            |c: &mut Config| c.hibernate_enabled = true,
+            |c: &mut Config| c.hibernate_check_interval_secs = 30,
+        ] {
+            let dir = TempDir::new().unwrap();
+            let config_path = dir.path().join("config.toml");
+            let config = Config::default();
+            write_config(&config_path, &config);
+            let store = ConfigStore::with_path(config, config_path);
+
+            store.mutate(mutate).unwrap();
+
+            assert!(store.restart_required());
+        }
+    }
+
+    #[test]
+    fn test_restart_not_required_when_hibernate_timeout_changes() {
+        // The idle timeout is read live each tick, so changing it must NOT
+        // demand a restart.
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let config = Config::default();
+        write_config(&config_path, &config);
+        let store = ConfigStore::with_path(config, config_path);
+
+        store
+            .mutate(|c| {
+                c.hibernate_idle_timeout_secs = 60;
+            })
+            .unwrap();
+
+        assert!(!store.restart_required());
+    }
+
+    #[test]
     fn test_restart_required_reverts_when_changed_back() {
         let dir = TempDir::new().unwrap();
         let config_path = dir.path().join("config.toml");
