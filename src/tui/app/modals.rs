@@ -20,6 +20,130 @@ fn place_input_cursor(
     frame.set_cursor_position(((text_x + col).min(max_x), text_y));
 }
 
+/// Build the body lines for the New Session (`Modal::Input`) dialog.
+///
+/// Pure so it can be unit-tested without a terminal. Laid out like the settings
+/// modal: each picker is an accent-coloured section header followed by its rows,
+/// and the highlighted row is drawn as a full-width `theme.selection()` bar
+/// (the same subtle background the settings list uses) rather than a leading
+/// glyph — this keeps the `❯` caret exclusively for text-input lines (the name
+/// field and the project filter) so it never competes with the list selection.
+/// `width` is the inner content width, used to pad the selection bar. Returns
+/// the lines plus the row index (relative to the inner area) of the project
+/// filter input, so the caller can place the real cursor there when the project
+/// field has focus.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn build_input_modal_lines(
+    prompt: &str,
+    value: &str,
+    hint: Option<&str>,
+    project_picker: Option<&ProjectPicker>,
+    program_picker: Option<&ProgramPicker>,
+    focus: InputFocus,
+    max_rows: usize,
+    width: u16,
+    theme: &Theme,
+) -> (Vec<Line<'static>>, Option<u16>) {
+    let header_style = Style::default()
+        .fg(theme.text_accent)
+        .add_modifier(Modifier::BOLD);
+    let dim_style = Style::default().add_modifier(Modifier::DIM);
+    let selection_style = theme.selection();
+
+    // A single list row, indented two columns. The selected row becomes a
+    // full-width bar (text padded to `width`) so the subtle selection
+    // background reads as a clean band, mirroring the settings list.
+    let row_line = |text: String, selected: bool| -> Line<'static> {
+        if selected {
+            let padded = format!("  {text:<pad$}", pad = (width as usize).saturating_sub(2));
+            Line::from(Span::styled(padded, selection_style))
+        } else {
+            Line::from(vec![Span::raw("  "), Span::styled(text, dim_style)])
+        }
+    };
+    // A section header: accent when its field is focused, dim otherwise, with a
+    // trailing hint in the muted colour either way.
+    let section_header = |label: &str, hint: &str, focused: bool| -> Line<'static> {
+        let label_style = if focused { header_style } else { dim_style };
+        Line::from(vec![
+            Span::styled(label.to_string(), label_style),
+            Span::styled(hint.to_string(), dim_style),
+        ])
+    };
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(prompt.to_string()),
+        Line::from(""),
+        Line::from(format!("❯ {value}")),
+    ];
+    if let Some(h) = hint {
+        lines.push(Line::from(Span::styled(
+            h.to_string(),
+            Style::default()
+                .fg(theme.modal_info)
+                .add_modifier(Modifier::ITALIC),
+        )));
+    }
+
+    // Track the filter-input row so the caller can place the cursor there while
+    // the project field is focused.
+    let mut project_filter_row: Option<u16> = None;
+    if let Some(picker) = project_picker {
+        lines.push(Line::from(""));
+        lines.push(section_header(
+            "Project",
+            "  (Tab to switch, ↑/↓ to choose, type to filter)",
+            focus == InputFocus::Project,
+        ));
+        project_filter_row = Some(lines.len() as u16);
+        if picker.filter.is_empty() {
+            lines.push(Line::from(vec![
+                Span::raw("❯ "),
+                Span::styled("type to filter…", dim_style),
+            ]));
+        } else {
+            lines.push(Line::from(format!("❯ {}", picker.filter)));
+        }
+
+        if picker.filtered.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  (no matching projects)",
+                dim_style,
+            )));
+        } else {
+            // Draw the current scroll window (kept in view by
+            // `ProjectPicker::adjust_scroll`).
+            let start = picker.scroll;
+            let end = (start + max_rows).min(picker.filtered.len());
+            for row in start..end {
+                let choice = &picker.choices[picker.filtered[row]];
+                lines.push(row_line(choice.name.clone(), row == picker.selected));
+            }
+        }
+    }
+
+    if let Some(picker) = program_picker {
+        lines.push(Line::from(""));
+        lines.push(section_header(
+            "Program",
+            "  (Tab to switch, ↑/↓ to choose)",
+            focus == InputFocus::Program,
+        ));
+        for (i, entry) in picker.choices.iter().enumerate() {
+            // Append the command in parens only when it differs from the label
+            // (the synthesised entry has label == command).
+            let text = if entry.label == entry.command {
+                entry.label.clone()
+            } else {
+                format!("{}  ({})", entry.label, entry.command)
+            };
+            lines.push(row_line(text, i == picker.selected));
+        }
+    }
+
+    (lines, project_filter_row)
+}
+
 impl App {
     pub(super) fn render_modal(&mut self, frame: &mut Frame, area: Rect) {
         // Record the review body geometry (depends only on `area`) so mouse
@@ -117,87 +241,17 @@ impl App {
                 let inner = block.inner(modal_area);
                 frame.render_widget(block, modal_area);
 
-                let selected_style = Style::default()
-                    .fg(self.theme.modal_warning)
-                    .add_modifier(Modifier::BOLD);
-                let dim_style = Style::default().add_modifier(Modifier::DIM);
-
-                let mut lines: Vec<Line> = vec![
-                    Line::from(prompt.as_str()),
-                    Line::from(""),
-                    Line::from(format!("❯ {}", value.value())),
-                ];
-                if let Some(h) = hint {
-                    lines.push(Line::from(Span::styled(
-                        h,
-                        Style::default()
-                            .fg(self.theme.modal_info)
-                            .add_modifier(Modifier::ITALIC),
-                    )));
-                }
-
-                // Track the filter-input row so we can place the cursor there
-                // while the project field is focused.
-                let mut project_filter_row: Option<u16> = None;
-                if let Some(picker) = project_picker {
-                    let focused = *focus == InputFocus::Project;
-                    lines.push(Line::from(""));
-                    let label_style = if focused { selected_style } else { dim_style };
-                    lines.push(Line::from(vec![
-                        Span::styled("Project", label_style),
-                        Span::styled(
-                            "  (Tab to switch, ↑/↓ to choose, type to filter)",
-                            dim_style,
-                        ),
-                    ]));
-                    project_filter_row = Some(lines.len() as u16);
-                    lines.push(Line::from(format!("❯ {}", picker.filter)));
-
-                    if picker.filtered.is_empty() {
-                        lines.push(Line::from(Span::styled(
-                            "  (no matching projects)",
-                            dim_style,
-                        )));
-                    } else {
-                        // Draw the current scroll window (kept in view by
-                        // `ProjectPicker::adjust_scroll`).
-                        let start = picker.scroll;
-                        let end = (start + max_rows).min(picker.filtered.len());
-                        for row in start..end {
-                            let choice = &picker.choices[picker.filtered[row]];
-                            let selected = row == picker.selected;
-                            let marker = if selected { "❯ " } else { "  " };
-                            let style = if selected { selected_style } else { dim_style };
-                            lines.push(Line::from(Span::styled(
-                                format!("{marker}{}", choice.name),
-                                style,
-                            )));
-                        }
-                    }
-                }
-
-                if let Some(picker) = program_picker {
-                    let focused = *focus == InputFocus::Program;
-                    lines.push(Line::from(""));
-                    let label_style = if focused { selected_style } else { dim_style };
-                    lines.push(Line::from(vec![
-                        Span::styled("Program", label_style),
-                        Span::styled("  (Tab to switch, ↑/↓ to choose)", dim_style),
-                    ]));
-                    for (i, entry) in picker.choices.iter().enumerate() {
-                        let selected = i == picker.selected;
-                        let marker = if selected { "❯ " } else { "  " };
-                        let style = if selected { selected_style } else { dim_style };
-                        // Append the command in parens only when it differs from
-                        // the label (the synthesised entry has label == command).
-                        let text = if entry.label == entry.command {
-                            format!("{marker}{}", entry.label)
-                        } else {
-                            format!("{marker}{}  ({})", entry.label, entry.command)
-                        };
-                        lines.push(Line::from(Span::styled(text, style)));
-                    }
-                }
+                let (lines, project_filter_row) = build_input_modal_lines(
+                    prompt,
+                    value.value(),
+                    hint.as_deref(),
+                    project_picker.as_ref(),
+                    program_picker.as_ref(),
+                    *focus,
+                    max_rows,
+                    inner.width,
+                    &self.theme,
+                );
                 frame.render_widget(Paragraph::new(lines), inner);
                 // Place the real cursor in whichever text field has focus: the
                 // name input (third line) or the project filter input.
@@ -1007,4 +1061,239 @@ pub(super) fn modal_list_index_at(
     }
     let idx = scroll + (row - rows.y) as usize;
     (idx < len).then_some(idx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::build_input_modal_lines;
+    use crate::config::ProgramEntry;
+    use crate::session::ProjectId;
+    use crate::tui::app::{InputFocus, ProgramPicker, ProjectChoice, ProjectPicker};
+    use crate::tui::theme::Theme;
+    use ratatui::text::Line;
+
+    const MAX_ROWS: usize = 8;
+    const WIDTH: u16 = 40;
+
+    fn line_text(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    /// Number of body lines that begin with the `❯` input caret. This should
+    /// only ever count text-input fields (name + project filter), never list
+    /// rows — the invariant that fixes the confusing "double ❯".
+    fn caret_lines(lines: &[Line]) -> usize {
+        lines
+            .iter()
+            .filter(|l| line_text(l).starts_with('❯'))
+            .count()
+    }
+
+    /// The style of the list row whose (trimmed) text is `name`, taken from the
+    /// span that actually carries the text. A selected row is one padded span
+    /// styled with the selection bar; an unselected row's text lives in its own
+    /// dim span.
+    fn row_style(lines: &[Line], name: &str) -> Option<ratatui::style::Style> {
+        lines
+            .iter()
+            .find(|l| line_text(l).trim() == name)
+            .and_then(|l| l.spans.iter().find(|s| s.content.contains(name)))
+            .map(|s| s.style)
+    }
+
+    fn project_choices(names: &[&str]) -> Vec<ProjectChoice> {
+        names
+            .iter()
+            .map(|n| ProjectChoice {
+                id: ProjectId::new(),
+                name: n.to_string(),
+                repo_path: std::path::PathBuf::from(format!("/repos/{n}")),
+            })
+            .collect()
+    }
+
+    fn program_picker(entries: &[(&str, &str)], selected: usize) -> ProgramPicker {
+        ProgramPicker {
+            choices: entries
+                .iter()
+                .map(|(label, command)| ProgramEntry {
+                    label: label.to_string(),
+                    command: command.to_string(),
+                })
+                .collect(),
+            selected,
+        }
+    }
+
+    #[test]
+    fn name_only_modal_has_a_single_caret() {
+        let theme = Theme::basic();
+        let (lines, filter_row) = build_input_modal_lines(
+            "Enter session name:",
+            "my-feature",
+            None,
+            None,
+            None,
+            InputFocus::Name,
+            MAX_ROWS,
+            WIDTH,
+            &theme,
+        );
+        assert_eq!(filter_row, None);
+        assert_eq!(caret_lines(&lines), 1);
+        assert!(lines.iter().any(|l| line_text(l) == "❯ my-feature"));
+    }
+
+    #[test]
+    fn project_rows_use_highlight_not_a_caret() {
+        let theme = Theme::basic();
+        let choices = project_choices(&["alpha", "beta", "gamma"]);
+        let selected_id = choices[1].id;
+        let picker = ProjectPicker::new(choices, selected_id);
+
+        let (lines, filter_row) = build_input_modal_lines(
+            "Enter session name:",
+            "",
+            None,
+            Some(&picker),
+            None,
+            InputFocus::Project,
+            MAX_ROWS,
+            WIDTH,
+            &theme,
+        );
+
+        // Exactly two carets: the name field and the project filter. The
+        // selected project row must NOT add a third — that was the confusing
+        // "double ❯".
+        assert_eq!(caret_lines(&lines), 2);
+        assert!(!lines.iter().any(|l| line_text(l).starts_with("❯ beta")));
+
+        // The selected row ("beta") is drawn as the settings-style selection
+        // bar (a background colour); siblings have no background.
+        let selected = row_style(&lines, "beta").expect("selected row rendered");
+        assert_eq!(selected.bg, theme.selection().bg);
+        assert!(selected.bg.is_some());
+        let sibling = row_style(&lines, "alpha").expect("sibling row rendered");
+        assert!(sibling.bg.is_none());
+
+        // The reported filter row is the `❯ …` filter input line.
+        let fr = filter_row.expect("project filter row reported") as usize;
+        assert!(line_text(&lines[fr]).starts_with('❯'));
+    }
+
+    #[test]
+    fn empty_filter_shows_placeholder() {
+        let theme = Theme::basic();
+        let choices = project_choices(&["alpha", "beta"]);
+        let id = choices[0].id;
+        let picker = ProjectPicker::new(choices, id);
+
+        let (lines, _) = build_input_modal_lines(
+            "Enter session name:",
+            "",
+            None,
+            Some(&picker),
+            None,
+            InputFocus::Project,
+            MAX_ROWS,
+            WIDTH,
+            &theme,
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| line_text(l).contains("type to filter…"))
+        );
+    }
+
+    #[test]
+    fn typed_filter_replaces_placeholder() {
+        let theme = Theme::basic();
+        let choices = project_choices(&["alpha", "beta"]);
+        let id = choices[0].id;
+        let mut picker = ProjectPicker::new(choices, id);
+        picker.filter = "al".to_string();
+        picker.apply_filter();
+
+        let (lines, _) = build_input_modal_lines(
+            "Enter session name:",
+            "",
+            None,
+            Some(&picker),
+            None,
+            InputFocus::Project,
+            MAX_ROWS,
+            WIDTH,
+            &theme,
+        );
+        assert!(lines.iter().any(|l| line_text(l) == "❯ al"));
+        // The placeholder (ellipsis form) is gone; the label hint's
+        // "…type to filter)" text is a different string and may remain.
+        assert!(
+            !lines
+                .iter()
+                .any(|l| line_text(l).contains("type to filter…"))
+        );
+    }
+
+    #[test]
+    fn no_matches_shows_placeholder_row() {
+        let theme = Theme::basic();
+        let choices = project_choices(&["alpha", "beta"]);
+        let id = choices[0].id;
+        let mut picker = ProjectPicker::new(choices, id);
+        picker.filter = "zzz".to_string();
+        picker.apply_filter();
+
+        let (lines, _) = build_input_modal_lines(
+            "Enter session name:",
+            "",
+            None,
+            Some(&picker),
+            None,
+            InputFocus::Project,
+            MAX_ROWS,
+            WIDTH,
+            &theme,
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| line_text(l).contains("(no matching projects)"))
+        );
+    }
+
+    #[test]
+    fn program_rows_use_highlight_not_a_caret() {
+        let theme = Theme::basic();
+        // Second entry's command differs from its label, so it renders with the
+        // command in parens; the first entry's label == command.
+        let picker = program_picker(&[("claude", "claude"), ("Codex", "codex --yolo")], 1);
+
+        let (lines, filter_row) = build_input_modal_lines(
+            "Enter session name:",
+            "",
+            None,
+            None,
+            Some(&picker),
+            InputFocus::Program,
+            MAX_ROWS,
+            WIDTH,
+            &theme,
+        );
+
+        assert_eq!(filter_row, None);
+        // Only the name field carries a caret — program rows never do.
+        assert_eq!(caret_lines(&lines), 1);
+
+        // Label == command renders just the label (unselected → own dim span).
+        assert!(lines.iter().any(|l| line_text(l) == "  claude"));
+        // Divergent command is shown in parens, and the selected row is drawn as
+        // the selection bar (a background colour).
+        let selected =
+            row_style(&lines, "Codex  (codex --yolo)").expect("selected program row rendered");
+        assert_eq!(selected.bg, theme.selection().bg);
+        assert!(selected.bg.is_some());
+    }
 }
