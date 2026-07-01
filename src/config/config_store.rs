@@ -23,6 +23,15 @@ struct InitSnapshot {
     ui_refresh_fps: u32,
     state_sync_interval_ms: u64,
     commander_enabled: bool,
+    // The web UI server is bound once at startup, so every web_ui_* setting
+    // needs a restart to take effect — track them all for restart_required.
+    web_ui_enabled: bool,
+    web_ui_port: u16,
+    web_ui_auth: crate::config::WebUiAuth,
+    web_ui_password: Option<String>,
+    web_ui_tls_cert: Option<std::path::PathBuf>,
+    web_ui_tls_key: Option<std::path::PathBuf>,
+    web_ui_tls_client_ca: Option<std::path::PathBuf>,
 }
 
 impl InitSnapshot {
@@ -34,6 +43,13 @@ impl InitSnapshot {
             ui_refresh_fps: config.ui_refresh_fps,
             state_sync_interval_ms: config.state_sync_interval_ms,
             commander_enabled: config.commander_enabled,
+            web_ui_enabled: config.web_ui_enabled,
+            web_ui_port: config.web_ui_port,
+            web_ui_auth: config.web_ui_auth,
+            web_ui_password: config.web_ui_password.clone(),
+            web_ui_tls_cert: config.web_ui_tls_cert.clone(),
+            web_ui_tls_key: config.web_ui_tls_key.clone(),
+            web_ui_tls_client_ca: config.web_ui_tls_client_ca.clone(),
         }
     }
 
@@ -44,6 +60,13 @@ impl InitSnapshot {
             && self.ui_refresh_fps == config.ui_refresh_fps
             && self.state_sync_interval_ms == config.state_sync_interval_ms
             && self.commander_enabled == config.commander_enabled
+            && self.web_ui_enabled == config.web_ui_enabled
+            && self.web_ui_port == config.web_ui_port
+            && self.web_ui_auth == config.web_ui_auth
+            && self.web_ui_password == config.web_ui_password
+            && self.web_ui_tls_cert == config.web_ui_tls_cert
+            && self.web_ui_tls_key == config.web_ui_tls_key
+            && self.web_ui_tls_client_ca == config.web_ui_tls_client_ca
     }
 }
 
@@ -112,6 +135,13 @@ impl ConfigStore {
 
     /// Apply a mutation to the config, then persist to disk.
     ///
+    /// Before applying `f`, this re-reads the file if it changed on disk since we
+    /// last touched it, so an edit made elsewhere (another instance, the web UI,
+    /// a hand-edit) is folded in rather than clobbered by our stale in-memory
+    /// copy. Without this, a long-running instance would overwrite external
+    /// changes every time it persisted. The reload + mutate + write all happen
+    /// under the same write lock so the cycle is atomic within this process.
+    ///
     /// Updates the tracked mtime so that `reload_if_changed()` won't
     /// immediately re-read our own write.
     pub fn mutate<F, R>(&self, f: F) -> Result<R>
@@ -120,6 +150,19 @@ impl ConfigStore {
     {
         let result = {
             let mut config = self.config.write().expect("config lock poisoned");
+
+            // Fold in any external change before mutating, so we build on the
+            // current on-disk state instead of overwriting it.
+            let current_mtime = std::fs::metadata(&self.config_path)
+                .and_then(|m| m.modified())
+                .ok();
+            let last = *self.last_mtime.read().expect("mtime lock poisoned");
+            if current_mtime != last
+                && let Ok(disk_config) = self.load_from_disk()
+            {
+                *config = disk_config;
+            }
+
             let result = f(&mut config);
             self.save_to_disk(&config)?;
             result
@@ -269,6 +312,62 @@ mod tests {
 
         // No spurious reload after our own write
         assert!(!store.reload_if_changed().unwrap());
+    }
+
+    /// Read the config straight from a file via the same layered resolution the
+    /// store uses, without going through a ConfigStore (whose constructor would
+    /// capture the current mtime and make reload_if_changed a no-op).
+    fn read_config_file(path: &std::path::Path) -> Config {
+        use figment::{
+            Figment,
+            providers::{Format, Serialized, Toml},
+        };
+        Figment::new()
+            .merge(Serialized::defaults(Config::default()))
+            .merge(Toml::file(path))
+            .extract()
+            .expect("load config from disk")
+    }
+
+    #[test]
+    fn test_mutate_folds_in_external_edit_instead_of_clobbering() {
+        // Regression: a long-running instance must not overwrite a setting that
+        // another instance / the web UI / a hand-edit wrote to disk. mutate()
+        // reloads the changed file before applying its own change, so both
+        // survive.
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+
+        let config = Config::default();
+        write_config(&config_path, &config);
+        let store = ConfigStore::with_path(config, config_path.clone());
+
+        // This store first persists something so its mtime is in sync with disk.
+        store
+            .mutate(|c| c.branch_prefix = "mine".to_string())
+            .unwrap();
+
+        // Meanwhile, an external writer changes a DIFFERENT field on disk.
+        // Sleep so the mtime is guaranteed to differ (filesystem granularity).
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let external = Config {
+            branch_prefix: "mine".to_string(),
+            default_program: "set-by-other-instance".to_string(),
+            ..Config::default()
+        };
+        write_config(&config_path, &external);
+
+        // Our next mutate touches yet another field. It must fold in the external
+        // edit (reload-before-mutate), not wipe it.
+        store.mutate(|c| c.web_ui_port = 9999).unwrap();
+
+        let disk = read_config_file(&config_path);
+        assert_eq!(
+            disk.default_program, "set-by-other-instance",
+            "external edit must be preserved, not clobbered"
+        );
+        assert_eq!(disk.web_ui_port, 9999, "our own edit must be applied");
+        assert_eq!(disk.branch_prefix, "mine", "earlier edit preserved");
     }
 
     #[test]

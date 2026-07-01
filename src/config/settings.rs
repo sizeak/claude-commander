@@ -194,6 +194,62 @@ pub struct Config {
     /// Usage-telemetry settings (on by default, opt-out). See [`TelemetryConfig`].
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+
+    /// Enable the embedded web UI server. When on, an HTTP(S) + WebSocket server
+    /// binds `0.0.0.0:web_ui_port` and lets a browser list, watch, drive, and
+    /// jump into every session. Disabled by default. Access is gated by
+    /// [`Config::web_ui_auth`] — note this is real remote control of all
+    /// terminals, so only expose it on a trusted network, behind a TLS reverse
+    /// proxy / tunnel, or using the built-in mutual-TLS mode.
+    #[serde(default)]
+    pub web_ui_enabled: bool,
+
+    /// Port the web UI server listens on (binds `0.0.0.0`). Defaults to 8420.
+    #[serde(default = "default_web_ui_port")]
+    pub web_ui_port: u16,
+
+    /// How the web UI authenticates clients. See [`WebUiAuth`]. Defaults to
+    /// HTTP Basic auth.
+    #[serde(default)]
+    pub web_ui_auth: WebUiAuth,
+
+    /// Password for the web UI's HTTP Basic auth (username is always `admin`).
+    /// Required when `web_ui_auth = "basic"` — the server refuses to start
+    /// without one rather than generating one (which would rewrite this file).
+    #[serde(default)]
+    pub web_ui_password: Option<String>,
+
+    /// PEM file: the server's TLS certificate (chain). Required when
+    /// `web_ui_auth = "mutual_tls"`.
+    #[serde(default)]
+    pub web_ui_tls_cert: Option<PathBuf>,
+
+    /// PEM file: the server's TLS private key. Required when
+    /// `web_ui_auth = "mutual_tls"`.
+    #[serde(default)]
+    pub web_ui_tls_key: Option<PathBuf>,
+
+    /// PEM file: the CA certificate that client certificates must be signed by.
+    /// Required when `web_ui_auth = "mutual_tls"` — only clients presenting a
+    /// cert chaining to this CA may connect.
+    #[serde(default)]
+    pub web_ui_tls_client_ca: Option<PathBuf>,
+}
+
+/// How the web UI authenticates incoming connections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum WebUiAuth {
+    /// HTTP Basic auth over plain HTTP (username `admin` + [`Config::web_ui_password`]).
+    /// Simple, but credentials travel base64-encoded over an unencrypted
+    /// connection — use only on a trusted network or behind a TLS proxy.
+    #[default]
+    Basic,
+    /// Mutual TLS over HTTPS: the connection is encrypted and every client must
+    /// present a certificate signed by [`Config::web_ui_tls_client_ca`]. The
+    /// certificate is the identity, so there is no password. Strongest option
+    /// for direct network exposure.
+    MutualTls,
 }
 
 /// Conversation-mode (text-to-speech) settings.
@@ -390,12 +446,23 @@ impl Default for Config {
             conversation: ConversationConfig::default(),
             stt: SttConfig::default(),
             telemetry: TelemetryConfig::default(),
+            web_ui_enabled: false,
+            web_ui_port: default_web_ui_port(),
+            web_ui_auth: WebUiAuth::Basic,
+            web_ui_password: None,
+            web_ui_tls_cert: None,
+            web_ui_tls_key: None,
+            web_ui_tls_client_ca: None,
         }
     }
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_web_ui_port() -> u16 {
+    8420
 }
 
 fn default_pr_review_labels() -> Vec<String> {
@@ -1004,6 +1071,68 @@ show_session_program = false
 
         let cfg: Config = toml::from_str("commander_enabled = true\n").unwrap();
         assert!(cfg.commander_enabled);
+    }
+
+    #[test]
+    fn test_web_ui_defaults() {
+        let cfg = Config::default();
+        assert!(!cfg.web_ui_enabled);
+        assert_eq!(cfg.web_ui_port, 8420);
+        assert_eq!(cfg.web_ui_password, None);
+        assert_eq!(cfg.web_ui_auth, WebUiAuth::Basic);
+        assert_eq!(cfg.web_ui_tls_cert, None);
+        assert_eq!(cfg.web_ui_tls_key, None);
+        assert_eq!(cfg.web_ui_tls_client_ca, None);
+    }
+
+    #[test]
+    fn test_web_ui_auth_round_trips_and_defaults_basic() {
+        // Absent → Basic.
+        let cfg: Config = toml::from_str("web_ui_enabled = true\n").unwrap();
+        assert_eq!(cfg.web_ui_auth, WebUiAuth::Basic);
+
+        // snake_case serde for the enum.
+        let cfg: Config = toml::from_str("web_ui_auth = \"mutual_tls\"\n").unwrap();
+        assert_eq!(cfg.web_ui_auth, WebUiAuth::MutualTls);
+
+        // Full round-trip with TLS paths.
+        let cfg = Config {
+            web_ui_auth: WebUiAuth::MutualTls,
+            web_ui_tls_cert: Some("/certs/server.pem".into()),
+            web_ui_tls_key: Some("/certs/server.key".into()),
+            web_ui_tls_client_ca: Some("/certs/ca.pem".into()),
+            ..Config::default()
+        };
+        let restored: Config = toml::from_str(&toml::to_string_pretty(&cfg).unwrap()).unwrap();
+        assert_eq!(restored.web_ui_auth, WebUiAuth::MutualTls);
+        assert_eq!(restored.web_ui_tls_cert, Some("/certs/server.pem".into()));
+        assert_eq!(restored.web_ui_tls_key, Some("/certs/server.key".into()));
+        assert_eq!(restored.web_ui_tls_client_ca, Some("/certs/ca.pem".into()));
+    }
+
+    #[test]
+    fn test_web_ui_port_defaults_when_absent() {
+        // Missing in TOML → falls back to the default helper, not 0.
+        let cfg: Config = toml::from_str("web_ui_enabled = true\n").unwrap();
+        assert!(cfg.web_ui_enabled);
+        assert_eq!(cfg.web_ui_port, 8420);
+    }
+
+    #[test]
+    fn test_web_ui_fields_round_trip() {
+        let cfg = Config {
+            web_ui_enabled: true,
+            web_ui_port: 9000,
+            web_ui_password: Some("hunter2".to_string()),
+            ..Config::default()
+        };
+
+        let toml = toml::to_string_pretty(&cfg).unwrap();
+        let restored: Config = toml::from_str(&toml).unwrap();
+
+        assert!(restored.web_ui_enabled);
+        assert_eq!(restored.web_ui_port, 9000);
+        assert_eq!(restored.web_ui_password.as_deref(), Some("hunter2"));
     }
 
     #[test]

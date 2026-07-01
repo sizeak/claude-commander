@@ -16,6 +16,14 @@ use tracing::{debug, instrument, warn};
 
 use crate::error::{Result, TmuxError};
 
+/// Encode bytes as lowercase two-digit hex strings, the form tmux's
+/// `send-keys -H` expects (one value per byte). Pulled out of
+/// [`TmuxExecutor::send_raw_bytes`] so the encoding is unit-testable without
+/// spawning tmux.
+fn bytes_to_tmux_hex(bytes: &[u8]) -> Vec<String> {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 /// Default maximum concurrent tmux commands
 pub const DEFAULT_MAX_CONCURRENT: usize = 16;
 
@@ -244,6 +252,80 @@ impl TmuxExecutor {
         Ok(())
     }
 
+    /// Resize a tmux session's window to `cols`×`rows`.
+    ///
+    /// Sets `window-size manual` first so the size sticks even when no client is
+    /// attached (the default `latest`/`largest` policy ignores `resize-window`
+    /// on a detached session). Used by the web UI to make the tmux pane match
+    /// the browser's xterm.js grid, so `capture-pane` output wraps correctly
+    /// instead of being laid out for the 200-col default. Clamps to sane bounds.
+    pub async fn resize_window(&self, session_name: &str, cols: u16, rows: u16) -> Result<()> {
+        let cols = cols.clamp(20, 500);
+        let rows = rows.clamp(5, 300);
+        let cols_s = cols.to_string();
+        let rows_s = rows.to_string();
+        // `window-size manual` is a window option; set it then resize.
+        self.execute(&[
+            "set-option",
+            "-t",
+            session_name,
+            "-w",
+            "window-size",
+            "manual",
+        ])
+        .await?;
+        self.execute(&[
+            "resize-window",
+            "-t",
+            session_name,
+            "-x",
+            &cols_s,
+            "-y",
+            &rows_s,
+        ])
+        .await?;
+        Ok(())
+    }
+
+    /// Send raw bytes verbatim to a tmux session's pane.
+    ///
+    /// Uses tmux `send-keys -H`, which interprets each argument as a hex byte
+    /// value and writes it directly to the pane with no key-name lookup. This is
+    /// the faithful primitive for a terminal passthrough (e.g. the web UI's
+    /// xterm.js bridge): control characters, escape sequences, arrow keys and
+    /// literal text all round-trip exactly, with none of `send-keys`'s
+    /// "Enter"/"C-c"/space-token interpretation. A no-op for empty input.
+    pub async fn send_raw_bytes(&self, session_name: &str, bytes: &[u8]) -> Result<()> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        // tmux accepts multiple hex values in one send-keys -H invocation.
+        let hex = bytes_to_tmux_hex(bytes);
+        let mut args: Vec<&str> = vec!["send-keys", "-t", session_name, "-H"];
+        args.extend(hex.iter().map(String::as_str));
+        self.execute(&args).await?;
+        Ok(())
+    }
+
+    /// Capture only the *visible* pane (the current screen), with ANSI escape
+    /// sequences preserved (`-e`).
+    ///
+    /// This is the right primitive for a live terminal mirror: it returns
+    /// exactly one screenful sized to the pane's current dimensions, so after
+    /// the web UI resizes the window the snapshot matches the browser's grid.
+    /// (`capture-pane -S -N` would instead return N lines of scrollback, which
+    /// piles up and scrambles a full-repaint renderer.) Colours/styles survive
+    /// so xterm.js renders them. Returns `None` if the session doesn't exist.
+    pub async fn capture_visible_ansi(&self, session_name: &str) -> Result<Option<String>> {
+        if !self.session_exists(session_name).await? {
+            return Ok(None);
+        }
+        Ok(Some(
+            self.execute(&["capture-pane", "-t", session_name, "-p", "-e"])
+                .await?,
+        ))
+    }
+
     /// Configure the status bar for a CC tmux session.
     ///
     /// Shows branch name, optional PR badge, and key hints. Style is set by
@@ -388,6 +470,18 @@ mod tests {
     async fn test_executor_creation() {
         let executor = TmuxExecutor::new();
         assert_eq!(executor.timeout, DEFAULT_TIMEOUT);
+    }
+
+    #[test]
+    fn bytes_to_tmux_hex_encodes_each_byte_two_digits() {
+        // Mixed control + printable + high bytes: "a\r\x1b\xff"
+        let hex = bytes_to_tmux_hex(b"a\r\x1b\xff");
+        assert_eq!(hex, vec!["61", "0d", "1b", "ff"]);
+    }
+
+    #[test]
+    fn bytes_to_tmux_hex_empty_is_empty() {
+        assert!(bytes_to_tmux_hex(b"").is_empty());
     }
 
     #[tokio::test]

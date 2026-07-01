@@ -36,6 +36,7 @@ pub mod session;
 pub mod telemetry;
 pub mod tmux;
 pub mod tui;
+pub mod web;
 
 pub use config::keybindings::editor_trigger_bytes;
 pub use config::{AppState, Config, StateStore};

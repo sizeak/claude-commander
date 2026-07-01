@@ -467,6 +467,31 @@ async fn main() -> Result<()> {
                 println!("State file: {:?}", Config::state_file_path()?);
             }
         }
+
+        Some(Commands::ServeWeb { port, password }) => {
+            // Log to stdout (not the TUI's file) so the listening address and any
+            // generated password are visible in the terminal running the server.
+            setup_logging(cli.debug, false)?;
+
+            // Apply flag overrides on top of file config, and force-enable the
+            // web UI for this run regardless of the persisted flag — the user
+            // explicitly asked to serve it.
+            let mut config = config;
+            config.web_ui_enabled = true;
+            if let Some(p) = port {
+                config.web_ui_port = p;
+            }
+            if let Some(pw) = password {
+                config.web_ui_password = Some(pw);
+            }
+
+            let service =
+                claude_commander::api::CommanderService::for_cli(config.clone(), frontend())?;
+            service.check_tmux().await?;
+
+            info!("Starting headless web UI server v{}", VERSION);
+            claude_commander::web::serve(service, config).await?;
+        }
     }
 
     Ok(())

@@ -400,15 +400,17 @@ pub enum SettingsTab {
     #[default]
     General,
     Conversation,
+    WebUi,
     Keybindings,
     Theme,
     Sections,
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 5] = [
+    const ALL: [SettingsTab; 6] = [
         Self::General,
         Self::Conversation,
+        Self::WebUi,
         Self::Keybindings,
         Self::Theme,
         Self::Sections,
@@ -418,6 +420,7 @@ impl SettingsTab {
         match self {
             Self::General => "General",
             Self::Conversation => "Conversation",
+            Self::WebUi => "Web UI",
             Self::Keybindings => "Keybindings",
             Self::Theme => "Theme",
             Self::Sections => "Sections",
@@ -427,7 +430,8 @@ impl SettingsTab {
     fn next(self) -> Self {
         match self {
             Self::General => Self::Conversation,
-            Self::Conversation => Self::Keybindings,
+            Self::Conversation => Self::WebUi,
+            Self::WebUi => Self::Keybindings,
             Self::Keybindings => Self::Theme,
             Self::Theme => Self::Sections,
             Self::Sections => Self::General,
@@ -438,7 +442,8 @@ impl SettingsTab {
         match self {
             Self::General => Self::Sections,
             Self::Conversation => Self::General,
-            Self::Keybindings => Self::Conversation,
+            Self::WebUi => Self::Conversation,
+            Self::Keybindings => Self::WebUi,
             Self::Theme => Self::Keybindings,
             Self::Sections => Self::Theme,
         }
@@ -1043,6 +1048,20 @@ impl App {
                             debug!("State sync check failed: {}", e);
                         }
                     }
+                }
+            });
+        }
+
+        // Start the embedded web UI server, sharing this instance's service so
+        // the browser drives the same sessions, state file, and tmux executor
+        // as the TUI. Spawned detached: a web-server failure (e.g. port in use)
+        // is logged but must never take down the terminal UI.
+        if self.config.web_ui_enabled {
+            let service = self.service.clone();
+            let config = self.config.clone();
+            tokio::spawn(async move {
+                if let Err(e) = crate::web::serve(service, config).await {
+                    warn!("Web UI server stopped: {}", e);
                 }
             });
         }

@@ -129,13 +129,8 @@ impl SessionManager {
     /// Generate branch name from title
     fn generate_branch_name(&self, title: &str) -> String {
         let sanitized = self.sanitize_name(title);
-
         let config = self.config_store.read();
-        if config.branch_prefix.is_empty() {
-            sanitized
-        } else {
-            format!("{}/{}", config.branch_prefix, sanitized)
-        }
+        join_branch_prefix(&config.branch_prefix, &sanitized)
     }
 
     /// Sanitize a name for use as branch/directory name
@@ -163,17 +158,40 @@ pub fn sanitize_name(name: &str) -> String {
         .to_string()
 }
 
+/// Join a configured `branch_prefix` with an already-sanitized branch name,
+/// normalizing slashes so the result is always a valid git ref.
+///
+/// The prefix is user-controlled (typed in the settings UI), so values like
+/// `"web/"`, `"/web"`, or `"web//"` are common. Naively joining with `/` then
+/// yields `web//<name>`, which git rejects as an invalid ref name and broke
+/// session creation. We strip leading/trailing slashes from the prefix and
+/// collapse any internal run to a single `/`, so every such variant produces
+/// `web/<name>`. An empty (or all-slash) prefix yields just `<name>`.
+pub fn join_branch_prefix(branch_prefix: &str, sanitized_name: &str) -> String {
+    let prefix = branch_prefix.trim_matches('/');
+    if prefix.is_empty() {
+        return sanitized_name.to_string();
+    }
+    // Collapse internal slash runs (e.g. "team//x" -> "team/x").
+    let mut prefix_clean = String::with_capacity(prefix.len());
+    let mut prev_slash = false;
+    for c in prefix.chars() {
+        let is_slash = c == '/';
+        if is_slash && prev_slash {
+            continue;
+        }
+        prefix_clean.push(c);
+        prev_slash = is_slash;
+    }
+    format!("{prefix_clean}/{sanitized_name}")
+}
+
 /// Compute the branch name a new session would target, given the user's typed
 /// title and the configured `branch_prefix`. Mirrors the logic in
 /// `SessionManager::generate_branch_name`, but as a free function so the new
 /// session dialog can preview the result without holding a `SessionManager`.
 pub fn candidate_branch_name(title: &str, branch_prefix: &str) -> String {
-    let sanitized = sanitize_name(title);
-    if branch_prefix.is_empty() {
-        sanitized
-    } else {
-        format!("{}/{}", branch_prefix, sanitized)
-    }
+    join_branch_prefix(branch_prefix, &sanitize_name(title))
 }
 
 /// Look up whether the candidate branch implied by `title` would resolve to an

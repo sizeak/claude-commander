@@ -7,11 +7,16 @@ use crate::config::AppState;
 use crate::git::{PrState, ReviewDecision, effective_pr_state};
 use crate::session::{AgentState, WorktreeSession};
 
-/// Find a session by title (case-insensitive) or ID prefix.
+/// Find a session by title (case-insensitive), full UUID, or short-ID prefix.
 ///
 /// Title match takes priority: if a session's title matches exactly
 /// (case-insensitive), it is returned even if another session's ID
 /// happens to start with the query string.
+///
+/// ID matching accepts either the full 36-char UUID (what the web UI and JSON
+/// output use — `SessionId::Display` truncates to 8 chars, so the full UUID is
+/// *not* a prefix of `id.to_string()` and must be checked separately) or a
+/// prefix of the 8-char display id (CLI convenience).
 pub fn find_session<'a>(state: &'a AppState, query: &str) -> Option<&'a WorktreeSession> {
     let query_lower = query.to_lowercase();
 
@@ -25,11 +30,11 @@ pub fn find_session<'a>(state: &'a AppState, query: &str) -> Option<&'a Worktree
         return by_title;
     }
 
-    // Fall back to ID prefix match
+    // Fall back to ID match: full UUID exact, or short-display-id prefix.
     state
         .sessions
         .values()
-        .find(|s| s.id.to_string().starts_with(query))
+        .find(|s| s.id.as_uuid().to_string() == query_lower || s.id.to_string().starts_with(query))
 }
 
 /// Outcome of resolving a session by an *exact* identifier.
@@ -363,6 +368,21 @@ mod tests {
         let id_prefix = &s.id.to_string()[..4];
         let state = make_state(vec![s.clone()]);
         let found = find_session(&state, id_prefix).unwrap();
+        assert_eq!(found.id, s.id);
+    }
+
+    #[test]
+    fn finds_by_full_uuid() {
+        // The web UI addresses sessions by their full 36-char UUID
+        // (`SessionInfo.id`). `SessionId::Display` truncates to 8 chars, so the
+        // old prefix check (`id.to_string().starts_with(query)`) failed to match
+        // a full UUID — which surfaced as every web terminal showing
+        // "[session closed]". find_session must resolve the full UUID.
+        let s = make_session("my-session");
+        let full_uuid = s.id.as_uuid().to_string();
+        assert_eq!(full_uuid.len(), 36, "sanity: full UUID is 36 chars");
+        let state = make_state(vec![s.clone()]);
+        let found = find_session(&state, &full_uuid).unwrap();
         assert_eq!(found.id, s.id);
     }
 

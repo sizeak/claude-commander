@@ -13,6 +13,7 @@ A high-performance terminal UI for managing Claude coding sessions, written in R
 - **Agent state detection** - Detect if agent is waiting for input, processing, or errored
 - **Persistent state** - Sessions survive restarts
 - **Auto-pull project main** - Periodically fast-forwards each project's main branch from `origin` so it doesn't drift stale
+- **Optional web UI** - Opt-in browser dashboard to list, watch, drive, and jump into every session remotely (xterm.js terminals over WebSocket), protected by HTTP Basic auth. Off by default — see [Configuration](docs/configuration.md#web-ui)
 
 ## Requirements
 

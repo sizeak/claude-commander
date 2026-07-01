@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Claude Commander</title>
+    <link rel="stylesheet" href="/vendor/xterm.css" />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <header id="sidebar-header">
+          <h1>Claude Commander</h1>
+          <div class="header-actions">
+            <button id="new-btn" title="New session">＋</button>
+            <button id="settings-btn" title="Settings">⚙</button>
+            <button id="refresh-btn" title="Refresh now">⟳</button>
+          </div>
+        </header>
+
+        <div class="section-label">
+          <span>Projects &amp; sessions</span>
+          <button id="add-project-btn" class="link-btn" title="Add or scan a project">＋ add</button>
+        </div>
+        <div id="tree"></div>
+
+        <footer id="sidebar-footer">
+          <span id="conn-status" class="conn unknown">connecting…</span>
+        </footer>
+      </aside>
+
+      <main id="main">
+        <header id="toolbar">
+          <div id="session-title">Select a session</div>
+          <div id="toolbar-actions">
+            <button id="info-btn" disabled title="Toggle info panel">Info</button>
+            <button id="restart-btn" disabled title="Restart session">Restart</button>
+            <button id="kill-btn" disabled title="Kill session">Kill</button>
+            <button id="delete-btn" disabled title="Delete session" class="danger">Delete</button>
+          </div>
+        </header>
+        <div id="content-area">
+          <div id="terminal-wrap">
+            <div id="terminal"></div>
+            <div id="terminal-placeholder">
+              Pick a session on the left to view its terminal, or create a new one
+              with ＋. Keystrokes you type here are sent live to that session.
+            </div>
+          </div>
+          <aside id="info-panel" class="hidden">
+            <h2>Session info</h2>
+            <dl id="info-list"></dl>
+          </aside>
+        </div>
+      </main>
+    </div>
+
+    <!-- New session modal -->
+    <div id="new-modal" class="modal-overlay hidden">
+      <div class="modal">
+        <h2>New session</h2>
+        <form id="new-form">
+          <label>Project
+            <input id="new-project-name" type="text" readonly />
+          </label>
+          <input id="new-project" type="hidden" />
+          <label>Title
+            <input id="new-title" type="text" placeholder="fix-auth" required />
+          </label>
+          <label>Program
+            <input id="new-program" type="text" placeholder="(default)" />
+          </label>
+          <div class="row">
+            <label>Effort
+              <select id="new-effort"></select>
+            </label>
+            <label>Permission mode
+              <select id="new-mode"></select>
+            </label>
+          </div>
+          <label>Section
+            <select id="new-section"></select>
+          </label>
+          <label>Base branch
+            <input id="new-base" type="text" placeholder="(default: origin/main)" />
+          </label>
+          <label>Initial prompt
+            <textarea id="new-prompt" rows="3" placeholder="(optional)"></textarea>
+          </label>
+          <div class="modal-actions">
+            <button type="button" class="ghost" data-close="new-modal">Cancel</button>
+            <button type="submit" class="primary">Create</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Add project modal -->
+    <div id="project-modal" class="modal-overlay hidden">
+      <div class="modal">
+        <h2>Add project</h2>
+        <p class="hint">Register a single git repo by its path, or scan a directory for repos.</p>
+        <label>Path
+          <input id="project-path" type="text" placeholder="/Users/you/code/my-repo" />
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="ghost" data-close="project-modal">Cancel</button>
+          <button type="button" id="scan-dir-btn">Scan directory</button>
+          <button type="button" id="add-path-btn" class="primary">Add repo</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings modal -->
+    <div id="settings-modal" class="modal-overlay hidden">
+      <div class="modal">
+        <h2>Settings</h2>
+        <div id="settings-restart" class="restart-banner hidden">
+          ⚠ A restart is required for some changes to take effect.
+        </div>
+        <form id="settings-form">
+          <label>Default program
+            <input id="set-default-program" type="text" />
+          </label>
+          <label>Branch prefix
+            <input id="set-branch-prefix" type="text" />
+          </label>
+          <label>Worktrees dir
+            <input id="set-worktrees-dir" type="text" placeholder="(default)" />
+          </label>
+          <label>Editor
+            <input id="set-editor" type="text" placeholder="(default: $EDITOR)" />
+          </label>
+          <label class="checkbox">
+            <input id="set-fetch-before-create" type="checkbox" /> Fetch before create
+          </label>
+          <label class="checkbox">
+            <input id="set-resume-session" type="checkbox" /> Resume session on restart
+          </label>
+          <hr />
+          <div class="section-heading">Web UI</div>
+          <label class="checkbox">
+            <input id="set-web-ui-enabled" type="checkbox" /> Web UI enabled
+          </label>
+          <label>Port
+            <input id="set-web-ui-port" type="number" min="1" max="65535" />
+          </label>
+          <label>Auth type
+            <select id="set-web-ui-auth">
+              <option value="basic">Basic auth (HTTP)</option>
+              <option value="mutual_tls">Mutual TLS (HTTPS, client cert)</option>
+            </select>
+          </label>
+
+          <!-- Basic-auth field (shown when auth type = basic) -->
+          <div id="auth-basic-fields">
+            <label>Password
+              <input id="set-web-ui-password" type="password" placeholder="(unchanged)" />
+              <small id="web-pw-status"></small>
+            </label>
+          </div>
+
+          <!-- mTLS fields (shown when auth type = mutual_tls) -->
+          <div id="auth-mtls-fields" class="hidden">
+            <p class="hint">
+              Paths to PEM files on the machine running claude-commander. Clients
+              must present a certificate signed by the client CA.
+            </p>
+            <label>Server cert (PEM)
+              <input id="set-web-ui-tls-cert" type="text" placeholder="/path/to/server.pem" />
+            </label>
+            <label>Server key (PEM)
+              <input id="set-web-ui-tls-key" type="text" placeholder="/path/to/server.key" />
+            </label>
+            <label>Client CA (PEM)
+              <input id="set-web-ui-tls-client-ca" type="text" placeholder="/path/to/ca.pem" />
+            </label>
+          </div>
+
+          <div class="modal-actions">
+            <button type="button" class="ghost" data-close="settings-modal">Cancel</button>
+            <button type="submit" class="primary">Save</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <script src="/vendor/xterm.js"></script>
+    <script src="/vendor/addon-fit.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>

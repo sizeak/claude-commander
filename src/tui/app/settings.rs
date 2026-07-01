@@ -2,6 +2,17 @@
 
 use super::*;
 
+/// Parse a settings text value into an optional path: empty or the common
+/// placeholder strings clear it to `None`, otherwise it's a `PathBuf`.
+fn parse_optional_path(value: &str) -> Option<std::path::PathBuf> {
+    let v = value.trim();
+    if v.is_empty() || v == "(unset)" || v == "(default)" {
+        None
+    } else {
+        Some(std::path::PathBuf::from(v))
+    }
+}
+
 impl App {
     pub(super) fn build_settings_rows(&self, tab: SettingsTab) -> Vec<SettingsRow> {
         match tab {
@@ -156,6 +167,57 @@ impl App {
                         "telemetry_enabled",
                     ),
                 ]
+            }
+            SettingsTab::WebUi => {
+                let c = &self.config;
+                let mtls = c.web_ui_auth == crate::config::WebUiAuth::MutualTls;
+                let path_display = |p: &Option<std::path::PathBuf>| {
+                    p.as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "(unset)".into())
+                };
+                let mut rows = vec![
+                    SettingsRow::toggle("Web UI Enabled", c.web_ui_enabled, "web_ui_enabled"),
+                    SettingsRow::text("Port", c.web_ui_port.to_string(), "web_ui_port"),
+                    // Auth type is an option-picker (Basic / Mutual TLS).
+                    SettingsRow::text(
+                        "Auth Type",
+                        match c.web_ui_auth {
+                            crate::config::WebUiAuth::Basic => "basic".to_string(),
+                            crate::config::WebUiAuth::MutualTls => "mutual_tls".to_string(),
+                        },
+                        "web_ui_auth",
+                    ),
+                ];
+                if mtls {
+                    // mTLS: cert/key/CA paths (password is irrelevant).
+                    rows.push(SettingsRow::text(
+                        "TLS Cert (PEM)",
+                        path_display(&c.web_ui_tls_cert),
+                        "web_ui_tls_cert",
+                    ));
+                    rows.push(SettingsRow::text(
+                        "TLS Key (PEM)",
+                        path_display(&c.web_ui_tls_key),
+                        "web_ui_tls_key",
+                    ));
+                    rows.push(SettingsRow::text(
+                        "Client CA (PEM)",
+                        path_display(&c.web_ui_tls_client_ca),
+                        "web_ui_tls_client_ca",
+                    ));
+                } else {
+                    // Basic: password.
+                    rows.push(SettingsRow::text(
+                        "Password",
+                        c.web_ui_password
+                            .as_ref()
+                            .map(|_| "(set)".to_string())
+                            .unwrap_or_else(|| "(unset)".into()),
+                        "web_ui_password",
+                    ));
+                }
+                rows
             }
             SettingsTab::Conversation => {
                 let c = &self.config.conversation;
@@ -915,6 +977,45 @@ impl App {
                 }
                 _ => {}
             },
+            SettingsTab::WebUi => match field_key {
+                "web_ui_port" => match value.parse::<u16>() {
+                    Ok(v) if v >= 1 => {
+                        self.config.web_ui_port = v;
+                    }
+                    _ => {
+                        self.ui_state.status_message = Some((
+                            "Port must be a number between 1 and 65535".into(),
+                            std::time::Instant::now() + std::time::Duration::from_secs(4),
+                        ));
+                    }
+                },
+                "web_ui_auth" => {
+                    self.config.web_ui_auth = match value {
+                        "mutual_tls" => crate::config::WebUiAuth::MutualTls,
+                        _ => crate::config::WebUiAuth::Basic,
+                    };
+                }
+                "web_ui_password" => {
+                    // Empty / placeholder clears it (server then refuses to start
+                    // in Basic mode until one is set).
+                    self.config.web_ui_password =
+                        if value.is_empty() || value == "(unset)" || value == "(set)" {
+                            None
+                        } else {
+                            Some(value.to_string())
+                        };
+                }
+                "web_ui_tls_cert" => {
+                    self.config.web_ui_tls_cert = parse_optional_path(value);
+                }
+                "web_ui_tls_key" => {
+                    self.config.web_ui_tls_key = parse_optional_path(value);
+                }
+                "web_ui_tls_client_ca" => {
+                    self.config.web_ui_tls_client_ca = parse_optional_path(value);
+                }
+                _ => {}
+            },
             SettingsTab::Conversation => match field_key {
                 "conversation_name" => {
                     let v = value.trim();
@@ -1122,6 +1223,7 @@ impl App {
             "stt_enabled" => self.config.stt.enabled = value,
             "stt_pause_media" => self.config.stt.pause_media = value,
             "telemetry_enabled" => self.config.telemetry.enabled = value,
+            "web_ui_enabled" => self.config.web_ui_enabled = value,
             _ => {
                 warn!("Unknown boolean setting: {}", field_key);
                 return;
@@ -1307,6 +1409,15 @@ impl App {
                                     .iter()
                                     .map(|s| s.label().to_string())
                                     .collect();
+                                let current_value = state.rows[state.selected_row].text_value();
+                                let selected =
+                                    options.iter().position(|o| o == current_value).unwrap_or(0);
+                                state.editing =
+                                    Some(SettingsEditing::OptionPicker { options, selected });
+                            } else if field_key == "web_ui_auth" {
+                                // Inline option picker for the web-UI auth mode.
+                                let options: Vec<String> =
+                                    vec!["basic".to_string(), "mutual_tls".to_string()];
                                 let current_value = state.rows[state.selected_row].text_value();
                                 let selected =
                                     options.iter().position(|o| o == current_value).unwrap_or(0);
@@ -1951,7 +2062,7 @@ mod tests {
 
     #[test]
     fn settings_tab_cycle_includes_conversation() {
-        assert_eq!(SettingsTab::ALL.len(), 5);
+        assert_eq!(SettingsTab::ALL.len(), 6);
         assert!(SettingsTab::ALL.contains(&SettingsTab::Conversation));
         assert_eq!(SettingsTab::General.next(), SettingsTab::Conversation);
         assert_eq!(SettingsTab::Conversation.prev(), SettingsTab::General);
@@ -1962,5 +2073,16 @@ mod tests {
         }
         assert_eq!(t, SettingsTab::General);
         assert_eq!(SettingsTab::Conversation.label(), "Conversation");
+    }
+
+    #[test]
+    fn settings_tab_includes_web_ui() {
+        assert!(SettingsTab::ALL.contains(&SettingsTab::WebUi));
+        assert_eq!(SettingsTab::WebUi.label(), "Web UI");
+        // Web UI sits between Conversation and Keybindings.
+        assert_eq!(SettingsTab::Conversation.next(), SettingsTab::WebUi);
+        assert_eq!(SettingsTab::WebUi.next(), SettingsTab::Keybindings);
+        assert_eq!(SettingsTab::Keybindings.prev(), SettingsTab::WebUi);
+        assert_eq!(SettingsTab::WebUi.prev(), SettingsTab::Conversation);
     }
 }

@@ -52,6 +52,51 @@ fn test_generate_branch_name() {
 }
 
 #[test]
+fn test_join_branch_prefix_normalizes() {
+    use crate::session::manager::join_branch_prefix;
+    assert_eq!(join_branch_prefix("", "x"), "x");
+    assert_eq!(join_branch_prefix("/", "x"), "x");
+    assert_eq!(join_branch_prefix("web", "x"), "web/x");
+    assert_eq!(join_branch_prefix("web/", "x"), "web/x");
+    assert_eq!(join_branch_prefix("/web", "x"), "web/x");
+    assert_eq!(join_branch_prefix("web//", "x"), "web/x");
+    assert_eq!(join_branch_prefix("team//sub", "x"), "team/sub/x");
+}
+
+#[test]
+fn test_candidate_branch_name_normalizes_slashy_prefix() {
+    use crate::session::manager::candidate_branch_name;
+    // Must mirror generate_branch_name so the new-session preview matches reality.
+    assert_eq!(
+        candidate_branch_name("Feature Auth", "web/"),
+        "web/feature-auth"
+    );
+    assert_eq!(candidate_branch_name("Feature Auth", ""), "feature-auth");
+}
+
+#[test]
+fn test_generate_branch_name_normalizes_slashy_prefix() {
+    // A branch_prefix with surrounding slashes (e.g. set to "web/" via the
+    // settings UI) must NOT produce "web//feature-auth" — git rejects the double
+    // slash as an invalid ref name, which broke session creation. The prefix is
+    // normalized: leading/trailing slashes stripped, internal runs collapsed.
+    let (_dir, store) = test_store();
+    for prefix in ["web/", "/web", "web//", "//web//"] {
+        let config = Config {
+            branch_prefix: prefix.to_string(),
+            ..Config::default()
+        };
+        let (_cdir, cs) = test_config_store(config);
+        let manager = SessionManager::new(cs, store.clone(), "");
+        assert_eq!(
+            manager.generate_branch_name("Feature Auth"),
+            "web/feature-auth",
+            "prefix {prefix:?} should normalize to a single-slash join"
+        );
+    }
+}
+
+#[test]
 fn test_sanitize_name_underscores_preserved() {
     let (_cdir, config_store) = test_config_store(Config::default());
     let (_dir, store) = test_store();
