@@ -208,6 +208,8 @@ pub enum UserCommand {
     RenameSession,
     /// Restart current session (kill tmux and recreate)
     RestartSession,
+    /// Toggle keep-alive on the selected session (opt out of auto-hibernation)
+    ToggleKeepAlive,
     /// Remove an entire project
     RemoveProject,
     /// Open worktree in editor/IDE
@@ -312,6 +314,7 @@ impl UserCommand {
             | UserCommand::NewStackedSession
             | UserCommand::DeleteSession
             | UserCommand::RestartSession
+            | UserCommand::ToggleKeepAlive
             | UserCommand::NewProject
             | UserCommand::ScanDirectory
             | UserCommand::OpenReviewDiff => None,
@@ -387,6 +390,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::DeleteMergedPrSessions => Self::DeleteMergedPrSessions,
             BindableAction::RenameSession => Self::RenameSession,
             BindableAction::RestartSession => Self::RestartSession,
+            BindableAction::ToggleKeepAlive => Self::ToggleKeepAlive,
             BindableAction::RemoveProject => Self::RemoveProject,
             BindableAction::OpenInEditor => Self::OpenInEditor,
             BindableAction::OpenPullRequest => Self::OpenPullRequest,
@@ -783,6 +787,11 @@ mod tests {
                 KeyCode::Char('R'),
                 KeyModifiers::SHIFT,
                 UserCommand::RestartSession,
+            ),
+            (
+                KeyCode::Char('K'),
+                KeyModifiers::SHIFT,
+                UserCommand::ToggleKeepAlive,
             ),
             (
                 KeyCode::Char('D'),

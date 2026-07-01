@@ -51,6 +51,18 @@ fetch_before_create = true
 # where it left off. Set to false to start the program fresh each time.
 resume_session = true
 
+# Automatically hibernate idle sessions to free memory (see "Idle-session
+# hibernation" below). A background loop stops the tmux process of sessions
+# that have sat idle-and-unattended past the timeout, keeping the worktree and
+# metadata; the session transparently resumes on next attach. Disabled by
+# default. Enabling (and the check interval) is restart-required; the idle
+# timeout is read live.
+# hibernate_enabled = false
+# Idle duration (seconds) before an eligible session is hibernated. Minimum 60.
+# hibernate_idle_timeout_secs = 1800
+# Interval (seconds) between hibernation policy checks. Minimum 10.
+# hibernate_check_interval_secs = 60
+
 # Launch sessions inside `nix develop` when the project has a `flake.nix` at
 # its root and `nix` is on PATH, so the agent and shell get the project's dev
 # environment. Applies to Claude sessions and shell sessions. Projects without
@@ -202,6 +214,37 @@ state_sync_interval_ms = 2000
 # quit = ["q", "Ctrl-c"]
 # toggle_pane = ["Tab"]
 ```
+
+## Idle-session hibernation
+
+Each live session holds a `claude` process open in tmux (~400MB RAM) whether or
+not you're using it. With many sessions open, idle ones waste memory. When
+`hibernate_enabled = true`, a background loop stops the tmux process of any
+session that has been idle past `hibernate_idle_timeout_secs`, **keeping its
+worktree, branch, and metadata** — only the process is stopped. The session
+shows as `Stopped` and transparently resumes (with `--resume`, so the
+conversation is preserved) the next time you attach.
+
+A session counts as **idle** only when all of these hold:
+
+- its agent is `Idle` — a `Working` or `WaitingForInput` (pending approval)
+  session is never hibernated;
+- no tmux client is attached to it, and it wasn't attached within the last
+  check interval;
+- `keep_alive` is off for that session.
+
+**Waking is automatic**: attaching (`Enter`) recreates the tmux session and
+resumes the agent, even if `resume_session = false` globally — hibernation
+always resumes, since that's what makes it non-destructive.
+
+**Keeping a session alive**: press **`K`** on a session (or run
+`claude-commander keep-alive <session> [--on|--off]`) to exempt it from
+hibernation — useful for a long-running build, a watched log, or anything you
+want to keep warm. The flag persists across restarts.
+
+Enabling hibernation and changing `hibernate_check_interval_secs` are
+restart-required (the loop is spawned once at launch); `hibernate_idle_timeout_secs`
+is read live.
 
 ## Conversation mode (TTS)
 
