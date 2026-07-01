@@ -205,6 +205,95 @@ async fn test_remove_creating_session_clears_session() {
     assert!(store.read().await.get_session(&session_id).is_none());
 }
 
+#[tokio::test]
+async fn test_toggle_keep_alive_flips_and_returns_new_value() {
+    let (_cdir, config_store) = test_config_store(Config::default());
+    let (_dir, store) = test_store();
+    let manager = SessionManager::new(config_store, store.clone(), "");
+
+    let session = WorktreeSession::new(
+        ProjectId::new(),
+        "Keep",
+        "keep",
+        std::path::PathBuf::from("/tmp/wt"),
+        "claude",
+    );
+    let session_id = session.id;
+    store
+        .mutate(move |state| state.add_session(session))
+        .await
+        .unwrap();
+
+    // Defaults off; first toggle turns it on, second turns it off.
+    assert!(manager.toggle_keep_alive(&session_id).await.unwrap());
+    assert!(
+        store
+            .read()
+            .await
+            .get_session(&session_id)
+            .unwrap()
+            .keep_alive
+    );
+    assert!(!manager.toggle_keep_alive(&session_id).await.unwrap());
+    assert!(
+        !store
+            .read()
+            .await
+            .get_session(&session_id)
+            .unwrap()
+            .keep_alive
+    );
+}
+
+#[tokio::test]
+async fn test_set_keep_alive_sets_explicit_value() {
+    let (_cdir, config_store) = test_config_store(Config::default());
+    let (_dir, store) = test_store();
+    let manager = SessionManager::new(config_store, store.clone(), "");
+
+    let session = WorktreeSession::new(
+        ProjectId::new(),
+        "Keep",
+        "keep",
+        std::path::PathBuf::from("/tmp/wt"),
+        "claude",
+    );
+    let session_id = session.id;
+    store
+        .mutate(move |state| state.add_session(session))
+        .await
+        .unwrap();
+
+    manager.set_keep_alive(&session_id, true).await.unwrap();
+    assert!(
+        store
+            .read()
+            .await
+            .get_session(&session_id)
+            .unwrap()
+            .keep_alive
+    );
+    manager.set_keep_alive(&session_id, false).await.unwrap();
+    assert!(
+        !store
+            .read()
+            .await
+            .get_session(&session_id)
+            .unwrap()
+            .keep_alive
+    );
+}
+
+#[tokio::test]
+async fn test_toggle_keep_alive_missing_session_errors() {
+    let (_cdir, config_store) = test_config_store(Config::default());
+    let (_dir, store) = test_store();
+    let manager = SessionManager::new(config_store, store, "");
+
+    let missing = SessionId::new();
+    assert!(manager.toggle_keep_alive(&missing).await.is_err());
+}
+
 #[test]
 fn test_generate_branch_name_empty_prefix() {
     let (_cdir, config_store) = test_config_store(Config::default());
