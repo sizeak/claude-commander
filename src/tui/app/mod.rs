@@ -899,8 +899,15 @@ impl AppUiState {
 
 /// Main TUI application
 pub struct App {
-    /// Local config cache — refreshed from config_store on tick when file changes
+    /// Local config cache — refreshed from config_store on tick when the shared
+    /// config changes (see `config_generation`).
     config: Config,
+    /// The `config_store` generation this cache was last synced at. When the
+    /// store advances past it — from a disk edit or an in-process write by
+    /// another subsystem like the web UI — `check_config_reload` refreshes
+    /// `config`. Without this the mtime guard hides same-process web writes and
+    /// a later TUI settings-save would clobber them with the stale cache.
+    config_generation: u64,
     /// Frozen snapshot of `commander_enabled`, captured at startup. The
     /// commander's enablement is restart-required: the agent-state poll task
     /// captures it at spawn, so the footer chip reads this same frozen value
@@ -951,6 +958,7 @@ impl App {
     ) -> Self {
         let config = config_store.read().clone();
         let service = CommanderService::new(config_store, store, frontend);
+        let config_generation = service.config_generation();
 
         let base = config
             .theme
@@ -964,6 +972,7 @@ impl App {
 
         Self {
             config,
+            config_generation,
             commander_enabled_at_init,
             service,
             ui_state: AppUiState::default(),

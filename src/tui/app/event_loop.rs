@@ -121,25 +121,39 @@ impl App {
         false
     }
 
-    /// Check if `config.toml` has been modified externally and refresh the local cache.
+    /// Refresh the local config cache when the shared config has changed.
+    ///
+    /// Two sources of change: an external edit to `config.toml` (picked up by
+    /// `reload_config`, which reloads the store from disk) and an in-process
+    /// write through the same store by another subsystem — notably the web UI.
+    /// Both bump the store's generation, so we resync whenever it advances past
+    /// the one we last cached at. Keying off the generation rather than only the
+    /// disk reload is what stops a stale cache from later clobbering web-side
+    /// config writes (e.g. reverting `web_ui_enabled`/password on the next TUI
+    /// settings-save).
     pub(super) fn check_config_reload(&mut self) {
-        match self.service.reload_config() {
-            Ok(true) => {
-                debug!("Config hot-reloaded from disk");
-                self.config = self.service.read_config();
-                let base = self
-                    .config
-                    .theme
-                    .preset
-                    .as_deref()
-                    .and_then(Theme::from_preset)
-                    .unwrap_or_default();
-                self.theme = base.with_overrides(&self.config.theme);
-            }
-            Ok(false) => {}
-            Err(e) => {
-                debug!("Config reload check failed: {}", e);
-            }
+        // Fold in any external file edit first (updates the shared store).
+        if let Err(e) = self.service.reload_config() {
+            debug!("Config reload check failed: {}", e);
         }
+
+        let generation = self.service.config_generation();
+        if generation == self.config_generation {
+            return;
+        }
+        debug!(
+            "Config cache resync (generation {} -> {})",
+            self.config_generation, generation
+        );
+        self.config_generation = generation;
+        self.config = self.service.read_config();
+        let base = self
+            .config
+            .theme
+            .preset
+            .as_deref()
+            .and_then(Theme::from_preset)
+            .unwrap_or_default();
+        self.theme = base.with_overrides(&self.config.theme);
     }
 }

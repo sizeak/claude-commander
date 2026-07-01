@@ -124,6 +124,14 @@ impl CommanderService {
         self.config_store.reload_if_changed()
     }
 
+    /// Generation counter for the shared config, bumped on every change. A
+    /// frontend caching its own [`Config`] snapshot (the TUI does) compares this
+    /// to know when to resync — catching writes made by another subsystem
+    /// sharing this service in-process, such as the web UI.
+    pub fn config_generation(&self) -> u64 {
+        self.config_store.generation()
+    }
+
     /// Whether a pending config change requires an app restart to take effect.
     pub fn restart_required(&self) -> bool {
         self.config_store.restart_required()

@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use tracing::debug;
@@ -94,6 +95,14 @@ pub struct ConfigStore {
     last_mtime: RwLock<Option<SystemTime>>,
     /// Snapshot of restart-required fields captured at construction time.
     init_snapshot: InitSnapshot,
+    /// Bumped on every in-memory config change (a local [`mutate`](Self::mutate)
+    /// or a disk [`reload_if_changed`](Self::reload_if_changed)). In-process
+    /// readers that cache a `Config` copy (notably the TUI's `App`) compare this
+    /// to detect a stale snapshot even when the change came from another
+    /// subsystem sharing this store — e.g. the web UI writing config in the same
+    /// process. The mtime guard alone can't catch that, since our own write
+    /// updates the tracked mtime and suppresses the reload.
+    generation: AtomicU64,
 }
 
 impl ConfigStore {
@@ -109,6 +118,7 @@ impl ConfigStore {
             config_path,
             last_mtime: RwLock::new(mtime),
             init_snapshot,
+            generation: AtomicU64::new(0),
         })
     }
 
@@ -123,6 +133,7 @@ impl ConfigStore {
             config_path,
             last_mtime: RwLock::new(mtime),
             init_snapshot,
+            generation: AtomicU64::new(0),
         }
     }
 
@@ -165,10 +176,20 @@ impl ConfigStore {
 
             let result = f(&mut config);
             self.save_to_disk(&config)?;
+            // Signal in-process cache holders that the config changed, even
+            // though save_to_disk just moved the mtime past their reload guard.
+            self.generation.fetch_add(1, Ordering::Relaxed);
             result
         };
 
         Ok(result)
+    }
+
+    /// Monotonic counter bumped on every in-memory config change. Callers that
+    /// cache a `Config` snapshot compare this against the value they last synced
+    /// at to know when their copy is stale (see the field docs on `generation`).
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
     }
 
     /// Write the given config to `self.config_path` and update the tracked mtime.
@@ -216,6 +237,7 @@ impl ConfigStore {
         let new_config = self.load_from_disk()?;
         *self.config.write().expect("config lock poisoned") = new_config;
         *self.last_mtime.write().expect("mtime lock poisoned") = current_mtime;
+        self.generation.fetch_add(1, Ordering::Relaxed);
 
         Ok(true)
     }
@@ -368,6 +390,74 @@ mod tests {
         );
         assert_eq!(disk.web_ui_port, 9999, "our own edit must be applied");
         assert_eq!(disk.branch_prefix, "mine", "earlier edit preserved");
+    }
+
+    #[test]
+    fn test_same_process_write_hidden_from_mtime_but_caught_by_generation() {
+        // Regression: the TUI caches a Config snapshot and used to resync only
+        // when the *mtime* guard (`reload_if_changed`) reported a change. But a
+        // web-UI write goes through this same shared store, and its own
+        // `save_to_disk` advances the tracked mtime — so the mtime guard saw
+        // "no change" and the TUI never refreshed. Its next settings-save then
+        // clobbered the web write (reverting web_ui_enabled / dropping the
+        // password). The generation counter must advance on the write so a cache
+        // holder can detect it even though the mtime guard hides it.
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let config = Config::default();
+        write_config(&config_path, &config);
+        let store = ConfigStore::with_path(config, config_path);
+
+        let cached_gen = store.generation();
+
+        // Simulate the web UI enabling the server + setting a password.
+        store
+            .mutate(|c| {
+                c.web_ui_enabled = true;
+                c.web_ui_password = Some("secret".to_string());
+            })
+            .unwrap();
+
+        // The mtime guard hides our own write, so a cache holder relying on it
+        // alone would NOT resync...
+        assert!(
+            !store.reload_if_changed().unwrap(),
+            "our own write must not trigger a disk reload"
+        );
+        // ...but the generation advanced, which is how the cache holder knows.
+        assert_ne!(
+            store.generation(),
+            cached_gen,
+            "mutate must advance the generation counter"
+        );
+        assert!(store.read().web_ui_enabled);
+        assert_eq!(store.read().web_ui_password.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn test_generation_advances_on_external_reload() {
+        // An external edit reloaded from disk must also advance the generation
+        // so cache holders resync to the hand-edited values.
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let config = Config::default();
+        write_config(&config_path, &config);
+        let store = ConfigStore::with_path(config, config_path.clone());
+
+        let before = store.generation();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let edited = Config {
+            default_program: "edited".to_string(),
+            ..Config::default()
+        };
+        write_config(&config_path, &edited);
+
+        assert!(store.reload_if_changed().unwrap());
+        assert_ne!(
+            store.generation(),
+            before,
+            "external reload must advance the generation counter"
+        );
     }
 
     #[test]
