@@ -495,6 +495,10 @@ pub struct SettingsState {
     pub rows: Vec<SettingsRow>,
     /// State for the Sections tab (lazily initialised on first tab switch)
     pub sections_state: SectionsState,
+    /// Active search filter for the Keybindings tab. `Some` while the search
+    /// box is focused (typing filters the shortcut list live); `None` when the
+    /// list is browsed normally.
+    pub search: Option<Input>,
 }
 
 /// Kind of a settings row, carrying its typed value.
@@ -509,6 +513,9 @@ pub enum SettingsRowKind {
     Text(String),
     /// Two-state boolean rendered as a checkbox and flipped in place.
     Toggle(bool),
+    /// A non-selectable section heading (Keybindings tab grouping). Carries no
+    /// value and is skipped by navigation.
+    Header,
 }
 
 /// A single row in the settings list
@@ -546,6 +553,21 @@ impl SettingsRow {
         }
     }
 
+    /// A non-selectable section heading.
+    pub fn header(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            field_key: String::new(),
+            kind: SettingsRowKind::Header,
+            color_swatch: None,
+        }
+    }
+
+    /// Whether this row can be highlighted/edited. Section headers cannot.
+    pub fn is_selectable(&self) -> bool {
+        !matches!(self.kind, SettingsRowKind::Header)
+    }
+
     /// A text row that also displays a color swatch (Theme tab).
     pub fn swatch(
         label: impl Into<String>,
@@ -565,7 +587,7 @@ impl SettingsRow {
     pub fn text_value(&self) -> &str {
         match &self.kind {
             SettingsRowKind::Text(v) => v,
-            SettingsRowKind::Toggle(_) => "",
+            SettingsRowKind::Toggle(_) | SettingsRowKind::Header => "",
         }
     }
 
@@ -573,7 +595,7 @@ impl SettingsRow {
     pub fn toggled(&self) -> Option<bool> {
         match self.kind {
             SettingsRowKind::Toggle(on) => Some(!on),
-            SettingsRowKind::Text(_) => None,
+            SettingsRowKind::Text(_) | SettingsRowKind::Header => None,
         }
     }
 }
