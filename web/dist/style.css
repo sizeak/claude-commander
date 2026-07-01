@@ -26,6 +26,9 @@ body {
     -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial,
     sans-serif;
   font-size: 14px;
+  /* Stop the mobile browser's pull-to-refresh / overscroll bounce — a swipe
+     down inside the terminal must not reload the page. */
+  overscroll-behavior: none;
 }
 
 #app {
