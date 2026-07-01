@@ -37,6 +37,7 @@ fn make_worktree_with_stack(title: &str, stacked_child: bool) -> SessionListItem
         created_at: chrono::Utc::now(),
         agent_state: None,
         unread: false,
+        lfs_pulling: false,
         stacked_child,
     }
 }

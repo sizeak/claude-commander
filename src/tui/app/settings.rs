@@ -55,6 +55,7 @@ impl App {
                         c.fetch_before_create,
                         "fetch_before_create",
                     ),
+                    SettingsRow::toggle("Skip LFS Smudge", c.skip_lfs_smudge, "skip_lfs_smudge"),
                     SettingsRow::toggle("Resume Session", c.resume_session, "resume_session"),
                     SettingsRow::toggle("Nix Develop", c.nix_develop, "nix_develop"),
                     SettingsRow::text(
@@ -1182,6 +1183,7 @@ impl App {
         match field_key {
             "per_repo_worktree_dirs" => self.config.per_repo_worktree_dirs = value,
             "fetch_before_create" => self.config.fetch_before_create = value,
+            "skip_lfs_smudge" => self.config.skip_lfs_smudge = value,
             "resume_session" => self.config.resume_session = value,
             "nix_develop" => self.config.nix_develop = value,
             "project_pull_enabled" => self.config.project_pull_enabled = value,

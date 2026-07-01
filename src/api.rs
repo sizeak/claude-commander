@@ -324,6 +324,24 @@ impl CommanderService {
             return Err(e);
         }
 
+        // When smudging was skipped, the worktree holds LFS pointer files. The
+        // TUI pulls the real content in the background, but a CLI invocation
+        // exits right after this call, so pull synchronously here (best-effort)
+        // to leave a usable worktree behind.
+        if self.config_store.read().skip_lfs_smudge {
+            let worktree_path = {
+                let state = self.store.read().await;
+                state
+                    .get_session(&session_id)
+                    .map(|s| s.worktree_path.clone())
+            };
+            if let Some(worktree_path) = worktree_path
+                && let Err(e) = crate::git::lfs::pull(&worktree_path).await
+            {
+                tracing::warn!(error = %e, "git lfs pull after session create failed");
+            }
+        }
+
         Ok(session_id)
     }
 

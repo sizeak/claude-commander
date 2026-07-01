@@ -355,6 +355,43 @@ impl App {
         });
     }
 
+    /// Spawn a background `git lfs pull` for a freshly-created session.
+    ///
+    /// The worktree was created with smudging skipped (fast checkout, pointer
+    /// files), so this materialises the real LFS content while the agent is
+    /// already running. Marks the session in-flight for the `⇣ LFS` row marker
+    /// and sends `LfsPullFinished` when done (success or failure). No-op if
+    /// `skip_lfs_smudge` is disabled or a pull is already in flight.
+    pub(super) async fn spawn_lfs_pull(&mut self, session_id: SessionId) {
+        if !self.config.skip_lfs_smudge {
+            return;
+        }
+        if !self.ui_state.lfs_pull_in_flight.insert(session_id) {
+            return;
+        }
+        let worktree_path = {
+            let state = self.service.store().read().await;
+            state
+                .get_session(&session_id)
+                .map(|s| s.worktree_path.clone())
+        };
+        let Some(worktree_path) = worktree_path else {
+            self.ui_state.lfs_pull_in_flight.remove(&session_id);
+            return;
+        };
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            if let Err(e) = crate::git::lfs::pull(&worktree_path).await {
+                warn!(error = %e, "background git lfs pull failed");
+            }
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::LfsPullFinished {
+                    session_id,
+                }))
+                .await;
+        });
+    }
+
     /// Spawn AI summary generation for the given session.
     ///
     /// Called from the `GenerateSummary` hotkey handler. Always generates
