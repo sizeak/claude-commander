@@ -43,6 +43,7 @@ pub enum BindableAction {
     DeleteMergedPrSessions,
     RenameSession,
     RestartSession,
+    ToggleKeepAlive,
     RemoveProject,
     OpenInEditor,
     OpenPullRequest,
@@ -92,6 +93,7 @@ impl BindableAction {
         Self::DeleteMergedPrSessions,
         Self::RenameSession,
         Self::RestartSession,
+        Self::ToggleKeepAlive,
         Self::RemoveProject,
         Self::OpenInEditor,
         Self::OpenPullRequest,
@@ -141,6 +143,7 @@ impl BindableAction {
             Self::DeleteMergedPrSessions => "delete_merged_pr_sessions",
             Self::RenameSession => "rename_session",
             Self::RestartSession => "restart_session",
+            Self::ToggleKeepAlive => "toggle_keep_alive",
             Self::RemoveProject => "remove_project",
             Self::OpenInEditor => "open_in_editor",
             Self::OpenPullRequest => "open_pull_request",
@@ -191,6 +194,7 @@ impl BindableAction {
             Self::DeleteMergedPrSessions => "Delete sessions with merged PRs",
             Self::RenameSession => "Rename session",
             Self::RestartSession => "Restart session",
+            Self::ToggleKeepAlive => "Toggle keep-alive (never auto-hibernate)",
             Self::RemoveProject => "Remove project",
             Self::OpenInEditor => "Open in editor/IDE",
             Self::OpenPullRequest => "Open PR in browser",
@@ -241,6 +245,7 @@ impl BindableAction {
             | Self::DeleteMergedPrSessions
             | Self::RenameSession
             | Self::RestartSession
+            | Self::ToggleKeepAlive
             | Self::RemoveProject
             | Self::OpenInEditor
             | Self::OpenPullRequest
@@ -289,6 +294,7 @@ impl FromStr for BindableAction {
             "delete_merged_pr_sessions" => Ok(Self::DeleteMergedPrSessions),
             "rename_session" => Ok(Self::RenameSession),
             "restart_session" => Ok(Self::RestartSession),
+            "toggle_keep_alive" => Ok(Self::ToggleKeepAlive),
             "remove_project" => Ok(Self::RemoveProject),
             "open_in_editor" => Ok(Self::OpenInEditor),
             "open_pull_request" => Ok(Self::OpenPullRequest),
@@ -627,6 +633,10 @@ impl Default for KeyBindings {
         bindings.insert(
             BindableAction::RestartSession,
             vec![kb(KeyCode::Char('R'), shift)],
+        );
+        bindings.insert(
+            BindableAction::ToggleKeepAlive,
+            vec![kb(KeyCode::Char('K'), shift)],
         );
         bindings.insert(
             BindableAction::RemoveProject,
