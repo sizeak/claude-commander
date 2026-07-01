@@ -1873,6 +1873,25 @@ impl App {
                     }
                 }
             }
+            ConfirmAction::EnableWebUi => {
+                // Field-level write so we don't clobber other config (e.g. the
+                // web_ui_password the web UI owns). Takes effect on next launch —
+                // the server binds once at startup.
+                match self.service.mutate_config(|c| c.web_ui_enabled = true) {
+                    Ok(new) => {
+                        self.config = new;
+                        self.ui_state.status_message = Some((
+                            "Web UI enabled — restart to start the server".to_string(),
+                            Instant::now() + Duration::from_secs(5),
+                        ));
+                    }
+                    Err(e) => {
+                        self.ui_state.modal = Modal::Error {
+                            message: format!("Failed to enable web UI: {}", e),
+                        };
+                    }
+                }
+            }
             ConfirmAction::RemoveProject { project_id } => {
                 // 1. Capture project and session data before removal
                 let cleanup_data = {

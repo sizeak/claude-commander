@@ -125,6 +125,22 @@ impl CommanderService {
         self.config_store.reload_if_changed()
     }
 
+    /// Apply a field-level mutation to the shared config under the store lock and
+    /// return the resulting config. Unlike [`update_config`](Self::update_config)
+    /// (a full overwrite), this builds on the store's *current* state, so a
+    /// caller with a possibly-stale snapshot (the TUI) can change the fields it
+    /// owns without clobbering fields another subsystem (the web UI) wrote —
+    /// e.g. `web_ui_password`, which has no TUI editor.
+    pub fn mutate_config<F>(&self, f: F) -> Result<Config>
+    where
+        F: FnOnce(&mut Config),
+    {
+        self.config_store.mutate(|c| {
+            f(c);
+            c.clone()
+        })
+    }
+
     /// Generation counter for the shared config, bumped on every change. A
     /// frontend caching its own [`Config`] snapshot (the TUI does) compares this
     /// to know when to resync — catching writes made by another subsystem

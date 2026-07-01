@@ -2,6 +2,17 @@
 
 use super::*;
 
+/// Shown in a confirmation modal when the user turns on the web UI, before it is
+/// enabled. Warns that it is a remote-control surface bound on all interfaces
+/// and nudges toward a firewall / VPN / SSH tunnel rather than a raw public port.
+const WEB_UI_SECURITY_NOTICE: &str = "The web UI gives full remote control of \
+every session — creating, driving, and deleting them, with live terminal \
+access — and it listens on ALL network interfaces (0.0.0.0).\n\n\
+Only expose it on networks you trust: put it behind a firewall, a Tailscale/\
+WireGuard VPN, or an SSH tunnel rather than a raw public port, set a strong \
+password, or use the mutual-TLS auth mode.\n\n\
+Enable the web UI now?";
+
 /// Parse a settings text value into an optional path: empty or the common
 /// placeholder strings clear it to `None`, otherwise it's a `PathBuf`.
 fn parse_optional_path(value: &str) -> Option<std::path::PathBuf> {
@@ -1306,12 +1317,23 @@ impl App {
         self.persist_config();
     }
 
-    /// Persist the current config via the store (updates mtime so hot-reload
-    /// won't re-read our own write).
+    /// Persist the current config via the store.
+    ///
+    /// The TUI writes back its whole cached config, but that cache can be stale
+    /// for fields another in-process subsystem (the web UI) owns — most
+    /// critically `web_ui_password`, which has *no* TUI editor, so the cache can
+    /// only ever carry a stale or empty value. Writing it back would drop the
+    /// password and the web server would refuse to start on next launch. So we
+    /// apply the snapshot onto the store's *current* config under its lock and
+    /// preserve the store's `web_ui_password` (see [`overlay_tui_config`]).
     fn persist_config(&mut self) {
-        let updated = self.config.clone();
-        if let Err(e) = self.service.update_config(updated) {
-            warn!("Failed to save config: {}", e);
+        let snapshot = self.config.clone();
+        match self
+            .service
+            .mutate_config(move |c| overlay_tui_config(c, snapshot))
+        {
+            Ok(new) => self.config = new,
+            Err(e) => warn!("Failed to save config: {}", e),
         }
     }
 
@@ -1439,6 +1461,18 @@ impl App {
                 .flatten();
             if let Some(new_val) = new_val {
                 let field_key = state.rows[state.selected_row].field_key.clone();
+                // Enabling the web UI exposes a full remote-control surface, so
+                // confirm with a security notice before turning it on. Applied
+                // only on confirm (see ConfirmAction::EnableWebUi); disabling
+                // needs no prompt.
+                if should_confirm_web_ui_enable(&field_key, new_val, self.config.web_ui_enabled) {
+                    self.ui_state.modal = Modal::Confirm {
+                        title: "Enable Web UI?".to_string(),
+                        message: WEB_UI_SECURITY_NOTICE.to_string(),
+                        on_confirm: ConfirmAction::EnableWebUi,
+                    };
+                    return;
+                }
                 self.apply_bool_setting(&field_key, new_val);
                 state.rows = self.build_settings_rows(state.tab);
                 self.ui_state.modal = Modal::Settings(state);
@@ -1846,13 +1880,36 @@ impl App {
     }
 
     /// Persist the current sections config to disk and reconcile session assignments.
+    ///
+    /// Writes only the `sections` field onto the store's current config, so a
+    /// concurrent web-UI write (e.g. the password) isn't clobbered by our cache.
     async fn save_sections_config(&mut self) {
-        let updated = self.config.clone();
-        if let Err(e) = self.service.update_config(updated) {
-            warn!("Failed to save sections config: {}", e);
+        let sections = self.config.sections.clone();
+        match self.service.mutate_config(move |c| c.sections = sections) {
+            Ok(new) => self.config = new,
+            Err(e) => warn!("Failed to save sections config: {}", e),
         }
         self.reconcile_section_assignments().await;
     }
+}
+
+/// Apply the TUI's config `snapshot` onto the store's `current` config, keeping
+/// the fields the TUI settings modal cannot edit and must not clobber from its
+/// (possibly stale) cache. Today that is `web_ui_password`: there is no TUI
+/// field for it, so the store's value — owned by the web UI — always wins.
+///
+/// Free function so the preserve-list is unit-testable without a running `App`.
+fn overlay_tui_config(current: &mut crate::config::Config, snapshot: crate::config::Config) {
+    let web_ui_password = current.web_ui_password.take();
+    *current = snapshot;
+    current.web_ui_password = web_ui_password;
+}
+
+/// Whether toggling a settings row should first show the web-UI security
+/// confirmation ([`WEB_UI_SECURITY_NOTICE`]): only when turning `web_ui_enabled`
+/// from off to on. Disabling, or any other toggle, applies directly.
+fn should_confirm_web_ui_enable(field_key: &str, new_val: bool, currently_enabled: bool) -> bool {
+    field_key == "web_ui_enabled" && new_val && !currently_enabled
 }
 
 /// Build displayable rows for a section's predicates.
@@ -2231,6 +2288,46 @@ mod tests {
             .iter()
             .map(|l| SettingsRow::text(*l, "", "key"))
             .collect()
+    }
+
+    #[test]
+    fn confirms_web_ui_enable_only_on_off_to_on() {
+        // Turning it on prompts.
+        assert!(should_confirm_web_ui_enable("web_ui_enabled", true, false));
+        // Already on, re-affirming true: no prompt.
+        assert!(!should_confirm_web_ui_enable("web_ui_enabled", true, true));
+        // Turning it off: no prompt.
+        assert!(!should_confirm_web_ui_enable("web_ui_enabled", false, true));
+        // Any other toggle: no prompt.
+        assert!(!should_confirm_web_ui_enable(
+            "fetch_before_create",
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn overlay_tui_config_preserves_web_ui_password() {
+        // Regression: the TUI has no web_ui_password field, so its cached config
+        // carries None (or a stale value). Persisting must NOT drop the password
+        // the web UI set on the store — the server would then refuse to start.
+        let mut current = crate::config::Config {
+            web_ui_password: Some("set-via-web".to_string()),
+            ..Default::default()
+        };
+        // TUI snapshot with no password but a legitimately-edited field.
+        let snapshot = crate::config::Config {
+            web_ui_password: None,
+            branch_prefix: "tui-edit/".to_string(),
+            ..Default::default()
+        };
+
+        overlay_tui_config(&mut current, snapshot);
+
+        // The store's password survives...
+        assert_eq!(current.web_ui_password.as_deref(), Some("set-via-web"));
+        // ...and the TUI's actual edit is applied.
+        assert_eq!(current.branch_prefix, "tui-edit/");
     }
 
     #[test]

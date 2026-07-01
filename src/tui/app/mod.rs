@@ -678,10 +678,22 @@ pub enum InputAction {
 /// Action to perform when confirm modal is confirmed
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
-    DeleteSession { session_id: SessionId },
-    DeleteMergedPrSessions { session_ids: Vec<SessionId> },
-    RestartSession { session_id: SessionId },
-    RemoveProject { project_id: ProjectId },
+    DeleteSession {
+        session_id: SessionId,
+    },
+    DeleteMergedPrSessions {
+        session_ids: Vec<SessionId>,
+    },
+    RestartSession {
+        session_id: SessionId,
+    },
+    RemoveProject {
+        project_id: ProjectId,
+    },
+    /// Turn on the web UI after the user acknowledges the security notice shown
+    /// when they toggle it on in settings. Applied only on confirm so cancelling
+    /// leaves it disabled.
+    EnableWebUi,
 }
 
 /// Application UI state

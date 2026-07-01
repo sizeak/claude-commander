@@ -493,7 +493,10 @@ async fn session_scrollback(
         .clamp(1, SCROLLBACK_MAX_LINES);
     match state.service.capture_scrollback(&id, lines).await {
         Ok(Some(content)) => (
-            [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/plain; charset=utf-8",
+            )],
             content,
         )
             .into_response(),
