@@ -2,7 +2,10 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"
+    />
     <meta name="color-scheme" content="dark light" />
     <title>Claude Commander</title>
     <link rel="stylesheet" href="/vendor/xterm.css" />
@@ -33,8 +36,11 @@
 
       <main id="main">
         <header id="toolbar">
+          <button id="menu-btn" title="Show sessions" aria-label="Show sessions">☰</button>
           <div id="session-title">Select a session</div>
           <div id="toolbar-actions">
+            <button id="kbd-btn" disabled title="Show keyboard" aria-label="Show keyboard">⌨</button>
+            <button id="history-btn" disabled title="Scroll back / history" aria-label="History">⤒</button>
             <button id="info-btn" disabled title="Toggle info panel">Info</button>
             <button id="restart-btn" disabled title="Restart session">Restart</button>
             <button id="kill-btn" disabled title="Kill session">Kill</button>
@@ -48,14 +54,27 @@
               Pick a session on the left to view its terminal, or create a new one
               with ＋. Keystrokes you type here are sent live to that session.
             </div>
+            <button id="resume-live" class="hidden" title="Resume live view">⤓ Live</button>
           </div>
           <aside id="info-panel" class="hidden">
             <h2>Session info</h2>
             <dl id="info-list"></dl>
           </aside>
         </div>
+        <!-- On-screen special keys (mobile keyboards lack Esc/Tab/arrows/Ctrl). -->
+        <div id="key-bar">
+          <button type="button" data-key="esc">Esc</button>
+          <button type="button" data-key="tab">Tab</button>
+          <button type="button" id="ctrl-key" data-key="ctrl">Ctrl</button>
+          <button type="button" data-key="up" aria-label="Up">↑</button>
+          <button type="button" data-key="down" aria-label="Down">↓</button>
+          <button type="button" data-key="left" aria-label="Left">←</button>
+          <button type="button" data-key="right" aria-label="Right">→</button>
+          <button type="button" data-key="enter" aria-label="Enter">⏎</button>
+        </div>
       </main>
     </div>
+    <div id="sidebar-backdrop" class="hidden"></div>
 
     <!-- New session modal -->
     <div id="new-modal" class="modal-overlay hidden">

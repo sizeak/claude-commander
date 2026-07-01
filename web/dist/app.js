@@ -19,7 +19,10 @@ const els = {
   refresh: document.getElementById("refresh-btn"),
   addProjectBtn: document.getElementById("add-project-btn"),
   // toolbar
+  menuBtn: document.getElementById("menu-btn"),
   title: document.getElementById("session-title"),
+  kbdBtn: document.getElementById("kbd-btn"),
+  historyBtn: document.getElementById("history-btn"),
   infoBtn: document.getElementById("info-btn"),
   restart: document.getElementById("restart-btn"),
   kill: document.getElementById("kill-btn"),
@@ -27,6 +30,10 @@ const els = {
   // main
   placeholder: document.getElementById("terminal-placeholder"),
   terminal: document.getElementById("terminal"),
+  resumeLive: document.getElementById("resume-live"),
+  keyBar: document.getElementById("key-bar"),
+  ctrlKey: document.getElementById("ctrl-key"),
+  backdrop: document.getElementById("sidebar-backdrop"),
   infoPanel: document.getElementById("info-panel"),
   infoList: document.getElementById("info-list"),
   // modals
@@ -61,6 +68,12 @@ const state = {
   ws: null,
   term: null,
   fit: null,
+  // "live" mirrors the pane on each tick; "history" pauses that and shows a
+  // scrollable snapshot of the pane's scrollback so the user can scroll up.
+  mode: "live",
+  // Sticky Ctrl modifier for the on-screen key bar: when armed, the next typed
+  // character is sent as its control code.
+  ctrlPending: false,
 };
 
 // ---- Generic fetch helpers ----
@@ -317,7 +330,11 @@ function renderTree() {
   els.kill.disabled = !active;
   els.delete.disabled = !sel;
   els.infoBtn.disabled = !sel;
+  els.kbdBtn.disabled = !sel;
+  els.historyBtn.disabled = !sel;
   els.title.textContent = sel ? sel.title : "Select a session";
+  // Drives the mobile-only special-key bar (shown only with a session open).
+  document.body.classList.toggle("has-session", !!sel);
   if (state.showInfo) renderInfo();
 }
 
@@ -385,17 +402,39 @@ function ensureTerm() {
   // can measure a zero/short container and pick the wrong size.
   requestAnimationFrame(() => fitNow());
 
-  // Forward every keystroke to the session as raw bytes.
+  // Forward every keystroke to the session as raw bytes. Typing while the
+  // history view is up snaps back to the live mirror first. A sticky Ctrl
+  // (armed from the on-screen key bar) rewrites the next character to its
+  // control code (e.g. Ctrl + C → 0x03).
   state.term.onData((data) => {
-    if (state.ws && state.ws.readyState === WebSocket.OPEN) {
-      state.ws.send(new TextEncoder().encode(data));
+    if (state.mode === "history") exitHistory();
+    let out = data;
+    if (state.ctrlPending && data.length === 1) {
+      out = String.fromCharCode(data.charCodeAt(0) & 0x1f);
+      armCtrl(false);
     }
+    sendData(out);
   });
 
   window.addEventListener("resize", () => {
     fitNow();
     sendResize();
   });
+  // The mobile soft keyboard shrinks the visual viewport rather than the layout
+  // viewport; refit so the terminal fills the space above the keyboard.
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener("resize", () => {
+      fitNow();
+      sendResize();
+    });
+  }
+}
+
+// Send a string to the session as raw UTF-8 bytes (no-op if the socket is down).
+function sendData(data) {
+  if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+    state.ws.send(new TextEncoder().encode(data));
+  }
 }
 
 // Fit the xterm grid to its container (no-op if not ready). Safe to call often.
@@ -436,6 +475,10 @@ function selectSession(id) {
 
   ensureTerm();
   els.placeholder.style.display = "none";
+  // Switching sessions always drops back to the live view.
+  resetHistoryUi();
+  // On mobile the sidebar is a drawer; picking a session gets it out of the way.
+  if (isMobile()) closeDrawer();
 
   // Tear down any previous socket.
   if (state.ws) {
@@ -444,6 +487,7 @@ function selectSession(id) {
     state.ws = null;
   }
 
+  state.term.options.scrollback = 0;
   state.term.reset();
   state.term.write("\x1b[2J\x1b[H");
 
@@ -465,6 +509,8 @@ function selectSession(id) {
   };
 
   ws.onmessage = (ev) => {
+    // History view is frozen: ignore live snapshots so the scroll position holds.
+    if (state.mode === "history") return;
     const text = typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data);
     paintSnapshot(text);
   };
@@ -497,6 +543,136 @@ function paintSnapshot(text) {
   out += "\x1b[?25h"; // show cursor
   state.term.write(out);
 }
+
+// ---- Mobile: sidebar drawer ----
+
+// Match the CSS breakpoint that switches the sidebar to an off-canvas drawer.
+function isMobile() {
+  return window.matchMedia("(max-width: 768px)").matches;
+}
+
+function openDrawer() {
+  document.body.classList.add("drawer-open");
+  els.backdrop.classList.remove("hidden");
+}
+function closeDrawer() {
+  document.body.classList.remove("drawer-open");
+  els.backdrop.classList.add("hidden");
+}
+
+els.menuBtn.addEventListener("click", () => {
+  if (document.body.classList.contains("drawer-open")) closeDrawer();
+  else openDrawer();
+});
+els.backdrop.addEventListener("click", closeDrawer);
+
+// ---- Mobile: on-screen keyboard + special keys ----
+
+// Escape sequences the key bar emits (arrow keys, Esc, Tab, Enter).
+const KEY_SEQ = {
+  esc: "\x1b",
+  tab: "\t",
+  enter: "\r",
+  up: "\x1b[A",
+  down: "\x1b[B",
+  right: "\x1b[C",
+  left: "\x1b[D",
+};
+
+// Arm/disarm the sticky Ctrl modifier and reflect it on the key.
+function armCtrl(on) {
+  state.ctrlPending = on;
+  els.ctrlKey.classList.toggle("sticky-active", on);
+}
+
+// The ⌨ button just focuses the terminal, which raises the soft keyboard.
+els.kbdBtn.addEventListener("click", () => {
+  if (state.term) state.term.focus();
+});
+
+els.keyBar.querySelectorAll("button[data-key]").forEach((btn) => {
+  // Keep focus on the terminal's textarea so the soft keyboard doesn't drop.
+  btn.addEventListener("mousedown", (e) => e.preventDefault());
+  btn.addEventListener("click", () => {
+    const key = btn.dataset.key;
+    if (key === "ctrl") {
+      armCtrl(!state.ctrlPending);
+      return;
+    }
+    if (state.mode === "history") exitHistory();
+    const seq = KEY_SEQ[key];
+    if (seq) sendData(seq);
+  });
+});
+
+// ---- Terminal history / scroll-back view ----
+
+// Reset the history UI to the live state without touching the socket. Used both
+// when leaving history and when switching sessions (which rebuilds the socket).
+function resetHistoryUi() {
+  state.mode = "live";
+  els.resumeLive.classList.add("hidden");
+  els.historyBtn.classList.remove("sticky-active");
+}
+
+// Ask the server for a fresh snapshot immediately. The live stream only pushes
+// on change, so after we clear the screen (leaving history) we'd otherwise stare
+// at a blank pane until its content next changed. Reusing the resize control
+// message forces the server to drop its dedupe hash and repaint next tick.
+function forceResync() {
+  if (
+    state.ws &&
+    state.ws.readyState === WebSocket.OPEN &&
+    state.term &&
+    state.term.cols &&
+    state.term.rows
+  ) {
+    state.ws.send(
+      JSON.stringify({ type: "resize", cols: state.term.cols, rows: state.term.rows })
+    );
+  }
+}
+
+// Enter the frozen, scrollable history view: fetch the pane's scrollback and
+// render it with real line breaks so xterm builds a buffer the user can scroll.
+async function enterHistory() {
+  const s = currentSession();
+  if (!s || !state.term) return;
+  try {
+    const res = await fetch(`/api/sessions/${s.id}/scrollback?lines=2000`, {
+      headers: { Accept: "text/plain" },
+    });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    const text = await res.text();
+    state.mode = "history";
+    els.resumeLive.classList.remove("hidden");
+    els.historyBtn.classList.add("sticky-active");
+    state.term.options.scrollback = 5000;
+    state.term.reset();
+    // convertEol is off (see ensureTerm), so translate LF → CRLF ourselves.
+    state.term.write(text.replace(/\r?\n/g, "\r\n"));
+  } catch (e) {
+    alert("Failed to load history: " + e.message);
+  }
+}
+
+// Leave the history view and resume the live mirror.
+function exitHistory() {
+  if (state.mode !== "history") return;
+  resetHistoryUi();
+  if (state.term) {
+    state.term.options.scrollback = 0;
+    state.term.reset();
+    state.term.write("\x1b[2J\x1b[H");
+  }
+  forceResync();
+}
+
+els.historyBtn.addEventListener("click", () => {
+  if (state.mode === "history") exitHistory();
+  else enterHistory();
+});
+els.resumeLive.addEventListener("click", exitHistory);
 
 // ---- Session lifecycle actions ----
 
@@ -811,5 +987,8 @@ els.settingsForm.addEventListener("submit", async (e) => {
 
 // ---- Boot ----
 
-refreshAll();
+refreshAll().then(() => {
+  // On a phone nothing is selected yet, so start with the session list open.
+  if (isMobile() && !state.selectedId) openDrawer();
+});
 setInterval(refreshAll, POLL_MS);

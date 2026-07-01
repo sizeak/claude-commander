@@ -31,6 +31,9 @@ body {
 #app {
   display: flex;
   height: 100vh;
+  /* Dynamic viewport height: on mobile this shrinks when the soft keyboard
+     opens, so the terminal + key bar stay within the visible area. */
+  height: 100dvh;
   overflow: hidden;
 }
 
@@ -612,4 +615,149 @@ button.ghost {
   color: var(--fg-dim);
   margin: 4px 0 10px;
   font-weight: 600;
+}
+
+/* ------------------------------------------------------------------ */
+/* Mobile-friendly controls: drawer toggle, keyboard, history, keybar  */
+/* ------------------------------------------------------------------ */
+
+/* Hamburger that opens the sidebar drawer — desktop hides it (the sidebar
+   is always visible there), mobile shows it via the media query below. */
+#menu-btn {
+  display: none;
+  background: none;
+  border: none;
+  color: var(--fg-dim);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 6px;
+  flex-shrink: 0;
+}
+#menu-btn:hover {
+  color: var(--fg);
+  background: var(--bg-hover);
+}
+
+/* Backdrop behind the drawer (only meaningful on mobile). */
+#sidebar-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 250;
+}
+
+/* Floating "resume live" pill shown while the history view is up. */
+#resume-live {
+  position: absolute;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  background: var(--accent);
+  color: #04121f;
+  border: none;
+  border-radius: 20px;
+  padding: 9px 18px;
+  font-weight: 600;
+  font-size: 13px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+#resume-live:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+/* On-screen special-key bar. Hidden by default (desktop keyboards have these
+   keys); the media query reveals it on mobile once a session is selected. */
+#key-bar {
+  display: none;
+  gap: 6px;
+  padding: 6px 8px calc(6px + env(safe-area-inset-bottom, 0px));
+  background: var(--bg-alt);
+  border-top: 1px solid var(--border);
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  flex-shrink: 0;
+}
+#key-bar button {
+  flex: 1 0 auto;
+  min-width: 46px;
+  padding: 11px 12px;
+  font-size: 15px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--fg);
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+}
+#key-bar button:active {
+  background: var(--bg-hover);
+}
+/* Sticky modifier (Ctrl) that stays armed for the next keystroke. */
+#key-bar button.sticky-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #04121f;
+}
+
+@media (max-width: 768px) {
+  /* Sidebar collapses to an off-canvas drawer. */
+  #menu-btn {
+    display: inline-block;
+  }
+  #sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 300;
+    width: 84vw;
+    max-width: 320px;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    box-shadow: 2px 0 24px rgba(0, 0, 0, 0.55);
+  }
+  body.drawer-open #sidebar {
+    transform: translateX(0);
+  }
+
+  #main {
+    width: 100%;
+  }
+
+  /* Toolbar: let the title shrink so the action buttons keep their space,
+     and let the actions scroll horizontally if they overflow. */
+  #toolbar {
+    padding: 8px 10px;
+    gap: 6px;
+  }
+  #session-title {
+    flex: 1 1 auto;
+    min-width: 40px;
+  }
+  #toolbar-actions {
+    flex: 0 1 auto;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+  #toolbar-actions button {
+    padding: 6px 9px;
+    white-space: nowrap;
+  }
+
+  /* Info panel becomes a full-screen overlay instead of a side column. */
+  #info-panel {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    z-index: 260;
+  }
+
+  /* Special-key bar appears once a session is open. */
+  body.has-session #key-bar {
+    display: flex;
+  }
 }

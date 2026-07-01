@@ -17,7 +17,7 @@ use std::time::Duration;
 use axum::Json;
 use axum::Router;
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -41,6 +41,7 @@ pub(crate) fn router(state: WebState) -> Router {
         )
         .route("/api/sessions/{id}/restart", post(restart_session))
         .route("/api/sessions/{id}/kill", post(kill_session))
+        .route("/api/sessions/{id}/scrollback", get(session_scrollback))
         .route("/ws/sessions/{id}", get(terminal_ws))
         // Projects / repos
         .route("/api/projects", get(list_projects).post(add_project))
@@ -462,6 +463,44 @@ async fn get_meta(State(state): State<WebState>) -> Response {
 }
 
 // -- Terminal WebSocket --
+
+/// Query string for the scrollback endpoint: `?lines=N`.
+#[derive(Deserialize)]
+struct ScrollbackQuery {
+    #[serde(default)]
+    lines: Option<u32>,
+}
+
+/// Default and maximum number of history lines the scrollback view fetches.
+/// The default is generous enough to scroll back through a long Claude turn; the
+/// cap bounds the response size (tmux's own history-limit is the real ceiling).
+const SCROLLBACK_DEFAULT_LINES: u32 = 2000;
+const SCROLLBACK_MAX_LINES: u32 = 10_000;
+
+/// `GET /api/sessions/{id}/scrollback?lines=N` — one-shot capture of the pane
+/// with history, as `text/plain` (ANSI preserved). The live terminal WebSocket
+/// only ever sends one visible screenful; this backs the browser's "history"
+/// mode, where the user pauses the live mirror and scrolls up through output that
+/// has scrolled off. 404 if the session no longer exists.
+async fn session_scrollback(
+    State(state): State<WebState>,
+    Path(id): Path<String>,
+    Query(q): Query<ScrollbackQuery>,
+) -> Response {
+    let lines = q
+        .lines
+        .unwrap_or(SCROLLBACK_DEFAULT_LINES)
+        .clamp(1, SCROLLBACK_MAX_LINES);
+    match state.service.capture_scrollback(&id, lines).await {
+        Ok(Some(content)) => (
+            [(axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+            content,
+        )
+            .into_response(),
+        Ok(None) => api_err(StatusCode::NOT_FOUND, "session not found"),
+        Err(e) => api_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
 
 async fn terminal_ws(
     State(state): State<WebState>,

@@ -332,6 +332,36 @@ mod router_tests {
     }
 
     #[tokio::test]
+    async fn scrollback_requires_auth() {
+        let resp = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/sessions/{}/scrollback", uuid::Uuid::new_v4()))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn scrollback_unknown_session_is_not_found() {
+        // Valid UUID, but no such session in a fresh state → 404 (not a 400/500).
+        let resp = test_app()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/sessions/{}/scrollback", uuid::Uuid::new_v4()))
+                    .header(header::AUTHORIZATION, basic("admin", "pw"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
     async fn projects_requires_auth() {
         let resp = test_app()
             .oneshot(

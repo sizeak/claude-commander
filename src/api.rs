@@ -307,6 +307,36 @@ impl CommanderService {
         self.manager.tmux.capture_visible_ansi(&tmux_name).await
     }
 
+    /// Capture a session's pane *including scrollback history* — the last `lines`
+    /// lines (history plus the current screen), ANSI colours intact.
+    ///
+    /// Unlike [`capture_terminal`](Self::capture_terminal), which returns exactly
+    /// one screenful for the live mirror, this returns many screenfuls so the web
+    /// UI's history view can let the user scroll back through output that has
+    /// scrolled off the visible pane. Returns `Ok(None)` if the session is gone.
+    pub async fn capture_scrollback(&self, query: &str, lines: u32) -> Result<Option<String>> {
+        let state = self.store.read().await;
+        let Some(session) = crate::cli::find_session(&state, query) else {
+            return Ok(None);
+        };
+        let tmux_name = session.tmux_session_name.clone();
+        drop(state);
+
+        if !self.manager.tmux.session_exists(&tmux_name).await? {
+            return Ok(None);
+        }
+        // tmux uses a negative start line to reach into history: `-N` is N lines
+        // above the top of the visible screen. No end line → up to the bottom.
+        let start = -(lines as i32);
+        self.telemetry.feature("web.scrollback");
+        let content = self
+            .manager
+            .tmux
+            .capture_pane(&tmux_name, Some(start), None)
+            .await?;
+        Ok(Some(content))
+    }
+
     /// Forward raw input bytes to a session's tmux pane, verbatim.
     ///
     /// This is the input half of the web UI's terminal bridge: the browser's
