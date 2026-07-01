@@ -58,14 +58,14 @@ resume_session = true
 # default. Enabling (and the check interval) is restart-required; the idle
 # timeout is read live.
 # hibernate_enabled = false
-# Idle duration (seconds) before an eligible session is hibernated. The in-app
-# settings editor enforces a minimum of 60; hand-edited values here are used
-# as-is.
-# hibernate_idle_timeout_secs = 1800
-# Interval (seconds) between hibernation policy checks. The in-app settings
-# editor enforces a minimum of 10; hand-edited values here are used as-is, and
-# 0 disables the loop entirely.
-# hibernate_check_interval_secs = 60
+# Idle duration (seconds) before an eligible session is hibernated. Default
+# 86400 (1 day). The in-app settings editor enforces a minimum of 60;
+# hand-edited values here are used as-is.
+# hibernate_idle_timeout_secs = 86400
+# Interval (seconds) between hibernation policy checks. Default 600 (10 min).
+# The in-app settings editor enforces a minimum of 10; hand-edited values here
+# are used as-is, and 0 disables the loop entirely.
+# hibernate_check_interval_secs = 600
 
 # Launch sessions inside `nix develop` when the project has a `flake.nix` at
 # its root and `nix` is on PATH, so the agent and shell get the project's dev
