@@ -174,7 +174,9 @@ pub async fn attach_to_session(
     // `tmux attach-session` in it. The local adapter below layers raw-mode,
     // SIGWINCH, and hotkey interception on top — none of which live in the
     // bridge, so the server can reuse the same spawn.
-    let bridge = super::HeadlessAttach::spawn(session_name, cols, rows)?;
+    // Local TUI/CLI attach talks to the user's own tmux server, so no socket-dir
+    // isolation (unlike the server's WS attach, which honours `tmux_tmpdir`).
+    let bridge = super::HeadlessAttach::spawn(session_name, cols, rows, None)?;
     let resize = bridge.resize_handle();
     let (pty_reader, pty_writer, _resize_handle, mut child_guard) = bridge.split();
 

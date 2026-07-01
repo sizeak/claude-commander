@@ -15,12 +15,11 @@
 //! convert into the plain-struct / unit-enum DTOs defined below before handing
 //! them to frb.
 
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use claude_commander_protocol::api::{NewComment, ReviewSnapshot};
+use claude_commander_protocol::api::{NewComment, ReviewSnapshot, ToggleReviewed};
 use claude_commander_protocol::comment::{ApplyOutcome, Comment, CommentSide, CommentStatus};
 use claude_commander_protocol::diff::{
     BinaryKind, DiffLine, FileDiff, FileStatus, Hunk, LineOrigin, ParsedDiff,
@@ -358,7 +357,6 @@ pub fn open_review(
     let snapshot = ok_or_status(resp, "open_review")?
         .json::<ReviewSnapshot>()
         .context("response did not match the ReviewSnapshot contract")?;
-    cache_files(&session_id, &snapshot.diff.files);
     Ok(snapshot.into())
 }
 
@@ -390,7 +388,6 @@ pub fn refresh_review(
     let snapshot = ok_or_status(resp, "refresh_review")?
         .json::<ReviewSnapshot>()
         .context("response did not match the ReviewSnapshot contract")?;
-    cache_files(&session_id, &snapshot.diff.files);
     Ok(Some(snapshot.into()))
 }
 
@@ -527,22 +524,17 @@ pub fn fetch_blob(
     Ok(bytes.to_vec())
 }
 
-/// `POST {base_url}/api/sessions/{session_id}/files/reviewed` → toggle a file's
-/// reviewed mark, returning the new state. The server keys the mark on the
-/// exact `FileDiff` (path + a content hash), so we replay the raw `FileDiff`
-/// JSON cached from the last `open_review`/`refresh_review` for `display_path`.
+/// `POST {base_url}/api/sessions/{session_id}/files/reviewed` (body =
+/// [`ToggleReviewed`]) → toggle a file's reviewed mark, returning the new
+/// state. Only the display path crosses the wire — the server resolves the
+/// file in the *current* review diff itself, so no client-side `FileDiff`
+/// caching is needed and a mark can't be recorded against a stale copy.
 pub fn toggle_file_reviewed(
     base_url: String,
     token: String,
     session_id: String,
     display_path: String,
 ) -> Result<bool> {
-    let raw = file_cache()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get(&(session_id.clone(), display_path.clone()))
-        .cloned()
-        .context("file not in the last-opened review; open the review first")?;
     let resp = client()
         .post(format!(
             "{}/api/sessions/{}/files/reviewed",
@@ -550,8 +542,7 @@ pub fn toggle_file_reviewed(
             session_id
         ))
         .bearer_auth(token)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(raw)
+        .json(&ToggleReviewed { display_path })
         .send()
         .context("toggle_file_reviewed request failed")?;
     let value: serde_json::Value = ok_or_status(resp, "toggle_file_reviewed")?
@@ -561,26 +552,6 @@ pub fn toggle_file_reviewed(
         .get("reviewed")
         .and_then(|v| v.as_bool())
         .unwrap_or(false))
-}
-
-/// Raw `FileDiff` JSON keyed by `(session_id, display_path)`, populated by
-/// `open_review`/`refresh_review` so `toggle_file_reviewed` can replay the exact
-/// `FileDiff` the server hashed (a reconstructed one would hash differently and
-/// orphan the mark).
-fn file_cache() -> &'static Mutex<HashMap<(String, String), String>> {
-    static CACHE: OnceLock<Mutex<HashMap<(String, String), String>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-/// Replace the cached files for `session_id` with the snapshot's current set.
-fn cache_files(session_id: &str, files: &[FileDiff]) {
-    let mut cache = file_cache().lock().unwrap_or_else(|e| e.into_inner());
-    cache.retain(|(sid, _), _| sid != session_id);
-    for f in files {
-        if let Ok(json) = serde_json::to_string(f) {
-            cache.insert((session_id.to_string(), f.display_path().to_string()), json);
-        }
-    }
 }
 
 #[cfg(test)]
@@ -638,32 +609,6 @@ mod tests {
         };
         let dto: ReviewSnapshotDto = snap.into();
         assert_eq!(dto.content_hash, u64::MAX.to_string());
-    }
-
-    #[test]
-    fn cache_files_stores_lossless_filediff_by_display_path() {
-        // Uses a unique session id so it doesn't race other tests sharing the
-        // process-global cache.
-        let f = FileDiff {
-            old_path: "src/a.rs".into(),
-            new_path: "src/a.rs".into(),
-            status: FileStatus::Modified,
-            added: 1,
-            removed: 0,
-            hunks: vec![],
-            binary: None,
-        };
-        cache_files("sess-cache-test", std::slice::from_ref(&f));
-        let raw = file_cache()
-            .lock()
-            .unwrap()
-            .get(&("sess-cache-test".to_string(), "src/a.rs".to_string()))
-            .cloned()
-            .expect("file should be cached by display_path");
-        // The cached JSON must round-trip to the identical FileDiff so the
-        // server hashes the same value for the reviewed mark.
-        let back: FileDiff = serde_json::from_str(&raw).unwrap();
-        assert_eq!(back, f);
     }
 
     #[test]

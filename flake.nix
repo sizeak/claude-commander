@@ -123,6 +123,53 @@
         };
         clientAndroidSdkRoot = "${clientAndroid.androidsdk}/libexec/android-sdk";
         clientNdkVersion = "28.0.13004108";
+        # cargokit (flutter_rust_bridge's native-build glue, vendored under
+        # client/rust_builder/cargokit) hard-requires `rustup` — it queries
+        # `rustup toolchain list` / `rustup target list --installed` and builds
+        # via `rustup run <toolchain> cargo build`, with no plain-cargo
+        # fallback. These shells pin Rust via fenix instead of rustup, so
+        # provide a shim that answers cargokit's queries from the toolchain on
+        # PATH and execs `rustup run`'s command directly (the toolchain name is
+        # ignored — Nix already pinned it). Without this, builds only work
+        # where a host rustup happens to leak in through the outer PATH.
+        # Toolchain/target *installation* is Nix's job: the shim fails loudly
+        # so a missing target is fixed in flake.nix, not auto-downloaded.
+        clientRustupShim = clientPkgs.writeShellScriptBin "rustup" ''
+          set -eu
+          cmd="''${1:-}"; [ $# -gt 0 ] && shift
+          case "$cmd" in
+            toolchain)
+              sub="''${1:-}"
+              if [ "$sub" = "list" ]; then
+                echo "stable-$(rustc -vV | sed -n 's/^host: //p') (default)"
+              else
+                echo "rustup shim: 'rustup toolchain $sub' is unsupported — toolchains come from Nix (fenix); edit flake.nix" >&2
+                exit 1
+              fi ;;
+            target)
+              sub="''${1:-}"
+              if [ "$sub" = "list" ]; then
+                sysroot="$(rustc --print sysroot)"
+                # `if`, not `[ … ] &&`: under `set -e` the AND-list form makes a
+                # trailing non-target entry (e.g. `etc/`) the loop's — and the
+                # script's — exit status, which aborts cargokit. Which entry
+                # sorts last is platform-dependent (aarch64-apple-darwin sorts
+                # BEFORE etc), so the && form breaks exactly on macOS.
+                for d in "$sysroot"/lib/rustlib/*/; do
+                  if [ -d "$d/lib" ]; then basename "$d"; fi
+                done
+              else
+                echo "rustup shim: 'rustup target $sub' is unsupported — add the target to the fenix toolchain in flake.nix" >&2
+                exit 1
+              fi ;;
+            run)
+              shift # toolchain name — pinned by Nix, ignored
+              exec "$@" ;;
+            *)
+              echo "rustup shim: unsupported command '$cmd'" >&2
+              exit 1 ;;
+          esac
+        '';
       in
       {
         checks = {
@@ -163,6 +210,7 @@
           # Linux (macOS desktop is Cocoa, built via Xcode, not these libs).
           buildInputs = [
             clientRust
+            clientRustupShim
             clientAndroid.androidsdk
             clientPkgs.jdk17
           ] ++ (with clientPkgs; [
@@ -257,6 +305,7 @@
             # Host-only Rust (no Android targets): cargokit cross-builds the
             # cdylib for the linux desktop target during the e2e bundle build.
             fenix.packages.${system}.stable.toolchain
+            clientRustupShim
           ] ++ (with clientPkgs; [
             flutter
             dart

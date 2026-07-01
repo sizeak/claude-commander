@@ -52,7 +52,8 @@ impl ApiError {
             // Missing things → 404.
             CoreError::Session(SessionError::NotFound(_))
             | CoreError::Session(SessionError::ProjectNotFound(_))
-            | CoreError::Session(SessionError::TmuxSessionNotFound(_)) => StatusCode::NOT_FOUND,
+            | CoreError::Session(SessionError::TmuxSessionNotFound(_))
+            | CoreError::Session(SessionError::FileNotInDiff(_)) => StatusCode::NOT_FOUND,
 
             // Conflicting existing state → 409.
             CoreError::Session(SessionError::AlreadyExists(_))

@@ -8,7 +8,7 @@ import 'mirrors.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:uuid/uuid.dart';
 
-// These functions are ignored because they are not marked as `pub`: `base`, `client`, `ok_or_status`, `parse_created_id`
+// These functions are ignored because they are not marked as `pub`: `base`, `client`, `ok_or_status`, `parse_created_id`, `session_url`
 
 /// Liveness probe: `GET {base_url}/health` (no auth). Returns true on a 2xx.
 Future<bool> health({required String baseUrl}) =>

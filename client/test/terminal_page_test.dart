@@ -89,6 +89,39 @@ void main() {
     expect(find.textContaining('detached: session ended'), findsOneWidget);
   });
 
+  testWidgets('a ready event re-announces the terminal size', (tester) async {
+    await tester.pumpWidget(wrap());
+    await tester.pump(); // subscribe
+    await tester.pump(); // let any layout-driven onResize fire first
+
+    final before = api.countOf('terminalResize');
+    await emitAndPump(tester, signal(TerminalEventKind.ready, 'sess'));
+
+    // The server spawns each attach at 80x24 and only learns our size from an
+    // explicit Resize, so `ready` must (re-)announce it.
+    expect(api.countOf('terminalResize'), greaterThan(before));
+  });
+
+  testWidgets('reconnect re-announces the terminal size on the new ready', (
+    tester,
+  ) async {
+    await tester.pumpWidget(wrap());
+    await tester.pump();
+    await tester.pump();
+
+    await emitAndPump(tester, signal(TerminalEventKind.ready, 'sess'));
+    final afterFirstReady = api.countOf('terminalResize');
+
+    await emitAndPump(tester, signal(TerminalEventKind.detached, 'bye'));
+    await tester.tap(find.widgetWithIcon(IconButton, Icons.refresh));
+    await tester.pump();
+    await emitAndPump(tester, signal(TerminalEventKind.ready, 'sess2'));
+
+    // The reconnected PTY starts at 80x24 again; the same-size Terminal won't
+    // fire onResize, so the new ready must re-announce.
+    expect(api.countOf('terminalResize'), greaterThan(afterFirstReady));
+  });
+
   testWidgets('tapping reconnect re-subscribes via attachTerminal', (
     tester,
   ) async {

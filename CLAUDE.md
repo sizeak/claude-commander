@@ -69,6 +69,8 @@ Unit tests are co-located in source files (`#[cfg(test)]`). Integration tests in
 
 Tests must not read or modify anything on the real filesystem. Any disk access must go through `tempfile::TempDir` (already in dev-deps) for OS-portable temp paths. Never hardcode `/tmp/...` as a real path. Dummy `PathBuf` values stored in struct fields (never accessed on disk) are acceptable.
 
+**tmux isolation:** tmux clients resolve their socket from the `$TMUX` env var (set inside any tmux session) **in preference to** `$TMUX_TMPDIR` — so a test script that only exports `TMUX_TMPDIR` is NOT isolated when run from inside tmux: its tmux commands (including a cleanup `tmux kill-server`) hit the developer's real server and can kill every open session. Any script that isolates tmux via `TMUX_TMPDIR` must also `unset TMUX TMUX_PANE` (see `client/tool/e2e.sh`), and never run a bare `tmux kill-server` without `$TMUX` provably unset. The Rust integration tests are now genuinely isolated via the `tmux_tmpdir` config knob (set by `crates/claude-commander-test-support`'s `test_state` and core's `create_isolated_config_store`): the `TmuxExecutor` and the `HeadlessAttach` bridge apply `TMUX_TMPDIR` + strip `$TMUX`/`$TMUX_PANE` per-command when it is set, so each test gets its own throwaway tmux server (which exits with its last session) rather than landing on the developer's default server.
+
 ### Writing new tests
 
 Use red-green TDD: write a failing test first, then implement the fix. Key areas covered by regression tests:

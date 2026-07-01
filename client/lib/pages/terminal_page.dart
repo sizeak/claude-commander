@@ -120,6 +120,17 @@ class _TerminalPageState extends State<TerminalPage> {
         _decoder.add(e.bytes);
       case TerminalEventKind.ready:
         setState(() => _status = 'attached: ${e.text}');
+        // The server spawns each attach at its default 80x24 and only ever
+        // learns our size from an explicit Resize. xterm's onResize fires only
+        // when dimensions change, so on a same-size (re)connect it never does —
+        // re-announce our current size on every ready.
+        unawaited(
+          widget.api.terminalResize(
+            handle: _handle,
+            cols: _terminal.viewWidth,
+            rows: _terminal.viewHeight,
+          ),
+        );
       case TerminalEventKind.detached:
         setState(() {
           _status = 'detached: ${e.text}';

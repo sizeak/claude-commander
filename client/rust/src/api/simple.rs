@@ -25,6 +25,18 @@ fn base(base_url: &str) -> &str {
     base_url.trim_end_matches('/')
 }
 
+/// Build `{base}/api/sessions/{query}/{leaf}` with `query` percent-encoded as a
+/// single path segment. The loose session query may be a branch or title
+/// prefix, so a raw '/', '?', or '#' in it must not restructure the URL (which
+/// would 404 and read as "session gone").
+fn session_url(base_url: &str, query: &str, leaf: &str) -> Result<reqwest::Url> {
+    let mut url = reqwest::Url::parse(base(base_url)).context("invalid base URL")?;
+    url.path_segments_mut()
+        .map_err(|_| anyhow::anyhow!("base URL cannot be used as a base"))?
+        .extend(["api", "sessions", query, leaf]);
+    Ok(url)
+}
+
 /// A process-wide blocking client, so repeated calls (e.g. the 2s detail poll)
 /// reuse connections instead of building a fresh pool each time. `Client` is
 /// `Arc`-backed, so the clone is cheap and shares the pool.
@@ -99,9 +111,9 @@ pub fn get_session_detail(
     query: String,
     lines: Option<u32>,
 ) -> Result<Option<SessionDetail>> {
-    let mut url = format!("{}/api/sessions/{}/detail", base(&base_url), query);
+    let mut url = session_url(&base_url, &query, "detail")?;
     if let Some(n) = lines {
-        url.push_str(&format!("?lines={n}"));
+        url.query_pairs_mut().append_pair("lines", &n.to_string());
     }
     let resp = client()
         .get(url)
@@ -126,9 +138,9 @@ pub fn get_pane(
     query: String,
     lines: Option<u32>,
 ) -> Result<Option<String>> {
-    let mut url = format!("{}/api/sessions/{}/pane", base(&base_url), query);
+    let mut url = session_url(&base_url, &query, "pane")?;
     if let Some(n) = lines {
-        url.push_str(&format!("?lines={n}"));
+        url.query_pairs_mut().append_pair("lines", &n.to_string());
     }
     let resp = client()
         .get(url)
@@ -247,5 +259,26 @@ mod tests {
         // violation, not a silent empty string.
         assert!(parse_created_id(&serde_json::json!({})).is_err());
         assert!(parse_created_id(&serde_json::json!({ "id": 42 })).is_err());
+    }
+
+    /// The loose `query` (a branch or title prefix, per the server's resolve)
+    /// must travel as ONE percent-encoded path segment: a raw '/' would add a
+    /// bogus segment, and '?'/'#' would truncate the path into a query string
+    /// or fragment — turning a live session into a phantom 404.
+    #[test]
+    fn session_url_encodes_query_as_single_segment() {
+        let url = session_url("http://host:7878/", "feature/login", "detail").unwrap();
+        assert_eq!(
+            url.as_str(),
+            "http://host:7878/api/sessions/feature%2Flogin/detail"
+        );
+
+        let url = session_url("http://host:7878", "fix? #123", "pane").unwrap();
+        let s = url.as_str();
+        assert!(
+            !s.contains('?') && !s.contains('#'),
+            "reserved chars must be encoded, got {s}"
+        );
+        assert!(s.ends_with("/pane"), "leaf must survive: {s}");
     }
 }

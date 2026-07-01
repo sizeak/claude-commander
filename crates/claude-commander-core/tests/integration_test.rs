@@ -23,8 +23,21 @@ fn create_isolated_store(temp_dir: &TempDir) -> Arc<StateStore> {
     Arc::new(StateStore::with_path(state, state_path))
 }
 
-/// Helper to create an isolated ConfigStore for testing
-fn create_isolated_config_store(temp_dir: &TempDir, config: Config) -> Arc<ConfigStore> {
+/// Isolate every tmux command spawned by a manager built on `temp_dir` onto a
+/// throwaway socket dir, so the suite never touches the developer's real tmux
+/// server — even when `cargo test` runs from inside a tmux session (where an
+/// inherited `$TMUX` would win over an unset `TMUX_TMPDIR`). Returns the dir,
+/// which must already exist for tmux to bind its server there.
+fn isolated_tmux_tmpdir(temp_dir: &TempDir) -> PathBuf {
+    let dir = temp_dir.path().join("tmux");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Helper to create an isolated ConfigStore for testing. Pins `tmux_tmpdir` so
+/// any `SessionManager` built from it spawns tmux on a throwaway server.
+fn create_isolated_config_store(temp_dir: &TempDir, mut config: Config) -> Arc<ConfigStore> {
+    config.tmux_tmpdir = Some(isolated_tmux_tmpdir(temp_dir));
     let config_path = temp_dir.path().join("config.toml");
     let toml = toml::to_string_pretty(&config).unwrap();
     std::fs::write(&config_path, toml).unwrap();
@@ -346,6 +359,9 @@ async fn test_session_manager_restart() {
     let worktrees_dir = TempDir::new().unwrap();
     let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        // This test bypasses `create_isolated_config_store`, so pin the tmux
+        // socket dir directly to keep it off the developer's real server.
+        tmux_tmpdir: Some(isolated_tmux_tmpdir(&state_temp_dir)),
         ..Config::default()
     };
 
@@ -1012,30 +1028,33 @@ async fn test_commander_session_lifecycle() {
         return;
     }
 
-    let tmux = TmuxExecutor::new();
-    // Never touch a real commander the developer may be running.
-    if tmux
-        .session_exists(COMMANDER_TMUX_NAME)
-        .await
-        .unwrap_or(false)
-    {
-        eprintln!("Skipping test: a `{COMMANDER_TMUX_NAME}` session already exists");
-        return;
-    }
+    // Isolate onto a throwaway tmux server so the global `cc-commander` singleton
+    // this test manages can never collide with — or leak onto — the developer's
+    // real server. On a fresh socket dir `cc-commander` cannot pre-exist, so no
+    // "already running" guard is needed; the server exits with its last session.
+    let socket_temp = TempDir::new().unwrap();
+    let socket_dir = isolated_tmux_tmpdir(&socket_temp);
+    let tmux = TmuxExecutor::new().with_tmux_tmpdir(Some(socket_dir.clone()));
 
-    // Best-effort cleanup so a panicking assertion can't leak the global
-    // `cc-commander` session into later tests or the developer's tmux. Drop
-    // can't await, so shell out to tmux synchronously. Instantiated only after
-    // the "already exists" guard, so it never kills a session we didn't create.
-    struct KillOnDrop;
+    // Best-effort cleanup so a panicking assertion can't leak the `cc-commander`
+    // session on the isolated server. Drop can't await, so shell out to tmux
+    // synchronously — pinned to the same isolated socket dir as `tmux` above.
+    struct KillOnDrop {
+        tmux_tmpdir: PathBuf,
+    }
     impl Drop for KillOnDrop {
         fn drop(&mut self) {
             let _ = std::process::Command::new("tmux")
+                .env("TMUX_TMPDIR", &self.tmux_tmpdir)
+                .env_remove("TMUX")
+                .env_remove("TMUX_PANE")
                 .args(["kill-session", "-t", COMMANDER_TMUX_NAME])
                 .status();
         }
     }
-    let _cleanup = KillOnDrop;
+    let _cleanup = KillOnDrop {
+        tmux_tmpdir: socket_dir.clone(),
+    };
 
     let dir = TempDir::new().unwrap();
     let cmd = cli_command();
@@ -1043,6 +1062,7 @@ async fn test_commander_session_lifecycle() {
         commander_enabled: true,
         commander_dir: Some(dir.path().to_path_buf()),
         commander_program: Some("sleep 60".to_string()),
+        tmux_tmpdir: Some(socket_dir.clone()),
         ..Config::default()
     };
 

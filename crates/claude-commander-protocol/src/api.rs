@@ -62,6 +62,15 @@ pub struct NewComment {
     pub comment: String,
 }
 
+/// Request to toggle a file's reviewed mark. Carries only the display path —
+/// the server resolves the file in the *current* review diff and hashes that,
+/// so clients never echo (or cache) the full `FileDiff` and a mark can't be
+/// recorded against a stale copy of the file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToggleReviewed {
+    pub display_path: String,
+}
+
 /// Which side of a diff a binary blob fetch refers to: the base ("before") or
 /// the working tree ("after").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

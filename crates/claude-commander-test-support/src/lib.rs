@@ -72,8 +72,17 @@ pub async fn create_test_repo() -> (TempDir, PathBuf) {
 /// Build a hermetic [`AppState`]: empty core state under `data_dir`, a temp
 /// worktrees dir, auth disabled, wrapping a real `CommanderService`.
 pub fn test_state(data_dir: &TempDir, worktrees_dir: &TempDir) -> AppState {
+    // Isolate every tmux command this service spawns onto a throwaway socket dir
+    // under `data_dir`, so tests never touch the developer's real tmux server —
+    // even when `cargo test` is run from inside a tmux session (where an
+    // inherited `$TMUX` would otherwise win over `TMUX_TMPDIR`). tmux servers
+    // exit with their last session, so when a test kills the sessions it made
+    // the throwaway server tears itself down; no extra cleanup is needed.
+    let tmux_tmpdir = data_dir.path().join("tmux");
+    std::fs::create_dir_all(&tmux_tmpdir).expect("create isolated tmux socket dir");
     let mut config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        tmux_tmpdir: Some(tmux_tmpdir),
         ..Config::default()
     };
     // Telemetry is opt-out by default with a baked ingest token, so a plain
@@ -124,6 +133,28 @@ mod tests {
         assert!(
             !state.service.telemetry().is_active(),
             "test-support fixtures must not emit telemetry (would pollute production OpenObserve)"
+        );
+    }
+
+    /// Guard: the harness must isolate tmux onto a throwaway socket dir. Without
+    /// `tmux_tmpdir` set, `cargo test` run from inside a tmux session would
+    /// create/attach the suites' `cc-*` sessions on the developer's REAL tmux
+    /// server (an inherited `$TMUX` wins over an unset `TMUX_TMPDIR`). Fails if
+    /// someone drops the knob here.
+    #[tokio::test]
+    async fn test_state_isolates_tmux_socket_dir() {
+        let data_dir = TempDir::new().unwrap();
+        let worktrees_dir = TempDir::new().unwrap();
+        let state = test_state(&data_dir, &worktrees_dir);
+        let tmux_tmpdir = state.service.read_config().tmux_tmpdir;
+        assert_eq!(
+            tmux_tmpdir.as_deref(),
+            Some(data_dir.path().join("tmux").as_path()),
+            "test-support fixtures must pin tmux onto an isolated socket dir"
+        );
+        assert!(
+            tmux_tmpdir.unwrap().is_dir(),
+            "the isolated tmux socket dir must exist for tmux to bind its server there"
         );
     }
 }

@@ -41,6 +41,16 @@ pub struct Config {
     /// Path to worktrees directory
     pub worktrees_dir: Option<PathBuf>,
 
+    /// Socket directory to isolate every tmux command commander spawns onto.
+    ///
+    /// For hermetic tests and the e2e harness only — leave unset (`None`) for
+    /// normal use. When set, each spawned tmux command runs with
+    /// `TMUX_TMPDIR=<dir>` and with `$TMUX`/`$TMUX_PANE` stripped, so it talks to
+    /// a throwaway per-test tmux server instead of the developer's real one
+    /// (tmux clients otherwise prefer an inherited live `$TMUX` over
+    /// `TMUX_TMPDIR`). `None` touches the environment not at all.
+    pub tmux_tmpdir: Option<PathBuf>,
+
     /// Organize worktrees into per-repository subdirectories
     pub per_repo_worktree_dirs: bool,
 
@@ -355,6 +365,7 @@ impl Default for Config {
             diff_cache_ttl_ms: 500,
             ui_refresh_fps: 30,
             worktrees_dir: None,
+            tmux_tmpdir: None,
             per_repo_worktree_dirs: false,
             editor: None,
             editor_gui: None,

@@ -6,7 +6,7 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `base`, `cache_files`, `client`, `file_cache`, `ok_or_status`
+// These functions are ignored because they are not marked as `pub`: `base`, `client`, `ok_or_status`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ReviewDiffDto`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
 
@@ -115,10 +115,11 @@ Future<Uint8List> fetchBlob({
   path: path,
 );
 
-/// `POST {base_url}/api/sessions/{session_id}/files/reviewed` → toggle a file's
-/// reviewed mark, returning the new state. The server keys the mark on the
-/// exact `FileDiff` (path + a content hash), so we replay the raw `FileDiff`
-/// JSON cached from the last `open_review`/`refresh_review` for `display_path`.
+/// `POST {base_url}/api/sessions/{session_id}/files/reviewed` (body =
+/// [`ToggleReviewed`]) → toggle a file's reviewed mark, returning the new
+/// state. Only the display path crosses the wire — the server resolves the
+/// file in the *current* review diff itself, so no client-side `FileDiff`
+/// caching is needed and a mark can't be recorded against a stale copy.
 Future<bool> toggleFileReviewed({
   required String baseUrl,
   required String token,

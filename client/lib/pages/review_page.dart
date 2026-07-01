@@ -564,16 +564,24 @@ class _HunkViewState extends State<_HunkView> {
     );
     final side = allDeletions ? 'old' : 'new';
 
-    final numbers = selected
-        .map((l) => allDeletions ? l.oldLineno : l.newLineno)
-        .whereType<int>()
+    // Keep only the lines that exist on the chosen side. Both the line-number
+    // bounds AND the snippet must come from these — a mixed selection's snippet
+    // must not carry the other side's text, or the server's reanchor (which
+    // searches the chosen side only) can't find it and the comment drifts on
+    // creation.
+    final sideLines = selected
+        .where((l) => (allDeletions ? l.oldLineno : l.newLineno) != null)
         .toList();
-    if (numbers.isEmpty) {
+    if (sideLines.isEmpty) {
       _clear();
       return;
     }
-    numbers.sort();
-    final snippet = selected.map((l) => l.content).join('\n');
+    final numbers =
+        sideLines
+            .map((l) => (allDeletions ? l.oldLineno : l.newLineno)!)
+            .toList()
+          ..sort();
+    final snippet = sideLines.map((l) => l.content).join('\n');
 
     await cb(
       file: widget.file,
@@ -582,7 +590,22 @@ class _HunkViewState extends State<_HunkView> {
       lineEnd: numbers.last,
       snippet: snippet,
     );
+    // The re-open after staging disposes this hunk's State mid-await; don't
+    // touch State once we're gone.
+    if (!mounted) return;
     _clear();
+  }
+
+  @override
+  void didUpdateWidget(covariant _HunkView old) {
+    super.didUpdateWidget(old);
+    // Every snapshot rebuilds fresh hunk DTOs, so an identity change means this
+    // positional State is now bound to a different hunk. Drop stale selection
+    // indices that would otherwise range-error on / mis-highlight the new lines.
+    if (!identical(widget.hunk, old.hunk)) {
+      _anchor = null;
+      _focus = null;
+    }
   }
 
   @override

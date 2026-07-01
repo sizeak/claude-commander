@@ -1,4 +1,8 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- The app is entirely network-driven (it talks to the commander server);
+         release builds use only this manifest, so the permission must live here
+         rather than only in the debug/profile manifests. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
     <application
         android:label="claude_commander_client"
         android:name="${applicationName}"

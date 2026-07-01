@@ -5,10 +5,10 @@
 //! (`list_comments`/`create_comment`/`delete_comment`), `apply_comments`, and
 //! `toggle_file_reviewed`.
 //!
-//! `toggle_file_reviewed` takes a [`FileDiff`] — the client echoes back the
-//! file it saw in the review snapshot. `FileDiff` lives in the shared
-//! `claude-commander-protocol` crate and derives `Deserialize`, so the body
-//! deserializes directly with no hand-written mirror DTO.
+//! `toggle_file_reviewed` takes a [`ToggleReviewed`] body carrying only the
+//! display path — the server resolves the file in the *current* review diff
+//! itself, so clients never echo (or cache) the full `FileDiff` and a mark
+//! can't be recorded against a stale copy of the file.
 
 use axum::{
     Json,
@@ -16,9 +16,8 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use claude_commander_core::api::{NewComment, ReviewSnapshot};
+use claude_commander_core::api::{NewComment, ReviewSnapshot, ToggleReviewed};
 use claude_commander_core::comment::Comment;
-use claude_commander_core::git::FileDiff;
 use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
@@ -104,16 +103,20 @@ pub async fn apply(
     Ok(Json(outcome).into_response())
 }
 
-/// `POST /sessions/{id}/files/reviewed` → `toggle_file_reviewed` →
-/// `{ "reviewed": bool }`. The body is the [`FileDiff`] the client is
-/// displaying (echoed from the review snapshot).
+/// `POST /sessions/{id}/files/reviewed` → `toggle_file_reviewed_by_path` →
+/// `{ "reviewed": bool }`. The body is a [`ToggleReviewed`] display path; the
+/// server resolves the file in the current review diff (404 when the path
+/// isn't in it).
 pub async fn toggle_reviewed(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    Json(file): Json<FileDiff>,
+    Json(body): Json<ToggleReviewed>,
 ) -> Result<Response, ApiError> {
     let id = parse_session_id(&id)?;
-    let reviewed = state.service.toggle_file_reviewed(&id, &file).await?;
+    let reviewed = state
+        .service
+        .toggle_file_reviewed_by_path(&id, &body.display_path)
+        .await?;
     Ok(Json(json!({ "reviewed": reviewed })).into_response())
 }
 
@@ -151,8 +154,29 @@ mod tests {
         assert_eq!(status, 400);
     }
 
-    // The `FileDiff` wire round-trip (the contract a client relies on to echo a
-    // file back to `POST .../files/reviewed`) is covered in the
-    // `claude-commander-protocol` crate, which now owns the type and its
-    // `Serialize + Deserialize` derives — no server-side mirror to test.
+    /// `toggle_reviewed` takes only a display path — the server resolves the
+    /// `FileDiff` itself from the current review diff, so clients never echo
+    /// (or cache) the full file. Unknown session → 404 through the same body.
+    #[tokio::test]
+    async fn toggle_reviewed_takes_display_path_unknown_session_is_404() {
+        let dir = TempDir::new().unwrap();
+        let id = uuid::Uuid::new_v4();
+        let router = Router::new()
+            .route(
+                "/sessions/{id}/files/reviewed",
+                axum::routing::post(super::toggle_reviewed),
+            )
+            .with_state(test_state(&dir));
+        let req = axum::http::Request::post(format!("/sessions/{id}/files/reviewed"))
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(
+                serde_json::json!({ "display_path": "src/main.rs" }).to_string(),
+            ))
+            .unwrap();
+        let (status, _) = crate::handlers::test_support::send(router, req).await;
+        assert_eq!(
+            status, 404,
+            "a display_path body for an unknown session must 404 (not 422)"
+        );
+    }
 }

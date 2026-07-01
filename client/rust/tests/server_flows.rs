@@ -264,7 +264,8 @@ fn review_round_trip() {
         "the created comment should be listed"
     );
 
-    // -- toggle the file's reviewed mark on --
+    // -- toggle the file's reviewed mark on (by display path; the server
+    //    resolves the FileDiff itself) --
     let reviewed = review::toggle_file_reviewed(
         fx.base.clone(),
         token(),
@@ -275,6 +276,18 @@ fn review_round_trip() {
     assert!(
         reviewed,
         "toggling an un-reviewed file should mark it reviewed"
+    );
+
+    // -- a path that isn't in the current diff is a 404, not a silent no-op --
+    assert!(
+        review::toggle_file_reviewed(
+            fx.base.clone(),
+            token(),
+            id.clone(),
+            "no-such-file.txt".to_string(),
+        )
+        .is_err(),
+        "toggling a file absent from the diff must error"
     );
 
     // -- apply the staged comment: composed + delivered (or deferred), not

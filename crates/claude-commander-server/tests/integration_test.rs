@@ -222,7 +222,10 @@ async fn ws_attach_streams_and_detach_keeps_session_alive() {
     drain_until_close(&mut ws, Duration::from_secs(5)).await;
 
     // -- the tmux session must STILL EXIST (detach ≠ kill) --
-    let tmux = TmuxExecutor::new();
+    // Pin this probe onto the same isolated socket dir the harness put the
+    // session on (via `tmux_tmpdir`), or it would query the developer's real
+    // tmux server and never see the session.
+    let tmux = TmuxExecutor::new().with_tmux_tmpdir(service.read_config().tmux_tmpdir);
     let mut exists = false;
     for _ in 0..50 {
         if tmux.session_exists(&tmux_name).await.unwrap_or(false) {

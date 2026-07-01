@@ -35,6 +35,12 @@ pub fn test_state(dir: &TempDir) -> AppState {
     // instance from the test suite (incl. CI). Disable it for tests.
     let mut config = Config::default();
     config.telemetry.enabled = false;
+    // Isolate tmux onto a throwaway socket dir under `dir`. These handler tests
+    // never spawn tmux, but pinning the knob keeps the fixture safe by default
+    // if one ever does (and matches the shared `test-support` harness).
+    let tmux_tmpdir = dir.path().join("tmux");
+    std::fs::create_dir_all(&tmux_tmpdir).expect("create isolated tmux socket dir");
+    config.tmux_tmpdir = Some(tmux_tmpdir);
     let config_store = Arc::new(ConfigStore::with_path(
         config,
         dir.path().join("config.toml"),

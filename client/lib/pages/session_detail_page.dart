@@ -39,6 +39,11 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
   SessionDetail? _detail;
   String? _error;
 
+  /// Set once a poll confirms the session is gone (detail endpoint returned
+  /// null → 404). Polling stops and the page renders a terminal gone-state
+  /// instead of pretending the stale session is still live.
+  bool _gone = false;
+
   /// Set while a lifecycle action is in flight, to disable the buttons and
   /// pause polling so a refresh doesn't race the mutation.
   bool _busy = false;
@@ -68,6 +73,16 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
         lines: 200,
       );
       if (!mounted) return;
+      if (detail == null) {
+        // Null after a successful call means the session no longer exists.
+        // Stop polling and switch to the gone-state.
+        _timer?.cancel();
+        setState(() {
+          _gone = true;
+          _error = null;
+        });
+        return;
+      }
       setState(() {
         _detail = detail;
         _error = null;
@@ -198,34 +213,75 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
     return Scaffold(
       appBar: AppBar(
         title: Text(info.title, overflow: TextOverflow.ellipsis),
-        actions: [
-          IconButton(
-            onPressed: () => _openReview(info),
-            icon: const Icon(Icons.rate_review),
-            tooltip: 'Review changes',
-          ),
-          IconButton(
-            onPressed: () => _openTerminal(info),
-            icon: const Icon(Icons.terminal),
-            tooltip: 'Open live terminal',
-          ),
-        ],
+        actions: _gone
+            ? const []
+            : [
+                IconButton(
+                  onPressed: () => _openReview(info),
+                  icon: const Icon(Icons.rate_review),
+                  tooltip: 'Review changes',
+                ),
+                IconButton(
+                  onPressed: () => _openTerminal(info),
+                  icon: const Icon(Icons.terminal),
+                  tooltip: 'Open live terminal',
+                ),
+              ],
       ),
-      body: RefreshIndicator(
-        onRefresh: _poll,
-        child: ListView(
-          padding: const EdgeInsets.all(16),
+      body: _gone ? _goneView(context) : _liveBody(context, info),
+    );
+  }
+
+  Widget _goneView(BuildContext context) {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            _header(context, info),
+            Icon(
+              Icons.link_off,
+              size: 40,
+              color: Theme.of(context).colorScheme.outline,
+            ),
+            const SizedBox(height: 12),
+            Text(
+              'Session no longer exists',
+              style: Theme.of(context).textTheme.titleMedium,
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'It was deleted or stopped and removed on the server.',
+              style: Theme.of(context).textTheme.bodySmall,
+              textAlign: TextAlign.center,
+            ),
             const SizedBox(height: 16),
-            if (_error != null) _errorBanner(context, _error!),
-            _detailSection(context),
-            const SizedBox(height: 16),
-            _paneSection(context),
-            const SizedBox(height: 24),
-            _actions(context, info),
+            FilledButton.tonal(
+              onPressed: () => Navigator.of(context).maybePop(),
+              child: const Text('Back'),
+            ),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _liveBody(BuildContext context, SessionInfo info) {
+    return RefreshIndicator(
+      onRefresh: _poll,
+      child: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          _header(context, info),
+          const SizedBox(height: 16),
+          if (_error != null) _errorBanner(context, _error!),
+          _detailSection(context),
+          const SizedBox(height: 16),
+          _paneSection(context),
+          const SizedBox(height: 24),
+          _actions(context, info),
+        ],
       ),
     );
   }

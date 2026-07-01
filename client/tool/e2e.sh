@@ -42,14 +42,21 @@ export XDG_DATA_HOME="$TMP/data"
 # server creates lives in a throwaway tmux server we can kill wholesale — nothing
 # leaks into the developer's / CI runner's default tmux server, even on failure.
 export TMUX_TMPDIR="$TMP/tmux"
+# CRITICAL: when this script runs from inside a tmux session, $TMUX is set and
+# tmux clients resolve their socket from it IN PREFERENCE to $TMUX_TMPDIR — so
+# without this unset, the spawned server's sessions land on (and the cleanup's
+# kill-server NUKES) the developer's real tmux server, killing every session
+# they have open. Unset both so all tmux activity stays in the temp socket dir.
+unset TMUX TMUX_PANE
 mkdir -p "$XDG_CONFIG_HOME" "$XDG_DATA_HOME" "$TMUX_TMPDIR"
 REPO="$TMP/repo"
 
 SERVER_PID=""
 cleanup() {
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" 2>/dev/null || true
-  # Kill the isolated tmux server (TMUX_TMPDIR is still exported here) so sessions
-  # the server spawned don't survive a mid-run failure, then drop the temp tree.
+  # Kill the isolated tmux server ($TMUX_TMPDIR still exported, $TMUX unset, so
+  # this can only ever hit the throwaway server in the temp dir), then drop the
+  # temp tree.
   tmux kill-server 2>/dev/null || true
   rm -rf "$TMP" 2>/dev/null || true
 }

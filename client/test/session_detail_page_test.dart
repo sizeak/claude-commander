@@ -38,6 +38,26 @@ void main() {
     expect(find.text('hello world'), findsOneWidget);
   });
 
+  testWidgets('a deleted session shows a gone state and stops polling', (
+    tester,
+  ) async {
+    // getSessionDetail returns null (404 → session gone by design).
+    api.getSessionDetailResponse = null;
+    await tester.pumpWidget(wrap(sessionInfo(title: 'Gone one')));
+    await settleFirstPoll(tester);
+
+    expect(find.textContaining('no longer exists'), findsOneWidget);
+    // The lifecycle actions are gone (or disabled) — no live controls.
+    expect(find.widgetWithText(FilledButton, 'Kill'), findsNothing);
+    expect(find.widgetWithText(FilledButton, 'Restart'), findsNothing);
+    expect(find.widgetWithText(FilledButton, 'Delete'), findsNothing);
+
+    // The poll timer is cancelled: no further getSessionDetail calls fire.
+    final callsSoFar = api.countOf('getSessionDetail');
+    await tester.pump(const Duration(seconds: 5));
+    expect(api.countOf('getSessionDetail'), callsSoFar);
+  });
+
   Future<void> confirmAction(
     WidgetTester tester, {
     required String button,

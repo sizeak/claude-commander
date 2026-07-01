@@ -17,11 +17,13 @@
 //! same lifecycle and there is exactly one copy of the PTY plumbing.
 
 use std::os::unix::io::{AsRawFd, RawFd};
+use std::path::Path;
 
 use tokio::io::{ReadHalf, WriteHalf};
 use tracing::{info, warn};
 
 use crate::error::Result;
+use crate::tmux::isolation::TmuxTmpdir;
 
 /// A live `tmux attach-session` running inside a PTY.
 ///
@@ -35,11 +37,24 @@ pub struct HeadlessAttach {
 impl HeadlessAttach {
     /// Spawn `tmux attach-session -t <session_name>` in a fresh PTY sized to
     /// `cols`×`rows`.
-    pub fn spawn(session_name: &str, cols: u16, rows: u16) -> Result<Self> {
+    ///
+    /// `tmux_tmpdir` isolates the attach client onto a throwaway socket dir (for
+    /// hermetic tests/e2e — see [`Config::tmux_tmpdir`](crate::config::Config::tmux_tmpdir));
+    /// pass `None` for normal use, which leaves the environment untouched. It
+    /// must match the socket dir the target session was created on, or the
+    /// client attaches to the wrong server.
+    pub fn spawn(
+        session_name: &str,
+        cols: u16,
+        rows: u16,
+        tmux_tmpdir: Option<&Path>,
+    ) -> Result<Self> {
         let (pty, pts) = pty_process::open()?;
         pty.resize(pty_process::Size::new(rows, cols))?;
 
-        let cmd = pty_process::Command::new("tmux").args(["attach-session", "-t", session_name]);
+        let cmd = pty_process::Command::new("tmux")
+            .args(["attach-session", "-t", session_name])
+            .with_tmux_tmpdir(tmux_tmpdir);
         let child = cmd.spawn(pts)?;
 
         info!("Spawned tmux attach-session for {}", session_name);

@@ -87,6 +87,9 @@ pub enum SessionError {
         "Commander session is disabled. Enable it with `commander_enabled = true` in config.toml, or toggle it in the in-app settings."
     )]
     CommanderDisabled,
+
+    #[error("File not in the current review diff: {0}")]
+    FileNotInDiff(String),
 }
 
 /// Tmux integration errors
@@ -286,6 +289,7 @@ mod tests {
             SessionError::MaxSessionsReached(10),
             SessionError::TmuxSessionNotFound("sess".to_string()),
             SessionError::CommanderDisabled,
+            SessionError::FileNotInDiff("src/main.rs".to_string()),
         ];
         for err in variants {
             assert!(!err.to_string().is_empty(), "Empty display for {:?}", err);

@@ -496,6 +496,29 @@ impl CommanderService {
         Ok(now_reviewed)
     }
 
+    /// Toggle a file's reviewed mark by display path: resolve the file in the
+    /// **current** review diff and toggle against that. Keeps the wire API down
+    /// to a path (no `FileDiff` echo for remote clients to cache) and makes it
+    /// impossible to record a mark against a stale copy of the file — the hash
+    /// always reflects the diff as it exists now. `FileNotInDiff` when the path
+    /// isn't in the current diff.
+    pub async fn toggle_file_reviewed_by_path(
+        &self,
+        session_id: &SessionId,
+        display_path: &str,
+    ) -> Result<bool> {
+        let (worktree_path, review_base) = self.review_target(session_id).await?;
+        let base = review_base.git_ref(&worktree_path).await;
+        let raw = compose_review_diff(&worktree_path, &base).await?;
+        let diff = parse_unified_diff(&raw);
+        let file = diff
+            .files
+            .iter()
+            .find(|f| f.display_path() == display_path)
+            .ok_or_else(|| SessionError::FileNotInDiff(display_path.to_string()))?;
+        self.toggle_file_reviewed(session_id, file).await
+    }
+
     /// List a session's stored comments (without re-anchoring).
     pub async fn list_comments(&self, session_id: &SessionId) -> Result<Vec<Comment>> {
         self.comments.load(*session_id).await
@@ -802,6 +825,7 @@ fn ensure_install_id(store: &Arc<StateStore>) -> String {
 // `session_info_from_session` below.
 pub use claude_commander_protocol::api::{
     CreateSessionOpts, DiffSide, NewComment, ReviewSnapshot, SessionDetail, SessionInfo,
+    ToggleReviewed,
 };
 
 /// Build a [`SessionInfo`] wire DTO from core's `WorktreeSession` domain model.
