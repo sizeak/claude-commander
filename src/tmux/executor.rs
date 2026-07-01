@@ -252,7 +252,7 @@ impl TmuxExecutor {
                 "#{session_attached}",
             ])
             .await?;
-        Ok(output.trim().parse::<u32>().unwrap_or(0) > 0)
+        Ok(parse_session_attached(&output))
     }
 
     /// Send keys to a tmux session
@@ -398,9 +398,38 @@ fn stderr_means_session_absent(stderr: &str) -> bool {
     s.contains("error connecting to") && s.contains("no such file")
 }
 
+/// Parse tmux's `#{session_attached}` client count into "is a client attached".
+///
+/// Conservative on unexpected output: an empty or unparsable value (seen on
+/// some tmux versions / client-handoff edge states) counts as **attached**, so
+/// a glitch never lets the hibernation loop kill a session out from under a
+/// user. The `execute` error path is likewise treated as attached by callers
+/// (`unwrap_or(true)`); this keeps the Ok-but-garbage path equally safe.
+fn parse_session_attached(output: &str) -> bool {
+    output.trim().parse::<u32>().map(|n| n > 0).unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_session_attached_counts() {
+        assert!(parse_session_attached("1"));
+        assert!(parse_session_attached("2"));
+        assert!(!parse_session_attached("0"));
+        assert!(!parse_session_attached(" 0\n"));
+        assert!(parse_session_attached(" 1 "));
+    }
+
+    #[test]
+    fn parse_session_attached_unparsable_is_conservatively_attached() {
+        // Empty / non-numeric output must NOT read as unattached, or a
+        // detection glitch could hibernate a session under an attached user.
+        assert!(parse_session_attached(""));
+        assert!(parse_session_attached("   "));
+        assert!(parse_session_attached("garbage"));
+    }
 
     #[tokio::test]
     async fn test_executor_creation() {

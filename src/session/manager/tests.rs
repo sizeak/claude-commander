@@ -294,6 +294,19 @@ async fn test_toggle_keep_alive_missing_session_errors() {
     assert!(manager.toggle_keep_alive(&missing).await.is_err());
 }
 
+#[tokio::test]
+async fn test_set_keep_alive_missing_session_errors() {
+    let (_cdir, config_store) = test_config_store(Config::default());
+    let (_dir, store) = test_store();
+    let manager = SessionManager::new(config_store, store, "");
+
+    // Setting keep-alive on an absent session must not report success — it
+    // returns NotFound so a CLI/TUI caller can't print "keep-alive on" for a
+    // session that was never modified.
+    let missing = SessionId::new();
+    assert!(manager.set_keep_alive(&missing, true).await.is_err());
+}
+
 #[test]
 fn test_generate_branch_name_empty_prefix() {
     let (_cdir, config_store) = test_config_store(Config::default());
