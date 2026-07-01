@@ -174,7 +174,15 @@ async fn attach_session(
         }
     };
 
-    match HeadlessAttach::spawn(&tmux_name, DEFAULT_COLS, DEFAULT_ROWS) {
+    // Honour the socket-dir isolation knob so a hermetic test attaches to the
+    // same throwaway tmux server its session was created on, not the real one.
+    let tmux_tmpdir = state.service.read_config().tmux_tmpdir;
+    match HeadlessAttach::spawn(
+        &tmux_name,
+        DEFAULT_COLS,
+        DEFAULT_ROWS,
+        tmux_tmpdir.as_deref(),
+    ) {
         Ok(bridge) => Some((tmux_name, bridge)),
         Err(e) => {
             let _ = send_control(

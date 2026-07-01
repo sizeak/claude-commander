@@ -83,7 +83,8 @@ impl SessionManager {
         let config = config_store.read();
         // Floor at 1: a hand-edited config with 0 would create an empty
         // semaphore and deadlock every tmux command.
-        let tmux = TmuxExecutor::with_max_concurrent(config.max_concurrent_tmux.max(1));
+        let tmux = TmuxExecutor::with_max_concurrent(config.max_concurrent_tmux.max(1))
+            .with_tmux_tmpdir(config.tmux_tmpdir.clone());
         let content_capture = ContentCapture::with_ttl(
             tmux.clone(),
             std::time::Duration::from_millis(config.capture_cache_ttl_ms),

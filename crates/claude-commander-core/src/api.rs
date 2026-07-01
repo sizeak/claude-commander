@@ -4,25 +4,22 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-
 use uuid::Uuid;
 
 use crate::comment::{
-    ApplyOutcome, Comment, CommentSide, CommentStatus, CommentStore, SendDecision,
-    compose_markdown, decide_send, reanchor_comments,
+    ApplyOutcome, Comment, CommentStatus, CommentStore, SendDecision, compose_markdown,
+    decide_send, reanchor_comments,
 };
 use crate::config::{AppState, Config, ConfigStore, StateStore};
 use crate::error::{Result, SessionError};
 use crate::git::{
-    FileDiff, GitBackend, ParsedDiff, PrState, ReviewDecision, compose_review_diff,
-    diff_stat_summary, effective_pr_state, enrich_binary_sizes, parse_unified_diff,
-    prefer_remote_branch, read_base_blob, read_worktree_file,
+    FileDiff, GitBackend, compose_review_diff, diff_stat_summary, effective_pr_state,
+    enrich_binary_sizes, parse_unified_diff, prefer_remote_branch, read_base_blob,
+    read_worktree_file,
 };
 use crate::reviewed::ReviewedStore;
 use crate::session::{
-    AgentState, ProjectId, ScanResult, SessionId, SessionManager, SessionStatus, WorktreeSession,
+    AgentState, ProjectId, ScanResult, SessionId, SessionManager, WorktreeSession,
     program_is_claude, program_with_claude_flags,
 };
 use crate::telemetry::{ConfigSnapshot, EnvFingerprint, FrontendInfo, Telemetry};
@@ -182,7 +179,7 @@ impl CommanderService {
                     .get(&session.project_id)
                     .map(|p| p.name.as_str())
                     .unwrap_or("unknown");
-                crate::cli::SessionLookup::Found(SessionInfo::from_session(session, project_name))
+                crate::cli::SessionLookup::Found(session_info_from_session(session, project_name))
             }
             crate::cli::SessionLookup::NotFound => crate::cli::SessionLookup::NotFound,
             crate::cli::SessionLookup::Ambiguous(n) => crate::cli::SessionLookup::Ambiguous(n),
@@ -235,7 +232,7 @@ impl CommanderService {
         };
 
         Ok(Some(SessionDetail {
-            info: SessionInfo::from_session(&found, &project_name),
+            info: session_info_from_session(&found, &project_name),
             agent_state,
             diff_stat,
             pane_content,
@@ -283,7 +280,7 @@ impl CommanderService {
             .map(str::to_string)
             .unwrap_or_else(|| self.config_store.read().default_program.clone());
 
-        opts.validate_program_flags(&base_program)?;
+        validate_program_flags(&opts, &base_program)?;
 
         let program =
             program_with_claude_flags(&base_program, opts.mode.as_deref(), opts.effort.as_deref());
@@ -497,6 +494,29 @@ impl CommanderService {
         let now_reviewed = crate::reviewed::toggle(&mut marks, file);
         self.reviewed.save(*session_id, &marks).await?;
         Ok(now_reviewed)
+    }
+
+    /// Toggle a file's reviewed mark by display path: resolve the file in the
+    /// **current** review diff and toggle against that. Keeps the wire API down
+    /// to a path (no `FileDiff` echo for remote clients to cache) and makes it
+    /// impossible to record a mark against a stale copy of the file — the hash
+    /// always reflects the diff as it exists now. `FileNotInDiff` when the path
+    /// isn't in the current diff.
+    pub async fn toggle_file_reviewed_by_path(
+        &self,
+        session_id: &SessionId,
+        display_path: &str,
+    ) -> Result<bool> {
+        let (worktree_path, review_base) = self.review_target(session_id).await?;
+        let base = review_base.git_ref(&worktree_path).await;
+        let raw = compose_review_diff(&worktree_path, &base).await?;
+        let diff = parse_unified_diff(&raw);
+        let file = diff
+            .files
+            .iter()
+            .find(|f| f.display_path() == display_path)
+            .ok_or_else(|| SessionError::FileNotInDiff(display_path.to_string()))?;
+        self.toggle_file_reviewed(session_id, file).await
     }
 
     /// List a session's stored comments (without re-anchoring).
@@ -722,31 +742,22 @@ impl ReviewBase {
     }
 }
 
-pub struct CreateSessionOpts {
-    pub project_path: PathBuf,
-    pub title: String,
-    pub program: Option<String>,
-    pub initial_prompt: Option<String>,
-    pub effort: Option<String>,
-    pub mode: Option<String>,
-    pub base_branch: Option<String>,
-    pub section: Option<String>,
-}
-
-impl CreateSessionOpts {
-    pub fn validate_program_flags(&self, resolved_program: &str) -> Result<()> {
-        if !program_is_claude(resolved_program)
-            && (self.effort.is_some() || self.mode.is_some() || self.initial_prompt.is_some())
-        {
-            return Err(SessionError::InvalidProgram(format!(
-                "--effort, --mode, and --initial-prompt are only supported \
-                 when the program is claude (got {:?})",
-                resolved_program
-            ))
-            .into());
-        }
-        Ok(())
+/// Validate that the claude-only create flags (`--effort`, `--mode`,
+/// `--initial-prompt`) aren't set for a non-claude program. [`CreateSessionOpts`]
+/// itself is a plain wire type in `claude-commander-protocol`; this check lives
+/// here because it needs core's `program_is_claude`.
+pub fn validate_program_flags(opts: &CreateSessionOpts, resolved_program: &str) -> Result<()> {
+    if !program_is_claude(resolved_program)
+        && (opts.effort.is_some() || opts.mode.is_some() || opts.initial_prompt.is_some())
+    {
+        return Err(SessionError::InvalidProgram(format!(
+            "--effort, --mode, and --initial-prompt are only supported \
+             when the program is claude (got {:?})",
+            resolved_program
+        ))
+        .into());
     }
+    Ok(())
 }
 
 /// Build the telemetry handle for a freshly-constructed service: resolve the
@@ -806,91 +817,39 @@ fn ensure_install_id(store: &Arc<StateStore>) -> String {
 }
 
 // -- Response types --
+//
+// The HTTP request/response DTOs live in `claude-commander-protocol`
+// (`Serialize + Deserialize`, mobile-safe) and are re-exported here so
+// `crate::api::{SessionInfo, ReviewSnapshot, ...}` paths keep working.
+// Construction that needs core's domain model is done by
+// `session_info_from_session` below.
+pub use claude_commander_protocol::api::{
+    CreateSessionOpts, DiffSide, NewComment, ReviewSnapshot, SessionDetail, SessionInfo,
+    ToggleReviewed,
+};
 
-#[derive(Debug, Clone, Serialize)]
-pub struct SessionInfo {
-    pub id: String,
-    pub session_id: SessionId,
-    pub title: String,
-    pub branch: String,
-    pub status: SessionStatus,
-    pub program: String,
-    pub project_id: ProjectId,
-    pub project_name: String,
-    pub pr_number: Option<u32>,
-    pub pr_url: Option<String>,
-    pub pr_state: PrState,
-    pub pr_draft: bool,
-    pub pr_labels: Vec<String>,
-    pub review_decision: Option<ReviewDecision>,
-    pub pr_reviewers: Vec<String>,
-    pub created_at: DateTime<Utc>,
-}
-
-impl SessionInfo {
-    pub fn from_session(session: &WorktreeSession, project_name: &str) -> Self {
-        Self {
-            id: session.id.as_uuid().to_string(),
-            session_id: session.id,
-            title: session.title.clone(),
-            branch: session.branch.clone(),
-            status: session.status,
-            program: session.program.clone(),
-            project_id: session.project_id,
-            project_name: project_name.to_string(),
-            pr_number: session.pr_number,
-            pr_url: session.pr_url.clone(),
-            pr_state: effective_pr_state(session.pr_state, session.pr_merged),
-            pr_draft: session.pr_draft,
-            pr_labels: session.pr_labels.clone(),
-            review_decision: session.review_decision,
-            pr_reviewers: session.pr_reviewers.clone(),
-            created_at: session.created_at,
-        }
+/// Build a [`SessionInfo`] wire DTO from core's `WorktreeSession` domain model.
+/// (Was `SessionInfo::from_session`; relocated here because `SessionInfo` is now
+/// a foreign type and this conversion needs core-only types.)
+fn session_info_from_session(session: &WorktreeSession, project_name: &str) -> SessionInfo {
+    SessionInfo {
+        id: session.id.as_uuid().to_string(),
+        session_id: session.id,
+        title: session.title.clone(),
+        branch: session.branch.clone(),
+        status: session.status,
+        program: session.program.clone(),
+        project_id: session.project_id,
+        project_name: project_name.to_string(),
+        pr_number: session.pr_number,
+        pr_url: session.pr_url.clone(),
+        pr_state: effective_pr_state(session.pr_state, session.pr_merged),
+        pr_draft: session.pr_draft,
+        pr_labels: session.pr_labels.clone(),
+        review_decision: session.review_decision,
+        pr_reviewers: session.pr_reviewers.clone(),
+        created_at: session.created_at,
     }
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct SessionDetail {
-    #[serde(flatten)]
-    pub info: SessionInfo,
-    pub agent_state: AgentState,
-    pub diff_stat: Option<String>,
-    pub pane_content: Option<String>,
-}
-
-/// Request to stage a new comment on a session's review diff.
-#[derive(Debug, Clone)]
-pub struct NewComment {
-    pub file: String,
-    pub side: CommentSide,
-    pub line_range: (usize, usize),
-    pub snippet: String,
-    pub comment: String,
-}
-
-/// Which side of a diff a binary blob fetch refers to: the base ("before") or
-/// the working tree ("after").
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DiffSide {
-    Old,
-    New,
-}
-
-/// Result of opening the review view: the parsed diff plus the session's
-/// (re-anchored) comments and the base they were computed against.
-#[derive(Debug, Clone, Serialize)]
-pub struct ReviewSnapshot {
-    pub base: String,
-    pub diff: ParsedDiff,
-    pub comments: Vec<Comment>,
-    /// Display paths of files still marked reviewed (stale marks pruned).
-    pub reviewed: Vec<String>,
-    /// xxh3 hash of the raw unified diff this snapshot was built from, so an
-    /// open review view can cheaply tell whether a re-compose actually changed
-    /// anything before rebuilding.
-    pub content_hash: u64,
 }
 
 // -- Internal helpers --
@@ -904,7 +863,7 @@ fn build_session_info_list(state: &AppState, include_stopped: bool) -> Vec<Sessi
             .filter_map(|id| state.sessions.get(id))
             .filter(|s| include_stopped || s.status.is_active())
         {
-            entries.push(SessionInfo::from_session(session, &project.name));
+            entries.push(session_info_from_session(session, &project.name));
         }
     }
     entries
@@ -917,7 +876,7 @@ fn find_session_info(state: &AppState, query: &str) -> Option<SessionInfo> {
         .get(&session.project_id)
         .map(|p| p.name.as_str())
         .unwrap_or("unknown");
-    Some(SessionInfo::from_session(session, project_name))
+    Some(session_info_from_session(session, project_name))
 }
 
 async fn capture_pane(
@@ -940,7 +899,9 @@ async fn capture_pane(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::{Project, ProjectId, WorktreeSession};
+    use crate::comment::CommentSide;
+    use crate::git::PrState;
+    use crate::session::{Project, ProjectId, SessionStatus, WorktreeSession};
     use std::path::PathBuf;
 
     fn make_project(name: &str) -> Project {
@@ -973,7 +934,7 @@ mod tests {
     #[test]
     fn session_info_from_session_populates_fields() {
         let session = make_session_for_project("fix-bug", ProjectId::new());
-        let info = SessionInfo::from_session(&session, "my-project");
+        let info = session_info_from_session(&session, "my-project");
 
         assert_eq!(info.title, "fix-bug");
         assert_eq!(info.branch, "branch-fix-bug");
@@ -990,7 +951,7 @@ mod tests {
         session.pr_state = None;
         session.pr_merged = true;
 
-        let info = SessionInfo::from_session(&session, "proj");
+        let info = session_info_from_session(&session, "proj");
         assert_eq!(info.pr_state, PrState::Merged);
     }
 
@@ -1056,7 +1017,7 @@ mod tests {
     fn session_detail_flattens_info_in_json() {
         let session = make_session_for_project("test", ProjectId::new());
         let detail = SessionDetail {
-            info: SessionInfo::from_session(&session, "proj"),
+            info: session_info_from_session(&session, "proj"),
             agent_state: AgentState::Working,
             diff_stat: Some("3 files changed".to_string()),
             pane_content: None,
@@ -1080,7 +1041,7 @@ mod tests {
             base_branch: None,
             section: None,
         };
-        let err = opts.validate_program_flags("bash").unwrap_err();
+        let err = validate_program_flags(&opts, "bash").unwrap_err();
         assert!(err.to_string().contains("--effort"));
     }
 
@@ -1096,7 +1057,7 @@ mod tests {
             base_branch: None,
             section: None,
         };
-        let err = opts.validate_program_flags("vim").unwrap_err();
+        let err = validate_program_flags(&opts, "vim").unwrap_err();
         assert!(err.to_string().contains("--mode"));
     }
 
@@ -1112,7 +1073,7 @@ mod tests {
             base_branch: None,
             section: None,
         };
-        opts.validate_program_flags("claude").unwrap();
+        validate_program_flags(&opts, "claude").unwrap();
     }
 
     #[test]
@@ -1156,7 +1117,7 @@ mod tests {
             base_branch: None,
             section: None,
         };
-        opts.validate_program_flags("bash").unwrap();
+        validate_program_flags(&opts, "bash").unwrap();
     }
 
     /// A `CommanderService` built over `TempDir`-backed stores must root its

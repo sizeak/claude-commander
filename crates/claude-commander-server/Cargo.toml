@@ -24,6 +24,7 @@ path = "src/main.rs"
 
 [dependencies]
 claude-commander-core = { path = "../claude-commander-core" }
+claude-commander-protocol = { path = "../claude-commander-protocol" }
 
 # Async runtime
 tokio = { workspace = true }
@@ -61,6 +62,10 @@ default = []
 tls = ["dep:axum-server"]
 
 [dev-dependencies]
+# Shared hermetic-server + git/tmux harness for the integration tests. This is a
+# dev-dependency cycle (test-support depends on this crate); Cargo allows it
+# because it only closes through this crate's test targets, not its library.
+claude-commander-test-support = { path = "../claude-commander-test-support" }
 tempfile = "3.10"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

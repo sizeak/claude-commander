@@ -5,6 +5,7 @@
 //! - Timeout handling
 //! - Structured output parsing
 
+use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,6 +16,7 @@ use tokio::time::timeout;
 use tracing::{debug, instrument, warn};
 
 use crate::error::{Result, TmuxError};
+use crate::tmux::isolation::TmuxTmpdir;
 
 /// Default maximum concurrent tmux commands
 pub const DEFAULT_MAX_CONCURRENT: usize = 16;
@@ -32,6 +34,11 @@ pub struct TmuxExecutor {
     semaphore: Arc<Semaphore>,
     /// Command timeout
     timeout: Duration,
+    /// When set, every spawned tmux command is pinned onto this socket dir
+    /// (`TMUX_TMPDIR=<dir>`, `$TMUX`/`$TMUX_PANE` stripped) so it hits a
+    /// throwaway per-test server rather than the real one. `None` in normal use
+    /// leaves the environment untouched. See [`Config::tmux_tmpdir`](crate::config::Config::tmux_tmpdir).
+    tmux_tmpdir: Option<PathBuf>,
 }
 
 impl TmuxExecutor {
@@ -45,6 +52,7 @@ impl TmuxExecutor {
         Self {
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
             timeout: DEFAULT_TIMEOUT,
+            tmux_tmpdir: None,
         }
     }
 
@@ -54,9 +62,25 @@ impl TmuxExecutor {
         self
     }
 
+    /// Isolate every spawned tmux command onto `dir` (for hermetic tests/e2e).
+    /// `None` (the default) leaves the environment untouched.
+    pub fn with_tmux_tmpdir(mut self, dir: Option<PathBuf>) -> Self {
+        self.tmux_tmpdir = dir;
+        self
+    }
+
+    /// Build a `tmux` command, applying socket-dir isolation when configured.
+    /// The single construction seam every spawn goes through, so the isolation
+    /// env trio can never be applied inconsistently (CLAUDE.md: minimise
+    /// duplication).
+    fn command(&self) -> Command {
+        Command::new("tmux").with_tmux_tmpdir(self.tmux_tmpdir.as_deref())
+    }
+
     /// Check if tmux is installed and accessible
     pub async fn check_installed(&self) -> Result<()> {
-        let output = Command::new("tmux")
+        let output = self
+            .command()
             .arg("-V")
             .output()
             .await
@@ -82,7 +106,7 @@ impl TmuxExecutor {
             .map_err(|_| TmuxError::SemaphoreError)?;
 
         // Build command
-        let mut cmd = Command::new("tmux");
+        let mut cmd = self.command();
         cmd.args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -395,6 +419,43 @@ mod tests {
         let executor = TmuxExecutor::with_max_concurrent(8).with_timeout(Duration::from_secs(10));
 
         assert_eq!(executor.timeout, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn command_isolates_tmux_env_when_socket_dir_set() {
+        use std::ffi::OsStr;
+
+        let dir = PathBuf::from("/socket/dir");
+        let executor = TmuxExecutor::new().with_tmux_tmpdir(Some(dir.clone()));
+        let cmd = executor.command();
+        let envs: Vec<(&OsStr, Option<&OsStr>)> = cmd.as_std().get_envs().collect();
+
+        // TMUX_TMPDIR points the client at the isolated socket dir.
+        assert!(
+            envs.contains(&(OsStr::new("TMUX_TMPDIR"), Some(dir.as_os_str()))),
+            "TMUX_TMPDIR must be set to the socket dir, got {envs:?}"
+        );
+        // $TMUX / $TMUX_PANE must be stripped (recorded as a removal → `None`),
+        // or an inherited live server would win over TMUX_TMPDIR.
+        assert!(
+            envs.contains(&(OsStr::new("TMUX"), None)),
+            "TMUX must be removed, got {envs:?}"
+        );
+        assert!(
+            envs.contains(&(OsStr::new("TMUX_PANE"), None)),
+            "TMUX_PANE must be removed, got {envs:?}"
+        );
+    }
+
+    #[test]
+    fn command_leaves_env_untouched_without_socket_dir() {
+        let executor = TmuxExecutor::new();
+        let cmd = executor.command();
+        assert_eq!(
+            cmd.as_std().get_envs().count(),
+            0,
+            "normal (TUI/CLI) mode must not tamper with the tmux environment"
+        );
     }
 
     #[test]

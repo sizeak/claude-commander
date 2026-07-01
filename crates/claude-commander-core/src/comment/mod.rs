@@ -14,80 +14,24 @@
 pub mod apply;
 pub mod selection;
 
-pub use apply::{ApplyOutcome, SendDecision, decide_send};
+pub use apply::{SendDecision, decide_send};
 
 use std::path::PathBuf;
 
 use tokio::fs;
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::error::{ConfigError, Result};
 use crate::git::{FileDiff, LineOrigin, ParsedDiff};
 use crate::session::SessionId;
 
-/// Which side of the diff a line range refers to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CommentSide {
-    Old,
-    New,
-}
-
-/// Lifecycle status of an comment.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CommentStatus {
-    /// Anchored to the current diff, ready to apply.
-    Staged,
-    /// Its snippet could not be located unambiguously in the current diff;
-    /// blocks Apply until reviewed or deleted.
-    Drifted,
-    /// Already sent to the agent.
-    Applied,
-}
-
-/// A single review comment.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Comment {
-    pub id: Uuid,
-    /// Display path of the file (new path, or old path for deletions).
-    pub file: String,
-    pub side: CommentSide,
-    /// Inclusive line range on `side` at capture / last successful anchor time.
-    pub line_range: (usize, usize),
-    /// Captured line contents (joined with `\n`), used to re-anchor.
-    pub snippet: String,
-    pub comment: String,
-    pub status: CommentStatus,
-    pub created_at: DateTime<Utc>,
-}
-
-impl Comment {
-    /// Create a freshly staged comment with a random id and `created_at`
-    /// set to now. `snippet` is normalised to drop any trailing newline.
-    pub fn new(
-        file: impl Into<String>,
-        side: CommentSide,
-        line_range: (usize, usize),
-        snippet: impl Into<String>,
-        comment: impl Into<String>,
-    ) -> Self {
-        let snippet = snippet.into();
-        Self {
-            id: Uuid::new_v4(),
-            file: file.into(),
-            side,
-            line_range,
-            snippet: snippet.trim_end_matches('\n').to_string(),
-            comment: comment.into(),
-            status: CommentStatus::Staged,
-            created_at: Utc::now(),
-        }
-    }
-}
+// `Comment` and its enums are network wire types (the review API serializes and
+// the client deserializes them), so they live in the shared
+// `claude-commander-protocol` crate. Re-exported here so the persistence,
+// re-anchoring, and composition logic below — and `crate::comment::Comment`
+// paths — keep working unchanged.
+pub use claude_commander_protocol::comment::{ApplyOutcome, Comment, CommentSide, CommentStatus};
 
 /// Outcome of trying to locate an comment's snippet in a fresh diff.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -44,6 +44,12 @@ ui_refresh_fps = 30
 # Custom worktrees directory (default: platform-specific, see Data Storage below)
 # worktrees_dir = "/path/to/worktrees"
 
+# Isolate every tmux command onto a throwaway socket dir (default: unset).
+# For hermetic tests and the e2e harness ONLY — leave unset for normal use.
+# When set, tmux commands run with TMUX_TMPDIR=<dir> and $TMUX/$TMUX_PANE
+# stripped, so they hit a per-run tmux server instead of your real one.
+# tmux_tmpdir = "/path/to/throwaway/tmux"
+
 # Organize worktrees into per-repository subdirectories (default: false)
 # per_repo_worktree_dirs = true
 

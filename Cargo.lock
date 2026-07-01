@@ -738,6 +738,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
+ "claude-commander-protocol",
  "color-eyre",
  "cpal",
  "crossterm",
@@ -777,6 +778,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "claude-commander-protocol"
+version = "0.22.1"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "uuid",
+]
+
+[[package]]
 name = "claude-commander-server"
 version = "0.22.1"
 dependencies = [
@@ -784,6 +795,8 @@ dependencies = [
  "axum-server",
  "clap",
  "claude-commander-core",
+ "claude-commander-protocol",
+ "claude-commander-test-support",
  "figment",
  "futures",
  "http-body-util",
@@ -799,6 +812,17 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+]
+
+[[package]]
+name = "claude-commander-test-support"
+version = "0.22.1"
+dependencies = [
+ "axum",
+ "claude-commander-core",
+ "claude-commander-server",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

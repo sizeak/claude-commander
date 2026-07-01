@@ -1,0 +1,22 @@
+[package]
+name = "claude-commander-test-support"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared integration-test harness (hermetic server + git/tmux fixtures) for claude-commander"
+publish = false
+
+# Test scaffolding only — never part of a release (like the server crate).
+[package.metadata.release]
+release = false
+
+[dependencies]
+claude-commander-core = { path = "../claude-commander-core" }
+claude-commander-server = { path = "../claude-commander-server" }
+
+tokio = { workspace = true }
+tempfile = "3.10"
+# `spawn_server` calls `axum::serve`; keep the same major as the server crate.
+axum = { version = "0.8", features = ["ws", "macros"] }

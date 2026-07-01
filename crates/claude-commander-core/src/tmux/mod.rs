@@ -12,6 +12,7 @@ mod capture;
 mod executor;
 mod headless_attach;
 mod input;
+mod isolation;
 mod state;
 
 pub use attach::*;

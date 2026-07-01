@@ -5,11 +5,6 @@
 //! state, sending keys) lives in `CommanderService::apply_comments`; the
 //! pure decision here is unit-tested in isolation.
 
-use std::path::PathBuf;
-
-use serde::Serialize;
-use uuid::Uuid;
-
 use crate::session::AgentState;
 
 /// Whether the apply prompt can be injected immediately or must wait.
@@ -31,20 +26,9 @@ pub fn decide_send(state: AgentState) -> SendDecision {
     }
 }
 
-/// Outcome of applying a session's staged comments.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", tag = "outcome")]
-pub enum ApplyOutcome {
-    /// No staged comments to apply.
-    Nothing,
-    /// One or more comments are drifted; nothing was sent.
-    Blocked { drifted: Vec<Uuid> },
-    /// Comments were composed to `path` and the prompt injected.
-    Applied { path: PathBuf, count: usize },
-    /// The brief was written to `path` but couldn't be delivered (agent stopped
-    /// or stayed at a prompt past the hold timeout); the user can re-apply.
-    Deferred { path: PathBuf, count: usize },
-}
+// `ApplyOutcome` (the apply-result wire type) lives in
+// `claude-commander-protocol`; it's re-exported from this module's parent
+// (`crate::comment`) so existing paths keep working.
 
 #[cfg(test)]
 mod tests {
