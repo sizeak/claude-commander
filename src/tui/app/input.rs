@@ -247,6 +247,20 @@ impl App {
                     let files = self.ui_state.review_file_list_rect;
                     if matches!(self.ui_state.modal, Modal::ReviewDiff(_)) {
                         let (col, row) = (mouse.column, mouse.row);
+                        // A footer button replays the key it labels through the
+                        // normal review key path (which expects the modal to be
+                        // extracted first, exactly like the keyboard dispatch).
+                        if let Some(key) =
+                            super::review::review_button_at(&self.ui_state.review_buttons, col, row)
+                        {
+                            self.ui_state.review_last_click = None;
+                            if let Modal::ReviewDiff(state) =
+                                std::mem::replace(&mut self.ui_state.modal, Modal::None)
+                            {
+                                self.handle_review_key(key, state).await;
+                            }
+                            return;
+                        }
                         let mut selected_file = false;
                         if let Modal::ReviewDiff(state) = &mut self.ui_state.modal {
                             let in_files = files.is_some_and(|r| {
@@ -740,6 +754,16 @@ impl App {
     /// (attach for sessions, toggle for section headers).
     async fn handle_left_click(&mut self, col: u16, row: u16) {
         use super::selection::DOUBLE_CLICK_WINDOW;
+
+        // Status-bar action buttons sit outside the list. A hit dispatches the
+        // bound command — behaving exactly like the keypress — and consumes the
+        // click.
+        if let Some(action) = crate::tui::hotkey::button_at(&self.ui_state.action_buttons, col, row)
+        {
+            self.ui_state.last_left_click = None;
+            self.handle_command(UserCommand::from(action)).await;
+            return;
+        }
 
         let Some(idx) = self.list_index_at(col, row) else {
             self.ui_state.last_left_click = None;

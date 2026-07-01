@@ -47,8 +47,7 @@ impl App {
 
             // Full-screen takeovers are rendered directly in `render()`, not here.
             Modal::Conversation { .. } => {}
-
-            Modal::ReviewDiff(state) => self.render_review_modal(frame, area, state),
+            Modal::ReviewDiff(_) => {}
 
             Modal::Input {
                 title,
@@ -763,6 +762,25 @@ impl App {
         )));
         lines.push(Line::from(format!(
             "  {:<width$}shortcut to `claude-commander listen-toggle`",
+            "",
+            width = key_col_width,
+        )));
+
+        // Mouse (the status/review bars surface primary actions as buttons).
+        lines.push(Line::from(""));
+        lines.push(Line::from("Mouse:"));
+        lines.push(Line::from(format!(
+            "  {:<width$}Primary actions appear as clickable buttons in the",
+            "click",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}status bar (and review footer); the bracketed letter",
+            "",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}is the hotkey. Clicking fires the same action.",
             "",
             width = key_col_width,
         )));

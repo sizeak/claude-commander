@@ -886,6 +886,14 @@ pub struct AppUiState {
     /// or path-input completions), recorded each render frame so mouse clicks
     /// can be mapped to list indices. `None` when no list modal is open.
     pub modal_list_rect: Option<Rect>,
+    /// Clickable action-button regions from the main-view status bar, recorded
+    /// each render frame so a left-click can be mapped back to its
+    /// `BindableAction`. Rebuilt every frame; empty when no buttons are drawn.
+    pub action_buttons: Vec<crate::tui::hotkey::ActionButton>,
+    /// Clickable action-button regions from the review-view footer, recorded
+    /// each render frame. Review keys are view-local, so each button carries a
+    /// synthesized `KeyEvent` fed straight into `handle_review_key`.
+    pub review_buttons: Vec<review::ReviewButton>,
     /// Sessions with at least one pending (not-yet-applied) review comment.
     /// Drives the `*` marker in the session list; refreshed on startup and
     /// whenever the review view closes.
@@ -987,6 +995,8 @@ impl Default for AppUiState {
             review_body_rect: None,
             review_file_list_rect: None,
             modal_list_rect: None,
+            action_buttons: Vec::new(),
+            review_buttons: Vec::new(),
             sessions_with_comments: HashSet::new(),
 
             should_quit: false,

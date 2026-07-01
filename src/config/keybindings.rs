@@ -230,6 +230,62 @@ impl BindableAction {
         }
     }
 
+    /// Short verb phrase for on-screen action buttons, distinct from the
+    /// longer help-screen [`description`](Self::description). Worded so the
+    /// primary hotkey char appears naturally (favouring clean inline
+    /// bracketing, e.g. `n` → "new session" renders "[n]ew session").
+    ///
+    /// Exhaustive on purpose (no wildcard): adding a `BindableAction` must
+    /// force a button label to be supplied.
+    pub fn button_label(self) -> &'static str {
+        match self {
+            Self::NavigateUp => "up",
+            Self::NavigateDown => "down",
+            Self::NextGroup => "next group",
+            Self::PreviousGroup => "prev group",
+            Self::NavigateFirst => "first",
+            Self::NavigateLast => "last",
+            Self::Select => "attach",
+            Self::SelectShell => "shell",
+            Self::NewSession => "new session",
+            Self::NewStackedSession => "stacked",
+            Self::CascadeMergeMain => "merge stack",
+            Self::CascadeResume => "resume cascade",
+            Self::CascadeAbandon => "abandon cascade",
+            Self::PushStack => "push stack",
+            Self::NewProject => "new project",
+            Self::CheckoutBranch => "checkout",
+            Self::DeleteSession => "delete",
+            Self::DeleteMergedPrSessions => "delete merged",
+            Self::RenameSession => "rename",
+            Self::RestartSession => "restart",
+            Self::RemoveProject => "remove project",
+            Self::OpenInEditor => "edit",
+            Self::OpenPullRequest => "open PR",
+            Self::RefreshPrStatus => "refresh PR",
+            Self::OpenCommander => "commander",
+            Self::ToggleConversationOverlay => "conversation",
+            Self::ToggleVoiceInput => "voice",
+            Self::OpenReviewDiff => "review",
+            Self::TogglePane => "view",
+            Self::TogglePaneReverse => "view back",
+            Self::ShrinkLeftPane => "shrink",
+            Self::GrowLeftPane => "grow",
+            Self::ShowHelp => "help",
+            Self::ShowSettings => "settings",
+            Self::Quit => "quit",
+            Self::ScrollUp => "scroll up",
+            Self::ScrollDown => "scroll down",
+            Self::PageUp => "page up",
+            Self::PageDown => "page down",
+            Self::GenerateSummary => "summary",
+            Self::ScanDirectory => "scan",
+            Self::MoveToSection => "move",
+            Self::ToggleSection => "toggle section",
+            Self::ToggleViewMode => "view mode",
+        }
+    }
+
     /// Section this action is grouped under, for both the help screen and the
     /// settings Keybindings tab. The [`ALL`](Self::ALL) ordering keeps every
     /// section's actions contiguous so [`KeyBindings::sections`] can slice them
@@ -944,6 +1000,27 @@ pub fn matches_review_toggle(bindings: &KeyBindings, key: &KeyEvent) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- Button labels --
+
+    #[test]
+    fn button_label_nonempty_for_every_action() {
+        for &action in BindableAction::ALL {
+            assert!(
+                !action.button_label().is_empty(),
+                "empty button_label for {action:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn button_label_distinct_from_description() {
+        // The button label is intentionally terser than the help description.
+        assert_ne!(
+            BindableAction::NewSession.button_label(),
+            BindableAction::NewSession.description()
+        );
+    }
 
     // -- KeyBinding parsing --
 

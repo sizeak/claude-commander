@@ -1,6 +1,7 @@
 use super::actions::{adjust_list_scroll, delete_confirm_message};
 use super::modals::centered_rect;
 use super::render::commander_chip_label;
+use super::review::ReviewFocus;
 use super::selection::{session_number_to_list_index, worktree_list_index};
 use super::*;
 
@@ -2031,4 +2032,30 @@ fn project_picker_scroll_keeps_selection_visible() {
     }
     assert_eq!(p.selected, 0);
     assert_eq!(p.scroll, 0);
+}
+
+#[tokio::test]
+async fn backtab_toggles_review_focus_like_tab() {
+    let mut app = make_test_app();
+    let state = DiffReviewState::new(
+        SessionId::new(),
+        "t".to_string(),
+        "base".to_string(),
+        crate::git::ParsedDiff {
+            files: vec![modified_image_file("logo.png")],
+        },
+        Vec::new(),
+    );
+    assert_eq!(state.focus, ReviewFocus::FileList);
+    let key = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::BackTab,
+        crossterm::event::KeyModifiers::NONE,
+    );
+    app.handle_review_key(key, Box::new(state)).await;
+    match &app.ui_state.modal {
+        Modal::ReviewDiff(s) => {
+            assert_eq!(s.focus, ReviewFocus::Body, "BackTab should flip focus")
+        }
+        other => panic!("expected review modal to stay open, got {other:?}"),
+    }
 }
