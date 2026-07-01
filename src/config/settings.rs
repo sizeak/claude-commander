@@ -121,13 +121,13 @@ pub struct Config {
 
     /// Idle duration in seconds before an eligible session is hibernated. A
     /// session counts as idle only while its agent is Idle (not Working or
-    /// WaitingForInput) and no tmux client is attached. Default 1800 (30 min).
+    /// WaitingForInput) and no tmux client is attached. Default 86400 (1 day).
     #[serde(default = "default_hibernate_idle_timeout_secs")]
     pub hibernate_idle_timeout_secs: u64,
 
-    /// Interval in seconds between hibernation policy checks. Default 60.
-    /// `0` disables the loop entirely (the loop is not spawned), matching the
-    /// convention used by `agent_state_poll_interval_ms`.
+    /// Interval in seconds between hibernation policy checks. Default 600
+    /// (10 min). `0` disables the loop entirely (the loop is not spawned),
+    /// matching the convention used by `agent_state_poll_interval_ms`.
     #[serde(default = "default_hibernate_check_interval_secs")]
     pub hibernate_check_interval_secs: u64,
 
@@ -442,11 +442,11 @@ fn default_true() -> bool {
 }
 
 fn default_hibernate_idle_timeout_secs() -> u64 {
-    1800
+    86400
 }
 
 fn default_hibernate_check_interval_secs() -> u64 {
-    60
+    600
 }
 
 fn default_pr_review_labels() -> Vec<String> {
@@ -1046,8 +1046,8 @@ show_session_program = false
     fn test_hibernation_defaults() {
         let config = Config::default();
         assert!(!config.hibernate_enabled);
-        assert_eq!(config.hibernate_idle_timeout_secs, 1800);
-        assert_eq!(config.hibernate_check_interval_secs, 60);
+        assert_eq!(config.hibernate_idle_timeout_secs, 86400);
+        assert_eq!(config.hibernate_check_interval_secs, 600);
     }
 
     #[test]
@@ -1056,8 +1056,8 @@ show_session_program = false
         // fall back to the defaults rather than failing to parse.
         let config: Config = toml::from_str("default_program = \"claude\"").unwrap();
         assert!(!config.hibernate_enabled);
-        assert_eq!(config.hibernate_idle_timeout_secs, 1800);
-        assert_eq!(config.hibernate_check_interval_secs, 60);
+        assert_eq!(config.hibernate_idle_timeout_secs, 86400);
+        assert_eq!(config.hibernate_check_interval_secs, 600);
     }
 
     #[test]
