@@ -1106,8 +1106,12 @@ mod tests {
         use crate::config::{ConfigStore, StateStore};
 
         let dir = tempfile::TempDir::new().unwrap();
+        // Telemetry is opt-out by default with a baked ingest token; disable it
+        // so this test never posts events to the production OpenObserve instance.
+        let mut config = Config::default();
+        config.telemetry.enabled = false;
         let config_store = Arc::new(ConfigStore::with_path(
-            Config::default(),
+            config,
             dir.path().join("config.toml"),
         ));
         let store = Arc::new(StateStore::with_path(

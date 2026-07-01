@@ -72,10 +72,14 @@ pub async fn create_test_repo() -> (TempDir, PathBuf) {
 /// Build a hermetic [`AppState`]: empty core state under `data_dir`, a temp
 /// worktrees dir, auth disabled, wrapping a real `CommanderService`.
 pub fn test_state(data_dir: &TempDir, worktrees_dir: &TempDir) -> AppState {
-    let config = Config {
+    let mut config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
         ..Config::default()
     };
+    // Telemetry is opt-out by default with a baked ingest token, so a plain
+    // `CommanderService::new` would post events to the production OpenObserve
+    // instance from every suite using this harness (incl. CI). Disable it.
+    config.telemetry.enabled = false;
     let config_store = Arc::new(ConfigStore::with_path(
         config,
         data_dir.path().join("config.toml"),
@@ -100,4 +104,26 @@ pub async fn spawn_server(state: AppState) -> SocketAddr {
         axum::serve(listener, app).await.unwrap();
     });
     addr
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Guard: the harness must NOT emit telemetry. Telemetry is opt-out by
+    /// default with a baked ingest token, so an un-disabled test service would
+    /// post events to the production OpenObserve instance from every suite that
+    /// uses this harness (`cargo test` / CI). Mirrors the guard on the server's
+    /// in-crate `handlers/test_support.rs` fixture; fails if someone re-enables
+    /// it here.
+    #[tokio::test]
+    async fn test_state_disables_telemetry() {
+        let data_dir = TempDir::new().unwrap();
+        let worktrees_dir = TempDir::new().unwrap();
+        let state = test_state(&data_dir, &worktrees_dir);
+        assert!(
+            !state.service.telemetry().is_active(),
+            "test-support fixtures must not emit telemetry (would pollute production OpenObserve)"
+        );
+    }
 }

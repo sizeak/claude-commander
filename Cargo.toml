@@ -11,7 +11,7 @@ exclude = ["client"]
 default-members = ["crates/claude-commander-core", "crates/claude-commander"]
 
 [workspace.package]
-version = "0.21.2"
+version = "0.22.1"
 edition = "2024"
 authors = ["Claude Commander Contributors"]
 license = "MIT"

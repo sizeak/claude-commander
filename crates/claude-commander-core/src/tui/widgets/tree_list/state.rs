@@ -149,6 +149,27 @@ impl TreeListState {
         }
     }
 
+    /// Select the nearest selectable row to `idx`, preferring the row at or
+    /// after `idx` and falling back to the closest selectable row before it.
+    ///
+    /// Used after a deletion rebuilds the list: passing the removed row's old
+    /// index lands the cursor on the row that slid up into its place (the next
+    /// sibling) — or on the previous row when the last row was removed —
+    /// rather than resetting to the top. No-op on a list with no selectable
+    /// rows (selection is cleared).
+    pub fn select_nearest(&mut self, idx: usize) {
+        if !self.any_selectable() {
+            self.list_state.select(None);
+            return;
+        }
+        let count = self.item_count;
+        if let Some(i) = (idx..count).find(|&i| self.is_selectable(i)) {
+            self.list_state.select(Some(i));
+        } else if let Some(i) = (0..count.min(idx)).rev().find(|&i| self.is_selectable(i)) {
+            self.list_state.select(Some(i));
+        }
+    }
+
     /// Update item count and ensure selection is valid.
     ///
     /// Also clears any per-index `selectable` and `group_starts` masks
