@@ -375,7 +375,8 @@ impl App {
                     self.ui_state.modal = Modal::None;
                 }
                 // Tab toggles focus between the name field and the program list.
-                KeyCode::Tab => {
+                // Shift+Tab is its own reverse, same as Tab.
+                KeyCode::Tab | KeyCode::BackTab => {
                     if let Some(picker) = program_picker.as_mut() {
                         picker.focus_program = !picker.focus_program;
                     }
