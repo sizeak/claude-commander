@@ -69,6 +69,11 @@ impl CommanderService {
         let comments = Arc::new(CommentStore::new(data_dir.join("comments")));
         let reviewed = Arc::new(ReviewedStore::new(data_dir.join("reviewed")));
         let telemetry = init_telemetry(&config_store, &store, &frontend);
+        // NB: the idle-hibernation loop is NOT started here. `new` is shared by
+        // one-shot CLI commands (via `for_cli`), and a tokio runtime is always
+        // present under `#[tokio::main]`, so starting it here would let any CLI
+        // command trigger a hibernation pass. Long-lived frontends call
+        // `start_hibernation_loop` explicitly after construction instead.
         Self {
             manager,
             store,
@@ -77,6 +82,15 @@ impl CommanderService {
             reviewed,
             telemetry,
         }
+    }
+
+    /// Start the background idle-hibernation policy loop. Long-lived frontends
+    /// (the TUI) call this once after construction; one-shot CLI paths do not,
+    /// so a CLI command can never trigger a hibernation pass as a side effect.
+    /// No-op unless `hibernate_enabled` is set, the check interval is non-zero,
+    /// and a tokio runtime is present.
+    pub fn start_hibernation_loop(&self) {
+        self.manager.spawn_hibernation_loop(self.telemetry.clone());
     }
 
     pub fn for_cli(
