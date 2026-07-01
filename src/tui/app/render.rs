@@ -1,6 +1,7 @@
 //! Rendering: main layout, session list, preview/info/shell panes, status bar.
 
 use super::*;
+use crate::tui::hotkey::ActionButton;
 
 /// Build the footer commander chip label, or `None` when the commander is not
 /// running (the chip is hidden then). When running, the label is `● Commander`,
@@ -54,9 +55,12 @@ impl App {
             self.ui_state.review_body_rect = Some(super::review::review_body_inner_rect(size));
             self.ui_state.review_file_list_rect =
                 Some(super::review::review_file_list_inner_rect(size));
-            if let Modal::ReviewDiff(state) = &self.ui_state.modal {
-                self.render_review_modal(frame, size, state);
-            }
+            let review_buttons = if let Modal::ReviewDiff(state) = &self.ui_state.modal {
+                self.render_review_modal(frame, size, state)
+            } else {
+                Vec::new()
+            };
+            self.ui_state.review_buttons = review_buttons;
             return;
         }
 
@@ -104,8 +108,9 @@ impl App {
         // Render modal if open
         self.render_modal(frame, content_area);
 
-        // Render status bar at the very bottom of the screen
-        self.render_status_bar(frame, size);
+        // Render status bar at the very bottom of the screen. It returns the
+        // clickable action-button regions it drew, recorded for hit-testing.
+        self.ui_state.action_buttons = self.render_status_bar(frame, size);
     }
 
     /// Render the session list
@@ -407,10 +412,11 @@ impl App {
         frame.render_widget(preview, area);
     }
 
-    /// Render status bar
-    pub(super) fn render_status_bar(&self, frame: &mut Frame, area: Rect) {
+    /// Render status bar. Returns the clickable action-button regions drawn in
+    /// the middle zone (empty when a toast / restart message occupies the bar).
+    pub(super) fn render_status_bar(&self, frame: &mut Frame, area: Rect) -> Vec<ActionButton> {
         if area.height < 2 {
-            return;
+            return Vec::new();
         }
 
         let status_area = Rect {
@@ -421,6 +427,7 @@ impl App {
         };
 
         let base_style = self.theme.status_bar();
+        let accent = base_style.fg(self.theme.text_accent);
         let sep = Span::styled(" \u{2502} ", base_style);
 
         // Fill the entire status bar background
@@ -456,36 +463,28 @@ impl App {
 
         let help_hint = Span::styled("? help ", base_style);
 
-        // Build left-side spans and right-side help hint based on state
-        let mut left_spans = if let Some(msg) = toast {
-            let mut spans = vec![sessions_span, sep.clone(), Span::styled(msg, base_style)];
+        // A toast or restart notice claims the bar; otherwise it hosts the
+        // context-aware action buttons.
+        let show_buttons = toast.is_none() && !restart_needed;
+
+        // Build the left status zone: session count, then any transient message.
+        let mut left_spans = vec![sessions_span];
+        if let Some(msg) = toast {
+            left_spans.push(sep.clone());
+            left_spans.push(Span::styled(msg, base_style));
             if restart_needed {
-                spans.push(sep);
-                spans.push(Span::styled("Restart to apply config changes", base_style));
+                left_spans.push(sep.clone());
+                left_spans.push(Span::styled("Restart to apply config changes", base_style));
             }
-            spans
         } else if restart_needed {
-            vec![
-                sessions_span,
-                sep,
-                Span::styled("Restart to apply config changes", base_style),
-            ]
-        } else {
-            vec![
-                sessions_span,
-                sep.clone(),
-                Span::styled("n", base_style.add_modifier(Modifier::BOLD)),
-                Span::styled(": new session", base_style),
-                sep,
-                Span::styled("N", base_style.add_modifier(Modifier::BOLD)),
-                Span::styled(": add project", base_style),
-            ]
-        };
+            left_spans.push(sep.clone());
+            left_spans.push(Span::styled("Restart to apply config changes", base_style));
+        }
 
         // The commander chip reflects live system state, so it shows in every
         // branch (toast / restart / default) — spliced right after the session
-        // count rather than added to one branch. The label folds in the live
-        // agent state; absence of the chip means the commander isn't running.
+        // count. The label folds in the live agent state; absence of the chip
+        // means the commander isn't running.
         let commander_agent_state = self
             .ui_state
             .agent_states
@@ -503,17 +502,113 @@ impl App {
             );
         }
 
-        // Split the status area into left (fill) and right (fixed width for help hint)
+        // A trailing separator visually detaches the buttons from the status.
+        if show_buttons {
+            left_spans.push(sep);
+        }
+
+        let left_line = Line::from(left_spans);
+        let left_width = left_line.width() as u16;
+
+        // Split the status area into left status | middle buttons | help hint.
         let help_width = 8u16; // "? help " + padding
         let chunks = Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Fill(1), Constraint::Length(help_width)])
+            .constraints([
+                Constraint::Length(left_width),
+                Constraint::Fill(1),
+                Constraint::Length(help_width),
+            ])
             .split(status_area);
 
-        let left_line = Line::from(left_spans);
         frame.render_widget(Paragraph::new(left_line).style(base_style), chunks[0]);
 
+        let buttons = if show_buttons {
+            let actions = self.status_bar_actions();
+            self.render_action_bar(frame, &actions, chunks[1], base_style, accent)
+        } else {
+            Vec::new()
+        };
+
         let right_line = Line::from(vec![help_hint]).alignment(Alignment::Right);
-        frame.render_widget(Paragraph::new(right_line).style(base_style), chunks[1]);
+        frame.render_widget(Paragraph::new(right_line).style(base_style), chunks[2]);
+
+        buttons
+    }
+
+    /// The ordered, context-aware set of actions surfaced as buttons in the
+    /// status bar, filtered to those currently invokable. Buttons swap with the
+    /// focused pane so they sit near the UI they act on.
+    fn status_bar_actions(&self) -> Vec<BindableAction> {
+        use BindableAction::*;
+        let actions: &[BindableAction] = match self.ui_state.focused_pane {
+            FocusedPane::SessionList => &[
+                NewSession,
+                NewStackedSession,
+                DeleteSession,
+                OpenReviewDiff,
+                OpenInEditor,
+                NewProject,
+            ],
+            FocusedPane::RightPane => &[TogglePane, ShrinkLeftPane, GrowLeftPane, GenerateSummary],
+        };
+        actions
+            .iter()
+            .copied()
+            // GenerateSummary is also config-gated (AI summaries can be off);
+            // `is_command_available` already covers the Info-pane requirement.
+            .filter(|&a| a != GenerateSummary || self.config.ai_summary_enabled)
+            .filter(|&a| self.ui_state.is_command_available(a))
+            .collect()
+    }
+
+    /// Render a horizontal row of bracketed, clickable action buttons into
+    /// `area` (a 1-row rect), separated by `" │ "`. Returns each button's
+    /// rect + action for hit-testing. A button that would overflow `area` is
+    /// dropped whole (never half-clipped), along with all lower-priority
+    /// buttons after it.
+    pub(super) fn render_action_bar(
+        &self,
+        frame: &mut Frame,
+        actions: &[BindableAction],
+        area: Rect,
+        base: Style,
+        accent: Style,
+    ) -> Vec<ActionButton> {
+        const SEP: &str = " \u{2502} ";
+        const SEP_WIDTH: u16 = 3; // " │ "
+
+        // Segment + style each label once, then let `layout_buttons` decide
+        // which fit. Kept buttons are always a prefix, so the rendered spans
+        // (built from the same prefix) stay in sync with the recorded rects.
+        let rendered: Vec<(BindableAction, Vec<Span<'static>>)> = actions
+            .iter()
+            .map(|&action| {
+                let seg = crate::tui::hotkey::segment_label(
+                    action.button_label(),
+                    &self.config.keybindings,
+                    action,
+                );
+                (action, crate::tui::hotkey::hotkey_spans(&seg, base, accent))
+            })
+            .collect();
+
+        let widths: Vec<(BindableAction, u16)> = rendered
+            .iter()
+            .map(|(action, spans)| (*action, spans.iter().map(|s| s.width() as u16).sum()))
+            .collect();
+
+        let buttons = crate::tui::hotkey::layout_buttons(&widths, area, SEP_WIDTH);
+
+        let mut spans: Vec<Span> = Vec::new();
+        for (i, (_, btn_spans)) in rendered.iter().take(buttons.len()).enumerate() {
+            if i != 0 {
+                spans.push(Span::styled(SEP, base));
+            }
+            spans.extend(btn_spans.iter().cloned());
+        }
+
+        frame.render_widget(Paragraph::new(Line::from(spans)).style(base), area);
+        buttons
     }
 }
