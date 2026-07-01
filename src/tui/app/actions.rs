@@ -468,6 +468,16 @@ impl App {
     }
 
     /// Handle new session command
+    /// Build the program picker for a new-session dialog: the configured
+    /// choices with the default program pre-selected, name field focused first.
+    pub(super) fn new_program_picker(&self) -> super::ProgramPicker {
+        super::ProgramPicker {
+            choices: self.config.program_choices(),
+            selected: self.config.default_program_index(),
+            focus_program: false,
+        }
+    }
+
     pub(super) async fn handle_new_session(&mut self) {
         if let Some(project_id) = self.ui_state.selected_project_id {
             let repo_path = {
@@ -492,6 +502,7 @@ impl App {
                     section,
                 },
                 existing_branches,
+                program_picker: Some(self.new_program_picker()),
             };
         } else {
             self.ui_state.status_message = Some((
@@ -550,6 +561,7 @@ impl App {
                 parent_branch,
             },
             existing_branches,
+            program_picker: Some(self.new_program_picker()),
         };
     }
 
@@ -1322,10 +1334,20 @@ impl App {
             ));
         }
 
-        if self.ui_state.selected_session_id == Some(session_id) {
+        // When deleting the session under the cursor, remember its row so we
+        // can land the cursor on whatever slides up into that slot (nearest
+        // selectable) once the list is rebuilt, rather than snapping to the
+        // top. Bulk callers deleting a non-selected session leave the cursor
+        // alone.
+        let deleting_selected = self.ui_state.selected_session_id == Some(session_id);
+        let prev_idx = self.ui_state.list_state.selected();
+        if deleting_selected {
             self.ui_state.selected_session_id = None;
         }
         self.refresh_list_items().await;
+        if deleting_selected && let Some(idx) = prev_idx {
+            self.ui_state.list_state.select_nearest(idx);
+        }
 
         if let Some((tmux_name, shell_tmux_name, worktree_path, repo_path)) = cleanup_data {
             let tmux = self.service.session_manager().tmux.clone();
@@ -1493,11 +1515,19 @@ impl App {
             value: current_title.into(),
             on_submit: InputAction::RenameSession { session_id },
             existing_branches: None,
+            program_picker: None,
         };
     }
 
-    /// Handle input modal submission
-    pub(super) async fn handle_input_submit(&mut self, action: InputAction, value: String) {
+    /// Handle input modal submission. `program` is the command chosen in the
+    /// new-session program picker, or `None` for flows without a picker (which
+    /// then fall back to `default_program` inside `prepare_session`).
+    pub(super) async fn handle_input_submit(
+        &mut self,
+        action: InputAction,
+        value: String,
+        program: Option<String>,
+    ) {
         match action {
             InputAction::CreateSession {
                 project_id,
@@ -1516,7 +1546,7 @@ impl App {
                 let session_id = match self
                     .service
                     .session_manager()
-                    .prepare_session(&project_id, value, None, None)
+                    .prepare_session(&project_id, value, program, None)
                     .await
                 {
                     Ok(id) => id,
@@ -1594,7 +1624,7 @@ impl App {
                 let session_id = match self
                     .service
                     .session_manager()
-                    .prepare_session(&project_id, value, None, None)
+                    .prepare_session(&project_id, value, program, None)
                     .await
                 {
                     Ok(id) => id,

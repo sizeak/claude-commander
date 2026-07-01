@@ -129,6 +129,8 @@ When automatic project-branch pulling is enabled (see `project_pull_enabled` in 
 
 All keybindings below are defaults and can be customised via the `[keybindings]` config table (see [Configuration](docs/configuration.md)).
 
+The status bar surfaces the most useful actions for the focused pane as clickable buttons, with the hotkey letter bracketed (`[n]ew session`, `[d]elete`); the review view's footer works the same way. Clicking a button fires the same action as its key, so the hotkeys below can also be discovered and triggered with the mouse.
+
 | Key | Action |
 |-----|--------|
 | `j/k` or `↑/↓` or `Ctrl-n/p` | Navigate session list |

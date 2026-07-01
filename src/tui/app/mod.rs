@@ -244,6 +244,10 @@ pub enum Modal {
         /// (i.e. remote-only `origin/<x>` is stored as just `<x>` to match
         /// `finalize_session`'s resolution logic).
         existing_branches: Option<Vec<String>>,
+        /// When `Some`, the dialog renders a program picker beneath the name
+        /// field and the chosen entry's command launches the session. `None`
+        /// for Input flows that don't create sessions (Rename, AddProject…).
+        program_picker: Option<ProgramPicker>,
     },
     /// Confirmation modal
     Confirm {
@@ -496,6 +500,10 @@ pub struct SettingsState {
     pub rows: Vec<SettingsRow>,
     /// State for the Sections tab (lazily initialised on first tab switch)
     pub sections_state: SectionsState,
+    /// Active search filter for the Keybindings tab. `Some` while the search
+    /// box is focused (typing filters the shortcut list live); `None` when the
+    /// list is browsed normally.
+    pub search: Option<Input>,
 }
 
 /// Kind of a settings row, carrying its typed value.
@@ -510,6 +518,9 @@ pub enum SettingsRowKind {
     Text(String),
     /// Two-state boolean rendered as a checkbox and flipped in place.
     Toggle(bool),
+    /// A non-selectable section heading (Keybindings tab grouping). Carries no
+    /// value and is skipped by navigation.
+    Header,
 }
 
 /// A single row in the settings list
@@ -547,6 +558,21 @@ impl SettingsRow {
         }
     }
 
+    /// A non-selectable section heading.
+    pub fn header(label: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            field_key: String::new(),
+            kind: SettingsRowKind::Header,
+            color_swatch: None,
+        }
+    }
+
+    /// Whether this row can be highlighted/edited. Section headers cannot.
+    pub fn is_selectable(&self) -> bool {
+        !matches!(self.kind, SettingsRowKind::Header)
+    }
+
     /// A text row that also displays a color swatch (Theme tab).
     pub fn swatch(
         label: impl Into<String>,
@@ -566,7 +592,7 @@ impl SettingsRow {
     pub fn text_value(&self) -> &str {
         match &self.kind {
             SettingsRowKind::Text(v) => v,
-            SettingsRowKind::Toggle(_) => "",
+            SettingsRowKind::Toggle(_) | SettingsRowKind::Header => "",
         }
     }
 
@@ -574,7 +600,7 @@ impl SettingsRow {
     pub fn toggled(&self) -> Option<bool> {
         match self.kind {
             SettingsRowKind::Toggle(on) => Some(!on),
-            SettingsRowKind::Text(_) => None,
+            SettingsRowKind::Text(_) | SettingsRowKind::Header => None,
         }
     }
 }
@@ -594,6 +620,38 @@ pub enum SettingsEditing {
         options: Vec<String>,
         selected: usize,
     },
+}
+
+/// Program-picker state embedded in the New Session input modal: the
+/// selectable harnesses, the highlighted index, and which field has focus.
+#[derive(Debug, Clone)]
+pub struct ProgramPicker {
+    /// Selectable harnesses, from `Config::program_choices`.
+    pub choices: Vec<crate::config::ProgramEntry>,
+    /// Index into `choices` of the highlighted entry.
+    pub selected: usize,
+    /// `true` when the program list has focus (Up/Down change the selection);
+    /// `false` when the name field has focus (keys edit text). Tab toggles it.
+    pub focus_program: bool,
+}
+
+impl ProgramPicker {
+    /// The launch command of the highlighted entry, if any.
+    pub fn selected_command(&self) -> Option<String> {
+        self.choices.get(self.selected).map(|e| e.command.clone())
+    }
+
+    /// Move the highlight up one entry (saturating at the top).
+    pub fn select_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    /// Move the highlight down one entry (saturating at the bottom).
+    pub fn select_down(&mut self) {
+        if self.selected + 1 < self.choices.len() {
+            self.selected += 1;
+        }
+    }
 }
 
 /// Action to perform when input modal is submitted
@@ -672,6 +730,14 @@ pub struct AppUiState {
     /// or path-input completions), recorded each render frame so mouse clicks
     /// can be mapped to list indices. `None` when no list modal is open.
     pub modal_list_rect: Option<Rect>,
+    /// Clickable action-button regions from the main-view status bar, recorded
+    /// each render frame so a left-click can be mapped back to its
+    /// `BindableAction`. Rebuilt every frame; empty when no buttons are drawn.
+    pub action_buttons: Vec<crate::tui::hotkey::ActionButton>,
+    /// Clickable action-button regions from the review-view footer, recorded
+    /// each render frame. Review keys are view-local, so each button carries a
+    /// synthesized `KeyEvent` fed straight into `handle_review_key`.
+    pub review_buttons: Vec<review::ReviewButton>,
     /// Sessions with at least one pending (not-yet-applied) review comment.
     /// Drives the `*` marker in the session list; refreshed on startup and
     /// whenever the review view closes.
@@ -773,6 +839,8 @@ impl Default for AppUiState {
             review_body_rect: None,
             review_file_list_rect: None,
             modal_list_rect: None,
+            action_buttons: Vec::new(),
+            review_buttons: Vec::new(),
             sessions_with_comments: HashSet::new(),
 
             should_quit: false,

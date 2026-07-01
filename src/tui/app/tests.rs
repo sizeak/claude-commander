@@ -799,6 +799,46 @@ fn make_test_app() -> App {
 }
 
 #[test]
+fn test_keybinding_rows_are_grouped_under_section_headers() {
+    use crate::tui::app::SettingsRowKind;
+
+    let app = make_test_app();
+    let rows = app.build_settings_rows(SettingsTab::Keybindings);
+
+    // The first row is a section header (not a blank spacer, not a binding).
+    assert!(matches!(rows[0].kind, SettingsRowKind::Header));
+    assert_eq!(rows[0].label, "Navigation");
+
+    // One real (named) header per section, and one row per bindable action.
+    let real_headers = rows
+        .iter()
+        .filter(|r| matches!(r.kind, SettingsRowKind::Header) && !r.label.is_empty())
+        .count();
+    let bindings = rows.iter().filter(|r| r.is_selectable()).count();
+    assert_eq!(real_headers, app.config.keybindings.sections().len());
+    assert_eq!(
+        bindings,
+        crate::config::keybindings::BindableAction::ALL.len()
+    );
+
+    // Every section after the first is preceded by exactly one blank spacer,
+    // and no two named headers are adjacent.
+    let spacers = rows
+        .iter()
+        .filter(|r| matches!(r.kind, SettingsRowKind::Header) && r.label.is_empty())
+        .count();
+    assert_eq!(spacers, real_headers - 1, "one blank line between sections");
+    for pair in rows.windows(2) {
+        let named =
+            |r: &SettingsRow| matches!(r.kind, SettingsRowKind::Header) && !r.label.is_empty();
+        assert!(
+            !(named(&pair[0]) && named(&pair[1])),
+            "empty section header rendered"
+        );
+    }
+}
+
+#[test]
 fn test_worktrees_dir_row_shows_default_when_none() {
     let app = make_test_app();
     let rows = app.build_settings_rows(SettingsTab::General);
@@ -1527,6 +1567,84 @@ fn edit_text_input_inserts_at_cursor_and_reports_change() {
 // View-switch clearing happens in render(), not via terminal.clear()
 // ---------------------------------------------------------------------------
 
+/// Flatten a `TestBackend` buffer into one string (rows joined by spaces) so
+/// tests can assert that expected text was drawn somewhere on screen.
+fn buffer_text(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
+    let buffer = terminal.backend().buffer();
+    buffer
+        .content()
+        .iter()
+        .map(|c| c.symbol())
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+fn keybindings_settings_state(app: &App, search: Option<&str>) -> crate::tui::app::SettingsState {
+    use crate::tui::app::{SectionsState, SettingsState, SettingsTab};
+    let rows = app.build_settings_rows(SettingsTab::Keybindings);
+    SettingsState {
+        tab: SettingsTab::Keybindings,
+        selected_row: 1,
+        editing: None,
+        rows,
+        sections_state: SectionsState::default(),
+        search: search.map(|q| q.into()),
+    }
+}
+
+#[test]
+fn render_keybindings_tab_draws_section_headers() {
+    use crate::tui::app::Modal;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    app.ui_state.modal = Modal::Settings(keybindings_settings_state(&app, None));
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+
+    let text = buffer_text(&terminal);
+    // Section headers are drawn, and a representative binding under them.
+    assert!(text.contains("Navigation"), "missing Navigation header");
+    assert!(text.contains("Sessions"), "missing Sessions header");
+    assert!(text.contains("Attach to selected session"));
+    // Footer advertises the search shortcut on this tab.
+    assert!(text.contains("/: search"));
+}
+
+#[test]
+fn render_keybindings_search_box_filters_and_shows_prompt() {
+    use crate::tui::app::Modal;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    // A search matching only "commander" should hide unrelated bindings.
+    let rows = super::settings::filter_keybinding_rows(
+        app.build_settings_rows(crate::tui::app::SettingsTab::Keybindings),
+        "commander",
+    );
+    let mut state = keybindings_settings_state(&app, Some("commander"));
+    state.rows = rows;
+    state.selected_row = 1;
+    app.ui_state.modal = Modal::Settings(state);
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+
+    let text = buffer_text(&terminal);
+    // The search prompt line is visible…
+    assert!(text.contains("/commander"), "search prompt not rendered");
+    // …the matching binding is shown…
+    assert!(text.contains("Open commander session"));
+    // …and an unrelated binding is filtered out.
+    assert!(
+        !text.contains("Scroll up"),
+        "unrelated binding not filtered"
+    );
+}
+
 #[test]
 fn render_consumes_clear_right_pane_flag() {
     use ratatui::Terminal;
@@ -1727,4 +1845,39 @@ async fn mouse_file_click_kicks_off_image_fetch() {
             .contains_key(&("logo.png".to_string(), DiffSide::New)),
         "clicking an image file in the tree should kick off its image fetch"
     );
+}
+
+// --- ProgramPicker (new-session program selection) ---
+
+fn picker(commands: &[&str], selected: usize) -> ProgramPicker {
+    ProgramPicker {
+        choices: commands
+            .iter()
+            .map(|c| crate::config::ProgramEntry {
+                label: c.to_string(),
+                command: c.to_string(),
+            })
+            .collect(),
+        selected,
+        focus_program: true,
+    }
+}
+
+#[test]
+fn program_picker_selected_command_reads_highlight() {
+    let p = picker(&["claude", "codex"], 1);
+    assert_eq!(p.selected_command().as_deref(), Some("codex"));
+}
+
+#[test]
+fn program_picker_navigation_saturates_at_ends() {
+    let mut p = picker(&["claude", "codex"], 0);
+    // Up at the top stays put.
+    p.select_up();
+    assert_eq!(p.selected, 0);
+    // Down advances, then saturates at the last entry.
+    p.select_down();
+    assert_eq!(p.selected, 1);
+    p.select_down();
+    assert_eq!(p.selected, 1);
 }

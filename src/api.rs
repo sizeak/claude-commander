@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use uuid::Uuid;
 
+use crate::agent::AgentKind;
 use crate::comment::{
     ApplyOutcome, Comment, CommentSide, CommentStatus, CommentStore, SendDecision,
     compose_markdown, decide_send, reanchor_comments,
@@ -23,7 +24,7 @@ use crate::git::{
 use crate::reviewed::ReviewedStore;
 use crate::session::{
     AgentState, ProjectId, ScanResult, SessionId, SessionManager, SessionStatus, WorktreeSession,
-    program_is_claude, program_with_claude_flags,
+    program_with_claude_flags,
 };
 use crate::telemetry::{ConfigSnapshot, EnvFingerprint, FrontendInfo, Telemetry};
 use crate::tmux::{AgentStateDetector, StatusBarInfo, TmuxExecutor};
@@ -248,7 +249,12 @@ impl CommanderService {
 
         let agent_state = if found.status.is_active() {
             let mut detector = AgentStateDetector::new(self.manager.tmux.clone(), Duration::ZERO);
-            detector.detect(&found.tmux_session_name).await
+            detector
+                .detect(
+                    AgentKind::from_program(&found.program),
+                    &found.tmux_session_name,
+                )
+                .await
         } else {
             AgentState::Unknown
         };
@@ -666,7 +672,7 @@ impl CommanderService {
     /// comments are marked [`CommentStatus::Applied`].
     pub async fn apply_comments(&self, session_id: &SessionId) -> Result<ApplyOutcome> {
         self.telemetry.feature("review.apply_comments");
-        let (worktree_path, review_base, title, tmux_name, is_active) = {
+        let (worktree_path, review_base, title, tmux_name, is_active, kind) = {
             let state = self.store.read().await;
             let s = state
                 .sessions
@@ -678,6 +684,7 @@ impl CommanderService {
                 s.title.clone(),
                 s.tmux_session_name.clone(),
                 s.status.is_active(),
+                AgentKind::from_program(&s.program),
             )
         };
 
@@ -717,9 +724,9 @@ impl CommanderService {
 
         // Gate delivery on agent state.
         let mut detector = AgentStateDetector::new(self.manager.tmux.clone(), Duration::ZERO);
-        let ready = match decide_send(detector.detect(&tmux_name).await) {
+        let ready = match decide_send(detector.detect(kind, &tmux_name).await) {
             SendDecision::Now => true,
-            SendDecision::HoldUntilClear => wait_until_ready(&mut detector, &tmux_name).await,
+            SendDecision::HoldUntilClear => wait_until_ready(&mut detector, kind, &tmux_name).await,
         };
         if !ready {
             return Ok(ApplyOutcome::Deferred { path, count });
@@ -759,11 +766,15 @@ async fn write_apply_brief(session_id: SessionId, markdown: &str) -> Result<Path
 
 /// Poll the agent state, returning `true` once it leaves `WaitingForInput`, or
 /// `false` if it stays at a prompt past the bounded timeout.
-async fn wait_until_ready(detector: &mut AgentStateDetector, tmux_name: &str) -> bool {
+async fn wait_until_ready(
+    detector: &mut AgentStateDetector,
+    kind: AgentKind,
+    tmux_name: &str,
+) -> bool {
     const ATTEMPTS: u32 = 20;
     const INTERVAL: Duration = Duration::from_millis(250);
     for _ in 0..ATTEMPTS {
-        if detector.detect(tmux_name).await != AgentState::WaitingForInput {
+        if detector.detect(kind, tmux_name).await != AgentState::WaitingForInput {
             return true;
         }
         tokio::time::sleep(INTERVAL).await;
@@ -858,12 +869,22 @@ pub struct CreateSessionOpts {
 
 impl CreateSessionOpts {
     pub fn validate_program_flags(&self, resolved_program: &str) -> Result<()> {
-        if !program_is_claude(resolved_program)
-            && (self.effort.is_some() || self.mode.is_some() || self.initial_prompt.is_some())
-        {
+        let kind = AgentKind::from_program(resolved_program);
+        // `--effort` / `--mode` map to Claude-specific flags.
+        if !kind.is_claude() && (self.effort.is_some() || self.mode.is_some()) {
             return Err(SessionError::InvalidProgram(format!(
-                "--effort, --mode, and --initial-prompt are only supported \
-                 when the program is claude (got {:?})",
+                "--effort and --mode are only supported when the program is \
+                 claude (got {:?})",
+                resolved_program
+            ))
+            .into());
+        }
+        // An initial prompt is passed as a positional argument, which only
+        // harnesses that accept one (claude, codex) understand.
+        if self.initial_prompt.is_some() && !kind.accepts_positional_prompt() {
+            return Err(SessionError::InvalidProgram(format!(
+                "--initial-prompt is only supported for programs that accept a \
+                 positional prompt, e.g. claude or codex (got {:?})",
                 resolved_program
             ))
             .into());

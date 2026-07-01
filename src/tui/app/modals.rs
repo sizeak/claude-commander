@@ -47,14 +47,14 @@ impl App {
 
             // Full-screen takeovers are rendered directly in `render()`, not here.
             Modal::Conversation { .. } => {}
-
-            Modal::ReviewDiff(state) => self.render_review_modal(frame, area, state),
+            Modal::ReviewDiff(_) => {}
 
             Modal::Input {
                 title,
                 prompt,
                 value,
                 existing_branches,
+                program_picker,
                 ..
             } => {
                 // Resolve the hint up-front so we know whether to reserve a
@@ -71,10 +71,14 @@ impl App {
                 });
 
                 // Base: 2 borders + prompt + blank + input = 5 rows. Add one
-                // row when the existing-branch hint is showing so the layout
-                // doesn't jump when it appears/disappears.
+                // row for the existing-branch hint, and — when a program picker
+                // is shown — a blank, a label, and one row per choice.
+                let picker_height = program_picker
+                    .as_ref()
+                    .map(|p| 2 + p.choices.len() as u16)
+                    .unwrap_or(0);
                 let modal_width = (area.width * 60 / 100).max(40);
-                let modal_height = if hint.is_some() { 6u16 } else { 5u16 };
+                let modal_height = 5u16 + u16::from(hint.is_some()) + picker_height;
                 let modal_area = Rect {
                     x: area.x + (area.width.saturating_sub(modal_width)) / 2,
                     y: area.y + (area.height.saturating_sub(modal_height)) / 2,
@@ -105,15 +109,55 @@ impl App {
                             .add_modifier(Modifier::ITALIC),
                     )));
                 }
+                let name_focused = program_picker.as_ref().is_none_or(|p| !p.focus_program);
+                if let Some(picker) = program_picker {
+                    lines.push(Line::from(""));
+                    let label_style = if picker.focus_program {
+                        Style::default()
+                            .fg(self.theme.modal_warning)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().add_modifier(Modifier::DIM)
+                    };
+                    lines.push(Line::from(vec![
+                        Span::styled("Program", label_style),
+                        Span::styled(
+                            "  (Tab to switch, ↑/↓ to choose)",
+                            Style::default().add_modifier(Modifier::DIM),
+                        ),
+                    ]));
+                    for (i, entry) in picker.choices.iter().enumerate() {
+                        let selected = i == picker.selected;
+                        let marker = if selected { "❯ " } else { "  " };
+                        let style = if selected {
+                            Style::default()
+                                .fg(self.theme.modal_warning)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().add_modifier(Modifier::DIM)
+                        };
+                        // Append the command in parens only when it differs from
+                        // the label (the synthesised entry has label == command).
+                        let text = if entry.label == entry.command {
+                            format!("{marker}{}", entry.label)
+                        } else {
+                            format!("{marker}{}  ({})", entry.label, entry.command)
+                        };
+                        lines.push(Line::from(Span::styled(text, style)));
+                    }
+                }
                 frame.render_widget(Paragraph::new(lines), inner);
-                // Input is the third line ("❯ " + value); place the real cursor.
-                place_input_cursor(
-                    frame,
-                    value,
-                    inner.x + 2,
-                    inner.y + 2,
-                    inner.width.saturating_sub(2),
-                );
+                // Input is the third line ("❯ " + value); place the real cursor
+                // there only while the name field has focus.
+                if name_focused {
+                    place_input_cursor(
+                        frame,
+                        value,
+                        inner.x + 2,
+                        inner.y + 2,
+                        inner.width.saturating_sub(2),
+                    );
+                }
             }
 
             Modal::PathInput {
@@ -656,6 +700,25 @@ impl App {
         )));
         lines.push(Line::from(format!(
             "  {:<width$}shortcut to `claude-commander listen-toggle`",
+            "",
+            width = key_col_width,
+        )));
+
+        // Mouse (the status/review bars surface primary actions as buttons).
+        lines.push(Line::from(""));
+        lines.push(Line::from("Mouse:"));
+        lines.push(Line::from(format!(
+            "  {:<width$}Primary actions appear as clickable buttons in the",
+            "click",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}status bar (and review footer); the bracketed letter",
+            "",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}is the hotkey. Clicking fires the same action.",
             "",
             width = key_col_width,
         )));
