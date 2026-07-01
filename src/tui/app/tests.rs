@@ -840,6 +840,44 @@ fn test_keybinding_rows_are_grouped_under_section_headers() {
 }
 
 #[test]
+fn test_general_rows_are_grouped_under_section_headers() {
+    use crate::tui::app::SettingsRowKind;
+
+    let app = make_test_app();
+    let rows = app.build_settings_rows(SettingsTab::General);
+
+    // The first row is a named section header, so the flat list is broken up.
+    assert!(matches!(rows[0].kind, SettingsRowKind::Header));
+    assert!(!rows[0].label.is_empty());
+
+    // More than one section (i.e. it was actually split up), and every section
+    // after the first is preceded by exactly one blank spacer.
+    let named = |r: &SettingsRow| matches!(r.kind, SettingsRowKind::Header) && !r.label.is_empty();
+    let named_headers = rows.iter().filter(|r| named(r)).count();
+    assert!(
+        named_headers > 1,
+        "General tab should be split into sections"
+    );
+    let spacers = rows
+        .iter()
+        .filter(|r| matches!(r.kind, SettingsRowKind::Header) && r.label.is_empty())
+        .count();
+    assert_eq!(
+        spacers,
+        named_headers - 1,
+        "one blank line between sections"
+    );
+
+    // No two named headers are adjacent (empty sections would render badly).
+    for pair in rows.windows(2) {
+        assert!(
+            !(named(&pair[0]) && named(&pair[1])),
+            "empty section header rendered"
+        );
+    }
+}
+
+#[test]
 fn test_worktrees_dir_row_shows_default_when_none() {
     let app = make_test_app();
     let rows = app.build_settings_rows(SettingsTab::General);
@@ -1612,6 +1650,38 @@ fn render_keybindings_tab_draws_section_headers() {
     assert!(text.contains("Attach to selected session"));
     // Footer advertises the search shortcut on this tab.
     assert!(text.contains("/: search"));
+}
+
+#[test]
+fn render_general_tab_draws_section_headers() {
+    use crate::tui::app::{Modal, SettingsState, SettingsTab};
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    let rows = app.build_settings_rows(SettingsTab::General);
+    let selected_row = super::settings::first_selectable_from(&rows, 0);
+    app.ui_state.modal = Modal::Settings(SettingsState {
+        tab: SettingsTab::General,
+        selected_row,
+        editing: None,
+        rows,
+        sections_state: Default::default(),
+        search: None,
+    });
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+
+    let text = buffer_text(&terminal);
+    // Representative section headers are drawn alongside their settings.
+    assert!(
+        text.contains("Sessions & Worktrees"),
+        "missing Sessions header"
+    );
+    assert!(text.contains("Editor"), "missing Editor header");
+    assert!(text.contains("Appearance"), "missing Appearance header");
+    assert!(text.contains("Default Program"));
 }
 
 #[test]

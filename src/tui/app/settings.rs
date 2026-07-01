@@ -6,8 +6,13 @@ impl App {
     pub(super) fn build_settings_rows(&self, tab: SettingsTab) -> Vec<SettingsRow> {
         match tab {
             SettingsTab::General => {
+                // Grouped into logical sections, each preceded by a
+                // non-selectable header row; `with_section_spacers` inserts a
+                // blank line between groups so the long list is easy to scan
+                // (mirrors the Keybindings tab).
                 let c = &self.config;
-                vec![
+                with_section_spacers(vec![
+                    SettingsRow::header("Sessions & Worktrees"),
                     SettingsRow::text(
                         "Default Program",
                         c.default_program.clone(),
@@ -36,6 +41,21 @@ impl App {
                         c.per_repo_worktree_dirs,
                         "per_repo_worktree_dirs",
                     ),
+                    SettingsRow::toggle(
+                        "Fetch Before Create",
+                        c.fetch_before_create,
+                        "fetch_before_create",
+                    ),
+                    SettingsRow::toggle("Resume Session", c.resume_session, "resume_session"),
+                    SettingsRow::toggle("Nix Develop", c.nix_develop, "nix_develop"),
+                    SettingsRow::text(
+                        "In Progress WIP Limit",
+                        c.in_progress_limit
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|| "(unlimited)".into()),
+                        "in_progress_limit",
+                    ),
+                    SettingsRow::header("Editor"),
                     SettingsRow::text(
                         "Editor",
                         c.editor.clone().unwrap_or_else(|| "(auto)".into()),
@@ -50,18 +70,7 @@ impl App {
                         },
                         "editor_gui",
                     ),
-                    SettingsRow::toggle(
-                        "Fetch Before Create",
-                        c.fetch_before_create,
-                        "fetch_before_create",
-                    ),
-                    SettingsRow::toggle("Resume Session", c.resume_session, "resume_session"),
-                    SettingsRow::toggle("Nix Develop", c.nix_develop, "nix_develop"),
-                    SettingsRow::text(
-                        "UI Refresh FPS",
-                        c.ui_refresh_fps.to_string(),
-                        "ui_refresh_fps",
-                    ),
+                    SettingsRow::header("Pull Requests & Sync"),
                     SettingsRow::text(
                         "PR Check Interval (s)",
                         c.pr_check_interval_secs.to_string(),
@@ -77,11 +86,7 @@ impl App {
                         c.project_pull_interval_secs.to_string(),
                         "project_pull_interval_secs",
                     ),
-                    SettingsRow::text(
-                        "Max Concurrent Tmux",
-                        c.max_concurrent_tmux.to_string(),
-                        "max_concurrent_tmux",
-                    ),
+                    SettingsRow::header("Appearance"),
                     SettingsRow::toggle(
                         "Dim Unfocused Preview",
                         c.dim_unfocused_preview,
@@ -103,6 +108,17 @@ impl App {
                         "show_session_program",
                     ),
                     SettingsRow::toggle("Rounded Borders", c.rounded_borders, "rounded_borders"),
+                    SettingsRow::header("Performance"),
+                    SettingsRow::text(
+                        "UI Refresh FPS",
+                        c.ui_refresh_fps.to_string(),
+                        "ui_refresh_fps",
+                    ),
+                    SettingsRow::text(
+                        "Max Concurrent Tmux",
+                        c.max_concurrent_tmux.to_string(),
+                        "max_concurrent_tmux",
+                    ),
                     SettingsRow::toggle(
                         "Precompute Review Caches",
                         c.precompute_review_caches,
@@ -113,6 +129,7 @@ impl App {
                         c.session_number_debounce_ms.to_string(),
                         "session_number_debounce_ms",
                     ),
+                    SettingsRow::header("AI Summaries"),
                     SettingsRow::toggle(
                         "AI Summary Enabled",
                         c.ai_summary_enabled,
@@ -123,6 +140,7 @@ impl App {
                         c.ai_summary_model.clone(),
                         "ai_summary_model",
                     ),
+                    SettingsRow::header("Commander"),
                     SettingsRow::toggle(
                         "Commander Enabled",
                         c.commander_enabled,
@@ -143,19 +161,13 @@ impl App {
                             .unwrap_or_else(|| "(default)".into()),
                         "commander_dir",
                     ),
-                    SettingsRow::text(
-                        "In Progress WIP Limit",
-                        c.in_progress_limit
-                            .map(|n| n.to_string())
-                            .unwrap_or_else(|| "(unlimited)".into()),
-                        "in_progress_limit",
-                    ),
+                    SettingsRow::header("Privacy"),
                     SettingsRow::toggle(
                         "Usage Telemetry",
                         c.telemetry.enabled,
                         "telemetry_enabled",
                     ),
-                ]
+                ])
             }
             SettingsTab::Conversation => {
                 let c = &self.config.conversation;
@@ -1592,14 +1604,14 @@ impl App {
                         }
                         KeyCode::Tab => {
                             state.tab = state.tab.next();
-                            state.selected_row = 0;
                             state.rows = self.build_settings_rows(state.tab);
+                            state.selected_row = first_selectable_from(&state.rows, 0);
                             self.ui_state.modal = Modal::Settings(state);
                         }
                         KeyCode::BackTab => {
                             state.tab = state.tab.prev();
-                            state.selected_row = 0;
                             state.rows = self.build_settings_rows(state.tab);
+                            state.selected_row = first_selectable_from(&state.rows, 0);
                             self.ui_state.modal = Modal::Settings(state);
                         }
                         KeyCode::Right | KeyCode::Enter => {
@@ -1699,14 +1711,14 @@ impl App {
                         }
                         KeyCode::Tab => {
                             state.tab = state.tab.next();
-                            state.selected_row = 0;
                             state.rows = self.build_settings_rows(state.tab);
+                            state.selected_row = first_selectable_from(&state.rows, 0);
                             self.ui_state.modal = Modal::Settings(state);
                         }
                         KeyCode::BackTab => {
                             state.tab = state.tab.prev();
-                            state.selected_row = 0;
                             state.rows = self.build_settings_rows(state.tab);
+                            state.selected_row = first_selectable_from(&state.rows, 0);
                             self.ui_state.modal = Modal::Settings(state);
                         }
                         KeyCode::Enter => {
@@ -1985,7 +1997,7 @@ fn settings_label_width(rows: &[SettingsRow], area_width: u16) -> u16 {
 
 /// Index of the first selectable row at or after `from`, wrapping to the start
 /// if none is found below. Returns `from` when there are no selectable rows.
-fn first_selectable_from(rows: &[SettingsRow], from: usize) -> usize {
+pub(super) fn first_selectable_from(rows: &[SettingsRow], from: usize) -> usize {
     rows.iter()
         .enumerate()
         .skip(from)

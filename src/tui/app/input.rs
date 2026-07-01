@@ -1107,9 +1107,10 @@ impl App {
             }
             UserCommand::ShowSettings => {
                 let rows = self.build_settings_rows(SettingsTab::General);
+                let selected_row = super::settings::first_selectable_from(&rows, 0);
                 self.ui_state.modal = Modal::Settings(SettingsState {
                     tab: SettingsTab::General,
-                    selected_row: 0,
+                    selected_row,
                     editing: None,
                     rows,
                     sections_state: SectionsState::default(),
