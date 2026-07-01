@@ -581,13 +581,20 @@ impl SessionManager {
     /// marks the session `hibernated` — the wake path then resumes the agent
     /// conversation even when the global `resume_session` config is off.
     ///
-    /// Guards against racing a concurrent manual restart: if the tmux session
-    /// reappears after the kill (someone recreated it), the status update is
-    /// skipped; and the final mutate only transitions a still-`Running` session
-    /// so a restart that flipped it back to Running is not clobbered.
+    /// Guards against racing a concurrent manual restart or a late attach:
+    ///  - the hibernation decision is made a tick earlier, so immediately before
+    ///    the destructive kill we re-verify the session is still a valid target
+    ///    ([`still_hibernatable`]). A concurrent restart/wake bumps
+    ///    `last_active_at` when it flips the session back to `Running`, so a
+    ///    changed stamp means "a live pane was just recreated — don't kill it";
+    ///  - a client attached just before the kill is detected via
+    ///    `is_session_attached` (which errs toward "attached" on any glitch);
+    ///  - as a backstop for the reverse interleaving, if the tmux session
+    ///    reappears after the kill the status update is skipped, and the final
+    ///    mutate only transitions a still-`Running` session.
     #[instrument(skip(self))]
     pub async fn hibernate_session(&self, session_id: &SessionId) -> Result<()> {
-        let (tmux_session_name, shell_tmux_name) = {
+        let (tmux_session_name, shell_tmux_name, last_active_at) = {
             let state = self.store.read().await;
             let session = state
                 .get_session(session_id)
@@ -595,13 +602,46 @@ impl SessionManager {
             (
                 session.tmux_session_name.clone(),
                 session.shell_tmux_session_name.clone(),
+                session.last_active_at,
             )
         };
+
+        // A client attached since the decision was made? Leave it running.
+        // Conservative: a failed probe counts as attached.
+        if self
+            .tmux
+            .is_session_attached(&tmux_session_name)
+            .await
+            .unwrap_or(true)
+        {
+            info!(
+                "Session {} attached before hibernate kill; skipping",
+                session_id
+            );
+            return Ok(());
+        }
+
+        // Final re-check under the lock, as close to the kill as possible: a
+        // manual restart that completed in the meantime bumped last_active_at
+        // (and would have recreated a live pane), so bail rather than clobber it.
+        {
+            let state = self.store.read().await;
+            let still = state.get_session(session_id).is_some_and(|s| {
+                still_hibernatable(s.status, s.keep_alive, s.last_active_at, last_active_at)
+            });
+            if !still {
+                info!(
+                    "Session {} no longer a hibernate candidate at kill time; skipping",
+                    session_id
+                );
+                return Ok(());
+            }
+        }
 
         self.kill_tmux_sessions(&tmux_session_name, shell_tmux_name.as_deref())
             .await;
 
-        // If a concurrent restart recreated the tmux session between our read
+        // If a concurrent restart recreated the tmux session between our re-check
         // and the kill, don't mark it Stopped — that would leave a live pane
         // flagged hibernated.
         if self
@@ -786,9 +826,55 @@ pub(super) fn resume_program_for(program: &str, force_resume: bool) -> String {
     }
 }
 
+/// Whether a session is still a valid hibernate target at the pre-kill re-check.
+///
+/// `snapshot_last_active` is `last_active_at` captured when hibernation was
+/// decided. A session is still hibernatable only if it is `Running`, not
+/// keep-alive, and its `last_active_at` is unchanged — any advance means a
+/// concurrent restart/wake flipped it back to `Running` (`set_status` bumps the
+/// stamp) and recreated a live pane that must not be killed. Pure, so the
+/// clobber-guard logic is unit-tested without tmux.
+pub(super) fn still_hibernatable(
+    status: SessionStatus,
+    keep_alive: bool,
+    last_active_at: chrono::DateTime<chrono::Utc>,
+    snapshot_last_active: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    status == SessionStatus::Running && !keep_alive && last_active_at == snapshot_last_active
+}
+
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
+
+    // --- still_hibernatable (pre-kill clobber/attach guard) ---
+
+    #[test]
+    fn still_hibernatable_when_running_and_unchanged() {
+        let t = chrono::Utc::now();
+        assert!(still_hibernatable(SessionStatus::Running, false, t, t));
+    }
+
+    #[test]
+    fn not_hibernatable_when_last_active_advanced() {
+        // A concurrent restart/wake bumped last_active_at — its live pane must
+        // not be killed even though the status is (again) Running.
+        let snapshot = chrono::Utc::now();
+        let after_restart = snapshot + chrono::Duration::seconds(1);
+        assert!(!still_hibernatable(
+            SessionStatus::Running,
+            false,
+            after_restart,
+            snapshot
+        ));
+    }
+
+    #[test]
+    fn not_hibernatable_when_keep_alive_or_not_running() {
+        let t = chrono::Utc::now();
+        assert!(!still_hibernatable(SessionStatus::Running, true, t, t));
+        assert!(!still_hibernatable(SessionStatus::Stopped, false, t, t));
+    }
 
     // --- program_with_claude_flags ---
 

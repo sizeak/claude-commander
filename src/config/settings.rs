@@ -126,6 +126,8 @@ pub struct Config {
     pub hibernate_idle_timeout_secs: u64,
 
     /// Interval in seconds between hibernation policy checks. Default 60.
+    /// `0` disables the loop entirely (the loop is not spawned), matching the
+    /// convention used by `agent_state_poll_interval_ms`.
     #[serde(default = "default_hibernate_check_interval_secs")]
     pub hibernate_check_interval_secs: u64,
 

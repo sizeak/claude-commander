@@ -1020,6 +1020,11 @@ impl App {
         self.sync_session_states().await;
         self.reconcile_section_assignments().await;
 
+        // Start the idle-hibernation loop now we're in the long-lived TUI
+        // runtime (no-op unless enabled in config). Deliberately not started in
+        // CommanderService::new so one-shot CLI commands never trigger it.
+        self.service.start_hibernation_loop();
+
         // Check gh availability and do initial PR check
         if self.config.pr_check_interval_secs > 0 {
             self.ui_state.gh_available = is_gh_available().await;

@@ -41,14 +41,43 @@ pub(crate) fn idle_tick(
     (if hibernate { None } else { Some(since) }, hibernate)
 }
 
+/// Whether a session should count as active this tick (so its idle timer is
+/// reset and it is never hibernated).
+///
+/// `Unknown` is treated as **active**: `detect_fresh` returns `Unknown` on any
+/// tmux hiccup (pane-title or capture error — server overload, semaphore
+/// timeout, transient EAGAIN), and a detection *failure* must never advance the
+/// idle timer toward killing a session that may actually be working. This
+/// mirrors the conservative attached-check (a failed attach probe also counts
+/// as active); it costs at most one extra idle window for a genuinely-gone
+/// session. Pure, so it can be unit-tested without tmux.
+pub(crate) fn is_session_active(
+    state: AgentState,
+    attached: bool,
+    recently_attached: bool,
+) -> bool {
+    matches!(
+        state,
+        AgentState::Working | AgentState::WaitingForInput | AgentState::Unknown
+    ) || attached
+        || recently_attached
+}
+
 impl SessionManager {
     /// Spawn the background hibernation loop. No-op unless `hibernate_enabled`
     /// is set, the check interval is non-zero, and a tokio runtime is present.
     ///
     /// Enablement is restart-required (mirrors the commander poll loop), but the
     /// idle threshold is read live each tick so it can be tuned without a
-    /// restart. Only the long-lived TUI frontend should call this — one-shot CLI
-    /// invocations exit before a single interval elapses.
+    /// restart.
+    ///
+    /// Only long-lived frontends should call this (the TUI does, via
+    /// [`CommanderService::start_hibernation_loop`]). The runtime-presence check
+    /// is NOT a proxy for "am I the TUI" — under `#[tokio::main]` a runtime is
+    /// always present, and `tokio::time::interval`'s first tick fires
+    /// immediately, so a one-shot CLI command that started this could run a full
+    /// hibernation pass before exiting. `CommanderService::new` therefore does
+    /// not call it; only the TUI startup path does.
     pub fn spawn_hibernation_loop(&self, telemetry: Telemetry) {
         let (enabled, interval_secs) = {
             let cfg = self.config_store.read();
@@ -132,9 +161,7 @@ impl SessionManager {
                 let recently_attached = last_attached_at
                     .and_then(|t| (Utc::now() - t).to_std().ok())
                     .is_some_and(|elapsed| elapsed < attach_grace);
-                let is_active = matches!(state, AgentState::Working | AgentState::WaitingForInput)
-                    || attached
-                    || recently_attached;
+                let is_active = is_session_active(state, attached, recently_attached);
 
                 let (next, hibernate) =
                     idle_tick(is_active, idle_since.get(&id).copied(), now, threshold);
@@ -201,5 +228,28 @@ mod tests {
         assert!(!hibernate);
         // Must keep the ORIGINAL stamp, not reset to now — else it never expires.
         assert_eq!(next, Some(idle_since));
+    }
+
+    #[test]
+    fn unknown_agent_state_counts_as_active() {
+        // A transient tmux detection failure surfaces as Unknown. It must NOT
+        // be treated as idle, or a hiccup while a detached session is working
+        // would advance the idle timer toward hibernating it mid-work.
+        assert!(is_session_active(AgentState::Unknown, false, false));
+    }
+
+    #[test]
+    fn explicit_idle_and_unattached_counts_as_inactive() {
+        // Only an explicit Idle read on an unattached session is inactive.
+        assert!(!is_session_active(AgentState::Idle, false, false));
+    }
+
+    #[test]
+    fn working_or_attached_or_recent_counts_as_active() {
+        assert!(is_session_active(AgentState::Working, false, false));
+        assert!(is_session_active(AgentState::WaitingForInput, false, false));
+        // Idle but attached, or recently attached, is still active.
+        assert!(is_session_active(AgentState::Idle, true, false));
+        assert!(is_session_active(AgentState::Idle, false, true));
     }
 }
