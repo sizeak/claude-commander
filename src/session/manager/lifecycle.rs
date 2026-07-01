@@ -506,6 +506,10 @@ impl SessionManager {
             .mutate(move |state| {
                 if let Some(session) = state.get_session_mut(&sid) {
                     session.set_status(SessionStatus::Running);
+                    // The pane is live again, so clear the hibernation marker to
+                    // uphold the "live pane ⇒ not hibernated" invariant (matches
+                    // restart_session and the attach/recreate wake path).
+                    session.hibernated = false;
                 }
             })
             .await?;
@@ -630,17 +634,20 @@ impl SessionManager {
     }
 
     /// Set a session's keep-alive flag (opt-out of auto-hibernation). Returns
-    /// the value that was set. No-op if the session no longer exists.
+    /// the value that was set, or [`SessionError::NotFound`] if the session no
+    /// longer exists — so callers don't report success for a no-op (matches
+    /// [`toggle_keep_alive`](Self::toggle_keep_alive)).
     pub async fn set_keep_alive(&self, session_id: &SessionId, keep_alive: bool) -> Result<bool> {
         let sid = *session_id;
         self.store
             .mutate(move |state| {
-                if let Some(session) = state.get_session_mut(&sid) {
+                state.get_session_mut(&sid).map(|session| {
                     session.keep_alive = keep_alive;
-                }
+                    session.keep_alive
+                })
             })
-            .await?;
-        Ok(keep_alive)
+            .await?
+            .ok_or_else(|| SessionError::NotFound(sid).into())
     }
 
     /// Toggle a session's keep-alive flag, returning the new value. The flip is

@@ -1168,3 +1168,170 @@ async fn read_base_blob_resolves_lfs_pointer_to_real_bytes() {
         .expect("read_worktree_file should succeed");
     assert_eq!(new, png, "new side should be the real image bytes");
 }
+
+#[tokio::test]
+async fn test_hibernate_session_keeps_worktree_and_wakes_with_resume() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let state_temp_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+
+    // resume_session = false so the test proves hibernation wakes a session
+    // *regardless* of the global flag (the `hibernated` marker forces it).
+    let config = Config {
+        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        resume_session: false,
+        ..Config::default()
+    };
+
+    let store = create_isolated_store(&state_temp_dir);
+    let config_store = Arc::new(ConfigStore::new(config).unwrap());
+    let manager = SessionManager::new(config_store, store.clone(), "");
+
+    let project_id = manager.add_project(repo_path).await.unwrap();
+    let session_id = manager
+        .prepare_session(
+            &project_id,
+            "hibernate-test".to_string(),
+            Some("bash".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+    manager
+        .finalize_session(&session_id, None, None)
+        .await
+        .unwrap();
+
+    let (tmux_name, worktree_path) = {
+        let state = store.read().await;
+        let s = state.get_session(&session_id).unwrap();
+        assert_eq!(s.status, SessionStatus::Running);
+        assert!(!s.hibernated, "fresh session must not be marked hibernated");
+        (s.tmux_session_name.clone(), s.worktree_path.clone())
+    };
+    assert!(
+        manager.tmux.session_exists(&tmux_name).await.unwrap(),
+        "tmux session should be live before hibernation"
+    );
+
+    // Hibernate: tmux process is stopped, but the worktree and metadata stay.
+    manager.hibernate_session(&session_id).await.unwrap();
+    {
+        let state = store.read().await;
+        let s = state.get_session(&session_id).unwrap();
+        assert_eq!(s.status, SessionStatus::Stopped, "should be Stopped");
+        assert!(s.hibernated, "should be marked hibernated");
+    }
+    assert!(
+        !manager.tmux.session_exists(&tmux_name).await.unwrap(),
+        "tmux session should be killed (memory freed) by hibernation"
+    );
+    assert!(
+        worktree_path.exists(),
+        "worktree must be preserved across hibernation (not a delete)"
+    );
+
+    // Wake via the attach path: recreates tmux, flips back to Running, and
+    // clears the marker — even though resume_session is false.
+    let attach_cmd = manager.get_attach_command(&session_id).await.unwrap();
+    assert!(
+        attach_cmd.contains(&tmux_name),
+        "attach command should target the session's tmux name"
+    );
+    {
+        let state = store.read().await;
+        let s = state.get_session(&session_id).unwrap();
+        assert_eq!(s.status, SessionStatus::Running, "should be Running again");
+        assert!(!s.hibernated, "hibernation marker must be cleared on wake");
+    }
+    assert!(
+        manager.tmux.session_exists(&tmux_name).await.unwrap(),
+        "tmux session should be recreated on wake"
+    );
+
+    // Cleanup
+    let _ = manager.kill_session(&session_id, true).await;
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
+    drop(worktrees_dir);
+}
+
+#[tokio::test]
+async fn test_fresh_restart_clears_hibernation_marker() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let state_temp_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+
+    let config = Config {
+        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        resume_session: false,
+        ..Config::default()
+    };
+
+    let store = create_isolated_store(&state_temp_dir);
+    let config_store = Arc::new(ConfigStore::new(config).unwrap());
+    let manager = SessionManager::new(config_store, store.clone(), "");
+
+    let project_id = manager.add_project(repo_path).await.unwrap();
+    let session_id = manager
+        .prepare_session(
+            &project_id,
+            "fresh-restart-test".to_string(),
+            Some("bash".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+    manager
+        .finalize_session(&session_id, None, None)
+        .await
+        .unwrap();
+
+    let tmux_name = {
+        let state = store.read().await;
+        state.get_session(&session_id).unwrap().tmux_session_name.clone()
+    };
+
+    // Hibernate, then wake via the fresh-restart path (used when the pane
+    // process exits). This path must also clear the hibernation marker so the
+    // "live pane ⇒ not hibernated" invariant holds on every wake route.
+    manager.hibernate_session(&session_id).await.unwrap();
+    assert!(
+        store.read().await.get_session(&session_id).unwrap().hibernated,
+        "should be marked hibernated before wake"
+    );
+
+    manager
+        .restart_session_fresh_by_tmux_name(&tmux_name)
+        .await
+        .unwrap();
+    {
+        let state = store.read().await;
+        let s = state.get_session(&session_id).unwrap();
+        assert_eq!(s.status, SessionStatus::Running, "should be Running again");
+        assert!(
+            !s.hibernated,
+            "fresh restart must clear the hibernation marker"
+        );
+    }
+    assert!(
+        manager.tmux.session_exists(&tmux_name).await.unwrap(),
+        "tmux session should be recreated by fresh restart"
+    );
+
+    // Cleanup
+    let _ = manager.kill_session(&session_id, true).await;
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
+    drop(worktrees_dir);
+}
