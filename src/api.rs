@@ -356,6 +356,17 @@ impl CommanderService {
         self.manager.delete_session(id).await
     }
 
+    /// Set a session's keep-alive flag (opt-out of auto-hibernation).
+    pub async fn set_keep_alive(&self, id: &SessionId, keep_alive: bool) -> Result<bool> {
+        self.manager.set_keep_alive(id, keep_alive).await
+    }
+
+    /// Toggle a session's keep-alive flag, returning the new value.
+    pub async fn toggle_keep_alive(&self, id: &SessionId) -> Result<bool> {
+        self.telemetry.feature("session.toggle_keep_alive");
+        self.manager.toggle_keep_alive(id).await
+    }
+
     // -- Review / comments --
 
     /// Open the review diff for a session: compose the base→working-tree diff,
