@@ -1299,7 +1299,11 @@ async fn test_fresh_restart_clears_hibernation_marker() {
 
     let tmux_name = {
         let state = store.read().await;
-        state.get_session(&session_id).unwrap().tmux_session_name.clone()
+        state
+            .get_session(&session_id)
+            .unwrap()
+            .tmux_session_name
+            .clone()
     };
 
     // Hibernate, then wake via the fresh-restart path (used when the pane
@@ -1307,7 +1311,12 @@ async fn test_fresh_restart_clears_hibernation_marker() {
     // "live pane ⇒ not hibernated" invariant holds on every wake route.
     manager.hibernate_session(&session_id).await.unwrap();
     assert!(
-        store.read().await.get_session(&session_id).unwrap().hibernated,
+        store
+            .read()
+            .await
+            .get_session(&session_id)
+            .unwrap()
+            .hibernated,
         "should be marked hibernated before wake"
     );
 
