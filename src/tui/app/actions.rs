@@ -524,6 +524,7 @@ impl App {
                 project_picker: Some(project_picker),
                 program_picker: Some(self.new_program_picker()),
                 focus: super::InputFocus::Name,
+                expanded: false,
             };
         } else {
             self.ui_state.status_message = Some((
@@ -585,6 +586,7 @@ impl App {
             project_picker: None,
             program_picker: Some(self.new_program_picker()),
             focus: super::InputFocus::Name,
+            expanded: false,
         };
     }
 
@@ -1541,6 +1543,7 @@ impl App {
             project_picker: None,
             program_picker: None,
             focus: super::InputFocus::Name,
+            expanded: false,
         };
     }
 
