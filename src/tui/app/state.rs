@@ -1023,8 +1023,9 @@ fn build_stacked_section_items(
                 continue;
             };
 
-            // Walk leaf → root. First section_override encountered wins;
-            // overrides on off-path siblings are not considered.
+            // Walk leaf → root. First *valid* section_override encountered
+            // wins (stale ones are skipped, see below); overrides on off-path
+            // siblings are not considered.
             let mut effective: Option<String> = None;
             let mut cursor = leaf.id;
             for _ in 0..project_sessions.len() {
