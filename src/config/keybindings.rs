@@ -634,10 +634,9 @@ impl Default for KeyBindings {
             BindableAction::RestartSession,
             vec![kb(KeyCode::Char('R'), shift)],
         );
-        bindings.insert(
-            BindableAction::ToggleKeepAlive,
-            vec![kb(KeyCode::Char('K'), shift)],
-        );
+        // ToggleKeepAlive has no default key — it's reachable via the command
+        // palette and can be bound explicitly in config. Keep-alive is a rarely
+        // toggled, opt-in control, so it doesn't claim a top-level hotkey.
         bindings.insert(
             BindableAction::RemoveProject,
             vec![kb(KeyCode::Char('D'), shift)],
@@ -1473,6 +1472,16 @@ mod tests {
         assert!(kb.keys_for(BindableAction::RenameSession).is_empty());
         let r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);
         assert_eq!(kb.resolve(&r), Some(BindableAction::OpenReviewDiff));
+    }
+
+    #[test]
+    fn test_toggle_keep_alive_unbound_by_default() {
+        // Keep-alive is palette-only: no default hotkey, and Shift-K resolves
+        // to nothing so the key stays free.
+        let kb = KeyBindings::default();
+        assert!(kb.keys_for(BindableAction::ToggleKeepAlive).is_empty());
+        let shift_k = KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT);
+        assert_eq!(kb.resolve(&shift_k), None);
     }
 
     #[test]

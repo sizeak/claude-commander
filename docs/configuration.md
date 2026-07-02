@@ -242,10 +242,12 @@ A session counts as **idle** only when all of these hold:
 resumes the agent, even if `resume_session = false` globally — hibernation
 always resumes, since that's what makes it non-destructive.
 
-**Keeping a session alive**: press **`K`** on a session (or run
-`claude-commander keep-alive <session> [--on|--off]`) to exempt it from
-hibernation — useful for a long-running build, a watched log, or anything you
-want to keep warm. The flag persists across restarts.
+**Keeping a session alive**: run the **Toggle keep-alive** action from the
+command palette on a session (or `claude-commander keep-alive <session>
+[--on|--off]`) to exempt it from hibernation — useful for a long-running build,
+a watched log, or anything you want to keep warm. The action has no default
+hotkey; bind one under `[keybindings]` if you want a shortcut. The flag persists
+across restarts.
 
 Enabling hibernation and changing `hibernate_check_interval_secs` are
 restart-required (the loop is spawned once at launch); `hibernate_idle_timeout_secs`

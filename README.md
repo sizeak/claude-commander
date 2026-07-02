@@ -144,7 +144,6 @@ All keybindings below are defaults and can be customised via the `[keybindings]`
 | `c` | Checkout existing branch into a new worktree session (fetches `origin` in the background, filterable list) |
 | `d` | Delete session |
 | `R` | Restart session (kill tmux + recreate; adds `--resume` when `resume_session = true`) |
-| `K` | Toggle keep-alive: exempt the selected session from automatic idle-hibernation (see [Idle-session hibernation](docs/configuration.md#idle-session-hibernation)) |
 | `D` | Remove project |
 | `.` or `Ctrl-.` | Open in editor/IDE |
 | `o` | Open PR in browser (when the session has a PR) |

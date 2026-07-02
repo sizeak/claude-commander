@@ -789,11 +789,6 @@ mod tests {
                 UserCommand::RestartSession,
             ),
             (
-                KeyCode::Char('K'),
-                KeyModifiers::SHIFT,
-                UserCommand::ToggleKeepAlive,
-            ),
-            (
                 KeyCode::Char('D'),
                 KeyModifiers::SHIFT,
                 UserCommand::RemoveProject,
