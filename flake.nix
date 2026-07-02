@@ -235,9 +235,6 @@
             # flutter_secure_storage_linux links libsecret (needs a running
             # secret service at runtime, e.g. gnome-keyring).
             libsecret
-            # The cdylib's dev-dep on claude-commander-test-support pulls in the
-            # server + core, whose rodio → cpal → alsa-sys needs alsa.pc to build.
-            alsa-lib
           ]);
 
           # Used by flutter_rust_bridge / bindgen to find libclang.
@@ -333,10 +330,6 @@
             libsecret
             mesa
             libGL
-            # `cargo test` in client/rust builds the cdylib's dev-dep on
-            # claude-commander-test-support, which drags in server + core; core's
-            # rodio → cpal → alsa-sys needs alsa.pc on the pkg-config path.
-            alsa-lib
           ]);
 
           LIBCLANG_PATH = "${clientPkgs.llvmPackages.libclang.lib}/lib";

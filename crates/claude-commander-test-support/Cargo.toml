@@ -13,7 +13,10 @@ publish = false
 release = false
 
 [dependencies]
-claude-commander-core = { path = "../claude-commander-core" }
+# Boots a headless server for tests — no host audio — so match the server and
+# build core without its ALSA-linked `audio` feature. Without this, the client
+# cdylib's dev-dep on test-support would drag ALSA into the client build.
+claude-commander-core = { path = "../claude-commander-core", default-features = false }
 claude-commander-server = { path = "../claude-commander-server" }
 
 tokio = { workspace = true }

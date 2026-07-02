@@ -249,9 +249,12 @@ volume = 1.0                             # 0.0–2.0
 | `prose_only` (default) | Strip code blocks and markdown; speak the natural-language prose |
 | `verbatim` | Speak the text unchanged |
 
-> **Build note:** in-process playback uses `rodio`, which links **ALSA** on Linux. Building from
-> source needs the ALSA development headers (`libasound2-dev` on Debian/Ubuntu, `alsa-lib` on
-> Arch). The Nix dev shell provides them automatically.
+> **Build note:** in-process playback (`rodio`) and microphone capture (`cpal`) link **ALSA** on
+> Linux. They're gated behind the `audio` cargo feature, which is **on by default** — so building
+> the TUI (`claude-commander`) from source needs the ALSA development headers (`libasound2-dev` on
+> Debian/Ubuntu, `alsa-lib` on Arch); the default Nix dev shell provides them automatically. The
+> headless server and the Flutter client build with `audio` off (`default-features = false`) and
+> never link ALSA — remote clients do capture/playback on-device instead.
 
 ## Voice input (STT)
 

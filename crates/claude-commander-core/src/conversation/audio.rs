@@ -6,19 +6,19 @@
 //! `Send` (it only holds a channel sender), so the worker can hold it across
 //! `.await` points. Dropping the `Player` ends the thread and stops audio.
 
-use std::io::Cursor;
-use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
-use std::time::{Duration, Instant};
-
-use rodio::{OutputStream, Sink};
-use tracing::{debug, warn};
-
 use crate::error::TtsError;
 
-enum Command {
-    Enqueue(Vec<u8>),
-    Stop,
-}
+#[cfg(feature = "audio")]
+use std::io::Cursor;
+#[cfg(feature = "audio")]
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+#[cfg(feature = "audio")]
+use std::time::{Duration, Instant};
+
+#[cfg(feature = "audio")]
+use rodio::{OutputStream, Sink};
+#[cfg(feature = "audio")]
+use tracing::{debug, warn};
 
 /// A playback span boundary, reported (if a listener was given) so a caller can
 /// track when audio is actually coming out of the speaker. `Started` fires when
@@ -31,12 +31,20 @@ pub enum PlaybackEdge {
     Stopped,
 }
 
+#[cfg(feature = "audio")]
+enum Command {
+    Enqueue(Vec<u8>),
+    Stop,
+}
+
 /// A `Send` handle to the audio thread. Clips enqueued play back-to-back; `stop`
 /// clears the queue (used to interrupt on a new reply / when toggled off).
+#[cfg(feature = "audio")]
 pub struct Player {
     tx: Sender<Command>,
 }
 
+#[cfg(feature = "audio")]
 impl Player {
     /// Start the audio thread. Returns an error synchronously if no output
     /// device is available.
@@ -74,6 +82,7 @@ impl Player {
     }
 }
 
+#[cfg(feature = "audio")]
 fn audio_thread(
     rx: Receiver<Command>,
     volume: f32,
@@ -164,4 +173,29 @@ fn audio_thread(
             emit(PlaybackEdge::Started);
         }
     }
+}
+
+/// Placeholder [`Player`] compiled when the `audio` feature is off (headless
+/// server, client cdylib). Construction fails rather than silently no-opping, so
+/// voice can't appear to work on a build with no audio backend. These builds
+/// never spawn the voice runtime, so the error path is unreachable in practice.
+#[cfg(not(feature = "audio"))]
+pub struct Player;
+
+#[cfg(not(feature = "audio"))]
+impl Player {
+    pub fn new(_volume: f32) -> Result<Self, TtsError> {
+        Err(TtsError::Audio("audio support not compiled in".into()))
+    }
+
+    pub fn with_edges(
+        _volume: f32,
+        _edges: Option<tokio::sync::mpsc::UnboundedSender<PlaybackEdge>>,
+    ) -> Result<Self, TtsError> {
+        Err(TtsError::Audio("audio support not compiled in".into()))
+    }
+
+    pub fn enqueue(&self, _bytes: Vec<u8>) {}
+
+    pub fn stop(&self) {}
 }

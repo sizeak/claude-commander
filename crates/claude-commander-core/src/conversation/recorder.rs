@@ -11,17 +11,25 @@
 //! 16-bit PCM WAV — the transcription server resamples as needed, so we don't
 //! force a (possibly unsupported) capture rate on the device.
 
-use std::io::Cursor;
-use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex};
-
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{FromSample, Sample, SizedSample};
 use tokio::sync::mpsc::UnboundedSender;
-use tracing::warn;
 
 use crate::error::TtsError;
 
+#[cfg(feature = "audio")]
+use std::io::Cursor;
+#[cfg(feature = "audio")]
+use std::sync::mpsc::{Receiver, Sender, channel};
+#[cfg(feature = "audio")]
+use std::sync::{Arc, Mutex};
+
+#[cfg(feature = "audio")]
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+#[cfg(feature = "audio")]
+use cpal::{FromSample, Sample, SizedSample};
+#[cfg(feature = "audio")]
+use tracing::warn;
+
+#[cfg(feature = "audio")]
 enum Command {
     Start,
     Stop,
@@ -29,10 +37,12 @@ enum Command {
 
 /// A `Send` handle to the recorder thread. `start` begins capture; `stop` ends
 /// it and sends the encoded WAV bytes on the channel given to [`Recorder::new`].
+#[cfg(feature = "audio")]
 pub struct Recorder {
     tx: Sender<Command>,
 }
 
+#[cfg(feature = "audio")]
 impl Recorder {
     /// Start the recorder thread. Returns an error synchronously if no input
     /// device is available. Finished recordings are delivered as WAV bytes on
@@ -62,6 +72,7 @@ impl Recorder {
     }
 }
 
+#[cfg(feature = "audio")]
 fn recorder_thread(
     rx: Receiver<Command>,
     wav_tx: UnboundedSender<Vec<u8>>,
@@ -121,6 +132,7 @@ fn recorder_thread(
 }
 
 /// Build an input stream for the device's sample format, downmixing to mono.
+#[cfg(feature = "audio")]
 fn build_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -137,6 +149,7 @@ fn build_stream(
     .map_err(|e| e.to_string())
 }
 
+#[cfg(feature = "audio")]
 fn build_typed<T>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
@@ -163,6 +176,7 @@ where
 }
 
 /// Encode mono f32 samples (`-1.0..=1.0`) as 16-bit PCM WAV bytes.
+#[cfg(feature = "audio")]
 pub fn encode_wav(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, String> {
     let spec = hound::WavSpec {
         channels: 1,
@@ -182,7 +196,25 @@ pub fn encode_wav(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, String> 
     Ok(cursor.into_inner())
 }
 
-#[cfg(test)]
+/// Placeholder [`Recorder`] compiled when the `audio` feature is off (headless
+/// server, client cdylib). Construction fails rather than silently no-opping;
+/// these builds never spawn the voice listener, so the error path is unreachable
+/// in practice.
+#[cfg(not(feature = "audio"))]
+pub struct Recorder;
+
+#[cfg(not(feature = "audio"))]
+impl Recorder {
+    pub fn new(_wav_tx: UnboundedSender<Vec<u8>>) -> Result<Self, TtsError> {
+        Err(TtsError::Audio("audio support not compiled in".into()))
+    }
+
+    pub fn start(&self) {}
+
+    pub fn stop(&self) {}
+}
+
+#[cfg(all(test, feature = "audio"))]
 mod tests {
     use super::*;
 

@@ -107,19 +107,32 @@ image = "0.25"
 
 # Conversation mode (TTS + STT): HTTP client for the OpenAI-compatible TTS/STT
 # endpoints (rustls to avoid an OpenSSL C dependency, consistent with the
-# pure-Rust lean; `multipart` for the STT audio upload), in-process audio
-# playback (rodio) and microphone capture (cpal). Both rodio's backend and cpal
-# link ALSA on Linux — the build host needs alsa-lib (see flake.nix /
-# CONTRIBUTING). `cpal` is pinned to the version rodio already resolves so ALSA
-# isn't linked twice; `hound` encodes captured PCM to WAV for upload.
+# pure-Rust lean; `multipart` for the STT audio upload).
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "multipart",
     "rustls-tls",
 ] }
-rodio = { version = "0.19", default-features = false, features = ["wav", "mp3"] }
-cpal = "0.15"
-hound = "3.5"
+# In-process audio playback (rodio) and microphone capture (cpal), gated behind
+# the `audio` feature. Both rodio's backend and cpal link ALSA on Linux, so only
+# builds that actually do device I/O (the TUI binary) pull them — the headless
+# server and the Flutter client's cdylib build with `audio` off and never link
+# ALSA. `cpal` is pinned to the version rodio already resolves so ALSA isn't
+# linked twice; `hound` encodes captured PCM to WAV for upload.
+rodio = { version = "0.19", default-features = false, features = [
+    "wav",
+    "mp3",
+], optional = true }
+cpal = { version = "0.15", optional = true }
+hound = { version = "3.5", optional = true }
+
+[features]
+# On by default so `cargo build`, the TUI binary, and `cargo test` all get voice
+# device I/O. Downstream crates that never touch a mic/speaker (the server,
+# test-support, the client cdylib) depend on core with `default-features = false`
+# to drop the ALSA-linked rodio/cpal/hound entirely.
+default = ["audio"]
+audio = ["dep:rodio", "dep:cpal", "dep:hound"]
 
 [dev-dependencies]
 # Property-based testing
