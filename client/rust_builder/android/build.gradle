@@ -1,0 +1,58 @@
+// The Android Gradle Plugin builds the native code with the Android NDK.
+
+group 'com.flutter_rust_bridge.rust_lib_claude_commander_client'
+version '1.0'
+
+buildscript {
+    repositories {
+        google()
+        mavenCentral()
+    }
+
+    dependencies {
+        // The Android Gradle Plugin knows how to build native code with the NDK.
+        classpath 'com.android.tools.build:gradle:7.3.0'
+    }
+}
+
+rootProject.allprojects {
+    repositories {
+        google()
+        mavenCentral()
+    }
+}
+
+apply plugin: 'com.android.library'
+
+android {
+    if (project.android.hasProperty("namespace")) {
+        namespace 'com.flutter_rust_bridge.rust_lib_claude_commander_client'
+    }
+
+    // Bumping the plugin compileSdkVersion requires all clients of this plugin
+    // to bump the version in their app. Use a platform the Nix dev shell
+    // provides (read-only SDK can't auto-install platform 33).
+    compileSdkVersion 35
+
+    // Pin to the Nix-provided NDK (exported as ANDROID_NDK_VERSION by
+    // devShells.client) so cargokit/AGP use the present NDK instead of trying to
+    // install Flutter's bundled default into the read-only Nix store. Library
+    // subprojects don't inherit the app's ndkVersion, so set it here too. Falls
+    // back to the default outside the Nix shell.
+    ndkVersion System.getenv("ANDROID_NDK_VERSION") ?: android.ndkVersion
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_1_8
+        targetCompatibility JavaVersion.VERSION_1_8
+    }
+
+    defaultConfig {
+        minSdkVersion 19
+    }
+}
+
+apply from: "../cargokit/gradle/plugin.gradle"
+cargokit {
+    manifestDir = "../../rust"
+    libname = "rust_lib_claude_commander_client"
+}
