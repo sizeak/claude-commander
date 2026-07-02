@@ -22,8 +22,11 @@ default_program = "claude"
 # entry whose `command` matches `default_program`. When `programs` is omitted,
 # the picker offers a single entry synthesised from `default_program`.
 #
-# In the New Session dialog, press Tab to move between the name field and the
-# picker, then ↑/↓ to choose.
+# In the New Session dialog, press Tab (or Shift+Tab to go back) to cycle focus
+# between the name field, the project picker, and the program picker, then ↑/↓
+# to choose. The project picker defaults to the currently-selected project and
+# can be typed into to filter the list — so the usual "type a name, hit Enter"
+# flow is unchanged.
 #
 # [[programs]]
 # label = "Claude"
@@ -87,6 +90,12 @@ ui_refresh_fps = 30
 
 # Custom worktrees directory (default: platform-specific, see Data Storage below)
 # worktrees_dir = "/path/to/worktrees"
+
+# Isolate every tmux command onto a throwaway socket dir (default: unset).
+# For hermetic tests and the e2e harness ONLY — leave unset for normal use.
+# When set, tmux commands run with TMUX_TMPDIR=<dir> and $TMUX/$TMUX_PANE
+# stripped, so they hit a per-run tmux server instead of your real one.
+# tmux_tmpdir = "/path/to/throwaway/tmux"
 
 # Organize worktrees into per-repository subdirectories (default: false)
 # per_repo_worktree_dirs = true
@@ -293,9 +302,12 @@ volume = 1.0                             # 0.0–2.0
 | `prose_only` (default) | Strip code blocks and markdown; speak the natural-language prose |
 | `verbatim` | Speak the text unchanged |
 
-> **Build note:** in-process playback uses `rodio`, which links **ALSA** on Linux. Building from
-> source needs the ALSA development headers (`libasound2-dev` on Debian/Ubuntu, `alsa-lib` on
-> Arch). The Nix dev shell provides them automatically.
+> **Build note:** in-process playback (`rodio`) and microphone capture (`cpal`) link **ALSA** on
+> Linux. They're gated behind the `audio` cargo feature, which is **on by default** — so building
+> the TUI (`claude-commander`) from source needs the ALSA development headers (`libasound2-dev` on
+> Debian/Ubuntu, `alsa-lib` on Arch); the default Nix dev shell provides them automatically. The
+> headless server and the Flutter client build with `audio` off (`default-features = false`) and
+> never link ALSA — remote clients do capture/playback on-device instead.
 
 ## Voice input (STT)
 
