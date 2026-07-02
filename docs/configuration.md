@@ -377,7 +377,7 @@ All fields are optional; a section matches when **every declared field** matches
 | `has_label` | string (literal) or array (any-of) | |
 | `review_decision` | `"approved"` \| `"changes_requested"` \| `"review_required"` — scalar or array (any-of) | Mirrors GitHub's `reviewDecision` field |
 | `has_reviewer` | `true` / `false`, a specific login, or an array of logins (any-of) | `true` excludes Copilot via case-insensitive `"copilot"` substring match; specific/array forms match literally |
-| `max_sessions` | positive integer | Advisory WIP limit. Section header shows `count/limit` and highlights when at or over the limit. Never blocks creation. |
+| `max_sessions` | positive integer | Advisory WIP limit. Section header shows `count/limit`, warning-coloured at the limit and error-coloured over it. Never blocks creation. |
 
 ### Process order and forward-only
 

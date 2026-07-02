@@ -904,12 +904,11 @@ fn make_section_header(name: &str, count: usize, collapsed: bool) -> SessionList
 /// Section header with a WIP limit set. Used by the tests that exercise the
 /// `(count/limit)` suffix rendering (text + colour ramp).
 fn make_section_header_with_limit(count: usize, limit: u32) -> SessionListItem {
-    SessionListItem::SectionHeader {
-        name: "Review".to_string(),
-        count,
-        collapsed: false,
-        max_sessions: Some(limit),
+    let mut h = make_section_header("Review", count, false);
+    if let SessionListItem::SectionHeader { max_sessions, .. } = &mut h {
+        *max_sessions = Some(limit);
     }
+    h
 }
 
 #[test]
@@ -979,42 +978,36 @@ fn test_section_header_shows_count_under_limit_when_max_sessions_set() {
     );
 }
 
-/// Assert that the `(count/limit)` suffix rendered on row 0 uses `expected` as
-/// its foreground colour. Uses `find_text_in_row` (the same needle-scanner
-/// production code uses) so it can't mis-anchor on a stray `(` in the section
-/// name.
-fn assert_count_suffix_colour(item: SessionListItem, needle: &str, expected: Color) {
-    let buf = draw_tree_buffer(&[item], 60, 2, |t| t);
-    let x = super::render::find_text_in_row(&buf, 0, 0, 60, needle)
+/// Assert that the `(count/limit)` suffix rendered on the section header uses
+/// `expected` as its foreground colour. Uses `find_text_in_row` (the same
+/// needle-scanner production code uses) so it can't mis-anchor on a stray `(`
+/// in the section name.
+fn assert_count_suffix_colour(count: usize, limit: u32, expected: Color) {
+    let buf = draw_tree_buffer(
+        &[make_section_header_with_limit(count, limit)],
+        60,
+        2,
+        |t| t,
+    );
+    let needle = format!("({count}/{limit})");
+    let x = super::render::find_text_in_row(&buf, 0, 0, 60, &needle)
         .unwrap_or_else(|| panic!("count suffix {needle:?} not found in rendered row"));
     assert_eq!(buf[(x, 0)].style().fg, Some(expected));
 }
 
 #[test]
 fn section_header_under_limit_uses_secondary_colour() {
-    assert_count_suffix_colour(
-        make_section_header_with_limit(1, 5),
-        "(1/5)",
-        Theme::basic().text_secondary,
-    );
+    assert_count_suffix_colour(1, 5, Theme::basic().text_secondary);
 }
 
 #[test]
 fn section_header_at_limit_uses_warning_colour() {
-    assert_count_suffix_colour(
-        make_section_header_with_limit(2, 2),
-        "(2/2)",
-        Theme::basic().modal_warning,
-    );
+    assert_count_suffix_colour(2, 2, Theme::basic().modal_warning);
 }
 
 #[test]
 fn section_header_over_limit_uses_error_colour() {
-    assert_count_suffix_colour(
-        make_section_header_with_limit(3, 2),
-        "(3/2)",
-        Theme::basic().modal_error,
-    );
+    assert_count_suffix_colour(3, 2, Theme::basic().modal_error);
 }
 
 #[test]
