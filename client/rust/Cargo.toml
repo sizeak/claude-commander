@@ -1,0 +1,59 @@
+[package]
+name = "rust_lib_claude_commander_client"
+version = "0.1.0"
+edition = "2021"
+
+# `rlib` is added so the crate's own integration tests (client/rust/tests) can
+# link against it as a normal Rust library; `cdylib`/`staticlib` are what
+# cargokit/flutter_rust_bridge link into the Flutter app. The extra rlib is inert
+# for the mobile build.
+[lib]
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+[dependencies]
+# `chrono`/`uuid` features enable frb's built-in codecs for the DateTime/Uuid
+# fields carried by the mirrored protocol DTOs.
+flutter_rust_bridge = { version = "=2.11.1", features = ["chrono", "uuid"] }
+# Shared wire contract with the server — the client core deserializes server
+# responses into these exact types, so drift fails loudly in Rust. The mirrors
+# in `api::mirrors` re-export these for flutter_rust_bridge.
+claude-commander-protocol = { path = "../../crates/claude-commander-protocol" }
+# Same major versions as the protocol crate so the `Uuid`/`DateTime` in the
+# mirrors are the *same* types cargo resolves for the protocol DTOs.
+uuid = { version = "1.0", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+# HTTP client. rustls (not OpenSSL) keeps Android/iOS cross-compiles painless.
+reqwest = { version = "0.12", default-features = false, features = [
+    "blocking",
+    "json",
+    "rustls-tls",
+] }
+serde_json = "1"
+anyhow = "1"
+# Live terminal bridge (Phase 3 spike): an async WS to the server's /ws/attach.
+# A small multi-thread tokio runtime drives the socket off the Dart isolate.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+# rustls (webpki roots) to match reqwest's TLS stack and keep mobile cross-builds
+# painless — no OpenSSL.
+tokio-tungstenite = { version = "0.24", default-features = false, features = [
+    "connect",
+    "rustls-tls-webpki-roots",
+] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+
+[dev-dependencies]
+# Host-only: the shared hermetic-server + git/tmux harness, plus core for session
+# setup/worktree lookup/cleanup. The cdylib is `exclude`d from the root workspace
+# (see root Cargo.toml), so these never enter the Android/iOS cross-build — they
+# compile only for `cargo test` on the host.
+claude-commander-test-support = { path = "../../crates/claude-commander-test-support" }
+# `default-features = false` drops core's ALSA-linked `audio` feature: the client
+# does on-device capture/playback itself, so the host test harness never needs a
+# server-side audio backend. Without this, the direct edge re-enables `audio` and
+# drags alsa-sys into the cdylib build.
+claude-commander-core = { path = "../../crates/claude-commander-core", default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tempfile = "3.10"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(frb_expand)'] }

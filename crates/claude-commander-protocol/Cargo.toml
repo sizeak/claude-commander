@@ -1,0 +1,25 @@
+[package]
+name = "claude-commander-protocol"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared wire types (DTOs + WebSocket control protocol) for the Claude Commander server API and its clients"
+
+# Only the `claude-commander` bin crate drives the release (single shared tag).
+[package.metadata.release]
+release = false
+
+[lib]
+name = "claude_commander_protocol"
+path = "src/lib.rs"
+
+[dependencies]
+# Serialization — the whole point of this crate is the serde wire shape.
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Wire types carry ids and timestamps. Versions match `claude-commander-core`
+# so the workspace resolves a single copy. Both cross-compile to mobile.
+uuid = { version = "1.0", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
