@@ -474,8 +474,26 @@ impl App {
         super::ProgramPicker {
             choices: self.config.program_choices(),
             selected: self.config.default_program_index(),
-            focus_program: false,
         }
+    }
+
+    /// Build the project picker for a new-session dialog: every project sorted
+    /// by name, with `default` pre-selected.
+    async fn new_project_picker(&self, default: ProjectId) -> super::ProjectPicker {
+        let mut choices: Vec<super::ProjectChoice> = {
+            let state = self.service.store().read().await;
+            state
+                .projects
+                .values()
+                .map(|p| super::ProjectChoice {
+                    id: p.id,
+                    name: p.name.clone(),
+                    repo_path: p.repo_path.clone(),
+                })
+                .collect()
+        };
+        choices.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        super::ProjectPicker::new(choices, default)
     }
 
     pub(super) async fn handle_new_session(&mut self) {
@@ -493,6 +511,7 @@ impl App {
                 .list_state
                 .selected()
                 .and_then(|idx| super::selection::section_at(&self.ui_state.list_items, idx));
+            let project_picker = self.new_project_picker(project_id).await;
             self.ui_state.modal = Modal::Input {
                 title: "New Session".to_string(),
                 prompt: "Enter session name:".to_string(),
@@ -502,7 +521,10 @@ impl App {
                     section,
                 },
                 existing_branches,
+                project_picker: Some(project_picker),
                 program_picker: Some(self.new_program_picker()),
+                focus: super::InputFocus::Name,
+                expanded: false,
             };
         } else {
             self.ui_state.status_message = Some((
@@ -561,7 +583,10 @@ impl App {
                 parent_branch,
             },
             existing_branches,
+            project_picker: None,
             program_picker: Some(self.new_program_picker()),
+            focus: super::InputFocus::Name,
+            expanded: false,
         };
     }
 
@@ -1515,7 +1540,10 @@ impl App {
             value: current_title.into(),
             on_submit: InputAction::RenameSession { session_id },
             existing_branches: None,
+            project_picker: None,
             program_picker: None,
+            focus: super::InputFocus::Name,
+            expanded: false,
         };
     }
 

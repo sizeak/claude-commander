@@ -1930,7 +1930,6 @@ fn picker(commands: &[&str], selected: usize) -> ProgramPicker {
             })
             .collect(),
         selected,
-        focus_program: true,
     }
 }
 
@@ -1953,37 +1952,156 @@ fn program_picker_navigation_saturates_at_ends() {
     assert_eq!(p.selected, 1);
 }
 
-#[tokio::test]
-async fn backtab_toggles_program_picker_focus_like_tab() {
-    let mut app = make_test_app();
-    app.ui_state.modal = Modal::Input {
-        title: String::new(),
-        prompt: String::new(),
-        value: Input::from(""),
-        on_submit: InputAction::AddProject,
-        existing_branches: None,
-        program_picker: Some(picker(&["claude", "codex"], 0)),
-    };
+// --- InputFocus (Tab cycling in the input modal) ---
 
-    app.handle_modal_key(key(crossterm::event::KeyCode::BackTab))
-        .await;
-    match &app.ui_state.modal {
-        Modal::Input {
-            program_picker: Some(p),
-            ..
-        } => assert!(!p.focus_program, "BackTab should flip focus off"),
-        other => panic!("expected Modal::Input, got {other:?}"),
-    }
+#[test]
+fn input_focus_cycles_all_present_fields() {
+    // Name → Project → Program → Name when both pickers are present.
+    assert_eq!(InputFocus::Name.next(true, true), InputFocus::Project);
+    assert_eq!(InputFocus::Project.next(true, true), InputFocus::Program);
+    assert_eq!(InputFocus::Program.next(true, true), InputFocus::Name);
+}
 
-    app.handle_modal_key(key(crossterm::event::KeyCode::BackTab))
-        .await;
-    match &app.ui_state.modal {
-        Modal::Input {
-            program_picker: Some(p),
-            ..
-        } => assert!(p.focus_program, "BackTab should flip focus back on"),
-        other => panic!("expected Modal::Input, got {other:?}"),
+#[test]
+fn input_focus_skips_absent_fields() {
+    // No project picker: Name → Program → Name.
+    assert_eq!(InputFocus::Name.next(false, true), InputFocus::Program);
+    assert_eq!(InputFocus::Program.next(false, true), InputFocus::Name);
+    // No program picker: Name → Project → Name.
+    assert_eq!(InputFocus::Name.next(true, false), InputFocus::Project);
+    assert_eq!(InputFocus::Project.next(true, false), InputFocus::Name);
+    // Neither picker: Tab stays on the name field.
+    assert_eq!(InputFocus::Name.next(false, false), InputFocus::Name);
+}
+
+#[test]
+fn input_focus_prev_cycles_backward() {
+    // Shift+Tab reverses: Name → Program → Project → Name with both present.
+    assert_eq!(InputFocus::Name.prev(true, true), InputFocus::Program);
+    assert_eq!(InputFocus::Program.prev(true, true), InputFocus::Project);
+    assert_eq!(InputFocus::Project.prev(true, true), InputFocus::Name);
+    // Absent fields are skipped, same as forward cycling.
+    assert_eq!(InputFocus::Name.prev(false, true), InputFocus::Program);
+    assert_eq!(InputFocus::Name.prev(true, false), InputFocus::Project);
+    assert_eq!(InputFocus::Name.prev(false, false), InputFocus::Name);
+}
+
+// --- ProjectPicker (new-session project selection) ---
+
+fn project_choices(names: &[&str]) -> Vec<ProjectChoice> {
+    names
+        .iter()
+        .map(|n| ProjectChoice {
+            id: ProjectId::new(),
+            name: n.to_string(),
+            repo_path: std::path::PathBuf::from(format!("/repos/{n}")),
+        })
+        .collect()
+}
+
+#[test]
+fn project_picker_new_preselects_default() {
+    let choices = project_choices(&["alpha", "beta", "gamma"]);
+    let default = choices[2].id;
+    let p = ProjectPicker::new(choices.clone(), default);
+    assert_eq!(p.selected_id(), Some(default));
+    assert_eq!(p.selected_choice().map(|c| c.name.as_str()), Some("gamma"));
+}
+
+#[test]
+fn project_picker_navigation_saturates_over_filtered() {
+    let choices = project_choices(&["alpha", "beta"]);
+    let first = choices[0].id;
+    let mut p = ProjectPicker::new(choices, first);
+    p.select_up();
+    assert_eq!(p.selected, 0);
+    p.select_down();
+    assert_eq!(p.selected, 1);
+    p.select_down();
+    assert_eq!(p.selected, 1);
+}
+
+#[test]
+fn project_picker_apply_filter_narrows_and_reanchors() {
+    let choices = project_choices(&["commander", "kokoro", "commons"]);
+    let default = choices[0].id; // "commander"
+    let mut p = ProjectPicker::new(choices, default);
+
+    // Filter to entries fuzzy-matching "com" — "commander" and "commons".
+    p.filter = "com".to_string();
+    p.apply_filter();
+    assert_eq!(p.filtered.len(), 2);
+    let names: Vec<&str> = p
+        .filtered
+        .iter()
+        .map(|&i| p.choices[i].name.as_str())
+        .collect();
+    assert!(names.contains(&"commander"));
+    assert!(names.contains(&"commons"));
+    assert!(!names.contains(&"kokoro"));
+    // The previously-selected "commander" survives the filter, so the
+    // highlight re-anchors onto it rather than jumping to the top.
+    assert_eq!(p.selected_id(), Some(default));
+
+    // Clearing the filter restores all choices in name order.
+    p.filter.clear();
+    p.apply_filter();
+    assert_eq!(p.filtered, vec![0, 1, 2]);
+}
+
+#[test]
+fn project_picker_apply_filter_clamps_when_selection_filtered_out() {
+    let choices = project_choices(&["alpha", "beta"]);
+    let beta = choices[1].id;
+    let mut p = ProjectPicker::new(choices, beta);
+    assert_eq!(p.selected, 1);
+    // A filter that excludes the current selection resets to the top match.
+    p.filter = "alpha".to_string();
+    p.apply_filter();
+    assert_eq!(p.selected, 0);
+    assert_eq!(p.selected_choice().map(|c| c.name.as_str()), Some("alpha"));
+}
+
+#[test]
+fn project_picker_no_match_has_no_selection() {
+    // When the filter matches nothing there's no project to submit under — the
+    // Enter handler keys off `selected_id()` being None to keep the dialog open.
+    let choices = project_choices(&["alpha", "beta"]);
+    let first = choices[0].id;
+    let mut p = ProjectPicker::new(choices, first);
+    p.filter = "zzzznomatch".to_string();
+    p.apply_filter();
+    assert!(p.filtered.is_empty());
+    assert_eq!(p.selected_id(), None);
+}
+
+#[test]
+fn project_picker_scroll_keeps_selection_visible() {
+    // More projects than fit on screen: scrolling down keeps the highlight
+    // inside the visible window rather than off the bottom.
+    let names: Vec<String> = (0..12).map(|i| format!("proj{i:02}")).collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let choices = project_choices(&refs);
+    let first = choices[0].id;
+    let mut p = ProjectPicker::new(choices, first);
+    assert_eq!(p.scroll, 0);
+    for _ in 0..11 {
+        p.select_down();
+        assert!(
+            p.scroll <= p.selected && p.selected < p.scroll + 6,
+            "selected {} must stay within window [{}, {})",
+            p.selected,
+            p.scroll,
+            p.scroll + 6
+        );
     }
+    assert_eq!(p.selected, 11);
+    // Scrolling back to the top brings the window with it.
+    for _ in 0..11 {
+        p.select_up();
+    }
+    assert_eq!(p.selected, 0);
+    assert_eq!(p.scroll, 0);
 }
 
 #[tokio::test]
