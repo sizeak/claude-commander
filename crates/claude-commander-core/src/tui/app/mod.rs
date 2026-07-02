@@ -43,6 +43,10 @@ use super::widgets::{
     TreeList, TreeListState,
 };
 use crate::api::{CommanderService, DiffSide};
+use crate::backend::{
+    BackendHandle, BackendId, BackendView, CommanderBackend, LOCAL_BACKEND_ID, LocalBackend,
+    SessionRef,
+};
 use crate::config::{BindableAction, Config, ConfigStore, StateStore};
 use crate::error::{Result, TuiError};
 use crate::git::{
@@ -1138,8 +1142,17 @@ pub struct App {
     /// runtime only surfaces the restart warning; the commander UI doesn't move
     /// until the next launch.
     commander_enabled_at_init: bool,
-    /// Unified service layer — owns SessionManager, StateStore, and ConfigStore
+    /// Unified service layer — owns SessionManager, StateStore, and ConfigStore.
+    ///
+    /// PHASE-C transition: retained while store/service call sites are migrated
+    /// onto `backends`. The end state drops this field entirely; until then the
+    /// local `BackendHandle` wraps a clone of this same service.
     service: CommanderService,
+    /// The backends the TUI drives. Exactly one (the local backend) this phase;
+    /// Phase E adds remote entries. Each holds a cached [`BackendView`] the
+    /// render path reads synchronously, refreshed by a per-backend change-feed
+    /// task via [`StateUpdate::BackendChanged`](crate::tui::event::StateUpdate).
+    backends: Vec<BackendHandle>,
     /// UI state
     ui_state: AppUiState,
     /// Event loop
@@ -1182,6 +1195,12 @@ impl App {
         let config = config_store.read().clone();
         let service = CommanderService::new(config_store, store, frontend);
 
+        // The local backend wraps a clone of the same service (a bundle of
+        // Arcs). During the Phase-C transition both coexist; call sites migrate
+        // from `service` onto `backends` incrementally.
+        let local: Arc<dyn CommanderBackend> = Arc::new(LocalBackend::new(service.clone()));
+        let backends = vec![BackendHandle::new(LOCAL_BACKEND_ID, local)];
+
         let base = config
             .theme
             .preset
@@ -1196,6 +1215,7 @@ impl App {
             config,
             commander_enabled_at_init,
             service,
+            backends,
             ui_state: AppUiState::default(),
             event_loop: EventLoop::new(),
             theme,
@@ -1208,16 +1228,156 @@ impl App {
         }
     }
 
+    // -- Backend accessors (Phase C) --
+
+    /// The backend handle for `id`, if present.
+    pub(super) fn backend(&self, id: BackendId) -> Option<&BackendHandle> {
+        self.backends.iter().find(|h| h.id == id)
+    }
+
+    /// The local backend's cached view (single-backend convenience this phase).
+    pub(super) fn local_view(&self) -> &BackendView {
+        &self.backends[0].view
+    }
+
+    /// The local backend trait object, cloneable into a spawned task.
+    pub(super) fn local_arc(&self) -> Arc<dyn CommanderBackend> {
+        self.backends[0].backend.clone()
+    }
+
+    /// Record a UI-only telemetry feature against the local backend.
+    pub(super) fn record_feature(&self, feature: &'static str) {
+        self.backends[0].backend.record_feature(feature);
+    }
+
+    /// Fetch a fresh snapshot + agent states into the local backend's cached
+    /// view. Call after a user-initiated backend mutation so the very next
+    /// `refresh_list_items` reflects it, rather than waiting a change-feed cycle
+    /// (the change-feed task still delivers a redundant, idempotent refresh).
+    pub(super) async fn refresh_local_view(&mut self) {
+        let backend = self.local_arc();
+        if let Ok(snapshot) = backend.workspace_snapshot().await {
+            self.backends[0].view.snapshot = snapshot;
+            self.backends[0].view.connection = crate::backend::ConnectionState::Connected;
+        }
+        if let Ok(states) = backend.agent_states(false).await {
+            self.backends[0].view.agent_states = states;
+        }
+    }
+
+    /// Test-only: fold the current store state into the local backend's cached
+    /// view. Production populates the view via `bootstrap_backend_views` and the
+    /// change-feed task; tests that seed the store directly (bypassing backend
+    /// mutations, so no change-feed bump fires) call this before asserting on
+    /// the rendered tree.
+    #[cfg(test)]
+    pub(super) async fn sync_local_view_from_store_for_test(&mut self) {
+        let snapshot = {
+            let state = self.service.store().read().await;
+            crate::api::workspace_snapshot_from_state(&state)
+        };
+        self.backends[0].view.snapshot = snapshot;
+        self.backends[0].view.connection = crate::backend::ConnectionState::Connected;
+    }
+
+    /// Look up a session in a backend's cached snapshot.
+    pub(super) fn session(&self, r: SessionRef) -> Option<&crate::api::SessionInfo> {
+        self.backend(r.backend)?
+            .view
+            .snapshot
+            .sessions
+            .iter()
+            .find(|s| s.session_id == r.id)
+    }
+
+    /// Fetch an initial snapshot + agent states for every backend, so the first
+    /// list refresh reads real data rather than the empty `connecting` view.
+    /// A backend that errors is left `Connecting` (its change-feed task will
+    /// retry) and marked `Degraded` so its header shows the reason.
+    async fn bootstrap_backend_views(&mut self) {
+        for handle in &mut self.backends {
+            let snapshot = handle.backend.workspace_snapshot().await;
+            let states = handle.backend.agent_states(false).await;
+            match (snapshot, states) {
+                (Ok(snapshot), Ok(states)) => {
+                    handle.view.snapshot = snapshot;
+                    handle.view.agent_states = states;
+                    handle.view.connection = crate::backend::ConnectionState::Connected;
+                }
+                (Err(e), _) | (_, Err(e)) => {
+                    warn!("Initial snapshot for backend {:?} failed: {}", handle.id, e);
+                    handle.view.connection = crate::backend::ConnectionState::Degraded {
+                        reason: e.to_string(),
+                    };
+                }
+            }
+        }
+    }
+
+    /// Spawn one task per backend that awaits its change feed and, on each bump,
+    /// fetches a fresh snapshot + agent states and forwards them as
+    /// [`StateUpdate::BackendChanged`] over the event channel. The task exits
+    /// when the feed's sender is dropped (backend gone).
+    fn spawn_backend_change_feeds(&self) {
+        for handle in &self.backends {
+            let backend_id = handle.id.0;
+            let backend = handle.backend.clone();
+            let mut feed = backend.change_feed();
+            let tx = self.event_loop.sender();
+            tokio::spawn(async move {
+                while feed.changed().await {
+                    let snapshot = match backend.workspace_snapshot().await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            debug!("Change-feed snapshot for backend {backend_id} failed: {e}");
+                            continue;
+                        }
+                    };
+                    let states = backend.agent_states(false).await.unwrap_or_else(|_| {
+                        crate::api::AgentStatesSnapshot {
+                            states: Default::default(),
+                            commander_running: false,
+                        }
+                    });
+                    if tx
+                        .send(AppEvent::StateUpdate(StateUpdate::BackendChanged {
+                            backend_id,
+                            snapshot: Box::new(snapshot),
+                            states: Box::new(states),
+                        }))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
+        }
+    }
+
     /// Run the application
     pub async fn run(&mut self) -> Result<()> {
         // Check tmux is available
         self.service.check_tmux().await?;
 
-        // One-time setup
-        self.cleanup_stale_creating_sessions().await;
-        self.cleanup_stale_merging_sessions().await;
-        self.sync_session_states().await;
-        self.reconcile_section_assignments().await;
+        // One-time setup: reconcile each backend (drop stale Creating sessions,
+        // reset transient stack states, sync status against live tmux, re-run
+        // section assignment). The local backend runs it in-process; a remote
+        // backend's server reconciles itself (default no-op).
+        for handle in &self.backends {
+            if let Err(e) = handle.backend.startup_reconcile().await {
+                warn!(
+                    "Startup reconciliation for backend {:?} failed: {}",
+                    handle.id, e
+                );
+            }
+        }
+
+        // Populate each backend's cached view with an initial snapshot before
+        // the first list refresh, then start a per-backend change-feed task so
+        // subsequent store/remote changes fold in off the render path.
+        self.bootstrap_backend_views().await;
+        self.spawn_backend_change_feeds();
 
         // Check gh availability and do initial PR check
         if self.config.pr_check_interval_secs > 0 {
@@ -1751,7 +1911,7 @@ impl App {
                         self.save_selection().await;
                         // Flush any queued telemetry before exit so the last
                         // session's events aren't lost to the flush interval.
-                        self.service.telemetry().flush().await;
+                        self.local_arc().flush_telemetry().await;
                         break;
                     }
                 }

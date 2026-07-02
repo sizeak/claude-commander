@@ -131,17 +131,8 @@ impl App {
             {
                 Ok(cmd) => {
                     info!("Got attach command: {}", cmd);
-                    // Clear unread flag when attaching
-                    let sid = session_id;
-                    let _ = self
-                        .service
-                        .store()
-                        .mutate(move |state| {
-                            if let Some(session) = state.get_session_mut(&sid) {
-                                session.unread = false;
-                            }
-                        })
-                        .await;
+                    // Clear unread flag when attaching.
+                    let _ = self.local_arc().mark_read(session_id).await;
                     self.ui_state.attach_command = Some(cmd);
                     self.ui_state.should_quit = true;
                     info!("Set should_quit = true");
@@ -287,14 +278,13 @@ impl App {
             .unwrap_or(tmux_session_name)
             .to_string();
 
-        let path = {
-            let state = self.service.store().read().await;
-            state
-                .sessions
-                .values()
-                .find(|s| s.tmux_session_name == lookup_name)
-                .map(|s| s.worktree_path.clone())
-        };
+        let path = self
+            .local_view()
+            .snapshot
+            .sessions
+            .iter()
+            .find(|s| s.tmux_session_name == lookup_name)
+            .map(|s| s.worktree_path.clone());
 
         let Some(path) = path else {
             warn!(
@@ -341,18 +331,18 @@ impl App {
         if self.selected_session_is_creating() {
             return;
         }
-        let path = {
-            let state = self.service.store().read().await;
-            if let Some(session_id) = self.ui_state.selected_session_id {
-                state
-                    .sessions
-                    .get(&session_id)
-                    .map(|s| s.worktree_path.clone())
-            } else if let Some(project_id) = self.ui_state.selected_project_id {
-                state.projects.get(&project_id).map(|p| p.repo_path.clone())
-            } else {
-                None
-            }
+        let path = if let Some(session_id) = self.ui_state.selected_session_id {
+            self.session(SessionRef::local(session_id))
+                .map(|s| s.worktree_path.clone())
+        } else if let Some(project_id) = self.ui_state.selected_project_id {
+            self.local_view()
+                .snapshot
+                .projects
+                .iter()
+                .find(|p| p.id == project_id)
+                .map(|p| p.repo_path.clone())
+        } else {
+            None
         };
 
         let Some(path) = path else {
@@ -389,13 +379,9 @@ impl App {
         let Some(session_id) = self.ui_state.selected_session_id else {
             return;
         };
-        let pr_url = {
-            let state = self.service.store().read().await;
-            state
-                .sessions
-                .get(&session_id)
-                .and_then(|s| s.pr_url.clone())
-        };
+        let pr_url = self
+            .session(SessionRef::local(session_id))
+            .and_then(|s| s.pr_url.clone());
         let Some(url) = pr_url else {
             self.ui_state.status_message = Some((
                 "No PR associated with this session".to_string(),
@@ -1491,25 +1477,8 @@ impl App {
         session_id: SessionId,
         target: Option<String>,
     ) {
-        let sections = self.config.sections.clone();
-        let now = chrono::Utc::now();
-        let _ = self
-            .service
-            .store()
-            .mutate(move |state| {
-                if let Some(session) = state.get_session_mut(&session_id) {
-                    match target {
-                        Some(name) => {
-                            session.section_override = Some(name);
-                            crate::session::apply_assignment(session, &sections, now);
-                        }
-                        None => {
-                            crate::session::clear_override_and_reassign(session, &sections, now);
-                        }
-                    }
-                }
-            })
-            .await;
+        let _ = self.local_arc().set_section(session_id, target).await;
+        self.refresh_local_view().await;
         self.refresh_list_items().await;
 
         // The session has moved to a new position in the rebuilt list. Keep it

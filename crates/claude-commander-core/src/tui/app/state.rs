@@ -1,11 +1,28 @@
 //! State management: state updates, session sync, list refresh, selection persistence.
 
 use super::*;
-use crate::api::{ProjectInfo, SessionInfo, WorkspaceSnapshot, workspace_snapshot_from_state};
+use crate::api::{ProjectInfo, SessionInfo, WorkspaceSnapshot};
+// Used only by the tree-builder tests below, which build a snapshot from a
+// hand-constructed `AppState` via the same projection production used before
+// the change-feed cache landed.
+#[cfg(test)]
+use crate::api::workspace_snapshot_from_state;
 
 impl App {
     pub(super) async fn handle_state_update(&mut self, update: StateUpdate) {
         match update {
+            StateUpdate::BackendChanged {
+                backend_id,
+                snapshot,
+                states,
+            } => {
+                if let Some(handle) = self.backends.iter_mut().find(|h| h.id.0 == backend_id) {
+                    handle.view.snapshot = *snapshot;
+                    handle.view.agent_states = *states;
+                    handle.view.connection = crate::backend::ConnectionState::Connected;
+                }
+                self.refresh_list_items().await;
+            }
             StateUpdate::ContentUpdated { session_id, .. } => {
                 debug!("Content updated for session {}", session_id);
             }
@@ -417,188 +434,17 @@ impl App {
         }
     }
 
-    pub(super) async fn cleanup_stale_creating_sessions(&self) {
-        let creating_ids: Vec<SessionId> = {
-            let state = self.service.store().read().await;
-            state
-                .sessions
-                .values()
-                .filter(|s| s.status == SessionStatus::Creating)
-                .map(|s| s.id)
-                .collect()
-        };
-
-        if !creating_ids.is_empty() {
-            warn!(
-                "Cleaning up {} stale Creating session(s) from previous run",
-                creating_ids.len()
-            );
-            let _ = self
-                .service
-                .store()
-                .mutate(move |state| {
-                    for sid in &creating_ids {
-                        state.remove_session(sid);
-                    }
-                })
-                .await;
-        }
-    }
-
-    /// Reset any sessions left in transient stack-operation states to `Running`.
-    ///
-    /// Both `Merging` and `Pushing` are transient — they're only valid while
-    /// a cascade-merge or push-stack step is actively running. If the process
-    /// died mid-op the git state is whatever it was, but the session-level
-    /// status is stale and must be cleared so the UI doesn't show a spinner
-    /// forever. `CascadePaused` is deliberately not touched: it's the durable
-    /// signal that a conflict is outstanding, and pairs with the persisted
-    /// `cascade_paused_at`.
-    pub(super) async fn cleanup_stale_merging_sessions(&self) {
-        let stale_ids: Vec<SessionId> = {
-            let state = self.service.store().read().await;
-            state
-                .sessions
-                .values()
-                .filter(|s| matches!(s.status, SessionStatus::Merging | SessionStatus::Pushing))
-                .map(|s| s.id)
-                .collect()
-        };
-
-        if !stale_ids.is_empty() {
-            warn!(
-                "Resetting {} stale Merging/Pushing session(s) to Running",
-                stale_ids.len()
-            );
-            let _ = self
-                .service
-                .store()
-                .mutate(move |state| {
-                    for sid in &stale_ids {
-                        if let Some(session) = state.get_session_mut(sid) {
-                            session.set_status(SessionStatus::Running);
-                        }
-                    }
-                })
-                .await;
-        }
-    }
-
-    /// Sync app state with actual tmux session state
-    ///
-    /// This method checks all active sessions and updates their status
-    /// if the corresponding tmux session no longer exists or the pane is dead.
-    pub(super) async fn sync_session_states(&self) {
-        let session_ids: Vec<(SessionId, String)> = {
-            let state = self.service.store().read().await;
-            state
-                .sessions
-                .values()
-                .filter(|s| s.status.is_active() && s.status != SessionStatus::Creating)
-                .map(|s| (s.id, s.tmux_session_name.clone()))
-                .collect()
-        };
-
-        for (session_id, tmux_name) in session_ids {
-            let should_mark_stopped = if let Ok(exists) = self
-                .service
-                .session_manager()
-                .tmux
-                .session_exists(&tmux_name)
-                .await
-            {
-                if !exists {
-                    true
-                } else {
-                    // Session exists, but check if pane is dead (program exited)
-                    self.service
-                        .session_manager()
-                        .tmux
-                        .is_pane_dead(&tmux_name)
-                        .await
-                        .unwrap_or(false)
-                }
-            } else {
-                false
-            };
-
-            if should_mark_stopped {
-                // Kill the tmux session if it exists but pane is dead
-                let _ = self
-                    .service
-                    .session_manager()
-                    .tmux
-                    .kill_session(&tmux_name)
-                    .await;
-
-                let _ = self
-                    .service
-                    .store()
-                    .mutate(move |state| {
-                        if let Some(session) = state.get_session_mut(&session_id) {
-                            session.set_status(SessionStatus::Stopped);
-                        }
-                    })
-                    .await;
-            }
-        }
-
-        // Sync unmanaged worktrees for all projects
-        let project_ids: Vec<ProjectId> = {
-            let state = self.service.store().read().await;
-            state.projects.keys().copied().collect()
-        };
-        for project_id in project_ids {
-            if let Err(e) = self
-                .service
-                .session_manager()
-                .sync_worktrees(&project_id)
-                .await
-            {
-                debug!("Failed to sync worktrees for project {}: {}", project_id, e);
-            }
-        }
-    }
-
-    /// Run `apply_assignment` over every session against the current
-    /// `[[sections]]` config. Used at startup to reconcile state.json with
-    /// possibly-changed config.
+    /// Re-run section assignment over every session against current config
+    /// (after a live config change), then refresh the cached view + tree.
     pub(super) async fn reconcile_section_assignments(&mut self) {
-        let sections = self.config.sections.clone();
-        let now = chrono::Utc::now();
-        let _ = self
-            .service
-            .store()
-            .mutate(move |state| {
-                if sections.is_empty()
-                    && state.sessions.values().all(|s| s.current_section.is_none())
-                {
-                    return;
-                }
-                for session in state.sessions.values_mut() {
-                    crate::session::apply_assignment(session, &sections, now);
-                }
-            })
-            .await;
+        let _ = self.local_arc().reconcile_sections().await;
+        self.refresh_local_view().await;
     }
 
-    /// Run `apply_assignment` for a single session — used after creating a
-    /// session, where the rest of the session set is already reconciled.
+    /// Re-run section assignment for a single freshly created session.
     pub(super) async fn reconcile_one_section_assignment(&mut self, session_id: SessionId) {
-        if self.config.sections.is_empty() {
-            return;
-        }
-        let sections = self.config.sections.clone();
-        let now = chrono::Utc::now();
-        let _ = self
-            .service
-            .store()
-            .mutate(move |state| {
-                if let Some(session) = state.get_session_mut(&session_id) {
-                    crate::session::apply_assignment(session, &sections, now);
-                }
-            })
-            .await;
+        let _ = self.local_arc().reconcile_one_section(session_id).await;
+        self.refresh_local_view().await;
     }
 
     pub(super) async fn refresh_list_items(&mut self) {
@@ -612,14 +458,12 @@ impl App {
             self.ui_state.view_mode = ViewMode::ProjectGrouped;
         }
 
-        // PHASE-D: this still reads the local store to build the snapshot on
-        // every refresh. Once the change-feed-driven `BackendView` cache lands,
-        // this reads the already-cached `WorkspaceSnapshot` instead of touching
-        // the store here. The tree builders below are already snapshot-only.
-        let snapshot = {
-            let state = self.service.store().read().await;
-            workspace_snapshot_from_state(&state)
-        };
+        // Read the change-feed-maintained cached snapshot. No store access on
+        // the refresh path: a backend mutation bumps the change feed, whose task
+        // fetches a fresh snapshot and folds it into the `BackendView` via
+        // `StateUpdate::BackendChanged` before this runs. Single-backend this
+        // phase; Phase E merges every backend's snapshot into one tree.
+        let snapshot = self.local_view().snapshot.clone();
 
         let items = match self.ui_state.view_mode {
             ViewMode::ProjectGrouped => {

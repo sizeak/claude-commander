@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::agent::AgentKind;
@@ -22,8 +23,8 @@ use crate::git::{
 };
 use crate::reviewed::ReviewedStore;
 use crate::session::{
-    AgentState, CascadeOutcome, ProjectId, ScanResult, SessionId, SessionManager, WorktreeSession,
-    apply_assignment, clear_override_and_reassign, program_with_claude_flags,
+    AgentState, CascadeOutcome, ProjectId, ScanResult, SessionId, SessionManager, SessionStatus,
+    WorktreeSession, apply_assignment, clear_override_and_reassign, program_with_claude_flags,
 };
 use crate::telemetry::{ConfigSnapshot, EnvFingerprint, FrontendInfo, Telemetry};
 use crate::tmux::{AgentStateDetector, StatusBarInfo, TmuxExecutor};
@@ -364,6 +365,159 @@ impl CommanderService {
         }
 
         Ok(session_id)
+    }
+
+    /// One-time startup reconciliation, run once when a frontend attaches (and
+    /// on the server at boot). Bundles the checks the TUI used to run inline so
+    /// every frontend — and the server — reconciles identically:
+    ///
+    /// 1. Drop sessions stuck in `Creating` from a previous run.
+    /// 2. Reset transient `Merging`/`Pushing` states to `Running` (a died
+    ///    mid-op process leaves stale spinners; `CascadePaused` is left alone).
+    /// 3. Mark sessions whose tmux session/pane is gone as `Stopped`, and sync
+    ///    each project's unmanaged worktrees.
+    /// 4. Re-run section assignment over every session against current config.
+    pub async fn startup_reconcile(&self) -> Result<()> {
+        // 1. Stale Creating sessions.
+        let creating_ids: Vec<SessionId> = {
+            let state = self.store.read().await;
+            state
+                .sessions
+                .values()
+                .filter(|s| s.status == SessionStatus::Creating)
+                .map(|s| s.id)
+                .collect()
+        };
+        if !creating_ids.is_empty() {
+            warn!(
+                "Cleaning up {} stale Creating session(s) from previous run",
+                creating_ids.len()
+            );
+            self.store
+                .mutate(move |state| {
+                    for sid in &creating_ids {
+                        state.remove_session(sid);
+                    }
+                })
+                .await?;
+        }
+
+        // 2. Stale Merging/Pushing sessions.
+        let stale_ids: Vec<SessionId> = {
+            let state = self.store.read().await;
+            state
+                .sessions
+                .values()
+                .filter(|s| matches!(s.status, SessionStatus::Merging | SessionStatus::Pushing))
+                .map(|s| s.id)
+                .collect()
+        };
+        if !stale_ids.is_empty() {
+            warn!(
+                "Resetting {} stale Merging/Pushing session(s) to Running",
+                stale_ids.len()
+            );
+            self.store
+                .mutate(move |state| {
+                    for sid in &stale_ids {
+                        if let Some(session) = state.get_session_mut(sid) {
+                            session.set_status(SessionStatus::Running);
+                        }
+                    }
+                })
+                .await?;
+        }
+
+        // 3. Sync session status against live tmux, then sync worktrees.
+        let session_ids: Vec<(SessionId, String)> = {
+            let state = self.store.read().await;
+            state
+                .sessions
+                .values()
+                .filter(|s| s.status.is_active() && s.status != SessionStatus::Creating)
+                .map(|s| (s.id, s.tmux_session_name.clone()))
+                .collect()
+        };
+        for (session_id, tmux_name) in session_ids {
+            let should_mark_stopped =
+                if let Ok(exists) = self.manager.tmux.session_exists(&tmux_name).await {
+                    if !exists {
+                        true
+                    } else {
+                        self.manager
+                            .tmux
+                            .is_pane_dead(&tmux_name)
+                            .await
+                            .unwrap_or(false)
+                    }
+                } else {
+                    false
+                };
+            if should_mark_stopped {
+                let _ = self.manager.tmux.kill_session(&tmux_name).await;
+                self.store
+                    .mutate(move |state| {
+                        if let Some(session) = state.get_session_mut(&session_id) {
+                            session.set_status(SessionStatus::Stopped);
+                        }
+                    })
+                    .await?;
+            }
+        }
+        let project_ids: Vec<ProjectId> = {
+            let state = self.store.read().await;
+            state.projects.keys().copied().collect()
+        };
+        for project_id in project_ids {
+            if let Err(e) = self.manager.sync_worktrees(&project_id).await {
+                debug!("Failed to sync worktrees for project {}: {}", project_id, e);
+            }
+        }
+
+        // 4. Reconcile section assignments against current config.
+        self.reconcile_all_section_assignments().await?;
+
+        Ok(())
+    }
+
+    /// Re-run section assignment over every session against the current
+    /// `[[sections]]` config. Used at startup and after a live config change.
+    /// A no-op when no sections are configured and none are currently pinned.
+    pub async fn reconcile_all_section_assignments(&self) -> Result<()> {
+        let sections = self.config_store.read().sections.clone();
+        let now = chrono::Utc::now();
+        self.store
+            .mutate(move |state| {
+                if sections.is_empty()
+                    && state.sessions.values().all(|s| s.current_section.is_none())
+                {
+                    return;
+                }
+                for session in state.sessions.values_mut() {
+                    crate::session::apply_assignment(session, &sections, now);
+                }
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Re-run section assignment for a single session against current config.
+    /// Used after creating a session, where the rest of the set is already
+    /// reconciled. No-op when no sections are configured.
+    pub async fn reconcile_one_section_assignment(&self, session_id: SessionId) -> Result<()> {
+        let sections = self.config_store.read().sections.clone();
+        if sections.is_empty() {
+            return Ok(());
+        }
+        let now = chrono::Utc::now();
+        self.store
+            .mutate(move |state| {
+                if let Some(session) = state.get_session_mut(&session_id) {
+                    crate::session::apply_assignment(session, &sections, now);
+                }
+            })
+            .await?;
+        Ok(())
     }
 
     pub async fn ensure_project(&self, path: PathBuf) -> Result<ProjectId> {
@@ -1379,13 +1533,13 @@ fn build_session_info_list(state: &AppState, include_stopped: bool) -> Vec<Sessi
 }
 
 /// Build a [`WorkspaceSnapshot`] purely from persisted state, with no live
-/// gh/tmux probing. The tree builders and the TUI's `refresh_list_items` read
-/// only `projects`, `sessions`, and `cascade_paused` from a snapshot, so the
-/// I/O-bearing fields ([`ServerStatus`], pending comments, operations) are
-/// filled with cheap placeholders. The full [`CommanderService::workspace_snapshot`]
-/// remains the source of truth for those fields; this is the synchronous,
-/// allocation-only projection used on the hot render/refresh path (and by the
-/// tree-builder tests, which feed the same shaped state to the DTO builders).
+/// gh/tmux probing — the I/O-bearing fields ([`ServerStatus`], pending
+/// comments, operations) get cheap placeholders. The full
+/// [`CommanderService::workspace_snapshot`] is the production source of truth
+/// (the change-feed cache reads it); this synchronous, allocation-only
+/// projection is retained for the tree-builder tests, which feed a
+/// hand-constructed `AppState` through the same DTO builders.
+#[cfg(test)]
 pub(crate) fn workspace_snapshot_from_state(state: &AppState) -> WorkspaceSnapshot {
     WorkspaceSnapshot {
         projects: build_project_info_list(state),
@@ -1779,6 +1933,67 @@ mod tests {
         assert!(snap.project_pull.is_empty());
         assert!(snap.operations.is_empty());
         assert_eq!(snap.server.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[tokio::test]
+    async fn startup_reconcile_drops_stale_creating_sessions() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let project = Project::new("repo", PathBuf::from("/tmp/repo"), "main");
+        let pid = project.id;
+        // A session left in `Creating` from a crashed previous run.
+        let mut creating = WorktreeSession::new(
+            pid,
+            "half",
+            "branch-half",
+            PathBuf::from("/tmp/wt"),
+            "claude",
+        );
+        creating.set_status(SessionStatus::Creating);
+        let creating_id = creating.id;
+        svc.store()
+            .mutate(move |state| {
+                state.add_project(project);
+                state.add_session(creating);
+            })
+            .await
+            .unwrap();
+
+        svc.startup_reconcile().await.unwrap();
+
+        let state = svc.store().read().await;
+        assert!(
+            state.get_session(&creating_id).is_none(),
+            "stale Creating session should be dropped"
+        );
+        assert!(state.projects.contains_key(&pid), "project must survive");
+    }
+
+    #[tokio::test]
+    async fn startup_reconcile_clears_stale_merging_state() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_pid, sid) = seed_project_session(&svc).await;
+        svc.store()
+            .mutate(move |state| {
+                state
+                    .get_session_mut(&sid)
+                    .unwrap()
+                    .set_status(SessionStatus::Merging);
+            })
+            .await
+            .unwrap();
+
+        svc.startup_reconcile().await.unwrap();
+
+        // The transient Merging state must be cleared. With no live tmux session
+        // the reconcile then marks it Stopped; either way it is no longer stuck
+        // spinning in Merging.
+        let state = svc.store().read().await;
+        assert_ne!(
+            state.get_session(&sid).unwrap().status,
+            SessionStatus::Merging
+        );
     }
 
     #[tokio::test]

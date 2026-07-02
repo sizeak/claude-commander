@@ -100,6 +100,15 @@ pub enum StateUpdate {
         /// (a synchronous renderer).
         commander_running: bool,
     },
+    /// A backend's change-feed fired: a fresh workspace snapshot (and agent
+    /// states) fetched off the render path, to fold into that backend's cached
+    /// [`BackendView`](crate::backend::BackendView). `backend_id` indexes the
+    /// TUI's `Vec<BackendHandle>`.
+    BackendChanged {
+        backend_id: usize,
+        snapshot: Box<crate::api::WorkspaceSnapshot>,
+        states: Box<crate::api::AgentStatesSnapshot>,
+    },
     /// Background `git fetch origin` kicked off by the Checkout modal
     /// has finished — the modal should refresh its branch list if still open.
     CheckoutFetchComplete {

@@ -72,6 +72,29 @@ impl CommanderBackend for LocalBackend {
         BackendChangeFeed::new(self.service.store().subscribe())
     }
 
+    async fn startup_reconcile(&self) -> BResult<()> {
+        // `sync_worktrees` opens a gix repo across an `.await` → `!Send`; route
+        // the whole reconcile through `run_local` so the future stays `Send`.
+        let svc = self.service.clone();
+        Ok(run_local(move || async move { svc.startup_reconcile().await }).await?)
+    }
+
+    async fn reconcile_sections(&self) -> BResult<()> {
+        Ok(self.service.reconcile_all_section_assignments().await?)
+    }
+
+    async fn reconcile_one_section(&self, id: SessionId) -> BResult<()> {
+        Ok(self.service.reconcile_one_section_assignment(id).await?)
+    }
+
+    fn record_feature(&self, feature: &'static str) {
+        self.service.telemetry().feature(feature);
+    }
+
+    async fn flush_telemetry(&self) {
+        self.service.telemetry().flush().await;
+    }
+
     // -- Queries (all `Send`: store reads, tmux, git CLI) --
 
     async fn workspace_snapshot(&self) -> BResult<WorkspaceSnapshot> {
@@ -194,6 +217,10 @@ impl CommanderBackend for LocalBackend {
     }
 
     // -- Review / comments (git CLI + stores → `Send`) --
+
+    async fn list_comments(&self, id: SessionId) -> BResult<Vec<crate::comment::Comment>> {
+        Ok(self.service.list_comments(&id).await?)
+    }
 
     async fn open_review(&self, id: SessionId) -> BResult<ReviewSnapshot> {
         Ok(self.service.open_review(&id).await?)
@@ -489,6 +516,34 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let be = backend(&dir);
         assert!(be.pending_comment_sessions().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_comments_empty_by_default() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let be = backend(&dir);
+        let (_pid, sid) = seed(&be).await;
+        assert!(be.list_comments(sid).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn startup_reconcile_via_backend_drops_stale_creating() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let be = backend(&dir);
+        let (_pid, sid) = seed(&be).await;
+        be.service()
+            .store()
+            .mutate(move |state| {
+                state
+                    .get_session_mut(&sid)
+                    .unwrap()
+                    .set_status(crate::session::SessionStatus::Creating)
+            })
+            .await
+            .unwrap();
+        be.startup_reconcile().await.unwrap();
+        let state = be.service().store().read().await;
+        assert!(state.get_session(&sid).is_none());
     }
 
     #[tokio::test]

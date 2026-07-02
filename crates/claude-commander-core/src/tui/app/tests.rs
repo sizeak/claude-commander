@@ -1371,9 +1371,12 @@ async fn apply_section_move_keeps_moved_session_selected() {
         .await
         .unwrap();
 
+    app.sync_local_view_from_store_for_test().await;
     app.refresh_list_items().await;
 
     // Move session two into "Beta" — it was in the "In Progress" catch-all.
+    // `apply_section_move` refreshes the cached view itself, so the rebuilt
+    // tree reflects the move without a manual sync here.
     app.apply_section_move(s2_id, Some("Beta".to_string()))
         .await;
 
@@ -2339,6 +2342,7 @@ async fn seed_render_scenario(app: &mut App) {
 
     // Pin the spinner frame so Working/Creating rows are stable.
     app.ui_state.tick_count = 0;
+    app.sync_local_view_from_store_for_test().await;
     app.refresh_list_items().await;
 }
 

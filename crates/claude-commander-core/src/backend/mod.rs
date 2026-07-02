@@ -33,7 +33,8 @@ use uuid::Uuid;
 
 use crate::api::{
     AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
-    OperationStatus, PreviewData, PreviewTarget, ReviewSnapshot, SessionDetail, WorkspaceSnapshot,
+    OperationStatus, PreviewData, PreviewTarget, ReviewSnapshot, ServerStatus, SessionDetail,
+    WorkspaceSnapshot,
 };
 use crate::comment::ApplyOutcome;
 use crate::session::{ProjectId, SessionId};
@@ -100,6 +101,112 @@ impl BackendChangeFeed {
     /// gone (the backend was dropped), so a consumer loop can exit cleanly.
     pub async fn changed(&mut self) -> bool {
         self.rx.changed().await.is_ok()
+    }
+}
+
+/// Index of a backend in the TUI's `Vec<BackendHandle>`. Stable for the process
+/// lifetime; `BackendId(0)` is the local backend (the only one this phase).
+///
+/// The TUI qualifies every session/project reference with a `BackendId` so a
+/// future multi-backend tree routes each action to the backend that owns it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct BackendId(pub usize);
+
+/// The always-present local backend.
+pub const LOCAL_BACKEND_ID: BackendId = BackendId(0);
+
+/// A session qualified by the backend that owns it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SessionRef {
+    pub backend: BackendId,
+    pub id: SessionId,
+}
+
+impl SessionRef {
+    pub fn new(backend: BackendId, id: SessionId) -> Self {
+        Self { backend, id }
+    }
+
+    /// A ref on the local backend.
+    pub fn local(id: SessionId) -> Self {
+        Self {
+            backend: LOCAL_BACKEND_ID,
+            id,
+        }
+    }
+}
+
+/// A backend's connection health, rendered in its server header. The local
+/// backend is always [`Connected`](ConnectionState::Connected).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionState {
+    /// The initial handshake / first snapshot hasn't landed yet.
+    Connecting,
+    /// Healthy: snapshots are current.
+    Connected,
+    /// Reachable but stale or erroring; `reason` is a short user-facing note.
+    Degraded { reason: String },
+}
+
+/// The TUI's cached view of one backend: the latest snapshots plus connection
+/// health. A per-backend change-feed task refreshes it; the render path reads it
+/// synchronously (no `.await` on the hot path).
+#[derive(Debug, Clone)]
+pub struct BackendView {
+    pub snapshot: WorkspaceSnapshot,
+    pub agent_states: AgentStatesSnapshot,
+    pub connection: ConnectionState,
+}
+
+impl BackendView {
+    /// An empty view for a backend whose first snapshot hasn't arrived. The
+    /// tree renders nothing for it until the change-feed task fills it in.
+    pub fn connecting() -> Self {
+        Self {
+            snapshot: empty_snapshot(),
+            agent_states: AgentStatesSnapshot {
+                states: Default::default(),
+                commander_running: false,
+            },
+            connection: ConnectionState::Connecting,
+        }
+    }
+}
+
+/// An empty [`WorkspaceSnapshot`] placeholder (no projects/sessions). Used to
+/// seed a [`BackendView`] before its first real snapshot lands.
+fn empty_snapshot() -> WorkspaceSnapshot {
+    WorkspaceSnapshot {
+        projects: Vec::new(),
+        sessions: Vec::new(),
+        cascade_paused: None,
+        pending_comment_sessions: Vec::new(),
+        project_pull: Default::default(),
+        operations: Vec::new(),
+        server: ServerStatus {
+            gh_available: false,
+            tmux_ok: false,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+    }
+}
+
+/// One backend the TUI drives: its id, the trait object (cloneable across
+/// `tokio::spawn`), and the cached [`BackendView`].
+pub struct BackendHandle {
+    pub id: BackendId,
+    pub backend: Arc<dyn CommanderBackend>,
+    pub view: BackendView,
+}
+
+impl BackendHandle {
+    /// Wrap a backend as handle `id` with an empty (connecting) view.
+    pub fn new(id: BackendId, backend: Arc<dyn CommanderBackend>) -> Self {
+        Self {
+            id,
+            backend,
+            view: BackendView::connecting(),
+        }
     }
 }
 
@@ -206,6 +313,38 @@ pub trait CommanderBackend: Send + Sync {
     /// A change-feed whose generation advances when observable state changes.
     fn change_feed(&self) -> BackendChangeFeed;
 
+    /// One-time startup reconciliation (drop stale `Creating` sessions, reset
+    /// transient stack states, sync status against live tmux, re-run section
+    /// assignment). Run once by the TUI when a backend attaches. A remote
+    /// backend's server reconciles itself, so the default is a no-op.
+    async fn startup_reconcile(&self) -> BResult<()> {
+        Ok(())
+    }
+
+    /// Re-run section assignment over every session against current config —
+    /// used after a live `[[sections]]` config change. A remote backend
+    /// reconciles server-side, so the default is a no-op.
+    async fn reconcile_sections(&self) -> BResult<()> {
+        Ok(())
+    }
+
+    /// Re-run section assignment for a single (freshly created) session. Default
+    /// no-op for remote backends.
+    async fn reconcile_one_section(&self, _id: SessionId) -> BResult<()> {
+        Ok(())
+    }
+
+    /// Record a UI-only usage feature (fire-and-forget). Domain features are
+    /// recorded inside the service's mutation methods; this covers TUI-only
+    /// interactions the trait surface can't otherwise see. A remote backend
+    /// records telemetry server-side, so the default is a no-op.
+    fn record_feature(&self, _feature: &'static str) {}
+
+    /// Flush any queued telemetry before the frontend exits, so the last
+    /// session's events aren't lost to the flush interval. No-op for a remote
+    /// backend (telemetry is the server's concern).
+    async fn flush_telemetry(&self) {}
+
     // -- Queries --
 
     async fn workspace_snapshot(&self) -> BResult<WorkspaceSnapshot>;
@@ -265,6 +404,10 @@ pub trait CommanderBackend: Send + Sync {
 
     // -- Review / comments --
 
+    /// A session's stored comments without re-anchoring (the lighter refresh
+    /// the review view uses when only comments, not the diff, may have changed).
+    async fn list_comments(&self, id: SessionId) -> BResult<Vec<crate::comment::Comment>>;
+
     async fn open_review(&self, id: SessionId) -> BResult<ReviewSnapshot>;
     /// Re-compose the review diff; `None` when unchanged from `prev_hash`.
     async fn refresh_review_if_changed(
@@ -305,4 +448,56 @@ pub trait CommanderBackend: Send + Sync {
 fn _assert_object_safe(b: Arc<dyn CommanderBackend>) {
     fn is_send_sync_static<T: Send + Sync + 'static>(_: &T) {}
     is_send_sync_static(&b);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backend_id_local_is_zero() {
+        assert_eq!(LOCAL_BACKEND_ID, BackendId(0));
+    }
+
+    #[test]
+    fn session_ref_local_uses_local_backend() {
+        let id = SessionId::new();
+        let r = SessionRef::local(id);
+        assert_eq!(r.backend, LOCAL_BACKEND_ID);
+        assert_eq!(r.id, id);
+        assert_eq!(r, SessionRef::new(LOCAL_BACKEND_ID, id));
+    }
+
+    #[test]
+    fn connecting_view_is_empty_and_connecting() {
+        let v = BackendView::connecting();
+        assert!(v.snapshot.projects.is_empty());
+        assert!(v.snapshot.sessions.is_empty());
+        assert!(v.agent_states.states.is_empty());
+        assert_eq!(v.connection, ConnectionState::Connecting);
+    }
+
+    #[test]
+    fn backend_handle_new_seeds_connecting_view() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut config = crate::config::Config::default();
+        config.telemetry.enabled = false;
+        let config_store = std::sync::Arc::new(crate::config::ConfigStore::with_path(
+            config,
+            dir.path().join("config.toml"),
+        ));
+        let store = std::sync::Arc::new(crate::config::StateStore::with_path(
+            crate::config::storage::AppState::default(),
+            dir.path().join("state.json"),
+        ));
+        let service = crate::api::CommanderService::new(
+            config_store,
+            store,
+            crate::telemetry::FrontendInfo::new("test", "0.0.0"),
+        );
+        let backend: Arc<dyn CommanderBackend> = Arc::new(LocalBackend::new(service));
+        let handle = BackendHandle::new(LOCAL_BACKEND_ID, backend);
+        assert_eq!(handle.id, LOCAL_BACKEND_ID);
+        assert_eq!(handle.view.connection, ConnectionState::Connecting);
+    }
 }

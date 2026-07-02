@@ -1101,7 +1101,7 @@ impl App {
         // Commands handled by an instrumented service method (and pure
         // navigation noise) map to `None` — see `UserCommand::telemetry_feature`.
         if let Some(feature) = cmd.telemetry_feature() {
-            self.service.telemetry().feature(feature);
+            self.record_feature(feature);
         }
         match cmd {
             UserCommand::NavigateUp => {

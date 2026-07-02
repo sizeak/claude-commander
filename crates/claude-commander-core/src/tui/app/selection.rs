@@ -158,14 +158,15 @@ impl App {
     /// which, after the in-session switcher, may differ from the one they
     /// entered. No-op if the session no longer exists.
     pub(super) async fn focus_session_in_tree(&mut self, tmux_name: &str) {
-        let session_id = {
-            let state = self.service.store().read().await;
-            state
-                .sessions
-                .values()
-                .find(|s| s.matches_tmux_name(tmux_name))
-                .map(|s| s.id)
-        };
+        // A shell pane's tmux session is named `<primary>-sh`; match either.
+        let primary = tmux_name.strip_suffix("-sh").unwrap_or(tmux_name);
+        let session_id = self
+            .local_view()
+            .snapshot
+            .sessions
+            .iter()
+            .find(|s| s.tmux_session_name == primary || s.tmux_session_name == tmux_name)
+            .map(|s| s.session_id);
         if let Some(id) = session_id
             && self.select_session_in_tree(id)
         {

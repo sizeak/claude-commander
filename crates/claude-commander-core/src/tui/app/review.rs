@@ -1279,16 +1279,12 @@ impl App {
             return;
         };
 
-        let title = {
-            let state = self.service.store().read().await;
-            state
-                .sessions
-                .get(&session_id)
-                .map(|s| s.title.clone())
-                .unwrap_or_default()
-        };
+        let title = self
+            .session(SessionRef::local(session_id))
+            .map(|s| s.title.clone())
+            .unwrap_or_default();
 
-        match self.service.open_review(&session_id).await {
+        match self.local_arc().open_review(session_id).await {
             Ok(snapshot) => {
                 if snapshot.diff.is_empty() {
                     self.set_review_status("No changes to review");
@@ -1449,7 +1445,7 @@ impl App {
         // don't flow through an instrumented service method. Comment create /
         // delete / apply and reviewed-toggle are recorded at the service layer.
         if let Some(feature) = review_key_feature(nav_code, state.focus) {
-            self.service.telemetry().feature(feature);
+            self.record_feature(feature);
         }
         match nav_code {
             // Esc cancels an in-progress selection first; otherwise closes.
@@ -1478,7 +1474,7 @@ impl App {
             // files don't inflate the metric.
             KeyCode::Char('o') => {
                 if state.can_toggle_image_side() {
-                    self.service.telemetry().feature("review.toggle_image_side");
+                    self.record_feature("review.toggle_image_side");
                 }
                 state.toggle_image_side();
             }
