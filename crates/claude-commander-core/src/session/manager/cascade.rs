@@ -461,7 +461,7 @@ fn walk_to_stack_base(start: SessionId, project_sessions: &[&WorktreeSession]) -
         let Some(current_session) = project_sessions.iter().find(|s| s.id == current) else {
             break;
         };
-        match crate::session::resolve_stack_parent(current_session, project_sessions) {
+        match crate::session::resolve_stack_parent(*current_session, project_sessions) {
             Some(parent) => current = parent,
             None => break,
         }

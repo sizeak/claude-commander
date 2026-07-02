@@ -1378,6 +1378,30 @@ fn build_session_info_list(state: &AppState, include_stopped: bool) -> Vec<Sessi
     entries
 }
 
+/// Build a [`WorkspaceSnapshot`] purely from persisted state, with no live
+/// gh/tmux probing. The tree builders and the TUI's `refresh_list_items` read
+/// only `projects`, `sessions`, and `cascade_paused` from a snapshot, so the
+/// I/O-bearing fields ([`ServerStatus`], pending comments, operations) are
+/// filled with cheap placeholders. The full [`CommanderService::workspace_snapshot`]
+/// remains the source of truth for those fields; this is the synchronous,
+/// allocation-only projection used on the hot render/refresh path (and by the
+/// tree-builder tests, which feed the same shaped state to the DTO builders).
+pub(crate) fn workspace_snapshot_from_state(state: &AppState) -> WorkspaceSnapshot {
+    WorkspaceSnapshot {
+        projects: build_project_info_list(state),
+        sessions: build_session_info_list(state, true),
+        cascade_paused: state.cascade_paused_at,
+        pending_comment_sessions: Vec::new(),
+        project_pull: HashMap::new(),
+        operations: Vec::new(),
+        server: ServerStatus {
+            gh_available: false,
+            tmux_ok: true,
+            version: env!("CARGO_PKG_VERSION").to_string(),
+        },
+    }
+}
+
 fn find_session_info(state: &AppState, query: &str) -> Option<SessionInfo> {
     let session = crate::cli::find_session(state, query)?;
     let project_name = state

@@ -1,6 +1,7 @@
 //! State management: state updates, session sync, list refresh, selection persistence.
 
 use super::*;
+use crate::api::{ProjectInfo, SessionInfo, WorkspaceSnapshot, workspace_snapshot_from_state};
 
 impl App {
     pub(super) async fn handle_state_update(&mut self, update: StateUpdate) {
@@ -611,21 +612,28 @@ impl App {
             self.ui_state.view_mode = ViewMode::ProjectGrouped;
         }
 
-        let state = self.service.store().read().await;
+        // PHASE-D: this still reads the local store to build the snapshot on
+        // every refresh. Once the change-feed-driven `BackendView` cache lands,
+        // this reads the already-cached `WorkspaceSnapshot` instead of touching
+        // the store here. The tree builders below are already snapshot-only.
+        let snapshot = {
+            let state = self.service.store().read().await;
+            workspace_snapshot_from_state(&state)
+        };
 
         let items = match self.ui_state.view_mode {
             ViewMode::ProjectGrouped => {
-                build_project_grouped_items(&state, &self.ui_state.agent_states)
+                build_project_grouped_items(&snapshot, &self.ui_state.agent_states)
             }
             ViewMode::SectionGrouped => build_section_grouped_items(
-                &state,
+                &snapshot,
                 &self.config.sections,
                 self.config.in_progress_limit,
                 &self.ui_state.agent_states,
                 &self.ui_state.collapsed_sections,
             ),
             ViewMode::SectionStacks => build_stacked_section_items(
-                &state,
+                &snapshot,
                 &self.config.sections,
                 self.config.in_progress_limit,
                 &self.ui_state.agent_states,
@@ -636,7 +644,7 @@ impl App {
         let selectable: Vec<bool> = items.iter().map(|i| i.is_selectable()).collect();
         let group_starts: Vec<bool> = items.iter().map(|i| i.is_group_header()).collect();
         self.ui_state.list_items = items;
-        self.ui_state.cascade_paused = state.cascade_paused_at.is_some();
+        self.ui_state.cascade_paused = snapshot.cascade_paused.is_some();
         if matches!(self.ui_state.view_mode, ViewMode::ProjectGrouped) {
             self.ui_state
                 .list_state
@@ -648,25 +656,27 @@ impl App {
 
         // Pre-compute stack chain for the selected session
         self.ui_state.stack_chain.clear();
+        let by_id = session_index(&snapshot);
         if let Some(session_id) = self.ui_state.selected_session_id
-            && let Some(session) = state.sessions.get(&session_id)
+            && let Some(session) = by_id.get(&session_id).copied()
         {
-            let project_sessions: Vec<&WorktreeSession> = state
+            let project_sessions: Vec<&SessionInfo> = snapshot
                 .projects
-                .get(&session.project_id)
+                .iter()
+                .find(|p| p.id == session.project_id)
                 .map(|p| {
-                    p.worktrees
+                    p.session_ids
                         .iter()
-                        .filter_map(|sid| state.sessions.get(sid))
+                        .filter_map(|sid| by_id.get(sid).copied())
                         .collect()
                 })
                 .unwrap_or_default();
             // Walk up to the stack base
             let mut base = session_id;
             for _ in 0..project_sessions.len() {
-                let base_session = project_sessions.iter().find(|s| s.id == base);
+                let base_session = project_sessions.iter().find(|s| s.session_id == base);
                 match base_session
-                    .and_then(|s| crate::session::resolve_stack_parent(s, &project_sessions))
+                    .and_then(|s| crate::session::resolve_stack_parent(*s, &project_sessions))
                 {
                     Some(parent) => base = parent,
                     None => break,
@@ -675,7 +685,7 @@ impl App {
             let chain = crate::session::stack_chain_from_base(base, &project_sessions);
             if chain.len() > 1 {
                 for &sid in &chain {
-                    if let Some(s) = state.sessions.get(&sid) {
+                    if let Some(s) = by_id.get(&sid).copied() {
                         self.ui_state.stack_chain.push(StackChainEntry {
                             title: s.title.clone(),
                             status: s.status,
@@ -752,11 +762,13 @@ impl App {
 /// Root-list sessions (unstacked + stack bases) are sorted newest-first by
 /// `created_at`; stacked children follow their root in parent→child (stack
 /// position) order at the single deeper indent.
-pub(super) fn build_session_order(sessions: &[&WorktreeSession]) -> Vec<(SessionId, bool)> {
-    let mut root_sessions: Vec<&WorktreeSession> = Vec::new();
-    let mut children_by_parent: HashMap<SessionId, Vec<&WorktreeSession>> = HashMap::new();
+pub(super) fn build_session_order<S: crate::session::SessionNode>(
+    sessions: &[&S],
+) -> Vec<(SessionId, bool)> {
+    let mut root_sessions: Vec<&S> = Vec::new();
+    let mut children_by_parent: HashMap<SessionId, Vec<&S>> = HashMap::new();
     for s in sessions {
-        match crate::session::resolve_stack_parent(s, sessions) {
+        match crate::session::resolve_stack_parent(*s, sessions) {
             Some(parent_id) => {
                 children_by_parent.entry(parent_id).or_default().push(s);
             }
@@ -766,25 +778,25 @@ pub(super) fn build_session_order(sessions: &[&WorktreeSession]) -> Vec<(Session
         }
     }
 
-    root_sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
+    root_sessions.sort_by_key(|s| std::cmp::Reverse(s.node_created_at()));
     for children in children_by_parent.values_mut() {
-        children.sort_by_key(|s| s.created_at);
+        children.sort_by_key(|s| s.node_created_at());
     }
 
     let mut out = Vec::new();
     for root in root_sessions {
-        out.push((root.id, false));
+        out.push((root.node_id(), false));
         // to_visit is a LIFO stack; reverse the initial children and every
         // subsequent children-of-children push so pop() yields them in
         // ascending created_at order.
-        let mut to_visit: Vec<&WorktreeSession> = children_by_parent
-            .get(&root.id)
+        let mut to_visit: Vec<&S> = children_by_parent
+            .get(&root.node_id())
             .cloned()
             .unwrap_or_default();
         to_visit.reverse();
         while let Some(next) = to_visit.pop() {
-            out.push((next.id, true));
-            if let Some(grandchildren) = children_by_parent.get(&next.id) {
+            out.push((next.node_id(), true));
+            if let Some(grandchildren) = children_by_parent.get(&next.node_id()) {
                 for gc in grandchildren.iter().rev() {
                     to_visit.push(gc);
                 }
@@ -795,7 +807,7 @@ pub(super) fn build_session_order(sessions: &[&WorktreeSession]) -> Vec<(Session
 }
 
 fn worktree_item(
-    session: &crate::session::WorktreeSession,
+    session: &SessionInfo,
     agent_states: &HashMap<SessionId, AgentState>,
     project_name_prefix: Option<&str>,
     stacked_child: bool,
@@ -805,7 +817,7 @@ fn worktree_item(
         None => session.title.clone(),
     };
     SessionListItem::Worktree {
-        id: session.id,
+        id: session.session_id,
         project_id: session.project_id,
         title,
         branch: session.branch.clone(),
@@ -814,23 +826,36 @@ fn worktree_item(
         pr_number: session.pr_number,
         pr_url: session.pr_url.clone(),
         pr_merged: session.pr_merged,
-        pr_state: session.pr_state,
+        // The DTO carries the already-effective PR state; the list item's
+        // renderer re-applies `effective_pr_state`, which is idempotent on
+        // `Some`, so wrapping preserves the previous rendering exactly.
+        pr_state: Some(session.pr_state),
         pr_draft: session.pr_draft,
         pr_labels: session.pr_labels.clone(),
         worktree_path: session.worktree_path.clone(),
         created_at: session.created_at,
-        agent_state: agent_states.get(&session.id).copied(),
+        agent_state: agent_states.get(&session.session_id).copied(),
         unread: session.unread,
         stacked_child,
     }
 }
 
+/// Index a snapshot's sessions by id for O(1) lookup during tree building.
+fn session_index(snapshot: &WorkspaceSnapshot) -> HashMap<SessionId, &SessionInfo> {
+    snapshot
+        .sessions
+        .iter()
+        .map(|s| (s.session_id, s))
+        .collect()
+}
+
 pub(super) fn build_project_grouped_items(
-    state: &crate::config::AppState,
+    snapshot: &WorkspaceSnapshot,
     agent_states: &HashMap<SessionId, AgentState>,
 ) -> Vec<SessionListItem> {
+    let by_id = session_index(snapshot);
     let mut items = Vec::new();
-    let mut projects: Vec<_> = state.projects.values().collect();
+    let mut projects: Vec<&ProjectInfo> = snapshot.projects.iter().collect();
     projects.sort_by(|a, b| a.name.cmp(&b.name));
 
     for project in projects {
@@ -839,19 +864,19 @@ pub(super) fn build_project_grouped_items(
             name: project.name.clone(),
             repo_path: project.repo_path.clone(),
             main_branch: project.main_branch.clone(),
-            worktree_count: project.worktrees.len(),
+            worktree_count: project.session_ids.len(),
             nested: false,
         });
 
         // Use stack-aware ordering so stacked children render indented
         // directly beneath their stack base.
-        let sessions: Vec<&WorktreeSession> = project
-            .worktrees
+        let sessions: Vec<&SessionInfo> = project
+            .session_ids
             .iter()
-            .filter_map(|sid| state.sessions.get(sid))
+            .filter_map(|sid| by_id.get(sid).copied())
             .collect();
         for (sid, stacked_child) in build_session_order(&sessions) {
-            if let Some(session) = state.sessions.get(&sid) {
+            if let Some(session) = by_id.get(&sid).copied() {
                 items.push(worktree_item(session, agent_states, None, stacked_child));
             }
         }
@@ -878,16 +903,16 @@ fn resolve_section_limit(
 }
 
 pub(super) fn build_section_grouped_items(
-    state: &crate::config::AppState,
+    snapshot: &WorkspaceSnapshot,
     sections: &[crate::session::SectionConfig],
     in_progress_limit: Option<u32>,
     agent_states: &HashMap<SessionId, AgentState>,
     collapsed_sections: &std::collections::HashSet<String>,
 ) -> Vec<SessionListItem> {
-    let sessions: Vec<crate::session::WorktreeSession> = state.sessions.values().cloned().collect();
-    let groups = crate::session::build_sections(&sessions, sections);
+    let by_id = session_index(snapshot);
+    let groups = crate::session::build_sections(&snapshot.sessions, sections);
 
-    let mut projects: Vec<_> = state.projects.values().collect();
+    let mut projects: Vec<&ProjectInfo> = snapshot.projects.iter().collect();
     projects.sort_by(|a, b| a.name.cmp(&b.name));
 
     let mut items = Vec::new();
@@ -913,7 +938,7 @@ pub(super) fn build_section_grouped_items(
             Default::default();
         let mut project_order: Vec<crate::session::ProjectId> = Vec::new();
         for sid in &group.sessions {
-            if let Some(session) = state.sessions.get(sid) {
+            if let Some(session) = by_id.get(sid) {
                 by_project.entry(session.project_id).or_default().push(*sid);
                 if !project_order.contains(&session.project_id) {
                     project_order.push(session.project_id);
@@ -939,7 +964,7 @@ pub(super) fn build_section_grouped_items(
             });
             if let Some(sids) = project_sessions {
                 for sid in sids {
-                    if let Some(session) = state.sessions.get(sid) {
+                    if let Some(session) = by_id.get(sid).copied() {
                         items.push(worktree_item(session, agent_states, None, false));
                     }
                 }
@@ -954,7 +979,7 @@ pub(super) fn build_section_grouped_items(
 /// `section_override` walked closest-to-leaf-first), and stack indentation is
 /// preserved via `stacked_child: true` on non-root members.
 pub(super) fn build_stacked_section_items(
-    state: &crate::config::AppState,
+    snapshot: &WorkspaceSnapshot,
     sections: &[crate::session::SectionConfig],
     in_progress_limit: Option<u32>,
     agent_states: &HashMap<SessionId, AgentState>,
@@ -974,9 +999,11 @@ pub(super) fn build_stacked_section_items(
         order: Vec<(SessionId, bool)>,
     }
 
+    let by_id = session_index(snapshot);
+
     // Stable project order. Ties on `name` (unusual but possible) fall
     // back to project id so we never depend on HashMap iteration order.
-    let mut projects: Vec<_> = state.projects.values().collect();
+    let mut projects: Vec<&ProjectInfo> = snapshot.projects.iter().collect();
     projects.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
 
     // section_name → project_id → Vec<GroupRender>
@@ -991,25 +1018,29 @@ pub(super) fn build_stacked_section_items(
         // Sort by (created_at, id) so any downstream max_by_key on this
         // slice (e.g. fan-out children with identical created_at in
         // `stack_top`) picks a deterministic winner.
-        let mut project_sessions: Vec<&WorktreeSession> = state
+        let mut project_sessions: Vec<&SessionInfo> = snapshot
             .sessions
-            .values()
+            .iter()
             .filter(|s| s.project_id == project.id)
             .collect();
         if project_sessions.is_empty() {
             continue;
         }
-        project_sessions.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        project_sessions.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then(a.session_id.cmp(&b.session_id))
+        });
 
         // Bucket every session by its stack root (returns self for
         // unstacked). Track first-encounter root order so we iterate
         // groups deterministically below without leaking
         // HashMap-iteration order into the output.
-        let mut groups: std::collections::HashMap<SessionId, Vec<&WorktreeSession>> =
+        let mut groups: std::collections::HashMap<SessionId, Vec<&SessionInfo>> =
             std::collections::HashMap::new();
         let mut group_roots: Vec<SessionId> = Vec::new();
         for s in &project_sessions {
-            let root_id = crate::session::stack_root(s.id, &project_sessions);
+            let root_id = crate::session::stack_root(s.session_id, &project_sessions);
             if !groups.contains_key(&root_id) {
                 group_roots.push(root_id);
             }
@@ -1020,7 +1051,7 @@ pub(super) fn build_stacked_section_items(
             let members = groups.remove(&root_id).unwrap_or_default();
             // Pick the leaf in the whole subgraph; its section drives placement.
             let leaf_id = crate::session::stack_top(root_id, &project_sessions);
-            let Some(leaf) = members.iter().find(|s| s.id == leaf_id).copied() else {
+            let Some(leaf) = members.iter().find(|s| s.session_id == leaf_id).copied() else {
                 continue;
             };
 
@@ -1028,9 +1059,13 @@ pub(super) fn build_stacked_section_items(
             // wins (stale ones are skipped, see below); overrides on off-path
             // siblings are not considered.
             let mut effective: Option<String> = None;
-            let mut cursor = leaf.id;
+            let mut cursor = leaf.session_id;
             for _ in 0..project_sessions.len() {
-                let Some(cur) = project_sessions.iter().find(|s| s.id == cursor).copied() else {
+                let Some(cur) = project_sessions
+                    .iter()
+                    .find(|s| s.session_id == cursor)
+                    .copied()
+                else {
                     break;
                 };
                 // Only a *valid* override stops the walk. A stale override
@@ -1066,7 +1101,7 @@ pub(super) fn build_stacked_section_items(
                 .entry(project.id)
                 .or_default()
                 .push(GroupRender {
-                    sort_key: leaf.entered_section_at,
+                    sort_key: leaf.entered_section_at.unwrap_or_default(),
                     leaf_id,
                     order,
                 });
@@ -1133,7 +1168,7 @@ pub(super) fn build_stacked_section_items(
                 .sort_by(|a, b| a.sort_key.cmp(&b.sort_key).then(a.leaf_id.cmp(&b.leaf_id)));
             for group in groups_in_proj {
                 for (sid, stacked_child) in group.order {
-                    if let Some(session) = state.sessions.get(&sid) {
+                    if let Some(session) = by_id.get(&sid).copied() {
                         items.push(worktree_item(session, agent_states, None, stacked_child));
                     }
                 }
@@ -1400,7 +1435,11 @@ mod stack_order_tests {
         }
     }
 
-    fn appstate_from(sessions: Vec<WorktreeSession>) -> crate::config::AppState {
+    /// Build the DTO [`WorkspaceSnapshot`] the tree builders now consume, from a
+    /// list of domain sessions — same shaped input as before, projected through
+    /// the production `workspace_snapshot_from_state` so tests exercise the real
+    /// conversion path.
+    fn appstate_from(sessions: Vec<WorktreeSession>) -> WorkspaceSnapshot {
         let mut state = crate::config::AppState::default();
         // Group sessions by their project_id so projects with multiple
         // worktrees stay linked correctly.
@@ -1420,7 +1459,7 @@ mod stack_order_tests {
             state.projects.get_mut(&pid).unwrap().add_worktree(s.id);
             state.sessions.insert(s.id, s);
         }
-        state
+        workspace_snapshot_from_state(&state)
     }
 
     #[test]
@@ -2087,10 +2126,14 @@ mod stack_order_tests {
             "expected at least 100 sessions, got {session_count}"
         );
         let collapsed = std::collections::HashSet::new();
+        // Project into the DTO snapshot the builders now consume, once, outside
+        // the timed loop — we measure the builders, not snapshot construction
+        // (the cached snapshot is built on change, not per refresh).
+        let snapshot = workspace_snapshot_from_state(&state);
 
         // Warm up so the first-touch allocation cost doesn't dominate the timing.
         for _ in 0..50 {
-            std::hint::black_box(build_project_grouped_items(&state, &agent_states));
+            std::hint::black_box(build_project_grouped_items(&snapshot, &agent_states));
         }
 
         let iterations = 2_000u32;
@@ -2111,11 +2154,11 @@ mod stack_order_tests {
         };
 
         time("project_grouped", &mut || {
-            std::hint::black_box(build_project_grouped_items(&state, &agent_states));
+            std::hint::black_box(build_project_grouped_items(&snapshot, &agent_states));
         });
         time("section_grouped", &mut || {
             std::hint::black_box(build_section_grouped_items(
-                &state,
+                &snapshot,
                 &sections,
                 Some(5),
                 &agent_states,
@@ -2124,7 +2167,7 @@ mod stack_order_tests {
         });
         time("section_stacks", &mut || {
             std::hint::black_box(build_stacked_section_items(
-                &state,
+                &snapshot,
                 &sections,
                 Some(5),
                 &agent_states,

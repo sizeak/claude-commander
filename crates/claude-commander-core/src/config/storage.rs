@@ -227,7 +227,7 @@ impl AppState {
                 let derived = if let Some(pr_base) = s.pr_base_branch.clone() {
                     pr_base
                 } else if let Some(parent_id) =
-                    crate::session::resolve_stack_parent(s, &project_sessions)
+                    crate::session::resolve_stack_parent(*s, &project_sessions)
                 {
                     match project_sessions.iter().find(|p| p.id == parent_id) {
                         Some(parent) => parent.branch.clone(),
@@ -266,7 +266,7 @@ impl AppState {
         let deleted = project_sessions.iter().find(|s| s.id == *deleted_id)?;
         let deleted_branch = deleted.branch.clone();
 
-        let new_parent_id = crate::session::resolve_stack_parent(deleted, &project_sessions);
+        let new_parent_id = crate::session::resolve_stack_parent(*deleted, &project_sessions);
         let new_base_branch = new_parent_id
             .and_then(|pid| project_sessions.iter().find(|s| s.id == pid))
             .map(|p| p.branch.clone())
@@ -274,7 +274,7 @@ impl AppState {
         let child_ids = project_sessions
             .iter()
             .filter(|s| {
-                crate::session::resolve_stack_parent(s, &project_sessions) == Some(*deleted_id)
+                crate::session::resolve_stack_parent(**s, &project_sessions) == Some(*deleted_id)
             })
             .map(|s| s.id)
             .collect();
