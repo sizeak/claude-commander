@@ -633,6 +633,19 @@ impl DiffReviewState {
         self.clamp_tree_cursor();
     }
 
+    /// Select the first file not yet marked reviewed (in tree/display order),
+    /// falling back to the first file when every file is reviewed. Called once
+    /// after the reviewed set is populated so opening the view lands on the
+    /// first file still needing attention rather than always the first file.
+    pub(super) fn select_first_unreviewed(&mut self) {
+        if let Some(idx) = first_unreviewed_file_index(&self.file_tree, &self.diff, &self.reviewed)
+            .or_else(|| first_file_index(&self.file_tree))
+        {
+            self.set_body_file(idx);
+            self.sync_tree_cursor_to_file();
+        }
+    }
+
     /// Jump the body to the next unreviewed file after the current one (in
     /// diff order), wrapping around; stays put when every file is reviewed.
     fn advance_to_next_unreviewed(&mut self) {
@@ -1295,6 +1308,7 @@ impl App {
                     );
                     state.content_hash = content_hash;
                     state.reviewed = snapshot.reviewed.into_iter().collect();
+                    state.select_first_unreviewed();
                     self.reset_review_images();
                     self.ensure_review_image(&state).await;
                     self.ui_state.modal = Modal::ReviewDiff(Box::new(state));
@@ -1441,7 +1455,8 @@ impl App {
             // Esc cancels an in-progress selection first; otherwise closes.
             KeyCode::Esc if state.visual_anchor.is_none() => return,
             KeyCode::Esc => state.visual_anchor = None,
-            KeyCode::Tab => state.toggle_focus(),
+            // Binary focus toggle: Shift+Tab is its own reverse, same as Tab.
+            KeyCode::Tab | KeyCode::BackTab => state.toggle_focus(),
             KeyCode::Char(']') => state.next_file(),
             KeyCode::Char('[') => state.prev_file(),
             KeyCode::Down | KeyCode::Char('j') => match state.focus {
@@ -2325,17 +2340,34 @@ fn collect_completed_dirs(
     }
 }
 
-/// Index of the first file in tree order (depth-first), if any.
-fn first_file_index(nodes: &[TreeNode]) -> Option<usize> {
+/// First file index in tree order (depth-first) whose index satisfies `pred`,
+/// if any. `first_file_index` and `first_unreviewed_file_index` are thin
+/// predicate wrappers over this walker.
+fn find_file_index(nodes: &[TreeNode], pred: &impl Fn(usize) -> bool) -> Option<usize> {
     for node in nodes {
-        if let Some(i) = node.file_index {
+        if let Some(i) = node.file_index.filter(|&i| pred(i)) {
             return Some(i);
         }
-        if let Some(i) = first_file_index(&node.children) {
+        if let Some(i) = find_file_index(&node.children, pred) {
             return Some(i);
         }
     }
     None
+}
+
+/// Index of the first file in tree order (depth-first), if any.
+fn first_file_index(nodes: &[TreeNode]) -> Option<usize> {
+    find_file_index(nodes, &|_| true)
+}
+
+/// First file index (in tree display order) whose file is not marked reviewed,
+/// or `None` when every file is reviewed.
+fn first_unreviewed_file_index(
+    nodes: &[TreeNode],
+    diff: &ParsedDiff,
+    reviewed: &HashSet<String>,
+) -> Option<usize> {
+    find_file_index(nodes, &|i| !reviewed.contains(diff.files[i].display_path()))
 }
 
 /// One-character marker for a file's change status.
@@ -3690,6 +3722,25 @@ diff --git a/c.rs b/c.rs
             diff,
             Vec::new(),
         )
+    }
+
+    #[test]
+    fn opens_on_first_unreviewed_file() {
+        let mut s = state_with_three_files();
+        s.reviewed = ["a.rs".to_string()].into_iter().collect();
+        s.select_first_unreviewed();
+        assert_eq!(s.selected_file, 1, "skips reviewed a.rs, lands on b.rs");
+    }
+
+    #[test]
+    fn opens_on_first_file_when_all_reviewed() {
+        let mut s = state_with_three_files();
+        s.reviewed = ["a.rs", "b.rs", "c.rs"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        s.select_first_unreviewed();
+        assert_eq!(s.selected_file, 0, "all reviewed falls back to first file");
     }
 
     #[test]

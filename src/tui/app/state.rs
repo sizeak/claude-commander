@@ -307,6 +307,7 @@ impl App {
                     let mut state = DiffReviewState::new(session_id, title, base, diff, comments);
                     state.content_hash = content_hash;
                     state.reviewed = reviewed.into_iter().collect();
+                    state.select_first_unreviewed();
                     state.prime_segments(segments);
                     self.reset_review_images();
                     self.ensure_review_image(&state).await;
