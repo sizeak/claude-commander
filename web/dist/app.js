@@ -398,6 +398,17 @@ function ensureTerm() {
   state.fit = new FitAddon.FitAddon();
   state.term.loadAddon(state.fit);
   state.term.open(els.terminal);
+  // Mobile keyboards apply autocorrect / predictive text / auto-capitalisation
+  // to xterm's hidden input textarea, which rewrites its contents and makes
+  // typed text re-send and duplicate/garble. Turn all of that off so each
+  // keystroke is forwarded verbatim, once.
+  if (state.term.textarea) {
+    const ta = state.term.textarea;
+    ta.setAttribute("autocorrect", "off");
+    ta.setAttribute("autocapitalize", "off");
+    ta.setAttribute("autocomplete", "off");
+    ta.setAttribute("spellcheck", "false");
+  }
   // Fit after layout settles — calling fit() synchronously right after open()
   // can measure a zero/short container and pick the wrong size.
   requestAnimationFrame(() => fitNow());
