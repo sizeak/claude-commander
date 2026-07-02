@@ -49,7 +49,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Run Clippy
-        run: nix develop -c cargo clippy --all-targets -- -D warnings
+        run: nix develop -c cargo clippy --workspace --all-targets -- -D warnings
 
   nix:
     name: Nix Build
@@ -110,7 +110,68 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Build
-        run: nix develop -c cargo build --all-targets
+        run: nix develop -c cargo build --workspace --all-targets
 
       - name: Run Tests
-        run: nix develop -c cargo test
+        run: nix develop -c cargo test --workspace
+
+  client:
+    name: Client Tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The Flutter + host-Rust + Linux-desktop toolchain comes from the slim
+      # `clientCi` dev shell in flake.nix (no Android SDK/NDK). tmux + git are
+      # present for the hermetic server the e2e boots.
+      - name: Install Nix
+        uses: nixbuild/nix-quick-install-action@v30
+        with:
+          nix_conf: |
+            keep-env-derivations = true
+            keep-outputs = true
+
+      - name: Restore Nix Store Cache
+        uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-client-${{ runner.os }}-${{ hashFiles('**/flake.lock', '**/Cargo.lock', 'client/pubspec.lock') }}
+          restore-prefixes-first-match: nix-client-${{ runner.os }}-
+
+      - name: Restore Cargo Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: client/rust
+
+      # The Flutter SDK comes from the Nix store (cached above); this caches the
+      # downloaded pub packages so `flutter pub get` doesn't re-fetch every run.
+      - name: Restore Pub Cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ hashFiles('client/pubspec.lock') }}
+          restore-keys: pub-${{ runner.os }}-
+
+      - name: Fetch Flutter Packages
+        run: nix develop .#clientCi -c bash -c 'cd client && flutter pub get'
+
+      - name: Analyze Dart
+        run: nix develop .#clientCi -c bash -c 'cd client && flutter analyze lib test integration_test'
+
+      - name: Run Dart Unit Tests
+        run: nix develop .#clientCi -c bash -c 'cd client && flutter test'
+
+      - name: Run cdylib Integration Tests
+        run: nix develop .#clientCi -c bash -c 'cd client/rust && cargo test'
+
+      # DISABLED for this PR: the headless Linux GUI e2e (flutter test
+      # integration_test under xvfb) builds fine but the app fails to *launch*
+      # in CI — it needs a full headless GUI runtime (D-Bus session + a secret
+      # service for flutter_secure_storage_linux, software GL). Standing that up
+      # is its own task; tracked as a follow-up. The client is still covered by
+      # the Dart unit tests and the cdylib integration tests above.
+      #
+      # When re-enabling, cargokit resolves `rustup` from ~/.cargo/bin *before*
+      # PATH, so the shim must be linked there first (else `rustc -vV` 127):
+      #   - name: Run Linux End-to-End Tests
+      #     run: nix develop .#clientCi -c bash -c 'mkdir -p ~/.cargo/bin && ln -sf "$(command -v rustup)" ~/.cargo/bin/rustup && xvfb-run -a client/tool/e2e.sh'

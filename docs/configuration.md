@@ -75,6 +75,12 @@ ui_refresh_fps = 30
 # Custom worktrees directory (default: platform-specific, see Data Storage below)
 # worktrees_dir = "/path/to/worktrees"
 
+# Isolate every tmux command onto a throwaway socket dir (default: unset).
+# For hermetic tests and the e2e harness ONLY — leave unset for normal use.
+# When set, tmux commands run with TMUX_TMPDIR=<dir> and $TMUX/$TMUX_PANE
+# stripped, so they hit a per-run tmux server instead of your real one.
+# tmux_tmpdir = "/path/to/throwaway/tmux"
+
 # Organize worktrees into per-repository subdirectories (default: false)
 # per_repo_worktree_dirs = true
 
@@ -246,9 +252,12 @@ volume = 1.0                             # 0.0–2.0
 | `prose_only` (default) | Strip code blocks and markdown; speak the natural-language prose |
 | `verbatim` | Speak the text unchanged |
 
-> **Build note:** in-process playback uses `rodio`, which links **ALSA** on Linux. Building from
-> source needs the ALSA development headers (`libasound2-dev` on Debian/Ubuntu, `alsa-lib` on
-> Arch). The Nix dev shell provides them automatically.
+> **Build note:** in-process playback (`rodio`) and microphone capture (`cpal`) link **ALSA** on
+> Linux. They're gated behind the `audio` cargo feature, which is **on by default** — so building
+> the TUI (`claude-commander`) from source needs the ALSA development headers (`libasound2-dev` on
+> Debian/Ubuntu, `alsa-lib` on Arch); the default Nix dev shell provides them automatically. The
+> headless server and the Flutter client build with `audio` off (`default-features = false`) and
+> never link ALSA — remote clients do capture/playback on-device instead.
 
 ## Voice input (STT)
 
