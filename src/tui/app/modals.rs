@@ -209,9 +209,13 @@ pub(super) fn build_input_modal_lines(
         lines.push(Line::from(Span::styled(h.to_string(), italic_info)));
     }
 
-    // Footer hint (context-sensitive), separated by a blank line.
+    // Footer hint (context-sensitive), separated by a blank line. On the name
+    // row Space types a literal space, so only advertise "Space choose" when a
+    // picker row is focused.
     let footer = if expanded {
         "↑↓ choose · Enter select · Esc close"
+    } else if focus == InputFocus::Name {
+        "↑↓ move · Enter create · Esc cancel"
     } else {
         "↑↓ move · Space choose · Enter create · Esc cancel"
     };
@@ -1292,6 +1296,23 @@ mod tests {
             row_style(&lines, "Codex  (codex --yolo)").expect("selected program row rendered");
         assert_eq!(sel.bg, Theme::basic().selection().bg);
         assert!(sel.bg.is_some());
+    }
+
+    #[test]
+    fn project_dropdown_caps_visible_rows_at_the_scroll_window() {
+        // A list longer than `max_rows` must render only the scroll window, so
+        // the modal can't grow off-screen.
+        let names: Vec<String> = (0..20).map(|i| format!("proj{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let choices = project_choices(&refs);
+        let project = ProjectPicker::new(choices.clone(), choices[0].id);
+
+        let (lines, _) = build("", Some(&project), None, InputFocus::Project, true);
+        let item_rows = lines
+            .iter()
+            .filter(|l| line_text(l).trim().starts_with("proj"))
+            .count();
+        assert_eq!(item_rows, MAX_ROWS);
     }
 
     #[test]

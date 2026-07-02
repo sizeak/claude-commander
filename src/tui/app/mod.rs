@@ -256,10 +256,11 @@ pub enum Modal {
         /// Which field currently has focus. Tab cycles through the fields that
         /// are present (see `InputFocus::next`).
         focus: InputFocus,
-        /// Whether the focused picker row's dropdown is expanded. Only
-        /// meaningful when `focus` is `Project`/`Program`; moving focus resets
-        /// it to false. `expanded && focus == Project` means the project
-        /// dropdown is open (and likewise for the program picker).
+        /// Whether the focused picker row's dropdown is expanded.
+        /// `expanded && focus == Project` means the project dropdown is open
+        /// (and likewise for the program picker). Focus cannot move while a
+        /// dropdown is open (Tab/arrows are captured by the dropdown), so the
+        /// flag stays consistent with `focus` without needing an explicit reset.
         expanded: bool,
     },
     /// Confirmation modal

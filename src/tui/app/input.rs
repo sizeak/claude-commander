@@ -229,7 +229,22 @@ fn handle_input_modal_key(modal: &mut Modal, key: crossterm::event::KeyEvent) ->
     let has_project = project_picker.is_some();
     let has_program = program_picker.is_some();
     match key.code {
-        KeyCode::Enter => return InputKeyOutcome::Submit,
+        KeyCode::Enter => {
+            // A project picker with no current match has nothing to create
+            // under. Rather than silently ignore Enter, reopen the Project
+            // dropdown so the `(no matching projects)` row is visible and the
+            // user can see why — and keep the gate here (pure + testable)
+            // rather than in the `App` caller.
+            if project_picker
+                .as_ref()
+                .is_some_and(|p| p.selected_id().is_none())
+            {
+                *focus = InputFocus::Project;
+                *expanded = true;
+                return InputKeyOutcome::Handled;
+            }
+            return InputKeyOutcome::Submit;
+        }
         KeyCode::Esc => return InputKeyOutcome::Cancel,
         KeyCode::Tab | KeyCode::Down => *focus = focus.next(has_project, has_program),
         KeyCode::BackTab | KeyCode::Up => *focus = focus.prev(has_project, has_program),
@@ -516,6 +531,8 @@ impl App {
                     InputKeyOutcome::Handled => {}
                     InputKeyOutcome::Cancel => self.ui_state.modal = Modal::None,
                     InputKeyOutcome::Submit => {
+                        // `handle_input_modal_key` only returns `Submit` once a
+                        // project (if any) is selectable, so no re-gating here.
                         let Modal::Input {
                             value,
                             on_submit,
@@ -526,15 +543,6 @@ impl App {
                         else {
                             return;
                         };
-                        // A project picker showing no matches has nothing to
-                        // create under — keep the dialog open so the user can
-                        // fix the filter.
-                        let no_project = project_picker
-                            .as_ref()
-                            .is_some_and(|p| p.selected_id().is_none());
-                        if no_project {
-                            return;
-                        }
                         let mut action = on_submit.clone();
                         // A chosen project overrides the one baked in at open time.
                         if let (InputAction::CreateSession { project_id, .. }, Some(picker)) =
@@ -1838,6 +1846,48 @@ diff --git a/a.rs b/a.rs
             InputKeyOutcome::Handled
         );
         assert!(!expanded_of(&m));
+    }
+
+    #[test]
+    fn enter_with_no_matching_project_reopens_dropdown_instead_of_submitting() {
+        let mut m = session_modal(Some(project_fixture(&["alpha", "beta"], 0)), None);
+        // Filter to nothing so the picker has no selectable project.
+        match &mut m {
+            Modal::Input {
+                project_picker: Some(p),
+                ..
+            } => {
+                p.filter = "zzz".to_string();
+                p.apply_filter();
+                assert!(p.selected_id().is_none());
+            }
+            _ => panic!("not an Input modal with project picker"),
+        }
+        // Enter must not submit; it reopens the Project dropdown so the empty
+        // result is visible.
+        assert_eq!(
+            handle_input_modal_key(&mut m, key(KeyCode::Enter)),
+            InputKeyOutcome::Handled
+        );
+        assert_eq!(focus_of(&m), InputFocus::Project);
+        assert!(expanded_of(&m));
+    }
+
+    #[test]
+    fn enter_submits_from_a_collapsed_picker_row_with_a_valid_selection() {
+        let mut m = session_modal(
+            Some(project_fixture(&["alpha"], 0)),
+            Some(program_fixture(&["claude"], 0)),
+        );
+        // Name → Project → Program, all collapsed, valid selections.
+        handle_input_modal_key(&mut m, key(KeyCode::Down));
+        handle_input_modal_key(&mut m, key(KeyCode::Down));
+        assert_eq!(focus_of(&m), InputFocus::Program);
+        assert!(!expanded_of(&m));
+        assert_eq!(
+            handle_input_modal_key(&mut m, key(KeyCode::Enter)),
+            InputKeyOutcome::Submit
+        );
     }
 
     #[test]
