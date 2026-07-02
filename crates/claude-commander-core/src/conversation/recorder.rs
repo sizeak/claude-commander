@@ -177,7 +177,7 @@ where
 
 /// Encode mono f32 samples (`-1.0..=1.0`) as 16-bit PCM WAV bytes.
 #[cfg(feature = "audio")]
-pub fn encode_wav(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, String> {
+pub(crate) fn encode_wav(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, String> {
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate,
