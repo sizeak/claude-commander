@@ -112,6 +112,171 @@ fn palette_text_char(key: &crossterm::event::KeyEvent) -> Option<char> {
     None
 }
 
+/// Re-list the highlighted project's branches so the New Session dialog's
+/// existing-branch collision hint tracks the project the user is now targeting.
+/// Results are memoized per repo path in the picker, so listing runs at most
+/// once per project rather than on every navigation keystroke.
+fn refresh_branch_hint(
+    existing_branches: &mut Option<Vec<String>>,
+    picker: &mut super::ProjectPicker,
+) {
+    let Some(path) = picker.selected_repo_path() else {
+        *existing_branches = None;
+        return;
+    };
+    *existing_branches = picker
+        .branch_cache
+        .entry(path.clone())
+        .or_insert_with(|| super::actions::existing_branch_names(&path))
+        .clone();
+}
+
+/// Result of routing a key through the New Session (`Modal::Input`) dialog.
+#[derive(Debug, PartialEq, Eq)]
+enum InputKeyOutcome {
+    /// The key mutated in-modal state (focus, expansion, filter, name text) and
+    /// the dialog stays open.
+    Handled,
+    /// Submit the dialog (create the session / apply the input action).
+    Submit,
+    /// Close the dialog without submitting.
+    Cancel,
+}
+
+/// Pure key routing for the New Session dialog, mirroring `apply_paste_to_modal`
+/// so it can be unit-tested without an `App`. Owns focus movement, dropdown
+/// expand/collapse, project-filter editing, and name-field editing. Returns
+/// `Submit`/`Cancel` for the two outcomes the caller must action (they need
+/// `App` to run); everything else is `Handled`.
+///
+/// Interaction (collapsed): ↑/↓ and Tab/Shift+Tab move focus between the present
+/// rows; Enter submits; Esc cancels; on a picker row Space/→ opens the dropdown,
+/// and typing on the Project row opens it and starts filtering. Expanded: ↑/↓
+/// navigate the picker, Enter/Space/→ confirm-and-collapse, Esc collapses, and
+/// (Project only) characters filter.
+fn handle_input_modal_key(modal: &mut Modal, key: crossterm::event::KeyEvent) -> InputKeyOutcome {
+    use super::InputFocus;
+    use crossterm::event::KeyCode;
+    let Modal::Input {
+        value,
+        existing_branches,
+        project_picker,
+        program_picker,
+        focus,
+        expanded,
+        ..
+    } = modal
+    else {
+        return InputKeyOutcome::Handled;
+    };
+
+    // --- Expanded: keys drive the open dropdown. ---
+    if *expanded {
+        match focus {
+            InputFocus::Project => {
+                let Some(picker) = project_picker.as_mut() else {
+                    *expanded = false;
+                    return InputKeyOutcome::Handled;
+                };
+                match key.code {
+                    KeyCode::Up => {
+                        picker.select_up();
+                        refresh_branch_hint(existing_branches, picker);
+                    }
+                    KeyCode::Down => {
+                        picker.select_down();
+                        refresh_branch_hint(existing_branches, picker);
+                    }
+                    KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Right | KeyCode::Esc => {
+                        *expanded = false;
+                    }
+                    KeyCode::Backspace => {
+                        if picker.filter.pop().is_some() {
+                            picker.apply_filter();
+                            refresh_branch_hint(existing_branches, picker);
+                        }
+                    }
+                    _ => {
+                        if let Some(c) = palette_text_char(&key) {
+                            picker.filter.push(c);
+                            picker.apply_filter();
+                            refresh_branch_hint(existing_branches, picker);
+                        }
+                    }
+                }
+            }
+            InputFocus::Program => {
+                let Some(picker) = program_picker.as_mut() else {
+                    *expanded = false;
+                    return InputKeyOutcome::Handled;
+                };
+                match key.code {
+                    KeyCode::Up => picker.select_up(),
+                    KeyCode::Down => picker.select_down(),
+                    KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Right | KeyCode::Esc => {
+                        *expanded = false;
+                    }
+                    _ => {}
+                }
+            }
+            // The name field never expands; treat as a stray state and reset.
+            InputFocus::Name => *expanded = false,
+        }
+        return InputKeyOutcome::Handled;
+    }
+
+    // --- Collapsed: Enter/Esc act on the whole dialog; movement + activation. ---
+    let has_project = project_picker.is_some();
+    let has_program = program_picker.is_some();
+    match key.code {
+        KeyCode::Enter => {
+            // A project picker with no current match has nothing to create
+            // under. Rather than silently ignore Enter, reopen the Project
+            // dropdown so the `(no matching projects)` row is visible and the
+            // user can see why — and keep the gate here (pure + testable)
+            // rather than in the `App` caller.
+            if project_picker
+                .as_ref()
+                .is_some_and(|p| p.selected_id().is_none())
+            {
+                *focus = InputFocus::Project;
+                *expanded = true;
+                return InputKeyOutcome::Handled;
+            }
+            return InputKeyOutcome::Submit;
+        }
+        KeyCode::Esc => return InputKeyOutcome::Cancel,
+        KeyCode::Tab | KeyCode::Down => *focus = focus.next(has_project, has_program),
+        KeyCode::BackTab | KeyCode::Up => *focus = focus.prev(has_project, has_program),
+        _ => match focus {
+            InputFocus::Name => {
+                super::edit_text_input(value, key);
+            }
+            InputFocus::Project => match key.code {
+                // Space / → open the dropdown.
+                KeyCode::Char(' ') | KeyCode::Right if has_project => *expanded = true,
+                // Typing a filter char opens the dropdown and starts filtering.
+                _ => {
+                    if let (Some(picker), Some(c)) =
+                        (project_picker.as_mut(), palette_text_char(&key))
+                    {
+                        *expanded = true;
+                        picker.filter.push(c);
+                        picker.apply_filter();
+                        refresh_branch_hint(existing_branches, picker);
+                    }
+                }
+            },
+            InputFocus::Program => {
+                if matches!(key.code, KeyCode::Char(' ') | KeyCode::Right) && has_program {
+                    *expanded = true;
+                }
+            }
+        },
+    }
+    InputKeyOutcome::Handled
+}
+
 impl App {
     pub(super) async fn handle_input(&mut self, input: InputEvent) {
         match input {
@@ -358,49 +523,41 @@ impl App {
         }
 
         match &mut self.ui_state.modal {
-            Modal::Input {
-                value,
-                on_submit,
-                program_picker,
-                ..
-            } => match key.code {
-                KeyCode::Enter => {
-                    let action = on_submit.clone();
-                    let value = value.value().to_string();
-                    let program = program_picker.as_ref().and_then(|p| p.selected_command());
-                    self.ui_state.modal = Modal::None;
-                    self.handle_input_submit(action, value, program).await;
-                }
-                KeyCode::Esc => {
-                    self.ui_state.modal = Modal::None;
-                }
-                // Tab toggles focus between the name field and the program list.
-                // Shift+Tab is its own reverse, same as Tab.
-                KeyCode::Tab | KeyCode::BackTab => {
-                    if let Some(picker) = program_picker.as_mut() {
-                        picker.focus_program = !picker.focus_program;
+            Modal::Input { .. } => {
+                // All in-modal routing (focus, dropdown expand/collapse, filter
+                // editing) lives in the pure `handle_input_modal_key` helper so
+                // it is unit-testable without an `App`.
+                match handle_input_modal_key(&mut self.ui_state.modal, key) {
+                    InputKeyOutcome::Handled => {}
+                    InputKeyOutcome::Cancel => self.ui_state.modal = Modal::None,
+                    InputKeyOutcome::Submit => {
+                        // `handle_input_modal_key` only returns `Submit` once a
+                        // project (if any) is selectable, so no re-gating here.
+                        let Modal::Input {
+                            value,
+                            on_submit,
+                            project_picker,
+                            program_picker,
+                            ..
+                        } = &self.ui_state.modal
+                        else {
+                            return;
+                        };
+                        let mut action = on_submit.clone();
+                        // A chosen project overrides the one baked in at open time.
+                        if let (InputAction::CreateSession { project_id, .. }, Some(picker)) =
+                            (&mut action, project_picker.as_ref())
+                            && let Some(chosen) = picker.selected_id()
+                        {
+                            *project_id = chosen;
+                        }
+                        let value = value.value().to_string();
+                        let program = program_picker.as_ref().and_then(|p| p.selected_command());
+                        self.ui_state.modal = Modal::None;
+                        self.handle_input_submit(action, value, program).await;
                     }
                 }
-                // Up/Down move the program selection only while the list is
-                // focused; otherwise they're inert (the name field is one line).
-                KeyCode::Up => {
-                    if let Some(picker) = program_picker.as_mut().filter(|p| p.focus_program) {
-                        picker.select_up();
-                    }
-                }
-                KeyCode::Down => {
-                    if let Some(picker) = program_picker.as_mut().filter(|p| p.focus_program) {
-                        picker.select_down();
-                    }
-                }
-                // Other keys edit the name unless the program list has focus.
-                _ => {
-                    let name_focused = program_picker.as_ref().is_none_or(|p| !p.focus_program);
-                    if name_focused {
-                        super::edit_text_input(value, key);
-                    }
-                }
-            },
+            }
 
             Modal::PathInput {
                 value,
@@ -1365,7 +1522,10 @@ mod tests {
             value: value.into(),
             on_submit: InputAction::AddProject,
             existing_branches: None,
+            project_picker: None,
             program_picker: None,
+            focus: crate::tui::app::InputFocus::Name,
+            expanded: false,
         }
     }
 
@@ -1511,5 +1671,242 @@ diff --git a/a.rs b/a.rs
         let mut modal = Modal::Help { scroll: 0 };
         assert_eq!(apply_paste_to_modal(&mut modal, "hello"), None);
         assert!(matches!(modal, Modal::Help { scroll: 0 }));
+    }
+
+    // -----------------------------------------------------------------------
+    // handle_input_modal_key: pure routing for the New Session dialog —
+    // collapsed field focus, dropdown expand/collapse, filtering, submit.
+    // -----------------------------------------------------------------------
+
+    use crate::config::ProgramEntry;
+    use crate::tui::app::{InputFocus, ProgramPicker, ProjectChoice, ProjectPicker};
+
+    fn project_fixture(names: &[&str], selected: usize) -> ProjectPicker {
+        let choices: Vec<ProjectChoice> = names
+            .iter()
+            .map(|n| ProjectChoice {
+                id: ProjectId::new(),
+                name: n.to_string(),
+                repo_path: std::path::PathBuf::from(format!("/repos/{n}")),
+            })
+            .collect();
+        let id = choices[selected].id;
+        ProjectPicker::new(choices, id)
+    }
+
+    fn program_fixture(cmds: &[&str], selected: usize) -> ProgramPicker {
+        ProgramPicker {
+            choices: cmds
+                .iter()
+                .map(|c| ProgramEntry {
+                    label: c.to_string(),
+                    command: c.to_string(),
+                })
+                .collect(),
+            selected,
+        }
+    }
+
+    fn session_modal(project: Option<ProjectPicker>, program: Option<ProgramPicker>) -> Modal {
+        Modal::Input {
+            title: String::new(),
+            prompt: String::new(),
+            value: "".into(),
+            on_submit: InputAction::AddProject,
+            existing_branches: None,
+            project_picker: project,
+            program_picker: program,
+            focus: InputFocus::Name,
+            expanded: false,
+        }
+    }
+
+    fn focus_of(m: &Modal) -> InputFocus {
+        match m {
+            Modal::Input { focus, .. } => *focus,
+            _ => panic!("not an Input modal"),
+        }
+    }
+
+    fn expanded_of(m: &Modal) -> bool {
+        match m {
+            Modal::Input { expanded, .. } => *expanded,
+            _ => panic!("not an Input modal"),
+        }
+    }
+
+    #[test]
+    fn collapsed_enter_submits_and_esc_cancels() {
+        let mut m = session_modal(
+            Some(project_fixture(&["a", "b"], 0)),
+            Some(program_fixture(&["claude"], 0)),
+        );
+        assert_eq!(
+            handle_input_modal_key(&mut m, key(KeyCode::Enter)),
+            InputKeyOutcome::Submit
+        );
+        assert_eq!(
+            handle_input_modal_key(&mut m, key(KeyCode::Esc)),
+            InputKeyOutcome::Cancel
+        );
+    }
+
+    #[test]
+    fn arrows_move_focus_between_present_rows() {
+        let mut m = session_modal(
+            Some(project_fixture(&["a"], 0)),
+            Some(program_fixture(&["claude"], 0)),
+        );
+        handle_input_modal_key(&mut m, key(KeyCode::Down));
+        assert_eq!(focus_of(&m), InputFocus::Project);
+        handle_input_modal_key(&mut m, key(KeyCode::Down));
+        assert_eq!(focus_of(&m), InputFocus::Program);
+    }
+
+    #[test]
+    fn name_row_edits_text_and_stays_collapsed() {
+        let mut m = session_modal(Some(project_fixture(&["a"], 0)), None);
+        assert_eq!(
+            handle_input_modal_key(&mut m, key(KeyCode::Char('x'))),
+            InputKeyOutcome::Handled
+        );
+        match &m {
+            Modal::Input {
+                value,
+                focus,
+                expanded,
+                ..
+            } => {
+                assert_eq!(value.value(), "x");
+                assert_eq!(*focus, InputFocus::Name);
+                assert!(!expanded);
+            }
+            _ => panic!("not an Input modal"),
+        }
+    }
+
+    #[test]
+    fn space_opens_project_dropdown() {
+        let mut m = session_modal(Some(project_fixture(&["a", "b"], 0)), None);
+        handle_input_modal_key(&mut m, key(KeyCode::Down)); // focus Project
+        assert_eq!(focus_of(&m), InputFocus::Project);
+        assert_eq!(
+            handle_input_modal_key(&mut m, key(KeyCode::Char(' '))),
+            InputKeyOutcome::Handled
+        );
+        assert!(expanded_of(&m));
+    }
+
+    #[test]
+    fn typing_on_project_row_opens_and_filters() {
+        let mut m = session_modal(Some(project_fixture(&["alpha", "beta"], 0)), None);
+        handle_input_modal_key(&mut m, key(KeyCode::Down)); // focus Project
+        handle_input_modal_key(&mut m, key(KeyCode::Char('b')));
+        match &m {
+            Modal::Input {
+                expanded,
+                project_picker: Some(p),
+                ..
+            } => {
+                assert!(expanded);
+                assert_eq!(p.filter, "b");
+                assert_eq!(p.filtered.len(), 1); // only "beta" matches
+            }
+            _ => panic!("not an Input modal with project picker"),
+        }
+    }
+
+    #[test]
+    fn dropdown_navigation_then_enter_confirms_and_collapses() {
+        let mut m = session_modal(Some(project_fixture(&["alpha", "beta", "gamma"], 0)), None);
+        handle_input_modal_key(&mut m, key(KeyCode::Down)); // focus Project
+        handle_input_modal_key(&mut m, key(KeyCode::Char(' '))); // open
+        handle_input_modal_key(&mut m, key(KeyCode::Down)); // move to index 1
+        assert_eq!(
+            handle_input_modal_key(&mut m, key(KeyCode::Enter)),
+            InputKeyOutcome::Handled
+        );
+        assert!(!expanded_of(&m));
+        match &m {
+            Modal::Input {
+                project_picker: Some(p),
+                ..
+            } => assert_eq!(p.selected, 1),
+            _ => panic!("not an Input modal with project picker"),
+        }
+    }
+
+    #[test]
+    fn dropdown_esc_collapses_without_cancelling() {
+        let mut m = session_modal(Some(project_fixture(&["a", "b"], 0)), None);
+        handle_input_modal_key(&mut m, key(KeyCode::Down));
+        handle_input_modal_key(&mut m, key(KeyCode::Char(' ')));
+        assert!(expanded_of(&m));
+        assert_eq!(
+            handle_input_modal_key(&mut m, key(KeyCode::Esc)),
+            InputKeyOutcome::Handled
+        );
+        assert!(!expanded_of(&m));
+    }
+
+    #[test]
+    fn enter_with_no_matching_project_reopens_dropdown_instead_of_submitting() {
+        let mut m = session_modal(Some(project_fixture(&["alpha", "beta"], 0)), None);
+        // Filter to nothing so the picker has no selectable project.
+        match &mut m {
+            Modal::Input {
+                project_picker: Some(p),
+                ..
+            } => {
+                p.filter = "zzz".to_string();
+                p.apply_filter();
+                assert!(p.selected_id().is_none());
+            }
+            _ => panic!("not an Input modal with project picker"),
+        }
+        // Enter must not submit; it reopens the Project dropdown so the empty
+        // result is visible.
+        assert_eq!(
+            handle_input_modal_key(&mut m, key(KeyCode::Enter)),
+            InputKeyOutcome::Handled
+        );
+        assert_eq!(focus_of(&m), InputFocus::Project);
+        assert!(expanded_of(&m));
+    }
+
+    #[test]
+    fn enter_submits_from_a_collapsed_picker_row_with_a_valid_selection() {
+        let mut m = session_modal(
+            Some(project_fixture(&["alpha"], 0)),
+            Some(program_fixture(&["claude"], 0)),
+        );
+        // Name → Project → Program, all collapsed, valid selections.
+        handle_input_modal_key(&mut m, key(KeyCode::Down));
+        handle_input_modal_key(&mut m, key(KeyCode::Down));
+        assert_eq!(focus_of(&m), InputFocus::Program);
+        assert!(!expanded_of(&m));
+        assert_eq!(
+            handle_input_modal_key(&mut m, key(KeyCode::Enter)),
+            InputKeyOutcome::Submit
+        );
+    }
+
+    #[test]
+    fn program_only_modal_skips_project_and_selects() {
+        let mut m = session_modal(None, Some(program_fixture(&["claude", "codex"], 0)));
+        handle_input_modal_key(&mut m, key(KeyCode::Down)); // Name → Program (no project)
+        assert_eq!(focus_of(&m), InputFocus::Program);
+        handle_input_modal_key(&mut m, key(KeyCode::Char(' '))); // open
+        assert!(expanded_of(&m));
+        handle_input_modal_key(&mut m, key(KeyCode::Down)); // select index 1
+        handle_input_modal_key(&mut m, key(KeyCode::Enter)); // confirm
+        assert!(!expanded_of(&m));
+        match &m {
+            Modal::Input {
+                program_picker: Some(p),
+                ..
+            } => assert_eq!(p.selected, 1),
+            _ => panic!("not an Input modal with program picker"),
+        }
     }
 }

@@ -244,10 +244,24 @@ pub enum Modal {
         /// (i.e. remote-only `origin/<x>` is stored as just `<x>` to match
         /// `finalize_session`'s resolution logic).
         existing_branches: Option<Vec<String>>,
+        /// When `Some`, the dialog renders a filterable project picker beneath
+        /// the name field; the highlighted project becomes the session's target.
+        /// Only the plain New Session flow populates this — stacked sessions are
+        /// locked to the parent's project, and non-creating flows leave it `None`.
+        project_picker: Option<ProjectPicker>,
         /// When `Some`, the dialog renders a program picker beneath the name
         /// field and the chosen entry's command launches the session. `None`
         /// for Input flows that don't create sessions (Rename, AddProject…).
         program_picker: Option<ProgramPicker>,
+        /// Which field currently has focus. Tab cycles through the fields that
+        /// are present (see `InputFocus::next`).
+        focus: InputFocus,
+        /// Whether the focused picker row's dropdown is expanded.
+        /// `expanded && focus == Project` means the project dropdown is open
+        /// (and likewise for the program picker). Focus cannot move while a
+        /// dropdown is open (Tab/arrows are captured by the dropdown), so the
+        /// flag stays consistent with `focus` without needing an explicit reset.
+        expanded: bool,
     },
     /// Confirmation modal
     Confirm {
@@ -617,17 +631,62 @@ pub enum SettingsEditing {
     },
 }
 
+/// Which field of the New Session input modal currently has focus. Tab cycles
+/// through the fields that are present; the modal owns the value so the
+/// name/project/program sections stay mutually exclusive by construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputFocus {
+    /// The session-name text field (default on open).
+    Name,
+    /// The filterable project picker.
+    Project,
+    /// The program/agent picker.
+    Program,
+}
+
+impl InputFocus {
+    /// Ordered ring of the fields that exist; Name is always present.
+    fn ring(has_project: bool, has_program: bool) -> Vec<InputFocus> {
+        let mut ring = vec![InputFocus::Name];
+        if has_project {
+            ring.push(InputFocus::Project);
+        }
+        if has_program {
+            ring.push(InputFocus::Program);
+        }
+        ring
+    }
+
+    /// The next focus when Tab is pressed, skipping fields that aren't present.
+    /// Cycles Name → Project → Program → Name.
+    pub fn next(self, has_project: bool, has_program: bool) -> InputFocus {
+        let ring = Self::ring(has_project, has_program);
+        let idx = ring.iter().position(|f| *f == self).unwrap_or(0);
+        ring[(idx + 1) % ring.len()]
+    }
+
+    /// The previous focus when Shift+Tab is pressed, skipping absent fields.
+    /// Cycles Name → Program → Project → Name.
+    pub fn prev(self, has_project: bool, has_program: bool) -> InputFocus {
+        let ring = Self::ring(has_project, has_program);
+        let idx = ring.iter().position(|f| *f == self).unwrap_or(0);
+        ring[(idx + ring.len() - 1) % ring.len()]
+    }
+}
+
+/// Maximum project rows shown at once in the New Session project picker; the
+/// list scrolls to keep the highlighted row visible. Shared by the input
+/// handler (scroll bookkeeping) and the renderer.
+pub(super) const MAX_PROJECT_ROWS: usize = 6;
+
 /// Program-picker state embedded in the New Session input modal: the
-/// selectable harnesses, the highlighted index, and which field has focus.
+/// selectable harnesses and the highlighted index.
 #[derive(Debug, Clone)]
 pub struct ProgramPicker {
     /// Selectable harnesses, from `Config::program_choices`.
     pub choices: Vec<crate::config::ProgramEntry>,
     /// Index into `choices` of the highlighted entry.
     pub selected: usize,
-    /// `true` when the program list has focus (Up/Down change the selection);
-    /// `false` when the name field has focus (keys edit text). Tab toggles it.
-    pub focus_program: bool,
 }
 
 impl ProgramPicker {
@@ -646,6 +705,114 @@ impl ProgramPicker {
         if self.selected + 1 < self.choices.len() {
             self.selected += 1;
         }
+    }
+}
+
+/// A project that can be chosen as the target of a new session.
+#[derive(Debug, Clone)]
+pub struct ProjectChoice {
+    pub id: ProjectId,
+    pub name: String,
+    pub repo_path: PathBuf,
+}
+
+/// Filterable project-picker state embedded in the New Session input modal.
+/// `choices` holds every project (sorted by name); `filtered` is the subset
+/// matching `filter`, and `selected` indexes into `filtered`.
+#[derive(Debug, Clone)]
+pub struct ProjectPicker {
+    pub choices: Vec<ProjectChoice>,
+    pub filter: String,
+    pub filtered: Vec<usize>,
+    pub selected: usize,
+    /// First visible row (index into `filtered`) — keeps the highlight on
+    /// screen as the list scrolls, maintained via `adjust_list_scroll`.
+    pub scroll: usize,
+    /// Memoized branch lists per repo path, so switching the highlight only
+    /// lists a given project's branches once per dialog session.
+    pub branch_cache: HashMap<PathBuf, Option<Vec<String>>>,
+}
+
+impl ProjectPicker {
+    /// Build a picker over `choices`, highlighting `default` (falling back to
+    /// the first entry). The filter starts empty, so all choices are visible.
+    pub fn new(choices: Vec<ProjectChoice>, default: ProjectId) -> Self {
+        let filtered = (0..choices.len()).collect();
+        let selected = choices.iter().position(|c| c.id == default).unwrap_or(0);
+        let mut picker = Self {
+            choices,
+            filter: String::new(),
+            filtered,
+            selected,
+            scroll: 0,
+            branch_cache: HashMap::new(),
+        };
+        picker.adjust_scroll();
+        picker
+    }
+
+    /// Keep `scroll` positioned so the highlighted row stays visible, reusing
+    /// the same window helper as the other scrolling lists.
+    fn adjust_scroll(&mut self) {
+        self.scroll = actions::adjust_list_scroll(self.selected, self.scroll, MAX_PROJECT_ROWS);
+    }
+
+    /// The highlighted project, if any.
+    pub fn selected_choice(&self) -> Option<&ProjectChoice> {
+        self.filtered
+            .get(self.selected)
+            .and_then(|&i| self.choices.get(i))
+    }
+
+    /// The id of the highlighted project, if any.
+    pub fn selected_id(&self) -> Option<ProjectId> {
+        self.selected_choice().map(|c| c.id)
+    }
+
+    /// The repo path of the highlighted project, if any.
+    pub fn selected_repo_path(&self) -> Option<PathBuf> {
+        self.selected_choice().map(|c| c.repo_path.clone())
+    }
+
+    /// Move the highlight up one entry (saturating at the top).
+    pub fn select_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+        self.adjust_scroll();
+    }
+
+    /// Move the highlight down one entry (saturating at the bottom).
+    pub fn select_down(&mut self) {
+        if self.selected + 1 < self.filtered.len() {
+            self.selected += 1;
+        }
+        self.adjust_scroll();
+    }
+
+    /// Recompute `filtered` from `filter`, re-anchoring the highlight onto the
+    /// previously-selected project when it survives (else clamp to the top).
+    /// An empty filter shows every project in name order; otherwise entries are
+    /// ranked best-fuzzy-match first via `crate::fuzzy::fuzzy_score`.
+    pub fn apply_filter(&mut self) {
+        let prev_id = self.selected_id();
+        if self.filter.is_empty() {
+            self.filtered = (0..self.choices.len()).collect();
+        } else {
+            let mut scored: Vec<(usize, i64)> = self
+                .choices
+                .iter()
+                .enumerate()
+                .filter_map(|(i, c)| {
+                    crate::fuzzy::fuzzy_score(&c.name, &self.filter).map(|s| (i, s))
+                })
+                .collect();
+            // Highest score first; ties keep the original (name-sorted) order.
+            scored.sort_by(|a, b| b.1.cmp(&a.1));
+            self.filtered = scored.into_iter().map(|(i, _)| i).collect();
+        }
+        self.selected = prev_id
+            .and_then(|id| self.filtered.iter().position(|&i| self.choices[i].id == id))
+            .unwrap_or(0);
+        self.adjust_scroll();
     }
 }
 
