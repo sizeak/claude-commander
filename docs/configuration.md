@@ -393,7 +393,7 @@ In the section-grouped views, a session created with `n` lands in the section th
 
 ### WIP limits
 
-Set `max_sessions = N` on any section to flag it when it accumulates too much work. The header renders `count/N` and switches to the warning colour once `count >= N`. The catch-all "In Progress" section uses the top-level `in_progress_limit` instead:
+Set `max_sessions = N` on any section to flag it when it accumulates too much work. The header renders `count/N`, switching to the warning colour when `count == N` and to the error colour when `count > N`. The catch-all "In Progress" section uses the top-level `in_progress_limit` instead:
 
 ```toml
 in_progress_limit = 3

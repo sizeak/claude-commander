@@ -157,9 +157,9 @@ pub struct Config {
     pub sections: Vec<crate::session::SectionConfig>,
 
     /// Advisory WIP limit for the implicit "In Progress" catch-all section.
-    /// When set, the section header shows `count/n` and renders in a warning
-    /// colour once `count >= n`. Purely informational — never blocks session
-    /// creation.
+    /// When set, the section header shows `count/n`, rendering in the warning
+    /// colour when `count == n` and the error colour when `count > n`. Purely
+    /// informational — never blocks session creation.
     #[serde(default)]
     pub in_progress_limit: Option<u32>,
 

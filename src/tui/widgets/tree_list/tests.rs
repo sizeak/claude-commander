@@ -2,7 +2,7 @@ use super::*;
 use crate::git::PrState;
 use crate::session::{ProjectId, SessionId};
 use ratatui::buffer::Buffer;
-use ratatui::style::{Color, Style};
+use ratatui::style::Color;
 use ratatui::{Terminal, backend::TestBackend, widgets::ListState};
 use std::path::PathBuf;
 
@@ -901,6 +901,17 @@ fn make_section_header(name: &str, count: usize, collapsed: bool) -> SessionList
     }
 }
 
+/// Section header with a WIP limit set. Used by the tests that exercise the
+/// `(count/limit)` suffix rendering (text + colour ramp).
+fn make_section_header_with_limit(count: usize, limit: u32) -> SessionListItem {
+    SessionListItem::SectionHeader {
+        name: "Review".to_string(),
+        count,
+        collapsed: false,
+        max_sessions: Some(limit),
+    }
+}
+
 #[test]
 fn test_section_header_expanded_shows_down_twistie() {
     let items = vec![
@@ -950,13 +961,7 @@ fn test_section_header_shows_count() {
 
 #[test]
 fn test_section_header_shows_count_over_limit_when_max_sessions_set() {
-    let item = SessionListItem::SectionHeader {
-        name: "Review".to_string(),
-        count: 3,
-        collapsed: false,
-        max_sessions: Some(2),
-    };
-    let lines = render_tree(&[item], 60, 2);
+    let lines = render_tree(&[make_section_header_with_limit(3, 2)], 60, 2);
     assert!(
         lines[0].contains("(3/2)"),
         "Expected count/limit display when over limit: {:?}",
@@ -966,13 +971,7 @@ fn test_section_header_shows_count_over_limit_when_max_sessions_set() {
 
 #[test]
 fn test_section_header_shows_count_under_limit_when_max_sessions_set() {
-    let item = SessionListItem::SectionHeader {
-        name: "Review".to_string(),
-        count: 1,
-        collapsed: false,
-        max_sessions: Some(5),
-    };
-    let lines = render_tree(&[item], 60, 2);
+    let lines = render_tree(&[make_section_header_with_limit(1, 5)], 60, 2);
     assert!(
         lines[0].contains("(1/5)"),
         "Expected count/limit display when under limit: {:?}",
@@ -980,71 +979,42 @@ fn test_section_header_shows_count_under_limit_when_max_sessions_set() {
     );
 }
 
-/// Render the tree and return per-cell `(symbol, style)` pairs for every row.
-/// Unlike `render_tree`, this preserves cell styles so tests can assert on
-/// foreground colours.
-fn render_tree_styles(
-    items: &[SessionListItem],
-    width: u16,
-    height: u16,
-) -> Vec<Vec<(String, Style)>> {
-    let buf = draw_tree_buffer(items, width, height, |t| t);
-    (0..height)
-        .map(|y| {
-            (0..width)
-                .map(|x| {
-                    let cell = &buf[(x, y)];
-                    (cell.symbol().to_string(), cell.style())
-                })
-                .collect()
-        })
-        .collect()
-}
-
-/// Return the foreground colour of the cell containing the first `(` in `row`,
-/// which marks the start of the `(count/limit)` suffix on a section header.
-fn count_suffix_fg(row: &[(String, Style)]) -> Color {
-    let (_, style) = row
-        .iter()
-        .find(|(sym, _)| sym == "(")
-        .expect("expected '(' in section header row");
-    style.fg.expect("count suffix should have an explicit fg")
+/// Assert that the `(count/limit)` suffix rendered on row 0 uses `expected` as
+/// its foreground colour. Uses `find_text_in_row` (the same needle-scanner
+/// production code uses) so it can't mis-anchor on a stray `(` in the section
+/// name.
+fn assert_count_suffix_colour(item: SessionListItem, needle: &str, expected: Color) {
+    let buf = draw_tree_buffer(&[item], 60, 2, |t| t);
+    let x = super::render::find_text_in_row(&buf, 0, 0, 60, needle)
+        .unwrap_or_else(|| panic!("count suffix {needle:?} not found in rendered row"));
+    assert_eq!(buf[(x, 0)].style().fg, Some(expected));
 }
 
 #[test]
 fn section_header_under_limit_uses_secondary_colour() {
-    let item = SessionListItem::SectionHeader {
-        name: "Review".to_string(),
-        count: 1,
-        collapsed: false,
-        max_sessions: Some(5),
-    };
-    let rows = render_tree_styles(&[item], 60, 2);
-    assert_eq!(count_suffix_fg(&rows[0]), Theme::basic().text_secondary);
+    assert_count_suffix_colour(
+        make_section_header_with_limit(1, 5),
+        "(1/5)",
+        Theme::basic().text_secondary,
+    );
 }
 
 #[test]
 fn section_header_at_limit_uses_warning_colour() {
-    let item = SessionListItem::SectionHeader {
-        name: "Review".to_string(),
-        count: 2,
-        collapsed: false,
-        max_sessions: Some(2),
-    };
-    let rows = render_tree_styles(&[item], 60, 2);
-    assert_eq!(count_suffix_fg(&rows[0]), Theme::basic().modal_warning);
+    assert_count_suffix_colour(
+        make_section_header_with_limit(2, 2),
+        "(2/2)",
+        Theme::basic().modal_warning,
+    );
 }
 
 #[test]
 fn section_header_over_limit_uses_error_colour() {
-    let item = SessionListItem::SectionHeader {
-        name: "Review".to_string(),
-        count: 3,
-        collapsed: false,
-        max_sessions: Some(2),
-    };
-    let rows = render_tree_styles(&[item], 60, 2);
-    assert_eq!(count_suffix_fg(&rows[0]), Theme::basic().modal_error);
+    assert_count_suffix_colour(
+        make_section_header_with_limit(3, 2),
+        "(3/2)",
+        Theme::basic().modal_error,
+    );
 }
 
 #[test]
