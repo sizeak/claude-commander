@@ -10,6 +10,10 @@
   --yellow: #d29922;
   --red: #f85149;
   --grey: #6e7681;
+  /* Height of the *visible* viewport. Defaults to the dynamic viewport height;
+     JS narrows it to window.visualViewport.height on mobile so the layout tracks
+     the area left above the soft keyboard / dictation panel (see syncAppHeight). */
+  --app-vh: 100dvh;
 }
 
 * {
@@ -35,8 +39,11 @@ body {
   display: flex;
   height: 100vh;
   /* Dynamic viewport height: on mobile this shrinks when the soft keyboard
-     opens, so the terminal + key bar stay within the visible area. */
+     opens, so the terminal + key bar stay within the visible area. --app-vh is
+     kept in sync with the visual viewport by JS so keyboard/dictation panels
+     don't push the terminal off-screen. */
   height: 100dvh;
+  height: var(--app-vh, 100dvh);
   overflow: hidden;
 }
 
@@ -314,6 +321,13 @@ button.danger:hover:not(:disabled) {
 .header-actions button:hover {
   color: var(--fg);
   background: var(--bg-hover);
+}
+
+/* Microphone/dictation button, pulsing red while actively listening. */
+#mic-btn.mic-active {
+  color: var(--red);
+  border-color: var(--red);
+  animation: pulse 1.2s infinite ease-in-out;
 }
 
 /* Section labels */

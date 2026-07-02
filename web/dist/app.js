@@ -21,6 +21,7 @@ const els = {
   // toolbar
   menuBtn: document.getElementById("menu-btn"),
   title: document.getElementById("session-title"),
+  micBtn: document.getElementById("mic-btn"),
   kbdBtn: document.getElementById("kbd-btn"),
   historyBtn: document.getElementById("history-btn"),
   infoBtn: document.getElementById("info-btn"),
@@ -330,6 +331,7 @@ function renderTree() {
   els.kill.disabled = !active;
   els.delete.disabled = !sel;
   els.infoBtn.disabled = !sel;
+  els.micBtn.disabled = !sel;
   els.kbdBtn.disabled = !sel;
   els.historyBtn.disabled = !sel;
   els.title.textContent = sel ? sel.title : "Select a session";
@@ -427,18 +429,30 @@ function ensureTerm() {
     sendData(out);
   });
 
-  window.addEventListener("resize", () => {
-    fitNow();
-    sendResize();
-  });
-  // The mobile soft keyboard shrinks the visual viewport rather than the layout
-  // viewport; refit so the terminal fills the space above the keyboard.
-  if (window.visualViewport) {
-    window.visualViewport.addEventListener("resize", () => {
-      fitNow();
-      sendResize();
-    });
-  }
+}
+
+// Keep the layout sized to the *visible* viewport. The mobile soft keyboard and
+// the dictation panel shrink window.visualViewport rather than the layout
+// viewport; without this the app keeps its full height and the terminal gets
+// pushed off-screen (needing a refresh). Driving --app-vh from the visual
+// viewport keeps everything within the visible area.
+function syncAppHeight() {
+  const h = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+  document.documentElement.style.setProperty("--app-vh", `${Math.round(h)}px`);
+}
+
+// Viewport changed (window resize, keyboard/dictation open-close, orientation):
+// re-sync height, refit the xterm grid, and tell the server the new size.
+function handleViewportChange() {
+  syncAppHeight();
+  fitNow();
+  sendResize();
+}
+
+window.addEventListener("resize", handleViewportChange);
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", handleViewportChange);
+  window.visualViewport.addEventListener("scroll", handleViewportChange);
 }
 
 // Send a string to the session as raw UTF-8 bytes (no-op if the socket is down).
@@ -679,6 +693,69 @@ els.keyBar.querySelectorAll("button[data-key]").forEach((btn) => {
     if (seq) sendData(seq);
   });
 });
+
+// ---- Microphone dictation (Web Speech API) ----
+
+// Browser speech recognition requires a secure context (HTTPS); over plain HTTP
+// the API is absent, so the button explains what's needed rather than silently
+// failing. When it works, final transcripts are sent to the pane as if typed.
+let recognition = null;
+let dictating = false;
+
+function updateMicButton() {
+  els.micBtn.classList.toggle("mic-active", dictating);
+  els.micBtn.title = dictating ? "Stop dictation" : "Dictate (microphone)";
+}
+
+function toggleDictation() {
+  if (dictating) {
+    if (recognition) recognition.stop();
+    return;
+  }
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!window.isSecureContext || !SR) {
+    alert(
+      "Microphone dictation needs a secure (HTTPS) connection — browsers block " +
+        "mic access over plain HTTP. Reach this UI over HTTPS (e.g. a Tailscale/" +
+        "WireGuard address, a TLS reverse proxy, or the mutual-TLS mode) and the " +
+        "mic button will work."
+    );
+    return;
+  }
+  recognition = new SR();
+  recognition.lang = navigator.language || "en-US";
+  recognition.continuous = true;
+  recognition.interimResults = false;
+  recognition.onresult = (e) => {
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      if (e.results[i].isFinal) sendData(e.results[i][0].transcript);
+    }
+  };
+  recognition.onend = () => {
+    dictating = false;
+    recognition = null;
+    updateMicButton();
+  };
+  recognition.onerror = (e) => {
+    // "no-speech"/"aborted" are routine (silence, or the user stopping); surface
+    // the rest briefly.
+    if (e.error !== "aborted" && e.error !== "no-speech") {
+      setConn("error", `mic: ${e.error}`);
+      setTimeout(() => setConn("ok", "connected"), 2000);
+    }
+  };
+  try {
+    recognition.start();
+    dictating = true;
+    updateMicButton();
+  } catch (_) {
+    dictating = false;
+    recognition = null;
+    updateMicButton();
+  }
+}
+
+els.micBtn.addEventListener("click", toggleDictation);
 
 // ---- Terminal history / scroll-back view ----
 
@@ -1062,6 +1139,7 @@ els.settingsForm.addEventListener("submit", async (e) => {
 
 // ---- Boot ----
 
+syncAppHeight();
 refreshAll().then(() => {
   // On a phone nothing is selected yet, so start with the session list open.
   if (isMobile() && !state.selectedId) openDrawer();
