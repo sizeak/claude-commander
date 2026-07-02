@@ -467,6 +467,11 @@ pub enum SessionListItem {
         created_at: chrono::DateTime<chrono::Utc>,
         agent_state: Option<AgentState>,
         unread: bool,
+        /// True while a background `git lfs pull` is materialising this
+        /// session's LFS content (the worktree was created with smudging
+        /// skipped). Drives the `⇣ LFS` row marker. Sourced from
+        /// `UiState::lfs_pull_in_flight`, not persisted.
+        lfs_pulling: bool,
         /// True when this row is a stacked child of the row directly above it,
         /// meaning it sits one indent deeper than a normal session row. Stack
         /// bases and unstacked sessions keep the normal indent and have this
@@ -694,6 +699,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             agent_state: None,
             unread: false,
+            lfs_pulling: false,
             stacked_child: false,
         };
 
@@ -865,6 +871,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             agent_state: None,
             unread: false,
+            lfs_pulling: false,
             stacked_child: false,
         };
 
