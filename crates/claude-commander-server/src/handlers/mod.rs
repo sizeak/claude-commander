@@ -3,11 +3,13 @@
 //! (`Json`/status code) and errors onto [`crate::error::ApiError`].
 
 pub mod blobs;
+pub mod cascade;
 pub mod config;
 pub mod health;
 pub mod projects;
 pub mod review;
 pub mod sessions;
+pub mod workspace;
 
 #[cfg(test)]
 pub(crate) mod test_support;

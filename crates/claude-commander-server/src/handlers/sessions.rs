@@ -11,7 +11,9 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use claude_commander_core::api::{CreateSessionOpts, SessionInfo};
+use claude_commander_core::api::{
+    CreateSessionOpts, PreviewData, PreviewTarget, RenameSession, SessionInfo, SetSection,
+};
 use claude_commander_core::cli::SessionLookup;
 use serde::Deserialize;
 use serde_json::json;
@@ -146,6 +148,70 @@ pub async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PreviewQuery {
+    /// Capture this many pane lines directly instead of the cached snapshot.
+    pub lines: Option<usize>,
+}
+
+/// `GET /sessions/{id}/preview?lines=` → session `preview`.
+pub async fn preview(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<PreviewQuery>,
+) -> Result<Json<PreviewData>, ApiError> {
+    let id = parse_session_id(&id)?;
+    Ok(Json(
+        state
+            .service
+            .preview(PreviewTarget::Session { id, lines: q.lines })
+            .await?,
+    ))
+}
+
+/// `GET /sessions/{id}/branch-diff` → `branch_diff` (text/plain).
+pub async fn branch_diff(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<String, ApiError> {
+    let id = parse_session_id(&id)?;
+    Ok(state.service.branch_diff(&id).await?)
+}
+
+/// PATCH body for a session: rename it, or move it to a section (`section:
+/// null` clears the manual override). Tagged by `op` so a section clear
+/// (`null`) is unambiguous.
+#[derive(Debug, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum PatchSession {
+    Rename(RenameSession),
+    SetSection(SetSection),
+}
+
+/// `PATCH /sessions/{id}` → `rename_session` / `set_section` → 204.
+pub async fn patch(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(body): Json<PatchSession>,
+) -> Result<StatusCode, ApiError> {
+    let id = parse_session_id(&id)?;
+    match body {
+        PatchSession::Rename(r) => state.service.rename_session(&id, r.title).await?,
+        PatchSession::SetSection(s) => state.service.set_section(&id, s.section).await?,
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// `POST /sessions/{id}/read` → `mark_read` → 204.
+pub async fn read(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let id = parse_session_id(&id)?;
+    state.service.mark_read(&id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[cfg(test)]
 mod tests {
     use axum::{
@@ -165,7 +231,13 @@ mod tests {
             .route("/sessions/{q}/pane", get(super::pane))
             .route("/sessions/{id}/kill", post(super::kill))
             .route("/sessions/{id}/restart", post(super::restart))
-            .route("/sessions/{id}", axum::routing::delete(super::delete))
+            .route(
+                "/sessions/{id}",
+                axum::routing::delete(super::delete).patch(super::patch),
+            )
+            .route("/sessions/{id}/preview", get(super::preview))
+            .route("/sessions/{id}/branch-diff", get(super::branch_diff))
+            .route("/sessions/{id}/read", post(super::read))
             .with_state(state)
     }
 
@@ -230,5 +302,61 @@ mod tests {
             .unwrap();
         let (status, _) = crate::handlers::test_support::send(router(test_state(&dir)), req).await;
         assert_eq!(status, 400);
+    }
+
+    /// Preview for an unknown session id is a 404.
+    #[tokio::test]
+    async fn preview_unknown_is_404() {
+        let dir = TempDir::new().unwrap();
+        let (status, _) = do_get(
+            router(test_state(&dir)),
+            &format!("/sessions/{}/preview", uuid::Uuid::new_v4()),
+        )
+        .await;
+        assert_eq!(status, 404);
+    }
+
+    /// `read` on an unknown session id is a 404.
+    #[tokio::test]
+    async fn read_unknown_is_404() {
+        use axum::body::Body;
+        use axum::http::Request;
+        let dir = TempDir::new().unwrap();
+        let req = Request::post(format!("/sessions/{}/read", uuid::Uuid::new_v4()))
+            .body(Body::empty())
+            .unwrap();
+        let (status, _) = crate::handlers::test_support::send(router(test_state(&dir)), req).await;
+        assert_eq!(status, 404);
+    }
+
+    /// A rename PATCH with an empty title is a 400 (from the service guard).
+    #[tokio::test]
+    async fn patch_rename_empty_title_is_400() {
+        use axum::body::Body;
+        use axum::http::Request;
+        let dir = TempDir::new().unwrap();
+        // Well-formed id that doesn't exist would 404, so use a real one? The
+        // empty-title guard fires before the existence check, so any id yields
+        // 400 here.
+        let req = Request::patch(format!("/sessions/{}", uuid::Uuid::new_v4()))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"op":"rename","title":"  "}"#))
+            .unwrap();
+        let (status, _) = crate::handlers::test_support::send(router(test_state(&dir)), req).await;
+        assert_eq!(status, 400);
+    }
+
+    /// A `set_section` PATCH on an unknown session id is a 404 (existence check).
+    #[tokio::test]
+    async fn patch_set_section_unknown_is_404() {
+        use axum::body::Body;
+        use axum::http::Request;
+        let dir = TempDir::new().unwrap();
+        let req = Request::patch(format!("/sessions/{}", uuid::Uuid::new_v4()))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"op":"set_section","section":null}"#))
+            .unwrap();
+        let (status, _) = crate::handlers::test_support::send(router(test_state(&dir)), req).await;
+        assert_eq!(status, 404);
     }
 }

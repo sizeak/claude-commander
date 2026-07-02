@@ -2129,3 +2129,507 @@ async fn backtab_toggles_review_focus_like_tab() {
         other => panic!("expected review modal to stay open, got {other:?}"),
     }
 }
+
+// ===========================================================================
+// Main-view render characterization (Phase C0 safety net)
+//
+// These byte-identical buffer snapshots pin the CURRENT rendered output of the
+// session-list tree across all three `ViewMode`s and a couple of interaction
+// states. The Phase C refactor moves the tree/render data source from the
+// local `AppState` onto DTO snapshots behind a backend trait; re-running these
+// against the refactor proves the pixels did not move for local users.
+//
+// Normalization (documented so goldens stay stable):
+//   * Each buffer row is flattened to its cell symbols, OSC 8 hyperlink escape
+//     sequences (injected around PR badges) are stripped, and trailing
+//     whitespace is trimmed. Styling/colour is intentionally NOT captured —
+//     `TestBackend` symbols carry glyphs only, which keeps goldens independent
+//     of the auto-detected terminal theme.
+//   * All session timestamps are fixed, and `tick_count` is pinned to 0 so the
+//     braille spinner (Working / Creating rows) resolves to a stable frame.
+// ===========================================================================
+
+/// Strip OSC 8 hyperlink escape sequences (`ESC ] ... BEL`) that
+/// `inject_pr_hyperlinks` wraps around PR-badge glyphs, leaving the visible
+/// text (e.g. `PR #42`) behind.
+fn strip_osc(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // Skip until the terminating BEL.
+            for c2 in chars.by_ref() {
+                if c2 == '\u{07}' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Flatten a `TestBackend` buffer into one newline-joined string, one line per
+/// row, OSC escapes stripped and trailing whitespace trimmed. See the module
+/// comment above for why styling is dropped.
+fn buffer_lines(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
+    let buffer = terminal.backend().buffer();
+    let area = buffer.area;
+    let mut out = String::new();
+    for y in 0..area.height {
+        let mut row = String::new();
+        for x in 0..area.width {
+            row.push_str(buffer[(x, y)].symbol());
+        }
+        out.push_str(strip_osc(&row).trim_end());
+        out.push('\n');
+    }
+    out
+}
+
+/// A fixed instant plus `offset` seconds, so seeded ordering is deterministic
+/// and any rendered timestamp is stable.
+fn fixed_time(offset: i64) -> chrono::DateTime<chrono::Utc> {
+    use chrono::TimeZone;
+    chrono::Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap() + chrono::Duration::seconds(offset)
+}
+
+/// Seed a small but feature-rich scenario into `app` and refresh the list.
+///
+/// Covers three projects, a stacked parent/child chain, unread plus Working,
+/// WaitingForInput and Idle agent states, a Creating and a Stopped session,
+/// open/merged/draft PR chips, and section placement (including one manual
+/// `section_override`). All timestamps are fixed so ordering is deterministic.
+async fn seed_render_scenario(app: &mut App) {
+    use crate::git::PrState;
+    use crate::session::{Project, SectionConfig, SessionStatus, WorktreeSession};
+    use std::path::PathBuf;
+
+    app.config.sections = vec![
+        SectionConfig {
+            name: "Review".to_string(),
+            ..Default::default()
+        },
+        SectionConfig {
+            name: "Done".to_string(),
+            ..Default::default()
+        },
+    ];
+
+    let alpha = Project::new("alpha", PathBuf::from("/tmp/alpha"), "main");
+    let bravo = Project::new("bravo", PathBuf::from("/tmp/bravo"), "main");
+    let charlie = Project::new("charlie", PathBuf::from("/tmp/charlie"), "develop");
+    let (alpha_id, bravo_id, charlie_id) = (alpha.id, bravo.id, charlie.id);
+
+    // alpha: working / unread / stacked base+child / stopped
+    let mut working =
+        WorktreeSession::new(alpha_id, "fix-login", "fix-login", PathBuf::new(), "claude");
+    working.created_at = fixed_time(50);
+    working.status = SessionStatus::Running;
+
+    let mut unread = WorktreeSession::new(
+        alpha_id,
+        "flaky-test",
+        "flaky-test",
+        PathBuf::new(),
+        "claude",
+    );
+    unread.created_at = fixed_time(40);
+    unread.unread = true;
+
+    let mut base = WorktreeSession::new(
+        alpha_id,
+        "refactor",
+        "refactor-br",
+        PathBuf::new(),
+        "claude",
+    );
+    base.created_at = fixed_time(30);
+
+    let mut child = WorktreeSession::new(
+        alpha_id,
+        "refactor-2",
+        "refactor-2-br",
+        PathBuf::new(),
+        "claude",
+    );
+    child.created_at = fixed_time(35);
+    child.pr_base_branch = Some("refactor-br".to_string());
+
+    let mut stopped =
+        WorktreeSession::new(alpha_id, "old-thing", "old-thing", PathBuf::new(), "claude");
+    stopped.created_at = fixed_time(10);
+    stopped.status = SessionStatus::Stopped;
+
+    // bravo: creating / PR open / PR merged / PR draft
+    let mut creating = WorktreeSession::new(
+        bravo_id,
+        "spinning-up",
+        "spinning-up",
+        PathBuf::new(),
+        "claude",
+    );
+    creating.created_at = fixed_time(45);
+    creating.status = SessionStatus::Creating;
+
+    let mut pr_open =
+        WorktreeSession::new(bravo_id, "review-me", "review-me", PathBuf::new(), "claude");
+    pr_open.created_at = fixed_time(35);
+    pr_open.pr_number = Some(42);
+    pr_open.pr_url = Some("https://example.com/pr/42".to_string());
+    pr_open.pr_state = Some(PrState::Open);
+    pr_open.current_section = Some("Review".to_string());
+    pr_open.section_override = Some("Review".to_string());
+
+    let mut pr_merged =
+        WorktreeSession::new(bravo_id, "shipped", "shipped", PathBuf::new(), "claude");
+    pr_merged.created_at = fixed_time(25);
+    pr_merged.pr_number = Some(7);
+    pr_merged.pr_url = Some("https://example.com/pr/7".to_string());
+    pr_merged.pr_state = Some(PrState::Merged);
+    pr_merged.pr_merged = true;
+    pr_merged.current_section = Some("Done".to_string());
+
+    let mut pr_draft = WorktreeSession::new(bravo_id, "wip-pr", "wip-pr", PathBuf::new(), "claude");
+    pr_draft.created_at = fixed_time(15);
+    pr_draft.pr_number = Some(99);
+    pr_draft.pr_url = Some("https://example.com/pr/99".to_string());
+    pr_draft.pr_state = Some(PrState::Open);
+    pr_draft.pr_draft = true;
+
+    // charlie: waiting-for-input
+    let mut waiting = WorktreeSession::new(
+        charlie_id,
+        "need-input",
+        "need-input",
+        PathBuf::new(),
+        "claude",
+    );
+    waiting.created_at = fixed_time(20);
+
+    let working_id = working.id;
+    let base_id = base.id;
+    let pr_open_id = pr_open.id;
+
+    app.service
+        .store()
+        .mutate(move |state| {
+            state.add_project(alpha);
+            state.add_project(bravo);
+            state.add_project(charlie);
+            for s in [
+                working, unread, base, child, stopped, creating, pr_open, pr_merged, pr_draft,
+                waiting,
+            ] {
+                state.add_session(s);
+            }
+        })
+        .await
+        .unwrap();
+
+    // Agent states: Working / Idle / WaitingForInput; others left unset.
+    app.ui_state
+        .agent_states
+        .insert(working_id, AgentState::Working);
+    app.ui_state.agent_states.insert(base_id, AgentState::Idle);
+    app.ui_state
+        .agent_states
+        .insert(pr_open_id, AgentState::WaitingForInput);
+
+    // Pin the spinner frame so Working/Creating rows are stable.
+    app.ui_state.tick_count = 0;
+    app.refresh_list_items().await;
+}
+
+#[tokio::test]
+async fn render_project_grouped_view_matches_snapshot() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    seed_render_scenario(&mut app).await;
+    app.ui_state.view_mode = ViewMode::ProjectGrouped;
+    app.refresh_list_items().await;
+    app.ui_state.list_state.select(Some(0));
+    app.update_selection();
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+
+    let expected = r#"
+  Sessions [Project]:               ┌ Shell · Info ───────────────────────────────────────────────────────────────────┐
+  alpha [main] (5)                  │                                                                                 │
+      1 ⠋ fix-login                 │                                                                                 │
+      2 ◆ flaky-test                │                                                                                 │
+      3 ● refactor [refactor-br]    │                                                                                 │
+         4 ● refactor-2 [refactor-2-│                                                                                 │
+      5 ○ old-thing                 │                                                                                 │
+  bravo [main] (4)                  │                                                                                 │
+      6 ⠋ spinning-up               │                                                                                 │
+      7 ? review-me  PR #42         │                                                                                 │
+      8 ● shipped  PR #7            │                                                                                 │
+      9 ● wip-pr  PR #99            │                                                                                 │
+  charlie [develop] (1)             │                                                                                 │
+     10 ● need-input                │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    └─────────────────────────────────────────────────────────────────────────────────┘
+
+ Sessions: 10 │ [n]ew session │ s[t]acked │ [N]ew project                                                        ? help
+"#;
+    pretty_assertions::assert_eq!(buffer_lines(&terminal), expected);
+}
+
+#[tokio::test]
+async fn render_section_grouped_view_matches_snapshot() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    seed_render_scenario(&mut app).await;
+    app.ui_state.view_mode = ViewMode::SectionGrouped;
+    app.refresh_list_items().await;
+    app.ui_state.list_state.select(Some(0));
+    app.update_selection();
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+
+    let expected = r#"
+  Sessions [Sections]:              ┌ Preview · Info · Shell ─────────────────────────────────────────────────────────┐
+  ▾ In Progress (8)                 │                                                                                 │
+    alpha [main] (5)                │                                                                                 │
+      1 ⠋ fix-login                 │                                                                                 │
+      2 ◆ flaky-test                │                                                                                 │
+      3 ● refactor [refactor-br]    │                                                                                 │
+      4 ● refactor-2 [refactor-2-br]│                                                                                 │
+      5 ○ old-thing                 │                                                                                 │
+    bravo [main] (2)                │                                                                                 │
+      6 ⠋ spinning-up               │                                                                                 │
+      7 ● wip-pr  PR #99            │                                                                                 │
+    charlie [develop] (1)           │                                                                                 │
+      8 ● need-input                │                                                                                 │
+   ────────────────────             │                                                                                 │
+  ▾ Review (1)                      │                                                                                 │
+    bravo [main] (1)                │                                                                                 │
+      9 ? review-me  PR #42         │                                                                                 │
+   ────────────────────             │                                                                                 │
+  ▾ Done (1)                        │                                                                                 │
+    bravo [main] (1)                │                                                                                 │
+     10 ● shipped  PR #7            │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    └─────────────────────────────────────────────────────────────────────────────────┘
+
+ Sessions: 10 │ [n]ew session │ s[t]acked │ [N]ew project                                                        ? help
+"#;
+    pretty_assertions::assert_eq!(buffer_lines(&terminal), expected);
+}
+
+#[tokio::test]
+async fn render_section_stacks_view_matches_snapshot() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    seed_render_scenario(&mut app).await;
+    app.ui_state.view_mode = ViewMode::SectionStacks;
+    app.refresh_list_items().await;
+    app.ui_state.list_state.select(Some(0));
+    app.update_selection();
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+
+    let expected = r#"
+  Sessions [Section Stacks]:        ┌ Preview · Info · Shell ─────────────────────────────────────────────────────────┐
+  ▾ In Progress (8)                 │                                                                                 │
+    alpha [main] (5)                │                                                                                 │
+      1 ⠋ fix-login                 │                                                                                 │
+      2 ◆ flaky-test                │                                                                                 │
+      3 ● refactor [refactor-br]    │                                                                                 │
+         4 ● refactor-2 [refactor-2-│                                                                                 │
+      5 ○ old-thing                 │                                                                                 │
+    bravo [main] (2)                │                                                                                 │
+      6 ⠋ spinning-up               │                                                                                 │
+      7 ● wip-pr  PR #99            │                                                                                 │
+    charlie [develop] (1)           │                                                                                 │
+      8 ● need-input                │                                                                                 │
+   ────────────────────             │                                                                                 │
+  ▾ Review (1)                      │                                                                                 │
+    bravo [main] (1)                │                                                                                 │
+      9 ? review-me  PR #42         │                                                                                 │
+   ────────────────────             │                                                                                 │
+  ▾ Done (1)                        │                                                                                 │
+    bravo [main] (1)                │                                                                                 │
+     10 ● shipped  PR #7            │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    └─────────────────────────────────────────────────────────────────────────────────┘
+
+ Sessions: 10 │ [n]ew session │ s[t]acked │ [N]ew project                                                        ? help
+"#;
+    pretty_assertions::assert_eq!(buffer_lines(&terminal), expected);
+}
+
+#[tokio::test]
+async fn render_navigation_moves_selection_and_swaps_status_actions() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    seed_render_scenario(&mut app).await;
+    app.ui_state.view_mode = ViewMode::ProjectGrouped;
+    app.refresh_list_items().await;
+
+    // Start on the first row (the `alpha` project header) and move the
+    // selection down two rows onto the second worktree (`flaky-test`).
+    app.ui_state.list_state.select(Some(0));
+    app.update_selection();
+    app.ui_state.list_state.next();
+    app.ui_state.list_state.next();
+    app.update_selection();
+
+    // Selection landed on list index 2, which is the unread `flaky-test`
+    // worktree; `selected_session_id` tracks it and no project is selected.
+    assert_eq!(app.ui_state.list_state.selected(), Some(2));
+    let selected = &app.ui_state.list_items[2];
+    let (selected_id, selected_project) = match selected {
+        SessionListItem::Worktree {
+            id,
+            project_id,
+            title,
+            unread,
+            ..
+        } => {
+            assert_eq!(title, "flaky-test");
+            assert!(unread, "flaky-test is seeded unread");
+            (*id, *project_id)
+        }
+        other => panic!("expected the flaky-test worktree at index 2, got {other:?}"),
+    };
+    assert_eq!(app.ui_state.selected_session_id, Some(selected_id));
+    // Characterization: selecting a worktree also stamps `selected_project_id`
+    // with the session's parent project (it is not cleared to None).
+    assert_eq!(app.ui_state.selected_project_id, Some(selected_project));
+
+    // With a session selected, the status bar surfaces the session-scoped
+    // action buttons (delete / review / edit) alongside the always-present
+    // new-session and new-project actions.
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    let lines = buffer_lines(&terminal);
+    let status = lines.lines().last().unwrap();
+    assert_eq!(
+        status,
+        " Sessions: 10 │ [n]ew session │ s[t]acked │ [d]elete │ [r]eview │ edit [.] │ [N]ew project                       ? help"
+    );
+}
+
+// --- actions.rs decision predicates (characterization) ----------------------
+
+#[tokio::test]
+async fn selected_session_is_creating_tracks_selected_worktree_status() {
+    let mut app = make_test_app();
+    seed_render_scenario(&mut app).await;
+    app.ui_state.view_mode = ViewMode::ProjectGrouped;
+    app.refresh_list_items().await;
+
+    // Point the selection at the `spinning-up` (Creating) worktree.
+    let creating_id = app.ui_state.list_items.iter().find_map(|i| match i {
+        SessionListItem::Worktree {
+            id, title, status, ..
+        } if title == "spinning-up" && *status == SessionStatus::Creating => Some(*id),
+        _ => None,
+    });
+    app.ui_state.selected_session_id = creating_id;
+    assert!(
+        app.selected_session_is_creating(),
+        "a selected Creating session should be reported as creating"
+    );
+
+    // A Running session is not creating.
+    let running_id = app.ui_state.list_items.iter().find_map(|i| match i {
+        SessionListItem::Worktree { id, title, .. } if title == "fix-login" => Some(*id),
+        _ => None,
+    });
+    app.ui_state.selected_session_id = running_id;
+    assert!(!app.selected_session_is_creating());
+
+    // No selection at all is not creating.
+    app.ui_state.selected_session_id = None;
+    assert!(!app.selected_session_is_creating());
+}
+
+#[tokio::test]
+async fn selected_item_is_section_header_detects_header_rows() {
+    let mut app = make_test_app();
+    seed_render_scenario(&mut app).await;
+    app.ui_state.view_mode = ViewMode::SectionGrouped;
+    app.refresh_list_items().await;
+
+    // Index 0 in a section view is the "In Progress" section header.
+    assert!(matches!(
+        app.ui_state.list_items[0],
+        SessionListItem::SectionHeader { .. }
+    ));
+    app.ui_state.list_state.select(Some(0));
+    assert!(app.selected_item_is_section_header());
+
+    // Select the first worktree row instead — not a header.
+    let worktree_idx = app
+        .ui_state
+        .list_items
+        .iter()
+        .position(|i| matches!(i, SessionListItem::Worktree { .. }))
+        .unwrap();
+    app.ui_state.list_state.select(Some(worktree_idx));
+    assert!(!app.selected_item_is_section_header());
+}

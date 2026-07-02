@@ -120,6 +120,21 @@ pub async fn toggle_reviewed(
     Ok(Json(json!({ "reviewed": reviewed })).into_response())
 }
 
+/// `GET /comments/pending` → session ids with at least one not-yet-applied
+/// review comment, sorted for a deterministic response.
+pub async fn pending(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<claude_commander_core::session::SessionId>>, ApiError> {
+    let mut ids: Vec<_> = state
+        .service
+        .sessions_with_pending_comments()
+        .await?
+        .into_iter()
+        .collect();
+    ids.sort();
+    Ok(Json(ids))
+}
+
 #[cfg(test)]
 mod tests {
     use axum::{Router, routing::get};
@@ -141,6 +156,19 @@ mod tests {
         assert_eq!(status, 200);
         let comments: Vec<Comment> = json(&body);
         assert!(comments.is_empty());
+    }
+
+    /// `GET /comments/pending` over empty state is a 200 empty array.
+    #[tokio::test]
+    async fn pending_comments_empty_is_200_empty_array() {
+        let dir = TempDir::new().unwrap();
+        let router = Router::new()
+            .route("/comments/pending", get(super::pending))
+            .with_state(test_state(&dir));
+        let (status, body) = do_get(router, "/comments/pending").await;
+        assert_eq!(status, 200);
+        let ids: Vec<claude_commander_core::session::SessionId> = json(&body);
+        assert!(ids.is_empty());
     }
 
     /// A malformed session id on an id-route maps to 400, not 404.

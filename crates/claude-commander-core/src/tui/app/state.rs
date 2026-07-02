@@ -752,7 +752,7 @@ impl App {
 /// Root-list sessions (unstacked + stack bases) are sorted newest-first by
 /// `created_at`; stacked children follow their root in parent→child (stack
 /// position) order at the single deeper indent.
-fn build_session_order(sessions: &[&WorktreeSession]) -> Vec<(SessionId, bool)> {
+pub(super) fn build_session_order(sessions: &[&WorktreeSession]) -> Vec<(SessionId, bool)> {
     let mut root_sessions: Vec<&WorktreeSession> = Vec::new();
     let mut children_by_parent: HashMap<SessionId, Vec<&WorktreeSession>> = HashMap::new();
     for s in sessions {
@@ -825,7 +825,7 @@ fn worktree_item(
     }
 }
 
-fn build_project_grouped_items(
+pub(super) fn build_project_grouped_items(
     state: &crate::config::AppState,
     agent_states: &HashMap<SessionId, AgentState>,
 ) -> Vec<SessionListItem> {
@@ -877,7 +877,7 @@ fn resolve_section_limit(
         .and_then(|s| s.max_sessions)
 }
 
-fn build_section_grouped_items(
+pub(super) fn build_section_grouped_items(
     state: &crate::config::AppState,
     sections: &[crate::session::SectionConfig],
     in_progress_limit: Option<u32>,
@@ -953,7 +953,7 @@ fn build_section_grouped_items(
 /// the whole stack lands in the section chosen by its newest leaf (with
 /// `section_override` walked closest-to-leaf-first), and stack indentation is
 /// preserved via `stacked_child: true` on non-root members.
-fn build_stacked_section_items(
+pub(super) fn build_stacked_section_items(
     state: &crate::config::AppState,
     sections: &[crate::session::SectionConfig],
     in_progress_limit: Option<u32>,
@@ -1970,5 +1970,166 @@ mod stack_order_tests {
             vec![(child.id, false), (base.id, false)],
             "child with PR targeting main should pop to the root list"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Perf baseline: tree building over a large seeded state.
+    //
+    // The tree builders (`build_project_grouped_items` /
+    // `build_section_grouped_items` / `build_stacked_section_items`) currently
+    // read the local `AppState` directly. The Phase C refactor moves them onto
+    // DTO snapshots behind a backend trait; this seeder + `#[ignore]`d timing
+    // test pin the current cost so the refactor can prove it did not regress
+    // tree building for local users.
+    //
+    // `seed_large_state` is intentionally reusable (`pub(super)`) so Phase C can
+    // feed the *same* shaped state into the DTO-based builders and compare
+    // apples-to-apples. Run with:
+    //   cargo test -p claude-commander-core tree_build_perf_baseline -- --ignored --nocapture
+    // -----------------------------------------------------------------------
+
+    /// Build a deterministic `AppState` with `n_projects` projects, each holding
+    /// `sessions_per_project` sessions. Roughly one in five sessions is a
+    /// stacked child of the session before it (exercising `resolve_stack_parent`
+    /// and the stack-ordering path), and sessions are round-robin assigned a
+    /// `current_section` so the section builders have populated buckets. Also
+    /// returns matching `agent_states` (one entry per session, cycling through
+    /// the agent states) and a `sections` config for the section views.
+    ///
+    /// All timestamps are derived from a fixed base + per-session offset so the
+    /// output ordering is fully determined (no wall-clock reads leak in).
+    #[allow(clippy::type_complexity)]
+    pub(super) fn seed_large_state(
+        n_projects: usize,
+        sessions_per_project: usize,
+    ) -> (
+        crate::config::AppState,
+        HashMap<SessionId, AgentState>,
+        Vec<crate::session::SectionConfig>,
+    ) {
+        use chrono::TimeZone;
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let section_names = ["Review", "Ready", "Blocked"];
+        let sections: Vec<crate::session::SectionConfig> =
+            section_names.iter().map(|n| section_named(n)).collect();
+        let agent_cycle = [
+            AgentState::Working,
+            AgentState::Idle,
+            AgentState::WaitingForInput,
+            AgentState::Unknown,
+        ];
+
+        let mut state = crate::config::AppState::default();
+        let mut agent_states = HashMap::new();
+        let mut global_idx: i64 = 0;
+
+        for p in 0..n_projects {
+            let project = crate::session::Project::new(
+                format!("project-{p:02}"),
+                PathBuf::from("/tmp/repo"),
+                "main",
+            );
+            let project_id = project.id;
+            state.projects.insert(project_id, project);
+
+            let mut prev_in_project: Option<SessionId> = None;
+            for s in 0..sessions_per_project {
+                let mut session = WorktreeSession::new(
+                    project_id,
+                    format!("session-{p:02}-{s:03}"),
+                    format!("branch-{p:02}-{s:03}"),
+                    PathBuf::from("/tmp/wt"),
+                    if s % 3 == 0 { "codex" } else { "claude" },
+                );
+                let ts = base + ChronoDuration::seconds(global_idx);
+                session.created_at = ts;
+                session.entered_section_at = ts;
+                // Every 5th session (that has a predecessor) stacks on the one
+                // before it, forming short chains within the project.
+                if s % 5 == 0 && s != 0 {
+                    session.stack_parent_session_id = prev_in_project;
+                }
+                // Spread sessions across the catch-all + configured sections.
+                session.current_section = match s % 4 {
+                    0 => None, // In Progress catch-all
+                    other => Some(section_names[other - 1].to_string()),
+                };
+                session.unread = s % 7 == 0;
+                if s % 6 == 0 {
+                    session.pr_number = Some(1000 + global_idx as u32);
+                    session.pr_state = Some(crate::git::PrState::Open);
+                }
+
+                agent_states.insert(session.id, agent_cycle[(global_idx as usize) % 4]);
+                prev_in_project = Some(session.id);
+
+                let sid = session.id;
+                state.sessions.insert(sid, session);
+                state
+                    .projects
+                    .get_mut(&project_id)
+                    .unwrap()
+                    .add_worktree(sid);
+                global_idx += 1;
+            }
+        }
+        (state, agent_states, sections)
+    }
+
+    #[test]
+    #[ignore = "perf baseline; run explicitly with --ignored --nocapture"]
+    fn tree_build_perf_baseline() {
+        // ~100 sessions across ~10 projects, matching the Phase C brief.
+        let (state, agent_states, sections) = seed_large_state(10, 10);
+        let session_count = state.sessions.len();
+        assert!(
+            session_count >= 100,
+            "expected at least 100 sessions, got {session_count}"
+        );
+        let collapsed = std::collections::HashSet::new();
+
+        // Warm up so the first-touch allocation cost doesn't dominate the timing.
+        for _ in 0..50 {
+            std::hint::black_box(build_project_grouped_items(&state, &agent_states));
+        }
+
+        let iterations = 2_000u32;
+        let time = |label: &str, f: &mut dyn FnMut()| {
+            let start = std::time::Instant::now();
+            for _ in 0..iterations {
+                f();
+            }
+            let per = start.elapsed() / iterations;
+            println!("{label:<28} {per:?}/build ({session_count} sessions)");
+            // Generous ceiling: a build of ~100 sessions is microsecond-scale;
+            // 5ms leaves multiple orders of magnitude of slack while still
+            // catching a catastrophic regression (e.g. an accidental O(n^2)).
+            assert!(
+                per < std::time::Duration::from_millis(5),
+                "{label} regressed: {per:?}/build exceeds the 5ms ceiling"
+            );
+        };
+
+        time("project_grouped", &mut || {
+            std::hint::black_box(build_project_grouped_items(&state, &agent_states));
+        });
+        time("section_grouped", &mut || {
+            std::hint::black_box(build_section_grouped_items(
+                &state,
+                &sections,
+                Some(5),
+                &agent_states,
+                &collapsed,
+            ));
+        });
+        time("section_stacks", &mut || {
+            std::hint::black_box(build_stacked_section_items(
+                &state,
+                &sections,
+                Some(5),
+                &agent_states,
+                &collapsed,
+            ));
+        });
     }
 }

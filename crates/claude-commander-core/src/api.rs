@@ -1,7 +1,9 @@
 //! Commander API — unified service layer for CLI and TUI consumers.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use uuid::Uuid;
@@ -14,14 +16,14 @@ use crate::comment::{
 use crate::config::{AppState, Config, ConfigStore, StateStore};
 use crate::error::{Result, SessionError};
 use crate::git::{
-    FileDiff, GitBackend, compose_review_diff, diff_stat_summary, effective_pr_state,
-    enrich_binary_sizes, parse_unified_diff, prefer_remote_branch, read_base_blob,
-    read_worktree_file,
+    FileDiff, GitBackend, compose_review_diff, compute_branch_diff, diff_stat_summary,
+    effective_pr_state, enrich_binary_sizes, is_gh_available, parse_unified_diff,
+    prefer_remote_branch, read_base_blob, read_worktree_file,
 };
 use crate::reviewed::ReviewedStore;
 use crate::session::{
-    AgentState, ProjectId, ScanResult, SessionId, SessionManager, WorktreeSession,
-    program_with_claude_flags,
+    AgentState, CascadeOutcome, ProjectId, ScanResult, SessionId, SessionManager, WorktreeSession,
+    apply_assignment, clear_override_and_reassign, program_with_claude_flags,
 };
 use crate::telemetry::{ConfigSnapshot, EnvFingerprint, FrontendInfo, Telemetry};
 use crate::tmux::{AgentStateDetector, StatusBarInfo, TmuxExecutor};
@@ -42,7 +44,28 @@ pub struct CommanderService {
     comments: Arc<CommentStore>,
     reviewed: Arc<ReviewedStore>,
     telemetry: Telemetry,
+    /// Bounded in-memory ledger of recent cascade / push-stack operations,
+    /// surfaced through [`Self::workspace_snapshot`]. Capped at
+    /// [`OPERATION_LEDGER_CAP`]; oldest entries are evicted.
+    operations: Arc<std::sync::Mutex<std::collections::VecDeque<OperationStatus>>>,
+    /// Monotonic id source for ledger entries (stable for the process lifetime).
+    next_op_id: Arc<std::sync::atomic::AtomicU64>,
+    /// Cached `gh --version` availability. Computed once (fork/exec is not free)
+    /// and reused for every `workspace_snapshot`.
+    gh_available: Arc<tokio::sync::OnceCell<bool>>,
+    /// Shared agent-state detector with a short TTL cache, reused across
+    /// non-`fresh` [`Self::agent_states`] calls so repeated polls don't
+    /// re-capture every pane. A `fresh` call bypasses it with a zero-TTL
+    /// detector instead.
+    agent_detector: Arc<tokio::sync::Mutex<AgentStateDetector>>,
 }
+
+/// Max entries kept in the operation ledger before the oldest are evicted.
+const OPERATION_LEDGER_CAP: usize = 32;
+
+/// TTL for the shared agent-state detector cache used by non-`fresh`
+/// `agent_states` polls.
+const AGENT_STATE_CACHE_TTL: Duration = Duration::from_millis(1000);
 
 impl CommanderService {
     /// Construct the service. `frontend` identifies the embedding application
@@ -68,6 +91,10 @@ impl CommanderService {
         let comments = Arc::new(CommentStore::new(data_dir.join("comments")));
         let reviewed = Arc::new(ReviewedStore::new(data_dir.join("reviewed")));
         let telemetry = init_telemetry(&config_store, &store, &frontend);
+        let agent_detector = Arc::new(tokio::sync::Mutex::new(AgentStateDetector::new(
+            manager.tmux.clone(),
+            AGENT_STATE_CACHE_TTL,
+        )));
         Self {
             manager,
             store,
@@ -75,6 +102,10 @@ impl CommanderService {
             comments,
             reviewed,
             telemetry,
+            operations: Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new())),
+            next_op_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
+            gh_available: Arc::new(tokio::sync::OnceCell::new()),
+            agent_detector,
         }
     }
 
@@ -648,6 +679,417 @@ impl CommanderService {
 
         Ok(ApplyOutcome::Applied { path, count })
     }
+
+    // -- Workspace / tree (additive: everything the session tree needs) --
+
+    /// One snapshot of the whole workspace: projects, sessions (including
+    /// stopped, so the full tree renders), cascade state, pending-comment
+    /// indicators, the recent-operations ledger, and server health. This is the
+    /// single query a remote client polls to build the session tree.
+    ///
+    /// `project_pull` is left empty here; the core background pull loop
+    /// (Phase D) is what populates per-project pull status.
+    pub async fn workspace_snapshot(&self) -> Result<WorkspaceSnapshot> {
+        let gh_available = self.gh_available().await;
+        let tmux_ok = self.check_tmux().await.is_ok();
+        let pending = self.sessions_with_pending_comments().await?;
+
+        let (projects, sessions, cascade_paused) = {
+            let state = self.store.read().await;
+            (
+                build_project_info_list(&state),
+                build_session_info_list(&state, true),
+                state.cascade_paused_at,
+            )
+        };
+
+        let mut pending_comment_sessions: Vec<SessionId> = pending.into_iter().collect();
+        pending_comment_sessions.sort();
+
+        Ok(WorkspaceSnapshot {
+            projects,
+            sessions,
+            cascade_paused,
+            pending_comment_sessions,
+            project_pull: HashMap::new(),
+            operations: self.operations_snapshot(),
+            server: ServerStatus {
+                gh_available,
+                tmux_ok,
+                version: env!("CARGO_PKG_VERSION").to_string(),
+            },
+        })
+    }
+
+    /// List projects (sorted by name), for clients that only need the project
+    /// set rather than a full [`Self::workspace_snapshot`].
+    pub async fn list_projects(&self) -> Vec<ProjectInfo> {
+        let state = self.store.read().await;
+        build_project_info_list(&state)
+    }
+
+    /// Remove a project and all its sessions (kills their tmux sessions first).
+    /// Wraps [`SessionManager::remove_project`].
+    pub async fn remove_project(&self, id: &ProjectId) -> Result<()> {
+        self.telemetry.feature("project.remove");
+        self.manager.remove_project(id).await
+    }
+
+    /// List a project's git branches. When `fetch` is set, a best-effort
+    /// `git fetch origin` runs first so newly-pushed remote branches appear.
+    /// Mirrors the TUI checkout picker's source of truth
+    /// ([`GitBackend::list_branches`]).
+    pub async fn list_branches(
+        &self,
+        project_id: &ProjectId,
+        fetch: bool,
+    ) -> Result<Vec<BranchInfo>> {
+        let repo_path = {
+            let state = self.store.read().await;
+            state
+                .get_project(project_id)
+                .ok_or_else(|| SessionError::ProjectNotFound(project_id.to_string()))?
+                .repo_path
+                .clone()
+        };
+        if fetch {
+            // Best-effort — a failed fetch (offline, no remote) just means we
+            // list whatever refs already exist.
+            let _ = tokio::process::Command::new("git")
+                .current_dir(&repo_path)
+                .args(["fetch", "origin"])
+                .output()
+                .await;
+        }
+        let backend = GitBackend::open(&repo_path)?;
+        Ok(backend
+            .list_branches()?
+            .into_iter()
+            .map(|(name, is_remote)| BranchInfo { name, is_remote })
+            .collect())
+    }
+
+    /// Compute preview data (agent pane, diff + stat, shell pane) for a session
+    /// or a project. Lifts the TUI's `fetch_preview_data`; the TUI keeps its own
+    /// copy until Phase C deletes it.
+    pub async fn preview(&self, target: PreviewTarget) -> Result<PreviewData> {
+        match target {
+            PreviewTarget::Session { id, lines } => self.session_preview(&id, lines).await,
+            PreviewTarget::Project(id) => self.project_preview(&id).await,
+        }
+    }
+
+    async fn session_preview(&self, sid: &SessionId, lines: Option<usize>) -> Result<PreviewData> {
+        let (is_creating, tmux_name) = {
+            let state = self.store.read().await;
+            match state.get_session(sid) {
+                Some(s) => (
+                    s.status == crate::session::SessionStatus::Creating,
+                    s.tmux_session_name.clone(),
+                ),
+                None => return Err(SessionError::NotFound(*sid).into()),
+            }
+        };
+        // No tmux session exists yet while creating; short-circuit like the TUI.
+        if is_creating {
+            return Ok(PreviewData {
+                pane: Some("Creating session...".to_string()),
+                diff_text: String::new(),
+                diff_stat: None,
+                shell: None,
+            });
+        }
+
+        // An explicit line count captures the pane directly; otherwise use the
+        // manager's cached content (matches the TUI preview).
+        let pane = match lines {
+            Some(n) => capture_pane(&self.manager.tmux, &tmux_name, Some(n)).await?,
+            None => self.manager.get_content(sid).await.ok().map(|c| c.content),
+        };
+        let diff = self.manager.get_diff(sid).await.ok();
+        let shell = self
+            .manager
+            .get_shell_content(sid)
+            .await
+            .ok()
+            .flatten()
+            .map(|c| c.content);
+        Ok(PreviewData {
+            pane,
+            diff_text: diff.as_ref().map(|d| d.diff.clone()).unwrap_or_default(),
+            diff_stat: diff.as_ref().map(|d| d.summary()),
+            shell,
+        })
+    }
+
+    async fn project_preview(&self, pid: &ProjectId) -> Result<PreviewData> {
+        let diff = self.manager.get_project_diff(pid).await.ok();
+        let shell = self
+            .manager
+            .get_project_shell_content(pid)
+            .await
+            .ok()
+            .flatten()
+            .map(|c| c.content);
+        Ok(PreviewData {
+            pane: None,
+            diff_text: diff.as_ref().map(|d| d.diff.clone()).unwrap_or_default(),
+            diff_stat: diff.as_ref().map(|d| d.summary()),
+            shell,
+        })
+    }
+
+    /// The full branch diff (committed vs `origin/<main>` plus uncommitted
+    /// working changes) used for the AI summary. Wraps
+    /// [`crate::git::compute_branch_diff`].
+    pub async fn branch_diff(&self, session_id: &SessionId) -> Result<String> {
+        let (worktree_path, main_branch) = {
+            let state = self.store.read().await;
+            let s = state
+                .get_session(session_id)
+                .ok_or(SessionError::NotFound(*session_id))?;
+            let project = state
+                .get_project(&s.project_id)
+                .ok_or_else(|| SessionError::ProjectNotFound(s.project_id.to_string()))?;
+            (s.worktree_path.clone(), project.main_branch.clone())
+        };
+        Ok(compute_branch_diff(&worktree_path, &main_branch).await)
+    }
+
+    /// Rename a session's title. Rejects an empty (whitespace-only) title.
+    pub async fn rename_session(&self, id: &SessionId, title: impl Into<String>) -> Result<()> {
+        let title = title.into().trim().to_string();
+        if title.is_empty() {
+            return Err(SessionError::InvalidName {
+                name: title,
+                reason: "session name cannot be empty".to_string(),
+            }
+            .into());
+        }
+        self.ensure_session_exists(id).await?;
+        self.telemetry.feature("session.rename");
+        let id = *id;
+        self.store
+            .mutate(move |state| {
+                if let Some(s) = state.get_session_mut(&id) {
+                    s.title = title;
+                }
+            })
+            .await
+    }
+
+    /// Move a session to a section (`Some(name)`) or clear its manual override
+    /// and re-run predicate assignment (`None`). Mirrors the TUI's
+    /// `apply_section_move`.
+    pub async fn set_section(&self, id: &SessionId, section: Option<String>) -> Result<()> {
+        self.ensure_session_exists(id).await?;
+        self.telemetry.feature("session.set_section");
+        let sections = self.config_store.read().sections.clone();
+        let now = chrono::Utc::now();
+        let id = *id;
+        self.store
+            .mutate(move |state| {
+                if let Some(s) = state.get_session_mut(&id) {
+                    match section {
+                        Some(name) => {
+                            s.section_override = Some(name);
+                            apply_assignment(s, &sections, now);
+                        }
+                        None => {
+                            clear_override_and_reassign(s, &sections, now);
+                        }
+                    }
+                }
+            })
+            .await
+    }
+
+    /// Clear a session's unread flag (as the TUI does when attaching).
+    pub async fn mark_read(&self, id: &SessionId) -> Result<()> {
+        self.ensure_session_exists(id).await?;
+        let id = *id;
+        self.store
+            .mutate(move |state| {
+                if let Some(s) = state.get_session_mut(&id) {
+                    s.unread = false;
+                }
+            })
+            .await
+    }
+
+    /// New-session dialog options: the default program, the configured program
+    /// list, and the configured section names.
+    pub fn create_options(&self) -> CreateOptions {
+        let config = self.config_store.read();
+        CreateOptions {
+            default_program: config.default_program.clone(),
+            programs: config
+                .programs
+                .iter()
+                .map(|p| ProgramInfo {
+                    label: p.label.clone(),
+                    command: p.command.clone(),
+                })
+                .collect(),
+            sections: config.sections.iter().map(|s| s.name.clone()).collect(),
+        }
+    }
+
+    // -- Cascade / push-stack (record outcomes in the operation ledger) --
+
+    /// Cascade-merge the stack containing `start_from`. Detects agent states
+    /// itself (the server has no cached map like the TUI), runs the merge, and
+    /// records the outcome in the ledger. Returns the recorded status.
+    pub async fn cascade_merge(&self, start_from: &SessionId) -> Result<OperationStatus> {
+        self.telemetry.feature("cascade.merge");
+        let states = self.detect_active_states().await;
+        let outcome = self.manager.cascade_merge_stack(start_from, &states).await;
+        Ok(self.record_cascade_outcome(outcome))
+    }
+
+    /// Resume a paused cascade. Records the outcome in the ledger.
+    pub async fn cascade_resume(&self) -> Result<OperationStatus> {
+        self.telemetry.feature("cascade.resume");
+        let states = self.detect_active_states().await;
+        let outcome = self.manager.cascade_resume(&states).await;
+        Ok(self.record_cascade_outcome(outcome))
+    }
+
+    /// Push every branch in the stack containing `start_from`. Records the
+    /// outcome in the ledger.
+    pub async fn push_stack(&self, start_from: &SessionId) -> Result<OperationStatus> {
+        self.telemetry.feature("stack.push");
+        let states = self.detect_active_states().await;
+        let outcome = match self.manager.push_stack(start_from, &states).await {
+            Ok(o) => OperationOutcome::Succeeded {
+                detail: format!("{} pushed", o.sessions_pushed),
+            },
+            Err(e) => OperationOutcome::Failed {
+                error: e.to_string(),
+            },
+        };
+        Ok(self.record_operation(OperationKind::PushStack, outcome))
+    }
+
+    /// Bulk agent-state detection over active sessions. `fresh` bypasses the
+    /// shared TTL cache with a zero-TTL detector, forcing a re-capture. The
+    /// signature is kept stable for Phase D, which will serve these from the
+    /// background loop's cache instead of computing on demand.
+    pub async fn agent_states(&self, fresh: bool) -> AgentStatesSnapshot {
+        let active = self.active_session_targets().await;
+        let states = if fresh {
+            let mut detector = AgentStateDetector::new(self.manager.tmux.clone(), Duration::ZERO);
+            detector.detect_all(&active).await
+        } else {
+            let mut detector = self.agent_detector.lock().await;
+            detector.detect_all(&active).await
+        };
+        // Phase D refines this to reflect background-loop liveness; a response
+        // here means the server computed states on demand, so report `true`.
+        AgentStatesSnapshot {
+            states,
+            commander_running: true,
+        }
+    }
+
+    /// Request a PR-metadata refresh. Phase A stub: the core PR-refresh loop is
+    /// wired in Phase D, so this is a no-op acknowledgement today.
+    pub fn request_pr_refresh(&self) -> Result<()> {
+        Ok(())
+    }
+
+    // -- Internal helpers for the workspace surface --
+
+    /// Cached `gh --version` availability (computed once per process).
+    async fn gh_available(&self) -> bool {
+        *self
+            .gh_available
+            .get_or_init(|| async { is_gh_available().await })
+            .await
+    }
+
+    /// Error with `NotFound` when a session id doesn't exist, so mutations can
+    /// surface a 404 rather than silently no-op'ing.
+    async fn ensure_session_exists(&self, id: &SessionId) -> Result<()> {
+        let state = self.store.read().await;
+        if state.get_session(id).is_none() {
+            return Err(SessionError::NotFound(*id).into());
+        }
+        Ok(())
+    }
+
+    /// `(id, tmux_session_name, program)` tuples for active sessions, the input
+    /// shape [`AgentStateDetector::detect_all`] expects.
+    async fn active_session_targets(&self) -> Vec<(SessionId, String, String)> {
+        let state = self.store.read().await;
+        state
+            .get_active_sessions()
+            .into_iter()
+            .map(|s| (s.id, s.tmux_session_name.clone(), s.program.clone()))
+            .collect()
+    }
+
+    /// Detect agent states for active sessions via the shared TTL-cached
+    /// detector — used to gate cascade/push delivery.
+    async fn detect_active_states(&self) -> HashMap<SessionId, AgentState> {
+        let active = self.active_session_targets().await;
+        let mut detector = self.agent_detector.lock().await;
+        detector.detect_all(&active).await
+    }
+
+    /// Push an operation onto the bounded ledger and return the recorded status.
+    fn record_operation(&self, kind: OperationKind, outcome: OperationOutcome) -> OperationStatus {
+        let status = OperationStatus {
+            id: self.next_op_id.fetch_add(1, Ordering::Relaxed),
+            kind,
+            outcome,
+            finished_at: Some(chrono::Utc::now()),
+        };
+        let mut ledger = self.operations.lock().expect("operation ledger poisoned");
+        if ledger.len() >= OPERATION_LEDGER_CAP {
+            ledger.pop_front();
+        }
+        ledger.push_back(status.clone());
+        status
+    }
+
+    /// Map a cascade result onto a ledger entry (`Complete`/`PausedOnConflict`/
+    /// error) and record it.
+    fn record_cascade_outcome(&self, outcome: Result<CascadeOutcome>) -> OperationStatus {
+        let outcome = match outcome {
+            Ok(CascadeOutcome::Complete { sessions_merged }) => OperationOutcome::Succeeded {
+                detail: format!("{sessions_merged} merged"),
+            },
+            Ok(CascadeOutcome::PausedOnConflict {
+                at,
+                sessions_merged,
+            }) => OperationOutcome::Paused {
+                detail: format!("paused at {at} after {sessions_merged} merged"),
+            },
+            Err(e) => OperationOutcome::Failed {
+                error: e.to_string(),
+            },
+        };
+        self.record_operation(OperationKind::Cascade, outcome)
+    }
+
+    /// Snapshot the operation ledger (oldest first).
+    fn operations_snapshot(&self) -> Vec<OperationStatus> {
+        self.operations
+            .lock()
+            .expect("operation ledger poisoned")
+            .iter()
+            .cloned()
+            .collect()
+    }
+}
+
+/// What a [`CommanderService::preview`] call targets: a session (with an
+/// optional explicit pane line count) or a project.
+#[derive(Debug, Clone, Copy)]
+pub enum PreviewTarget {
+    Session { id: SessionId, lines: Option<usize> },
+    Project(ProjectId),
 }
 
 /// Write the apply brief to a stable absolute path in the system temp dir
@@ -845,8 +1287,10 @@ fn ensure_install_id(store: &Arc<StateStore>) -> String {
 // Construction that needs core's domain model is done by
 // `session_info_from_session` below.
 pub use claude_commander_protocol::api::{
-    CreateSessionOpts, DiffSide, NewComment, ReviewSnapshot, SessionDetail, SessionInfo,
-    ToggleReviewed,
+    AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
+    OperationKind, OperationOutcome, OperationStatus, PreviewData, ProgramInfo, ProjectInfo,
+    PullBlockReason, PullStatus, RenameSession, ReviewSnapshot, ServerStatus, SessionDetail,
+    SessionInfo, SetSection, ToggleReviewed, WorkspaceSnapshot,
 };
 
 /// Build a [`SessionInfo`] wire DTO from core's `WorktreeSession` domain model.
@@ -870,10 +1314,38 @@ fn session_info_from_session(session: &WorktreeSession, project_name: &str) -> S
         review_decision: session.review_decision,
         pr_reviewers: session.pr_reviewers.clone(),
         created_at: session.created_at,
+        unread: session.unread,
+        stack_parent_session_id: session.stack_parent_session_id,
+        pr_base_branch: session.pr_base_branch.clone(),
+        pr_merged: session.pr_merged,
+        current_section: session.current_section.clone(),
+        section_override: session.section_override.clone(),
+        entered_section_at: Some(session.entered_section_at),
+        last_attached_at: session.last_attached_at,
+        worktree_path: session.worktree_path.clone(),
+        tmux_session_name: session.tmux_session_name.clone(),
     }
 }
 
 // -- Internal helpers --
+
+/// Build the [`ProjectInfo`] list from state, sorted by project name (stable
+/// ordering for the tree). Sessions are carried by id only; the full
+/// [`SessionInfo`] list rides alongside in [`WorkspaceSnapshot`].
+fn build_project_info_list(state: &AppState) -> Vec<ProjectInfo> {
+    let mut projects: Vec<_> = state.projects.values().collect();
+    projects.sort_by(|a, b| a.name.cmp(&b.name));
+    projects
+        .into_iter()
+        .map(|p| ProjectInfo {
+            id: p.id,
+            name: p.name.clone(),
+            repo_path: p.repo_path.clone(),
+            main_branch: p.main_branch.clone(),
+            session_ids: p.worktrees.clone(),
+        })
+        .collect()
+}
 
 fn build_session_info_list(state: &AppState, include_stopped: bool) -> Vec<SessionInfo> {
     let mut entries = Vec::new();
@@ -1196,5 +1668,257 @@ mod tests {
                 "temp data dir must differ from the real data dir"
             );
         }
+    }
+
+    // -- Workspace-surface service methods (Phase A) --
+
+    use crate::config::storage::AppState as CoreState;
+    use crate::config::{ConfigStore, StateStore};
+
+    /// Build a hermetic service over TempDir-backed stores with the given
+    /// config. Telemetry is disabled and tmux is isolated onto a throwaway
+    /// socket dir, per the project's test-isolation rules.
+    fn service_with_config(dir: &tempfile::TempDir, mut config: Config) -> CommanderService {
+        config.telemetry.enabled = false;
+        let tmux_tmpdir = dir.path().join("tmux");
+        std::fs::create_dir_all(&tmux_tmpdir).unwrap();
+        config.tmux_tmpdir = Some(tmux_tmpdir);
+        let config_store = Arc::new(ConfigStore::with_path(
+            config,
+            dir.path().join("config.toml"),
+        ));
+        let store = Arc::new(StateStore::with_path(
+            CoreState::default(),
+            dir.path().join("state.json"),
+        ));
+        CommanderService::new(config_store, store, FrontendInfo::new("test", "0.0.0"))
+    }
+
+    fn service(dir: &tempfile::TempDir) -> CommanderService {
+        service_with_config(dir, Config::default())
+    }
+
+    /// Seed one project with one session and return their ids.
+    async fn seed_project_session(svc: &CommanderService) -> (ProjectId, SessionId) {
+        let project = Project::new("repo", PathBuf::from("/tmp/repo"), "main");
+        let pid = project.id;
+        let session = WorktreeSession::new(
+            pid,
+            "task",
+            "branch-task",
+            PathBuf::from("/tmp/wt"),
+            "claude",
+        );
+        let sid = session.id;
+        svc.store()
+            .mutate(move |state| {
+                state.add_project(project);
+                state.add_session(session);
+            })
+            .await
+            .unwrap();
+        (pid, sid)
+    }
+
+    #[tokio::test]
+    async fn workspace_snapshot_carries_projects_and_sessions() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, sid) = seed_project_session(&svc).await;
+
+        let snap = svc.workspace_snapshot().await.unwrap();
+        assert_eq!(snap.projects.len(), 1);
+        assert_eq!(snap.projects[0].id, pid);
+        assert_eq!(snap.projects[0].session_ids, vec![sid]);
+        assert_eq!(snap.sessions.len(), 1);
+        assert_eq!(snap.sessions[0].session_id, sid);
+        assert_eq!(snap.sessions[0].worktree_path, PathBuf::from("/tmp/wt"));
+        assert!(snap.sessions[0].tmux_session_name.starts_with("cc-"));
+        assert!(snap.cascade_paused.is_none());
+        assert!(snap.pending_comment_sessions.is_empty());
+        assert!(snap.project_pull.is_empty());
+        assert!(snap.operations.is_empty());
+        assert_eq!(snap.server.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[tokio::test]
+    async fn workspace_snapshot_reports_paused_cascade() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_pid, sid) = seed_project_session(&svc).await;
+        svc.store()
+            .mutate(move |state| state.cascade_paused_at = Some(sid))
+            .await
+            .unwrap();
+        let snap = svc.workspace_snapshot().await.unwrap();
+        assert_eq!(snap.cascade_paused, Some(sid));
+    }
+
+    #[tokio::test]
+    async fn list_projects_sorted_by_name() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        svc.store()
+            .mutate(|state| {
+                state.add_project(Project::new("zzz", PathBuf::from("/z"), "main"));
+                state.add_project(Project::new("aaa", PathBuf::from("/a"), "main"));
+            })
+            .await
+            .unwrap();
+        let projects = svc.list_projects().await;
+        assert_eq!(projects.len(), 2);
+        assert_eq!(projects[0].name, "aaa");
+        assert_eq!(projects[1].name, "zzz");
+    }
+
+    #[tokio::test]
+    async fn create_options_from_config() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = Config {
+            default_program: "claude".to_string(),
+            programs: vec![crate::config::ProgramEntry {
+                label: "Claude (Opus)".to_string(),
+                command: "claude --model opus".to_string(),
+            }],
+            sections: vec![crate::session::SectionConfig {
+                name: "Open PRs".to_string(),
+                ..Default::default()
+            }],
+            ..Config::default()
+        };
+        let svc = service_with_config(&dir, config);
+        let opts = svc.create_options();
+        assert_eq!(opts.default_program, "claude");
+        assert_eq!(opts.programs.len(), 1);
+        assert_eq!(opts.programs[0].label, "Claude (Opus)");
+        assert_eq!(opts.sections, vec!["Open PRs".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn rename_session_updates_title() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_pid, sid) = seed_project_session(&svc).await;
+        svc.rename_session(&sid, "renamed").await.unwrap();
+        let state = svc.store().read().await;
+        assert_eq!(state.get_session(&sid).unwrap().title, "renamed");
+    }
+
+    #[tokio::test]
+    async fn rename_session_rejects_empty_title() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_pid, sid) = seed_project_session(&svc).await;
+        let err = svc.rename_session(&sid, "   ").await.unwrap_err();
+        assert!(err.to_string().contains("empty"));
+        // The original title is untouched.
+        let state = svc.store().read().await;
+        assert_eq!(state.get_session(&sid).unwrap().title, "task");
+    }
+
+    #[tokio::test]
+    async fn rename_missing_session_is_not_found() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let err = svc
+            .rename_session(&SessionId::new(), "x")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::Error::Session(SessionError::NotFound(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn set_section_sets_override_and_clears_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        // A predicate-less section is a valid manual override target.
+        let config = Config {
+            sections: vec![crate::session::SectionConfig {
+                name: "Parking".to_string(),
+                ..Default::default()
+            }],
+            ..Config::default()
+        };
+        let svc = service_with_config(&dir, config);
+        let (_pid, sid) = seed_project_session(&svc).await;
+
+        svc.set_section(&sid, Some("Parking".to_string()))
+            .await
+            .unwrap();
+        {
+            let state = svc.store().read().await;
+            let s = state.get_session(&sid).unwrap();
+            assert_eq!(s.section_override.as_deref(), Some("Parking"));
+            assert_eq!(s.current_section.as_deref(), Some("Parking"));
+        }
+
+        svc.set_section(&sid, None).await.unwrap();
+        {
+            let state = svc.store().read().await;
+            let s = state.get_session(&sid).unwrap();
+            assert!(s.section_override.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn mark_read_clears_unread() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_pid, sid) = seed_project_session(&svc).await;
+        svc.store()
+            .mutate(move |state| {
+                state.get_session_mut(&sid).unwrap().unread = true;
+            })
+            .await
+            .unwrap();
+        svc.mark_read(&sid).await.unwrap();
+        let state = svc.store().read().await;
+        assert!(!state.get_session(&sid).unwrap().unread);
+    }
+
+    #[tokio::test]
+    async fn operation_ledger_records_and_caps() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        // Record more than the cap; the ledger keeps only the newest CAP entries.
+        for i in 0..(OPERATION_LEDGER_CAP + 5) {
+            svc.record_operation(
+                OperationKind::Cascade,
+                OperationOutcome::Succeeded {
+                    detail: format!("op {i}"),
+                },
+            );
+        }
+        let ops = svc.operations_snapshot();
+        assert_eq!(ops.len(), OPERATION_LEDGER_CAP);
+        // Ids are monotonic; the oldest survivors dropped the first 5.
+        assert_eq!(ops.first().unwrap().id, 6);
+        assert!(ops.last().unwrap().id > ops.first().unwrap().id);
+    }
+
+    #[tokio::test]
+    async fn record_cascade_outcome_maps_variants() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let at = SessionId::new();
+        let paused = svc.record_cascade_outcome(Ok(CascadeOutcome::PausedOnConflict {
+            at,
+            sessions_merged: 2,
+        }));
+        assert!(matches!(paused.outcome, OperationOutcome::Paused { .. }));
+        let done = svc.record_cascade_outcome(Ok(CascadeOutcome::Complete { sessions_merged: 3 }));
+        match done.outcome {
+            OperationOutcome::Succeeded { detail } => assert!(detail.contains('3')),
+            other => panic!("expected Succeeded, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn request_pr_refresh_is_ok_stub() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        assert!(svc.request_pr_refresh().is_ok());
     }
 }
