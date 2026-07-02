@@ -1,0 +1,76 @@
+[package]
+name = "claude-commander-server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Remote-access server exposing Claude Commander sessions over HTTP + WebSocket"
+publish = false
+
+# Only the `claude-commander` bin crate drives the release (single shared tag).
+[package.metadata.release]
+release = false
+
+# Library target so integration tests can build the router in-process; the
+# binary is a thin wrapper over it.
+[lib]
+name = "claude_commander_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "claude-commander-server"
+path = "src/main.rs"
+
+[dependencies]
+# The server never does host audio I/O — playback/capture is the client's job —
+# so drop core's default `audio` feature and its ALSA-linked rodio/cpal/hound.
+claude-commander-core = { path = "../claude-commander-core", default-features = false }
+claude-commander-protocol = { path = "../claude-commander-protocol" }
+
+# Async runtime
+tokio = { workspace = true }
+futures = "0.3"
+
+# Web framework
+axum = { version = "0.8", features = ["ws", "macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors", "catch-panic"] }
+# Optional TLS termination (behind the `tls` feature, off by default).
+axum-server = { version = "0.7", features = ["tls-rustls"], optional = true }
+
+# Configuration (layered: defaults -> [server] table -> CLI flags)
+figment = { version = "0.10", features = ["toml", "env"] }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Random bearer-token generation (auto-generated token on first run)
+uuid = { version = "1.0", features = ["v4"] }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI (derive macros)
+clap = { version = "4.5", features = ["derive"] }
+
+[features]
+default = []
+tls = ["dep:axum-server"]
+
+[dev-dependencies]
+# Shared hermetic-server + git/tmux harness for the integration tests. This is a
+# dev-dependency cycle (test-support depends on this crate); Cargo allows it
+# because it only closes through this crate's test targets, not its library.
+claude-commander-test-support = { path = "../claude-commander-test-support" }
+tempfile = "3.10"
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"
+# Real HTTP + WebSocket clients for the tmux-gated integration tests.
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+tokio-tungstenite = "0.24"

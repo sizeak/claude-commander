@@ -1,0 +1,30 @@
+# Flutter / Dart
+build/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+*.iml
+
+# Rust
+target/
+**/*.rs.bk
+Cargo.lock.orig
+
+# Nix / direnv
+.direnv/
+result
+result-*
+
+# Android
+*.keystore
+local.properties
+.gradle/
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
