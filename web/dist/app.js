@@ -491,16 +491,44 @@ function selectSession(id) {
   // On mobile the sidebar is a drawer; picking a session gets it out of the way.
   if (isMobile()) closeDrawer();
 
-  // Tear down any previous socket.
-  if (state.ws) {
-    state.ws.onclose = null;
-    state.ws.close();
-    state.ws = null;
-  }
+  // Tear down any previous socket, then open a fresh (reconnecting) one.
+  closeSocket();
 
   state.term.options.scrollback = 0;
   state.term.reset();
   state.term.write("\x1b[2J\x1b[H");
+
+  openSocket(id);
+}
+
+// Reconnect timer handle, so we never stack multiple pending reconnects.
+let wsReconnectTimer = null;
+
+// Intentionally close the terminal socket (switching/closing a session). Nulls
+// the handlers first so the teardown doesn't trigger the auto-reconnect path.
+function closeSocket() {
+  if (wsReconnectTimer) {
+    clearTimeout(wsReconnectTimer);
+    wsReconnectTimer = null;
+  }
+  if (state.ws) {
+    state.ws.onclose = null;
+    state.ws.onmessage = null;
+    state.ws.onerror = null;
+    try {
+      state.ws.close();
+    } catch (_) {}
+    state.ws = null;
+  }
+}
+
+// Open (or reopen) the terminal socket for `id`. On an *unexpected* drop — a
+// mobile browser suspending a backgrounded tab, a flaky network, or a server
+// restart — we auto-reconnect while this session stays selected, so switching
+// tabs (or a deploy) doesn't leave a dead terminal. The current screen is kept;
+// the first snapshot from the new socket repaints it.
+function openSocket(id) {
+  closeSocket();
 
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
   const ws = new WebSocket(`${proto}//${location.host}/ws/sessions/${id}`);
@@ -508,6 +536,7 @@ function selectSession(id) {
   state.ws = ws;
 
   ws.onopen = () => {
+    setConn("ok", "connected");
     // Fit to the container, then push our size up front (bypassing the debounce)
     // so the server resizes the tmux window before the first capture tick and
     // the very first snapshot is laid out for the right dimensions.
@@ -525,13 +554,48 @@ function selectSession(id) {
     const text = typeof ev.data === "string" ? ev.data : new TextDecoder().decode(ev.data);
     paintSnapshot(text);
   };
+
   ws.onclose = () => {
-    if (state.selectedId === id) {
-      state.term.write("\r\n\x1b[90m[disconnected]\x1b[0m\r\n");
-    }
+    // Ignore if this isn't the active session's socket any more (a newer socket
+    // or an intentional teardown superseded it).
+    if (state.selectedId !== id || state.ws !== ws) return;
+    state.ws = null;
+    setConn("error", "reconnecting…");
+    scheduleReconnect(id);
   };
+
   ws.onerror = () => setConn("error", "stream error");
 }
+
+// Retry the socket after a short delay, but only while the page is visible — a
+// backgrounded mobile tab can't do useful work, so we wait for the return (see
+// the visibilitychange handler) rather than hammering reconnects in the dark.
+function scheduleReconnect(id) {
+  if (wsReconnectTimer) return;
+  wsReconnectTimer = setTimeout(() => {
+    wsReconnectTimer = null;
+    if (state.selectedId === id && document.visibilityState === "visible") {
+      openSocket(id);
+    }
+  }, 1500);
+}
+
+// Coming back to a backgrounded tab: mobile browsers often suspended or closed
+// the socket, so reconnect immediately; if it survived, just refit and force a
+// fresh snapshot in case the viewport changed while we were away.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState !== "visible" || !state.selectedId) return;
+  if (!state.ws || state.ws.readyState > WebSocket.OPEN) {
+    if (wsReconnectTimer) {
+      clearTimeout(wsReconnectTimer);
+      wsReconnectTimer = null;
+    }
+    openSocket(state.selectedId);
+  } else if (state.ws.readyState === WebSocket.OPEN) {
+    fitNow();
+    forceResync();
+  }
+});
 
 // Paint a full visible-screen snapshot (a flat grid of rows, ANSI included)
 // onto the terminal. Each captured line is one terminal row, so we position the
@@ -714,7 +778,7 @@ async function deleteSession(s) {
   if (await action("DELETE", `/api/sessions/${s.id}`)) {
     if (state.selectedId === s.id) {
       state.selectedId = null;
-      if (state.ws) state.ws.close();
+      closeSocket();
       els.placeholder.style.display = "flex";
     }
     refreshAll();
