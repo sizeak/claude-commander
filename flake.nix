@@ -96,8 +96,10 @@
             android_sdk.accept_license = true;
           };
         };
+        # Slim host-only toolchain for the CI shell (no Android cross targets).
+        fenixStable = fenix.packages.${system}.stable.toolchain;
         clientRust = fenix.packages.${system}.combine [
-          fenix.packages.${system}.stable.toolchain
+          fenixStable
           fenix.packages.${system}.targets.aarch64-linux-android.stable.rust-std
           fenix.packages.${system}.targets.armv7-linux-androideabi.stable.rust-std
           fenix.packages.${system}.targets.x86_64-linux-android.stable.rust-std
@@ -128,14 +130,22 @@
         # `rustup toolchain list` / `rustup target list --installed` and builds
         # via `rustup run <toolchain> cargo build`, with no plain-cargo
         # fallback. These shells pin Rust via fenix instead of rustup, so
-        # provide a shim that answers cargokit's queries from the toolchain on
-        # PATH and execs `rustup run`'s command directly (the toolchain name is
-        # ignored — Nix already pinned it). Without this, builds only work
-        # where a host rustup happens to leak in through the outer PATH.
-        # Toolchain/target *installation* is Nix's job: the shim fails loudly
-        # so a missing target is fixed in flake.nix, not auto-downloaded.
-        clientRustupShim = clientPkgs.writeShellScriptBin "rustup" ''
+        # provide a shim (bound to a specific Nix toolchain) that answers
+        # cargokit's queries and execs `rustup run`'s command directly (the
+        # toolchain name is ignored — Nix already pinned it). Toolchain/target
+        # *installation* is Nix's job: the shim fails loudly so a missing target
+        # is fixed in flake.nix, not auto-downloaded.
+        #
+        # NOTE: cargokit resolves `rustup` from `$HOME/.cargo/bin` *before* PATH
+        # (rustup.dart `executablePath`), so on hosts with a real
+        # `~/.cargo/bin/rustup` (e.g. GitHub runners) this shim is bypassed. CI
+        # shadows that path with the shim in the e2e step — see ci.yml.
+        mkRustupShim = toolchain: clientPkgs.writeShellScriptBin "rustup" ''
           set -eu
+          # Prepend the pinned toolchain so the shim and the cargo/rustc it execs
+          # are found regardless of the caller's PATH — cargokit may invoke us
+          # from a build subprocess with a reduced environment.
+          export PATH="${toolchain}/bin''${PATH:+:$PATH}"
           cmd="''${1:-}"; [ $# -gt 0 ] && shift
           case "$cmd" in
             toolchain)
@@ -170,6 +180,10 @@
               exit 1 ;;
           esac
         '';
+        # `client` carries the Android-cross toolchain; `clientCi` the slim
+        # host-only one — so each shell's shim exposes exactly its own targets.
+        clientRustupShim = mkRustupShim clientRust;
+        clientCiRustupShim = mkRustupShim fenixStable;
       in
       {
         checks = {
@@ -304,8 +318,8 @@
           buildInputs = [
             # Host-only Rust (no Android targets): cargokit cross-builds the
             # cdylib for the linux desktop target during the e2e bundle build.
-            fenix.packages.${system}.stable.toolchain
-            clientRustupShim
+            fenixStable
+            clientCiRustupShim
           ] ++ (with clientPkgs; [
             flutter
             dart

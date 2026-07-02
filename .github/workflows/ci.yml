@@ -143,6 +143,15 @@ jobs:
         with:
           workspaces: client/rust
 
+      # The Flutter SDK comes from the Nix store (cached above); this caches the
+      # downloaded pub packages so `flutter pub get` doesn't re-fetch every run.
+      - name: Restore Pub Cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: pub-${{ runner.os }}-${{ hashFiles('client/pubspec.lock') }}
+          restore-keys: pub-${{ runner.os }}-
+
       - name: Fetch Flutter Packages
         run: nix develop .#clientCi -c bash -c 'cd client && flutter pub get'
 
@@ -156,4 +165,8 @@ jobs:
         run: nix develop .#clientCi -c bash -c 'cd client/rust && cargo test'
 
       - name: Run Linux End-to-End Tests
-        run: nix develop .#clientCi -c xvfb-run -a client/tool/e2e.sh
+        # cargokit resolves `rustup` from ~/.cargo/bin *before* PATH, so on the
+        # runner (which ships a preinstalled ~/.cargo/bin/rustup) it bypasses the
+        # Nix shim and fails with `rustc -vV` exit 127. Point that path at the
+        # shim so cargokit drives the Nix-pinned toolchain for the cdylib build.
+        run: nix develop .#clientCi -c bash -c 'mkdir -p ~/.cargo/bin && ln -sf "$(command -v rustup)" ~/.cargo/bin/rustup && xvfb-run -a client/tool/e2e.sh'
