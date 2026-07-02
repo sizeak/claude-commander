@@ -31,6 +31,9 @@ pub enum Error {
 
     #[error("TTS error: {0}")]
     Tts(#[from] TtsError),
+
+    #[error("Web UI error: {0}")]
+    Web(#[from] WebError),
 }
 
 /// Session management errors
@@ -213,6 +216,30 @@ impl From<reqwest::Error> for TtsError {
     }
 }
 
+/// Embedded web UI server errors.
+#[derive(Error, Debug)]
+pub enum WebError {
+    #[error("Failed to bind web UI server to {addr}: {source}")]
+    BindFailed {
+        addr: String,
+        source: std::io::Error,
+    },
+
+    /// The web UI is enabled but has no configured password. We refuse to start
+    /// rather than generate one (which would rewrite the user's config) or run
+    /// unauthenticated on an all-interfaces bind.
+    #[error("{0}")]
+    MissingPassword(String),
+
+    /// A required mutual-TLS file (server cert, key, or client CA) is missing
+    /// from config, or could not be read/parsed.
+    #[error("Web UI TLS configuration error: {0}")]
+    TlsConfig(String),
+
+    #[error("Web UI server error: {0}")]
+    Serve(String),
+}
+
 /// TUI-related errors
 #[derive(Error, Debug)]
 pub enum TuiError {
@@ -366,5 +393,28 @@ mod tests {
         let tts_err = TtsError::Audio("test".to_string());
         let top_err: Error = tts_err.into();
         assert!(matches!(top_err, Error::Tts(_)));
+    }
+
+    #[test]
+    fn test_all_web_error_variants_display() {
+        let variants: Vec<WebError> = vec![
+            WebError::BindFailed {
+                addr: "0.0.0.0:8420".to_string(),
+                source: std::io::Error::new(std::io::ErrorKind::AddrInUse, "in use"),
+            },
+            WebError::MissingPassword("no password".to_string()),
+            WebError::TlsConfig("cert not found".to_string()),
+            WebError::Serve("connection reset".to_string()),
+        ];
+        for err in variants {
+            assert!(!err.to_string().is_empty(), "Empty display for {:?}", err);
+        }
+    }
+
+    #[test]
+    fn test_web_error_conversion() {
+        let web_err = WebError::Serve("test".to_string());
+        let top_err: Error = web_err.into();
+        assert!(matches!(top_err, Error::Web(_)));
     }
 }

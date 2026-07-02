@@ -2,6 +2,28 @@
 
 use super::*;
 
+/// Shown in a confirmation modal when the user turns on the web UI, before it is
+/// enabled. Warns that it is a remote-control surface bound on all interfaces
+/// and nudges toward a firewall / VPN / SSH tunnel rather than a raw public port.
+const WEB_UI_SECURITY_NOTICE: &str = "The web UI gives full remote control of \
+every session — creating, driving, and deleting them, with live terminal \
+access — and it listens on ALL network interfaces (0.0.0.0).\n\n\
+Only expose it on networks you trust: put it behind a firewall, a Tailscale/\
+WireGuard VPN, or an SSH tunnel rather than a raw public port, set a strong \
+password, or use the mutual-TLS auth mode.\n\n\
+Enable the web UI now?";
+
+/// Parse a settings text value into an optional path: empty or the common
+/// placeholder strings clear it to `None`, otherwise it's a `PathBuf`.
+fn parse_optional_path(value: &str) -> Option<std::path::PathBuf> {
+    let v = value.trim();
+    if v.is_empty() || v == "(unset)" || v == "(default)" {
+        None
+    } else {
+        Some(std::path::PathBuf::from(v))
+    }
+}
+
 impl App {
     pub(super) fn build_settings_rows(&self, tab: SettingsTab) -> Vec<SettingsRow> {
         match tab {
@@ -168,6 +190,57 @@ impl App {
                         "telemetry_enabled",
                     ),
                 ])
+            }
+            SettingsTab::WebUi => {
+                let c = &self.config;
+                let mtls = c.web_ui_auth == crate::config::WebUiAuth::MutualTls;
+                let path_display = |p: &Option<std::path::PathBuf>| {
+                    p.as_ref()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|| "(unset)".into())
+                };
+                let mut rows = vec![
+                    SettingsRow::toggle("Web UI Enabled", c.web_ui_enabled, "web_ui_enabled"),
+                    SettingsRow::text("Port", c.web_ui_port.to_string(), "web_ui_port"),
+                    // Auth type is an option-picker (Basic / Mutual TLS).
+                    SettingsRow::text(
+                        "Auth Type",
+                        match c.web_ui_auth {
+                            crate::config::WebUiAuth::Basic => "basic".to_string(),
+                            crate::config::WebUiAuth::MutualTls => "mutual_tls".to_string(),
+                        },
+                        "web_ui_auth",
+                    ),
+                ];
+                if mtls {
+                    // mTLS: cert/key/CA paths (password is irrelevant).
+                    rows.push(SettingsRow::text(
+                        "TLS Cert (PEM)",
+                        path_display(&c.web_ui_tls_cert),
+                        "web_ui_tls_cert",
+                    ));
+                    rows.push(SettingsRow::text(
+                        "TLS Key (PEM)",
+                        path_display(&c.web_ui_tls_key),
+                        "web_ui_tls_key",
+                    ));
+                    rows.push(SettingsRow::text(
+                        "Client CA (PEM)",
+                        path_display(&c.web_ui_tls_client_ca),
+                        "web_ui_tls_client_ca",
+                    ));
+                } else {
+                    // Basic: password.
+                    rows.push(SettingsRow::text(
+                        "Password",
+                        c.web_ui_password
+                            .as_ref()
+                            .map(|_| "(set)".to_string())
+                            .unwrap_or_else(|| "(unset)".into()),
+                        "web_ui_password",
+                    ));
+                }
+                rows
             }
             SettingsTab::Conversation => {
                 let c = &self.config.conversation;
@@ -1001,6 +1074,45 @@ impl App {
                 }
                 _ => {}
             },
+            SettingsTab::WebUi => match field_key {
+                "web_ui_port" => match value.parse::<u16>() {
+                    Ok(v) if v >= 1 => {
+                        self.config.web_ui_port = v;
+                    }
+                    _ => {
+                        self.ui_state.status_message = Some((
+                            "Port must be a number between 1 and 65535".into(),
+                            std::time::Instant::now() + std::time::Duration::from_secs(4),
+                        ));
+                    }
+                },
+                "web_ui_auth" => {
+                    self.config.web_ui_auth = match value {
+                        "mutual_tls" => crate::config::WebUiAuth::MutualTls,
+                        _ => crate::config::WebUiAuth::Basic,
+                    };
+                }
+                "web_ui_password" => {
+                    // Empty / placeholder clears it (server then refuses to start
+                    // in Basic mode until one is set).
+                    self.config.web_ui_password =
+                        if value.is_empty() || value == "(unset)" || value == "(set)" {
+                            None
+                        } else {
+                            Some(value.to_string())
+                        };
+                }
+                "web_ui_tls_cert" => {
+                    self.config.web_ui_tls_cert = parse_optional_path(value);
+                }
+                "web_ui_tls_key" => {
+                    self.config.web_ui_tls_key = parse_optional_path(value);
+                }
+                "web_ui_tls_client_ca" => {
+                    self.config.web_ui_tls_client_ca = parse_optional_path(value);
+                }
+                _ => {}
+            },
             SettingsTab::Conversation => match field_key {
                 "conversation_name" => {
                     let v = value.trim();
@@ -1208,6 +1320,7 @@ impl App {
             "stt_enabled" => self.config.stt.enabled = value,
             "stt_pause_media" => self.config.stt.pause_media = value,
             "telemetry_enabled" => self.config.telemetry.enabled = value,
+            "web_ui_enabled" => self.config.web_ui_enabled = value,
             _ => {
                 warn!("Unknown boolean setting: {}", field_key);
                 return;
@@ -1216,12 +1329,23 @@ impl App {
         self.persist_config();
     }
 
-    /// Persist the current config via the store (updates mtime so hot-reload
-    /// won't re-read our own write).
+    /// Persist the current config via the store.
+    ///
+    /// The TUI writes back its whole cached config, but that cache can be stale
+    /// for fields another in-process subsystem (the web UI) owns — most
+    /// critically `web_ui_password`, which has *no* TUI editor, so the cache can
+    /// only ever carry a stale or empty value. Writing it back would drop the
+    /// password and the web server would refuse to start on next launch. So we
+    /// apply the snapshot onto the store's *current* config under its lock and
+    /// preserve the store's `web_ui_password` (see [`overlay_tui_config`]).
     fn persist_config(&mut self) {
-        let updated = self.config.clone();
-        if let Err(e) = self.service.update_config(updated) {
-            warn!("Failed to save config: {}", e);
+        let snapshot = self.config.clone();
+        match self
+            .service
+            .mutate_config(move |c| overlay_tui_config(c, snapshot))
+        {
+            Ok(new) => self.config = new,
+            Err(e) => warn!("Failed to save config: {}", e),
         }
     }
 
@@ -1349,6 +1473,18 @@ impl App {
                 .flatten();
             if let Some(new_val) = new_val {
                 let field_key = state.rows[state.selected_row].field_key.clone();
+                // Enabling the web UI exposes a full remote-control surface, so
+                // confirm with a security notice before turning it on. Applied
+                // only on confirm (see ConfirmAction::EnableWebUi); disabling
+                // needs no prompt.
+                if should_confirm_web_ui_enable(&field_key, new_val, self.config.web_ui_enabled) {
+                    self.ui_state.modal = Modal::Confirm {
+                        title: "Enable Web UI?".to_string(),
+                        message: WEB_UI_SECURITY_NOTICE.to_string(),
+                        on_confirm: ConfirmAction::EnableWebUi,
+                    };
+                    return;
+                }
                 self.apply_bool_setting(&field_key, new_val);
                 state.rows = self.build_settings_rows(state.tab);
                 self.ui_state.modal = Modal::Settings(state);
@@ -1403,6 +1539,15 @@ impl App {
                                     .iter()
                                     .map(|s| s.label().to_string())
                                     .collect();
+                                let current_value = state.rows[state.selected_row].text_value();
+                                let selected =
+                                    options.iter().position(|o| o == current_value).unwrap_or(0);
+                                state.editing =
+                                    Some(SettingsEditing::OptionPicker { options, selected });
+                            } else if field_key == "web_ui_auth" {
+                                // Inline option picker for the web-UI auth mode.
+                                let options: Vec<String> =
+                                    vec!["basic".to_string(), "mutual_tls".to_string()];
                                 let current_value = state.rows[state.selected_row].text_value();
                                 let selected =
                                     options.iter().position(|o| o == current_value).unwrap_or(0);
@@ -1747,13 +1892,36 @@ impl App {
     }
 
     /// Persist the current sections config to disk and reconcile session assignments.
+    ///
+    /// Writes only the `sections` field onto the store's current config, so a
+    /// concurrent web-UI write (e.g. the password) isn't clobbered by our cache.
     async fn save_sections_config(&mut self) {
-        let updated = self.config.clone();
-        if let Err(e) = self.service.update_config(updated) {
-            warn!("Failed to save sections config: {}", e);
+        let sections = self.config.sections.clone();
+        match self.service.mutate_config(move |c| c.sections = sections) {
+            Ok(new) => self.config = new,
+            Err(e) => warn!("Failed to save sections config: {}", e),
         }
         self.reconcile_section_assignments().await;
     }
+}
+
+/// Apply the TUI's config `snapshot` onto the store's `current` config, keeping
+/// the fields the TUI settings modal cannot edit and must not clobber from its
+/// (possibly stale) cache. Today that is `web_ui_password`: there is no TUI
+/// field for it, so the store's value — owned by the web UI — always wins.
+///
+/// Free function so the preserve-list is unit-testable without a running `App`.
+fn overlay_tui_config(current: &mut crate::config::Config, snapshot: crate::config::Config) {
+    let web_ui_password = current.web_ui_password.take();
+    *current = snapshot;
+    current.web_ui_password = web_ui_password;
+}
+
+/// Whether toggling a settings row should first show the web-UI security
+/// confirmation ([`WEB_UI_SECURITY_NOTICE`]): only when turning `web_ui_enabled`
+/// from off to on. Disabling, or any other toggle, applies directly.
+fn should_confirm_web_ui_enable(field_key: &str, new_val: bool, currently_enabled: bool) -> bool {
+    field_key == "web_ui_enabled" && new_val && !currently_enabled
 }
 
 /// Build displayable rows for a section's predicates.
@@ -2135,6 +2303,46 @@ mod tests {
     }
 
     #[test]
+    fn confirms_web_ui_enable_only_on_off_to_on() {
+        // Turning it on prompts.
+        assert!(should_confirm_web_ui_enable("web_ui_enabled", true, false));
+        // Already on, re-affirming true: no prompt.
+        assert!(!should_confirm_web_ui_enable("web_ui_enabled", true, true));
+        // Turning it off: no prompt.
+        assert!(!should_confirm_web_ui_enable("web_ui_enabled", false, true));
+        // Any other toggle: no prompt.
+        assert!(!should_confirm_web_ui_enable(
+            "fetch_before_create",
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn overlay_tui_config_preserves_web_ui_password() {
+        // Regression: the TUI has no web_ui_password field, so its cached config
+        // carries None (or a stale value). Persisting must NOT drop the password
+        // the web UI set on the store — the server would then refuse to start.
+        let mut current = crate::config::Config {
+            web_ui_password: Some("set-via-web".to_string()),
+            ..Default::default()
+        };
+        // TUI snapshot with no password but a legitimately-edited field.
+        let snapshot = crate::config::Config {
+            web_ui_password: None,
+            branch_prefix: "tui-edit/".to_string(),
+            ..Default::default()
+        };
+
+        overlay_tui_config(&mut current, snapshot);
+
+        // The store's password survives...
+        assert_eq!(current.web_ui_password.as_deref(), Some("set-via-web"));
+        // ...and the TUI's actual edit is applied.
+        assert_eq!(current.branch_prefix, "tui-edit/");
+    }
+
+    #[test]
     fn label_width_grows_to_fit_long_labels() {
         // A long keybinding-style description must not be clipped to the old
         // fixed 24-column label width.
@@ -2272,7 +2480,7 @@ mod tests {
 
     #[test]
     fn settings_tab_cycle_includes_conversation() {
-        assert_eq!(SettingsTab::ALL.len(), 5);
+        assert_eq!(SettingsTab::ALL.len(), 6);
         assert!(SettingsTab::ALL.contains(&SettingsTab::Conversation));
         assert_eq!(SettingsTab::General.next(), SettingsTab::Conversation);
         assert_eq!(SettingsTab::Conversation.prev(), SettingsTab::General);
@@ -2283,5 +2491,16 @@ mod tests {
         }
         assert_eq!(t, SettingsTab::General);
         assert_eq!(SettingsTab::Conversation.label(), "Conversation");
+    }
+
+    #[test]
+    fn settings_tab_includes_web_ui() {
+        assert!(SettingsTab::ALL.contains(&SettingsTab::WebUi));
+        assert_eq!(SettingsTab::WebUi.label(), "Web UI");
+        // Web UI sits between Conversation and Keybindings.
+        assert_eq!(SettingsTab::Conversation.next(), SettingsTab::WebUi);
+        assert_eq!(SettingsTab::WebUi.next(), SettingsTab::Keybindings);
+        assert_eq!(SettingsTab::Keybindings.prev(), SettingsTab::WebUi);
+        assert_eq!(SettingsTab::WebUi.prev(), SettingsTab::Conversation);
     }
 }

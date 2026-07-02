@@ -25,6 +25,11 @@ impl ProjectId {
     pub fn from_uuid(uuid: Uuid) -> Self {
         Self(uuid)
     }
+
+    /// Get the inner UUID (the full value; `Display` truncates to 8 chars).
+    pub fn as_uuid(&self) -> &Uuid {
+        &self.0
+    }
 }
 
 impl Default for ProjectId {

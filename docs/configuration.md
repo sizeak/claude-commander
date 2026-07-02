@@ -163,6 +163,14 @@ state_sync_interval_ms = 2000
 # Working directory for the commander; defaults to <data dir>/commander.
 # commander_dir = "/path/to/commander"
 
+# Optional web UI: serve a browser dashboard that lists, watches, drives, and
+# jumps into every session. Binds 0.0.0.0 and is gated behind HTTP Basic auth
+# (user `admin`). Off by default. See "Web UI" below — note it grants full
+# remote control of your terminals, so secure it accordingly.
+# web_ui_enabled = false
+# web_ui_port = 8420                       # listen port (default 8420)
+# web_ui_password = "choose-a-strong-password"  # REQUIRED when enabled; the web UI won't start without it
+
 # Conversation mode: a full-screen chat (open with `Alt-c`) backed by a
 # dedicated headless Claude session, whose replies stream in and are spoken
 # aloud via an OpenAI-compatible TTS engine. See "Conversation mode" below.
@@ -438,6 +446,41 @@ Limits are advisory — they never block session creation or section transitions
 ### Reordering, adding, or removing sections
 
 These are edit-`config.toml`-and-restart actions — there's no hot reload. The cached `current_section` on each session is reconciled against the new config on next startup; if the referenced section no longer exists, the session falls back to `"In Progress"` and continues forward-only from there.
+
+## Web UI
+
+Claude Commander can serve an optional **web UI** that mirrors the TUI in a
+browser: list every session with its live status and agent state, watch and
+type into each session's terminal (via xterm.js over a WebSocket), and
+create / restart / kill / delete sessions. The server shares the same running
+instance as the TUI, so both control the same sessions and state.
+
+It is **off by default**. Enable it in config:
+
+```toml
+web_ui_enabled = true
+# Port to listen on (binds 0.0.0.0). Defaults to 8420.
+web_ui_port = 8420
+# Password for HTTP Basic auth (username is always `admin`). REQUIRED when the
+# web UI is enabled — the server refuses to start without one (it never
+# generates or rewrites your config).
+web_ui_password = "choose-a-strong-password"
+```
+
+All three options are also editable in the in-app settings modal (`,`) on the
+General tab. You can also pass `--password` to `claude-commander serve-web` to
+override it for a single run.
+
+> ⚠️ **Security.** The server binds **all network interfaces** (`0.0.0.0`) so it
+> is reachable from other machines — that is the point, but it means anyone who
+> can reach the port and knows the password gets **full remote control of every
+> session**, including the ability to run arbitrary commands in your terminals.
+> Every route and the WebSocket upgrade are gated behind HTTP Basic auth, and
+> auth is mandatory: if the web UI is enabled with no `web_ui_password` set, it
+> **refuses to start** rather than run unauthenticated. Because Basic auth sends
+> credentials base64-encoded over plain HTTP, only expose this on a trusted
+> network, or put it behind a TLS-terminating reverse proxy or an SSH tunnel on
+> anything else.
 
 ## Usage Telemetry
 

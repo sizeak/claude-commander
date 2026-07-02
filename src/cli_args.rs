@@ -126,6 +126,25 @@ pub enum Commands {
         init: bool,
     },
 
+    /// Run only the web UI server, headless (no TUI).
+    ///
+    /// Serves the same browser dashboard the TUI embeds — list, watch, drive,
+    /// and jump into sessions — without occupying a terminal. Useful on a
+    /// headless host, in the background, or for testing the web UI. Reads the
+    /// same state/config as the TUI, so both can run against the same sessions.
+    /// `--port`/`--password` override the config values for this run.
+    ServeWeb {
+        /// Port to listen on (overrides `web_ui_port`; binds 0.0.0.0)
+        #[arg(short, long)]
+        port: Option<u16>,
+
+        /// Basic-auth password (overrides `web_ui_password`; username is `admin`).
+        /// If neither this nor config sets one, a random password is generated
+        /// and printed.
+        #[arg(long)]
+        password: Option<String>,
+    },
+
     /// Toggle voice input in the running TUI. Intended for binding to a desktop
     /// global keyboard shortcut (e.g. a KDE Plasma custom shortcut) so STT can be
     /// triggered system-wide, not just when the terminal is focused. Talks to the
@@ -180,6 +199,7 @@ mod tests {
             "config",
             "commander",
             "listen-toggle",
+            "serve-web",
         ] {
             assert!(
                 names.contains(&expected),

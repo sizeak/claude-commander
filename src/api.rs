@@ -125,6 +125,30 @@ impl CommanderService {
         self.config_store.reload_if_changed()
     }
 
+    /// Apply a field-level mutation to the shared config under the store lock and
+    /// return the resulting config. Unlike [`update_config`](Self::update_config)
+    /// (a full overwrite), this builds on the store's *current* state, so a
+    /// caller with a possibly-stale snapshot (the TUI) can change the fields it
+    /// owns without clobbering fields another subsystem (the web UI) wrote —
+    /// e.g. `web_ui_password`, which has no TUI editor.
+    pub fn mutate_config<F>(&self, f: F) -> Result<Config>
+    where
+        F: FnOnce(&mut Config),
+    {
+        self.config_store.mutate(|c| {
+            f(c);
+            c.clone()
+        })
+    }
+
+    /// Generation counter for the shared config, bumped on every change. A
+    /// frontend caching its own [`Config`] snapshot (the TUI does) compares this
+    /// to know when to resync — catching writes made by another subsystem
+    /// sharing this service in-process, such as the web UI.
+    pub fn config_generation(&self) -> u64 {
+        self.config_store.generation()
+    }
+
     /// Whether a pending config change requires an app restart to take effect.
     pub fn restart_required(&self) -> bool {
         self.config_store.restart_required()
@@ -142,6 +166,39 @@ impl CommanderService {
     pub async fn scan_directory(&self, dir: &Path) -> Result<ScanResult> {
         self.telemetry.feature("project.scan_directory");
         self.manager.scan_directory(dir).await
+    }
+
+    /// Remove a project and all its sessions (kills tmux, removes from state).
+    pub async fn remove_project(&self, project_id: &ProjectId) -> Result<()> {
+        self.telemetry.feature("project.remove");
+        self.manager.remove_project(project_id).await
+    }
+
+    /// List all registered projects with a session count, for management UIs.
+    pub async fn list_projects(&self) -> Result<Vec<ProjectInfo>> {
+        let state = self.store.read().await;
+        let mut projects: Vec<ProjectInfo> = state
+            .projects
+            .values()
+            .map(|p| ProjectInfo {
+                id: p.id.as_uuid().to_string(),
+                project_id: p.id,
+                name: p.name.clone(),
+                repo_path: p.repo_path.clone(),
+                main_branch: p.main_branch.clone(),
+                // Count only sessions that still exist in state (worktrees can
+                // hold ids that were pruned elsewhere).
+                session_count: p
+                    .worktrees
+                    .iter()
+                    .filter(|id| state.sessions.contains_key(id))
+                    .count(),
+                created_at: p.created_at,
+            })
+            .collect();
+        // Stable, friendly ordering for the UI.
+        projects.sort_by_key(|p| p.name.to_lowercase());
+        Ok(projects)
     }
 
     /// Clear the paused cascade state without merging.
@@ -260,6 +317,99 @@ impl CommanderService {
 
         let n = lines.map(crate::cli::clamp_log_lines);
         capture_pane(&self.manager.tmux, &tmux_name, n).await
+    }
+
+    /// Capture a session's *visible* terminal screen with ANSI escapes, for the
+    /// web UI's live terminal mirror.
+    ///
+    /// Unlike [`get_pane_content`] (scrollback, no colour — used for the CLI
+    /// `log` command and detail view), this returns exactly one screenful sized
+    /// to the pane's current dimensions, colours intact — so xterm.js can repaint
+    /// it as a faithful live mirror. Returns `Ok(None)` if the session is gone.
+    pub async fn capture_terminal(&self, query: &str) -> Result<Option<String>> {
+        let state = self.store.read().await;
+        let Some(session) = crate::cli::find_session(&state, query) else {
+            return Ok(None);
+        };
+        let tmux_name = session.tmux_session_name.clone();
+        drop(state);
+
+        self.manager.tmux.capture_visible_ansi(&tmux_name).await
+    }
+
+    /// Capture a session's pane *including scrollback history* — the last `lines`
+    /// lines (history plus the current screen), ANSI colours intact.
+    ///
+    /// Unlike [`capture_terminal`](Self::capture_terminal), which returns exactly
+    /// one screenful for the live mirror, this returns many screenfuls so the web
+    /// UI's history view can let the user scroll back through output that has
+    /// scrolled off the visible pane. Returns `Ok(None)` if the session is gone.
+    pub async fn capture_scrollback(&self, query: &str, lines: u32) -> Result<Option<String>> {
+        let state = self.store.read().await;
+        let Some(session) = crate::cli::find_session(&state, query) else {
+            return Ok(None);
+        };
+        let tmux_name = session.tmux_session_name.clone();
+        drop(state);
+
+        if !self.manager.tmux.session_exists(&tmux_name).await? {
+            return Ok(None);
+        }
+        // tmux uses a negative start line to reach into history: `-N` is N lines
+        // above the top of the visible screen. No end line → up to the bottom.
+        let start = -(lines as i32);
+        self.telemetry.feature("web.scrollback");
+        let content = self
+            .manager
+            .tmux
+            .capture_pane(&tmux_name, Some(start), None)
+            .await?;
+        Ok(Some(content))
+    }
+
+    /// Forward raw input bytes to a session's tmux pane, verbatim.
+    ///
+    /// This is the input half of the web UI's terminal bridge: the browser's
+    /// xterm.js emits a raw byte stream (printable text, control characters,
+    /// CSI escape sequences for arrows/function keys) and those bytes are
+    /// written straight through via tmux `send-keys -H`, so the session sees
+    /// exactly what a real terminal would deliver. Resolves the session by the
+    /// same fuzzy lookup as the other query methods; returns `Ok(false)` if no
+    /// session matches (so callers can report a closed/unknown session without
+    /// treating it as a hard error).
+    pub async fn send_input(&self, query: &str, bytes: &[u8]) -> Result<bool> {
+        let state = self.store.read().await;
+        let Some(session) = crate::cli::find_session(&state, query) else {
+            return Ok(false);
+        };
+        let tmux_name = session.tmux_session_name.clone();
+        drop(state);
+
+        self.telemetry.feature("web.input");
+        self.manager.tmux.send_raw_bytes(&tmux_name, bytes).await?;
+        Ok(true)
+    }
+
+    /// Resize a session's tmux window to `cols`×`rows`.
+    ///
+    /// The web UI calls this when its xterm.js terminal opens or the browser
+    /// window changes size, so the tmux pane is laid out for the same width the
+    /// browser renders — otherwise `capture-pane` returns content wrapped for
+    /// the 200-column default and the UI looks scrambled. Returns `Ok(false)` if
+    /// no session matches the query.
+    pub async fn resize_session(&self, query: &str, cols: u16, rows: u16) -> Result<bool> {
+        let state = self.store.read().await;
+        let Some(session) = crate::cli::find_session(&state, query) else {
+            return Ok(false);
+        };
+        let tmux_name = session.tmux_session_name.clone();
+        drop(state);
+
+        self.manager
+            .tmux
+            .resize_window(&tmux_name, cols, rows)
+            .await?;
+        Ok(true)
     }
 
     pub async fn check_tmux(&self) -> Result<()> {
@@ -816,6 +966,20 @@ fn ensure_install_id(store: &Arc<StateStore>) -> String {
 }
 
 // -- Response types --
+
+/// Project summary for management UIs (CLI/web): identity plus a live count of
+/// sessions that still exist in state.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectInfo {
+    /// Full UUID string (the 8-char `Display` is for terminals only).
+    pub id: String,
+    pub project_id: ProjectId,
+    pub name: String,
+    pub repo_path: PathBuf,
+    pub main_branch: String,
+    pub session_count: usize,
+    pub created_at: DateTime<Utc>,
+}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionInfo {

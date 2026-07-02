@@ -723,6 +723,24 @@ impl App {
             width = key_col_width,
         )));
 
+        // Web UI (a config-gated feature with no in-app keybinding). Only shown
+        // when enabled so the help stays relevant to the running instance.
+        if self.config.web_ui_enabled {
+            lines.push(Line::from(""));
+            lines.push(Line::from("Web UI:"));
+            lines.push(Line::from(format!(
+                "  {:<width$}Browser dashboard on http://<host>:{}",
+                "enabled",
+                self.config.web_ui_port,
+                width = key_col_width,
+            )));
+            lines.push(Line::from(format!(
+                "  {:<width$}Log in as `admin` (Basic auth) · configure in settings (,)",
+                "",
+                width = key_col_width,
+            )));
+        }
+
         // Status indicators (not keybinding-related, stays hardcoded)
         lines.push(Line::from(""));
         lines.push(Line::from("Status Indicators:"));

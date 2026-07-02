@@ -404,15 +404,17 @@ pub enum SettingsTab {
     #[default]
     General,
     Conversation,
+    WebUi,
     Keybindings,
     Theme,
     Sections,
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 5] = [
+    const ALL: [SettingsTab; 6] = [
         Self::General,
         Self::Conversation,
+        Self::WebUi,
         Self::Keybindings,
         Self::Theme,
         Self::Sections,
@@ -422,6 +424,7 @@ impl SettingsTab {
         match self {
             Self::General => "General",
             Self::Conversation => "Conversation",
+            Self::WebUi => "Web UI",
             Self::Keybindings => "Keybindings",
             Self::Theme => "Theme",
             Self::Sections => "Sections",
@@ -431,7 +434,8 @@ impl SettingsTab {
     fn next(self) -> Self {
         match self {
             Self::General => Self::Conversation,
-            Self::Conversation => Self::Keybindings,
+            Self::Conversation => Self::WebUi,
+            Self::WebUi => Self::Keybindings,
             Self::Keybindings => Self::Theme,
             Self::Theme => Self::Sections,
             Self::Sections => Self::General,
@@ -442,7 +446,8 @@ impl SettingsTab {
         match self {
             Self::General => Self::Sections,
             Self::Conversation => Self::General,
-            Self::Keybindings => Self::Conversation,
+            Self::WebUi => Self::Conversation,
+            Self::Keybindings => Self::WebUi,
             Self::Theme => Self::Keybindings,
             Self::Sections => Self::Theme,
         }
@@ -673,10 +678,22 @@ pub enum InputAction {
 /// Action to perform when confirm modal is confirmed
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
-    DeleteSession { session_id: SessionId },
-    DeleteMergedPrSessions { session_ids: Vec<SessionId> },
-    RestartSession { session_id: SessionId },
-    RemoveProject { project_id: ProjectId },
+    DeleteSession {
+        session_id: SessionId,
+    },
+    DeleteMergedPrSessions {
+        session_ids: Vec<SessionId>,
+    },
+    RestartSession {
+        session_id: SessionId,
+    },
+    RemoveProject {
+        project_id: ProjectId,
+    },
+    /// Turn on the web UI after the user acknowledges the security notice shown
+    /// when they toggle it on in settings. Applied only on confirm so cancelling
+    /// leaves it disabled.
+    EnableWebUi,
 }
 
 /// Application UI state
@@ -962,8 +979,15 @@ impl AppUiState {
 
 /// Main TUI application
 pub struct App {
-    /// Local config cache — refreshed from config_store on tick when file changes
+    /// Local config cache — refreshed from config_store on tick when the shared
+    /// config changes (see `config_generation`).
     config: Config,
+    /// The `config_store` generation this cache was last synced at. When the
+    /// store advances past it — from a disk edit or an in-process write by
+    /// another subsystem like the web UI — `check_config_reload` refreshes
+    /// `config`. Without this the mtime guard hides same-process web writes and
+    /// a later TUI settings-save would clobber them with the stale cache.
+    config_generation: u64,
     /// Frozen snapshot of `commander_enabled`, captured at startup. The
     /// commander's enablement is restart-required: the agent-state poll task
     /// captures it at spawn, so the footer chip reads this same frozen value
@@ -1014,6 +1038,7 @@ impl App {
     ) -> Self {
         let config = config_store.read().clone();
         let service = CommanderService::new(config_store, store, frontend);
+        let config_generation = service.config_generation();
 
         let base = config
             .theme
@@ -1027,6 +1052,7 @@ impl App {
 
         Self {
             config,
+            config_generation,
             commander_enabled_at_init,
             service,
             ui_state: AppUiState::default(),
@@ -1111,6 +1137,20 @@ impl App {
                             debug!("State sync check failed: {}", e);
                         }
                     }
+                }
+            });
+        }
+
+        // Start the embedded web UI server, sharing this instance's service so
+        // the browser drives the same sessions, state file, and tmux executor
+        // as the TUI. Spawned detached: a web-server failure (e.g. port in use)
+        // is logged but must never take down the terminal UI.
+        if self.config.web_ui_enabled {
+            let service = self.service.clone();
+            let config = self.config.clone();
+            tokio::spawn(async move {
+                if let Err(e) = crate::web::serve(service, config).await {
+                    warn!("Web UI server stopped: {}", e);
                 }
             });
         }

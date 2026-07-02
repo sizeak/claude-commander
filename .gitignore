@@ -23,3 +23,7 @@ Thumbs.db
 
 # claude-commander
 .claude/worktrees/
+
+# Built binary artifact from Dockerfile.build (export stage writes ./dist).
+# Only the repo-root dist/ — web/dist/ holds the embedded frontend and stays.
+/dist/
