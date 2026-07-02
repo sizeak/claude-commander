@@ -13,7 +13,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use nix::fcntl::{Flock, FlockArg};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, watch};
 use tracing::debug;
 
 use super::Config;
@@ -34,6 +34,12 @@ pub struct StateStore {
     state: Arc<RwLock<AppState>>,
     /// Modification time of the state file at last read/write (for change detection)
     last_mtime: Arc<RwLock<Option<SystemTime>>>,
+    /// Monotonic change counter, bumped after every successful mutation (and on
+    /// a reload that picked up an external change). Consumers subscribe via
+    /// [`Self::subscribe`] and re-read state on each bump — this is the local
+    /// backend's change-feed, letting the TUI refresh on mutation rather than
+    /// only on a fixed tick.
+    generation: Arc<watch::Sender<u64>>,
 }
 
 impl StateStore {
@@ -58,6 +64,7 @@ impl StateStore {
             lock_path,
             state: Arc::new(RwLock::new(app_state)),
             last_mtime: Arc::new(RwLock::new(mtime)),
+            generation: Arc::new(watch::Sender::new(0)),
         })
     }
 
@@ -69,7 +76,28 @@ impl StateStore {
             lock_path,
             state: Arc::new(RwLock::new(app_state)),
             last_mtime: Arc::new(RwLock::new(None)),
+            generation: Arc::new(watch::Sender::new(0)),
         }
+    }
+
+    /// Subscribe to the change-feed. The returned receiver's value is the
+    /// current generation counter; it changes (via [`watch::Receiver::changed`])
+    /// after every successful mutation and after a reload that picked up an
+    /// external change. This is the local backend's change notification — a
+    /// consumer re-reads [`Self::read`] on each bump rather than polling on a
+    /// fixed tick. See [`crate::backend`].
+    pub fn subscribe(&self) -> watch::Receiver<u64> {
+        self.generation.subscribe()
+    }
+
+    /// The current change generation. Bumped on every persisted mutation.
+    pub fn generation(&self) -> u64 {
+        *self.generation.borrow()
+    }
+
+    /// Bump the change generation, waking every [`Self::subscribe`] receiver.
+    fn bump_generation(&self) {
+        self.generation.send_modify(|g| *g += 1);
     }
 
     /// The data directory the state file lives in — the parent of
@@ -150,6 +178,7 @@ impl StateStore {
         // Update in-memory cache
         *self.state.write().await = new_state;
         *self.last_mtime.write().await = mtime;
+        self.bump_generation();
 
         Ok(result)
     }
@@ -195,6 +224,7 @@ impl StateStore {
 
         *self.state.write().await = new_state;
         *self.last_mtime.write().await = mtime;
+        self.bump_generation();
 
         Ok(result)
     }
@@ -241,6 +271,9 @@ impl StateStore {
 
         *self.state.write().await = new_state;
         *self.last_mtime.write().await = mtime;
+        // An external change was picked up — wake change-feed subscribers so the
+        // TUI re-renders on another instance's mutation, not just our own.
+        self.bump_generation();
 
         Ok(true)
     }
@@ -320,6 +353,7 @@ impl Clone for StateStore {
             lock_path: self.lock_path.clone(),
             state: self.state.clone(),
             last_mtime: self.last_mtime.clone(),
+            generation: self.generation.clone(),
         }
     }
 }
@@ -468,6 +502,62 @@ mod tests {
         // Verify the store picked up the external change
         let state = store.read().await;
         assert_eq!(state.project_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn mutate_bumps_generation_and_wakes_subscribers() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = create_test_store(&temp_dir);
+
+        let mut rx = store.subscribe();
+        assert_eq!(store.generation(), 0);
+        assert_eq!(*rx.borrow_and_update(), 0);
+
+        store.mutate(|_| {}).await.unwrap();
+
+        // The counter advanced and the subscriber observes the change.
+        assert_eq!(store.generation(), 1);
+        rx.changed().await.unwrap();
+        assert_eq!(*rx.borrow_and_update(), 1);
+
+        // A second mutation bumps again.
+        store.mutate(|_| {}).await.unwrap();
+        assert_eq!(store.generation(), 2);
+    }
+
+    #[tokio::test]
+    async fn reload_if_changed_bumps_only_on_external_change() {
+        let temp_dir = TempDir::new().unwrap();
+        let state_path = temp_dir.path().join("state.json");
+        let store = StateStore::with_path(AppState::new(), state_path.clone());
+
+        // Seed the file (bumps to 1) and record the mtime.
+        store.mutate(|_| {}).await.unwrap();
+        let gen_after_seed = store.generation();
+
+        // No external change → no reload, no bump.
+        assert!(!store.reload_if_changed().await.unwrap());
+        assert_eq!(store.generation(), gen_after_seed);
+
+        // External modification → reload picks it up and bumps.
+        let mut external = AppState::load_from(&state_path).unwrap();
+        external.add_project(Project::new("external", PathBuf::from("/tmp/ext"), "main"));
+        atomic_write(&state_path, &external).unwrap();
+        assert!(store.reload_if_changed().await.unwrap());
+        assert_eq!(store.generation(), gen_after_seed + 1);
+    }
+
+    #[tokio::test]
+    async fn cloned_store_shares_change_feed() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = create_test_store(&temp_dir);
+        let clone = store.clone();
+        let mut rx = clone.subscribe();
+
+        // A mutation through the original wakes a subscriber taken from the clone.
+        store.mutate(|_| {}).await.unwrap();
+        rx.changed().await.unwrap();
+        assert_eq!(clone.generation(), store.generation());
     }
 
     #[tokio::test]

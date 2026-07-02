@@ -1,0 +1,308 @@
+//! The backend seam the TUI drives, in place of wiring `CommanderService` and
+//! the stores together itself.
+//!
+//! A [`CommanderBackend`] is everything the session tree, preview, review view,
+//! and attach flow need, expressed over **protocol DTOs** only — no core domain
+//! types cross the trait surface. Two implementations exist:
+//!
+//! - [`LocalBackend`](local::LocalBackend): wraps an in-process
+//!   [`CommanderService`](crate::api::CommanderService); this is what the TUI
+//!   and CLI use today.
+//! - (Phase F) a remote client that talks to `claude-commander-server` over
+//!   HTTP + WebSocket, so the same TUI can drive a machine across the network.
+//!
+//! Because the trait is object-safe and `Send + Sync` with `Send` futures, the
+//! TUI holds an `Arc<dyn CommanderBackend>` and can hand clones to background
+//! tasks (`tokio::spawn`) — the poll loops, the review refresh, etc.
+//!
+//! The interactive attach loop (raw mode, keystroke interception, SIGWINCH) is
+//! **not** rewritten here — Phase C lifts it out of `tmux/attach.rs` to run over
+//! [`AttachConnection`], which this module defines so both a local PTY and a
+//! remote WebSocket can back it.
+
+pub mod error;
+pub mod local;
+pub mod run_local;
+
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::watch;
+use uuid::Uuid;
+
+use crate::api::{
+    AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
+    OperationStatus, PreviewData, PreviewTarget, ReviewSnapshot, SessionDetail, WorkspaceSnapshot,
+};
+use crate::comment::ApplyOutcome;
+use crate::session::{ProjectId, SessionId};
+
+pub use error::{BResult, BackendError};
+pub use local::LocalBackend;
+pub use run_local::{RunLocalError, run_local};
+
+/// Whether a backend runs in-process or talks to a remote server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackendKind {
+    /// In-process [`LocalBackend`](local::LocalBackend).
+    Local,
+    /// A client of a remote `claude-commander-server`.
+    Remote,
+}
+
+/// Identifies a backend for status display and logging.
+#[derive(Debug, Clone)]
+pub struct BackendDescriptor {
+    /// Human-readable name (e.g. `"local"`, or a remote host label).
+    pub name: String,
+    pub kind: BackendKind,
+}
+
+/// Which UI affordances a backend supports. A remote backend can't drive the
+/// operator's local editor or a `tmux display-popup` on the server host, so the
+/// TUI hides those actions when the capability is off. The local backend has
+/// them all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BackendCapabilities {
+    /// Open the operator's `$EDITOR`/GUI editor on a session worktree.
+    pub open_editor: bool,
+    /// The in-session `tmux display-popup` switcher (Ctrl+Space).
+    pub switcher_popup: bool,
+    /// A dedicated commander tmux session.
+    pub commander_session: bool,
+    /// Ctrl+\ agent↔shell pane toggle.
+    pub shell_toggle: bool,
+}
+
+/// A change-feed handle: its generation counter advances whenever the backend's
+/// observable state changes, so a consumer re-reads a snapshot on each bump
+/// rather than polling on a fixed tick. Backed by a [`watch`] channel — for
+/// [`LocalBackend`](local::LocalBackend) it forwards the
+/// [`StateStore`](crate::config::StateStore) generation; a remote backend drives
+/// it from its own poll/subscription loop.
+pub struct BackendChangeFeed {
+    rx: watch::Receiver<u64>,
+}
+
+impl BackendChangeFeed {
+    pub fn new(rx: watch::Receiver<u64>) -> Self {
+        Self { rx }
+    }
+
+    /// The current generation. Two reads returning the same value mean nothing
+    /// changed in between.
+    pub fn generation(&self) -> u64 {
+        *self.rx.borrow()
+    }
+
+    /// Wait until the generation changes. Returns `false` if the sending side is
+    /// gone (the backend was dropped), so a consumer loop can exit cleanly.
+    pub async fn changed(&mut self) -> bool {
+        self.rx.changed().await.is_ok()
+    }
+}
+
+/// Which pane of a session to attach to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachKind {
+    /// The agent (e.g. Claude) pane — the session's primary tmux session.
+    Agent,
+    /// The paired shell pane (Ctrl+\ toggles here), created on demand.
+    Shell,
+}
+
+/// Why an [`AttachConnection`] ended, so a driving loop can decide whether to
+/// auto-restart, return to the tree, etc.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AttachEnd {
+    /// The pane's process/session ended (PTY EOF or the child exited non-clean).
+    SessionEnded,
+    /// A clean detach — the attach child was killed but the session lives on.
+    Detached,
+    /// The transport failed.
+    Error(String),
+}
+
+/// Resizes an attached terminal. Cheaply cloneable and `Send + Sync`, so a
+/// SIGWINCH task (or a `resize` control-frame handler) can hold a clone while
+/// the main loop owns the streams. Wraps the transport-specific resize action
+/// (a local PTY `ioctl`, or a remote `resize` frame) behind one call.
+#[derive(Clone)]
+pub struct AttachResizer(Arc<dyn Fn(u16, u16) + Send + Sync>);
+
+impl AttachResizer {
+    pub fn new(f: impl Fn(u16, u16) + Send + Sync + 'static) -> Self {
+        Self(Arc::new(f))
+    }
+
+    /// Resize to `cols`×`rows`. Fire-and-forget: a failed resize is non-fatal
+    /// (the terminal keeps its previous size).
+    pub fn resize(&self, cols: u16, rows: u16) {
+        (self.0)(cols, rows)
+    }
+}
+
+impl std::fmt::Debug for AttachResizer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AttachResizer")
+    }
+}
+
+/// Teardown + termination-signal half of an attach. Kept separate from the byte
+/// streams so a loop can `select!` on `wait()` (natural end) while pumping the
+/// reader/writer, and call `detach()` on an explicit user detach.
+#[async_trait]
+pub trait AttachTerminator: Send {
+    /// Explicitly end the attach (deterministic teardown). Locally this kills
+    /// the `tmux attach-session` child — detaching the client while the tmux
+    /// session and its program keep running; remotely it sends a `detach` frame.
+    /// Idempotent.
+    async fn detach(&mut self);
+
+    /// Wait for the attach to end on its own (the user pressed tmux's detach
+    /// key, the pane's process exited, or the remote sent `detached`) and report
+    /// why. After [`Self::detach`] this resolves promptly.
+    async fn wait(&mut self) -> AttachEnd;
+}
+
+/// The independently-ownable parts of a live attach, ready for an interactive
+/// I/O loop: raw byte streams both ways, a resize handle, and a terminator. The
+/// reader/writer are boxed trait objects so a local PTY and a remote WebSocket
+/// present the same shape.
+pub struct AttachStreams {
+    pub reader: Box<dyn AsyncRead + Send + Unpin>,
+    pub writer: Box<dyn AsyncWrite + Send + Unpin>,
+    pub resizer: AttachResizer,
+    pub terminator: Box<dyn AttachTerminator>,
+}
+
+/// A live attach to a session's pane. Transport-agnostic: [`LocalBackend`] backs
+/// it with a PTY (`tmux attach-session`), a remote backend with a WebSocket.
+///
+/// The value is opaque until [`Self::split`], which yields the [`AttachStreams`]
+/// an interactive loop drives.
+#[async_trait]
+pub trait AttachConnection: Send {
+    /// Break the connection into its byte streams, resize handle, and
+    /// terminator. Consumes the connection.
+    fn split(self: Box<Self>) -> AttachStreams;
+}
+
+/// Everything the TUI needs from a backend, over protocol DTOs. See the module
+/// docs for the two implementations and the object-safety contract.
+///
+/// Every id-taking method uses the protocol [`SessionId`]/[`ProjectId`] types
+/// (which core re-exports), and every response is a protocol DTO — no
+/// `WorktreeSession`/`Project` domain type appears here, so a remote backend can
+/// satisfy the same trait over the wire.
+#[async_trait]
+pub trait CommanderBackend: Send + Sync {
+    // -- Identity / capabilities (sync; no I/O) --
+
+    fn descriptor(&self) -> BackendDescriptor;
+    fn capabilities(&self) -> BackendCapabilities;
+
+    /// A change-feed whose generation advances when observable state changes.
+    fn change_feed(&self) -> BackendChangeFeed;
+
+    // -- Queries --
+
+    async fn workspace_snapshot(&self) -> BResult<WorkspaceSnapshot>;
+
+    /// Bulk agent-state snapshot for active sessions. `fresh` bypasses any TTL
+    /// cache and forces a re-capture.
+    async fn agent_states(&self, fresh: bool) -> BResult<AgentStatesSnapshot>;
+
+    /// A session's live detail (agent sub-state, diff summary, optional pane
+    /// snapshot). `None` when the query resolves to no session.
+    async fn session_detail(
+        &self,
+        query: &str,
+        lines: Option<usize>,
+    ) -> BResult<Option<SessionDetail>>;
+
+    /// Preview payload for a session or project (agent pane, diff, shell pane).
+    async fn preview(&self, target: PreviewTarget) -> BResult<PreviewData>;
+
+    /// The full branch diff (committed vs origin/main plus uncommitted changes)
+    /// used for the AI summary.
+    async fn branch_diff(&self, id: SessionId) -> BResult<String>;
+
+    /// A project's git branches; `fetch` runs a best-effort `git fetch` first.
+    async fn list_branches(&self, project: ProjectId, fetch: bool) -> BResult<Vec<BranchInfo>>;
+
+    /// New-session dialog options (default program, program list, sections).
+    async fn create_options(&self) -> BResult<CreateOptions>;
+
+    /// Session ids with at least one not-yet-applied review comment.
+    async fn pending_comment_sessions(&self) -> BResult<Vec<SessionId>>;
+
+    // -- Session mutations --
+
+    async fn create_session(&self, opts: CreateSessionOpts) -> BResult<SessionId>;
+    async fn kill_session(&self, id: SessionId) -> BResult<()>;
+    async fn restart_session(&self, id: SessionId) -> BResult<()>;
+    async fn delete_session(&self, id: SessionId) -> BResult<()>;
+    async fn rename_session(&self, id: SessionId, title: String) -> BResult<()>;
+    /// Move a session to `section`, or clear its manual override (`None`).
+    async fn set_section(&self, id: SessionId, section: Option<String>) -> BResult<()>;
+    /// Clear a session's unread flag.
+    async fn mark_read(&self, id: SessionId) -> BResult<()>;
+
+    // -- Projects --
+
+    async fn add_project(&self, path: std::path::PathBuf) -> BResult<ProjectId>;
+    async fn remove_project(&self, id: ProjectId) -> BResult<()>;
+    async fn scan_directory(&self, dir: std::path::PathBuf) -> BResult<crate::session::ScanResult>;
+
+    // -- Cascade / push-stack --
+
+    async fn cascade_merge(&self, id: SessionId) -> BResult<OperationStatus>;
+    async fn cascade_resume(&self) -> BResult<OperationStatus>;
+    async fn cascade_abandon(&self) -> BResult<()>;
+    async fn push_stack(&self, id: SessionId) -> BResult<OperationStatus>;
+
+    // -- Review / comments --
+
+    async fn open_review(&self, id: SessionId) -> BResult<ReviewSnapshot>;
+    /// Re-compose the review diff; `None` when unchanged from `prev_hash`.
+    async fn refresh_review_if_changed(
+        &self,
+        id: SessionId,
+        prev_hash: u64,
+    ) -> BResult<Option<ReviewSnapshot>>;
+    async fn create_comment(&self, id: SessionId, draft: NewComment) -> BResult<Uuid>;
+    async fn delete_comment(&self, id: SessionId, comment_id: Uuid) -> BResult<()>;
+    async fn apply_comments(&self, id: SessionId) -> BResult<ApplyOutcome>;
+    /// Toggle a file's reviewed mark by display path against the current diff.
+    async fn toggle_file_reviewed(&self, id: SessionId, display_path: String) -> BResult<bool>;
+    /// Raw bytes of one side of a binary file in a session's review diff.
+    async fn fetch_diff_blob(
+        &self,
+        id: SessionId,
+        side: DiffSide,
+        path: String,
+    ) -> BResult<Vec<u8>>;
+
+    // -- Attach --
+
+    /// Open a live attach to a session's `kind` pane, sized `cols`×`rows`. Stamps
+    /// the session's last-attached time. The returned connection is split by the
+    /// caller into the streams an interactive loop drives.
+    async fn attach(
+        &self,
+        id: SessionId,
+        cols: u16,
+        rows: u16,
+        kind: AttachKind,
+    ) -> BResult<Box<dyn AttachConnection>>;
+}
+
+/// Compile-time proof the trait is object-safe and usable across `tokio::spawn`:
+/// an `Arc<dyn CommanderBackend>` must be `Send + Sync + 'static`.
+#[allow(dead_code)]
+fn _assert_object_safe(b: Arc<dyn CommanderBackend>) {
+    fn is_send_sync_static<T: Send + Sync + 'static>(_: &T) {}
+    is_send_sync_static(&b);
+}

@@ -904,6 +904,22 @@ impl CommanderService {
             .await
     }
 
+    /// Stamp a session's `last_attached_at` to now, for MRU ordering in the
+    /// in-session switcher. Called by the backend's `attach` so every frontend
+    /// records the attach the same way (the TUI used to do this inline). No-op
+    /// if the session doesn't exist — an attach to a vanished session is a
+    /// harmless race, not an error worth surfacing here.
+    pub async fn mark_attached(&self, id: &SessionId) -> Result<()> {
+        let id = *id;
+        self.store
+            .mutate(move |state| {
+                if let Some(s) = state.get_session_mut(&id) {
+                    s.mark_attached();
+                }
+            })
+            .await
+    }
+
     /// Clear a session's unread flag (as the TUI does when attaching).
     pub async fn mark_read(&self, id: &SessionId) -> Result<()> {
         self.ensure_session_exists(id).await?;

@@ -22,6 +22,7 @@
 
 pub mod agent;
 pub mod api;
+pub mod backend;
 pub mod cli;
 pub mod cli_args;
 pub mod commander;

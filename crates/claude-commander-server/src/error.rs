@@ -13,6 +13,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use claude_commander_core::Error as CoreError;
+use claude_commander_core::backend::RunLocalError;
 use claude_commander_core::error::{SessionError, TmuxError};
 use serde_json::json;
 
@@ -24,6 +25,21 @@ pub struct ApiError(pub CoreError);
 impl From<CoreError> for ApiError {
     fn from(err: CoreError) -> Self {
         ApiError(err)
+    }
+}
+
+impl From<RunLocalError<CoreError>> for ApiError {
+    /// A `!Send` core call routed through [`run_local`](claude_commander_core::backend::run_local):
+    /// an inner core error keeps its usual status mapping; a lost worker thread
+    /// (panic) becomes a 500, so a handler's `run_local(...).await?` behaves
+    /// exactly as it did when `run_local` lived in this crate.
+    fn from(err: RunLocalError<CoreError>) -> Self {
+        match err {
+            RunLocalError::Inner(e) => ApiError(e),
+            RunLocalError::WorkerLost => {
+                ApiError::internal("internal worker failed to produce a response")
+            }
+        }
     }
 }
 
