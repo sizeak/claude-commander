@@ -609,43 +609,49 @@ impl SessionManager {
     }
 }
 
-/// Insert `--permission-mode <mode>` and/or `--effort <level>` into a Claude
-/// command string. Always uses long-form flags (never short flags like `-p`)
-/// because short flags on the Claude CLI can have different meanings.
+/// Insert agent launch flags into a command string: `--permission-mode` and
+/// `--effort` for Claude only, `--model <name>` for any harness that
+/// understands it (Claude, Codex). Always uses long-form flags (never short
+/// flags like `-p`) because short flags can have different meanings across
+/// harnesses.
 ///
 /// `"default"` mode is treated as a no-op — the Claude CLI uses its own
 /// default when the flag is absent. Effort has no equivalent no-op value
 /// (its levels are `high`/`medium`/`low`), so all values are passed through.
-///
-/// No-op when the program isn't Claude.
-pub fn program_with_claude_flags(
+pub fn program_with_agent_flags(
     program: &str,
     mode: Option<&str>,
     effort: Option<&str>,
+    model: Option<&str>,
 ) -> String {
-    if !AgentKind::from_program(program).is_claude() || (mode.is_none() && effort.is_none()) {
+    let kind = AgentKind::from_program(program);
+
+    let mut flags = Vec::new();
+    if kind.is_claude() {
+        if let Some(m) = mode
+            && m != "default"
+        {
+            flags.push(format!("--permission-mode {m}"));
+        }
+        if let Some(e) = effort {
+            flags.push(format!("--effort {e}"));
+        }
+    }
+    if kind.supports_model_flag()
+        && let Some(m) = model
+    {
+        flags.push(format!("--model {m}"));
+    }
+
+    if flags.is_empty() {
         return program.to_string();
     }
 
     let mut parts = program.splitn(2, char::is_whitespace);
     let cmd = parts.next().unwrap();
-    let rest = parts.next();
-
-    let mut flags = Vec::new();
-    if let Some(m) = mode
-        && m != "default"
-    {
-        flags.push(format!("--permission-mode {m}"));
-    }
-    if let Some(e) = effort {
-        flags.push(format!("--effort {e}"));
-    }
-
-    match (flags.is_empty(), rest) {
-        (true, Some(r)) => format!("{cmd} {r}"),
-        (true, None) => cmd.to_string(),
-        (false, Some(r)) => format!("{cmd} {} {r}", flags.join(" ")),
-        (false, None) => format!("{cmd} {}", flags.join(" ")),
+    match parts.next() {
+        Some(r) => format!("{cmd} {} {r}", flags.join(" ")),
+        None => format!("{cmd} {}", flags.join(" ")),
     }
 }
 
@@ -674,12 +680,12 @@ pub(super) fn shell_escape_single_quote(s: &str) -> String {
 mod lifecycle_tests {
     use super::*;
 
-    // --- program_with_claude_flags ---
+    // --- program_with_agent_flags ---
 
     #[test]
     fn claude_flags_effort_only() {
         assert_eq!(
-            program_with_claude_flags("claude", None, Some("high")),
+            program_with_agent_flags("claude", None, Some("high"), None),
             "claude --effort high"
         );
     }
@@ -687,7 +693,7 @@ mod lifecycle_tests {
     #[test]
     fn claude_flags_mode_only() {
         assert_eq!(
-            program_with_claude_flags("claude", Some("auto"), None),
+            program_with_agent_flags("claude", Some("auto"), None, None),
             "claude --permission-mode auto"
         );
     }
@@ -695,7 +701,7 @@ mod lifecycle_tests {
     #[test]
     fn claude_flags_both() {
         assert_eq!(
-            program_with_claude_flags("claude", Some("plan"), Some("low")),
+            program_with_agent_flags("claude", Some("plan"), Some("low"), None),
             "claude --permission-mode plan --effort low"
         );
     }
@@ -703,7 +709,7 @@ mod lifecycle_tests {
     #[test]
     fn claude_flags_default_mode_is_noop() {
         assert_eq!(
-            program_with_claude_flags("claude", Some("default"), None),
+            program_with_agent_flags("claude", Some("default"), None, None),
             "claude"
         );
     }
@@ -711,7 +717,7 @@ mod lifecycle_tests {
     #[test]
     fn claude_flags_preserves_existing_args() {
         assert_eq!(
-            program_with_claude_flags("claude --resume", Some("auto"), Some("high")),
+            program_with_agent_flags("claude --resume", Some("auto"), Some("high"), None),
             "claude --permission-mode auto --effort high --resume"
         );
     }
@@ -719,12 +725,12 @@ mod lifecycle_tests {
     #[test]
     fn claude_flags_noop_for_non_claude() {
         assert_eq!(
-            program_with_claude_flags("bash", Some("auto"), Some("high")),
+            program_with_agent_flags("bash", Some("auto"), Some("high"), None),
             "bash"
         );
         // Codex has its own flag conventions — never inject Claude's flags.
         assert_eq!(
-            program_with_claude_flags("codex", Some("auto"), Some("high")),
+            program_with_agent_flags("codex", Some("auto"), Some("high"), None),
             "codex"
         );
     }
@@ -732,8 +738,40 @@ mod lifecycle_tests {
     #[test]
     fn claude_flags_noop_when_no_flags() {
         assert_eq!(
-            program_with_claude_flags("claude --resume", None, None),
+            program_with_agent_flags("claude --resume", None, None, None),
             "claude --resume"
+        );
+    }
+
+    #[test]
+    fn model_flag_injected_for_claude() {
+        assert_eq!(
+            program_with_agent_flags("claude", None, None, Some("opus")),
+            "claude --model opus"
+        );
+    }
+
+    #[test]
+    fn model_flag_injected_for_codex() {
+        assert_eq!(
+            program_with_agent_flags("codex", None, None, Some("gpt-5")),
+            "codex --model gpt-5"
+        );
+    }
+
+    #[test]
+    fn model_flag_combines_with_claude_only_flags() {
+        assert_eq!(
+            program_with_agent_flags("claude", Some("plan"), Some("high"), Some("opus")),
+            "claude --permission-mode plan --effort high --model opus"
+        );
+    }
+
+    #[test]
+    fn model_flag_noop_for_unknown_program() {
+        assert_eq!(
+            program_with_agent_flags("bash", None, None, Some("opus")),
+            "bash"
         );
     }
 

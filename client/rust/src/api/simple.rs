@@ -180,6 +180,7 @@ pub fn create_session(
         initial_prompt,
         effort,
         mode,
+        model: None,
         base_branch,
         section: None,
     };

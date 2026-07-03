@@ -100,6 +100,12 @@ impl AgentKind {
         matches!(self, Self::Claude | Self::Codex)
     }
 
+    /// Whether this harness accepts a `--model <name>` launch flag. Both
+    /// Claude and Codex do; an unknown program's flags are unconstrained.
+    pub fn supports_model_flag(self) -> bool {
+        matches!(self, Self::Claude | Self::Codex)
+    }
+
     /// Build the command that resumes this harness's previous session,
     /// preserving any flags on the base command. Returns `None` when the harness
     /// has no resume mechanism we can drive (so the caller launches fresh).
@@ -254,6 +260,13 @@ mod tests {
         assert!(AgentKind::Claude.is_claude());
         assert!(!AgentKind::Codex.is_claude());
         assert!(!AgentKind::Unknown.is_claude());
+    }
+
+    #[test]
+    fn supports_model_flag_for_agents_only() {
+        assert!(AgentKind::Claude.supports_model_flag());
+        assert!(AgentKind::Codex.supports_model_flag());
+        assert!(!AgentKind::Unknown.supports_model_flag());
     }
 
     // --- resume_command ---

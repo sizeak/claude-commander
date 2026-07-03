@@ -21,7 +21,7 @@ use crate::git::{
 use crate::reviewed::ReviewedStore;
 use crate::session::{
     AgentState, ProjectId, ScanResult, SessionId, SessionManager, WorktreeSession,
-    program_with_claude_flags,
+    program_with_agent_flags,
 };
 use crate::telemetry::{ConfigSnapshot, EnvFingerprint, FrontendInfo, Telemetry};
 use crate::tmux::{AgentStateDetector, StatusBarInfo, TmuxExecutor};
@@ -288,8 +288,12 @@ impl CommanderService {
 
         validate_program_flags(&opts, &base_program)?;
 
-        let program =
-            program_with_claude_flags(&base_program, opts.mode.as_deref(), opts.effort.as_deref());
+        let program = program_with_agent_flags(
+            &base_program,
+            opts.mode.as_deref(),
+            opts.effort.as_deref(),
+            opts.model.as_deref(),
+        );
 
         let path = {
             let backend = GitBackend::discover(&opts.project_path)?;
@@ -796,6 +800,15 @@ pub fn validate_program_flags(opts: &CreateSessionOpts, resolved_program: &str) 
         ))
         .into());
     }
+    // `--model` is understood by both Claude and Codex.
+    if opts.model.is_some() && !kind.supports_model_flag() {
+        return Err(SessionError::InvalidProgram(format!(
+            "--model is only supported for programs that accept it, e.g. \
+             claude or codex (got {:?})",
+            resolved_program
+        ))
+        .into());
+    }
     Ok(())
 }
 
@@ -1077,6 +1090,7 @@ mod tests {
             initial_prompt: None,
             effort: Some("high".to_string()),
             mode: None,
+            model: None,
             base_branch: None,
             section: None,
         };
@@ -1093,6 +1107,7 @@ mod tests {
             initial_prompt: None,
             effort: None,
             mode: Some("auto".to_string()),
+            model: None,
             base_branch: None,
             section: None,
         };
@@ -1109,10 +1124,44 @@ mod tests {
             initial_prompt: Some("hello".to_string()),
             effort: Some("high".to_string()),
             mode: Some("auto".to_string()),
+            model: Some("opus".to_string()),
             base_branch: None,
             section: None,
         };
         validate_program_flags(&opts, "claude").unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_unknown_program_with_model() {
+        let opts = CreateSessionOpts {
+            project_path: PathBuf::from("/tmp/repo"),
+            title: "test".to_string(),
+            program: Some("bash".to_string()),
+            initial_prompt: None,
+            effort: None,
+            mode: None,
+            model: Some("opus".to_string()),
+            base_branch: None,
+            section: None,
+        };
+        let err = validate_program_flags(&opts, "bash").unwrap_err();
+        assert!(err.to_string().contains("--model"));
+    }
+
+    #[test]
+    fn validate_allows_codex_with_model() {
+        let opts = CreateSessionOpts {
+            project_path: PathBuf::from("/tmp/repo"),
+            title: "test".to_string(),
+            program: Some("codex".to_string()),
+            initial_prompt: None,
+            effort: None,
+            mode: None,
+            model: Some("gpt-5".to_string()),
+            base_branch: None,
+            section: None,
+        };
+        validate_program_flags(&opts, "codex").unwrap();
     }
 
     #[test]
@@ -1153,6 +1202,7 @@ mod tests {
             initial_prompt: None,
             effort: None,
             mode: None,
+            model: None,
             base_branch: None,
             section: None,
         };

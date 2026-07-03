@@ -110,6 +110,8 @@ pub struct CreateSessionOpts {
     #[serde(default)]
     pub mode: Option<String>,
     #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
     pub base_branch: Option<String>,
     #[serde(default)]
     pub section: Option<String>,
