@@ -432,6 +432,136 @@ async fn test_session_manager_restart() {
     drop(worktrees_dir);
 }
 
+/// Regression: deleting a *Stopped* session must still remove its git
+/// worktree. `delete_session` used to only run worktree cleanup when the
+/// session was active, so a stopped session's worktree leaked on disk.
+#[tokio::test]
+async fn test_delete_stopped_session_removes_worktree() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let state_temp_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+    let config = Config {
+        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        ..Config::default()
+    };
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
+    let store = create_isolated_store(&state_temp_dir);
+    let manager = SessionManager::new(config_store, store.clone(), "");
+
+    let project_id = manager.add_project(repo_path).await.unwrap();
+    let session_id = manager
+        .prepare_session(
+            &project_id,
+            "doomed".to_string(),
+            Some("bash".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+    let session_id = manager
+        .finalize_session(&session_id, None, None)
+        .await
+        .unwrap();
+
+    let worktree_path = {
+        store
+            .read()
+            .await
+            .get_session(&session_id)
+            .unwrap()
+            .worktree_path
+            .clone()
+    };
+    assert!(worktree_path.exists(), "worktree should be created");
+
+    // Stop the session (kill tmux, keep the worktree) so it is inactive.
+    manager.kill_session(&session_id, false).await.unwrap();
+    assert!(
+        worktree_path.exists(),
+        "worktree should survive a stop with remove_worktree=false"
+    );
+
+    // Deleting the stopped session must remove the worktree.
+    manager.delete_session(&session_id).await.unwrap();
+    assert!(
+        !worktree_path.exists(),
+        "deleting a stopped session must remove its worktree"
+    );
+    assert!(
+        store.read().await.get_session(&session_id).is_none(),
+        "session should be gone from state"
+    );
+
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
+    drop(worktrees_dir);
+}
+
+/// Regression: removing a project must remove its sessions' git worktrees,
+/// including stopped ones. `remove_project` used to only kill tmux and leave
+/// worktrees on disk.
+#[tokio::test]
+async fn test_remove_project_removes_session_worktrees() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let state_temp_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+    let config = Config {
+        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        ..Config::default()
+    };
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
+    let store = create_isolated_store(&state_temp_dir);
+    let manager = SessionManager::new(config_store, store.clone(), "");
+
+    let project_id = manager.add_project(repo_path).await.unwrap();
+    let session_id = manager
+        .prepare_session(&project_id, "s".to_string(), Some("bash".to_string()), None)
+        .await
+        .unwrap();
+    let session_id = manager
+        .finalize_session(&session_id, None, None)
+        .await
+        .unwrap();
+    let worktree_path = {
+        store
+            .read()
+            .await
+            .get_session(&session_id)
+            .unwrap()
+            .worktree_path
+            .clone()
+    };
+    assert!(worktree_path.exists(), "worktree should be created");
+
+    // Stop the session first — the leak was specifically on inactive sessions.
+    manager.kill_session(&session_id, false).await.unwrap();
+    assert!(worktree_path.exists());
+
+    manager.remove_project(&project_id).await.unwrap();
+    assert!(
+        !worktree_path.exists(),
+        "removing a project must remove its sessions' worktrees"
+    );
+    assert!(
+        store.read().await.get_project(&project_id).is_none(),
+        "project should be gone from state"
+    );
+
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
+    drop(worktrees_dir);
+}
+
 #[tokio::test]
 async fn test_state_persistence() {
     let temp_dir = TempDir::new().unwrap();

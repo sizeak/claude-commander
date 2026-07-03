@@ -388,6 +388,19 @@ pub trait CommanderBackend: Send + Sync {
     async fn set_section(&self, id: SessionId, section: Option<String>) -> BResult<()>;
     /// Clear a session's unread flag.
     async fn mark_read(&self, id: SessionId) -> BResult<()>;
+    /// Mark a batch of sessions unread (paired with [`Self::mark_read`]).
+    async fn mark_unread(&self, ids: Vec<SessionId>) -> BResult<()>;
+
+    /// Persist a batch of PR-check results and refresh status bars. Takes the
+    /// core `PrCheckResult` because PR polling is a *local* capability (the
+    /// TUI's background loop drives it); a remote backend's server polls and
+    /// persists PR state itself, so the default is a no-op.
+    async fn apply_pr_results(
+        &self,
+        _results: Vec<(SessionId, crate::git::PrCheckResult)>,
+    ) -> BResult<()> {
+        Ok(())
+    }
 
     // -- Projects --
 

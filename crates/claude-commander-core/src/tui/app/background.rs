@@ -492,45 +492,6 @@ pub(super) async fn fetch_preview_data(
     }
 }
 
-/// Kill tmux sessions and remove a git worktree in the background.
-///
-/// Sends an error event if worktree removal fails.
-pub(super) async fn cleanup_session_tmux(
-    tmux: &crate::tmux::TmuxExecutor,
-    tmux_name: &str,
-    shell_tmux_name: Option<&str>,
-    worktree_path: Option<(&std::path::Path, &std::path::Path)>,
-    tx: &tokio::sync::mpsc::Sender<AppEvent>,
-) {
-    if let Err(e) = tmux.kill_session(tmux_name).await {
-        debug!("Failed to kill tmux session: {}", e);
-    }
-    if let Some(shell_name) = shell_tmux_name {
-        let _ = tmux.kill_session(shell_name).await;
-    }
-    if let Some((worktree_path, repo_path)) = worktree_path {
-        let output = tokio::process::Command::new("git")
-            .current_dir(repo_path)
-            .args(["worktree", "remove", "--force"])
-            .arg(worktree_path)
-            .output()
-            .await;
-        if let Err(e) = output.as_ref().map_err(|e| e.to_string()).and_then(|o| {
-            if o.status.success() {
-                Ok(())
-            } else {
-                Err(String::from_utf8_lossy(&o.stderr).into_owned())
-            }
-        }) {
-            let _ = tx
-                .send(AppEvent::StateUpdate(StateUpdate::Error {
-                    message: format!("Background cleanup failed: {}", e),
-                }))
-                .await;
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

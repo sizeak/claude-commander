@@ -73,11 +73,9 @@ pub enum StateUpdate {
     },
     /// Session creation completed successfully
     SessionCreated { session_id: SessionId },
-    /// Session creation failed
-    SessionCreateFailed {
-        session_id: SessionId,
-        message: String,
-    },
+    /// Session creation failed. The backend removes its own half-created
+    /// (`Creating`) session on failure, so this carries only the message.
+    SessionCreateFailed { message: String },
     /// State file was modified by another instance
     ExternalChange,
     /// Enriched PR info ready from background fetch

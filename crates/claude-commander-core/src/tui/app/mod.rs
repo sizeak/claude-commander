@@ -50,9 +50,8 @@ use crate::backend::{
 use crate::config::{BindableAction, Config, ConfigStore, StateStore};
 use crate::error::{Result, TuiError};
 use crate::git::{
-    AiSummary, BlockReason, DiffInfo, EnrichedPrInfo, PrCheckResult, PullOutcome,
-    check_pr_for_branch, diff_hash, fetch_branch_summary, fetch_enriched_pr, is_gh_available,
-    run_project_pull,
+    AiSummary, BlockReason, DiffInfo, EnrichedPrInfo, PullOutcome, check_pr_for_branch, diff_hash,
+    fetch_branch_summary, fetch_enriched_pr, is_gh_available, run_project_pull,
 };
 use crate::session::{
     AgentState, ProjectId, SessionId, SessionListItem, SessionManager, SessionStatus,

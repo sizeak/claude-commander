@@ -568,16 +568,12 @@ impl SessionManager {
     /// Delete a session (remove from state)
     #[instrument(skip(self))]
     pub async fn delete_session(&self, session_id: &SessionId) -> Result<()> {
-        // First kill if active
-        {
-            let state = self.store.read().await;
-            if let Some(session) = state.get_session(session_id)
-                && session.status.is_active()
-            {
-                drop(state);
-                self.kill_session(session_id, true).await?;
-            }
-        }
+        // Kill the tmux session (a no-op if it isn't running) AND remove the
+        // git worktree. Unconditional: a Stopped session no longer has a live
+        // tmux session but its worktree is still on disk and must be cleaned up
+        // — gating this on `status.is_active()` leaked stopped sessions'
+        // worktrees.
+        self.kill_session(session_id, true).await?;
 
         // Remove from state, re-pointing stacked children onto the parent and
         // returning the durable PR-base edits — planned atomically with the

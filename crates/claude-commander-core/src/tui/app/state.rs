@@ -73,78 +73,11 @@ impl App {
                 }
             }
             StateUpdate::PrStatusReady { results } => {
-                let sections = self.config.sections.clone();
-                let now = chrono::Utc::now();
-                let _ = self
-                    .service
-                    .store()
-                    .mutate(move |state| {
-                        for (session_id, result) in &results {
-                            let Some(session) = state.get_session_mut(session_id) else {
-                                continue;
-                            };
-                            match result {
-                                PrCheckResult::Found(info) => {
-                                    session.pr_number = Some(info.number);
-                                    session.pr_url = Some(info.url.clone());
-                                    session.pr_state = Some(info.state);
-                                    session.pr_draft = info.is_draft;
-                                    session.pr_labels = info.labels.clone();
-                                    session.pr_merged = info.merged();
-                                    session.review_decision = info.review_decision;
-                                    session.pr_reviewers = info.reviewers.clone();
-                                    session.pr_base_branch = info.base_ref_name.clone();
-                                }
-                                PrCheckResult::NotFound => {
-                                    // Authoritative "no PR" — clear cached fields so
-                                    // stale data (e.g. after a PR was deleted) doesn't
-                                    // linger.
-                                    session.pr_number = None;
-                                    session.pr_url = None;
-                                    session.pr_state = None;
-                                    session.pr_draft = false;
-                                    session.pr_labels.clear();
-                                    session.pr_merged = false;
-                                    session.review_decision = None;
-                                    session.pr_reviewers.clear();
-                                    session.pr_base_branch = None;
-                                }
-                                PrCheckResult::FetchFailed => {
-                                    // Transient error (gh missing, network, auth) —
-                                    // preserve cached PR state including `pr_base_branch`
-                                    // so the PR-stack topology doesn't flicker off and
-                                    // sessions don't collapse to a flat list.
-                                }
-                            }
-                        }
-                        for session in state.sessions.values_mut() {
-                            crate::session::apply_assignment(session, &sections, now);
-                        }
-                    })
-                    .await;
-
-                // Update tmux status bars for running sessions with PR info.
-                // Snapshot under the lock, then release before async tmux I/O.
-                let status_bar_updates: Vec<_> = {
-                    let state = self.service.store().read().await;
-                    state
-                        .sessions
-                        .values()
-                        .filter(|s| s.status == SessionStatus::Running)
-                        .map(|s| {
-                            let info = self.service.status_bar_info(s, &state);
-                            (s.tmux_session_name.clone(), info)
-                        })
-                        .collect()
-                };
-                for (tmux_name, info) in &status_bar_updates {
-                    self.service
-                        .session_manager()
-                        .tmux
-                        .configure_status_bar(tmux_name, info)
-                        .await;
-                }
-
+                // Persist the PR results, re-run section assignment, and refresh
+                // running sessions' tmux status bars — all server-side in the
+                // backend (status-bar config is a local-only capability).
+                let _ = self.local_arc().apply_pr_results(results).await;
+                self.refresh_local_view().await;
                 self.refresh_list_items().await;
             }
             StateUpdate::EnrichedPrReady { session_id, info } => {
@@ -188,17 +121,10 @@ impl App {
                 self.select_session_in_tree(session_id);
                 self.spawn_preview_update();
             }
-            StateUpdate::SessionCreateFailed {
-                session_id,
-                message,
-            } => {
+            StateUpdate::SessionCreateFailed { message } => {
                 debug!("Session creation failed: {}", message);
-                let _ = self
-                    .service
-                    .session_manager()
-                    .remove_creating_session(&session_id)
-                    .await;
-                self.refresh_list_items().await;
+                // The backend already removed its half-created session; the
+                // change feed refreshes the tree. Just surface the error.
                 self.ui_state.modal = Modal::Error { message };
             }
             StateUpdate::AgentStatesUpdated {
@@ -231,17 +157,8 @@ impl App {
                     .filter(|sid| *sid != sentinel)
                     .collect();
                 if !unread_ids.is_empty() {
-                    let _ = self
-                        .service
-                        .store()
-                        .mutate(move |state| {
-                            for sid in &unread_ids {
-                                if let Some(session) = state.get_session_mut(sid) {
-                                    session.unread = true;
-                                }
-                            }
-                        })
-                        .await;
+                    let _ = self.local_arc().mark_unread(unread_ids).await;
+                    self.refresh_local_view().await;
                 }
                 self.ui_state.agent_states = states;
                 self.refresh_list_items().await;

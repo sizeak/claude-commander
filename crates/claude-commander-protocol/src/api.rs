@@ -153,6 +153,11 @@ pub struct CreateSessionOpts {
     pub base_branch: Option<String>,
     #[serde(default)]
     pub section: Option<String>,
+    /// Local stack-parent hint: fork this new session's branch from the parent
+    /// session's branch and inject the PR-base context at launch. Set by the
+    /// "new stacked session" flow. Additive; older clients omit it.
+    #[serde(default)]
+    pub stack_parent: Option<SessionId>,
 }
 
 /// A project (git repository) as returned by the workspace/list endpoints.
@@ -358,6 +363,27 @@ mod tests {
         assert_eq!(opts.title, "x");
         assert!(opts.program.is_none());
         assert!(opts.effort.is_none());
+        // The additive `stack_parent` field defaults to absent for old bodies.
+        assert!(opts.stack_parent.is_none());
+    }
+
+    #[test]
+    fn create_session_opts_stack_parent_round_trips() {
+        let parent = SessionId::new();
+        let opts = CreateSessionOpts {
+            project_path: PathBuf::from("/repo"),
+            title: "child".to_string(),
+            program: None,
+            initial_prompt: None,
+            effort: None,
+            mode: None,
+            base_branch: None,
+            section: None,
+            stack_parent: Some(parent),
+        };
+        let json = serde_json::to_string(&opts).unwrap();
+        let back: CreateSessionOpts = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.stack_parent, Some(parent));
     }
 
     #[test]

@@ -17,9 +17,9 @@ use crate::comment::{
 use crate::config::{AppState, Config, ConfigStore, StateStore};
 use crate::error::{Result, SessionError};
 use crate::git::{
-    FileDiff, GitBackend, compose_review_diff, compute_branch_diff, diff_stat_summary,
-    effective_pr_state, enrich_binary_sizes, is_gh_available, parse_unified_diff,
-    prefer_remote_branch, read_base_blob, read_worktree_file,
+    FileDiff, GitBackend, PrCheckResult, compose_review_diff, compute_branch_diff,
+    diff_stat_summary, effective_pr_state, enrich_binary_sizes, is_gh_available,
+    parse_unified_diff, prefer_remote_branch, read_base_blob, read_worktree_file,
 };
 use crate::reviewed::ReviewedStore;
 use crate::session::{
@@ -348,6 +348,19 @@ impl CommanderService {
                 .await?;
         }
 
+        // Local stack-parent hint (set by the "new stacked session" flow):
+        // `finalize_session` reads it to fork the branch from the parent's
+        // branch and inject the PR-base launch context.
+        if let Some(parent) = opts.stack_parent {
+            self.store
+                .mutate(move |state| {
+                    if let Some(session) = state.sessions.get_mut(&session_id) {
+                        session.stack_parent_session_id = Some(parent);
+                    }
+                })
+                .await?;
+        }
+
         let result = async {
             self.manager
                 .link_stack_parent_by_branch(&session_id, opts.base_branch.as_deref())
@@ -518,6 +531,86 @@ impl CommanderService {
             })
             .await?;
         Ok(())
+    }
+
+    /// Persist a batch of PR-check results (from the background PR poll),
+    /// re-run section assignment, then push refreshed status bars to running
+    /// sessions' tmux panes. `Found` sets the cached PR fields, `NotFound`
+    /// authoritatively clears them, `FetchFailed` preserves cached state so a
+    /// transient error doesn't flatten a PR stack in the UI.
+    pub async fn apply_pr_results(&self, results: Vec<(SessionId, PrCheckResult)>) -> Result<()> {
+        let sections = self.config_store.read().sections.clone();
+        let now = chrono::Utc::now();
+        self.store
+            .mutate(move |state| {
+                for (session_id, result) in &results {
+                    let Some(session) = state.get_session_mut(session_id) else {
+                        continue;
+                    };
+                    match result {
+                        PrCheckResult::Found(info) => {
+                            session.pr_number = Some(info.number);
+                            session.pr_url = Some(info.url.clone());
+                            session.pr_state = Some(info.state);
+                            session.pr_draft = info.is_draft;
+                            session.pr_labels = info.labels.clone();
+                            session.pr_merged = info.merged();
+                            session.review_decision = info.review_decision;
+                            session.pr_reviewers = info.reviewers.clone();
+                            session.pr_base_branch = info.base_ref_name.clone();
+                        }
+                        PrCheckResult::NotFound => {
+                            session.pr_number = None;
+                            session.pr_url = None;
+                            session.pr_state = None;
+                            session.pr_draft = false;
+                            session.pr_labels.clear();
+                            session.pr_merged = false;
+                            session.review_decision = None;
+                            session.pr_reviewers.clear();
+                            session.pr_base_branch = None;
+                        }
+                        PrCheckResult::FetchFailed => {}
+                    }
+                }
+                for session in state.sessions.values_mut() {
+                    crate::session::apply_assignment(session, &sections, now);
+                }
+            })
+            .await?;
+
+        // Push refreshed status bars to running sessions' tmux panes. Snapshot
+        // under the lock, then release before the async tmux I/O.
+        let status_bar_updates: Vec<_> = {
+            let state = self.store.read().await;
+            state
+                .sessions
+                .values()
+                .filter(|s| s.status == SessionStatus::Running)
+                .map(|s| (s.tmux_session_name.clone(), self.status_bar_info(s, &state)))
+                .collect()
+        };
+        for (tmux_name, info) in &status_bar_updates {
+            self.manager
+                .tmux
+                .configure_status_bar(tmux_name, info)
+                .await;
+        }
+        Ok(())
+    }
+
+    /// Mark a batch of sessions unread (agent-finished transitions detected by
+    /// the poll loop). Paired with [`Self::mark_read`].
+    pub async fn mark_unread(&self, ids: Vec<SessionId>) -> Result<()> {
+        self.store
+            .mutate(move |state| {
+                for id in &ids {
+                    if let Some(session) = state.get_session_mut(id) {
+                        session.unread = true;
+                    }
+                }
+            })
+            .await
     }
 
     pub async fn ensure_project(&self, path: PathBuf) -> Result<ProjectId> {
@@ -1727,6 +1820,7 @@ mod tests {
             mode: None,
             base_branch: None,
             section: None,
+            stack_parent: None,
         };
         let err = validate_program_flags(&opts, "bash").unwrap_err();
         assert!(err.to_string().contains("--effort"));
@@ -1743,6 +1837,7 @@ mod tests {
             mode: Some("auto".to_string()),
             base_branch: None,
             section: None,
+            stack_parent: None,
         };
         let err = validate_program_flags(&opts, "vim").unwrap_err();
         assert!(err.to_string().contains("--mode"));
@@ -1759,6 +1854,7 @@ mod tests {
             mode: Some("auto".to_string()),
             base_branch: None,
             section: None,
+            stack_parent: None,
         };
         validate_program_flags(&opts, "claude").unwrap();
     }
@@ -1803,6 +1899,7 @@ mod tests {
             mode: None,
             base_branch: None,
             section: None,
+            stack_parent: None,
         };
         validate_program_flags(&opts, "bash").unwrap();
     }
@@ -1994,6 +2091,53 @@ mod tests {
             state.get_session(&sid).unwrap().status,
             SessionStatus::Merging
         );
+    }
+
+    #[tokio::test]
+    async fn mark_unread_sets_flag_for_batch() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_pid, sid) = seed_project_session(&svc).await;
+        svc.mark_unread(vec![sid]).await.unwrap();
+        let state = svc.store().read().await;
+        assert!(state.get_session(&sid).unwrap().unread);
+    }
+
+    #[tokio::test]
+    async fn apply_pr_results_sets_and_clears_pr_fields() {
+        use crate::git::{PrCheckResult, PrInfo};
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (_pid, sid) = seed_project_session(&svc).await;
+
+        let info = PrInfo {
+            number: 42,
+            url: "https://example/pr/42".to_string(),
+            state: crate::git::PrState::Open,
+            is_draft: false,
+            labels: vec!["x".to_string()],
+            review_decision: None,
+            reviewers: vec![],
+            base_ref_name: Some("main".to_string()),
+        };
+        svc.apply_pr_results(vec![(sid, PrCheckResult::Found(info))])
+            .await
+            .unwrap();
+        {
+            let state = svc.store().read().await;
+            let s = state.get_session(&sid).unwrap();
+            assert_eq!(s.pr_number, Some(42));
+            assert_eq!(s.pr_base_branch.as_deref(), Some("main"));
+        }
+
+        // NotFound authoritatively clears; FetchFailed would preserve.
+        svc.apply_pr_results(vec![(sid, PrCheckResult::NotFound)])
+            .await
+            .unwrap();
+        let state = svc.store().read().await;
+        let s = state.get_session(&sid).unwrap();
+        assert!(s.pr_number.is_none());
+        assert!(s.pr_base_branch.is_none());
     }
 
     #[tokio::test]

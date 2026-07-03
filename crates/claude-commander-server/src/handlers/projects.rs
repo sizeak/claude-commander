@@ -99,7 +99,9 @@ pub async fn delete(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     let id = parse_project_id(&id)?;
-    state.service.remove_project(&id).await?;
+    // `remove_project` now tears down each session's worktree (opens a `gix`
+    // repo → non-`Send` across an await), so drive it through `run_local`.
+    run_local(move || async move { state.service.remove_project(&id).await }).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

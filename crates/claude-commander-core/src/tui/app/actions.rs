@@ -882,56 +882,29 @@ impl App {
             return;
         }
 
+        let Some(project_path) = self.project(project_id).map(|p| p.repo_path.clone()) else {
+            self.ui_state.modal = Modal::Error {
+                message: "Project not found".to_string(),
+            };
+            return;
+        };
+
         // Use the branch name verbatim as the session title. This keeps
         // `display_branch` from rendering a redundant `[branch]` annotation
         // in the list (it short-circuits on exact title == branch match)
         // and the worktree directory still comes out sensibly because
-        // `sanitize_name` handles slashes and special chars.
-        let title = branch_name.clone();
-
-        let session_id = match self
-            .service
-            .session_manager()
-            .prepare_session(&project_id, title, None, Some(branch_name.clone()))
-            .await
-        {
-            Ok(id) => id,
-            Err(e) => {
-                self.ui_state.modal = Modal::Error {
-                    message: format!("Failed to create session: {}", e),
-                };
-                return;
-            }
-        };
-
-        // Refresh list and select the new placeholder
-        self.refresh_list_items().await;
-        self.select_session_in_tree(session_id);
-
-        // Spawn background task for heavy work (same pattern as NewSession)
-        let session_manager = self.service.session_manager().clone();
-        let tx = self.event_loop.sender();
-        tokio::spawn(async move {
-            match session_manager
-                .finalize_session(&session_id, None, None)
-                .await
-            {
-                Ok(sid) => {
-                    let _ = tx
-                        .send(AppEvent::StateUpdate(StateUpdate::SessionCreated {
-                            session_id: sid,
-                        }))
-                        .await;
-                }
-                Err(e) => {
-                    let _ = tx
-                        .send(AppEvent::StateUpdate(StateUpdate::SessionCreateFailed {
-                            session_id,
-                            message: format!("Failed to create session: {}", e),
-                        }))
-                        .await;
-                }
-            }
+        // `sanitize_name` handles slashes and special chars. `base_branch`
+        // forks the worktree from the existing branch.
+        self.spawn_create_session(crate::api::CreateSessionOpts {
+            project_path,
+            title: branch_name.clone(),
+            program: None,
+            initial_prompt: None,
+            effort: None,
+            mode: None,
+            base_branch: Some(branch_name),
+            section: None,
+            stack_parent: None,
         });
     }
 
@@ -1304,73 +1277,29 @@ impl App {
     /// Shared by the `DeleteSession` and `DeleteMergedPrSessions` confirm
     /// arms. Clears `selected_session_id` only when it matches the removed
     /// session — bulk callers leave the user's current selection alone.
-    async fn delete_session_immediately(
-        &mut self,
-        session_id: SessionId,
-    ) -> crate::error::Result<()> {
-        let cleanup_data = {
-            let state = self.service.store().read().await;
-            state.get_session(&session_id).map(|s| {
-                let repo_path = state
-                    .get_project(&s.project_id)
-                    .map(|p| p.repo_path.clone());
-                (
-                    s.tmux_session_name.clone(),
-                    s.shell_tmux_session_name.clone(),
-                    s.worktree_path.clone(),
-                    repo_path,
-                )
-            })
-        };
-
-        // Remove from state, re-pointing stacked children onto the parent and
-        // returning the durable PR-base edits — planned atomically with the
-        // removal inside the mutate closure.
-        let pr_retargets = self
-            .service
-            .store()
-            .mutate(move |state| state.remove_session_retargeting_children(&session_id).1)
-            .await?;
-
-        // Durably retarget child PRs on GitHub off the UI thread (best-effort).
-        if !pr_retargets.is_empty() {
-            tokio::spawn(crate::session::SessionManager::retarget_child_prs(
-                pr_retargets,
-            ));
-        }
-
-        // When deleting the session under the cursor, remember its row so we
-        // can land the cursor on whatever slides up into that slot (nearest
-        // selectable) once the list is rebuilt, rather than snapping to the
-        // top. Bulk callers deleting a non-selected session leave the cursor
-        // alone.
-        let deleting_selected = self.ui_state.selected_session_id == Some(session_id);
-        let prev_idx = self.ui_state.list_state.selected();
-        if deleting_selected {
+    /// Delete a session without blocking the UI. `backend.delete_session` owns
+    /// the whole teardown — kill tmux, remove the worktree, re-point stacked
+    /// children onto the parent, and retarget their PRs — so this just clears
+    /// the selection (if the focused row is going away) and spawns the call;
+    /// the change feed refreshes the tree on completion and a failure surfaces
+    /// as an error toast. Shared by the single and bulk delete confirmations.
+    fn delete_session_immediately(&mut self, session_id: SessionId) {
+        // When deleting the focused row, drop the selection now; the
+        // change-feed refresh clamps the cursor once the session is gone.
+        if self.ui_state.selected_session_id == Some(session_id) {
             self.ui_state.selected_session_id = None;
         }
-        self.refresh_list_items().await;
-        if deleting_selected && let Some(idx) = prev_idx {
-            self.ui_state.list_state.select_nearest(idx);
-        }
-
-        if let Some((tmux_name, shell_tmux_name, worktree_path, repo_path)) = cleanup_data {
-            let tmux = self.service.session_manager().tmux.clone();
-            let tx = self.event_loop.sender();
-            tokio::spawn(async move {
-                background::cleanup_session_tmux(
-                    &tmux,
-                    &tmux_name,
-                    shell_tmux_name.as_deref(),
-                    repo_path
-                        .as_ref()
-                        .map(|rp| (worktree_path.as_path(), rp.as_path())),
-                    &tx,
-                )
-                .await;
-            });
-        }
-        Ok(())
+        let backend = self.local_arc();
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            if let Err(e) = backend.delete_session(session_id).await {
+                let _ = tx
+                    .send(AppEvent::StateUpdate(StateUpdate::Error {
+                        message: format!("Failed to delete session: {e}"),
+                    }))
+                    .await;
+            }
+        });
     }
 
     /// Whether the currently selected list item is a section header.
@@ -1510,9 +1439,28 @@ impl App {
         };
     }
 
+    /// Create a session on the local backend off-thread. `create_session`
+    /// commits the `Creating` placeholder early, so the change feed surfaces
+    /// the new row immediately; `SessionCreated` (which selects it) or
+    /// `SessionCreateFailed` completes the flow. On failure the backend removes
+    /// its own half-created session.
+    pub(super) fn spawn_create_session(&self, opts: crate::api::CreateSessionOpts) {
+        let backend = self.local_arc();
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let update = match backend.create_session(opts).await {
+                Ok(session_id) => StateUpdate::SessionCreated { session_id },
+                Err(e) => StateUpdate::SessionCreateFailed {
+                    message: format!("Failed to create session: {e}"),
+                },
+            };
+            let _ = tx.send(AppEvent::StateUpdate(update)).await;
+        });
+    }
+
     /// Handle input modal submission. `program` is the command chosen in the
     /// new-session program picker, or `None` for flows without a picker (which
-    /// then fall back to `default_program` inside `prepare_session`).
+    /// then fall back to `default_program` inside the backend).
     pub(super) async fn handle_input_submit(
         &mut self,
         action: InputAction,
@@ -1531,70 +1479,24 @@ impl App {
                     ));
                     return;
                 }
-
-                // Insert placeholder session immediately (no blocking modal)
                 self.ui_state.modal = Modal::None;
-                let session_id = match self
-                    .service
-                    .session_manager()
-                    .prepare_session(&project_id, value, program, None)
-                    .await
-                {
-                    Ok(id) => id,
-                    Err(e) => {
-                        self.ui_state.modal = Modal::Error {
-                            message: format!("Failed to create session: {}", e),
-                        };
-                        return;
-                    }
+                let Some(project_path) = self.project(project_id).map(|p| p.repo_path.clone())
+                else {
+                    self.ui_state.modal = Modal::Error {
+                        message: "Project not found".to_string(),
+                    };
+                    return;
                 };
-
-                // Place the new session in the section the cursor was in when
-                // the modal opened, before the list refresh below renders it.
-                if let Some(name) = section {
-                    let sections = self.config.sections.clone();
-                    let now = chrono::Utc::now();
-                    let _ = self
-                        .service
-                        .store()
-                        .mutate(move |state| {
-                            if let Some(session) = state.get_session_mut(&session_id) {
-                                crate::session::place_created_session(
-                                    session, &name, &sections, now,
-                                );
-                            }
-                        })
-                        .await;
-                }
-
-                // Refresh list and select the new placeholder
-                self.refresh_list_items().await;
-                self.select_session_in_tree(session_id);
-
-                // Spawn background task for heavy work
-                let session_manager = self.service.session_manager().clone();
-                let tx = self.event_loop.sender();
-                tokio::spawn(async move {
-                    match session_manager
-                        .finalize_session(&session_id, None, None)
-                        .await
-                    {
-                        Ok(sid) => {
-                            let _ = tx
-                                .send(AppEvent::StateUpdate(StateUpdate::SessionCreated {
-                                    session_id: sid,
-                                }))
-                                .await;
-                        }
-                        Err(e) => {
-                            let _ = tx
-                                .send(AppEvent::StateUpdate(StateUpdate::SessionCreateFailed {
-                                    session_id,
-                                    message: format!("Failed to create session: {}", e),
-                                }))
-                                .await;
-                        }
-                    }
+                self.spawn_create_session(crate::api::CreateSessionOpts {
+                    project_path,
+                    title: value,
+                    program,
+                    initial_prompt: None,
+                    effort: None,
+                    mode: None,
+                    base_branch: None,
+                    section,
+                    stack_parent: None,
                 });
             }
             InputAction::CreateStackedSession {
@@ -1609,72 +1511,24 @@ impl App {
                     ));
                     return;
                 }
-
-                // Insert placeholder session immediately (no blocking modal)
                 self.ui_state.modal = Modal::None;
-                let session_id = match self
-                    .service
-                    .session_manager()
-                    .prepare_session(&project_id, value, program, None)
-                    .await
-                {
-                    Ok(id) => id,
-                    Err(e) => {
-                        self.ui_state.modal = Modal::Error {
-                            message: format!("Failed to create session: {}", e),
-                        };
-                        return;
-                    }
-                };
-
-                // Mark the new placeholder as stacked on the parent; finalize
-                // reads `stack_parent_session_id` to fork the worktree branch
-                // from the parent's branch and to inject the PR-base context
-                // into the Claude launch command.
-                if let Err(e) = self
-                    .service
-                    .store()
-                    .mutate(move |state| {
-                        if let Some(s) = state.get_session_mut(&session_id) {
-                            s.stack_parent_session_id = Some(parent_session_id);
-                        }
-                    })
-                    .await
-                {
+                let Some(project_path) = self.project(project_id).map(|p| p.repo_path.clone())
+                else {
                     self.ui_state.modal = Modal::Error {
-                        message: format!("Failed to save state: {}", e),
+                        message: "Project not found".to_string(),
                     };
                     return;
-                }
-
-                // Refresh list and select the new placeholder
-                self.refresh_list_items().await;
-                self.select_session_in_tree(session_id);
-
-                // Spawn background task for heavy work
-                let session_manager = self.service.session_manager().clone();
-                let tx = self.event_loop.sender();
-                tokio::spawn(async move {
-                    match session_manager
-                        .finalize_session(&session_id, None, None)
-                        .await
-                    {
-                        Ok(sid) => {
-                            let _ = tx
-                                .send(AppEvent::StateUpdate(StateUpdate::SessionCreated {
-                                    session_id: sid,
-                                }))
-                                .await;
-                        }
-                        Err(e) => {
-                            let _ = tx
-                                .send(AppEvent::StateUpdate(StateUpdate::SessionCreateFailed {
-                                    session_id,
-                                    message: format!("Failed to create session: {}", e),
-                                }))
-                                .await;
-                        }
-                    }
+                };
+                self.spawn_create_session(crate::api::CreateSessionOpts {
+                    project_path,
+                    title: value,
+                    program,
+                    initial_prompt: None,
+                    effort: None,
+                    mode: None,
+                    base_branch: None,
+                    section: None,
+                    stack_parent: Some(parent_session_id),
                 });
             }
             InputAction::AddProject => {
@@ -1807,42 +1661,21 @@ impl App {
     pub(super) async fn handle_confirm(&mut self, action: ConfirmAction) {
         match action {
             ConfirmAction::DeleteSession { session_id } => {
-                match self.delete_session_immediately(session_id).await {
-                    Ok(()) => {
-                        self.ui_state.status_message = Some((
-                            "Session deleted".to_string(),
-                            Instant::now() + Duration::from_secs(3),
-                        ));
-                    }
-                    Err(e) => {
-                        self.ui_state.modal = Modal::Error {
-                            message: format!("Failed to save state: {}", e),
-                        };
-                    }
-                }
+                self.delete_session_immediately(session_id);
+                self.ui_state.status_message = Some((
+                    "Deleting session…".to_string(),
+                    Instant::now() + Duration::from_secs(3),
+                ));
             }
             ConfirmAction::DeleteMergedPrSessions { session_ids } => {
                 let total = session_ids.len();
-                let mut succeeded = 0usize;
-                let mut last_error: Option<String> = None;
                 for sid in session_ids {
-                    match self.delete_session_immediately(sid).await {
-                        Ok(()) => succeeded += 1,
-                        Err(e) => last_error = Some(e.to_string()),
-                    }
+                    self.delete_session_immediately(sid);
                 }
-                if let Some(err) = last_error {
-                    self.ui_state.modal = Modal::Error {
-                        message: format!(
-                            "Deleted {succeeded}/{total} merged-PR session(s) before a state-save failure: {err}"
-                        ),
-                    };
-                } else {
-                    self.ui_state.status_message = Some((
-                        format!("Deleted {succeeded} merged-PR session(s)"),
-                        Instant::now() + Duration::from_secs(3),
-                    ));
-                }
+                self.ui_state.status_message = Some((
+                    format!("Deleting {total} merged-PR session(s)…"),
+                    Instant::now() + Duration::from_secs(3),
+                ));
             }
             ConfirmAction::RestartSession { session_id } => {
                 match self.local_arc().restart_session(session_id).await {
@@ -1862,72 +1695,27 @@ impl App {
                 }
             }
             ConfirmAction::RemoveProject { project_id } => {
-                // 1. Capture project and session data before removal
-                let cleanup_data = {
-                    let state = self.service.store().read().await;
-                    state.get_project(&project_id).map(|project| {
-                        let repo_path = project.repo_path.clone();
-                        let shell_tmux = project.shell_tmux_session_name.clone();
-                        let sessions: Vec<_> = project
-                            .worktrees
-                            .iter()
-                            .filter_map(|sid| {
-                                state.get_session(sid).map(|s| {
-                                    (
-                                        s.tmux_session_name.clone(),
-                                        s.shell_tmux_session_name.clone(),
-                                        s.worktree_path.clone(),
-                                    )
-                                })
-                            })
-                            .collect();
-                        (repo_path, shell_tmux, sessions)
-                    })
-                };
-
-                // 2. Remove from state immediately so the UI updates
-                if let Err(e) = self
-                    .service
-                    .store()
-                    .mutate(move |state| {
-                        state.remove_project(&project_id);
-                    })
-                    .await
-                {
-                    self.ui_state.modal = Modal::Error {
-                        message: format!("Failed to save state: {}", e),
-                    };
-                    return;
-                }
+                // `backend.remove_project` owns the teardown — kill the project
+                // shell + each session's tmux and remove every worktree, then
+                // drop the project (and its sessions) from state. Spawn it so
+                // the worktree removals never block the UI; the change feed
+                // refreshes the tree on completion.
                 self.ui_state.selected_project_id = None;
                 self.ui_state.status_message = Some((
-                    "Project removed".to_string(),
+                    "Removing project…".to_string(),
                     Instant::now() + Duration::from_secs(3),
                 ));
-                self.refresh_list_items().await;
-
-                // 3. Spawn background cleanup (kill all tmux sessions + remove worktrees)
-                if let Some((repo_path, shell_tmux, sessions)) = cleanup_data {
-                    let tmux = self.service.session_manager().tmux.clone();
-                    let tx = self.event_loop.sender();
-                    tokio::spawn(async move {
-                        // Kill project shell tmux session
-                        if let Some(ref shell_name) = shell_tmux {
-                            let _ = tmux.kill_session(shell_name).await;
-                        }
-                        // Kill all session tmux sessions + remove worktrees
-                        for (tmux_name, shell_tmux_name, worktree_path) in &sessions {
-                            background::cleanup_session_tmux(
-                                &tmux,
-                                tmux_name,
-                                shell_tmux_name.as_deref(),
-                                Some((worktree_path.as_path(), repo_path.as_path())),
-                                &tx,
-                            )
+                let backend = self.local_arc();
+                let tx = self.event_loop.sender();
+                tokio::spawn(async move {
+                    if let Err(e) = backend.remove_project(project_id).await {
+                        let _ = tx
+                            .send(AppEvent::StateUpdate(StateUpdate::Error {
+                                message: format!("Failed to remove project: {e}"),
+                            }))
                             .await;
-                        }
-                    });
-                }
+                    }
+                });
             }
         }
     }

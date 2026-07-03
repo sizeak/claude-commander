@@ -158,6 +158,7 @@ async fn ws_attach_streams_and_detach_keeps_session_alive() {
             mode: None,
             base_branch: None,
             section: None,
+            stack_parent: None,
         })
         .await
         .unwrap();

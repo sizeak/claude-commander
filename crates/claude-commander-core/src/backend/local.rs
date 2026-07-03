@@ -177,6 +177,17 @@ impl CommanderBackend for LocalBackend {
         Ok(self.service.mark_read(&id).await?)
     }
 
+    async fn mark_unread(&self, ids: Vec<SessionId>) -> BResult<()> {
+        Ok(self.service.mark_unread(ids).await?)
+    }
+
+    async fn apply_pr_results(
+        &self,
+        results: Vec<(SessionId, crate::git::PrCheckResult)>,
+    ) -> BResult<()> {
+        Ok(self.service.apply_pr_results(results).await?)
+    }
+
     // -- Projects (gix-backed → `run_local`) --
 
     async fn add_project(&self, path: PathBuf) -> BResult<ProjectId> {

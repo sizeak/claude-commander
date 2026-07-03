@@ -369,6 +369,7 @@ async fn main() -> Result<()> {
                     mode,
                     base_branch,
                     section,
+                    stack_parent: None,
                 })
                 .await
             {
