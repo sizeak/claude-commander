@@ -201,6 +201,7 @@ fn make_worktree_with_id(id: SessionId) -> SessionListItem {
         created_at: chrono::Utc::now(),
         agent_state: None,
         unread: false,
+        keep_alive: false,
         stacked_child: false,
     }
 }
@@ -360,6 +361,7 @@ fn test_is_command_available_session_scoped_hidden_without_session() {
         BindableAction::DeleteSession,
         BindableAction::RenameSession,
         BindableAction::RestartSession,
+        BindableAction::ToggleKeepAlive,
         BindableAction::OpenInEditor,
         BindableAction::OpenPullRequest,
     ] {
@@ -379,6 +381,7 @@ fn test_is_command_available_session_scoped_shown_with_session() {
         BindableAction::DeleteSession,
         BindableAction::RenameSession,
         BindableAction::RestartSession,
+        BindableAction::ToggleKeepAlive,
         BindableAction::OpenInEditor,
         BindableAction::OpenPullRequest,
     ] {

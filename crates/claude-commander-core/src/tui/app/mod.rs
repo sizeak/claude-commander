@@ -1057,6 +1057,7 @@ impl AppUiState {
             | BindableAction::DeleteSession
             | BindableAction::RenameSession
             | BindableAction::RestartSession
+            | BindableAction::ToggleKeepAlive
             | BindableAction::OpenInEditor
             | BindableAction::OpenPullRequest
             | BindableAction::OpenReviewDiff

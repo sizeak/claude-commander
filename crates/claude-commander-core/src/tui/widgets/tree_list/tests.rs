@@ -37,6 +37,7 @@ fn make_worktree_with_stack(title: &str, stacked_child: bool) -> SessionListItem
         created_at: chrono::Utc::now(),
         agent_state: None,
         unread: false,
+        keep_alive: false,
         stacked_child,
     }
 }
@@ -82,6 +83,30 @@ fn make_worktree_with_program(title: &str, program: &str) -> SessionListItem {
         *p = program.to_string();
     }
     w
+}
+
+#[test]
+fn worktree_shows_keep_alive_marker() {
+    let mut wt = make_worktree("Feature");
+    let items_off = vec![make_project("proj", 1), make_worktree("Feature")];
+
+    // No anchor marker when the session is not kept alive.
+    let plain = render_tree(&items_off, 40, 4).join("\n");
+    assert!(
+        !plain.contains(KEEP_ALIVE_MARKER),
+        "unexpected keep-alive marker:\n{plain}"
+    );
+
+    // The anchor appears once the session is kept alive.
+    if let SessionListItem::Worktree { keep_alive, .. } = &mut wt {
+        *keep_alive = true;
+    }
+    let items_on = vec![make_project("proj", 1), wt];
+    let marked = render_tree(&items_on, 40, 4).join("\n");
+    assert!(
+        marked.contains(KEEP_ALIVE_MARKER),
+        "expected keep-alive marker:\n{marked}"
+    );
 }
 
 #[test]

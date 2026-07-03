@@ -821,6 +821,7 @@ fn worktree_item(
         created_at: session.created_at,
         agent_state: agent_states.get(&session.id).copied(),
         unread: session.unread,
+        keep_alive: session.keep_alive,
         stacked_child,
     }
 }

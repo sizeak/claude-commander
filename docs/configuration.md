@@ -226,6 +226,7 @@ state_sync_interval_ms = 2000
 # navigate_last = ["End"]
 # quit = ["q", "Ctrl-c"]
 # toggle_pane = ["Tab"]
+# toggle_keep_alive = ["K"]                # palette-only by default; bind a key here
 ```
 
 ## Idle-session hibernation
@@ -254,9 +255,10 @@ always resumes, since that's what makes it non-destructive.
 **Keeping a session alive**: run the **Toggle keep-alive** action from the
 command palette on a session (or `claude-commander keep-alive <session>
 [--on|--off]`) to exempt it from hibernation — useful for a long-running build,
-a watched log, or anything you want to keep warm. The action has no default
-hotkey; bind one under `[keybindings]` if you want a shortcut. The flag persists
-across restarts.
+a watched log, or anything you want to keep warm. A kept-alive session shows an
+anchor (`⚓`) marker in the session list. The action has no default hotkey; bind
+one via `toggle_keep_alive` under `[keybindings]` (e.g. `toggle_keep_alive =
+["K"]`) if you want a shortcut. The flag persists across restarts.
 
 Enabling hibernation and changing `hibernate_check_interval_secs` are
 restart-required (the loop is spawned once at launch); `hibernate_idle_timeout_secs`

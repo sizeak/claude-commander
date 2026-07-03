@@ -483,6 +483,10 @@ pub enum SessionListItem {
         created_at: chrono::DateTime<chrono::Utc>,
         agent_state: Option<AgentState>,
         unread: bool,
+        /// True when the user has opted this session out of auto-hibernation
+        /// (the keep-alive toggle). Surfaced as a tree-row marker so the flag is
+        /// visible without toggling it to find out.
+        keep_alive: bool,
         /// True when this row is a stacked child of the row directly above it,
         /// meaning it sits one indent deeper than a normal session row. Stack
         /// bases and unstacked sessions keep the normal indent and have this
@@ -710,6 +714,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             agent_state: None,
             unread: false,
+            keep_alive: false,
             stacked_child: false,
         };
 
@@ -881,6 +886,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             agent_state: None,
             unread: false,
+            keep_alive: false,
             stacked_child: false,
         };
 
