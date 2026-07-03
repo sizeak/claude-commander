@@ -637,6 +637,15 @@ impl CommanderService {
         self.manager.restart_session(id).await
     }
 
+    /// Restart a session's tmux pane without `--resume` (a fresh agent
+    /// conversation). Used by the attach loop when the agent process exits, so
+    /// the user seamlessly gets a new session rather than being dropped to the
+    /// tree.
+    pub async fn restart_session_fresh(&self, id: &SessionId) -> Result<()> {
+        self.telemetry.feature("session.restart_fresh");
+        self.manager.restart_session_fresh(id).await
+    }
+
     pub async fn delete_session(&self, id: &SessionId) -> Result<()> {
         self.telemetry.feature("session.delete");
         self.manager.delete_session(id).await

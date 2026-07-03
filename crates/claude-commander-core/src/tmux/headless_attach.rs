@@ -19,9 +19,11 @@
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::Path;
 
+use async_trait::async_trait;
 use tokio::io::{ReadHalf, WriteHalf};
 use tracing::{info, warn};
 
+use crate::backend::{AttachEnd, AttachResizer, AttachStreams, AttachTerminator};
 use crate::error::Result;
 use crate::tmux::isolation::TmuxTmpdir;
 
@@ -92,6 +94,47 @@ impl HeadlessAttach {
         let (reader, writer) = tokio::io::split(self.pty);
         let guard = ChildGuard { child: self.child };
         (reader, writer, resize, guard)
+    }
+
+    /// Consume the bridge into the transport-agnostic [`AttachStreams`] the
+    /// generalized attach loop drives: boxed PTY halves, an [`AttachResizer`]
+    /// wrapping the `TIOCSWINSZ` ioctl, and a [`PtyTerminator`] owning the
+    /// `tmux attach-session` child. Both the local backend's `attach` and the
+    /// CLI's [`attach_to_session`](super::attach_to_session) build their streams
+    /// this way, so there is exactly one PTY→streams adapter.
+    pub fn into_streams(self) -> AttachStreams {
+        let (reader, writer, resize, child) = self.split();
+        let resizer = AttachResizer::new(move |cols, rows| resize.resize(cols, rows));
+        AttachStreams {
+            reader: Box::new(reader),
+            writer: Box::new(writer),
+            resizer,
+            terminator: Box::new(PtyTerminator { child }),
+        }
+    }
+}
+
+/// [`AttachTerminator`] for a local PTY attach: owns the `tmux attach-session`
+/// [`ChildGuard`]. `detach` kills the attach client (leaving the tmux session +
+/// its program running); `wait` reports how the client exited.
+pub struct PtyTerminator {
+    child: ChildGuard,
+}
+
+#[async_trait]
+impl AttachTerminator for PtyTerminator {
+    async fn detach(&mut self) {
+        self.child.kill().await;
+    }
+
+    async fn wait(&mut self) -> AttachEnd {
+        match self.child.wait().await {
+            // A clean exit is a tmux detach (Ctrl+B D / our own kill).
+            Ok(status) if status.success() => AttachEnd::Detached,
+            // A non-clean exit means the pane's process/session ended.
+            Ok(_) => AttachEnd::SessionEnded,
+            Err(e) => AttachEnd::Error(e.to_string()),
+        }
     }
 }
 

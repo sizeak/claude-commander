@@ -44,8 +44,8 @@ use super::widgets::{
 };
 use crate::api::{CommanderService, DiffSide};
 use crate::backend::{
-    BackendHandle, BackendId, BackendView, CommanderBackend, LOCAL_BACKEND_ID, LocalBackend,
-    SessionRef,
+    AttachConnection, AttachKind, BResult, BackendError, BackendHandle, BackendId, BackendView,
+    CommanderBackend, LOCAL_BACKEND_ID, LocalBackend, SessionRef,
 };
 use crate::config::{BindableAction, Config, ConfigStore, StateStore};
 use crate::error::{Result, TuiError};
@@ -114,6 +114,23 @@ fn should_auto_restart_ended(session_name: &str, consecutive_ends: u8) -> bool {
     !session_name.ends_with("-sh")
         && session_name != crate::commander::COMMANDER_TMUX_NAME
         && consecutive_ends < 3
+}
+
+/// What the TUI attaches to once it tears down for an attach. Set by the
+/// select / shell / commander handlers and consumed by the attach loop in
+/// [`App::run`], which drives it over [`crate::tmux::run_attach`].
+#[derive(Clone, Debug)]
+pub enum AttachTarget {
+    /// A session's pane, attached through the owning backend. `Ctrl+\` toggles
+    /// between [`AttachKind::Agent`] and [`AttachKind::Shell`] on the same id.
+    Session {
+        session: SessionRef,
+        kind: AttachKind,
+    },
+    /// A name-only tmux session with no `SessionId` — the commander session or
+    /// a project shell — attached via the local backend by name. Local-only:
+    /// these are absent from the workspace snapshot.
+    LocalName(String),
 }
 
 /// Whether the agent-state poll tick can skip entirely: there is nothing to
@@ -914,16 +931,13 @@ pub struct AppUiState {
     /// the background agent-state poll so the (sync) renderers — the footer chip
     /// — can read it without awaiting tmux.
     pub commander_running: bool,
-    /// Attach command to run after exiting TUI
-    pub attach_command: Option<String>,
+    /// What to attach to after the TUI tears down (set by select/shell/commander).
+    pub attach_request: Option<AttachTarget>,
     /// Session whose review diff should be opened on returning to the TUI —
     /// set when the user pressed Alt-r inside an attached session.
     pub pending_open_review: Option<SessionId>,
     /// Editor command + path to open after exiting TUI
     pub editor_command: Option<(String, PathBuf)>,
-    /// When attached via shell toggle (Ctrl+\), stores the session name to switch back to.
-    /// Contains (current_session_name, paired_session_name) so we can toggle between them.
-    pub shell_toggle_pair: Option<(String, String)>,
     /// Needs right pane clear (set on view switch, consumed on render)
     pub clear_right_pane: bool,
     /// Left pane width as a percentage (adjustable at runtime via < / >)
@@ -1011,10 +1025,9 @@ impl Default for AppUiState {
             selected_session_id: None,
             selected_project_id: None,
             commander_running: false,
-            attach_command: None,
+            attach_request: None,
             pending_open_review: None,
             editor_command: None,
-            shell_toggle_pair: None,
             clear_right_pane: false,
             left_pane_pct: DEFAULT_LEFT_PANE_PCT,
             last_pr_check: None,
@@ -1151,6 +1164,10 @@ pub struct App {
     /// render path reads synchronously, refreshed by a per-backend change-feed
     /// task via [`StateUpdate::BackendChanged`](crate::tui::event::StateUpdate).
     backends: Vec<BackendHandle>,
+    /// Frontend-owned UI preferences (view mode, last selection, pane width),
+    /// persisted to `tui.json` — kept out of `state.json` so backend/session
+    /// data and local UI prefs never share a file. See [`crate::tui::prefs`].
+    tui_prefs: crate::tui::prefs::TuiPrefsStore,
     /// UI state
     ui_state: AppUiState,
     /// Event loop
@@ -1191,6 +1208,10 @@ impl App {
         frontend: crate::telemetry::FrontendInfo,
     ) -> Self {
         let config = config_store.read().clone();
+        // Build the TUI prefs store from the same data dir as the state file
+        // (migrating legacy prefs out of `state.json` on first launch) before
+        // the store is moved into the service.
+        let tui_prefs = crate::tui::prefs::TuiPrefsStore::load(&store.data_dir());
         let service = CommanderService::new(config_store, store, frontend);
 
         // The local backend wraps a clone of the same service (a bundle of
@@ -1214,6 +1235,7 @@ impl App {
             commander_enabled_at_init,
             service,
             backends,
+            tui_prefs,
             ui_state: AppUiState::default(),
             event_loop: EventLoop::new(),
             theme,
@@ -1270,12 +1292,13 @@ impl App {
     /// the rendered tree.
     #[cfg(test)]
     pub(super) async fn sync_local_view_from_store_for_test(&mut self) {
-        let snapshot = {
-            let state = self.service.store().read().await;
-            crate::api::workspace_snapshot_from_state(&state)
-        };
-        self.backends[0].view.snapshot = snapshot;
-        self.backends[0].view.connection = crate::backend::ConnectionState::Connected;
+        // Read back through the backend (which wraps the same store the test
+        // seeded) rather than the store directly, so this stays clear of the
+        // Phase-C store-access gate.
+        if let Ok(snapshot) = self.local_arc().workspace_snapshot().await {
+            self.backends[0].view.snapshot = snapshot;
+            self.backends[0].view.connection = crate::backend::ConnectionState::Connected;
+        }
     }
 
     /// Look up a session in a backend's cached snapshot.
@@ -1295,6 +1318,130 @@ impl App {
             .projects
             .iter()
             .find(|p| p.id == id)
+    }
+
+    /// The local backend concretely, for the local-only affordances the trait
+    /// deliberately omits (name-based attach, shell-toggle resolution, the
+    /// commander session). `None` if backend 0 isn't a [`LocalBackend`] — never
+    /// today, since the local backend is always present.
+    pub(super) fn local_backend(&self) -> Option<&LocalBackend> {
+        self.backends[LOCAL_BACKEND_ID.0]
+            .backend
+            .as_any()
+            .downcast_ref::<LocalBackend>()
+    }
+
+    /// The tmux session name an [`AttachTarget`] resolves to, for the switcher
+    /// popup, MRU/viewed tracking, and post-attach focus. `None` when a session
+    /// ref isn't in the cached snapshot.
+    pub(super) fn attach_target_name(&self, target: &AttachTarget) -> Option<String> {
+        match target {
+            AttachTarget::LocalName(name) => Some(name.clone()),
+            AttachTarget::Session { session, kind } => {
+                let base = self.session(*session)?.tmux_session_name.clone();
+                Some(match kind {
+                    AttachKind::Agent => base,
+                    AttachKind::Shell => format!("{base}-sh"),
+                })
+            }
+        }
+    }
+
+    /// Map a tmux session name back to a local [`AttachTarget`] — used after the
+    /// in-session switcher lands on an arbitrary session by name. A `-sh`
+    /// suffix maps to the session's shell pane; a name that matches no session
+    /// (the commander, say) stays a [`AttachTarget::LocalName`].
+    pub(super) fn attach_target_from_name(&self, name: &str) -> AttachTarget {
+        let is_shell = name.ends_with("-sh");
+        let base = name.strip_suffix("-sh").unwrap_or(name);
+        match self
+            .local_view()
+            .snapshot
+            .sessions
+            .iter()
+            .find(|s| s.tmux_session_name == base)
+        {
+            Some(s) => AttachTarget::Session {
+                session: SessionRef::local(s.session_id),
+                kind: if is_shell {
+                    AttachKind::Shell
+                } else {
+                    AttachKind::Agent
+                },
+            },
+            None => AttachTarget::LocalName(name.to_string()),
+        }
+    }
+
+    /// The session id a tmux session name belongs to (agent or `-sh` shell),
+    /// from the cached snapshot. `None` for the commander / an unknown name.
+    pub(super) fn session_id_by_tmux_name(&self, name: &str) -> Option<SessionId> {
+        let base = name.strip_suffix("-sh").unwrap_or(name);
+        self.local_view()
+            .snapshot
+            .sessions
+            .iter()
+            .find(|s| s.tmux_session_name == base)
+            .map(|s| s.session_id)
+    }
+
+    /// Open an attach connection for `target`: through the owning backend for a
+    /// session pane (which stamps last-attached and revives a dead tmux
+    /// session), or via the local name-based path for the commander / project
+    /// shell.
+    pub(super) async fn open_attach(
+        &self,
+        target: &AttachTarget,
+        cols: u16,
+        rows: u16,
+    ) -> BResult<Box<dyn AttachConnection>> {
+        match target {
+            AttachTarget::Session { session, kind } => {
+                self.backend(session.backend)
+                    .ok_or(BackendError::NotFound)?
+                    .backend
+                    .attach(session.id, cols, rows, *kind)
+                    .await
+            }
+            AttachTarget::LocalName(name) => {
+                self.local_backend()
+                    .ok_or(BackendError::NotFound)?
+                    .attach_by_tmux_name(name, cols, rows)
+                    .await
+            }
+        }
+    }
+
+    /// Resolve the Ctrl+\ shell-toggle partner for `current`. A session pane
+    /// simply flips Agent↔Shell on the same id — `backend.attach(id, Shell)`
+    /// creates the `-sh` pair on demand, so no name resolution is needed. A
+    /// name-only target (a project shell, or a switcher-picked session) defers
+    /// to the local backend's name-based resolver.
+    pub(super) async fn toggle_shell_target(
+        &self,
+        current: &AttachTarget,
+        current_name: &str,
+    ) -> BResult<AttachTarget> {
+        match current {
+            AttachTarget::Session { session, kind } => Ok(AttachTarget::Session {
+                session: *session,
+                kind: match kind {
+                    AttachKind::Agent => AttachKind::Shell,
+                    AttachKind::Shell => AttachKind::Agent,
+                },
+            }),
+            AttachTarget::LocalName(name) => {
+                let be = self.local_backend().ok_or(BackendError::NotFound)?;
+                // Prefer the live name reported by the attach (post-switcher).
+                let base = if current_name.is_empty() {
+                    name.as_str()
+                } else {
+                    current_name
+                };
+                let paired = be.resolve_shell_toggle_pair(base).await?;
+                Ok(self.attach_target_from_name(&paired))
+            }
+        }
     }
 
     /// Fetch an initial snapshot + agent states for every backend, so the first
@@ -1425,107 +1572,18 @@ impl App {
             let _ = tokio::task::spawn_blocking(crate::tui::syntax_highlight::warm_assets).await;
         });
 
-        // Start background state sync for cross-instance changes
-        if self.config.state_sync_interval_ms > 0 {
-            let store = self.service.store().clone();
-            let tx = self.event_loop.sender();
-            let interval_ms = self.config.state_sync_interval_ms;
-            tokio::spawn(async move {
-                let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
-                loop {
-                    interval.tick().await;
-                    match store.reload_if_changed().await {
-                        Ok(true) => {
-                            let _ = tx
-                                .send(AppEvent::StateUpdate(StateUpdate::ExternalChange))
-                                .await;
-                        }
-                        Ok(false) => {}
-                        Err(e) => {
-                            debug!("State sync check failed: {}", e);
-                        }
-                    }
-                }
-            });
-        }
-
-        // Start background agent state polling
-        if self.config.agent_state_poll_interval_ms > 0 {
-            let store = self.service.store().clone();
-            let tx = self.event_loop.sender();
-            let interval_ms = self.config.agent_state_poll_interval_ms;
-            let tmux = self.service.session_manager().tmux.clone();
-            // The commander is project-less and absent from `state.sessions`, so
-            // it is polled separately. Enablement is restart-required: the poll
-            // task and the footer chip share `commander_enabled_at_init` so the
-            // chip can't disagree when the live config is toggled.
-            let commander_enabled = self.commander_enabled_at_init;
-            let commander_program = self.config.commander_program();
-            let commander_tmux = tmux.clone();
-            tokio::spawn(async move {
-                let cache_ttl = Duration::from_millis(interval_ms.saturating_sub(500).max(500));
-                let mut detector = AgentStateDetector::new(tmux, cache_ttl);
-                let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
-                let mut last_commander_running = false;
-                loop {
-                    interval.tick().await;
-                    let mut sessions: Vec<(SessionId, String, String)> = {
-                        let state = store.read().await;
-                        state
-                            .sessions
-                            .values()
-                            .filter(|s| s.status == SessionStatus::Running)
-                            .map(|s| (s.id, s.tmux_session_name.clone(), s.program.clone()))
-                            .collect()
-                    };
-                    let commander_running =
-                        commander_enabled && crate::commander::is_running(&commander_tmux).await;
-                    if commander_running {
-                        sessions.push((
-                            crate::commander::commander_sentinel_id(),
-                            crate::commander::COMMANDER_TMUX_NAME.to_string(),
-                            commander_program.clone(),
-                        ));
-                    }
-                    // Quiet path: nothing to detect and the commander's running
-                    // state is unchanged — skip the tick (no list rebuild).
-                    if poll_tick_can_skip(
-                        sessions.is_empty(),
-                        commander_running,
-                        last_commander_running,
-                    ) {
-                        continue;
-                    }
-                    let states: HashMap<SessionId, AgentState> = if sessions.is_empty() {
-                        HashMap::new()
-                    } else {
-                        detector.detect_all(&sessions).await
-                    };
-                    // Send on any real change: fresh states, or the commander
-                    // flipped (so its chip can turn on *and* off).
-                    if poll_tick_should_send(
-                        states.is_empty(),
-                        commander_running,
-                        last_commander_running,
-                    ) {
-                        last_commander_running = commander_running;
-                        let _ = tx
-                            .send(AppEvent::StateUpdate(StateUpdate::AgentStatesUpdated {
-                                states,
-                                commander_running,
-                            }))
-                            .await;
-                    }
-                }
-            });
-        }
+        // Start the cross-instance state-sync and agent-state poll loops. Both
+        // still clone `self.service` internals — the sole remaining PHASE-D seam,
+        // now confined to `background.rs` (see its module docs).
+        self.spawn_state_sync();
+        self.spawn_agent_poll();
 
         // Restore the last-selected view if the user has previously chosen
         // one. If they haven't, fall back to the section-aware default:
         // SectionGrouped when sections are configured, else ProjectGrouped.
         // Any section view falls back to ProjectGrouped at refresh time if
         // sections have since been removed from config.
-        let persisted_view = self.service.store().read().await.view_mode;
+        let persisted_view = self.tui_prefs.prefs().view_mode;
         self.ui_state.view_mode = match persisted_view {
             Some(view) => view,
             None if !self.config.sections.is_empty() => ViewMode::SectionGrouped,
@@ -1592,322 +1650,248 @@ impl App {
 
                 self.event_loop.restart_input();
             } else {
-                match self.ui_state.attach_command.take() {
-                    Some(cmd) => {
-                        // Stop the input reader BEFORE attaching so it doesn't compete for stdin
+                match self.ui_state.attach_request.take() {
+                    Some(request) => {
+                        // Stop the input reader BEFORE attaching so it doesn't
+                        // compete for stdin, then flush the key that triggered
+                        // this attach.
                         self.event_loop.stop_input();
-                        // Brief delay to let the reader task actually stop
                         tokio::time::sleep(Duration::from_millis(100)).await;
-
-                        // Flush any pending input (e.g. the Enter key that triggered this attach)
                         crate::tmux::flush_stdin();
 
-                        // Attach to session via async PTY bridge (supports Ctrl+Q detach, Ctrl+\ shell toggle)
-                        info!("Executing attach command: {}", cmd);
-                        let session_name = cmd.split_whitespace().last().unwrap_or("").to_string();
-                        // Track every session viewed during this attach
-                        // (including ones reached via the in-tmux switcher or
-                        // shell toggle) so we can refresh just their agent
-                        // state on the way out — see the post-loop block.
-                        let mut viewed_sessions: HashSet<String> = HashSet::new();
-                        // The session the user ends up on when the attach loop
-                        // exits — possibly reached via the in-session switcher,
-                        // so not necessarily the one they entered with.
-                        let mut final_session: Option<String> = None;
-                        if !session_name.is_empty() {
-                            // Pre-warm the conversation runtime so voice input
-                            // (Alt-V) works immediately while attached — the mic
-                            // listener only exists once the conversation has been
-                            // started. Idempotent; no-op after the first attach.
-                            if self.config.stt.enabled {
-                                self.ensure_conversation_started().await;
-                            }
-                            let mut current_session = session_name.clone();
-                            let mut consecutive_ends: u8 = 0;
-
-                            loop {
-                                viewed_sessions.insert(current_session.clone());
-
-                                let editor_triggers =
-                                    crate::config::keybindings::editor_trigger_bytes(
-                                        &self.config.keybindings,
-                                    );
-                                // Shell sessions are named with a trailing
-                                // "-sh" (see resolve_shell_toggle_pair). Only
-                                // intercept Ctrl+Z for non-shell (Claude)
-                                // sessions, where SIGTSTP would freeze the
-                                // pane with no shell to recover from.
-                                let intercept_ctrl_z = !current_session.ends_with("-sh");
-                                // The Alt-r review toggle is intercepted only
-                                // for Claude sessions. (Alt-r replaced Ctrl-r
-                                // precisely so a shell's Ctrl-r reverse-history-
-                                // search is never shadowed.)
-                                let review_triggers = if intercept_ctrl_z {
-                                    crate::config::keybindings::review_trigger_bytes(
-                                        &self.config.keybindings,
-                                    )
-                                } else {
-                                    Vec::new()
-                                };
-                                // Voice input (Alt-V) is toggled in-place mid-
-                                // attach; only meaningful for Claude sessions
-                                // with STT enabled and a listener running.
-                                let (voice_triggers, voice_listener) =
-                                    if intercept_ctrl_z && self.config.stt.enabled {
-                                        (
-                                            crate::config::keybindings::voice_trigger_bytes(
-                                                &self.config.keybindings,
-                                            ),
-                                            self.conversation.listener.clone(),
-                                        )
-                                    } else {
-                                        (Vec::new(), None)
-                                    };
-
-                                // Stamp last_attached_at so the in-tmux
-                                // switcher can sort Alt+Tab-style by MRU.
-                                let to_stamp = current_session.clone();
-                                if let Err(e) = self
-                                    .service
-                                    .store()
-                                    .mutate(move |state| {
-                                        if let Some(session) = state
-                                            .sessions
-                                            .values_mut()
-                                            .find(|s| s.matches_tmux_name(&to_stamp))
-                                        {
-                                            session.mark_attached();
-                                        }
-                                    })
-                                    .await
-                                {
-                                    warn!("Failed to stamp last_attached_at: {}", e);
-                                }
-
-                                let outcome = match crate::tmux::attach_to_session(
-                                    &current_session,
-                                    editor_triggers,
-                                    review_triggers,
-                                    voice_triggers,
-                                    voice_listener,
-                                    self.conversation.recording.clone(),
-                                    intercept_ctrl_z,
-                                )
-                                .await
-                                {
-                                    Ok(o) => o,
-                                    Err(e) => {
-                                        warn!("Failed to attach to session: {}", e);
-                                        self.ui_state.modal = Modal::Error {
-                                            message: format!("Failed to attach: {}", e),
-                                        };
-                                        self.ui_state.shell_toggle_pair = None;
-                                        break;
-                                    }
-                                };
-
-                                // `conversation.recording` is shared (`Arc`) with
-                                // the attach loop, so a mid-attach Alt-V toggle is
-                                // already reflected — no readback needed.
-
-                                // The in-session switcher may have run `tmux switch-client`
-                                // mid-attach, so the session we exited from isn't
-                                // necessarily the one we entered with. Trust the outcome.
-                                let switched_via_popup = outcome.final_session != current_session;
-                                current_session = outcome.final_session;
-                                viewed_sessions.insert(current_session.clone());
-                                if switched_via_popup {
-                                    // Picking a new session in the popup invalidates the
-                                    // shell-toggle pair (which is tied to a specific
-                                    // Claude/shell duo).
-                                    self.ui_state.shell_toggle_pair = None;
-                                }
-
-                                match outcome.result {
-                                    crate::tmux::AttachResult::SwitchToShell => {
-                                        info!(
-                                            "Shell toggle requested from session: {}",
-                                            current_session
-                                        );
-
-                                        // Determine the paired session to switch to
-                                        let next_session = match &self.ui_state.shell_toggle_pair {
-                                            Some((_, paired)) => paired.clone(),
-                                            None => {
-                                                // First toggle — resolve the shell session
-                                                match self
-                                                    .resolve_shell_toggle_pair(&current_session)
-                                                    .await
-                                                {
-                                                    Ok(paired) => paired,
-                                                    Err(e) => {
-                                                        warn!(
-                                                            "Failed to resolve shell session: {}",
-                                                            e
-                                                        );
-                                                        self.ui_state.modal = Modal::Error {
-                                                            message: format!(
-                                                                "Cannot switch to shell: {}",
-                                                                e
-                                                            ),
-                                                        };
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                        };
-
-                                        // Update the toggle pair so next Ctrl+\ switches back
-                                        self.ui_state.shell_toggle_pair =
-                                            Some((next_session.clone(), current_session.clone()));
-                                        current_session = next_session;
-
-                                        // Flush between switches
-                                        crate::tmux::flush_stdin();
-                                        consecutive_ends = 0;
-                                        info!("Switching to session: {}", current_session);
-                                        continue;
-                                    }
-                                    crate::tmux::AttachResult::SwitchToReview => {
-                                        info!(
-                                            "Review toggle requested from session: {}",
-                                            current_session
-                                        );
-                                        // Resolve the tmux session to its id and
-                                        // queue the review view; the post-loop
-                                        // code opens it once we're back in the
-                                        // TUI. Alt-r inside the review
-                                        // re-attaches (see handle_review_key).
-                                        self.ui_state.pending_open_review = {
-                                            let st = self.service.store().read().await;
-                                            st.sessions
-                                                .values()
-                                                .find(|s| s.matches_tmux_name(&current_session))
-                                                .map(|s| s.id)
-                                        };
-                                        self.ui_state.shell_toggle_pair = None;
-                                        break;
-                                    }
-                                    crate::tmux::AttachResult::OpenEditor => {
-                                        info!(
-                                            "OpenEditor requested from session: {}",
-                                            current_session
-                                        );
-                                        // Run the editor for the session's worktree, keep
-                                        // the tmux session alive, and then re-attach.
-                                        self.open_editor_for_tmux_session(&current_session).await;
-                                        crate::tmux::flush_stdin();
-                                        consecutive_ends = 0;
-                                        continue;
-                                    }
-                                    crate::tmux::AttachResult::SessionEnded => {
-                                        info!("Session ended, attempting fresh restart");
-                                        if should_auto_restart_ended(
-                                            &current_session,
-                                            consecutive_ends,
-                                        ) {
-                                            consecutive_ends += 1;
-                                            match self
-                                                .service
-                                                .session_manager()
-                                                .restart_session_fresh_by_tmux_name(
-                                                    &current_session,
-                                                )
-                                                .await
-                                            {
-                                                Ok(()) => {
-                                                    info!(
-                                                        "Auto-restarted session fresh (attempt {})",
-                                                        consecutive_ends
-                                                    );
-                                                    crate::tmux::flush_stdin();
-                                                    continue;
-                                                }
-                                                Err(e) => {
-                                                    warn!("Failed to auto-restart session: {}", e);
-                                                    self.ui_state.shell_toggle_pair = None;
-                                                    break;
-                                                }
-                                            }
-                                        } else {
-                                            if consecutive_ends >= 3 {
-                                                warn!(
-                                                    "Session ended {} consecutive times, \
-                                                     giving up",
-                                                    consecutive_ends
-                                                );
-                                            }
-                                            self.ui_state.shell_toggle_pair = None;
-                                            break;
-                                        }
-                                    }
-                                    result => {
-                                        info!("Attach ended: {:?}", result);
-                                        self.ui_state.shell_toggle_pair = None;
-                                        break;
-                                    }
-                                }
-                            }
-                            final_session = Some(current_session);
+                        // Pre-warm the conversation runtime so voice input
+                        // (Alt-V) works immediately while attached. Idempotent.
+                        if self.config.stt.enabled {
+                            self.ensure_conversation_started().await;
                         }
 
-                        // Flush stdin again after detach to discard any stale input
-                        crate::tmux::flush_stdin();
+                        let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+                        // The in-session switcher is a local capability; a remote
+                        // backend forwards Ctrl+Space to the pane instead.
+                        let switcher_enabled = self
+                            .backend(LOCAL_BACKEND_ID)
+                            .map(|h| h.backend.capabilities().switcher_popup)
+                            .unwrap_or(false);
+                        // Track every session viewed during this attach (via the
+                        // switcher or shell toggle) so we can refresh just their
+                        // agent state on the way out — see the post-loop block.
+                        let mut viewed: HashSet<String> = HashSet::new();
+                        let mut current = request;
+                        let mut consecutive_ends: u8 = 0;
+                        // The tmux name the user ends on (possibly reached via
+                        // the in-session switcher), for post-attach focus.
+                        let mut final_name: Option<String> = self.attach_target_name(&current);
 
-                        // Restart the input reader after detach. This also
-                        // drains the event channel, discarding any
-                        // AgentStatesUpdated events queued while attached.
+                        loop {
+                            let name = self.attach_target_name(&current);
+                            if let Some(n) = &name {
+                                viewed.insert(n.clone());
+                            }
+
+                            // Open the connection first (the backend revives a
+                            // dead tmux session and stamps last-attached); a
+                            // failure surfaces as an error modal.
+                            let conn = match self.open_attach(&current, cols, rows).await {
+                                Ok(c) => c,
+                                Err(e) => {
+                                    warn!("Failed to attach: {e}");
+                                    self.ui_state.modal = Modal::Error {
+                                        message: format!("Failed to attach: {e}"),
+                                    };
+                                    break;
+                                }
+                            };
+                            let streams = conn.split();
+
+                            // Only intercept Ctrl+Z / Alt-r / Alt-V for Claude
+                            // (non-shell) panes: SIGTSTP would freeze a shell-
+                            // less pane, and a shell's Ctrl-r must not be
+                            // shadowed. Voice is meaningful only with STT on.
+                            let is_shell = matches!(
+                                current,
+                                AttachTarget::Session {
+                                    kind: AttachKind::Shell,
+                                    ..
+                                }
+                            ) || name.as_deref().is_some_and(|n| n.ends_with("-sh"));
+                            let intercept_ctrl_z = !is_shell;
+                            let editor_triggers = crate::config::keybindings::editor_trigger_bytes(
+                                &self.config.keybindings,
+                            );
+                            let review_triggers = if intercept_ctrl_z {
+                                crate::config::keybindings::review_trigger_bytes(
+                                    &self.config.keybindings,
+                                )
+                            } else {
+                                Vec::new()
+                            };
+                            let (voice_triggers, voice_listener) =
+                                if intercept_ctrl_z && self.config.stt.enabled {
+                                    (
+                                        crate::config::keybindings::voice_trigger_bytes(
+                                            &self.config.keybindings,
+                                        ),
+                                        self.conversation.listener.clone(),
+                                    )
+                                } else {
+                                    (Vec::new(), None)
+                                };
+
+                            let cfg = crate::tmux::AttachConfig {
+                                editor_triggers,
+                                review_triggers,
+                                voice_triggers,
+                                voice_listener,
+                                recording: self.conversation.recording.clone(),
+                                intercept_ctrl_z,
+                                switcher_enabled,
+                                session_name: name.clone(),
+                            };
+
+                            let outcome = match crate::tmux::run_attach(streams, cfg).await {
+                                Ok(o) => o,
+                                Err(e) => {
+                                    warn!("Attach loop failed: {e}");
+                                    self.ui_state.modal = Modal::Error {
+                                        message: format!("Failed to attach: {e}"),
+                                    };
+                                    break;
+                                }
+                            };
+
+                            // The switcher may have run `tmux switch-client`
+                            // mid-attach, landing on a different session than we
+                            // entered. Trust the reported final session and
+                            // re-map it to a target.
+                            let landed = outcome.final_session.clone();
+                            if !landed.is_empty() {
+                                viewed.insert(landed.clone());
+                                if name.as_deref() != Some(landed.as_str()) {
+                                    current = self.attach_target_from_name(&landed);
+                                }
+                                final_name = Some(landed.clone());
+                            } else {
+                                final_name = self.attach_target_name(&current);
+                            }
+
+                            match outcome.result {
+                                crate::tmux::AttachResult::SwitchToShell => {
+                                    current =
+                                        match self.toggle_shell_target(&current, &landed).await {
+                                            Ok(t) => t,
+                                            Err(e) => {
+                                                warn!("Failed to resolve shell session: {e}");
+                                                self.ui_state.modal = Modal::Error {
+                                                    message: format!("Cannot switch to shell: {e}"),
+                                                };
+                                                break;
+                                            }
+                                        };
+                                    crate::tmux::flush_stdin();
+                                    consecutive_ends = 0;
+                                    continue;
+                                }
+                                crate::tmux::AttachResult::SwitchToReview => {
+                                    // Queue the review view; opened below once
+                                    // we're back in the TUI.
+                                    self.ui_state.pending_open_review =
+                                        self.session_id_by_tmux_name(&landed);
+                                    break;
+                                }
+                                crate::tmux::AttachResult::OpenEditor => {
+                                    // Local-only: launch the operator's editor on
+                                    // the session worktree, then re-attach.
+                                    if self.local_backend().is_some() {
+                                        self.open_editor_for_tmux_session(&landed).await;
+                                    }
+                                    crate::tmux::flush_stdin();
+                                    consecutive_ends = 0;
+                                    continue;
+                                }
+                                crate::tmux::AttachResult::SessionEnded => {
+                                    let auto = self.attach_target_name(&current).is_some_and(|n| {
+                                        should_auto_restart_ended(&n, consecutive_ends)
+                                    });
+                                    if let (true, AttachTarget::Session { session, .. }) =
+                                        (auto, &current)
+                                    {
+                                        consecutive_ends += 1;
+                                        match self
+                                            .local_arc()
+                                            .restart_session_fresh(session.id)
+                                            .await
+                                        {
+                                            Ok(()) => {
+                                                info!(
+                                                    "Auto-restarted session fresh (attempt {consecutive_ends})"
+                                                );
+                                                crate::tmux::flush_stdin();
+                                                continue;
+                                            }
+                                            Err(e) => {
+                                                warn!("Failed to auto-restart session: {e}");
+                                                break;
+                                            }
+                                        }
+                                    } else {
+                                        break;
+                                    }
+                                }
+                                other => {
+                                    info!("Attach ended: {other:?}");
+                                    break;
+                                }
+                            }
+                        }
+
+                        // Flush stdin again after detach to discard stale input,
+                        // then restart the input reader (also draining any
+                        // AgentStatesUpdated queued while attached).
+                        crate::tmux::flush_stdin();
                         info!("Returned from attach, restarting input reader");
                         self.event_loop.restart_input();
 
                         // Refresh agent state for just the sessions we viewed,
-                        // setting their freshly-observed state directly. We
-                        // deliberately do NOT clear the whole map: clearing
-                        // blanks every spinner in the tree until the next poll
-                        // (~3s) and wipes the unread baseline for background
-                        // sessions, silently dropping genuine Working→Idle
-                        // notifications that occurred while we were attached.
-                        // Setting the viewed sessions directly (bypassing the
-                        // unread diff) avoids re-flagging them as unread, since
-                        // the user was watching them.
-                        if !viewed_sessions.is_empty() {
-                            let targets: Vec<(SessionId, String, String)> = {
-                                let store_state = self.service.store().read().await;
-                                store_state
-                                    .sessions
-                                    .values()
-                                    .filter(|s| s.status == SessionStatus::Running)
-                                    .filter(|s| {
-                                        viewed_sessions.iter().any(|name| s.matches_tmux_name(name))
-                                    })
-                                    .map(|s| (s.id, s.tmux_session_name.clone(), s.program.clone()))
-                                    .collect()
-                            };
-                            if !targets.is_empty() {
-                                let mut detector = AgentStateDetector::new(
-                                    self.service.session_manager().tmux.clone(),
-                                    Duration::from_millis(0),
-                                );
-                                let refreshed = detector.detect_all(&targets).await;
-                                state::apply_viewed_session_refresh(
-                                    &mut self.ui_state.agent_states,
-                                    refreshed,
-                                );
-                                self.refresh_list_items().await;
-                            }
+                        // via the backend, applying the fresh states directly.
+                        // We do NOT clear the whole map: that would blank every
+                        // spinner until the next poll and wipe the unread
+                        // baseline. Applying viewed sessions directly (bypassing
+                        // the unread diff) avoids re-flagging them as unread.
+                        let viewed_ids: HashSet<SessionId> = self
+                            .local_view()
+                            .snapshot
+                            .sessions
+                            .iter()
+                            .filter(|s| {
+                                viewed.iter().any(|n| {
+                                    s.tmux_session_name == n.strip_suffix("-sh").unwrap_or(n)
+                                })
+                            })
+                            .map(|s| s.session_id)
+                            .collect();
+                        if !viewed_ids.is_empty()
+                            && let Ok(fresh) = self.local_arc().agent_states(true).await
+                        {
+                            let refreshed: HashMap<SessionId, AgentState> = fresh
+                                .states
+                                .into_iter()
+                                .filter(|(id, _)| viewed_ids.contains(id))
+                                .collect();
+                            state::apply_viewed_session_refresh(
+                                &mut self.ui_state.agent_states,
+                                refreshed,
+                            );
+                            self.refresh_list_items().await;
                         }
 
-                        // Focus the session the user just left so the tree
-                        // lands on it — important after the in-session switcher,
-                        // which may have moved them to a different session than
-                        // the one they entered.
-                        if let Some(name) = final_session {
+                        // Focus the session the user just left so the tree lands
+                        // on it (important after the in-session switcher).
+                        if let Some(name) = final_name {
                             self.focus_session_in_tree(&name).await;
                         }
 
                         // Alt-r inside the attached session queued its review
-                        // diff — open it now so the next TUI frame shows it
-                        // (rather than the session list).
+                        // diff — open it now so the next frame shows it.
                         if let Some(sid) = self.ui_state.pending_open_review.take() {
                             self.ui_state.selected_session_id = Some(sid);
                             self.handle_open_review().await;

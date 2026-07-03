@@ -450,6 +450,23 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Restart a session's tmux pane without `--resume`, identified by session
+    /// id. Resolves the tmux name and delegates to
+    /// [`Self::restart_session_fresh_by_tmux_name`]; the attach loop uses this
+    /// (it holds the [`SessionId`], not the tmux name) to give a fresh
+    /// conversation when the agent process exits.
+    pub async fn restart_session_fresh(&self, session_id: &SessionId) -> Result<()> {
+        let tmux_name = {
+            let state = self.store.read().await;
+            state
+                .get_session(session_id)
+                .ok_or(SessionError::NotFound(*session_id))?
+                .tmux_session_name
+                .clone()
+        };
+        self.restart_session_fresh_by_tmux_name(&tmux_name).await
+    }
+
     /// Restart a session's tmux pane without `--resume`, identified by tmux
     /// session name. Used when the process inside the pane exits (e.g. Claude
     /// had nothing to resume) so the user seamlessly gets a fresh conversation

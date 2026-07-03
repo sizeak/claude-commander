@@ -128,15 +128,17 @@ pub enum StateUpdate {
         shell_content: String,
     },
     /// Cascade-merge background task finished (completed, paused on conflict,
-    /// or errored). The TUI refreshes and shows an appropriate toast.
+    /// or errored). The TUI refreshes and shows a toast from the recorded
+    /// [`OperationStatus`](crate::api::OperationStatus). `Err` carries a
+    /// transport/backend error string (the operation never recorded).
     CascadeFinished {
-        result: std::result::Result<crate::session::CascadeOutcome, String>,
+        result: std::result::Result<crate::api::OperationStatus, String>,
     },
-    /// Push-stack background task finished. `Ok` carries the number of
-    /// sessions pushed before the task ended; `Err` carries the git error
-    /// from the first failed push (later sessions not attempted).
+    /// Push-stack background task finished. `Ok` carries the recorded
+    /// [`OperationStatus`](crate::api::OperationStatus) (its `detail` summarises
+    /// how many branches pushed); `Err` carries a transport/backend error.
     PushStackFinished {
-        result: std::result::Result<crate::session::PushStackOutcome, String>,
+        result: std::result::Result<crate::api::OperationStatus, String>,
     },
     /// Background project-branch pull finished for one project.
     ProjectPullFinished {

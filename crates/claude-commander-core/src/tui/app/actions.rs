@@ -121,31 +121,32 @@ impl App {
         if self.selected_session_is_creating() {
             return;
         }
-        if let Some(session_id) = self.ui_state.selected_session_id {
-            info!("Getting attach command for session: {}", session_id);
-            match self
-                .service
-                .session_manager()
-                .get_attach_command(&session_id)
-                .await
-            {
-                Ok(cmd) => {
-                    info!("Got attach command: {}", cmd);
-                    // Clear unread flag when attaching.
-                    let _ = self.local_arc().mark_read(session_id).await;
-                    self.ui_state.attach_command = Some(cmd);
-                    self.ui_state.should_quit = true;
-                    info!("Set should_quit = true");
-                }
-                Err(e) => {
-                    info!("Failed to get attach command: {}", e);
-                    self.ui_state.modal = Modal::Error {
-                        message: format!("Cannot attach: {}", e),
-                    };
-                }
-            }
-        } else {
+        let Some(session_id) = self.ui_state.selected_session_id else {
             info!("No session selected");
+            return;
+        };
+        // Validate against the cached snapshot so a non-attachable session
+        // reports immediately; the backend revives a dead-but-attachable tmux
+        // session when the attach actually runs.
+        match self
+            .session(SessionRef::local(session_id))
+            .map(|s| s.status)
+        {
+            Some(status) if status.can_attach() => {
+                // Clear unread when attaching.
+                let _ = self.local_arc().mark_read(session_id).await;
+                self.ui_state.attach_request = Some(AttachTarget::Session {
+                    session: SessionRef::local(session_id),
+                    kind: AttachKind::Agent,
+                });
+                self.ui_state.should_quit = true;
+            }
+            Some(_) => {
+                self.ui_state.modal = Modal::Error {
+                    message: "Cannot attach: session is not running".to_string(),
+                };
+            }
+            None => {}
         }
     }
 
@@ -155,113 +156,30 @@ impl App {
             return;
         }
         if let Some(session_id) = self.ui_state.selected_session_id {
-            match self
-                .service
-                .session_manager()
-                .get_shell_attach_command(&session_id)
-                .await
-            {
-                Ok(cmd) => {
-                    self.ui_state.attach_command = Some(cmd);
-                    self.ui_state.should_quit = true;
-                }
-                Err(e) => {
-                    self.ui_state.modal = Modal::Error {
-                        message: format!("Cannot open shell: {}", e),
-                    };
-                }
-            }
+            // The backend creates the `-sh` pair on demand; a failure surfaces
+            // as an error modal once the attach runs.
+            self.ui_state.attach_request = Some(AttachTarget::Session {
+                session: SessionRef::local(session_id),
+                kind: AttachKind::Shell,
+            });
+            self.ui_state.should_quit = true;
         } else if let Some(project_id) = self.ui_state.selected_project_id {
-            match self
-                .service
-                .session_manager()
-                .get_project_shell_attach_command(&project_id)
-                .await
-            {
-                Ok(cmd) => {
-                    self.ui_state.attach_command = Some(cmd);
+            // Project shells have no `SessionId` — resolve the name locally.
+            let Some(be) = self.local_backend() else {
+                return;
+            };
+            match be.project_shell_name(project_id).await {
+                Ok(name) => {
+                    self.ui_state.attach_request = Some(AttachTarget::LocalName(name));
                     self.ui_state.should_quit = true;
                 }
                 Err(e) => {
                     self.ui_state.modal = Modal::Error {
-                        message: format!("Cannot open shell: {}", e),
+                        message: format!("Cannot open shell: {e}"),
                     };
                 }
             }
         }
-    }
-
-    /// Resolve the shell toggle pair for a given tmux session name.
-    ///
-    /// If the current session is a Claude session, returns the shell session name
-    /// (creating it if needed). If the current session is already a shell session
-    /// (ends with "-sh"), returns the Claude session name.
-    pub(super) async fn resolve_shell_toggle_pair(
-        &mut self,
-        current_tmux_name: &str,
-    ) -> crate::error::Result<String> {
-        if current_tmux_name.ends_with("-sh") {
-            // We're in a shell session — the Claude session is the name without "-sh"
-            let claude_name = current_tmux_name.trim_end_matches("-sh").to_string();
-            // Verify the Claude session exists
-            if self
-                .service
-                .session_manager()
-                .tmux
-                .session_exists(&claude_name)
-                .await?
-            {
-                return Ok(claude_name);
-            }
-            return Err(crate::error::Error::Session(
-                crate::error::SessionError::TmuxSessionNotFound(claude_name),
-            ));
-        }
-
-        // We're in a Claude session — find the matching session ID and ensure shell exists
-        let session_id = {
-            let state = self.service.store().read().await;
-            state
-                .sessions
-                .values()
-                .find(|s| s.tmux_session_name == current_tmux_name)
-                .map(|s| s.id)
-        };
-
-        if let Some(session_id) = session_id {
-            let shell_name = self
-                .service
-                .session_manager()
-                .ensure_shell_session(&session_id)
-                .await?;
-            return Ok(shell_name);
-        }
-
-        // Try project-level shell
-        let project_id = {
-            let state = self.service.store().read().await;
-            state
-                .projects
-                .values()
-                .find(|p| p.shell_tmux_session_name.as_deref() == Some(current_tmux_name))
-                .map(|p| p.id)
-        };
-
-        if let Some(project_id) = project_id {
-            let shell_name = self
-                .service
-                .session_manager()
-                .ensure_project_shell_session(&project_id)
-                .await?;
-            return Ok(shell_name);
-        }
-
-        Err(crate::error::Error::Session(
-            crate::error::SessionError::TmuxSessionNotFound(format!(
-                "No session found for tmux name: {}",
-                current_tmux_name
-            )),
-        ))
     }
 
     /// Open the editor for the worktree associated with a given tmux session
@@ -422,21 +340,19 @@ impl App {
             return;
         }
 
-        // Reuse the TUI's existing tmux executor (shared semaphore) rather than
-        // constructing a second one. `ensure_session` re-checks the live flag
-        // and short-circuits with `CommanderDisabled` before touching tmux — a
-        // backstop for the toggle-off-while-running edge above the snapshot.
+        // The commander is a local-only session (no `SessionId`); ensure it via
+        // the local backend, which reuses the shared tmux executor and re-checks
+        // the live flag (short-circuiting with `CommanderDisabled` — a backstop
+        // for the toggle-off-while-running edge above the snapshot).
+        let Some(be) = self.local_backend() else {
+            return;
+        };
         let cmd = crate::cli_args::cli_command();
-        let result = crate::commander::ensure_session(
-            &self.config,
-            &self.service.session_manager().tmux,
-            &cmd,
-        )
-        .await;
+        let result = be.ensure_commander(&self.config, &cmd).await;
 
         match result {
             Ok(name) => {
-                self.ui_state.attach_command = Some(format!("attach {name}"));
+                self.ui_state.attach_request = Some(AttachTarget::LocalName(name));
                 self.ui_state.should_quit = true;
             }
             Err(crate::Error::Session(crate::error::SessionError::CommanderDisabled)) => {
@@ -621,12 +537,13 @@ impl App {
             Instant::now() + Duration::from_secs(30),
         ));
 
-        let agent_states = self.ui_state.agent_states.clone();
-        let mgr = self.service.session_manager().clone();
+        // The backend detects agent states itself, so the TUI no longer passes
+        // its cached map. Records the outcome in the operation ledger.
+        let backend = self.local_arc();
         let tx = self.event_loop.sender();
         tokio::spawn(async move {
-            let result = mgr
-                .push_stack(&session_id, &agent_states)
+            let result = backend
+                .push_stack(session_id)
                 .await
                 .map_err(|e| e.to_string());
             let _ = tx
@@ -639,28 +556,25 @@ impl App {
 
     pub(super) async fn handle_push_stack_finished(
         &mut self,
-        result: std::result::Result<crate::session::PushStackOutcome, String>,
+        result: std::result::Result<crate::api::OperationStatus, String>,
     ) {
+        self.refresh_local_view().await;
         self.refresh_list_items().await;
-        match result {
-            Ok(outcome) => {
-                let msg = if outcome.sessions_pushed == 0 {
-                    "Push stack complete (nothing to push)".to_string()
-                } else {
-                    format!(
-                        "Push stack complete: pushed {} branch(es)",
-                        outcome.sessions_pushed
-                    )
-                };
-                self.ui_state.status_message = Some((msg, Instant::now() + Duration::from_secs(5)));
-            }
-            Err(e) => {
-                self.ui_state.status_message = Some((
-                    format!("Push stack failed: {e}"),
-                    Instant::now() + Duration::from_secs(15),
-                ));
-            }
-        }
+        let (msg, secs) = match result {
+            Ok(status) => match status.outcome {
+                crate::api::OperationOutcome::Succeeded { detail } => {
+                    (format!("Push stack complete: {detail}"), 5)
+                }
+                crate::api::OperationOutcome::Paused { detail } => {
+                    (format!("Push stack paused: {detail}"), 15)
+                }
+                crate::api::OperationOutcome::Failed { error } => {
+                    (format!("Push stack failed: {error}"), 15)
+                }
+            },
+            Err(e) => (format!("Push stack failed: {e}"), 15),
+        };
+        self.ui_state.status_message = Some((msg, Instant::now() + Duration::from_secs(secs)));
     }
 
     /// Handle `Cascade abandon` — clear the paused state without merging.
@@ -698,13 +612,14 @@ impl App {
             Instant::now() + Duration::from_secs(30),
         ));
 
-        let agent_states = self.ui_state.agent_states.clone();
-        let mgr = self.service.session_manager().clone();
+        // The backend detects agent states itself and records the outcome in
+        // the operation ledger, returning the recorded status.
+        let backend = self.local_arc();
         let tx = self.event_loop.sender();
         tokio::spawn(async move {
             let result = match action {
-                CascadeAction::Start => mgr.cascade_merge_stack(&session_id, &agent_states).await,
-                CascadeAction::Resume => mgr.cascade_resume(&agent_states).await,
+                CascadeAction::Start => backend.cascade_merge(session_id).await,
+                CascadeAction::Resume => backend.cascade_resume().await,
             };
             let result = result.map_err(|e| e.to_string());
             let _ = tx
@@ -717,40 +632,26 @@ impl App {
 
     pub(super) async fn handle_cascade_finished(
         &mut self,
-        result: std::result::Result<crate::session::CascadeOutcome, String>,
+        result: std::result::Result<crate::api::OperationStatus, String>,
     ) {
+        self.refresh_local_view().await;
         self.refresh_list_items().await;
-        match result {
-            Ok(crate::session::CascadeOutcome::Complete { sessions_merged }) => {
-                let msg = if sessions_merged == 0 {
-                    "Cascade complete (nothing to merge)".to_string()
-                } else {
-                    format!("Cascade complete: merged {sessions_merged} session(s)")
-                };
-                self.ui_state.status_message = Some((msg, Instant::now() + Duration::from_secs(5)));
-            }
-            Ok(crate::session::CascadeOutcome::PausedOnConflict {
-                at,
-                sessions_merged,
-            }) => {
-                let title = self
-                    .session(SessionRef::local(at))
-                    .map(|s| s.title.clone())
-                    .unwrap_or_else(|| at.to_string());
-                self.ui_state.status_message = Some((
-                    format!(
-                        "Cascade paused at '{title}' ({sessions_merged} merged). Resolve conflicts and run `Cascade resume`."
-                    ),
-                    Instant::now() + Duration::from_secs(15),
-                ));
-            }
-            Err(e) => {
-                self.ui_state.status_message = Some((
-                    format!("Cascade failed: {e}"),
-                    Instant::now() + Duration::from_secs(10),
-                ));
-            }
-        }
+        let (msg, secs) = match result {
+            Ok(status) => match status.outcome {
+                crate::api::OperationOutcome::Succeeded { detail } => {
+                    (format!("Cascade complete: {detail}"), 5)
+                }
+                crate::api::OperationOutcome::Paused { detail } => (
+                    format!("Cascade {detail}. Resolve conflicts and run `Cascade resume`."),
+                    15,
+                ),
+                crate::api::OperationOutcome::Failed { error } => {
+                    (format!("Cascade failed: {error}"), 10)
+                }
+            },
+            Err(e) => (format!("Cascade failed: {e}"), 10),
+        };
+        self.ui_state.status_message = Some((msg, Instant::now() + Duration::from_secs(secs)));
     }
 
     /// Open the Checkout Branch modal.
@@ -1209,11 +1110,13 @@ impl App {
             return;
         }
         if let Some(session_id) = self.ui_state.selected_session_id {
-            let (title, retarget) = {
-                let state = self.service.store().read().await;
-                let title = state.get_session(&session_id).map(|s| s.title.clone());
-                (title, state.stack_retarget_preview(&session_id))
-            };
+            let title = self
+                .session(SessionRef::local(session_id))
+                .map(|s| s.title.clone());
+            let retarget = super::state::stack_retarget_preview_from_snapshot(
+                &self.local_view().snapshot,
+                session_id,
+            );
             self.ui_state.modal = Modal::Confirm {
                 title: "Delete Session".to_string(),
                 message: delete_confirm_message(
@@ -1419,12 +1322,11 @@ impl App {
         let Some(session_id) = self.ui_state.selected_session_id else {
             return;
         };
-        let current_title = {
-            let state = self.service.store().read().await;
-            match state.get_session(&session_id) {
-                Some(s) => s.title.clone(),
-                None => return,
-            }
+        let Some(current_title) = self
+            .session(SessionRef::local(session_id))
+            .map(|s| s.title.clone())
+        else {
+            return;
         };
         self.ui_state.modal = Modal::Input {
             title: "Rename Session".to_string(),

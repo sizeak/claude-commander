@@ -13,7 +13,7 @@ mod config;
 mod config_store;
 pub mod keybindings;
 pub mod storage;
-mod store;
+pub(crate) mod store;
 pub mod theme;
 mod view_mode;
 

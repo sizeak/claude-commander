@@ -1298,20 +1298,10 @@ impl App {
                 }
                 let new_view = self.ui_state.view_mode.next();
                 self.ui_state.view_mode = new_view;
-                // Persist the chosen view so it survives restarts. We don't
-                // care if this fails (disk full, locked file) — the runtime
-                // behaviour is correct either way and the user will just see
-                // the default view on the next launch.
-                if let Err(err) = self
-                    .service
-                    .store()
-                    .mutate(move |state| {
-                        state.view_mode = Some(new_view);
-                    })
-                    .await
-                {
-                    warn!("Failed to persist view_mode: {}", err);
-                }
+                // Persist the chosen view so it survives restarts. A failed
+                // write is logged (not surfaced) inside the prefs store — the
+                // runtime behaviour is correct either way.
+                self.tui_prefs.set_view_mode(new_view).await;
                 let selected_session = self.ui_state.selected_session_id;
                 let selected_project = self.ui_state.selected_project_id;
                 self.refresh_list_items().await;

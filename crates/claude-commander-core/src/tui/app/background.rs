@@ -1,4 +1,18 @@
-//! Background tasks: preview updates, PR status checks, info fetching, AI summaries.
+//! Background tasks: preview updates, PR status checks, info fetching, AI
+//! summaries, cross-instance state sync, and agent-state polling.
+//!
+//! PHASE-D SEAM: this module is the one remaining place the TUI reaches past the
+//! `CommanderBackend` trait into `self.service` (the local `StateStore` +
+//! `SessionManager`/`TmuxExecutor`). Every `self.service.store()` /
+//! `self.service.session_manager()` access in the crate now lives here, in the
+//! loop-spawning methods below (`spawn_preview_update`, `spawn_pr_status_check`,
+//! `spawn_info_fetch`, `spawn_ai_summary_if_needed`, `spawn_state_sync`,
+//! `spawn_agent_poll`). Phase D moves this polling/refresh work behind the
+//! backend (server-side for a remote backend, an in-process cache for the local
+//! one) and a bulk agent-states cache, at which point these direct-service
+//! clones and the transitional `App::service` field are deleted. Until then
+//! they are deliberately confined to this module so the rest of the TUI is
+//! already backend-only.
 
 use futures::StreamExt;
 
@@ -406,6 +420,112 @@ impl App {
                     diff_hash: result.1,
                 }))
                 .await;
+        });
+    }
+
+    /// Spawn the cross-instance state-sync loop: periodically reloads the state
+    /// file and emits [`StateUpdate::ExternalChange`] when another instance
+    /// mutated it. No-op when `state_sync_interval_ms` is 0. (PHASE-D seam.)
+    pub(super) fn spawn_state_sync(&self) {
+        if self.config.state_sync_interval_ms == 0 {
+            return;
+        }
+        let store = self.service.store().clone();
+        let tx = self.event_loop.sender();
+        let interval_ms = self.config.state_sync_interval_ms;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+            loop {
+                interval.tick().await;
+                match store.reload_if_changed().await {
+                    Ok(true) => {
+                        let _ = tx
+                            .send(AppEvent::StateUpdate(StateUpdate::ExternalChange))
+                            .await;
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        debug!("State sync check failed: {}", e);
+                    }
+                }
+            }
+        });
+    }
+
+    /// Spawn the agent-state poll loop: on each tick detects the agent state of
+    /// every running session (plus the commander) and emits
+    /// [`StateUpdate::AgentStatesUpdated`] on any change. No-op when
+    /// `agent_state_poll_interval_ms` is 0. (PHASE-D seam.)
+    pub(super) fn spawn_agent_poll(&self) {
+        if self.config.agent_state_poll_interval_ms == 0 {
+            return;
+        }
+        let store = self.service.store().clone();
+        let tx = self.event_loop.sender();
+        let interval_ms = self.config.agent_state_poll_interval_ms;
+        let tmux = self.service.session_manager().tmux.clone();
+        // The commander is project-less and absent from `state.sessions`, so it
+        // is polled separately. Enablement is restart-required: the poll task
+        // and the footer chip share `commander_enabled_at_init` so the chip
+        // can't disagree when the live config is toggled.
+        let commander_enabled = self.commander_enabled_at_init;
+        let commander_program = self.config.commander_program();
+        let commander_tmux = tmux.clone();
+        tokio::spawn(async move {
+            let cache_ttl = Duration::from_millis(interval_ms.saturating_sub(500).max(500));
+            let mut detector = AgentStateDetector::new(tmux, cache_ttl);
+            let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+            let mut last_commander_running = false;
+            loop {
+                interval.tick().await;
+                let mut sessions: Vec<(SessionId, String, String)> = {
+                    let state = store.read().await;
+                    state
+                        .sessions
+                        .values()
+                        .filter(|s| s.status == SessionStatus::Running)
+                        .map(|s| (s.id, s.tmux_session_name.clone(), s.program.clone()))
+                        .collect()
+                };
+                let commander_running =
+                    commander_enabled && crate::commander::is_running(&commander_tmux).await;
+                if commander_running {
+                    sessions.push((
+                        crate::commander::commander_sentinel_id(),
+                        crate::commander::COMMANDER_TMUX_NAME.to_string(),
+                        commander_program.clone(),
+                    ));
+                }
+                // Quiet path: nothing to detect and the commander's running
+                // state is unchanged — skip the tick (no list rebuild).
+                if poll_tick_can_skip(
+                    sessions.is_empty(),
+                    commander_running,
+                    last_commander_running,
+                ) {
+                    continue;
+                }
+                let states: HashMap<SessionId, AgentState> = if sessions.is_empty() {
+                    HashMap::new()
+                } else {
+                    detector.detect_all(&sessions).await
+                };
+                // Send on any real change: fresh states, or the commander
+                // flipped (so its chip can turn on *and* off).
+                if poll_tick_should_send(
+                    states.is_empty(),
+                    commander_running,
+                    last_commander_running,
+                ) {
+                    last_commander_running = commander_running;
+                    let _ = tx
+                        .send(AppEvent::StateUpdate(StateUpdate::AgentStatesUpdated {
+                            states,
+                            commander_running,
+                        }))
+                        .await;
+                }
+            }
         });
     }
 }

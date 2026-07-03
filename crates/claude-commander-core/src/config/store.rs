@@ -280,7 +280,7 @@ impl StateStore {
 }
 
 /// Open (or create) the lock file.
-fn open_lock_file(lock_path: &PathBuf) -> Result<File> {
+pub(crate) fn open_lock_file(lock_path: &Path) -> Result<File> {
     File::options()
         .create(true)
         .truncate(false)
@@ -314,8 +314,10 @@ fn read_state_from_disk(state_path: &PathBuf) -> Result<AppState> {
     Ok(state)
 }
 
-/// Atomically write state to a file (write to temp + fsync + rename).
-fn atomic_write(path: &PathBuf, state: &AppState) -> Result<()> {
+/// Atomically write a JSON-serializable value to a file (write to a temp file,
+/// fsync, then rename). Shared by [`StateStore`] and the sibling TUI-prefs store
+/// so both get the same crash-safe write with a single implementation.
+pub(crate) fn atomic_write<T: serde::Serialize>(path: &Path, state: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
             ConfigError::SaveFailed(format!("Failed to create state directory: {}", e))

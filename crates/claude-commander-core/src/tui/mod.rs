@@ -11,6 +11,7 @@ mod digit_accumulator;
 mod event;
 pub mod hotkey;
 mod path_completer;
+mod prefs;
 mod syntax_highlight;
 pub mod theme;
 mod widgets;

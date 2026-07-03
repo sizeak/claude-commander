@@ -20,13 +20,13 @@ use crate::api::{
 };
 use crate::comment::ApplyOutcome;
 use crate::session::{ProjectId, ScanResult, SessionId};
-use crate::tmux::{ChildGuard, HeadlessAttach};
+use crate::tmux::HeadlessAttach;
 
-use super::error::{BResult, BackendError};
+use super::error::BResult;
 use super::run_local::run_local;
 use super::{
-    AttachConnection, AttachEnd, AttachKind, AttachResizer, AttachStreams, AttachTerminator,
-    BackendCapabilities, BackendChangeFeed, BackendDescriptor, BackendKind, CommanderBackend,
+    AttachConnection, AttachKind, AttachStreams, BackendCapabilities, BackendChangeFeed,
+    BackendDescriptor, BackendKind, CommanderBackend,
 };
 
 /// A [`CommanderBackend`] backed by an in-process [`CommanderService`]. Cheap to
@@ -45,6 +45,121 @@ impl LocalBackend {
     /// Phase C migration.
     pub fn service(&self) -> &CommanderService {
         &self.service
+    }
+
+    // -- Local-only affordances (reached via `CommanderBackend::as_any`) --
+    //
+    // These have no place on the trait: they attach by tmux *name* (the
+    // commander and project shells have no `SessionId`) or drive the operator's
+    // own tmux server, which a remote backend can't do. The TUI gates them
+    // behind `capabilities()` and downcasts to `LocalBackend` to call them.
+
+    /// Attach to a tmux session by name (the commander session or a project
+    /// shell, which have no `SessionId`). Unlike [`CommanderBackend::attach`]
+    /// this does not stamp last-attached time or revive the session — the
+    /// caller ensures it exists first.
+    pub async fn attach_by_tmux_name(
+        &self,
+        tmux_name: &str,
+        cols: u16,
+        rows: u16,
+    ) -> BResult<Box<dyn AttachConnection>> {
+        let tmux_tmpdir = self.service.read_config().tmux_tmpdir;
+        let bridge = HeadlessAttach::spawn(tmux_name, cols, rows, tmux_tmpdir.as_deref())?;
+        Ok(Box::new(LocalAttachConnection { bridge }))
+    }
+
+    /// Resolve the Ctrl+\ shell-toggle partner for a tmux session reached via
+    /// the in-session switcher (which lands on an arbitrary session by name, so
+    /// there's no `SessionId`/[`AttachKind`] to flip). A Claude session toggles
+    /// to its `-sh` shell (created on demand); a shell toggles back to its
+    /// Claude session; a project shell toggles to itself.
+    pub async fn resolve_shell_toggle_pair(&self, current_tmux_name: &str) -> BResult<String> {
+        if let Some(claude_name) = current_tmux_name.strip_suffix("-sh") {
+            let claude_name = claude_name.to_string();
+            if self
+                .service
+                .session_manager()
+                .tmux
+                .session_exists(&claude_name)
+                .await?
+            {
+                return Ok(claude_name);
+            }
+            return Err(crate::error::Error::Session(
+                crate::error::SessionError::TmuxSessionNotFound(claude_name),
+            )
+            .into());
+        }
+
+        let session_id = {
+            let state = self.service.store().read().await;
+            state
+                .sessions
+                .values()
+                .find(|s| s.tmux_session_name == current_tmux_name)
+                .map(|s| s.id)
+        };
+        if let Some(session_id) = session_id {
+            return Ok(self
+                .service
+                .session_manager()
+                .ensure_shell_session(&session_id)
+                .await?);
+        }
+
+        let project_id = {
+            let state = self.service.store().read().await;
+            state
+                .projects
+                .values()
+                .find(|p| p.shell_tmux_session_name.as_deref() == Some(current_tmux_name))
+                .map(|p| p.id)
+        };
+        if let Some(project_id) = project_id {
+            return Ok(self
+                .service
+                .session_manager()
+                .ensure_project_shell_session(&project_id)
+                .await?);
+        }
+
+        Err(
+            crate::error::Error::Session(crate::error::SessionError::TmuxSessionNotFound(format!(
+                "No session found for tmux name: {current_tmux_name}"
+            )))
+            .into(),
+        )
+    }
+
+    /// Ensure a project's shell tmux session exists and return its name (the
+    /// project-shell equivalent of [`CommanderBackend::attach`]'s agent-pane
+    /// resolution). Recreates the shell if its pane died.
+    pub async fn project_shell_name(&self, project_id: ProjectId) -> BResult<String> {
+        // `get_project_shell_attach_command` returns `tmux attach-session -t
+        // <name>`; the caller wants just the name.
+        let cmd = self
+            .service
+            .session_manager()
+            .get_project_shell_attach_command(&project_id)
+            .await?;
+        Ok(cmd.rsplit(' ').next().unwrap_or(&cmd).to_string())
+    }
+
+    /// Create or revive the persistent commander tmux session and return its
+    /// name. Delegates to [`crate::commander::ensure_session`] with the local
+    /// tmux executor.
+    ///
+    /// Returns the core [`Result`](crate::error::Result) (not [`BResult`]) so
+    /// the caller can match [`SessionError::CommanderDisabled`](crate::error::SessionError::CommanderDisabled)
+    /// for its specific "enable it in settings" message.
+    pub async fn ensure_commander(
+        &self,
+        config: &crate::config::Config,
+        cli_command: &clap::Command,
+    ) -> crate::error::Result<String> {
+        crate::commander::ensure_session(config, &self.service.session_manager().tmux, cli_command)
+            .await
     }
 }
 
@@ -66,6 +181,10 @@ impl CommanderBackend for LocalBackend {
             commander_session: true,
             shell_toggle: true,
         }
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 
     fn change_feed(&self) -> BackendChangeFeed {
@@ -157,6 +276,11 @@ impl CommanderBackend for LocalBackend {
     async fn restart_session(&self, id: SessionId) -> BResult<()> {
         let svc = self.service.clone();
         Ok(run_local(move || async move { svc.restart_session(&id).await }).await?)
+    }
+
+    async fn restart_session_fresh(&self, id: SessionId) -> BResult<()> {
+        let svc = self.service.clone();
+        Ok(run_local(move || async move { svc.restart_session_fresh(&id).await }).await?)
     }
 
     async fn delete_session(&self, id: SessionId) -> BResult<()> {
@@ -285,16 +409,16 @@ impl CommanderBackend for LocalBackend {
         rows: u16,
         kind: AttachKind,
     ) -> BResult<Box<dyn AttachConnection>> {
-        // Resolve the tmux session name for the requested pane. The agent pane is
-        // the session's primary tmux session; the shell pane is created on demand.
+        // Resolve the tmux session name for the requested pane. The agent pane
+        // is the session's primary tmux session — `ensure_attachable` validates
+        // it can be attached and revives it (resume + status bar) if the tmux
+        // session died. The shell pane is created on demand.
         let tmux_name = match kind {
             AttachKind::Agent => {
-                let state = self.service.store().read().await;
-                state
-                    .get_session(&id)
-                    .ok_or(BackendError::NotFound)?
-                    .tmux_session_name
-                    .clone()
+                self.service
+                    .session_manager()
+                    .ensure_attachable(&id)
+                    .await?
             }
             AttachKind::Shell => {
                 self.service
@@ -318,51 +442,22 @@ impl CommanderBackend for LocalBackend {
 }
 
 /// A live local attach: a `tmux attach-session` running in a PTY via the
-/// transport-agnostic [`HeadlessAttach`] bridge.
+/// transport-agnostic [`HeadlessAttach`] bridge. Splits into the shared
+/// [`AttachStreams`] the generalized attach loop drives (see
+/// [`HeadlessAttach::into_streams`]).
 pub struct LocalAttachConnection {
     bridge: HeadlessAttach,
 }
 
 impl AttachConnection for LocalAttachConnection {
     fn split(self: Box<Self>) -> AttachStreams {
-        let (reader, writer, resize, child) = self.bridge.split();
-        // `resize` is a `Copy` fd handle; wrap the PTY ioctl behind the generic
-        // resizer so a SIGWINCH task can hold a clone.
-        let resizer = AttachResizer::new(move |cols, rows| resize.resize(cols, rows));
-        AttachStreams {
-            reader: Box::new(reader),
-            writer: Box::new(writer),
-            resizer,
-            terminator: Box::new(LocalTerminator { child }),
-        }
-    }
-}
-
-/// Local teardown: owns the `tmux attach-session` [`ChildGuard`].
-struct LocalTerminator {
-    child: ChildGuard,
-}
-
-#[async_trait]
-impl AttachTerminator for LocalTerminator {
-    async fn detach(&mut self) {
-        // Kills the attach client; the tmux session and its program keep running.
-        self.child.kill().await;
-    }
-
-    async fn wait(&mut self) -> AttachEnd {
-        match self.child.wait().await {
-            // A clean exit is a tmux detach (Ctrl+B D / our own kill).
-            Ok(status) if status.success() => AttachEnd::Detached,
-            // Non-clean exit means the pane's process/session ended.
-            Ok(_) => AttachEnd::SessionEnded,
-            Err(e) => AttachEnd::Error(e.to_string()),
-        }
+        self.bridge.into_streams()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::error::BackendError;
     use super::*;
     use crate::config::storage::AppState as CoreState;
     use crate::config::{Config, ConfigStore, StateStore};

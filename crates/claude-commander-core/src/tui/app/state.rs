@@ -458,42 +458,31 @@ impl App {
         }
     }
 
-    /// Save current selection to persisted state
+    /// Save current selection to persisted UI prefs
     pub(super) async fn save_selection(&self) {
-        let session_id = self.ui_state.selected_session_id;
-        let project_id = self.ui_state.selected_project_id;
-        let _ = self
-            .service
-            .store()
-            .mutate(move |state| {
-                state.last_selected_session = session_id;
-                state.last_selected_project = project_id;
-            })
-            .await;
-    }
-
-    /// Save left pane width to persisted state
-    pub(super) async fn save_left_pane_pct(&self) {
-        let pct = self.ui_state.left_pane_pct;
-        let _ = self
-            .service
-            .store()
-            .mutate(move |state| {
-                state.left_pane_pct = Some(pct);
-            })
-            .await;
-    }
-
-    /// Restore selection and UI preferences from persisted state
-    pub(super) async fn restore_selection(&mut self) {
-        let (last_session, last_project, left_pane_pct) = {
-            let state = self.service.store().read().await;
-            (
-                state.last_selected_session,
-                state.last_selected_project,
-                state.left_pane_pct,
+        self.tui_prefs
+            .set_selection(
+                self.ui_state.selected_session_id,
+                self.ui_state.selected_project_id,
             )
-        };
+            .await;
+    }
+
+    /// Save left pane width to persisted UI prefs
+    pub(super) async fn save_left_pane_pct(&self) {
+        self.tui_prefs
+            .set_left_pane_pct(self.ui_state.left_pane_pct)
+            .await;
+    }
+
+    /// Restore selection and UI preferences from persisted UI prefs
+    pub(super) async fn restore_selection(&mut self) {
+        let prefs = self.tui_prefs.prefs();
+        let (last_session, last_project, left_pane_pct) = (
+            prefs.last_selected_session,
+            prefs.last_selected_project,
+            prefs.left_pane_pct,
+        );
 
         if let Some(pct) = left_pane_pct {
             self.ui_state.left_pane_pct = pct.clamp(MIN_LEFT_PANE_PCT, MAX_LEFT_PANE_PCT);
@@ -969,6 +958,54 @@ pub(super) fn apply_viewed_session_refresh(
     agent_states.extend(refreshed);
 }
 
+/// Preview the stack-retarget that deleting `session_id` would trigger, derived
+/// from a workspace snapshot: `(number of direct stacked children, branch they'd
+/// be retargeted onto)`. Returns `None` when the session has no direct stacked
+/// children, so the delete confirmation only mentions retargeting when it
+/// actually applies.
+///
+/// DTO twin of [`AppState::stack_retarget_preview`](crate::config::storage::AppState::stack_retarget_preview):
+/// the delete-confirm dialog derives its preview from the cached snapshot rather
+/// than reading the store, so a remote backend's snapshot drives it identically.
+pub(super) fn stack_retarget_preview_from_snapshot(
+    snapshot: &WorkspaceSnapshot,
+    session_id: SessionId,
+) -> Option<(usize, String)> {
+    let deleted = snapshot
+        .sessions
+        .iter()
+        .find(|s| s.session_id == session_id)?;
+    let project_id = deleted.project_id;
+    let main_branch = snapshot
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)?
+        .main_branch
+        .clone();
+    let project_sessions: Vec<&SessionInfo> = snapshot
+        .sessions
+        .iter()
+        .filter(|s| s.project_id == project_id)
+        .collect();
+
+    let child_ids: Vec<SessionId> = project_sessions
+        .iter()
+        .filter(|s| {
+            crate::session::resolve_stack_parent(**s, &project_sessions) == Some(session_id)
+        })
+        .map(|s| s.session_id)
+        .collect();
+    if child_ids.is_empty() {
+        return None;
+    }
+
+    let new_base_branch = crate::session::resolve_stack_parent(deleted, &project_sessions)
+        .and_then(|pid| project_sessions.iter().find(|s| s.session_id == pid))
+        .map(|p| p.branch.clone())
+        .unwrap_or(main_branch);
+    Some((child_ids.len(), new_base_branch))
+}
+
 #[cfg(test)]
 mod unread_transition_tests {
     use super::*;
@@ -1221,6 +1258,37 @@ mod stack_order_tests {
             state.sessions.insert(s.id, s);
         }
         workspace_snapshot_from_state(&state)
+    }
+
+    #[test]
+    fn retarget_preview_reports_children_and_new_base() {
+        let pid = ProjectId::new();
+        let base = {
+            let mut s = make_session("base", "base-br", 0);
+            s.project_id = pid;
+            s
+        };
+        let child = {
+            let mut s = make_session("child", "child-br", 5);
+            s.project_id = pid;
+            s.stack_parent_session_id = Some(base.id);
+            s
+        };
+        let base_id = base.id;
+        let child_id = child.id;
+        let snapshot = appstate_from(vec![base, child]);
+
+        // Deleting the stack base retargets its one child onto the project's
+        // main branch (the base was the stack root).
+        assert_eq!(
+            stack_retarget_preview_from_snapshot(&snapshot, base_id),
+            Some((1, "main".to_string()))
+        );
+        // The leaf child has no stacked children → no retarget preview.
+        assert_eq!(
+            stack_retarget_preview_from_snapshot(&snapshot, child_id),
+            None
+        );
     }
 
     #[test]

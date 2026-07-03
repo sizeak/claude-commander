@@ -310,6 +310,14 @@ pub trait CommanderBackend: Send + Sync {
     fn descriptor(&self) -> BackendDescriptor;
     fn capabilities(&self) -> BackendCapabilities;
 
+    /// Downcast hook for the TUI to reach a concrete backend's local-only
+    /// affordances — the ones the trait deliberately doesn't expose because a
+    /// remote backend can't satisfy them (name-based attach for the commander /
+    /// project shell, the in-session switcher's shell-toggle resolution). The
+    /// TUI only downcasts to [`LocalBackend`] after checking
+    /// [`Self::capabilities`], so a remote backend never has these called.
+    fn as_any(&self) -> &dyn std::any::Any;
+
     /// A change-feed whose generation advances when observable state changes.
     fn change_feed(&self) -> BackendChangeFeed;
 
@@ -382,6 +390,13 @@ pub trait CommanderBackend: Send + Sync {
     async fn create_session(&self, opts: CreateSessionOpts) -> BResult<SessionId>;
     async fn kill_session(&self, id: SessionId) -> BResult<()>;
     async fn restart_session(&self, id: SessionId) -> BResult<()>;
+    /// Restart a session with a *fresh* agent conversation (no `--resume`). The
+    /// attach loop calls this when the agent process exits mid-attach. The
+    /// default resumes (a remote backend has no separate fresh path yet);
+    /// [`LocalBackend`] overrides it with the no-resume restart.
+    async fn restart_session_fresh(&self, id: SessionId) -> BResult<()> {
+        self.restart_session(id).await
+    }
     async fn delete_session(&self, id: SessionId) -> BResult<()>;
     async fn rename_session(&self, id: SessionId, title: String) -> BResult<()>;
     /// Move a session to `section`, or clear its manual override (`None`).

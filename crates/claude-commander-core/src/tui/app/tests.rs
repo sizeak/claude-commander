@@ -1094,8 +1094,8 @@ async fn open_commander_when_disabled_toasts_without_quitting() {
         "disabled commander must not quit the TUI to attach"
     );
     assert!(
-        app.ui_state.attach_command.is_none(),
-        "disabled commander must not queue an attach command"
+        app.ui_state.attach_request.is_none(),
+        "disabled commander must not queue an attach request"
     );
     assert!(
         !matches!(app.ui_state.modal, Modal::Error { .. }),
