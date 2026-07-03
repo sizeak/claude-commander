@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::api::{ProjectInfo, SessionInfo, WorkspaceSnapshot};
+use std::collections::BTreeMap;
 // Used only by the tree-builder tests below, which build a snapshot from a
 // hand-constructed `AppState` via the same projection production used before
 // the change-feed cache landed.
@@ -150,10 +151,17 @@ impl App {
                 // change feed refreshes the tree. Just surface the error.
                 self.ui_state.modal = Modal::Error { message };
             }
-            StateUpdate::RemoteServerProbed { server, result } => {
-                // Only meaningful while the add-server Loading modal is up;
-                // if the user dismissed the flow, drop the result silently.
-                if !matches!(self.ui_state.modal, Modal::Loading { .. }) {
+            StateUpdate::RemoteServerProbed {
+                nonce,
+                server,
+                result,
+            } => {
+                // Only meaningful while the add-server Loading modal from the
+                // SAME flow is up: the nonce rejects a stale probe landing
+                // while some unrelated Loading modal happens to be shown.
+                if nonce != self.probe_nonce
+                    || !matches!(self.ui_state.modal, Modal::Loading { .. })
+                {
                     return;
                 }
                 match result {
@@ -334,11 +342,13 @@ impl App {
                     None => {}
                 }
             }
-            StateUpdate::CascadeFinished { result } => {
-                self.handle_cascade_finished(result).await;
+            StateUpdate::CascadeFinished { backend_id, result } => {
+                self.handle_cascade_finished(BackendId(backend_id), result)
+                    .await;
             }
-            StateUpdate::PushStackFinished { result } => {
-                self.handle_push_stack_finished(result).await;
+            StateUpdate::PushStackFinished { backend_id, result } => {
+                self.handle_push_stack_finished(BackendId(backend_id), result)
+                    .await;
             }
             _ => {}
         }
@@ -370,7 +380,7 @@ impl App {
     /// in-place review refresh.
     fn review_refresh_on_transition(
         &self,
-        new_states: &HashMap<SessionId, AgentState>,
+        new_states: &BTreeMap<SessionId, AgentState>,
     ) -> Option<(SessionId, String, u64)> {
         let Modal::ReviewDiff(state) = &self.ui_state.modal else {
             return None;
@@ -621,7 +631,7 @@ pub(super) fn build_session_order<S: crate::session::SessionNode>(
 
 fn worktree_item(
     session: &SessionInfo,
-    agent_states: &HashMap<SessionId, AgentState>,
+    agent_states: &BTreeMap<SessionId, AgentState>,
     project_name_prefix: Option<&str>,
     stacked_child: bool,
 ) -> SessionListItem {
@@ -664,7 +674,7 @@ fn session_index(snapshot: &WorkspaceSnapshot) -> HashMap<SessionId, &SessionInf
 
 pub(super) fn build_project_grouped_items(
     snapshot: &WorkspaceSnapshot,
-    agent_states: &HashMap<SessionId, AgentState>,
+    agent_states: &BTreeMap<SessionId, AgentState>,
 ) -> Vec<SessionListItem> {
     let by_id = session_index(snapshot);
     let mut items = Vec::new();
@@ -719,7 +729,7 @@ pub(super) fn build_section_grouped_items(
     snapshot: &WorkspaceSnapshot,
     sections: &[crate::session::SectionConfig],
     in_progress_limit: Option<u32>,
-    agent_states: &HashMap<SessionId, AgentState>,
+    agent_states: &BTreeMap<SessionId, AgentState>,
     collapsed_sections: &std::collections::HashSet<String>,
 ) -> Vec<SessionListItem> {
     let by_id = session_index(snapshot);
@@ -795,7 +805,7 @@ pub(super) fn build_stacked_section_items(
     snapshot: &WorkspaceSnapshot,
     sections: &[crate::session::SectionConfig],
     in_progress_limit: Option<u32>,
-    agent_states: &HashMap<SessionId, AgentState>,
+    agent_states: &BTreeMap<SessionId, AgentState>,
     collapsed_sections: &std::collections::HashSet<String>,
 ) -> Vec<SessionListItem> {
     use chrono::{DateTime, Utc};
@@ -1002,8 +1012,8 @@ pub(super) fn build_stacked_section_items(
 /// their own transitions are never re-flagged as unread. Every other session
 /// keeps its prior state, preserving the baseline a later poll diffs against.
 pub(super) fn apply_viewed_session_refresh(
-    agent_states: &mut HashMap<SessionId, AgentState>,
-    refreshed: HashMap<SessionId, AgentState>,
+    agent_states: &mut BTreeMap<SessionId, AgentState>,
+    refreshed: BTreeMap<SessionId, AgentState>,
 ) {
     agent_states.extend(refreshed);
 }
@@ -1061,7 +1071,7 @@ mod unread_transition_tests {
     use super::*;
     use crate::api::detect_unread_transitions;
     use crate::session::SessionId;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     #[test]
     fn viewed_refresh_preserves_background_unread() {
@@ -1073,17 +1083,17 @@ mod unread_transition_tests {
         let b = SessionId::new();
 
         // Pre-attach baseline: both working.
-        let mut agent_states = HashMap::from([(a, AgentState::Working), (b, AgentState::Working)]);
+        let mut agent_states = BTreeMap::from([(a, AgentState::Working), (b, AgentState::Working)]);
 
         // Detach refreshes only the viewed session, now observed idle.
-        apply_viewed_session_refresh(&mut agent_states, HashMap::from([(a, AgentState::Idle)]));
+        apply_viewed_session_refresh(&mut agent_states, BTreeMap::from([(a, AgentState::Idle)]));
 
         // A reflects its observed state; B's baseline is untouched (not wiped).
         assert_eq!(agent_states.get(&a), Some(&AgentState::Idle));
         assert_eq!(agent_states.get(&b), Some(&AgentState::Working));
 
         // Next background poll reports both idle.
-        let poll = HashMap::from([(a, AgentState::Idle), (b, AgentState::Idle)]);
+        let poll = BTreeMap::from([(a, AgentState::Idle), (b, AgentState::Idle)]);
         let unread = detect_unread_transitions(&agent_states, &poll);
 
         // Only B is flagged: A's finish was watched, B's was not. A wholesale
@@ -1305,7 +1315,7 @@ mod stack_order_tests {
 
         let state = appstate_from(vec![base.clone(), child.clone()]);
         let sections = vec![section_named("Open"), section_named("Review")];
-        let agent_states = HashMap::new();
+        let agent_states = BTreeMap::new();
         let collapsed = std::collections::HashSet::new();
 
         let items = build_stacked_section_items(&state, &sections, None, &agent_states, &collapsed);
@@ -1386,7 +1396,7 @@ mod stack_order_tests {
             &state,
             &sections,
             None,
-            &HashMap::new(),
+            &BTreeMap::new(),
             &std::collections::HashSet::new(),
         );
 
@@ -1432,7 +1442,7 @@ mod stack_order_tests {
             &state,
             &sections,
             None,
-            &HashMap::new(),
+            &BTreeMap::new(),
             &std::collections::HashSet::new(),
         );
 
@@ -1479,7 +1489,7 @@ mod stack_order_tests {
             &state,
             &sections,
             None,
-            &HashMap::new(),
+            &BTreeMap::new(),
             &std::collections::HashSet::new(),
         );
 
@@ -1553,7 +1563,7 @@ mod stack_order_tests {
             &state,
             &sections,
             None,
-            &HashMap::new(),
+            &BTreeMap::new(),
             &std::collections::HashSet::new(),
         );
 
@@ -1631,13 +1641,13 @@ mod stack_order_tests {
         let collapsed = std::collections::HashSet::new();
 
         let first =
-            build_stacked_section_items(&state, &sections, None, &HashMap::new(), &collapsed);
+            build_stacked_section_items(&state, &sections, None, &BTreeMap::new(), &collapsed);
         // Call many times — every iteration constructs fresh internal
         // HashMaps with a new RandomState, so any non-determinism shows up
         // here. 32 calls is well past the birthday-paradox threshold.
         for _ in 0..32 {
             let again =
-                build_stacked_section_items(&state, &sections, None, &HashMap::new(), &collapsed);
+                build_stacked_section_items(&state, &sections, None, &BTreeMap::new(), &collapsed);
             assert_eq!(
                 again, first,
                 "build_stacked_section_items must produce identical output on every call"
@@ -1663,7 +1673,7 @@ mod stack_order_tests {
             &state,
             &sections,
             None,
-            &HashMap::new(),
+            &BTreeMap::new(),
             &std::collections::HashSet::new(),
         );
 
@@ -1743,7 +1753,7 @@ mod stack_order_tests {
             &state,
             &sections,
             None,
-            &HashMap::new(),
+            &BTreeMap::new(),
             &std::collections::HashSet::new(),
         );
 
@@ -1772,7 +1782,7 @@ mod stack_order_tests {
             &state,
             &sections,
             Some(2),
-            &HashMap::new(),
+            &BTreeMap::new(),
             &std::collections::HashSet::new(),
         );
 
@@ -1802,7 +1812,7 @@ mod stack_order_tests {
             &state,
             &sections,
             Some(1),
-            &HashMap::new(),
+            &BTreeMap::new(),
             &std::collections::HashSet::new(),
         );
 
@@ -1872,7 +1882,7 @@ mod stack_order_tests {
         sessions_per_project: usize,
     ) -> (
         crate::config::AppState,
-        HashMap<SessionId, AgentState>,
+        BTreeMap<SessionId, AgentState>,
         Vec<crate::session::SectionConfig>,
     ) {
         use chrono::TimeZone;
@@ -1888,7 +1898,7 @@ mod stack_order_tests {
         ];
 
         let mut state = crate::config::AppState::default();
-        let mut agent_states = HashMap::new();
+        let mut agent_states = BTreeMap::new();
         let mut global_idx: i64 = 0;
 
         for p in 0..n_projects {

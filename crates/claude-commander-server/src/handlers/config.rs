@@ -28,9 +28,11 @@ use serde_json::json;
 use crate::error::ApiError;
 use crate::state::AppState;
 
-/// `GET /config` → `read_config`.
+/// `GET /config` → `read_config`, with credential fields cleared: the caller
+/// proved it holds THIS server's token — not the remote-server tokens, STT
+/// API key, or telemetry credential the shared config file may also contain.
 pub async fn read(State(state): State<AppState>) -> Json<Config> {
-    Json(state.service.read_config())
+    Json(state.service.read_config().with_secrets_redacted())
 }
 
 /// Partial config update: every field is optional, and only the fields below —
@@ -202,6 +204,38 @@ mod tests {
         assert_eq!(status, 200);
         // Round-trips into a `Config` (the default), proving it's the real shape.
         let _config: Config = json(&body);
+    }
+
+    /// Credentials in the config never cross the wire: a client holding THIS
+    /// server's bearer token must not be able to harvest other remote servers'
+    /// tokens (or the STT/telemetry credentials) from `GET /config`.
+    #[tokio::test]
+    async fn read_config_redacts_secrets() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        state
+            .service
+            .update_config({
+                let mut c = state.service.read_config();
+                c.remote_servers = vec![claude_commander_core::config::RemoteServerConfig {
+                    name: "other".into(),
+                    url: "http://other:7878".into(),
+                    token: Some("other-server-secret".into()),
+                }];
+                c.stt.api_key = Some("stt-secret".into());
+                c.telemetry.token = Some("telemetry-secret".into());
+                c
+            })
+            .unwrap();
+
+        let (status, body) = do_get(router(state), "/config").await;
+        assert_eq!(status, 200);
+        let text = String::from_utf8(body.to_vec()).unwrap();
+        for secret in ["other-server-secret", "stt-secret", "telemetry-secret"] {
+            assert!(!text.contains(secret), "{secret} leaked via GET /config");
+        }
+        // The non-secret remote-server fields still serve normally.
+        assert!(text.contains("http://other:7878"));
     }
 
     /// An allow-listed field updates and persists; nothing else changes.

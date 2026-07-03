@@ -487,6 +487,20 @@ fn default_pr_review_labels() -> Vec<String> {
 }
 
 impl Config {
+    /// A copy with every credential field cleared, for serving over the wire
+    /// (`GET /api/config`). The redacting `Debug` impls don't help serde, so
+    /// without this a client holding one server's bearer token could harvest
+    /// every OTHER server's token from `remote_servers` (plus the STT API key
+    /// and telemetry credential) when the TUI and server share a config file.
+    pub fn with_secrets_redacted(mut self) -> Self {
+        for server in &mut self.remote_servers {
+            server.token = None;
+        }
+        self.stt.api_key = None;
+        self.telemetry.token = None;
+        self
+    }
+
     /// Load configuration from all sources
     pub fn load() -> Result<Self> {
         let config_path = Self::config_file_path()?;
@@ -788,6 +802,37 @@ fn parse_key_code(s: &str) -> KeyCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn with_secrets_redacted_clears_every_credential_field() {
+        let c = Config {
+            remote_servers: vec![RemoteServerConfig {
+                name: "b".into(),
+                url: "http://b:7878".into(),
+                token: Some("server-secret".into()),
+            }],
+            stt: SttConfig {
+                api_key: Some("stt-secret".into()),
+                ..Default::default()
+            },
+            telemetry: TelemetryConfig {
+                token: Some("telemetry-secret".into()),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let redacted = c.with_secrets_redacted();
+        assert!(redacted.remote_servers[0].token.is_none());
+        assert!(redacted.stt.api_key.is_none());
+        assert!(redacted.telemetry.token.is_none());
+        // Non-secret fields survive.
+        assert_eq!(redacted.remote_servers[0].url, "http://b:7878");
+        let json = serde_json::to_string(&redacted).unwrap();
+        for secret in ["server-secret", "stt-secret", "telemetry-secret"] {
+            assert!(!json.contains(secret), "{secret} survived redaction");
+        }
+    }
+
     use super::*;
 
     #[test]

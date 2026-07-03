@@ -10,7 +10,7 @@
 //! in `claude-commander-core`, since they depend on types that can't cross the
 //! network. These are plain data.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
@@ -273,7 +273,7 @@ pub struct WorkspaceSnapshot {
     /// Most recent background-pull outcome per project. Populated by the core
     /// background loop (Phase D); empty in Phase A.
     #[serde(default)]
-    pub project_pull: HashMap<ProjectId, PullStatus>,
+    pub project_pull: BTreeMap<ProjectId, PullStatus>,
     /// Recent cascade / push-stack operations, newest last.
     #[serde(default)]
     pub operations: Vec<OperationStatus>,
@@ -285,7 +285,7 @@ pub struct WorkspaceSnapshot {
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentStatesSnapshot {
-    pub states: HashMap<SessionId, AgentState>,
+    pub states: BTreeMap<SessionId, AgentState>,
     /// Whether a commander agent process appears to be running anywhere (used
     /// by the client to distinguish "no data yet" from "nothing running").
     pub commander_running: bool,
@@ -414,6 +414,29 @@ mod tests {
     }
 
     #[test]
+    fn agent_states_serialize_deterministically_regardless_of_insertion_order() {
+        // Remote clients hash the raw response bytes to detect change; a map
+        // whose key order varied between polls would defeat that diffing and
+        // degrade polling to "always changed" (BTreeMap pins the order).
+        let ids: Vec<SessionId> = (0..8).map(|_| SessionId::new()).collect();
+        let forward: BTreeMap<SessionId, AgentState> =
+            ids.iter().map(|id| (*id, AgentState::Idle)).collect();
+        let reverse: BTreeMap<SessionId, AgentState> =
+            ids.iter().rev().map(|id| (*id, AgentState::Idle)).collect();
+        let a = serde_json::to_vec(&AgentStatesSnapshot {
+            states: forward,
+            commander_running: true,
+        })
+        .unwrap();
+        let b = serde_json::to_vec(&AgentStatesSnapshot {
+            states: reverse,
+            commander_running: true,
+        })
+        .unwrap();
+        assert_eq!(a, b, "insertion order leaked into the wire bytes");
+    }
+
+    #[test]
     fn diff_side_wire_form() {
         assert_eq!(serde_json::to_string(&DiffSide::Old).unwrap(), r#""old""#);
         assert_eq!(
@@ -496,7 +519,7 @@ mod tests {
     fn workspace_snapshot_round_trips_with_maps() {
         let pid = ProjectId::new();
         let sid = SessionId::new();
-        let mut project_pull = HashMap::new();
+        let mut project_pull = BTreeMap::new();
         project_pull.insert(pid, PullStatus::UpToDate);
         let snapshot = WorkspaceSnapshot {
             projects: vec![ProjectInfo {
@@ -544,7 +567,7 @@ mod tests {
     #[test]
     fn agent_states_snapshot_round_trips() {
         let sid = SessionId::new();
-        let mut states = HashMap::new();
+        let mut states = BTreeMap::new();
         states.insert(sid, AgentState::Working);
         let snap = AgentStatesSnapshot {
             states,

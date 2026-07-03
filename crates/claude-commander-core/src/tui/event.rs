@@ -75,6 +75,10 @@ pub enum StateUpdate {
     /// the server answered a workspace-snapshot request (reachable + auth
     /// accepted); the flag carries its tmux health for the success toast.
     RemoteServerProbed {
+        /// Matches `App::probe_nonce` at spawn time; a stale probe (the user
+        /// dismissed the flow and possibly opened some other Loading modal)
+        /// is dropped instead of writing config.
+        nonce: u64,
         server: crate::config::RemoteServerConfig,
         result: Result<bool, String>,
     },
@@ -132,12 +136,16 @@ pub enum StateUpdate {
     /// [`OperationStatus`](crate::api::OperationStatus). `Err` carries a
     /// transport/backend error string (the operation never recorded).
     CascadeFinished {
+        /// Backend the cascade ran on, so the post-op refresh hits the right view.
+        backend_id: usize,
         result: std::result::Result<crate::api::OperationStatus, String>,
     },
     /// Push-stack background task finished. `Ok` carries the recorded
     /// [`OperationStatus`](crate::api::OperationStatus) (its `detail` summarises
     /// how many branches pushed); `Err` carries a transport/backend error.
     PushStackFinished {
+        /// Backend the push ran on, so the post-op refresh hits the right view.
+        backend_id: usize,
         result: std::result::Result<crate::api::OperationStatus, String>,
     },
     /// Review diff prepared off-thread: the parsed diff plus its warmed render

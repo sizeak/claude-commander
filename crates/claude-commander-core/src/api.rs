@@ -1,6 +1,6 @@
 //! Commander API — unified service layer for CLI and TUI consumers.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -72,7 +72,7 @@ pub struct CommanderService {
     agent_states_primed: Arc<std::sync::atomic::AtomicBool>,
     /// Most recent per-project background-pull status, maintained by the pull
     /// loop and surfaced in [`WorkspaceSnapshot::project_pull`].
-    pull_status: Arc<std::sync::Mutex<HashMap<ProjectId, PullStatus>>>,
+    pull_status: Arc<std::sync::Mutex<BTreeMap<ProjectId, PullStatus>>>,
     /// Last PR-status fan-out time, for debouncing manual refresh bursts.
     last_pr_check: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
     /// Signals the PR-status loop to run an immediate check (manual refresh).
@@ -129,11 +129,11 @@ impl CommanderService {
             gh_available: Arc::new(tokio::sync::OnceCell::new()),
             agent_detector,
             agent_states_cache: Arc::new(tokio::sync::RwLock::new(AgentStatesSnapshot {
-                states: HashMap::new(),
+                states: BTreeMap::new(),
                 commander_running: false,
             })),
             agent_states_primed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            pull_status: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            pull_status: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             last_pr_check: Arc::new(std::sync::Mutex::new(None)),
             pr_refresh: Arc::new(tokio::sync::Notify::new()),
             background_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1450,8 +1450,8 @@ impl CommanderService {
                 ) {
                     continue;
                 }
-                let states: HashMap<SessionId, AgentState> = if sessions.is_empty() {
-                    HashMap::new()
+                let states: BTreeMap<SessionId, AgentState> = if sessions.is_empty() {
+                    BTreeMap::new()
                 } else {
                     detector.detect_all(&sessions).await
                 };
@@ -1475,9 +1475,16 @@ impl CommanderService {
                     .collect();
                 let states_changed = states != prev;
 
+                // Only write the cache when something changed: a rebuilt-but-
+                // identical map would serialize identically anyway (BTreeMap,
+                // deterministic key order), but skipping the write keeps the
+                // remote pollers' content-hash diffing honest by construction
+                // and avoids needless lock traffic on all-idle ticks.
                 {
                     let mut c = cache.write().await;
-                    c.states = states;
+                    if states_changed {
+                        c.states = states;
+                    }
                     c.commander_running = commander_running;
                 }
                 primed.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1679,7 +1686,7 @@ impl CommanderService {
 
     /// Detect agent states for active sessions via the shared TTL-cached
     /// detector — used to gate cascade/push delivery.
-    async fn detect_active_states(&self) -> HashMap<SessionId, AgentState> {
+    async fn detect_active_states(&self) -> BTreeMap<SessionId, AgentState> {
         let active = self.active_session_targets().await;
         let mut detector = self.agent_detector.lock().await;
         detector.detect_all(&active).await
@@ -1816,8 +1823,8 @@ fn pr_check_debounce_passed(
 /// marker. An empty `prev` (never polled, or cleared after an attach) yields no
 /// transitions, so a freshly-populated baseline can't produce false unread.
 pub(crate) fn detect_unread_transitions(
-    prev: &HashMap<SessionId, AgentState>,
-    new: &HashMap<SessionId, AgentState>,
+    prev: &BTreeMap<SessionId, AgentState>,
+    new: &BTreeMap<SessionId, AgentState>,
 ) -> Vec<SessionId> {
     new.iter()
         .filter(|(id, state)| {
@@ -2134,7 +2141,7 @@ pub(crate) fn workspace_snapshot_from_state(state: &AppState) -> WorkspaceSnapsh
         sessions: build_session_info_list(state, true),
         cascade_paused: state.cascade_paused_at,
         pending_comment_sessions: Vec::new(),
-        project_pull: HashMap::new(),
+        project_pull: BTreeMap::new(),
         operations: Vec::new(),
         server: ServerStatus {
             gh_available: false,
@@ -2823,16 +2830,16 @@ mod tests {
     #[test]
     fn unread_transition_working_to_idle_is_flagged() {
         let sid = SessionId::new();
-        let prev = HashMap::from([(sid, AgentState::Working)]);
-        let new = HashMap::from([(sid, AgentState::Idle)]);
+        let prev = BTreeMap::from([(sid, AgentState::Working)]);
+        let new = BTreeMap::from([(sid, AgentState::Idle)]);
         assert_eq!(detect_unread_transitions(&prev, &new), vec![sid]);
     }
 
     #[test]
     fn unread_transition_idle_to_idle_is_not_flagged() {
         let sid = SessionId::new();
-        let prev = HashMap::from([(sid, AgentState::Idle)]);
-        let new = HashMap::from([(sid, AgentState::Idle)]);
+        let prev = BTreeMap::from([(sid, AgentState::Idle)]);
+        let new = BTreeMap::from([(sid, AgentState::Idle)]);
         assert!(detect_unread_transitions(&prev, &new).is_empty());
     }
 
@@ -2841,10 +2848,10 @@ mod tests {
         // A cleared baseline (never polled, or reset after an attach) must not
         // fabricate an unread from the first observation.
         let sid = SessionId::new();
-        let new_idle = HashMap::from([(sid, AgentState::Idle)]);
-        let new_working = HashMap::from([(sid, AgentState::Working)]);
-        assert!(detect_unread_transitions(&HashMap::new(), &new_idle).is_empty());
-        assert!(detect_unread_transitions(&HashMap::new(), &new_working).is_empty());
+        let new_idle = BTreeMap::from([(sid, AgentState::Idle)]);
+        let new_working = BTreeMap::from([(sid, AgentState::Working)]);
+        assert!(detect_unread_transitions(&BTreeMap::new(), &new_idle).is_empty());
+        assert!(detect_unread_transitions(&BTreeMap::new(), &new_working).is_empty());
     }
 
     #[test]
@@ -2853,8 +2860,8 @@ mod tests {
         // Working→Idle WOULD be reported; the poll loop filters it out (the
         // commander has no `WorktreeSession` to mark unread).
         let sentinel = crate::commander::commander_sentinel_id();
-        let prev = HashMap::from([(sentinel, AgentState::Working)]);
-        let new = HashMap::from([(sentinel, AgentState::Idle)]);
+        let prev = BTreeMap::from([(sentinel, AgentState::Working)]);
+        let new = BTreeMap::from([(sentinel, AgentState::Idle)]);
         assert_eq!(detect_unread_transitions(&prev, &new), vec![sentinel]);
     }
 

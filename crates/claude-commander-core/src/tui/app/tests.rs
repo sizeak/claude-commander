@@ -3064,6 +3064,7 @@ async fn probe_success_persists_server_and_wires_backend() {
     };
     let backends_before = app.backends.len();
     app.handle_state_update(StateUpdate::RemoteServerProbed {
+        nonce: app.probe_nonce,
         server: server_cfg("buildbox", "http://buildbox:7878"),
         result: Ok(true),
     })
@@ -3086,6 +3087,7 @@ async fn probe_failure_offers_save_anyway_which_persists() {
         hint: None,
     };
     app.handle_state_update(StateUpdate::RemoteServerProbed {
+        nonce: app.probe_nonce,
         server: server_cfg("buildbox", "http://buildbox:7878"),
         result: Err("connection refused".into()),
     })
@@ -3112,6 +3114,7 @@ async fn probe_result_ignored_when_flow_dismissed() {
     // No Loading modal up — the user cancelled; a late probe result must not
     // write config or open modals.
     app.handle_state_update(StateUpdate::RemoteServerProbed {
+        nonce: app.probe_nonce,
         server: server_cfg("buildbox", "http://buildbox:7878"),
         result: Ok(true),
     })
@@ -3204,4 +3207,77 @@ fn masked_input_modal_renders_bullets_not_the_token() {
     let text = buffer_text(&terminal);
     assert!(!text.contains("sekrit-token"), "token leaked to screen");
     assert!(text.contains(&"•".repeat("sekrit-token".len())));
+}
+
+// ---------------------------------------------------------------------------
+// Review fixes: bootstrap non-blocking, cascade routing, deterministic maps
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bootstrap_skips_remote_backends_so_a_dead_server_cannot_block_startup() {
+    let mut app = build_app_with_mock_remotes(vec![("deadbox", empty_snapshot())]);
+    // A downed server: every query fails. If bootstrap awaited it, the view
+    // would flip to Degraded here (and a real backend would block for its
+    // full connect timeout before first draw).
+    app.backend(BackendId(1))
+        .unwrap()
+        .backend
+        .as_any()
+        .downcast_ref::<MockBackend>()
+        .unwrap()
+        .set_failing(true);
+
+    app.bootstrap_backend_views().await;
+
+    // Local bootstrapped; the remote was never queried — still Connecting,
+    // waiting on its poller, exactly what the tree renders at first draw.
+    assert!(matches!(
+        app.backend(BackendId(0)).unwrap().view.connection,
+        ConnectionState::Connected
+    ));
+    assert!(matches!(
+        app.backend(BackendId(1)).unwrap().view.connection,
+        ConnectionState::Connecting
+    ));
+}
+
+#[tokio::test]
+async fn cascade_resume_targets_the_paused_backend_not_local() {
+    let (mut snap, sid, _pid) = snapshot_with_one_session();
+    snap.cascade_paused = Some(sid);
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", snap)]);
+    app.bootstrap_backend_views().await;
+    // Also fetch the remote view (bootstrap skips remotes by design).
+    app.refresh_backend_view(BackendId(1)).await;
+
+    let (backend_id, paused_sid) = app
+        .paused_cascade_backend()
+        .expect("remote paused cascade must be found");
+    assert_eq!(
+        backend_id,
+        BackendId(1),
+        "resume must route to the paused backend"
+    );
+    assert_eq!(paused_sid, sid);
+}
+
+#[tokio::test]
+async fn cascade_resume_prefers_the_selections_backend_when_multiple_paused() {
+    let (mut remote_snap, remote_sid, _pid) = snapshot_with_one_session();
+    remote_snap.cascade_paused = Some(remote_sid);
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", remote_snap)]);
+    app.bootstrap_backend_views().await;
+    app.refresh_backend_view(BackendId(1)).await;
+
+    // Local also paused; the user's selection sits on local.
+    let local_sid = SessionId::new();
+    app.backend_mut_for_test(BackendId(0))
+        .view
+        .snapshot
+        .cascade_paused = Some(local_sid);
+    app.ui_state.selected_session_id = Some(SessionRef::local(local_sid));
+
+    let (backend_id, paused_sid) = app.paused_cascade_backend().unwrap();
+    assert_eq!(backend_id, BackendId(0));
+    assert_eq!(paused_sid, local_sid);
 }

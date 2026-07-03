@@ -6,6 +6,7 @@
 //! - Background state updates
 
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
 use std::io::{self, Stdout};
 use std::path::PathBuf;
@@ -970,7 +971,7 @@ pub struct AppUiState {
     /// Throbber/spinner state for loading modals
     pub throbber_state: throbber_widgets_tui::ThrobberState,
     /// Current agent states for Running Claude sessions (ephemeral, from background poller)
-    pub agent_states: HashMap<SessionId, AgentState>,
+    pub agent_states: BTreeMap<SessionId, AgentState>,
     /// Cached mirror of `AppState::cascade_paused_at.is_some()` — used by
     /// `is_command_available` to gate the `CascadeResume` / `CascadeAbandon`
     /// palette entries without an async read on every keystroke. Refreshed
@@ -1040,7 +1041,7 @@ impl Default for AppUiState {
             terminal_size: Rect::default(),
             tick_count: 0,
             throbber_state: throbber_widgets_tui::ThrobberState::default(),
-            agent_states: HashMap::new(),
+            agent_states: BTreeMap::new(),
             cascade_paused: false,
             collapsed_sections: std::collections::HashSet::new(),
             last_left_click: None,
@@ -1157,6 +1158,9 @@ pub struct App {
     /// runtime only surfaces the restart warning; the commander UI doesn't move
     /// until the next launch.
     commander_enabled_at_init: bool,
+    /// Monotonic id for the add-server connection probe in flight; results
+    /// carrying a stale nonce are dropped (see `spawn_remote_server_probe`).
+    probe_nonce: u64,
     /// Unified service layer — owns SessionManager, StateStore, and ConfigStore.
     ///
     /// Retained for owner-side concerns only (spawning the core background
@@ -1263,6 +1267,7 @@ impl App {
         Self {
             config,
             commander_enabled_at_init,
+            probe_nonce: 0,
             service,
             backends,
             remote_factory,
@@ -1378,6 +1383,12 @@ impl App {
     // -- Backend accessors (Phase C) --
 
     /// The backend handle for `id`, if present.
+    /// Test-only mutable view access, for seeding backend snapshots directly.
+    #[cfg(test)]
+    pub(super) fn backend_mut_for_test(&mut self, id: BackendId) -> &mut BackendHandle {
+        self.backends.iter_mut().find(|h| h.id == id).unwrap()
+    }
+
     pub(super) fn backend(&self, id: BackendId) -> Option<&BackendHandle> {
         self.backends.iter().find(|h| h.id == id)
     }
@@ -1626,6 +1637,16 @@ impl App {
     /// retry) and marked `Degraded` so its header shows the reason.
     async fn bootstrap_backend_views(&mut self) {
         for handle in &mut self.backends {
+            // Only the local backend is fetched synchronously: it's in-process
+            // and effectively instant. Remote backends must NOT block first
+            // draw — an unreachable server would stall startup for its full
+            // connect/request timeout per server. Their headers render as
+            // Connecting, and the poller's first successful poll bumps the
+            // change feed, which delivers the initial snapshot (or flips the
+            // header to Degraded) moments later.
+            if handle.backend.descriptor().kind != crate::backend::BackendKind::Local {
+                continue;
+            }
             let snapshot = handle.backend.workspace_snapshot().await;
             let states = handle.backend.agent_states(false).await;
             match (snapshot, states) {
@@ -2110,7 +2131,7 @@ impl App {
                                 let _ = backend.mark_read(*id).await;
                             }
                             if let Ok(fresh) = backend.agent_states(true).await {
-                                let refreshed: HashMap<SessionId, AgentState> = fresh
+                                let refreshed: BTreeMap<SessionId, AgentState> = fresh
                                     .states
                                     .into_iter()
                                     .filter(|(id, _)| viewed_ids.contains(id))

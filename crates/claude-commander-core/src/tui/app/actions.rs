@@ -551,18 +551,35 @@ impl App {
     }
 
     /// Handle `Cascade resume` — continue a previously paused cascade.
+    /// Cascade state is per-backend and a cascade started on a remote can
+    /// pause there, so resolve which backend is paused (preferring the
+    /// selection's backend when several are) rather than assuming local.
     pub(super) async fn handle_cascade_resume(&mut self) {
-        let paused_at = self.local_view().snapshot.cascade_paused;
-        let Some(sid) = paused_at else {
+        let Some((backend_id, sid)) = self.paused_cascade_backend() else {
             self.ui_state.status_message = Some((
                 "No cascade in progress".to_string(),
                 Instant::now() + Duration::from_secs(3),
             ));
             return;
         };
-        // Cascade state is tracked per-backend; the footer's resume currently
-        // targets the local backend's paused cascade.
-        self.run_cascade_action(SessionRef::local(sid), CascadeAction::Resume);
+        self.run_cascade_action(SessionRef::new(backend_id, sid), CascadeAction::Resume);
+    }
+
+    /// The backend (and paused-at session) whose cascade is paused, if any.
+    /// When more than one backend has a paused cascade, prefer the one owning
+    /// the current selection so the footer action acts where the user is.
+    pub(super) fn paused_cascade_backend(&self) -> Option<(BackendId, SessionId)> {
+        let paused: Vec<(BackendId, SessionId)> = self
+            .backends
+            .iter()
+            .filter_map(|h| h.view.snapshot.cascade_paused.map(|sid| (h.id, sid)))
+            .collect();
+        if let Some(sref) = self.ui_state.selected_session_id
+            && let Some(hit) = paused.iter().find(|(b, _)| *b == sref.backend)
+        {
+            return Some(*hit);
+        }
+        paused.first().copied()
     }
 
     /// Handle `Push stack` — push every branch in the selected session's
@@ -588,6 +605,7 @@ impl App {
         // its cached map. Records the outcome in the operation ledger. Route to
         // the backend that owns the session.
         let backend = self.backend_for(sref);
+        let backend_id = sref.backend.0;
         let session_id = sref.id;
         let tx = self.event_loop.sender();
         tokio::spawn(async move {
@@ -597,6 +615,7 @@ impl App {
                 .map_err(|e| e.to_string());
             let _ = tx
                 .send(AppEvent::StateUpdate(StateUpdate::PushStackFinished {
+                    backend_id,
                     result,
                 }))
                 .await;
@@ -605,9 +624,10 @@ impl App {
 
     pub(super) async fn handle_push_stack_finished(
         &mut self,
+        backend_id: BackendId,
         result: std::result::Result<crate::api::OperationStatus, String>,
     ) {
-        self.refresh_local_view().await;
+        self.refresh_backend_view(backend_id).await;
         self.refresh_list_items().await;
         let (msg, secs) = match result {
             Ok(status) => match status.outcome {
@@ -626,15 +646,24 @@ impl App {
         self.ui_state.status_message = Some((msg, Instant::now() + Duration::from_secs(secs)));
     }
 
-    /// Handle `Cascade abandon` — clear the paused state without merging.
+    /// Handle `Cascade abandon` — clear the paused state without merging,
+    /// on whichever backend's cascade is paused (see
+    /// [`paused_cascade_backend`](Self::paused_cascade_backend)).
     pub(super) async fn handle_cascade_abandon(&mut self) {
-        match self.local_arc().cascade_abandon().await {
+        let Some((backend_id, _)) = self.paused_cascade_backend() else {
+            self.ui_state.status_message = Some((
+                "No cascade in progress".to_string(),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            return;
+        };
+        match self.backend_arc(backend_id).cascade_abandon().await {
             Ok(()) => {
                 self.ui_state.status_message = Some((
                     "Cascade pause cleared".to_string(),
                     Instant::now() + Duration::from_secs(3),
                 ));
-                self.refresh_local_view().await;
+                self.refresh_backend_view(backend_id).await;
                 self.refresh_list_items().await;
             }
             Err(e) => {
@@ -665,6 +694,7 @@ impl App {
         // the operation ledger, returning the recorded status. Route to the
         // backend that owns the session the cascade is anchored on.
         let backend = self.backend_for(sref);
+        let backend_id = sref.backend.0;
         let session_id = sref.id;
         let tx = self.event_loop.sender();
         tokio::spawn(async move {
@@ -675,6 +705,7 @@ impl App {
             let result = result.map_err(|e| e.to_string());
             let _ = tx
                 .send(AppEvent::StateUpdate(StateUpdate::CascadeFinished {
+                    backend_id,
                     result,
                 }))
                 .await;
@@ -683,9 +714,10 @@ impl App {
 
     pub(super) async fn handle_cascade_finished(
         &mut self,
+        backend_id: BackendId,
         result: std::result::Result<crate::api::OperationStatus, String>,
     ) {
-        self.refresh_local_view().await;
+        self.refresh_backend_view(backend_id).await;
         self.refresh_list_items().await;
         let (msg, secs) = match result {
             Ok(status) => match status.outcome {
@@ -1477,6 +1509,11 @@ impl App {
             message: format!("Testing connection to {}…", server.url),
             hint: None,
         };
+        // Nonce ties the eventual result to THIS flow: a probe that lands
+        // after the user dismissed the modal (and some other Loading modal
+        // happens to be up) must be dropped, not written to config.
+        self.probe_nonce = self.probe_nonce.wrapping_add(1);
+        let nonce = self.probe_nonce;
         let factory = self.remote_factory.clone();
         let tx = self.event_loop.sender();
         tokio::spawn(async move {
@@ -1489,6 +1526,7 @@ impl App {
             };
             let _ = tx
                 .send(AppEvent::StateUpdate(StateUpdate::RemoteServerProbed {
+                    nonce,
                     server,
                     result,
                 }))

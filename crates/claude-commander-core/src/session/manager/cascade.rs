@@ -59,7 +59,7 @@ impl SessionManager {
     pub async fn cascade_merge_stack(
         &self,
         start_from: &SessionId,
-        agent_states: &std::collections::HashMap<SessionId, AgentState>,
+        agent_states: &std::collections::BTreeMap<SessionId, AgentState>,
     ) -> Result<CascadeOutcome> {
         // Resolve chain + repo metadata under one read lock so the plan is
         // consistent before we start mutating.
@@ -184,7 +184,7 @@ impl SessionManager {
     #[instrument(skip(self))]
     pub async fn cascade_resume(
         &self,
-        agent_states: &std::collections::HashMap<SessionId, AgentState>,
+        agent_states: &std::collections::BTreeMap<SessionId, AgentState>,
     ) -> Result<CascadeOutcome> {
         let paused_at = {
             let state = self.store.read().await;
@@ -371,7 +371,7 @@ impl SessionManager {
     pub async fn push_stack(
         &self,
         start_from: &SessionId,
-        agent_states: &std::collections::HashMap<SessionId, AgentState>,
+        agent_states: &std::collections::BTreeMap<SessionId, AgentState>,
     ) -> Result<PushStackOutcome> {
         let (chain, worktrees) = {
             let state = self.store.read().await;
@@ -530,7 +530,7 @@ fn preflight_session(
     session: SessionId,
     worktree_path: &Path,
     title: &str,
-    agent_states: &std::collections::HashMap<SessionId, AgentState>,
+    agent_states: &std::collections::BTreeMap<SessionId, AgentState>,
 ) -> Result<()> {
     if let Some(state) = agent_states.get(&session) {
         match state {
