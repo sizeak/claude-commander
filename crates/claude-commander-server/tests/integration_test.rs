@@ -156,6 +156,7 @@ async fn ws_attach_streams_and_detach_keeps_session_alive() {
             initial_prompt: None,
             effort: None,
             mode: None,
+            model: None,
             base_branch: None,
             section: None,
         })
