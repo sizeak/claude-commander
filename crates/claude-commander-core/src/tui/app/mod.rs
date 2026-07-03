@@ -734,6 +734,12 @@ pub struct ProjectPicker {
     /// Memoized branch lists per repo path, so switching the highlight only
     /// lists a given project's branches once per dialog session.
     pub branch_cache: HashMap<PathBuf, Option<Vec<String>>>,
+    /// Whether the existing-branch collision hint is computed as the highlight
+    /// moves. The hint runs a local gix scan on the project's `repo_path`,
+    /// which is only meaningful for a local backend — a remote backend's
+    /// `repo_path` lives on the server, so its picker disables the hint rather
+    /// than making a network call at keystroke time.
+    pub branch_hint_enabled: bool,
 }
 
 impl ProjectPicker {
@@ -749,6 +755,7 @@ impl ProjectPicker {
             selected,
             scroll: 0,
             branch_cache: HashMap::new(),
+            branch_hint_enabled: true,
         };
         picker.adjust_scroll();
         picker
@@ -1572,15 +1579,24 @@ impl App {
     }
 
     /// The session id a tmux session name belongs to (agent or `-sh` shell),
-    /// from the cached snapshot. `None` for the commander / an unknown name.
-    pub(super) fn session_id_by_tmux_name(&self, name: &str) -> Option<SessionId> {
+    /// preferring `backend`'s cached snapshot before scanning the rest. The
+    /// attached backend takes precedence because tmux session names can collide
+    /// across machines. `None` for the commander / an unknown name.
+    pub(super) fn session_id_by_tmux_name(
+        &self,
+        backend: BackendId,
+        name: &str,
+    ) -> Option<SessionId> {
         let base = name.strip_suffix("-sh").unwrap_or(name);
-        self.local_view()
-            .snapshot
-            .sessions
-            .iter()
-            .find(|s| s.tmux_session_name == base)
-            .map(|s| s.session_id)
+        let find_in = |view: &BackendView| {
+            view.snapshot
+                .sessions
+                .iter()
+                .find(|s| s.tmux_session_name == base)
+                .map(|s| s.session_id)
+        };
+        find_in(self.view_for(backend))
+            .or_else(|| self.backends.iter().find_map(|h| find_in(&h.view)))
     }
 
     /// Open an attach connection for `target`: through the owning backend for a
@@ -2049,9 +2065,12 @@ impl App {
                                 }
                                 crate::tmux::AttachResult::SwitchToReview => {
                                     // Queue the review view; opened below once
-                                    // we're back in the TUI.
+                                    // we're back in the TUI. Resolve against the
+                                    // attached backend so a remote attach opens
+                                    // the right session's review.
+                                    let attached = self.attach_target_backend(&current);
                                     self.ui_state.pending_open_review =
-                                        self.session_id_by_tmux_name(&landed);
+                                        self.session_id_by_tmux_name(attached, &landed);
                                     break;
                                 }
                                 crate::tmux::AttachResult::OpenEditor => {
@@ -2173,7 +2192,7 @@ impl App {
                         // Focus the session the user just left so the tree lands
                         // on it (important after the in-session switcher).
                         if let Some(name) = final_name {
-                            self.focus_session_in_tree(&name).await;
+                            self.focus_session_in_tree(attached_backend, &name).await;
                         }
 
                         // Alt-r inside the attached session queued its review

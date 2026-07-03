@@ -19,6 +19,22 @@ mod view_mode;
 
 pub use config::*;
 pub use config_store::ConfigStore;
+
+/// Write `contents` to `path`, restricting the file to owner read/write
+/// (`0o600`) on Unix. The config file carries remote-server bearer tokens, so
+/// it must not be group/world-readable. A plain write on non-Unix platforms.
+pub(crate) fn write_private_file(
+    path: &std::path::Path,
+    contents: impl AsRef<[u8]>,
+) -> std::io::Result<()> {
+    std::fs::write(path, contents)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
 pub use keybindings::{BindableAction, KeyBinding, KeyBindings};
 pub use storage::*;
 pub use store::StateStore;

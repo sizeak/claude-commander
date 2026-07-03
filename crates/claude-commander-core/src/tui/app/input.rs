@@ -120,6 +120,12 @@ fn refresh_branch_hint(
     existing_branches: &mut Option<Vec<String>>,
     picker: &mut super::ProjectPicker,
 ) {
+    // A remote backend's picker disables the local gix hint (its repo path is
+    // server-side); don't scan and don't fabricate a misleading hint.
+    if !picker.branch_hint_enabled {
+        *existing_branches = None;
+        return;
+    }
     let Some(path) = picker.selected_repo_path() else {
         *existing_branches = None;
         return;
@@ -1204,9 +1210,9 @@ impl App {
                 self.handle_open_pull_request().await;
             }
             UserCommand::RefreshPrStatus => {
-                // Wake the service's PR-status loop; refreshed results arrive via
-                // the backend change feed.
-                let _ = self.local_arc().request_pr_refresh().await;
+                // Wake every connected backend's PR-status loop; refreshed
+                // results arrive via each backend's change feed.
+                self.refresh_pr_status_all().await;
             }
             UserCommand::AddRemoteServer => {
                 self.handle_add_remote_server();

@@ -143,7 +143,7 @@ impl ConfigStore {
 
         let toml =
             toml::to_string_pretty(config).map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
-        std::fs::write(&self.config_path, toml)
+        super::write_private_file(&self.config_path, toml)
             .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
 
         let mtime = std::fs::metadata(&self.config_path)
@@ -216,6 +216,27 @@ mod tests {
     fn write_config(path: &std::path::Path, config: &Config) {
         let toml = toml::to_string_pretty(config).expect("serialize config");
         std::fs::write(path, toml).expect("write config file");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_to_disk_restricts_config_to_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let store = ConfigStore::with_path(Config::default(), config_path.clone());
+
+        store.save_to_disk(&Config::default()).unwrap();
+
+        let mode = std::fs::metadata(&config_path)
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "config file carries bearer tokens and must be owner read/write only"
+        );
     }
 
     #[test]

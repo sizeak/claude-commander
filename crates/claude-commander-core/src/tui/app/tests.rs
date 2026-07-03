@@ -3416,3 +3416,217 @@ async fn stale_probe_result_ignored_while_unrelated_loading_modal_up() {
         "the unrelated Loading modal must be left intact"
     );
 }
+
+#[tokio::test]
+async fn checkout_branch_lists_remote_project_branches_via_backend() {
+    // Opening the Checkout modal on a remote project must route through the
+    // owning backend's `list_branches` — not the local-only gix path, which
+    // would fail "Project not found" for a project the local backend doesn't
+    // know about.
+    let (remote_snap, _sid, remote_pid) = snapshot_with_one_session();
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", remote_snap)]);
+    app.bootstrap_backend_views().await;
+    app.refresh_backend_view(BackendId(1)).await;
+
+    app.backend(BackendId(1))
+        .unwrap()
+        .backend
+        .as_any()
+        .downcast_ref::<MockBackend>()
+        .unwrap()
+        .set_branches(vec![
+            crate::api::BranchInfo {
+                name: "main".to_string(),
+                is_remote: false,
+            },
+            crate::api::BranchInfo {
+                name: "origin/feature-x".to_string(),
+                is_remote: true,
+            },
+        ]);
+
+    app.ui_state.selected_project_id = Some((BackendId(1), remote_pid));
+    app.handle_checkout_branch().await;
+
+    match &app.ui_state.modal {
+        Modal::CheckoutBranch { all_branches, .. } => {
+            let names: Vec<&str> = all_branches.iter().map(|b| b.local_name.as_str()).collect();
+            assert!(names.contains(&"main"), "local branch listed: {names:?}");
+            assert!(
+                names.contains(&"feature-x"),
+                "remote-only branch listed: {names:?}"
+            );
+        }
+        other => panic!("expected CheckoutBranch modal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn delete_merged_pr_sessions_sweeps_remote_backends() {
+    // A merged-PR session living on a remote backend must be swept by the bulk
+    // "Delete merged-PR sessions" command — candidates come from every backend
+    // view, and the delete routes to the owning backend.
+    let (mut remote_snap, remote_sid, _pid) = snapshot_with_one_session();
+    remote_snap.sessions[0].pr_merged = true;
+    remote_snap.sessions[0].pr_state = crate::git::PrState::Merged;
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", remote_snap)]);
+    app.bootstrap_backend_views().await;
+    app.refresh_backend_view(BackendId(1)).await;
+
+    app.handle_delete_merged_pr_sessions().await;
+    match &app.ui_state.modal {
+        Modal::Confirm {
+            on_confirm: ConfirmAction::DeleteMergedPrSessions { session_ids },
+            ..
+        } => assert_eq!(
+            session_ids,
+            &vec![remote_sid],
+            "the remote merged-PR session must be a delete candidate"
+        ),
+        other => panic!("expected merged-PR confirm, got {other:?}"),
+    }
+
+    app.handle_confirm(ConfirmAction::DeleteMergedPrSessions {
+        session_ids: vec![remote_sid],
+    })
+    .await;
+
+    // The delete is spawned; poll the mock's recorded deletes.
+    let mock = app
+        .backend(BackendId(1))
+        .unwrap()
+        .backend
+        .as_any()
+        .downcast_ref::<MockBackend>()
+        .unwrap();
+    let mut deleted = false;
+    for _ in 0..50 {
+        if mock.deleted_sessions().contains(&remote_sid) {
+            deleted = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        deleted,
+        "the remote backend must have been asked to delete the merged-PR session"
+    );
+}
+
+#[tokio::test]
+async fn refresh_pr_status_fans_out_to_connected_backends_only() {
+    let mut app = build_app_with_mock_remotes(vec![
+        ("connected", empty_snapshot()),
+        ("degraded", empty_snapshot()),
+    ]);
+    app.bootstrap_backend_views().await;
+    app.backend_mut_for_test(BackendId(1)).view.connection = ConnectionState::Connected;
+    app.backend_mut_for_test(BackendId(2)).view.connection = ConnectionState::Degraded {
+        reason: "down".to_string(),
+    };
+
+    app.refresh_pr_status_all().await;
+
+    let count = |id| {
+        app.backend(id)
+            .unwrap()
+            .backend
+            .as_any()
+            .downcast_ref::<MockBackend>()
+            .unwrap()
+            .pr_refresh_count()
+    };
+    assert_eq!(count(BackendId(1)), 1, "connected remote gets the refresh");
+    assert_eq!(count(BackendId(2)), 0, "degraded remote is skipped");
+}
+
+#[tokio::test]
+async fn palette_includes_remote_backend_sessions() {
+    let (remote_snap, remote_sid, _pid) = snapshot_with_one_session();
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", remote_snap)]);
+    app.bootstrap_backend_views().await;
+    app.refresh_backend_view(BackendId(1)).await;
+
+    let matches = app.gather_quick_switch_matches("").await;
+    assert!(
+        matches.iter().any(|m| m.session_id == remote_sid),
+        "the quick-switch palette must include remote-backend sessions"
+    );
+}
+
+#[tokio::test]
+async fn session_id_by_tmux_name_resolves_against_remote_view() {
+    let (remote_snap, remote_sid, _pid) = snapshot_with_one_session();
+    let tmux_name = remote_snap.sessions[0].tmux_session_name.clone();
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", remote_snap)]);
+    app.bootstrap_backend_views().await;
+    app.refresh_backend_view(BackendId(1)).await;
+
+    // Given the attached (remote) backend, the name resolves against its view —
+    // Alt-r inside a remote attach opens the right session's review.
+    assert_eq!(
+        app.session_id_by_tmux_name(BackendId(1), &tmux_name),
+        Some(remote_sid),
+    );
+}
+
+#[tokio::test]
+async fn new_session_disables_local_branch_hint_for_remote_project() {
+    let (remote_snap, _sid, remote_pid) = snapshot_with_one_session();
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", remote_snap)]);
+    app.bootstrap_backend_views().await;
+    app.refresh_backend_view(BackendId(1)).await;
+    app.ui_state.selected_project_id = Some((BackendId(1), remote_pid));
+
+    app.handle_new_session().await;
+
+    match &app.ui_state.modal {
+        Modal::Input {
+            existing_branches,
+            project_picker,
+            ..
+        } => {
+            assert!(
+                existing_branches.is_none(),
+                "no local branch hint for a remote project"
+            );
+            assert!(
+                !project_picker
+                    .as_ref()
+                    .expect("new-session dialog has a project picker")
+                    .branch_hint_enabled,
+                "a remote project's picker must not run the local gix hint on navigation"
+            );
+        }
+        other => panic!("expected New Session Input modal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn restore_selection_resolves_remembered_remote_backend() {
+    // Exercises `last_selected_backend`: the remembered name resolves to the
+    // owning backend and the row is restored. (Session ids are globally unique,
+    // so this is behaviour-preserving vs. raw-id matching — the field makes the
+    // resolution explicit and keeps the read side symmetric with the write.)
+    let (remote_snap, remote_sid, _pid) = snapshot_with_one_session();
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", remote_snap)]);
+    app.bootstrap_backend_views().await;
+    app.refresh_backend_view(BackendId(1)).await;
+    app.refresh_list_items().await;
+
+    app.tui_prefs
+        .set_selection(Some(remote_sid), None, Some("buildbox".to_string()))
+        .await;
+
+    app.restore_selection().await;
+
+    let idx = app
+        .ui_state
+        .list_state
+        .selected()
+        .expect("a row is selected");
+    match &app.ui_state.list_items[idx] {
+        SessionListItem::Worktree { id, .. } => assert_eq!(*id, remote_sid),
+        other => panic!("expected the remote session row, got {other:?}"),
+    }
+}

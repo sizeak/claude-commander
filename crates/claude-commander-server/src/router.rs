@@ -101,7 +101,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/sessions/{id}/blob", get(blobs::fetch))
         // -- projects --
         .route("/projects", get(projects::list).post(projects::add))
-        .route("/projects/scan", get(projects::scan))
+        .route("/projects/scan", post(projects::scan))
         .route("/projects/ensure", post(projects::ensure))
         .route("/projects/{id}", delete(projects::delete))
         .route("/projects/{id}/branches", get(projects::branches))

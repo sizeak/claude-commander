@@ -1318,8 +1318,16 @@ impl CommanderService {
             let active = self.active_session_targets().await;
             let mut detector = AgentStateDetector::new(self.manager.tmux.clone(), Duration::ZERO);
             let states = detector.detect_all(&active).await;
+            // Recompute commander liveness the same way the poll loop does, so a
+            // fresh read (and any non-fresh read served from the primed cache
+            // afterwards, including a remote client's) reflects the commander's
+            // real state rather than a stale flag left in the cache.
+            let commander_enabled = self.config_store.read().commander_enabled;
+            let commander_running =
+                commander_enabled && crate::commander::is_running(&self.manager.tmux).await;
             let mut cache = self.agent_states_cache.write().await;
             cache.states = states;
+            cache.commander_running = commander_running;
             self.agent_states_primed
                 .store(true, std::sync::atomic::Ordering::Relaxed);
             return cache.clone();
@@ -1337,6 +1345,20 @@ impl CommanderService {
             states,
             commander_running: true,
         }
+    }
+
+    /// Drop any agent states left in the cache once the running-session set has
+    /// gone empty (the last running session stopped), waking the change-feed so
+    /// clients re-read an empty snapshot rather than being served ghost states.
+    /// Idempotent: a call on an already-empty cache is a no-op (returns whether
+    /// it cleared anything). Called from the agent-state loop's quiet path.
+    async fn clear_stale_agent_states(&self) -> bool {
+        let had_states = !self.agent_states_cache.read().await.states.is_empty();
+        if had_states {
+            self.agent_states_cache.write().await.states.clear();
+            self.store.notify_change();
+        }
+        had_states
     }
 
     /// Request an immediate PR-metadata refresh. Wakes the background PR-status
@@ -1442,12 +1464,16 @@ impl CommanderService {
                     ));
                 }
                 // Quiet path: nothing to detect and the commander's state is
-                // unchanged — skip the tick (no cache write, no wake).
+                // unchanged — skip the tick (no cache write, no wake). But if the
+                // cache still holds states from a previous tick (the last running
+                // session just stopped), clear it once and wake the feed so
+                // clients — including remote pollers — aren't served ghost states.
                 if poll_tick_can_skip(
                     sessions.is_empty(),
                     commander_running,
                     last_commander_running,
                 ) {
+                    service.clear_stale_agent_states().await;
                     continue;
                 }
                 let states: BTreeMap<SessionId, AgentState> = if sessions.is_empty() {
@@ -2903,20 +2929,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_states_fresh_primes_cache_then_served_from_it() {
+    async fn agent_states_fresh_recomputes_commander_running_into_cache() {
         let dir = tempfile::TempDir::new().unwrap();
         let svc = service(&dir);
-        // Unprimed, non-fresh: on-demand path reports commander_running = true.
-        let before = svc.agent_states(false).await;
-        assert!(before.commander_running);
-        // A fresh call primes the cache (no active sessions → empty states,
-        // commander_running defaults to false in the cache).
+        // Seed a stale `commander_running = true` in the cache, as the poll loop
+        // might have left it while the commander was up. The test config has the
+        // commander disabled, so the correct recomputed value is `false`.
+        svc.agent_states_cache.write().await.commander_running = true;
+
+        // A fresh call re-detects state AND recomputes commander liveness the
+        // same way the poll loop does, folding the corrected flag into the
+        // cache — rather than rewriting only `states` and leaving the stale
+        // `commander_running` untouched.
         let fresh = svc.agent_states(true).await;
         assert!(fresh.states.is_empty());
+        assert!(
+            !fresh.commander_running,
+            "fresh must recompute commander_running (disabled → false)"
+        );
+        assert!(
+            !svc.agent_states_cache.read().await.commander_running,
+            "the corrected flag must be folded into the cache"
+        );
+
         // Once primed, the non-fresh read is served from the cache and so
-        // reflects the cached commander_running (false), not the on-demand true.
+        // reflects the corrected commander_running.
         let after = svc.agent_states(false).await;
         assert!(!after.commander_running);
+    }
+
+    #[tokio::test]
+    async fn clear_stale_agent_states_empties_cache_and_wakes_feed() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        // Seed the cache as if a running session had been detected on a prior
+        // tick (the state the quiet path would otherwise leave behind).
+        svc.agent_states_cache
+            .write()
+            .await
+            .states
+            .insert(SessionId::new(), AgentState::Working);
+        let gen_before = svc.store.generation();
+
+        // The last running session stopped: the quiet tick clears the cache once
+        // and wakes the change-feed so clients don't see ghosts.
+        assert!(svc.clear_stale_agent_states().await, "cleared stale states");
+        assert!(svc.agent_states_cache.read().await.states.is_empty());
+        assert!(
+            svc.store.generation() > gen_before,
+            "clearing must wake the change-feed"
+        );
+
+        // Idempotent: a second quiet tick on an already-empty cache is a no-op.
+        let gen_after = svc.store.generation();
+        assert!(!svc.clear_stale_agent_states().await);
+        assert_eq!(
+            svc.store.generation(),
+            gen_after,
+            "no redundant wake on an already-empty cache"
+        );
     }
 
     #[tokio::test]

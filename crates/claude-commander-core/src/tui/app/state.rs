@@ -214,41 +214,7 @@ impl App {
                     && *project_id == updated_project
                 {
                     *fetching = false;
-
-                    // Reconstruct BranchEntry list from (name, is_remote) pairs,
-                    // mirroring `load_branch_entries`'s dedup behavior.
-                    let mut local_names: std::collections::HashSet<String> =
-                        std::collections::HashSet::new();
-                    let mut entries: Vec<BranchEntry> = Vec::new();
-                    for (name, is_remote) in &branches {
-                        if !is_remote {
-                            local_names.insert(name.clone());
-                            entries.push(BranchEntry {
-                                local_name: name.clone(),
-                                display_name: name.clone(),
-                                is_remote: false,
-                            });
-                        }
-                    }
-                    for (name, is_remote) in &branches {
-                        if !is_remote {
-                            continue;
-                        }
-                        let local = name
-                            .split_once('/')
-                            .map(|(_, rest)| rest.to_string())
-                            .unwrap_or_else(|| name.clone());
-                        if local_names.contains(&local) {
-                            continue;
-                        }
-                        entries.push(BranchEntry {
-                            local_name: local,
-                            display_name: name.clone(),
-                            is_remote: true,
-                        });
-                    }
-
-                    *all_branches = entries;
+                    *all_branches = super::actions::branch_entries_from_pairs(branches);
                     self.refilter_checkout_branches();
                 }
             }
@@ -549,18 +515,30 @@ impl App {
     /// Restore selection and UI preferences from persisted UI prefs
     pub(super) async fn restore_selection(&mut self) {
         let prefs = self.tui_prefs.prefs();
-        let (last_session, last_project, left_pane_pct) = (
+        let (last_session, last_project, left_pane_pct, last_backend) = (
             prefs.last_selected_session,
             prefs.last_selected_project,
             prefs.left_pane_pct,
+            prefs.last_selected_backend.clone(),
         );
 
         if let Some(pct) = left_pane_pct {
             self.ui_state.left_pane_pct = pct.clamp(MIN_LEFT_PANE_PCT, MAX_LEFT_PANE_PCT);
         }
 
-        // Try to find the last selected session or project in the list
-        let target_idx = self.ui_state.list_items.iter().position(|item| match item {
+        // Resolve the remembered backend *name* back to its current id (config
+        // order can change between launches). An unknown/absent name resolves to
+        // the local backend.
+        let preferred_backend = last_backend
+            .and_then(|name| {
+                self.backends
+                    .iter()
+                    .find(|h| h.backend.descriptor().name == name)
+                    .map(|h| h.id)
+            })
+            .unwrap_or(LOCAL_BACKEND_ID);
+
+        let row_matches = |item: &SessionListItem| match item {
             SessionListItem::Worktree { id, .. } => last_session.is_some_and(|s| s == *id),
             SessionListItem::Project { id, .. } => {
                 last_session.is_none() && last_project.is_some_and(|p| p == *id)
@@ -568,7 +546,21 @@ impl App {
             SessionListItem::SectionHeader { .. }
             | SessionListItem::ServerHeader { .. }
             | SessionListItem::Spacer => false,
-        });
+        };
+        let owning_backend = |item: &SessionListItem| match item {
+            SessionListItem::Worktree { id, .. } => Some(self.backend_of_session(*id)),
+            SessionListItem::Project { id, .. } => Some(self.backend_of_project(*id)),
+            _ => None,
+        };
+
+        // Prefer a matching row on the remembered backend; if that backend is
+        // gone (or the row moved), fall back to the first match on any backend.
+        let target_idx = self
+            .ui_state
+            .list_items
+            .iter()
+            .position(|item| row_matches(item) && owning_backend(item) == Some(preferred_backend))
+            .or_else(|| self.ui_state.list_items.iter().position(row_matches));
 
         if let Some(idx) = target_idx {
             self.ui_state.list_state.select(Some(idx));

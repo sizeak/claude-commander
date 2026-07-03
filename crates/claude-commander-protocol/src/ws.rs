@@ -61,6 +61,16 @@ pub enum ServerControl {
     Error { message: String },
 }
 
+/// Fixed [`ServerControl::Error`] handshake message for a rejected auth token.
+/// Pinned as a constant so the server's wording and the client's error
+/// classifier reference the same string and can't drift out of sync.
+pub const WS_ERR_AUTH: &str = "authentication failed";
+
+/// Fixed [`ServerControl::Error`] handshake message for an attach to a session
+/// that doesn't exist. Shared by the server (which sends it) and the client
+/// (which classifies it), so the wording is a single source of truth.
+pub const WS_ERR_NO_SESSION: &str = "no such session";
+
 /// Which pane of a session to attach to. Mirrors core's `backend::AttachKind`
 /// but lives here so the wire shape has one source of truth. Serialized inside
 /// [`ClientControl::Attach`]; [`Agent`](Self::Agent) is the default and is

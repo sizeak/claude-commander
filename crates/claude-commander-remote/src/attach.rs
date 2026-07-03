@@ -301,9 +301,10 @@ async fn await_ready(
 /// to [`BackendError::Auth`], a "no such session" to [`BackendError::NotFound`],
 /// anything else to [`BackendError::Server`].
 fn handshake_error(message: &str) -> BackendError {
-    if message == "authentication failed" {
+    use claude_commander_protocol::ws::{WS_ERR_AUTH, WS_ERR_NO_SESSION};
+    if message == WS_ERR_AUTH {
         BackendError::Auth
-    } else if message.contains("no such session") {
+    } else if message.contains(WS_ERR_NO_SESSION) {
         BackendError::NotFound
     } else {
         BackendError::Server(message.to_string())
@@ -437,12 +438,12 @@ mod tests {
 
     #[test]
     fn handshake_error_classifies_by_message() {
+        use claude_commander_protocol::ws::{WS_ERR_AUTH, WS_ERR_NO_SESSION};
+        // Build the messages from the SAME constants the server formats its
+        // error frames with, so the classifier and the server can't drift.
+        assert!(matches!(handshake_error(WS_ERR_AUTH), BackendError::Auth));
         assert!(matches!(
-            handshake_error("authentication failed"),
-            BackendError::Auth
-        ));
-        assert!(matches!(
-            handshake_error("no such session"),
+            handshake_error(WS_ERR_NO_SESSION),
             BackendError::NotFound
         ));
         match handshake_error("failed to attach: boom") {

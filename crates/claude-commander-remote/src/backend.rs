@@ -217,74 +217,6 @@ async fn decode_json<T: DeserializeOwned>(response: Response) -> BResult<T> {
     response.json::<T>().await.map_err(crate::error::body_error)
 }
 
-/// Connectivity probe for the add-server flow. Verifies a candidate server is
-/// reachable and (when a token is supplied) that the token is accepted, before
-/// the TUI persists a `[[remote_servers]]` entry.
-///
-/// Checks two endpoints: the unauthenticated `GET /health` liveness probe, then
-/// the authenticated `GET /api/health/tmux` backing-service probe. Returns
-/// `Ok(())` when both pass, or a short human-readable reason otherwise. The
-/// token only ever reaches the `Authorization` header, so it can't appear in the
-/// returned message.
-pub async fn probe(spec: RemoteServerSpec) -> std::result::Result<(), String> {
-    let base = Url::parse(&spec.base_url).map_err(|e| format!("invalid server url: {e}"))?;
-    if base.cannot_be_a_base() || base.host().is_none() {
-        return Err("server url must include a host (e.g. http://host:port)".to_string());
-    }
-    let client = Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(REQUEST_TIMEOUT)
-        .build()
-        .map_err(|e| format!("could not build http client: {e}"))?;
-
-    // Join a path onto the base, dropping a bare trailing empty segment so a
-    // `http://host/` base doesn't produce a doubled slash.
-    let join = |segments: &[&str]| -> Url {
-        let mut url = base.clone();
-        {
-            let mut path = url
-                .path_segments_mut()
-                .expect("a validated http(s) base URL is always a base");
-            path.pop_if_empty();
-            path.extend(segments);
-        }
-        url
-    };
-
-    // Liveness: unauthenticated GET /health.
-    let resp = client
-        .get(join(&["health"]))
-        .send()
-        .await
-        .map_err(|e| format!("could not reach server: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!(
-            "liveness check failed: HTTP {}",
-            resp.status().as_u16()
-        ));
-    }
-
-    // Backing service + auth: authenticated GET /api/health/tmux.
-    let mut req = client.get(join(&["api", "health", "tmux"]));
-    if let Some(token) = &spec.token {
-        req = req.bearer_auth(token.expose());
-    }
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("could not reach server: {e}"))?;
-    match resp.status() {
-        s if s.is_success() => Ok(()),
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
-            Err("authentication failed (check the token)".to_string())
-        }
-        StatusCode::SERVICE_UNAVAILABLE => {
-            Err("server reachable, but tmux is unavailable on the server".to_string())
-        }
-        s => Err(format!("health check failed: HTTP {}", s.as_u16())),
-    }
-}
-
 /// The server wraps created-resource ids as `{ "id": … }`.
 #[derive(serde::Deserialize)]
 struct IdEnvelope<T> {
@@ -297,12 +229,18 @@ struct ReviewedBody {
     reviewed: bool,
 }
 
-/// `GET /projects/scan` → `{ added, skipped }` (core's `ScanResult` isn't
+/// `POST /projects/scan` → `{ added, skipped }` (core's `ScanResult` isn't
 /// `Deserialize`, so we mirror the fields and rebuild it).
 #[derive(serde::Deserialize)]
 struct ScanBody {
     added: usize,
     skipped: usize,
+}
+
+/// Request body for `POST /projects/scan`: the directory to scan.
+#[derive(serde::Serialize)]
+struct ScanRequest {
+    path: PathBuf,
 }
 
 fn diff_side_param(side: DiffSide) -> &'static str {
@@ -339,6 +277,15 @@ impl RemoteBackend {
             return Err(BackendError::InvalidRequest(
                 "server url must include a host (e.g. http://host:port)".to_string(),
             ));
+        }
+        // The WS attach URL is derived by rewriting the scheme (http→ws,
+        // https→wss); any other scheme would yield an unusable endpoint that
+        // `ws_attach_url` passes through unchanged. Reject it here.
+        if !matches!(base.scheme(), "http" | "https") {
+            return Err(BackendError::InvalidRequest(format!(
+                "server url must use http or https (got '{}')",
+                base.scheme()
+            )));
         }
         let client = Client::builder()
             .connect_timeout(CONNECT_TIMEOUT)
@@ -582,10 +529,11 @@ impl CommanderBackend for RemoteBackend {
     }
 
     async fn scan_directory(&self, dir: PathBuf) -> BResult<ScanResult> {
-        let mut url = self.inner.endpoint(&["projects", "scan"]);
-        url.query_pairs_mut()
-            .append_pair("dir", &dir.to_string_lossy());
-        let body: ScanBody = self.inner.get_json(url).await?;
+        let url = self.inner.endpoint(&["projects", "scan"]);
+        let body: ScanBody = self
+            .inner
+            .post_json(url, &ScanRequest { path: dir })
+            .await?;
         Ok(ScanResult {
             added: body.added,
             skipped: body.skipped,
@@ -807,6 +755,24 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         drop(listener);
         addr
+    }
+
+    #[test]
+    fn with_config_rejects_non_http_scheme() {
+        // Scheme validation happens before any tokio work, so no runtime needed.
+        let spec = RemoteServerSpec {
+            name: "box".to_string(),
+            base_url: "ftp://box".to_string(),
+            token: None,
+        };
+        match RemoteBackend::with_config(spec, idle_config()) {
+            Err(BackendError::InvalidRequest(m)) => assert!(
+                m.contains("http or https"),
+                "non-http(s) scheme must be rejected at construction: {m}"
+            ),
+            Ok(_) => panic!("non-http(s) scheme must be rejected"),
+            Err(other) => panic!("expected InvalidRequest, got {other:?}"),
+        }
     }
 
     #[test]

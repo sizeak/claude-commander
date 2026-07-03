@@ -31,7 +31,12 @@ pub struct MockBackend {
     descriptor: BackendDescriptor,
     snapshot: Mutex<WorkspaceSnapshot>,
     states: Mutex<AgentStatesSnapshot>,
+    branches: Mutex<Vec<BranchInfo>>,
     fail: Mutex<bool>,
+    /// Sessions passed to [`Self::delete_session`], for call-recording asserts.
+    deleted: Mutex<Vec<SessionId>>,
+    /// Count of [`Self::request_pr_refresh`] calls, for call-recording asserts.
+    pr_refresh_calls: Mutex<usize>,
     conn_tx: watch::Sender<ConnectionState>,
     conn_rx: watch::Receiver<ConnectionState>,
     gen_tx: watch::Sender<u64>,
@@ -53,7 +58,10 @@ impl MockBackend {
                 states: Default::default(),
                 commander_running: false,
             }),
+            branches: Mutex::new(Vec::new()),
             fail: Mutex::new(false),
+            deleted: Mutex::new(Vec::new()),
+            pr_refresh_calls: Mutex::new(0),
             conn_tx,
             conn_rx,
             gen_tx,
@@ -71,6 +79,21 @@ impl MockBackend {
     /// Make every query fail with `Unavailable` (a downed server).
     pub fn set_failing(&self, fail: bool) {
         *self.fail.lock().unwrap() = fail;
+    }
+
+    /// Set the branch list served by [`Self::list_branches`].
+    pub fn set_branches(&self, branches: Vec<BranchInfo>) {
+        *self.branches.lock().unwrap() = branches;
+    }
+
+    /// Session ids passed to [`Self::delete_session`], in call order.
+    pub fn deleted_sessions(&self) -> Vec<SessionId> {
+        self.deleted.lock().unwrap().clone()
+    }
+
+    /// How many times [`Self::request_pr_refresh`] has been called.
+    pub fn pr_refresh_count(&self) -> usize {
+        *self.pr_refresh_calls.lock().unwrap()
     }
 
     fn guard(&self) -> BResult<()> {
@@ -148,7 +171,7 @@ impl CommanderBackend for MockBackend {
 
     async fn list_branches(&self, _project: ProjectId, _fetch: bool) -> BResult<Vec<BranchInfo>> {
         self.guard()?;
-        Ok(Vec::new())
+        Ok(self.branches.lock().unwrap().clone())
     }
 
     async fn create_options(&self) -> BResult<CreateOptions> {
@@ -173,8 +196,10 @@ impl CommanderBackend for MockBackend {
         self.guard()
     }
 
-    async fn delete_session(&self, _id: SessionId) -> BResult<()> {
-        self.guard()
+    async fn delete_session(&self, id: SessionId) -> BResult<()> {
+        self.guard()?;
+        self.deleted.lock().unwrap().push(id);
+        Ok(())
     }
 
     async fn rename_session(&self, _id: SessionId, _title: String) -> BResult<()> {
@@ -194,7 +219,9 @@ impl CommanderBackend for MockBackend {
     }
 
     async fn request_pr_refresh(&self) -> BResult<()> {
-        self.guard()
+        self.guard()?;
+        *self.pr_refresh_calls.lock().unwrap() += 1;
+        Ok(())
     }
 
     async fn add_project(&self, _path: std::path::PathBuf) -> BResult<ProjectId> {

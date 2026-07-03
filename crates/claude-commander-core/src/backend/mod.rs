@@ -75,32 +75,6 @@ pub fn no_remote_backends() -> RemoteBackendFactory {
     })
 }
 
-/// A connectivity probe for the add-server flow, injected into
-/// [`App`](crate::tui::App) alongside [`RemoteBackendFactory`] so **core never
-/// depends on the remote client crate**. Given a candidate
-/// [`RemoteServerConfig`], it checks the server is reachable and the token (if
-/// any) is accepted, resolving to `Ok(())` on success or a short, token-free
-/// human-readable reason on failure. The binary supplies one backed by
-/// `claude_commander_remote::probe`.
-pub type RemoteProbe = Arc<
-    dyn Fn(
-            crate::config::RemoteServerConfig,
-        ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send>,
-        > + Send
-        + Sync,
->;
-
-/// A [`RemoteProbe`] that can't actually probe anything — every attempt reports
-/// the feature as unavailable. For contexts with no remote client wired in
-/// (tests, CLI-only frontends). The add-server flow treats its `Err` like any
-/// other probe failure, so the modal still offers "save anyway".
-pub fn no_remote_probe() -> RemoteProbe {
-    Arc::new(|_cfg| {
-        Box::pin(async { Err("remote probing is not available in this context".to_string()) })
-    })
-}
-
 /// Whether a backend runs in-process or talks to a remote server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {

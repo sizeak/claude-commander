@@ -137,9 +137,56 @@ async fn run(
                 consecutive_failures += 1;
                 let reason = err.to_string();
                 tracing::debug!(server = %inner.name(), %reason, "remote poll failed");
-                let _ = conn_tx.send(ConnectionState::Degraded { reason });
+                mark_degraded(&conn_tx, reason);
                 tokio::time::sleep(backoff_delay(&config.backoff, consecutive_failures)).await;
             }
         }
+    }
+}
+
+/// Move the connection watch into `Degraded` on a failed poll, notifying
+/// watchers only on the *transition* into degraded — mirror the Connected
+/// side's guard so a run of failed polls doesn't spam the connection watch.
+/// An already-degraded state stays put (reason and all). Returns whether a
+/// notification was sent.
+fn mark_degraded(conn_tx: &watch::Sender<ConnectionState>, reason: String) -> bool {
+    conn_tx.send_if_modified(|state| {
+        if matches!(state, ConnectionState::Degraded { .. }) {
+            false
+        } else {
+            *state = ConnectionState::Degraded { reason };
+            true
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn consecutive_failures_notify_connection_watch_once() {
+        let (tx, mut rx) = watch::channel(ConnectionState::Connecting);
+
+        // First failure transitions Connecting → Degraded and notifies.
+        assert!(mark_degraded(&tx, "boom".to_string()));
+        assert!(rx.has_changed().unwrap());
+        rx.borrow_and_update();
+
+        // Second failure is already degraded — no further notification.
+        assert!(!mark_degraded(&tx, "boom again".to_string()));
+        assert!(!rx.has_changed().unwrap());
+    }
+
+    #[test]
+    fn recovery_after_degraded_then_new_failure_notifies_again() {
+        let (tx, mut rx) = watch::channel(ConnectionState::Connecting);
+        assert!(mark_degraded(&tx, "down".to_string()));
+        rx.borrow_and_update();
+        // Recover, then fail again — a fresh transition notifies.
+        let _ = tx.send(ConnectionState::Connected);
+        rx.borrow_and_update();
+        assert!(mark_degraded(&tx, "down again".to_string()));
+        assert!(rx.has_changed().unwrap());
     }
 }

@@ -230,17 +230,32 @@ impl App {
     /// and focus it in the tree, repainting the preview pane. Used on the way
     /// out of an attach so the tree lands on the session the user just left —
     /// which, after the in-session switcher, may differ from the one they
-    /// entered. No-op if the session no longer exists.
-    pub(super) async fn focus_session_in_tree(&mut self, tmux_name: &str) {
+    /// entered. Prefers the attached `backend`'s view before scanning the rest,
+    /// since tmux session names can collide across machines. No-op if the
+    /// session no longer exists.
+    pub(super) async fn focus_session_in_tree(&mut self, backend: BackendId, tmux_name: &str) {
         // A shell pane's tmux session is named `<primary>-sh`; match either.
         let primary = tmux_name.strip_suffix("-sh").unwrap_or(tmux_name);
+        let matches = |s: &crate::api::SessionInfo| {
+            s.tmux_session_name == primary || s.tmux_session_name == tmux_name
+        };
         let session_id = self
-            .local_view()
+            .view_for(backend)
             .snapshot
             .sessions
             .iter()
-            .find(|s| s.tmux_session_name == primary || s.tmux_session_name == tmux_name)
-            .map(|s| s.session_id);
+            .find(|s| matches(s))
+            .map(|s| s.session_id)
+            .or_else(|| {
+                self.backends.iter().find_map(|h| {
+                    h.view
+                        .snapshot
+                        .sessions
+                        .iter()
+                        .find(|s| matches(s))
+                        .map(|s| s.session_id)
+                })
+            });
         if let Some(id) = session_id
             && self.select_session_in_tree(id)
         {

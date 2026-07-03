@@ -419,7 +419,11 @@ impl App {
             })
             .collect();
         choices.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-        super::ProjectPicker::new(choices, default)
+        let mut picker = super::ProjectPicker::new(choices, default);
+        // The existing-branch hint scans the repo locally; only meaningful for a
+        // local project (a remote project's path lives on the server).
+        picker.branch_hint_enabled = backend == LOCAL_BACKEND_ID;
+        picker
     }
 
     /// The new-session program picker for `backend`. The local backend's list
@@ -460,7 +464,14 @@ impl App {
                 .iter()
                 .find(|p| p.id == project_id)
                 .map(|p| p.repo_path.clone());
-            let existing_branches = repo_path.and_then(|p| existing_branch_names(&p));
+            // The existing-branch collision hint runs a local gix scan; only
+            // compute it for a local project (a remote project's `repo_path` is
+            // a server-side path this machine can't read).
+            let existing_branches = if backend == LOCAL_BACKEND_ID {
+                repo_path.and_then(|p| existing_branch_names(&p))
+            } else {
+                None
+            };
             // Capture the section under the cursor now, so a background list
             // refresh while the modal is open can't change where the new
             // session lands.
@@ -542,7 +553,12 @@ impl App {
             .iter()
             .find(|p| p.id == project_id)
             .map(|p| p.repo_path.clone());
-        let existing_branches = repo_path.and_then(|p| existing_branch_names(&p));
+        // Local-only hint: a remote project's `repo_path` is server-side.
+        let existing_branches = if sref.backend == LOCAL_BACKEND_ID {
+            repo_path.and_then(|p| existing_branch_names(&p))
+        } else {
+            None
+        };
         let program_picker = self.new_program_picker_for(sref.backend).await;
         self.ui_state.modal = Modal::Input {
             title: format!("New Session Stacked on \"{}\"", parent_title),
@@ -765,9 +781,9 @@ impl App {
 
     /// Open the Checkout Branch modal.
     ///
-    /// Loads the current list of branches synchronously via gix and kicks
-    /// off `git fetch origin` in a background task so the list can be
-    /// refreshed once remote changes are pulled in.
+    /// Loads the current branch list through the owning backend (local or
+    /// remote) without a fetch, then kicks off a fetch-refresh in a background
+    /// task so newly-pushed remote branches appear once the fetch lands.
     pub(super) async fn handle_checkout_branch(&mut self) {
         let Some((_backend, project_id)) = self.ui_state.selected_project_id else {
             self.ui_state.status_message = Some((
@@ -777,18 +793,27 @@ impl App {
             return;
         };
 
-        let repo_path = match self.project(project_id) {
-            Some(p) => p.repo_path.clone(),
-            None => {
-                self.ui_state.modal = Modal::Error {
-                    message: "Project not found".to_string(),
-                };
-                return;
-            }
-        };
+        // Resolve the backend that owns the project and confirm the project is
+        // present in its cached view — for both local and remote projects.
+        let backend_id = self.backend_of_project(project_id);
+        if !self
+            .view_for(backend_id)
+            .snapshot
+            .projects
+            .iter()
+            .any(|p| p.id == project_id)
+        {
+            self.ui_state.modal = Modal::Error {
+                message: "Project not found".to_string(),
+            };
+            return;
+        }
+        let backend = self.backend_arc(backend_id);
 
-        let all_branches = match load_branch_entries(&repo_path) {
-            Ok(b) => b,
+        let all_branches = match backend.list_branches(project_id, false).await {
+            Ok(infos) => {
+                branch_entries_from_pairs(infos.into_iter().map(|b| (b.name, b.is_remote)))
+            }
             Err(e) => {
                 self.ui_state.modal = Modal::Error {
                     message: format!("Failed to list branches: {}", e),
@@ -808,30 +833,23 @@ impl App {
             fetching: true,
         };
 
-        // Spawn `git fetch origin` in the background; when it finishes,
-        // post a CheckoutFetchComplete state update so the modal (if still
-        // open) can refresh its list.
+        // Kick off a fetch-refresh in the background; when it finishes, post a
+        // CheckoutFetchComplete state update so the modal (if still open) can
+        // refresh its list. The backend runs the `git fetch` where the repo
+        // actually lives (locally in-process, remotely server-side).
         let tx = self.event_loop.sender();
-        let repo_path_bg = repo_path.clone();
+        let backend_bg = backend.clone();
         tokio::spawn(async move {
-            let _ = tokio::process::Command::new("git")
-                .current_dir(&repo_path_bg)
-                .args(["fetch", "origin"])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .output()
-                .await;
-
-            // Re-list branches after the fetch. Run the sync gix call in a
-            // blocking task so we don't stall the async runtime.
-            let branches = tokio::task::spawn_blocking(move || {
-                crate::git::GitBackend::open(&repo_path_bg)
-                    .and_then(|b| b.list_branches())
-                    .unwrap_or_default()
-            })
-            .await
-            .unwrap_or_default();
+            let branches = backend_bg
+                .list_branches(project_id, true)
+                .await
+                .map(|infos| {
+                    infos
+                        .into_iter()
+                        .map(|b| (b.name, b.is_remote))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
 
             let _ = tx
                 .send(AppEvent::StateUpdate(StateUpdate::CheckoutFetchComplete {
@@ -941,32 +959,39 @@ impl App {
     pub(super) async fn gather_quick_switch_matches(&self, query: &str) -> Vec<QuickSwitchMatch> {
         let mut scored: Vec<(i64, QuickSwitchMatch)> = Vec::new();
 
-        for session in &self.local_view().snapshot.sessions {
-            if session.status == SessionStatus::Creating {
-                continue;
+        // Every backend's sessions, not just local — the palette mirrors the
+        // whole tree (and the refilter path already builds from `list_items`,
+        // which spans all backends). `project_name` carries the session's own
+        // project label, matching how the tree groups it; selection resolves
+        // the owning backend by session id (`backend_of_session`).
+        for handle in &self.backends {
+            for session in &handle.view.snapshot.sessions {
+                if session.status == SessionStatus::Creating {
+                    continue;
+                }
+                // Best fuzzy score across title/branch/program — mirrors
+                // `WorktreeSession::fuzzy_score` over the DTO fields.
+                let Some(score) = [
+                    session.title.as_str(),
+                    session.branch.as_str(),
+                    session.program.as_str(),
+                ]
+                .iter()
+                .filter_map(|s| crate::fuzzy::fuzzy_score(s, query))
+                .max() else {
+                    continue;
+                };
+                scored.push((
+                    score,
+                    QuickSwitchMatch {
+                        session_id: session.session_id,
+                        title: session.title.clone(),
+                        branch: session.branch.clone(),
+                        project_name: session.project_name.clone(),
+                        status: session.status,
+                    },
+                ));
             }
-            // Best fuzzy score across title/branch/program — mirrors
-            // `WorktreeSession::fuzzy_score` over the DTO fields.
-            let Some(score) = [
-                session.title.as_str(),
-                session.branch.as_str(),
-                session.program.as_str(),
-            ]
-            .iter()
-            .filter_map(|s| crate::fuzzy::fuzzy_score(s, query))
-            .max() else {
-                continue;
-            };
-            scored.push((
-                score,
-                QuickSwitchMatch {
-                    session_id: session.session_id,
-                    title: session.title.clone(),
-                    branch: session.branch.clone(),
-                    project_name: session.project_name.clone(),
-                    status: session.status,
-                },
-            ));
         }
 
         if query.is_empty() {
@@ -1265,15 +1290,31 @@ impl App {
         }
     }
 
+    /// Trigger a PR-metadata refresh on every connected backend. The local
+    /// backend is always connected; a degraded remote is skipped, since its
+    /// link is down and the request would only error. Each backend routes the
+    /// request to where its PR polling actually happens (local loop / server).
+    pub(super) async fn refresh_pr_status_all(&self) {
+        for handle in &self.backends {
+            let connected = handle.id == LOCAL_BACKEND_ID
+                || matches!(handle.view.connection, ConnectionState::Connected);
+            if connected {
+                let _ = handle.backend.request_pr_refresh().await;
+            }
+        }
+    }
+
     /// Sweep every project for sessions whose PR has merged on GitHub and
     /// open a single confirmation that names the count. No-op (with a
     /// transient status message) when nothing qualifies.
     pub(super) async fn handle_delete_merged_pr_sessions(&mut self) {
+        // Sweep every backend's view, not just local — a merged-PR session on a
+        // remote server is just as eligible, and the delete path already routes
+        // per-session via `backend_of_session`.
         let merged: Vec<(SessionId, String)> = self
-            .local_view()
-            .snapshot
-            .sessions
+            .backends
             .iter()
+            .flat_map(|h| h.view.snapshot.sessions.iter())
             .filter(|s| s.pr_merged || s.pr_state == crate::git::PrState::Merged)
             .map(|s| (s.session_id, s.branch.clone()))
             .collect();
@@ -2068,7 +2109,21 @@ pub(super) fn existing_branch_names(repo_path: &std::path::Path) -> Option<Vec<S
 /// we keep only the local entry — it's what we'd check out anyway.
 pub(super) fn load_branch_entries(repo_path: &std::path::Path) -> Result<Vec<BranchEntry>> {
     let backend = crate::git::GitBackend::open(repo_path)?;
-    let branches = backend.list_branches()?;
+    Ok(branch_entries_from_pairs(backend.list_branches()?))
+}
+
+/// Convert raw `(name, is_remote)` branch pairs — as produced by
+/// [`GitBackend::list_branches`](crate::git::GitBackend::list_branches) or a
+/// backend's [`list_branches`](crate::backend::CommanderBackend::list_branches)
+/// (`BranchInfo`) — into the `BranchEntry` list the Checkout modal shows.
+///
+/// For branches that exist both locally and as remote tracking refs we keep only
+/// the local entry — it's what we'd check out anyway. The single source of truth
+/// for this dedup, shared by the initial load and the post-fetch refresh.
+pub(super) fn branch_entries_from_pairs(
+    branches: impl IntoIterator<Item = (String, bool)>,
+) -> Vec<BranchEntry> {
+    let branches: Vec<(String, bool)> = branches.into_iter().collect();
 
     let mut local_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut entries: Vec<BranchEntry> = Vec::new();
@@ -2104,5 +2159,5 @@ pub(super) fn load_branch_entries(repo_path: &std::path::Path) -> Result<Vec<Bra
         });
     }
 
-    Ok(entries)
+    entries
 }

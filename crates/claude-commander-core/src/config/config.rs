@@ -556,6 +556,21 @@ impl Config {
                 }
                 .into());
             }
+            // Only http(s) is supported — the WS attach URL is derived by
+            // rewriting the scheme (`http`→`ws`, `https`→`wss`), so any other
+            // scheme (e.g. `ftp://`) would silently produce an unusable
+            // endpoint. Reject it here with a clear message instead.
+            if !matches!(parsed.scheme(), "http" | "https") {
+                return Err(ConfigError::InvalidValue {
+                    key: format!("remote_servers.{name}.url"),
+                    reason: format!(
+                        "url '{}' must use http or https (got '{}')",
+                        server.url,
+                        parsed.scheme()
+                    ),
+                }
+                .into());
+            }
         }
         Ok(())
     }
@@ -682,7 +697,8 @@ impl Config {
         let toml =
             toml::to_string_pretty(self).map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
 
-        std::fs::write(&config_path, toml).map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
+        super::write_private_file(&config_path, toml)
+            .map_err(|e| ConfigError::SaveFailed(e.to_string()))?;
 
         Ok(())
     }
@@ -1338,6 +1354,23 @@ url = "http://127.0.0.1:7878"
             ..Config::default()
         };
         assert!(cfg.validate_remote_servers().is_err());
+    }
+
+    #[test]
+    fn test_validate_remote_servers_rejects_non_http_scheme() {
+        let cfg = Config {
+            remote_servers: vec![RemoteServerConfig {
+                name: "box".to_string(),
+                url: "ftp://box".to_string(),
+                token: None,
+            }],
+            ..Config::default()
+        };
+        let err = cfg.validate_remote_servers().unwrap_err();
+        assert!(
+            err.to_string().contains("http or https"),
+            "non-http(s) scheme must be rejected at load: {err}"
+        );
     }
 
     #[test]

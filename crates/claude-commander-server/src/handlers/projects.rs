@@ -61,12 +61,7 @@ pub async fn ensure(
     Ok((StatusCode::CREATED, Json(json!({ "id": id }))).into_response())
 }
 
-#[derive(Debug, Deserialize)]
-pub struct ScanQuery {
-    pub dir: PathBuf,
-}
-
-/// Response for `GET /projects/scan`. Mirrors core's `ScanResult`, which is not
+/// Response for `POST /projects/scan`. Mirrors core's `ScanResult`, which is not
 /// `Serialize`. (`Deserialize` is for the handler's own round-trip test.)
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ScanResponse {
@@ -74,14 +69,16 @@ pub struct ScanResponse {
     pub skipped: usize,
 }
 
-/// `GET /projects/scan?dir=` → `scan_directory`.
+/// `POST /projects/scan` (body `{ path }`) → `scan_directory`. A POST, not a
+/// GET, because scanning *mutates* state: it adds every discovered repo as a
+/// project.
 pub async fn scan(
     State(state): State<AppState>,
-    Query(q): Query<ScanQuery>,
+    Json(body): Json<ProjectPathBody>,
 ) -> Result<Json<ScanResponse>, ApiError> {
     // `scan_directory` adds discovered repos via `add_project` (non-`Send` gix).
     let result =
-        run_local(move || async move { state.service.scan_directory(&q.dir).await }).await?;
+        run_local(move || async move { state.service.scan_directory(&body.path).await }).await?;
     Ok(Json(ScanResponse {
         added: result.added,
         skipped: result.skipped,
@@ -140,25 +137,31 @@ pub async fn preview(
 mod tests {
     use axum::body::Body;
     use axum::http::Request;
-    use axum::{Router, routing::get};
+    use axum::{
+        Router,
+        routing::{get, post},
+    };
     use tempfile::TempDir;
 
     use crate::handlers::test_support::{get as do_get, json, send, test_state};
 
     /// Scanning an empty temp dir touches no repos → 200 `{added:0, skipped:0}`.
-    /// (`scan_directory` is filesystem-only; it needs no tmux.)
+    /// (`scan_directory` is filesystem-only; it needs no tmux.) Scanning mutates
+    /// state (adds discovered repos), so the route is a POST with a JSON body.
     #[tokio::test]
     async fn scan_empty_dir_is_200_zero_counts() {
         let dir = TempDir::new().unwrap();
         let scan_target = TempDir::new().unwrap();
         let router = Router::new()
-            .route("/projects/scan", get(super::scan))
+            .route("/projects/scan", post(super::scan))
             .with_state(test_state(&dir));
-        let (status, body) = do_get(
-            router,
-            &format!("/projects/scan?dir={}", scan_target.path().display()),
-        )
-        .await;
+        let req = Request::post("/projects/scan")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({ "path": scan_target.path() }).to_string(),
+            ))
+            .unwrap();
+        let (status, body) = send(router, req).await;
         assert_eq!(status, 200);
         let resp: super::ScanResponse = json(&body);
         assert_eq!(resp.added, 0);

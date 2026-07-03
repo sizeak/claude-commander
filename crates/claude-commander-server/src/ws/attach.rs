@@ -25,7 +25,9 @@ use claude_commander_core::tmux::HeadlessAttach;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
-use super::protocol::{AttachKind, ClientControl, DetachReason, ServerControl};
+use super::protocol::{
+    AttachKind, ClientControl, DetachReason, ServerControl, WS_ERR_AUTH, WS_ERR_NO_SESSION,
+};
 use crate::state::AppState;
 
 /// How long to wait for the mandatory `auth` then `attach` handshake frames
@@ -107,7 +109,7 @@ async fn authenticate(socket: &mut WebSocket, state: &AppState) -> bool {
                 let _ = send_control(
                     socket,
                     &ServerControl::Error {
-                        message: "authentication failed".into(),
+                        message: WS_ERR_AUTH.into(),
                     },
                 )
                 .await;
@@ -169,7 +171,7 @@ async fn attach_session(
             let _ = send_control(
                 socket,
                 &ServerControl::Error {
-                    message: "no such session".into(),
+                    message: WS_ERR_NO_SESSION.into(),
                 },
             )
             .await;
