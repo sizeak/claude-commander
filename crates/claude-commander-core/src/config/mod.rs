@@ -12,6 +12,7 @@
 mod config;
 mod config_store;
 pub mod keybindings;
+mod migrations;
 pub mod storage;
 mod store;
 pub mod theme;

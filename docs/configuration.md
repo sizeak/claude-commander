@@ -10,17 +10,17 @@ Configuration file location depends on your platform:
 - **Linux**: `~/.config/claude-commander/config.toml`
 
 ```toml
-# Default program to run in new sessions. Also the entry pre-selected in the
-# New Session program picker.
-default_program = "claude"
-
 # Selectable agent harnesses for the New Session dialog's program picker. Each
 # entry pairs a display `label` with the `command` launched (program plus any
 # flags); the command's first token determines the harness, so Claude Code
 # (`claude`) and OpenAI Codex (`codex`) are both recognised and get the right
-# launch, resume, and working/waiting detection. The picker pre-selects the
-# entry whose `command` matches `default_program`. When `programs` is omitted,
-# the picker offers a single entry synthesised from `default_program`.
+# launch, resume, and working/waiting detection. The first entry is the default
+# for new sessions. When `programs` is omitted, the picker offers a single
+# built-in `claude` entry.
+#
+# Legacy configs using `default_program = "..."` are migrated automatically:
+# the legacy command is moved or inserted as the first `[[programs]]` entry and
+# `default_program` is removed from the file.
 #
 # In the New Session dialog, press Tab (or Shift+Tab to go back) to cycle focus
 # between the name field, the project picker, and the program picker, then ↑/↓
@@ -175,7 +175,8 @@ state_sync_interval_ms = 2000
 # the footer chip both key off the value read at launch). While running, a
 # `● Commander` chip in the footer status bar shows its live state.
 # commander_enabled = false
-# Program (with flags) for the commander; defaults to `default_program`.
+# Program (with flags) for the commander; defaults to the first `[[programs]]`
+# entry.
 # commander_program = "claude --model opus-4-7"
 # Working directory for the commander; defaults to <data dir>/commander.
 # commander_dir = "/path/to/commander"

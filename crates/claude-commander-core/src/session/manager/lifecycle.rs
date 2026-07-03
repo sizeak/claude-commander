@@ -22,7 +22,7 @@ impl SessionManager {
         program: Option<String>,
         base_branch: Option<String>,
     ) -> Result<SessionId> {
-        let program = program.unwrap_or_else(|| self.config_store.read().default_program.clone());
+        let program = program.unwrap_or_else(|| self.config_store.read().default_session_program());
 
         // Validate project exists
         {

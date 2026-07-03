@@ -1682,7 +1682,7 @@ fn render_general_tab_draws_section_headers() {
     );
     assert!(text.contains("Editor"), "missing Editor header");
     assert!(text.contains("Appearance"), "missing Appearance header");
-    assert!(text.contains("Default Program"));
+    assert!(text.contains("Branch Prefix"));
 }
 
 #[test]

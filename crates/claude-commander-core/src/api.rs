@@ -284,7 +284,7 @@ impl CommanderService {
             .program
             .as_deref()
             .map(str::to_string)
-            .unwrap_or_else(|| self.config_store.read().default_program.clone());
+            .unwrap_or_else(|| self.config_store.read().default_session_program());
 
         validate_program_flags(&opts, &base_program)?;
 
