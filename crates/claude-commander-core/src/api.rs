@@ -380,6 +380,7 @@ impl CommanderService {
 
     /// Set a session's keep-alive flag (opt-out of auto-hibernation).
     pub async fn set_keep_alive(&self, id: &SessionId, keep_alive: bool) -> Result<bool> {
+        self.telemetry.feature("session.set_keep_alive");
         self.manager.set_keep_alive(id, keep_alive).await
     }
 
