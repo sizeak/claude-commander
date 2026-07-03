@@ -380,6 +380,7 @@ impl CommanderService {
 
     /// Set a session's keep-alive flag (opt-out of auto-hibernation).
     pub async fn set_keep_alive(&self, id: &SessionId, keep_alive: bool) -> Result<bool> {
+        self.telemetry.feature("session.set_keep_alive");
         self.manager.set_keep_alive(id, keep_alive).await
     }
 
@@ -661,6 +662,19 @@ impl CommanderService {
         );
         self.manager.tmux.send_keys(&tmux_name, &prompt).await?;
         self.manager.tmux.send_keys(&tmux_name, "Enter").await?;
+
+        // Delivering a prompt flips an idle agent back to working without
+        // attaching or changing status, so bump last_active_at: a concurrent
+        // hibernation pass then sees a fresh stamp and won't kill the session we
+        // just handed work to (its still_hibernatable re-check compares stamps).
+        let sid = *session_id;
+        self.store
+            .mutate(move |state| {
+                if let Some(session) = state.get_session_mut(&sid) {
+                    session.touch();
+                }
+            })
+            .await?;
 
         // Mark the delivered comments applied.
         for ann in comments

@@ -32,7 +32,11 @@ pub(crate) fn idle_tick(
     now: Instant,
     threshold: Duration,
 ) -> (Option<Instant>, bool) {
-    if is_active {
+    // A zero threshold means "disabled", NOT "hibernate instantly": a user who
+    // sets hibernate_idle_timeout_secs = 0 expecting "off" (as 0 disables the
+    // sibling hibernate_check_interval_secs) must not have every idle session
+    // killed on the first tick. Clear any timer and never hibernate.
+    if is_active || threshold.is_zero() {
         return (None, false);
     }
     let since = idle_since.unwrap_or(now);
@@ -63,7 +67,37 @@ pub(crate) fn is_session_active(
         || recently_attached
 }
 
+/// Whether a session should count as attached, given attachment probes for its
+/// main pane and its optional paired shell (`None` = the session has no shell).
+///
+/// Hibernation kills *both* the main and the `-sh` tmux session, and `Ctrl-\`
+/// toggles the attached client to the shell — so a client on the shell alone
+/// must still block the kill. Pure, so it can be unit-tested without tmux.
+pub(crate) fn attached_including_shell(main_attached: bool, shell_attached: Option<bool>) -> bool {
+    main_attached || shell_attached.unwrap_or(false)
+}
+
 impl SessionManager {
+    /// Attachment check spanning the main pane and its paired shell. Each probe
+    /// is conservative — a failed `is_session_attached` counts as attached — so
+    /// a tmux glitch never green-lights a hibernate kill.
+    pub(super) async fn is_attached_including_shell(
+        &self,
+        tmux_name: &str,
+        shell_tmux_name: Option<&str>,
+    ) -> bool {
+        let main = self
+            .tmux
+            .is_session_attached(tmux_name)
+            .await
+            .unwrap_or(true);
+        let shell = match shell_tmux_name {
+            Some(sh) => Some(self.tmux.is_session_attached(sh).await.unwrap_or(true)),
+            None => None,
+        };
+        attached_including_shell(main, shell)
+    }
+
     /// Spawn the background hibernation loop. No-op unless `hibernate_enabled`
     /// is set, the check interval is non-zero, and a tokio runtime is present.
     ///
@@ -121,7 +155,14 @@ impl SessionManager {
             let attach_grace = Duration::from_secs(attach_grace_secs);
 
             // Running, non-keep-alive sessions are the only candidates.
-            let candidates: Vec<(SessionId, String, String, Option<chrono::DateTime<Utc>>)> = {
+            #[allow(clippy::type_complexity)]
+            let candidates: Vec<(
+                SessionId,
+                String,
+                Option<String>,
+                String,
+                Option<chrono::DateTime<Utc>>,
+            )> = {
                 let state = self.store.read().await;
                 state
                     .sessions
@@ -131,6 +172,7 @@ impl SessionManager {
                         (
                             s.id,
                             s.tmux_session_name.clone(),
+                            s.shell_tmux_session_name.clone(),
                             s.program.clone(),
                             s.last_attached_at,
                         )
@@ -144,17 +186,16 @@ impl SessionManager {
             idle_since.retain(|id, _| candidate_ids.contains(id));
 
             let now = Instant::now();
-            for (id, tmux_name, program, last_attached_at) in candidates {
+            for (id, tmux_name, shell_tmux_name, program, last_attached_at) in candidates {
                 let state = detector
                     .detect(AgentKind::from_program(&program), &tmux_name)
                     .await;
                 // Conservative: a failed attached-check counts as attached, so a
-                // detection error never triggers hibernation.
+                // detection error never triggers hibernation. Spans the paired
+                // shell too, since the kill destroys both sessions.
                 let attached = self
-                    .tmux
-                    .is_session_attached(&tmux_name)
-                    .await
-                    .unwrap_or(true);
+                    .is_attached_including_shell(&tmux_name, shell_tmux_name.as_deref())
+                    .await;
                 // last_attached_at is stamped just before the PTY attaches, so a
                 // recent stamp guards the sub-second window where a session being
                 // attached still reads unattached.
@@ -174,10 +215,18 @@ impl SessionManager {
                     }
                 }
                 if hibernate {
-                    info!("Auto-hibernating idle session {}", id);
-                    telemetry.feature("hibernate_auto");
-                    if let Err(e) = self.hibernate_session(&id).await {
-                        warn!("Failed to hibernate session {}: {}", id, e);
+                    // Record telemetry only for a real hibernation: the pre-kill
+                    // guards in hibernate_session may skip (attached, restarted,
+                    // tmux reappeared), and counting skips would inflate the metric.
+                    match self.hibernate_session(&id).await {
+                        Ok(true) => {
+                            info!("Auto-hibernated idle session {}", id);
+                            telemetry.feature("hibernate_auto");
+                        }
+                        Ok(false) => {
+                            debug!("Skipped hibernating {} (guard tripped at kill time)", id);
+                        }
+                        Err(e) => warn!("Failed to hibernate session {}: {}", id, e),
                     }
                 }
             }
@@ -221,6 +270,16 @@ mod tests {
     }
 
     #[test]
+    fn zero_threshold_is_disabled_not_instant() {
+        let now = Instant::now();
+        // Long-idle session with a zero threshold: must NOT hibernate (0 = off),
+        // and the timer is cleared. A "0 >= 0 → hibernate" reading would kill it.
+        let (next, hibernate) = idle_tick(false, Some(now - secs(10_000)), now, secs(0));
+        assert!(!hibernate);
+        assert_eq!(next, None);
+    }
+
+    #[test]
     fn idle_below_threshold_keeps_counting_from_original_stamp() {
         let now = Instant::now();
         let idle_since = now - secs(100);
@@ -242,6 +301,20 @@ mod tests {
     fn explicit_idle_and_unattached_counts_as_inactive() {
         // Only an explicit Idle read on an unattached session is inactive.
         assert!(!is_session_active(AgentState::Idle, false, false));
+    }
+
+    #[test]
+    fn shell_attachment_alone_counts_as_attached() {
+        // Main pane unattached but the paired shell is attached (Ctrl-\ toggled
+        // to it): must still count as attached, or the kill destroys the shell
+        // the user is in. Without spanning the shell, this returns false.
+        assert!(attached_including_shell(false, Some(true)));
+        // Main attached is enough regardless of the shell.
+        assert!(attached_including_shell(true, None));
+        assert!(attached_including_shell(true, Some(false)));
+        // Neither attached (or no shell) is unattached.
+        assert!(!attached_including_shell(false, Some(false)));
+        assert!(!attached_including_shell(false, None));
     }
 
     #[test]
