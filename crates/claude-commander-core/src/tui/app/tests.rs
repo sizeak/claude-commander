@@ -201,6 +201,7 @@ fn make_worktree_with_id(id: SessionId) -> SessionListItem {
         created_at: chrono::Utc::now(),
         agent_state: None,
         unread: false,
+        lfs_pulling: false,
         stacked_child: false,
     }
 }

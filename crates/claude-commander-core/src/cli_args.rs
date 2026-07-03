@@ -100,6 +100,10 @@ pub enum Commands {
         #[arg(short, long)]
         mode: Option<String>,
 
+        /// Model to run the agent with (Claude or Codex)
+        #[arg(long)]
+        model: Option<String>,
+
         /// Branch to fork from (default: origin/main)
         #[arg(short = 'b', long)]
         base_branch: Option<String>,

@@ -349,6 +349,7 @@ async fn main() -> Result<()> {
             initial_prompt,
             effort,
             mode,
+            model,
             base_branch,
             section,
         }) => {
@@ -367,6 +368,7 @@ async fn main() -> Result<()> {
                     initial_prompt,
                     effort,
                     mode,
+                    model,
                     base_branch,
                     section,
                 })
