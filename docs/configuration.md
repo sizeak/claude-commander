@@ -28,6 +28,11 @@ Configuration file location depends on your platform:
 # can be typed into to filter the list — so the usual "type a name, hit Enter"
 # flow is unchanged.
 #
+# Program entries can be managed in-app from Settings ▸ Programs (settings
+# modal, `,` key) — add (`n`), rename (`r`), edit the label/command fields, and
+# remove (`d`) entries, or reorder them with `J`/`K`. Reordering changes the
+# default, since the first entry is the default for new sessions.
+#
 # [[programs]]
 # label = "Claude"
 # command = "claude"

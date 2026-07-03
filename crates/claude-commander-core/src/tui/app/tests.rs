@@ -788,19 +788,7 @@ fn test_info_view_no_stack_section_for_unstacked() {
 use crate::config::{AppState, ConfigStore, StateStore};
 
 fn make_test_app() -> App {
-    let tmp = tempfile::TempDir::new().unwrap();
-    let config_path = tmp.path().join("config.toml");
-    let state_path = tmp.path().join("state.json");
-    let config = Config::default();
-    let config_store = Arc::new(ConfigStore::with_path(config, config_path));
-    let store = Arc::new(StateStore::with_path(AppState::new(), state_path));
-    // Leak the TempDir so paths stay valid for the lifetime of the test.
-    std::mem::forget(tmp);
-    App::new(
-        config_store,
-        store,
-        crate::telemetry::FrontendInfo::new("test", "0.0.0"),
-    )
+    make_test_app_with_path().0
 }
 
 #[test]
@@ -1623,7 +1611,7 @@ fn buffer_text(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> S
 }
 
 fn keybindings_settings_state(app: &App, search: Option<&str>) -> crate::tui::app::SettingsState {
-    use crate::tui::app::{SectionsState, SettingsState, SettingsTab};
+    use crate::tui::app::{ProgramsState, SectionsState, SettingsState, SettingsTab};
     let rows = app.build_settings_rows(SettingsTab::Keybindings);
     SettingsState {
         tab: SettingsTab::Keybindings,
@@ -1631,6 +1619,7 @@ fn keybindings_settings_state(app: &App, search: Option<&str>) -> crate::tui::ap
         editing: None,
         rows,
         sections_state: SectionsState::default(),
+        programs_state: ProgramsState::default(),
         search: search.map(|q| q.into()),
     }
 }
@@ -1671,6 +1660,7 @@ fn render_general_tab_draws_section_headers() {
         editing: None,
         rows,
         sections_state: Default::default(),
+        programs_state: Default::default(),
         search: None,
     });
 
@@ -1740,6 +1730,404 @@ fn render_consumes_clear_right_pane_flag() {
     assert!(
         !app.ui_state.clear_right_pane,
         "render() should consume clear_right_pane so the event loop never needs terminal.clear()"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Programs settings tab
+// ---------------------------------------------------------------------------
+
+fn programs_settings_state() -> crate::tui::app::SettingsState {
+    use crate::tui::app::{ProgramsState, SectionsState, SettingsState, SettingsTab};
+    SettingsState {
+        tab: SettingsTab::Programs,
+        selected_row: 0,
+        editing: None,
+        rows: vec![],
+        sections_state: SectionsState::default(),
+        programs_state: ProgramsState::default(),
+        search: None,
+    }
+}
+
+fn program_entry(label: &str, command: &str) -> crate::config::ProgramEntry {
+    crate::config::ProgramEntry {
+        label: label.to_string(),
+        command: command.to_string(),
+    }
+}
+
+/// Borrow the Programs-tab state out of the current settings modal.
+fn peek_programs(app: &App) -> &crate::tui::app::ProgramsState {
+    use crate::tui::app::Modal;
+    match &app.ui_state.modal {
+        Modal::Settings(s) => &s.programs_state,
+        _ => panic!("expected a settings modal"),
+    }
+}
+
+/// Feed one keypress into the Programs tab, keeping the modal in place.
+async fn feed_programs_key(app: &mut App, code: crossterm::event::KeyCode) {
+    use crate::tui::app::Modal;
+    let state = match std::mem::replace(&mut app.ui_state.modal, Modal::None) {
+        Modal::Settings(s) => s,
+        other => {
+            app.ui_state.modal = other;
+            panic!("expected a settings modal");
+        }
+    };
+    app.handle_settings_key(key(code), state).await;
+}
+
+async fn type_programs(app: &mut App, text: &str) {
+    for c in text.chars() {
+        feed_programs_key(app, crossterm::event::KeyCode::Char(c)).await;
+    }
+}
+
+#[tokio::test]
+async fn programs_tab_new_creates_entry_via_two_step_prompt() {
+    use crate::tui::app::{Modal, ProgramsEditing};
+    use crossterm::event::KeyCode;
+
+    let mut app = make_test_app();
+    app.ui_state.modal = Modal::Settings(programs_settings_state());
+
+    // Step 1: `n` opens the label prompt; type a label.
+    feed_programs_key(&mut app, KeyCode::Char('n')).await;
+    type_programs(&mut app, "Codex").await;
+    feed_programs_key(&mut app, KeyCode::Enter).await;
+
+    // Step 2: the command input is prefilled with the label.
+    match &peek_programs(&app).editing {
+        Some(ProgramsEditing::CreatingCommand { label, value }) => {
+            assert_eq!(label, "Codex");
+            assert_eq!(value.value(), "Codex", "command prefilled with label");
+        }
+        other => panic!("expected CreatingCommand, got {other:?}"),
+    }
+
+    // Enter creates the entry (using the prefilled command) and persists it.
+    feed_programs_key(&mut app, KeyCode::Enter).await;
+    assert_eq!(app.config.programs, vec![program_entry("Codex", "Codex")]);
+    let prog = peek_programs(&app);
+    assert_eq!(prog.selected, 0);
+    assert!(prog.editing.is_none());
+}
+
+#[tokio::test]
+async fn programs_tab_create_esc_at_command_step_discards() {
+    use crate::tui::app::Modal;
+    use crossterm::event::KeyCode;
+
+    let mut app = make_test_app();
+    app.ui_state.modal = Modal::Settings(programs_settings_state());
+
+    feed_programs_key(&mut app, KeyCode::Char('n')).await;
+    type_programs(&mut app, "Codex").await;
+    feed_programs_key(&mut app, KeyCode::Enter).await; // advance to command step
+    feed_programs_key(&mut app, KeyCode::Esc).await; // cancel
+
+    assert!(
+        app.config.programs.is_empty(),
+        "nothing half-formed persisted"
+    );
+    assert!(peek_programs(&app).editing.is_none());
+}
+
+#[tokio::test]
+async fn programs_tab_rename_rejects_duplicate_and_empty_labels() {
+    use crossterm::event::KeyCode;
+
+    let mut app = make_test_app();
+    app.config.programs = vec![
+        program_entry("Claude", "claude"),
+        program_entry("Codex", "codex"),
+    ];
+    app.ui_state.modal = crate::tui::app::Modal::Settings(programs_settings_state());
+
+    // Move to the second entry and rename it to a duplicate of the first.
+    feed_programs_key(&mut app, KeyCode::Char('j')).await;
+    assert_eq!(peek_programs(&app).selected, 1);
+    feed_programs_key(&mut app, KeyCode::Char('r')).await;
+    for _ in 0.."Codex".len() {
+        feed_programs_key(&mut app, KeyCode::Backspace).await;
+    }
+    type_programs(&mut app, "Claude").await;
+    feed_programs_key(&mut app, KeyCode::Enter).await;
+    assert_eq!(app.config.programs[1].label, "Codex", "duplicate rejected");
+
+    // Renaming to empty is likewise rejected.
+    feed_programs_key(&mut app, KeyCode::Char('r')).await;
+    for _ in 0.."Codex".len() {
+        feed_programs_key(&mut app, KeyCode::Backspace).await;
+    }
+    feed_programs_key(&mut app, KeyCode::Enter).await;
+    assert_eq!(app.config.programs[1].label, "Codex", "empty rejected");
+}
+
+#[tokio::test]
+async fn programs_tab_fields_focus_edits_command() {
+    use crate::tui::app::ProgramsFocus;
+    use crossterm::event::KeyCode;
+
+    let mut app = make_test_app();
+    app.config.programs = vec![program_entry("Claude", "claude")];
+    app.ui_state.modal = crate::tui::app::Modal::Settings(programs_settings_state());
+
+    // Enter the fields pane, move to the command field, edit it.
+    feed_programs_key(&mut app, KeyCode::Enter).await;
+    assert_eq!(peek_programs(&app).focus, ProgramsFocus::Fields);
+    feed_programs_key(&mut app, KeyCode::Char('j')).await; // toggle to command field
+    assert_eq!(peek_programs(&app).field_selected, 1);
+    feed_programs_key(&mut app, KeyCode::Enter).await; // start editing command
+    for _ in 0.."claude".len() {
+        feed_programs_key(&mut app, KeyCode::Backspace).await;
+    }
+    type_programs(&mut app, "claude --model opus").await;
+    feed_programs_key(&mut app, KeyCode::Enter).await;
+
+    assert_eq!(app.config.programs[0].command, "claude --model opus");
+    assert_eq!(app.config.programs[0].label, "Claude", "label untouched");
+}
+
+#[tokio::test]
+async fn programs_tab_delete_clamps_selection_and_allows_empty() {
+    use crossterm::event::KeyCode;
+
+    let mut app = make_test_app();
+    app.config.programs = vec![program_entry("Alpha", "a"), program_entry("Beta", "b")];
+    app.ui_state.modal = crate::tui::app::Modal::Settings(programs_settings_state());
+
+    // Select the last entry, then delete it: selection clamps back.
+    feed_programs_key(&mut app, KeyCode::Char('j')).await;
+    assert_eq!(peek_programs(&app).selected, 1);
+    feed_programs_key(&mut app, KeyCode::Char('d')).await;
+    assert_eq!(app.config.programs, vec![program_entry("Alpha", "a")]);
+    assert_eq!(peek_programs(&app).selected, 0, "selection clamped");
+
+    // Deleting the final entry is allowed — the list may be empty.
+    feed_programs_key(&mut app, KeyCode::Char('d')).await;
+    assert!(app.config.programs.is_empty());
+
+    // An empty list still yields the built-in `claude` choice.
+    let choices = app.config.program_choices();
+    assert_eq!(choices.len(), 1);
+    assert_eq!(choices[0].command, "claude");
+}
+
+#[tokio::test]
+async fn programs_tab_reorder_changes_default() {
+    use crossterm::event::KeyCode;
+
+    let mut app = make_test_app();
+    app.config.programs = vec![
+        program_entry("Claude", "claude"),
+        program_entry("Codex", "codex"),
+    ];
+    app.ui_state.modal = crate::tui::app::Modal::Settings(programs_settings_state());
+    assert_eq!(app.config.default_session_program(), "claude");
+
+    // `J` swaps the first entry down, making the second the new default.
+    feed_programs_key(&mut app, KeyCode::Char('J')).await;
+    assert_eq!(app.config.programs[0].label, "Codex");
+    assert_eq!(app.config.default_session_program(), "codex");
+    assert_eq!(
+        peek_programs(&app).selected,
+        1,
+        "selection follows the move"
+    );
+}
+
+#[tokio::test]
+async fn programs_tab_tab_key_switches_tabs() {
+    use crate::tui::app::{Modal, SettingsTab};
+    use crossterm::event::KeyCode;
+
+    let mut app = make_test_app();
+    app.ui_state.modal = Modal::Settings(programs_settings_state());
+
+    // Tab advances to the wrapped-around General tab.
+    feed_programs_key(&mut app, KeyCode::Tab).await;
+    match &app.ui_state.modal {
+        Modal::Settings(s) => assert_eq!(s.tab, SettingsTab::General),
+        _ => panic!("expected a settings modal"),
+    }
+
+    // BackTab from Programs lands on Sections.
+    app.ui_state.modal = Modal::Settings(programs_settings_state());
+    feed_programs_key(&mut app, KeyCode::BackTab).await;
+    match &app.ui_state.modal {
+        Modal::Settings(s) => assert_eq!(s.tab, SettingsTab::Sections),
+        _ => panic!("expected a settings modal"),
+    }
+}
+
+#[test]
+fn render_programs_tab_shows_entries_and_default_marker() {
+    use crate::tui::app::Modal;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    app.config.programs = vec![
+        program_entry("Claude", "claude"),
+        program_entry("Codex", "codex"),
+    ];
+    app.ui_state.modal = Modal::Settings(programs_settings_state());
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+
+    let text = buffer_text(&terminal);
+    assert!(text.contains("Claude"), "missing first program label");
+    assert!(text.contains("Codex"), "missing second program label");
+    assert!(text.contains("(default)"), "missing default marker");
+    assert!(text.contains("n: new"), "missing list footer hint");
+}
+
+/// Like `make_test_app`, but returns the on-disk config path so tests can read
+/// the persisted config back and pin that a mutation actually wrote through the
+/// store (not merely the in-memory `app.config`).
+fn make_test_app_with_path() -> (App, std::path::PathBuf) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_path = tmp.path().join("config.toml");
+    let state_path = tmp.path().join("state.json");
+    let config = Config::default();
+    let config_store = Arc::new(ConfigStore::with_path(config, config_path.clone()));
+    let store = Arc::new(StateStore::with_path(AppState::new(), state_path));
+    // Leak the TempDir so paths stay valid for the lifetime of the test.
+    std::mem::forget(tmp);
+    let app = App::new(
+        config_store,
+        store,
+        crate::telemetry::FrontendInfo::new("test", "0.0.0"),
+    );
+    (app, config_path)
+}
+
+#[tokio::test]
+async fn programs_tab_reorder_persists_through_store() {
+    use crate::tui::app::Modal;
+    use crossterm::event::KeyCode;
+
+    let (mut app, path) = make_test_app_with_path();
+    app.config.programs = vec![
+        program_entry("Claude", "claude"),
+        program_entry("Codex", "codex"),
+    ];
+    app.ui_state.modal = Modal::Settings(programs_settings_state());
+
+    feed_programs_key(&mut app, KeyCode::Char('J')).await;
+
+    // Read the config back from disk: the reorder must have been written
+    // through the store (this would fail if the `J` arm dropped persist_config).
+    let persisted = Config::load_from_path(&path).unwrap();
+    assert_eq!(
+        persisted.programs,
+        vec![
+            program_entry("Codex", "codex"),
+            program_entry("Claude", "claude"),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn programs_tab_editing_field_label_rejects_duplicate() {
+    use crate::tui::app::Modal;
+    use crossterm::event::KeyCode;
+
+    let mut app = make_test_app();
+    app.config.programs = vec![
+        program_entry("Claude", "claude"),
+        program_entry("Codex", "codex"),
+    ];
+    app.ui_state.modal = Modal::Settings(programs_settings_state());
+
+    // Focus the fields pane on the second entry and edit its label to a dup.
+    feed_programs_key(&mut app, KeyCode::Char('j')).await;
+    feed_programs_key(&mut app, KeyCode::Enter).await; // into Fields (label field)
+    assert_eq!(peek_programs(&app).field_selected, 0);
+    feed_programs_key(&mut app, KeyCode::Enter).await; // start editing label
+    for _ in 0.."Codex".len() {
+        feed_programs_key(&mut app, KeyCode::Backspace).await;
+    }
+    type_programs(&mut app, "Claude").await;
+    feed_programs_key(&mut app, KeyCode::Enter).await;
+
+    assert_eq!(app.config.programs[1].label, "Codex", "duplicate rejected");
+}
+
+#[tokio::test]
+async fn programs_tab_esc_cancels_rename_and_edit_without_change() {
+    use crate::tui::app::Modal;
+    use crossterm::event::KeyCode;
+
+    let mut app = make_test_app();
+    app.config.programs = vec![program_entry("Claude", "claude")];
+    app.ui_state.modal = Modal::Settings(programs_settings_state());
+
+    // Rename: type a new label then Esc — nothing changes.
+    feed_programs_key(&mut app, KeyCode::Char('r')).await;
+    type_programs(&mut app, "XYZ").await;
+    feed_programs_key(&mut app, KeyCode::Esc).await;
+    assert_eq!(app.config.programs[0].label, "Claude");
+    assert!(peek_programs(&app).editing.is_none());
+
+    // Edit command field: type then Esc — nothing changes.
+    feed_programs_key(&mut app, KeyCode::Enter).await; // Fields
+    feed_programs_key(&mut app, KeyCode::Char('j')).await; // command field
+    feed_programs_key(&mut app, KeyCode::Enter).await; // start editing
+    type_programs(&mut app, "-zzz").await;
+    feed_programs_key(&mut app, KeyCode::Esc).await;
+    assert_eq!(app.config.programs[0].command, "claude");
+    assert!(peek_programs(&app).editing.is_none());
+}
+
+#[tokio::test]
+async fn programs_tab_create_label_empty_or_duplicate_closes_editor() {
+    use crate::tui::app::Modal;
+    use crossterm::event::KeyCode;
+
+    let mut app = make_test_app();
+    app.config.programs = vec![program_entry("Claude", "claude")];
+    app.ui_state.modal = Modal::Settings(programs_settings_state());
+
+    // Empty label + Enter closes the editor without creating anything.
+    feed_programs_key(&mut app, KeyCode::Char('n')).await;
+    feed_programs_key(&mut app, KeyCode::Enter).await;
+    assert!(peek_programs(&app).editing.is_none(), "empty closes editor");
+    assert_eq!(app.config.programs.len(), 1);
+
+    // Duplicate label + Enter also closes the editor without creating.
+    feed_programs_key(&mut app, KeyCode::Char('n')).await;
+    type_programs(&mut app, "Claude").await;
+    feed_programs_key(&mut app, KeyCode::Enter).await;
+    assert!(peek_programs(&app).editing.is_none(), "dup closes editor");
+    assert_eq!(app.config.programs.len(), 1);
+}
+
+#[tokio::test]
+async fn programs_tab_reorder_up_with_k() {
+    use crate::tui::app::Modal;
+    use crossterm::event::KeyCode;
+
+    let mut app = make_test_app();
+    app.config.programs = vec![
+        program_entry("Claude", "claude"),
+        program_entry("Codex", "codex"),
+    ];
+    app.ui_state.modal = Modal::Settings(programs_settings_state());
+
+    // Select the second entry, then `K` moves it up to become the default.
+    feed_programs_key(&mut app, KeyCode::Char('j')).await;
+    feed_programs_key(&mut app, KeyCode::Char('K')).await;
+    assert_eq!(app.config.programs[0].label, "Codex");
+    assert_eq!(app.config.default_session_program(), "codex");
+    assert_eq!(
+        peek_programs(&app).selected,
+        0,
+        "selection follows the move"
     );
 }
 
