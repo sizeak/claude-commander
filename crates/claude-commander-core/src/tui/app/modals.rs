@@ -263,6 +263,7 @@ impl App {
                 program_picker,
                 focus,
                 expanded,
+                mask,
                 ..
             } => {
                 // Cap the visible project rows so a long list can't grow the
@@ -280,13 +281,24 @@ impl App {
                     .map(|b| format!("↳ existing branch: {} — will check out", b))
                 });
 
+                // Secret entry (e.g. a bearer token) renders as bullets; the
+                // underlying Input still holds the real value, and bullets are
+                // width-1 so the tui-input cursor math is unaffected.
+                let masked;
+                let shown_value = if *mask {
+                    masked = "•".repeat(value.value().chars().count());
+                    masked.as_str()
+                } else {
+                    value.value()
+                };
+
                 // Width is independent of height, so size the modal to the exact
                 // number of body lines the (collapsed-or-expanded) layout emits.
                 let modal_width = (area.width * 60 / 100).max(40);
                 let inner_width = modal_width.saturating_sub(2);
                 let (lines, cursor) = build_input_modal_lines(
                     prompt,
-                    value.value(),
+                    shown_value,
                     hint.as_deref(),
                     project_picker.as_ref(),
                     program_picker.as_ref(),
@@ -549,6 +561,7 @@ impl App {
                     PaletteMode::Unified => " Quick Switch ",
                     PaletteMode::CommandOnly => " Commands ",
                     PaletteMode::SectionPicker { .. } => " Move to Section ",
+                    PaletteMode::RemoteServerPicker => " Remove Remote Server ",
                 };
                 let block = Block::default()
                     .title(title)
@@ -686,7 +699,8 @@ impl App {
                             let line = Line::from(Span::styled(content, row_style));
                             frame.render_widget(Paragraph::new(line).style(row_style), line_area);
                         }
-                        QuickSwitchItem::SectionMove { label, .. } => {
+                        QuickSwitchItem::SectionMove { label, .. }
+                        | QuickSwitchItem::RemoteServerRemove { label, .. } => {
                             let style = if is_selected {
                                 self.theme.selection()
                             } else {

@@ -150,6 +150,46 @@ impl App {
                 // change feed refreshes the tree. Just surface the error.
                 self.ui_state.modal = Modal::Error { message };
             }
+            StateUpdate::RemoteServerProbed { server, result } => {
+                // Only meaningful while the add-server Loading modal is up;
+                // if the user dismissed the flow, drop the result silently.
+                if !matches!(self.ui_state.modal, Modal::Loading { .. }) {
+                    return;
+                }
+                match result {
+                    Ok(tmux_ok) => {
+                        let name = server.name.clone();
+                        match self.add_remote_server_to_config(server) {
+                            Ok(()) => {
+                                self.ui_state.modal = Modal::None;
+                                let msg = if tmux_ok {
+                                    format!("Added remote server \"{name}\"")
+                                } else {
+                                    format!(
+                                        "Added remote server \"{name}\" (warning: tmux unavailable on server)"
+                                    )
+                                };
+                                self.ui_state.status_message =
+                                    Some((msg, Instant::now() + Duration::from_secs(4)));
+                                self.refresh_list_items().await;
+                            }
+                            Err(e) => {
+                                self.ui_state.modal = Modal::Error {
+                                    message: format!("Failed to save server: {e}"),
+                                };
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let name = server.name.clone();
+                        self.ui_state.modal = Modal::Confirm {
+                            title: "Connection Test Failed".to_string(),
+                            message: format!("{e}\n\nSave \"{name}\" anyway?"),
+                            on_confirm: ConfirmAction::AddRemoteServerAnyway { server },
+                        };
+                    }
+                }
+            }
             StateUpdate::CheckoutFetchComplete {
                 project_id: updated_project,
                 branches,

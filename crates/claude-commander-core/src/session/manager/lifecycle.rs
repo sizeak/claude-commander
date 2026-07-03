@@ -251,109 +251,135 @@ impl SessionManager {
             worktree_create_start.elapsed().as_millis()
         );
 
-        // Read tmux_session_name from the placeholder session
-        let tmux_session_name = {
-            let state = self.store.read().await;
-            let session = state
-                .get_session(session_id)
-                .ok_or(SessionError::NotFound(*session_id))?;
-            session.tmux_session_name.clone()
-        };
+        // Everything from here on can still fail (tmux create, store writes).
+        // Scope those steps together so a failure unregisters the worktree we
+        // just created — otherwise the leaked registration makes every retry
+        // with the same title fail with "'<branch>' is already used by
+        // worktree at …".
+        let finalized: Result<SessionId> = async {
+            // Read tmux_session_name from the placeholder session
+            let tmux_session_name = {
+                let state = self.store.read().await;
+                let session = state
+                    .get_session(session_id)
+                    .ok_or(SessionError::NotFound(*session_id))?;
+                session.tmux_session_name.clone()
+            };
 
-        // Build a single positional prompt arg combining stack context (for
-        // stacked sessions) and any user-provided initial prompt. Harnesses that
-        // accept a positional prompt (Claude, Codex) take exactly one, so both
-        // parts are merged; harnesses that don't (a bare shell) get neither.
-        let accepts_prompt = AgentKind::from_program(&program).accepts_positional_prompt();
-        let launch_cmd = {
-            let mut prompt_parts: Vec<String> = Vec::new();
-            if let Some(pb) = stack_parent_branch.as_deref()
-                && accepts_prompt
-            {
-                prompt_parts.push(format!(
-                    "This branch is stacked on `{pb}` (not main). \
+            // Build a single positional prompt arg combining stack context (for
+            // stacked sessions) and any user-provided initial prompt. Harnesses that
+            // accept a positional prompt (Claude, Codex) take exactly one, so both
+            // parts are merged; harnesses that don't (a bare shell) get neither.
+            let accepts_prompt = AgentKind::from_program(&program).accepts_positional_prompt();
+            let launch_cmd = {
+                let mut prompt_parts: Vec<String> = Vec::new();
+                if let Some(pb) = stack_parent_branch.as_deref()
+                    && accepts_prompt
+                {
+                    prompt_parts.push(format!(
+                        "This branch is stacked on `{pb}` (not main). \
                      When creating a PR for this session, use: \
                      gh pr create --base {pb}"
-                ));
-            }
-            if let Some(ref user_prompt) = initial_prompt
-                && accepts_prompt
-            {
-                prompt_parts.push(user_prompt.clone());
-            }
-            if prompt_parts.is_empty() {
-                program.clone()
-            } else {
-                let combined = prompt_parts.join("\n\n");
-                let escaped = shell_escape_single_quote(&combined);
-                format!("{program} '{escaped}'")
-            }
-        };
-        let launch_cmd = program_with_session_name(&launch_cmd, &title);
-        let launch_cmd = self.maybe_wrap_nix_develop(&launch_cmd, &worktree_info.path);
-
-        // Create tmux session in the worktree directory
-        let tmux_start = std::time::Instant::now();
-        self.tmux
-            .create_session(&tmux_session_name, &worktree_info.path, Some(&launch_cmd))
-            .await?;
-        info!(
-            "[timing] tmux create_session took {}ms",
-            tmux_start.elapsed().as_millis()
-        );
-
-        // Update session to Running with the real worktree info
-        let sid = *session_id;
-        let wt_path = worktree_info.path.clone();
-        let head = worktree_info.head.clone();
-        // A fresh branch is created empty off its base, so HEAD *is* the fork
-        // point. A checked-out branch sits on its tip, so record its genuine
-        // fork point instead — else `merge-base(base, HEAD)` is HEAD and the
-        // review diff comes up empty for a branch that is ahead of its target.
-        let base_commit =
-            crate::git::managed_base_commit(&wt_path, &head, Some(&main_branch), branch_preexisted)
-                .await;
-        // The branch this session forked from, recorded so the review diff can
-        // resolve its base against that branch's *live* tip rather than the
-        // frozen `base_commit`: a stack parent's branch, an explicit
-        // `--base-branch`, or the project's main branch.
-        let base_branch = stack_parent_branch
-            .as_deref()
-            .or(base_branch.as_deref())
-            .unwrap_or(&main_branch)
-            .to_string();
-        self.store
-            .mutate(move |state| {
-                if let Some(session) = state.get_session_mut(&sid) {
-                    session.worktree_path = wt_path;
-                    session.base_commit = Some(base_commit);
-                    session.base_branch = Some(base_branch);
-                    session.set_status(SessionStatus::Running);
+                    ));
                 }
-            })
-            .await?;
+                if let Some(ref user_prompt) = initial_prompt
+                    && accepts_prompt
+                {
+                    prompt_parts.push(user_prompt.clone());
+                }
+                if prompt_parts.is_empty() {
+                    program.clone()
+                } else {
+                    let combined = prompt_parts.join("\n\n");
+                    let escaped = shell_escape_single_quote(&combined);
+                    format!("{program} '{escaped}'")
+                }
+            };
+            let launch_cmd = program_with_session_name(&launch_cmd, &title);
+            let launch_cmd = self.maybe_wrap_nix_develop(&launch_cmd, &worktree_info.path);
 
-        // Configure CC status bar (branch only, no PR yet)
-        let status_bar = {
-            let state = self.store.read().await;
-            let session = state
-                .get_session(session_id)
-                .ok_or(SessionError::NotFound(*session_id))?;
-            self.status_bar_info(session, &state)
-        };
-        self.tmux
-            .configure_status_bar(&tmux_session_name, &status_bar)
+            // Create tmux session in the worktree directory
+            let tmux_start = std::time::Instant::now();
+            self.tmux
+                .create_session(&tmux_session_name, &worktree_info.path, Some(&launch_cmd))
+                .await?;
+            info!(
+                "[timing] tmux create_session took {}ms",
+                tmux_start.elapsed().as_millis()
+            );
+
+            // Update session to Running with the real worktree info
+            let sid = *session_id;
+            let wt_path = worktree_info.path.clone();
+            let head = worktree_info.head.clone();
+            // A fresh branch is created empty off its base, so HEAD *is* the fork
+            // point. A checked-out branch sits on its tip, so record its genuine
+            // fork point instead — else `merge-base(base, HEAD)` is HEAD and the
+            // review diff comes up empty for a branch that is ahead of its target.
+            let base_commit = crate::git::managed_base_commit(
+                &wt_path,
+                &head,
+                Some(&main_branch),
+                branch_preexisted,
+            )
             .await;
+            // The branch this session forked from, recorded so the review diff can
+            // resolve its base against that branch's *live* tip rather than the
+            // frozen `base_commit`: a stack parent's branch, an explicit
+            // `--base-branch`, or the project's main branch.
+            let base_branch = stack_parent_branch
+                .as_deref()
+                .or(base_branch.as_deref())
+                .unwrap_or(&main_branch)
+                .to_string();
+            self.store
+                .mutate(move |state| {
+                    if let Some(session) = state.get_session_mut(&sid) {
+                        session.worktree_path = wt_path;
+                        session.base_commit = Some(base_commit);
+                        session.base_branch = Some(base_branch);
+                        session.set_status(SessionStatus::Running);
+                    }
+                })
+                .await?;
 
-        info!(
-            "Finalized session {} with tmux session {}",
-            session_id, tmux_session_name
-        );
-        info!(
-            "[timing] finalize_session total took {}ms",
-            finalize_start.elapsed().as_millis()
-        );
-        Ok(*session_id)
+            // Configure CC status bar (branch only, no PR yet)
+            let status_bar = {
+                let state = self.store.read().await;
+                let session = state
+                    .get_session(session_id)
+                    .ok_or(SessionError::NotFound(*session_id))?;
+                self.status_bar_info(session, &state)
+            };
+            self.tmux
+                .configure_status_bar(&tmux_session_name, &status_bar)
+                .await;
+
+            info!(
+                "Finalized session {} with tmux session {}",
+                session_id, tmux_session_name
+            );
+            info!(
+                "[timing] finalize_session total took {}ms",
+                finalize_start.elapsed().as_millis()
+            );
+            Ok(*session_id)
+        }
+        .await;
+
+        if finalized.is_err()
+            && let Ok(backend) = GitBackend::open(&repo_path)
+        {
+            let worktree_manager =
+                WorktreeManager::new(backend, self.config_store.read().worktrees_dir()?);
+            if let Err(e) = worktree_manager
+                .remove_worktree(&worktree_info.path, true)
+                .await
+            {
+                warn!("Failed to remove worktree after failed finalize: {}", e);
+            }
+        }
+        finalized
     }
 
     /// Remove a session that is still in `Creating` state (e.g., on failure or startup cleanup).

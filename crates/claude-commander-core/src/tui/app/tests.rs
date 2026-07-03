@@ -2947,3 +2947,261 @@ fn reconcile_remote_servers_reorder_is_noop() {
     assert!(recon.added.is_empty());
     assert!(recon.removed.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Add/remove remote server palette flows (Phase G)
+// ---------------------------------------------------------------------------
+
+fn server_cfg(name: &str, url: &str) -> crate::config::RemoteServerConfig {
+    crate::config::RemoteServerConfig {
+        name: name.to_string(),
+        url: url.to_string(),
+        token: None,
+    }
+}
+
+#[tokio::test]
+async fn add_remote_server_flow_chains_name_url_token() {
+    let mut app = make_test_app();
+    app.handle_add_remote_server();
+    assert!(matches!(
+        &app.ui_state.modal,
+        Modal::Input {
+            on_submit: InputAction::AddRemoteServerName,
+            mask: false,
+            ..
+        }
+    ));
+
+    // Name → URL step.
+    app.handle_input_submit(InputAction::AddRemoteServerName, "buildbox".into(), None)
+        .await;
+    assert!(matches!(
+        &app.ui_state.modal,
+        Modal::Input {
+            on_submit: InputAction::AddRemoteServerUrl { .. },
+            mask: false,
+            ..
+        }
+    ));
+
+    // Invalid URL is rejected and the URL step re-opens with the entry kept.
+    app.handle_input_submit(
+        InputAction::AddRemoteServerUrl {
+            name: "buildbox".into(),
+        },
+        "not a url".into(),
+        None,
+    )
+    .await;
+    match &app.ui_state.modal {
+        Modal::Input {
+            on_submit: InputAction::AddRemoteServerUrl { name },
+            value,
+            ..
+        } => {
+            assert_eq!(name, "buildbox");
+            assert_eq!(value.value(), "not a url");
+        }
+        other => panic!("expected URL re-prompt, got {other:?}"),
+    }
+    assert!(app.ui_state.status_message.is_some());
+
+    // Valid URL → masked token step.
+    app.handle_input_submit(
+        InputAction::AddRemoteServerUrl {
+            name: "buildbox".into(),
+        },
+        "http://buildbox:7878".into(),
+        None,
+    )
+    .await;
+    assert!(matches!(
+        &app.ui_state.modal,
+        Modal::Input {
+            on_submit: InputAction::AddRemoteServerToken { .. },
+            mask: true,
+            ..
+        }
+    ));
+
+    // Token submission kicks off the probe (Loading modal).
+    app.handle_input_submit(
+        InputAction::AddRemoteServerToken {
+            name: "buildbox".into(),
+            url: "http://buildbox:7878".into(),
+        },
+        "sekrit-token".into(),
+        None,
+    )
+    .await;
+    assert!(matches!(&app.ui_state.modal, Modal::Loading { .. }));
+}
+
+#[tokio::test]
+async fn add_remote_server_duplicate_name_reprompts() {
+    let mut app = make_test_app();
+    app.config.remote_servers = vec![server_cfg("buildbox", "http://b:7878")];
+    app.handle_input_submit(InputAction::AddRemoteServerName, "buildbox".into(), None)
+        .await;
+    assert!(matches!(
+        &app.ui_state.modal,
+        Modal::Input {
+            on_submit: InputAction::AddRemoteServerName,
+            ..
+        }
+    ));
+    assert!(app.ui_state.status_message.is_some());
+}
+
+#[tokio::test]
+async fn probe_success_persists_server_and_wires_backend() {
+    let mut app = make_test_app();
+    app.ui_state.modal = Modal::Loading {
+        title: String::new(),
+        message: String::new(),
+        hint: None,
+    };
+    let backends_before = app.backends.len();
+    app.handle_state_update(StateUpdate::RemoteServerProbed {
+        server: server_cfg("buildbox", "http://buildbox:7878"),
+        result: Ok(true),
+    })
+    .await;
+    assert!(matches!(app.ui_state.modal, Modal::None));
+    // Persisted to config (both the live cache and the store's copy)…
+    assert_eq!(app.config.remote_servers.len(), 1);
+    assert_eq!(app.service.read_config().remote_servers.len(), 1);
+    // …and a live handle exists (a degraded placeholder here, since the test
+    // factory refuses construction — the shape the tree renders either way).
+    assert_eq!(app.backends.len(), backends_before + 1);
+}
+
+#[tokio::test]
+async fn probe_failure_offers_save_anyway_which_persists() {
+    let mut app = make_test_app();
+    app.ui_state.modal = Modal::Loading {
+        title: String::new(),
+        message: String::new(),
+        hint: None,
+    };
+    app.handle_state_update(StateUpdate::RemoteServerProbed {
+        server: server_cfg("buildbox", "http://buildbox:7878"),
+        result: Err("connection refused".into()),
+    })
+    .await;
+    let confirm = match &app.ui_state.modal {
+        Modal::Confirm {
+            message,
+            on_confirm: ConfirmAction::AddRemoteServerAnyway { server },
+            ..
+        } => {
+            assert!(message.contains("connection refused"));
+            server.clone()
+        }
+        other => panic!("expected save-anyway confirm, got {other:?}"),
+    };
+    app.handle_confirm(ConfirmAction::AddRemoteServerAnyway { server: confirm })
+        .await;
+    assert_eq!(app.config.remote_servers.len(), 1);
+}
+
+#[tokio::test]
+async fn probe_result_ignored_when_flow_dismissed() {
+    let mut app = make_test_app();
+    // No Loading modal up — the user cancelled; a late probe result must not
+    // write config or open modals.
+    app.handle_state_update(StateUpdate::RemoteServerProbed {
+        server: server_cfg("buildbox", "http://buildbox:7878"),
+        result: Ok(true),
+    })
+    .await;
+    assert!(matches!(app.ui_state.modal, Modal::None));
+    assert!(app.config.remote_servers.is_empty());
+}
+
+#[tokio::test]
+async fn remove_remote_server_empty_config_reports_nothing_to_do() {
+    let mut app = make_test_app();
+    app.handle_remove_remote_server();
+    assert!(matches!(app.ui_state.modal, Modal::None));
+    let (msg, _) = app.ui_state.status_message.clone().unwrap();
+    assert!(msg.contains("No remote servers"));
+}
+
+#[tokio::test]
+async fn remove_remote_server_picker_confirm_removes_from_config() {
+    let mut app = make_test_app();
+    // Seed via the same write path the add flow uses so the store copy and
+    // live cache agree.
+    app.add_remote_server_to_config(server_cfg("buildbox", "http://b:7878"))
+        .unwrap();
+    assert_eq!(app.backends.len(), 2);
+
+    app.handle_remove_remote_server();
+    match &app.ui_state.modal {
+        Modal::QuickSwitch { mode, matches, .. } => {
+            assert!(matches!(mode, PaletteMode::RemoteServerPicker));
+            assert_eq!(matches.len(), 1);
+        }
+        other => panic!("expected picker, got {other:?}"),
+    }
+
+    app.handle_confirm(ConfirmAction::RemoveRemoteServer {
+        name: "buildbox".into(),
+    })
+    .await;
+    assert!(app.config.remote_servers.is_empty());
+    assert!(app.service.read_config().remote_servers.is_empty());
+    assert_eq!(app.backends.len(), 1, "backend handle dropped");
+}
+
+#[test]
+fn remote_server_picker_items_filter_by_name_and_url() {
+    let mut app = make_test_app();
+    app.config.remote_servers = vec![
+        server_cfg("buildbox", "http://tail:7878"),
+        server_cfg("laptop", "http://lap:7878"),
+    ];
+    let all = app.gather_remote_server_picker_items("");
+    assert_eq!(all.len(), 2);
+    let by_name = app.gather_remote_server_picker_items("build");
+    assert_eq!(by_name.len(), 1);
+    let by_url = app.gather_remote_server_picker_items("lap:7878");
+    assert_eq!(by_url.len(), 1);
+    match &by_url[0] {
+        QuickSwitchItem::RemoteServerRemove { name, label } => {
+            assert_eq!(name, "laptop");
+            assert!(label.contains("http://lap:7878"));
+        }
+        other => panic!("unexpected item {other:?}"),
+    }
+}
+
+#[test]
+fn masked_input_modal_renders_bullets_not_the_token() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    app.ui_state.modal = Modal::Input {
+        title: "Add Remote Server".to_string(),
+        prompt: "Bearer token:".to_string(),
+        value: "sekrit-token".into(),
+        on_submit: InputAction::AddRemoteServerToken {
+            name: "b".into(),
+            url: "http://b:7878".into(),
+        },
+        existing_branches: None,
+        project_picker: None,
+        program_picker: None,
+        focus: InputFocus::Name,
+        expanded: false,
+        mask: true,
+    };
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    let text = buffer_text(&terminal);
+    assert!(!text.contains("sekrit-token"), "token leaked to screen");
+    assert!(text.contains(&"•".repeat("sekrit-token".len())));
+}

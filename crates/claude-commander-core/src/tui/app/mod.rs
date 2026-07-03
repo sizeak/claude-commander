@@ -48,7 +48,7 @@ use crate::backend::{
     CommanderBackend, ConnectionState, LOCAL_BACKEND_ID, LocalBackend, PlaceholderBackend,
     RemoteBackendFactory, SessionRef,
 };
-use crate::config::{BindableAction, Config, ConfigStore, StateStore};
+use crate::config::{BindableAction, Config, ConfigStore, RemoteServerConfig, StateStore};
 use crate::error::{Result, TuiError};
 use crate::git::{
     AiSummary, BlockReason, DiffInfo, EnrichedPrInfo, diff_hash, fetch_branch_summary,
@@ -250,6 +250,10 @@ pub enum Modal {
         /// dropdown is open (Tab/arrows are captured by the dropdown), so the
         /// flag stays consistent with `focus` without needing an explicit reset.
         expanded: bool,
+        /// Render the value as bullets instead of plaintext (secret entry,
+        /// e.g. a remote server's bearer token). Editing behaves normally;
+        /// only the display is masked.
+        mask: bool,
     },
     /// Confirmation modal
     Confirm {
@@ -353,6 +357,9 @@ pub enum PaletteMode {
     SectionPicker {
         session_id: SessionId,
     },
+    /// Remote-server picker for the remove-server flow: one entry per
+    /// configured `[[remote_servers]]`; selecting one opens a confirm modal.
+    RemoteServerPicker,
 }
 
 /// A row in the quick-switch palette — either an open session, a
@@ -367,6 +374,13 @@ pub enum QuickSwitchItem {
         session_id: SessionId,
         target: Option<String>,
         /// Pre-formatted display label.
+        label: String,
+    },
+    /// Selecting this row opens the remove-confirmation for the named remote
+    /// server (remove-server palette mode).
+    RemoteServerRemove {
+        name: String,
+        /// Pre-formatted display label (`name (url)`).
         label: String,
     },
 }
@@ -823,15 +837,43 @@ pub enum InputAction {
     RenameSession {
         session_id: SessionId,
     },
+    /// Step 1 of the add-remote-server flow: the server's display name.
+    AddRemoteServerName,
+    /// Step 2: the server's base URL.
+    AddRemoteServerUrl {
+        name: String,
+    },
+    /// Step 3: the bearer token (masked; empty = no token). Submission kicks
+    /// off the async connection probe.
+    AddRemoteServerToken {
+        name: String,
+        url: String,
+    },
 }
 
 /// Action to perform when confirm modal is confirmed
 #[derive(Debug, Clone)]
 pub enum ConfirmAction {
-    DeleteSession { session_id: SessionId },
-    DeleteMergedPrSessions { session_ids: Vec<SessionId> },
-    RestartSession { session_id: SessionId },
-    RemoveProject { project_id: ProjectId },
+    DeleteSession {
+        session_id: SessionId,
+    },
+    DeleteMergedPrSessions {
+        session_ids: Vec<SessionId>,
+    },
+    RestartSession {
+        session_id: SessionId,
+    },
+    RemoveProject {
+        project_id: ProjectId,
+    },
+    /// Save a remote server whose connection probe failed ("save anyway").
+    AddRemoteServerAnyway {
+        server: RemoteServerConfig,
+    },
+    /// Remove a configured remote server (picked via the palette).
+    RemoveRemoteServer {
+        name: String,
+    },
 }
 
 /// Application UI state
@@ -1117,14 +1159,16 @@ pub struct App {
     commander_enabled_at_init: bool,
     /// Unified service layer — owns SessionManager, StateStore, and ConfigStore.
     ///
-    /// PHASE-C transition: retained while store/service call sites are migrated
-    /// onto `backends`. The end state drops this field entirely; until then the
-    /// local `BackendHandle` wraps a clone of this same service.
+    /// Retained for owner-side concerns only (spawning the core background
+    /// loops, tmux health check, config read/write/reload); all session and
+    /// project state flows through `backends`. The local `BackendHandle`
+    /// wraps a clone of this same service.
     service: CommanderService,
-    /// The backends the TUI drives. Exactly one (the local backend) this phase;
-    /// Phase E adds remote entries. Each holds a cached [`BackendView`] the
-    /// render path reads synchronously, refreshed by a per-backend change-feed
-    /// task via [`StateUpdate::BackendChanged`](crate::tui::event::StateUpdate).
+    /// The backends the TUI drives: the local backend first, then one entry
+    /// per configured `[[remote_servers]]`. Each holds a cached
+    /// [`BackendView`] the render path reads synchronously, refreshed by a
+    /// per-backend change-feed task via
+    /// [`StateUpdate::BackendChanged`](crate::tui::event::StateUpdate).
     backends: Vec<BackendHandle>,
     /// Builds a remote backend from its config entry. Injected by the binary so
     /// core never links the remote client crate. Held past construction so the

@@ -458,6 +458,7 @@ impl App {
                 program_picker: Some(program_picker),
                 focus: super::InputFocus::Name,
                 expanded: false,
+                mask: false,
             };
         } else {
             self.ui_state.status_message = Some((
@@ -531,6 +532,7 @@ impl App {
             program_picker: Some(program_picker),
             focus: super::InputFocus::Name,
             expanded: false,
+            mask: false,
         };
     }
 
@@ -957,6 +959,9 @@ impl App {
         if let PaletteMode::SectionPicker { session_id } = eff_mode {
             return self.gather_section_picker_items(session_id, eff_query);
         }
+        if eff_mode == PaletteMode::RemoteServerPicker {
+            return self.gather_remote_server_picker_items(eff_query);
+        }
         if eff_mode == PaletteMode::Unified {
             for m in self.gather_quick_switch_matches(eff_query).await {
                 out.push(QuickSwitchItem::Session(m));
@@ -1032,6 +1037,26 @@ impl App {
             } = &mut self.ui_state.modal
             {
                 *matches = section_items;
+                if *selected_idx >= matches.len() {
+                    *selected_idx = matches.len().saturating_sub(1);
+                }
+                *scroll = 0;
+                *scroll = adjust_list_scroll(*selected_idx, *scroll, LIST_MAX_VISIBLE);
+            }
+            return;
+        }
+
+        // Remote-server picker: same shape — re-filter the server rows and stop.
+        if eff_mode == PaletteMode::RemoteServerPicker {
+            let server_items = self.gather_remote_server_picker_items(eff_query);
+            if let Modal::QuickSwitch {
+                matches,
+                selected_idx,
+                scroll,
+                ..
+            } = &mut self.ui_state.modal
+            {
+                *matches = server_items;
                 if *selected_idx >= matches.len() {
                     *selected_idx = matches.len().saturating_sub(1);
                 }
@@ -1347,6 +1372,130 @@ impl App {
         };
     }
 
+    /// Handle "add remote server" — step 1 of the chained flow: prompt for a
+    /// display name. URL and token follow; submission of the token step runs
+    /// an async connection probe before writing config.
+    pub(super) fn handle_add_remote_server(&mut self) {
+        self.ui_state.modal = Modal::Input {
+            title: "Add Remote Server".to_string(),
+            prompt: "Server name (shown as the tree header):".to_string(),
+            value: super::Input::default(),
+            on_submit: InputAction::AddRemoteServerName,
+            existing_branches: None,
+            project_picker: None,
+            program_picker: None,
+            focus: super::InputFocus::Name,
+            expanded: false,
+            mask: false,
+        };
+    }
+
+    /// Handle "remove remote server" — open the palette in remote-server
+    /// picker mode. Not gated on the server count: an empty config just
+    /// reports there's nothing to remove.
+    pub(super) fn handle_remove_remote_server(&mut self) {
+        if self.config.remote_servers.is_empty() {
+            self.ui_state.status_message = Some((
+                "No remote servers configured".to_string(),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            return;
+        }
+        let matches = self.gather_remote_server_picker_items("");
+        self.ui_state.modal = Modal::QuickSwitch {
+            mode: PaletteMode::RemoteServerPicker,
+            query: super::Input::default(),
+            matches,
+            selected_idx: 0,
+            scroll: 0,
+        };
+    }
+
+    /// Build the remove-server picker rows: one per configured server,
+    /// filtered by name/url substring.
+    pub(super) fn gather_remote_server_picker_items(
+        &self,
+        filter_query: &str,
+    ) -> Vec<QuickSwitchItem> {
+        let q = filter_query.to_lowercase();
+        self.config
+            .remote_servers
+            .iter()
+            .filter(|s| {
+                q.is_empty()
+                    || s.name.to_lowercase().contains(&q)
+                    || s.url.to_lowercase().contains(&q)
+            })
+            .map(|s| QuickSwitchItem::RemoteServerRemove {
+                name: s.name.clone(),
+                label: format!("{} ({})", s.name, s.url),
+            })
+            .collect()
+    }
+
+    /// Persist a new `[[remote_servers]]` entry to config.toml (validating the
+    /// combined list first) and wire up its live backend handle. Returns a
+    /// user-facing error string on failure so callers can toast/modal it.
+    pub(super) fn add_remote_server_to_config(
+        &mut self,
+        server: crate::config::RemoteServerConfig,
+    ) -> std::result::Result<(), String> {
+        let old = self.config.remote_servers.clone();
+        let mut cfg = self.service.read_config();
+        cfg.remote_servers.push(server);
+        cfg.validate_remote_servers().map_err(|e| e.to_string())?;
+        self.service.update_config(cfg).map_err(|e| e.to_string())?;
+        self.config = self.service.read_config();
+        let new = self.config.remote_servers.clone();
+        self.apply_remote_servers_reload(&old, &new);
+        Ok(())
+    }
+
+    /// Remove a `[[remote_servers]]` entry by name from config.toml and drop
+    /// its live backend handle (selection falls back to local).
+    pub(super) fn remove_remote_server_from_config(
+        &mut self,
+        name: &str,
+    ) -> std::result::Result<(), String> {
+        let old = self.config.remote_servers.clone();
+        let mut cfg = self.service.read_config();
+        cfg.remote_servers.retain(|s| s.name != name);
+        self.service.update_config(cfg).map_err(|e| e.to_string())?;
+        self.config = self.service.read_config();
+        let new = self.config.remote_servers.clone();
+        self.apply_remote_servers_reload(&old, &new);
+        Ok(())
+    }
+
+    /// Kick off the async connection probe for a candidate server: build a
+    /// backend via the injected factory and fetch a workspace snapshot (which
+    /// exercises reachability, auth, and reports the server's tmux health).
+    /// The outcome arrives as [`StateUpdate::RemoteServerProbed`].
+    pub(super) fn spawn_remote_server_probe(&mut self, server: crate::config::RemoteServerConfig) {
+        self.ui_state.modal = Modal::Loading {
+            title: "Add Remote Server".to_string(),
+            message: format!("Testing connection to {}…", server.url),
+            hint: None,
+        };
+        let factory = self.remote_factory.clone();
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let result = match factory(&server) {
+                Ok(backend) => match backend.workspace_snapshot().await {
+                    Ok(snap) => Ok(snap.server.tmux_ok),
+                    Err(e) => Err(e.to_string()),
+                },
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::RemoteServerProbed {
+                    server,
+                    result,
+                }))
+                .await;
+        });
+    }
+
     /// Apply a manual section move chosen in the picker palette.
     /// `target = Some(name)` sets the override; `target = None` is the
     /// "Auto" entry, which must fully re-evaluate from the predicates
@@ -1394,6 +1543,7 @@ impl App {
             program_picker: None,
             focus: super::InputFocus::Name,
             expanded: false,
+            mask: false,
         };
     }
 
@@ -1640,6 +1790,89 @@ impl App {
                     }
                 }
             }
+            InputAction::AddRemoteServerName => {
+                let name = value.trim().to_string();
+                if name.is_empty() {
+                    self.ui_state.status_message = Some((
+                        "Server name cannot be empty".to_string(),
+                        Instant::now() + Duration::from_secs(3),
+                    ));
+                    self.handle_add_remote_server();
+                    return;
+                }
+                if self.config.remote_servers.iter().any(|s| s.name == name) {
+                    self.ui_state.status_message = Some((
+                        format!("A remote server named \"{name}\" already exists"),
+                        Instant::now() + Duration::from_secs(3),
+                    ));
+                    self.handle_add_remote_server();
+                    return;
+                }
+                self.ui_state.modal = Modal::Input {
+                    title: "Add Remote Server".to_string(),
+                    prompt: format!("Server URL for \"{name}\" (e.g. http://host:7878):"),
+                    value: "http://".into(),
+                    on_submit: InputAction::AddRemoteServerUrl { name },
+                    existing_branches: None,
+                    project_picker: None,
+                    program_picker: None,
+                    focus: super::InputFocus::Name,
+                    expanded: false,
+                    mask: false,
+                };
+            }
+            InputAction::AddRemoteServerUrl { name } => {
+                let url = value.trim().to_string();
+                // Validate the same way config loading does: a candidate list
+                // containing just this entry catches empty/unparseable/hostless
+                // URLs without duplicating the rules here.
+                let mut candidate = self.service.read_config();
+                candidate.remote_servers = vec![crate::config::RemoteServerConfig {
+                    name: name.clone(),
+                    url: url.clone(),
+                    token: None,
+                }];
+                if let Err(e) = candidate.validate_remote_servers() {
+                    self.ui_state.status_message = Some((
+                        format!("Invalid URL: {e}"),
+                        Instant::now() + Duration::from_secs(4),
+                    ));
+                    self.ui_state.modal = Modal::Input {
+                        title: "Add Remote Server".to_string(),
+                        prompt: format!("Server URL for \"{name}\" (e.g. http://host:7878):"),
+                        value: url.into(),
+                        on_submit: InputAction::AddRemoteServerUrl { name },
+                        existing_branches: None,
+                        project_picker: None,
+                        program_picker: None,
+                        focus: super::InputFocus::Name,
+                        expanded: false,
+                        mask: false,
+                    };
+                    return;
+                }
+                self.ui_state.modal = Modal::Input {
+                    title: "Add Remote Server".to_string(),
+                    prompt: "Bearer token (leave empty for --allow-no-auth servers):".to_string(),
+                    value: super::Input::default(),
+                    on_submit: InputAction::AddRemoteServerToken { name, url },
+                    existing_branches: None,
+                    project_picker: None,
+                    program_picker: None,
+                    focus: super::InputFocus::Name,
+                    expanded: false,
+                    mask: true,
+                };
+            }
+            InputAction::AddRemoteServerToken { name, url } => {
+                let token = value.trim();
+                let server = crate::config::RemoteServerConfig {
+                    name,
+                    url,
+                    token: (!token.is_empty()).then(|| token.to_string()),
+                };
+                self.spawn_remote_server_probe(server);
+            }
         }
     }
 
@@ -1708,6 +1941,39 @@ impl App {
                             .await;
                     }
                 });
+            }
+            ConfirmAction::AddRemoteServerAnyway { server } => {
+                let name = server.name.clone();
+                match self.add_remote_server_to_config(server) {
+                    Ok(()) => {
+                        self.ui_state.status_message = Some((
+                            format!("Added remote server \"{name}\" (untested)"),
+                            Instant::now() + Duration::from_secs(4),
+                        ));
+                        self.refresh_list_items().await;
+                    }
+                    Err(e) => {
+                        self.ui_state.modal = Modal::Error {
+                            message: format!("Failed to save server: {e}"),
+                        };
+                    }
+                }
+            }
+            ConfirmAction::RemoveRemoteServer { name } => {
+                match self.remove_remote_server_from_config(&name) {
+                    Ok(()) => {
+                        self.ui_state.status_message = Some((
+                            format!("Removed remote server \"{name}\""),
+                            Instant::now() + Duration::from_secs(4),
+                        ));
+                        self.refresh_list_items().await;
+                    }
+                    Err(e) => {
+                        self.ui_state.modal = Modal::Error {
+                            message: format!("Failed to remove server: {e}"),
+                        };
+                    }
+                }
             }
         }
     }

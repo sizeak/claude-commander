@@ -210,6 +210,17 @@ state_sync_interval_ms = 2000
 # navigate_last = ["End"]
 # quit = ["q", "Ctrl-c"]
 # toggle_pane = ["Tab"]
+
+# Remote claude-commander servers. Each entry adds a server node to the
+# session tree with that server's projects and sessions under it (full
+# create/delete/review/attach parity over HTTP + WebSocket). Manage these
+# from the palette ("Add remote server" / "Remove remote server", which
+# includes a connection test) or by hand here — the file is hot-reloaded.
+# [[remote_servers]]
+# name = "buildbox"              # unique display name (the tree header)
+# url = "http://buildbox:7878"   # base URL of claude-commander-server
+# token = "..."                  # bearer token; omit only for servers
+#                                # started with --allow-no-auth (loopback)
 ```
 
 ## Conversation mode (TTS)

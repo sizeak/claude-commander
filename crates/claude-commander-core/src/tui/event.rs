@@ -71,6 +71,13 @@ pub enum StateUpdate {
     /// Session creation failed. The backend removes its own half-created
     /// (`Creating`) session on failure, so this carries only the message.
     SessionCreateFailed { message: String },
+    /// Result of the add-remote-server connection probe. `Ok(tmux_ok)` means
+    /// the server answered a workspace-snapshot request (reachable + auth
+    /// accepted); the flag carries its tmux health for the success toast.
+    RemoteServerProbed {
+        server: crate::config::RemoteServerConfig,
+        result: Result<bool, String>,
+    },
     /// Enriched PR info ready from background fetch
     EnrichedPrReady {
         session_id: SessionId,
@@ -213,6 +220,10 @@ pub enum UserCommand {
     OpenPullRequest,
     /// Force an immediate PR-status re-check for all sessions (palette-only)
     RefreshPrStatus,
+    /// Add a remote server: chained name/URL/token inputs + connection test (palette-only)
+    AddRemoteServer,
+    /// Remove a configured remote server via a picker (palette-only)
+    RemoveRemoteServer,
     /// Open (creating if needed) the persistent commander session
     OpenCommander,
     /// Open/close the full-screen conversation overlay (TTS conversation mode)
@@ -346,6 +357,8 @@ impl UserCommand {
             UserCommand::OpenInEditor => Some("editor.open"),
             UserCommand::OpenPullRequest => Some("pr.open"),
             UserCommand::RefreshPrStatus => Some("pr.refresh_status"),
+            UserCommand::AddRemoteServer => Some("server.add_remote"),
+            UserCommand::RemoveRemoteServer => Some("server.remove_remote"),
             UserCommand::OpenCommander => Some("commander.open"),
             UserCommand::ToggleConversationOverlay => Some("conversation.toggle"),
             UserCommand::ToggleVoiceInput => Some("stt.toggle_voice"),
@@ -408,6 +421,8 @@ impl From<BindableAction> for UserCommand {
             BindableAction::MoveToSection => Self::MoveToSection,
             BindableAction::ToggleSection => Self::ToggleSection,
             BindableAction::ToggleViewMode => Self::ToggleViewMode,
+            BindableAction::AddRemoteServer => Self::AddRemoteServer,
+            BindableAction::RemoveRemoteServer => Self::RemoveRemoteServer,
         }
     }
 }
@@ -947,6 +962,28 @@ mod tests {
             UserCommand::from(BindableAction::RefreshPrStatus),
             UserCommand::RefreshPrStatus
         ));
+    }
+
+    #[test]
+    fn test_remote_server_actions_map_from_palette_and_record_telemetry() {
+        // Palette-only commands: reachable via the BindableAction conversion,
+        // and both record a feature at the handle_command chokepoint.
+        assert!(matches!(
+            UserCommand::from(BindableAction::AddRemoteServer),
+            UserCommand::AddRemoteServer
+        ));
+        assert!(matches!(
+            UserCommand::from(BindableAction::RemoveRemoteServer),
+            UserCommand::RemoveRemoteServer
+        ));
+        assert_eq!(
+            UserCommand::AddRemoteServer.telemetry_feature(),
+            Some("server.add_remote")
+        );
+        assert_eq!(
+            UserCommand::RemoveRemoteServer.telemetry_feature(),
+            Some("server.remove_remote")
+        );
     }
 
     #[test]

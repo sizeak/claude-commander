@@ -995,6 +995,15 @@ impl App {
                 self.ui_state.modal = Modal::None;
                 self.apply_section_move(session_id, target).await;
             }
+            Some(QuickSwitchItem::RemoteServerRemove { name, .. }) => {
+                self.ui_state.modal = Modal::Confirm {
+                    title: "Remove Remote Server".to_string(),
+                    message: format!(
+                        "Remove remote server \"{name}\"?\n\nSessions keep running on the server; this only removes it from this TUI's config."
+                    ),
+                    on_confirm: ConfirmAction::RemoveRemoteServer { name },
+                };
+            }
             None => {}
         }
     }
@@ -1198,6 +1207,12 @@ impl App {
                 // Wake the service's PR-status loop; refreshed results arrive via
                 // the backend change feed.
                 let _ = self.local_arc().request_pr_refresh().await;
+            }
+            UserCommand::AddRemoteServer => {
+                self.handle_add_remote_server();
+            }
+            UserCommand::RemoveRemoteServer => {
+                self.handle_remove_remote_server();
             }
             UserCommand::OpenCommander => {
                 self.handle_open_commander().await;
@@ -1521,6 +1536,7 @@ mod tests {
             program_picker: None,
             focus: crate::tui::app::InputFocus::Name,
             expanded: false,
+            mask: false,
         }
     }
 
@@ -1713,6 +1729,7 @@ diff --git a/a.rs b/a.rs
             program_picker: program,
             focus: InputFocus::Name,
             expanded: false,
+            mask: false,
         }
     }
 
