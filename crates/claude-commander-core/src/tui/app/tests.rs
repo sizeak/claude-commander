@@ -2907,6 +2907,33 @@ fn reconcile_remote_servers_detects_add_remove_change() {
     assert_eq!(added, vec!["b".to_string(), "c".to_string()]);
 }
 
+#[tokio::test]
+async fn attach_target_backend_routes_to_session_owner() {
+    let (remote_snap, sid, _pid) = snapshot_with_one_session();
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", remote_snap)]);
+    app.bootstrap_backend_views().await;
+
+    // A session target routes to the ref's backend; the switcher gate then
+    // reflects that backend's capabilities (a remote mock has no switcher).
+    let remote_target = AttachTarget::Session {
+        session: SessionRef::new(BackendId(1), sid),
+        kind: crate::backend::AttachKind::Agent,
+    };
+    assert_eq!(app.attach_target_backend(&remote_target), BackendId(1));
+    assert!(
+        !app.backend(BackendId(1))
+            .unwrap()
+            .backend
+            .capabilities()
+            .switcher_popup,
+        "remote backend has no in-session switcher"
+    );
+
+    // A name-only target (commander / project shell) is local.
+    let local_target = AttachTarget::LocalName("cc-commander".to_string());
+    assert_eq!(app.attach_target_backend(&local_target), LOCAL_BACKEND_ID);
+}
+
 #[test]
 fn reconcile_remote_servers_reorder_is_noop() {
     let cfg = |name: &str| crate::config::RemoteServerConfig {

@@ -1453,6 +1453,16 @@ impl App {
             .downcast_ref::<LocalBackend>()
     }
 
+    /// The backend that owns an [`AttachTarget`]: a session ref's own backend,
+    /// or the local backend for a name-only target (the commander / a project
+    /// shell, which are local-only affordances).
+    pub(super) fn attach_target_backend(&self, target: &AttachTarget) -> BackendId {
+        match target {
+            AttachTarget::Session { session, .. } => session.backend,
+            AttachTarget::LocalName(_) => LOCAL_BACKEND_ID,
+        }
+    }
+
     /// The tmux session name an [`AttachTarget`] resolves to, for the switcher
     /// popup, MRU/viewed tracking, and post-attach focus. `None` when a session
     /// ref isn't in the cached snapshot.
@@ -1832,12 +1842,6 @@ impl App {
                         }
 
                         let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-                        // The in-session switcher is a local capability; a remote
-                        // backend forwards Ctrl+Space to the pane instead.
-                        let switcher_enabled = self
-                            .backend(LOCAL_BACKEND_ID)
-                            .map(|h| h.backend.capabilities().switcher_popup)
-                            .unwrap_or(false);
                         // Track every session viewed during this attach (via the
                         // switcher or shell toggle) so we can refresh just their
                         // agent state on the way out — see the post-loop block.
@@ -1853,6 +1857,16 @@ impl App {
                             if let Some(n) = &name {
                                 viewed.insert(n.clone());
                             }
+
+                            // The in-session switcher is a local capability; a
+                            // remote backend forwards Ctrl+Space to the pane
+                            // instead. Gate on the *attached* session's backend,
+                            // re-evaluated each hop (the switcher/shell-toggle can
+                            // move `current` between backends).
+                            let switcher_enabled = self
+                                .backend(self.attach_target_backend(&current))
+                                .map(|h| h.backend.capabilities().switcher_popup)
+                                .unwrap_or(false);
 
                             // Open the connection first (the backend revives a
                             // dead tmux session and stamps last-attached); a
@@ -1965,9 +1979,14 @@ impl App {
                                     break;
                                 }
                                 crate::tmux::AttachResult::OpenEditor => {
-                                    // Local-only: launch the operator's editor on
-                                    // the session worktree, then re-attach.
-                                    if self.local_backend().is_some() {
+                                    // Launch the operator's editor on the session
+                                    // worktree, then re-attach. Only meaningful for
+                                    // a backend that can drive the local editor
+                                    // (there's no local worktree for a remote one).
+                                    let can_edit = self
+                                        .backend(self.attach_target_backend(&current))
+                                        .is_some_and(|h| h.backend.capabilities().open_editor);
+                                    if can_edit {
                                         self.open_editor_for_tmux_session(&landed).await;
                                     }
                                     crate::tmux::flush_stdin();
@@ -1983,7 +2002,7 @@ impl App {
                                     {
                                         consecutive_ends += 1;
                                         match self
-                                            .local_arc()
+                                            .backend_arc(session.backend)
                                             .restart_session_fresh(session.id)
                                             .await
                                         {
@@ -2017,15 +2036,16 @@ impl App {
                         info!("Returned from attach, restarting input reader");
                         self.event_loop.restart_input();
 
-                        // Refresh agent state for just the sessions we viewed,
-                        // via the backend, applying the fresh states directly.
-                        // We do NOT clear the whole map: that would blank every
-                        // spinner until the next poll. `agent_states(true)` also
-                        // advances the service loop's shared baseline to these
-                        // observed states, so the loop won't re-flag a
-                        // just-finished session on its next tick.
+                        // Refresh agent state for just the sessions we viewed, via
+                        // the *attached* session's backend, applying the fresh
+                        // states directly. We do NOT clear the whole map: that
+                        // would blank every spinner until the next poll.
+                        // `agent_states(true)` also advances the service loop's
+                        // shared baseline to these observed states, so the loop
+                        // won't re-flag a just-finished session on its next tick.
+                        let attached_backend = self.attach_target_backend(&current);
                         let viewed_ids: HashSet<SessionId> = self
-                            .local_view()
+                            .view_for(attached_backend)
                             .snapshot
                             .sessions
                             .iter()
@@ -2041,19 +2061,35 @@ impl App {
                             // flagged a watched session unread when it went idle.
                             // Clear unread for everything we actually saw — the
                             // operator watched those turns finish.
+                            let backend = self.backend_arc(attached_backend);
                             for id in &viewed_ids {
-                                let _ = self.local_arc().mark_read(*id).await;
+                                let _ = backend.mark_read(*id).await;
                             }
-                            if let Ok(fresh) = self.local_arc().agent_states(true).await {
+                            if let Ok(fresh) = backend.agent_states(true).await {
                                 let refreshed: HashMap<SessionId, AgentState> = fresh
                                     .states
                                     .into_iter()
                                     .filter(|(id, _)| viewed_ids.contains(id))
                                     .collect();
-                                state::apply_viewed_session_refresh(
-                                    &mut self.ui_state.agent_states,
-                                    refreshed,
-                                );
+                                // Fold into the attached backend's cached view —
+                                // the tree reads agent state per-backend from there.
+                                if let Some(handle) =
+                                    self.backends.iter_mut().find(|h| h.id == attached_backend)
+                                {
+                                    state::apply_viewed_session_refresh(
+                                        &mut handle.view.agent_states.states,
+                                        refreshed.clone(),
+                                    );
+                                }
+                                // The local rendered map also feeds local-only
+                                // consumers (commander chip, review-transition
+                                // detection), so keep it in sync for a local attach.
+                                if attached_backend == LOCAL_BACKEND_ID {
+                                    state::apply_viewed_session_refresh(
+                                        &mut self.ui_state.agent_states,
+                                        refreshed,
+                                    );
+                                }
                             }
                             self.refresh_list_items().await;
                         }

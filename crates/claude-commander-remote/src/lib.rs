@@ -58,7 +58,7 @@ mod error;
 mod poller;
 mod spec;
 
-pub use backend::RemoteBackend;
+pub use backend::{RemoteBackend, probe};
 pub use backoff::{BackoffConfig, backoff_delay};
 pub use poller::{ConnectionFeed, PollConfig};
 pub use spec::{RemoteServerSpec, SecretString};

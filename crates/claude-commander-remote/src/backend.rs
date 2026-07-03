@@ -177,6 +177,13 @@ impl RemoteInner {
         Ok(())
     }
 
+    /// POST a JSON body, discarding the (204) response.
+    async fn post_json_ok<B: Serialize>(&self, url: Url, body: &B) -> BResult<()> {
+        let response = self.send(self.client.post(url).json(body)).await?;
+        self.check(response).await?;
+        Ok(())
+    }
+
     /// PATCH a JSON body, discarding the (204) response.
     async fn patch_json_ok<B: Serialize>(&self, url: Url, body: &B) -> BResult<()> {
         let response = self.send(self.client.patch(url).json(body)).await?;
@@ -208,6 +215,74 @@ impl RemoteInner {
 
 async fn decode_json<T: DeserializeOwned>(response: Response) -> BResult<T> {
     response.json::<T>().await.map_err(crate::error::body_error)
+}
+
+/// Connectivity probe for the add-server flow. Verifies a candidate server is
+/// reachable and (when a token is supplied) that the token is accepted, before
+/// the TUI persists a `[[remote_servers]]` entry.
+///
+/// Checks two endpoints: the unauthenticated `GET /health` liveness probe, then
+/// the authenticated `GET /api/health/tmux` backing-service probe. Returns
+/// `Ok(())` when both pass, or a short human-readable reason otherwise. The
+/// token only ever reaches the `Authorization` header, so it can't appear in the
+/// returned message.
+pub async fn probe(spec: RemoteServerSpec) -> std::result::Result<(), String> {
+    let base = Url::parse(&spec.base_url).map_err(|e| format!("invalid server url: {e}"))?;
+    if base.cannot_be_a_base() || base.host().is_none() {
+        return Err("server url must include a host (e.g. http://host:port)".to_string());
+    }
+    let client = Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(REQUEST_TIMEOUT)
+        .build()
+        .map_err(|e| format!("could not build http client: {e}"))?;
+
+    // Join a path onto the base, dropping a bare trailing empty segment so a
+    // `http://host/` base doesn't produce a doubled slash.
+    let join = |segments: &[&str]| -> Url {
+        let mut url = base.clone();
+        {
+            let mut path = url
+                .path_segments_mut()
+                .expect("a validated http(s) base URL is always a base");
+            path.pop_if_empty();
+            path.extend(segments);
+        }
+        url
+    };
+
+    // Liveness: unauthenticated GET /health.
+    let resp = client
+        .get(join(&["health"]))
+        .send()
+        .await
+        .map_err(|e| format!("could not reach server: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "liveness check failed: HTTP {}",
+            resp.status().as_u16()
+        ));
+    }
+
+    // Backing service + auth: authenticated GET /api/health/tmux.
+    let mut req = client.get(join(&["api", "health", "tmux"]));
+    if let Some(token) = &spec.token {
+        req = req.bearer_auth(token.expose());
+    }
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| format!("could not reach server: {e}"))?;
+    match resp.status() {
+        s if s.is_success() => Ok(()),
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+            Err("authentication failed (check the token)".to_string())
+        }
+        StatusCode::SERVICE_UNAVAILABLE => {
+            Err("server reachable, but tmux is unavailable on the server".to_string())
+        }
+        s => Err(format!("health check failed: HTTP {}", s.as_u16())),
+    }
 }
 
 /// The server wraps created-resource ids as `{ "id": … }`.
@@ -480,13 +555,15 @@ impl CommanderBackend for RemoteBackend {
             .await
     }
 
-    async fn mark_unread(&self, _ids: Vec<SessionId>) -> BResult<()> {
-        // The server exposes `POST /sessions/{id}/read` (mark read) but no
-        // mark-unread route yet, so there's nothing honest to call. Surface a
-        // toast rather than silently succeeding. (Phase G: add the route.)
-        Err(BackendError::Unavailable {
-            reason: "the remote server does not support marking sessions unread yet".to_string(),
-        })
+    async fn mark_unread(&self, ids: Vec<SessionId>) -> BResult<()> {
+        // Batch counterpart to `mark_read`: `POST /api/sessions/unread` with
+        // `{ "ids": [...] }`. Unknown ids are silently skipped server-side,
+        // matching the local backend.
+        let ids: Vec<String> = ids.iter().map(|id| id.as_uuid().to_string()).collect();
+        let body = serde_json::json!({ "ids": ids });
+        self.inner
+            .post_json_ok(self.inner.endpoint(&["sessions", "unread"]), &body)
+            .await
     }
 
     // -- Projects --
@@ -815,6 +892,66 @@ mod tests {
             .find(|s| s.session_id == sid)
             .expect("session present");
         assert_eq!(s.title, "renamed-over-http");
+    }
+
+    #[tokio::test]
+    async fn mark_unread_flags_sessions_over_http() {
+        // Wire check for `POST /api/sessions/unread`: a seeded, read session is
+        // flagged unread over HTTP and the change is visible in the next snapshot.
+        let (addr, service, _d, _w) = serve_disabled().await;
+        let project = Project::new("repo", PathBuf::from("/tmp/repo"), "main");
+        let pid = project.id;
+        let session = WorktreeSession::new(
+            pid,
+            "task",
+            "branch-task",
+            PathBuf::from("/tmp/wt"),
+            "claude",
+        );
+        let sid = session.id;
+        service
+            .store()
+            .mutate(move |state| {
+                state.add_project(project);
+                let mut session = session;
+                session.unread = false;
+                state.add_session(session);
+            })
+            .await
+            .unwrap();
+
+        let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
+        // Precondition: not unread.
+        let before = backend.workspace_snapshot().await.unwrap();
+        assert!(
+            !before
+                .sessions
+                .iter()
+                .find(|s| s.session_id == sid)
+                .unwrap()
+                .unread
+        );
+
+        backend.mark_unread(vec![sid]).await.unwrap();
+
+        let after = backend.workspace_snapshot().await.unwrap();
+        assert!(
+            after
+                .sessions
+                .iter()
+                .find(|s| s.session_id == sid)
+                .unwrap()
+                .unread,
+            "session should be flagged unread after mark_unread over HTTP"
+        );
+    }
+
+    #[tokio::test]
+    async fn mark_unread_unknown_ids_is_ok() {
+        // Unknown ids are silently skipped server-side (a 204), matching local.
+        let (addr, _service, _d, _w) = serve_disabled().await;
+        let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
+        backend.mark_unread(vec![SessionId::new()]).await.unwrap();
     }
 
     #[tokio::test]
