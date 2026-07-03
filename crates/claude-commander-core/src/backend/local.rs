@@ -312,6 +312,10 @@ impl CommanderBackend for LocalBackend {
         Ok(self.service.apply_pr_results(results).await?)
     }
 
+    async fn request_pr_refresh(&self) -> BResult<()> {
+        Ok(self.service.request_pr_refresh()?)
+    }
+
     // -- Projects (gix-backed → `run_local`) --
 
     async fn add_project(&self, path: PathBuf) -> BResult<ProjectId> {

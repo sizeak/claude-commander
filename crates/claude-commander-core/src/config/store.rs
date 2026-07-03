@@ -100,6 +100,16 @@ impl StateStore {
         self.generation.send_modify(|g| *g += 1);
     }
 
+    /// Wake the change-feed without mutating persisted state. Used by
+    /// service-owned background loops (agent-state polling, project pulls) to
+    /// signal that *observable* state changed — e.g. an agent flipped
+    /// Working↔Idle, or a project-pull outcome updated — even though nothing in
+    /// `state.json` was written. Consumers re-read the relevant snapshot on the
+    /// bump, exactly as they do after a real mutation.
+    pub fn notify_change(&self) {
+        self.bump_generation();
+    }
+
     /// The data directory the state file lives in — the parent of
     /// `state_path`. Sibling stores (comments, reviewed marks) are rooted here
     /// so they share the same data dir as the state, which keeps tests that

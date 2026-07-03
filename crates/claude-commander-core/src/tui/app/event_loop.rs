@@ -39,29 +39,15 @@ impl App {
                 needs_tick |= self.process_event(event).await;
             }
 
-            // Periodic background work (only on Tick)
+            // Periodic background work (only on Tick). The PR-status,
+            // project-pull, agent-state, and state-sync loops now run inside the
+            // service (see `CommanderService::spawn_background_tasks`); the tick
+            // only refreshes the rendered list and the preview pane.
             if needs_tick {
                 self.refresh_list_items().await;
 
                 // Spawn non-blocking preview update
                 self.spawn_preview_update();
-
-                // Periodic PR status check
-                if self.ui_state.gh_available && self.config.pr_check_interval_secs > 0 {
-                    let interval = Duration::from_secs(self.config.pr_check_interval_secs);
-                    let should_check = self
-                        .ui_state
-                        .last_pr_check
-                        .is_none_or(|t| t.elapsed() >= interval);
-                    if should_check {
-                        self.spawn_pr_status_check();
-                    }
-                }
-
-                // Periodic project-branch pull
-                if self.config.project_pull_enabled && self.config.project_pull_interval_secs > 0 {
-                    self.maybe_spawn_project_pulls().await;
-                }
             }
 
             if self.ui_state.should_quit {

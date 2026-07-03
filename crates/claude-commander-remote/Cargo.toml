@@ -1,0 +1,58 @@
+[package]
+name = "claude-commander-remote"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "HTTP client backend that drives a remote claude-commander-server over the wire"
+publish = false
+
+# Only the `claude-commander` bin crate drives the release (single shared tag).
+[package.metadata.release]
+release = false
+
+[lib]
+name = "claude_commander_remote"
+path = "src/lib.rs"
+
+[dependencies]
+# The `CommanderBackend` trait, `BackendError`, and the DTOs the trait speaks in
+# live in core. Drop the default `audio` feature: this crate is a network client
+# and never touches a mic/speaker, so it must not drag in ALSA-linked rodio/cpal.
+claude-commander-core = { path = "../claude-commander-core", default-features = false }
+# The wire DTOs (also re-exported through core, but depended on directly so the
+# serde shapes have one source of truth).
+claude-commander-protocol = { path = "../claude-commander-protocol" }
+
+# Async runtime + trait objects.
+tokio = { workspace = true }
+async-trait = "0.1"
+
+# HTTP client. rustls (not OpenSSL) to keep the pure-Rust lean, matching core's
+# own reqwest usage. tokio-tungstenite (remote WS attach) is Phase F — not here.
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "rustls-tls",
+] }
+
+# Serialization (request bodies + response decode).
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Observability. The bearer token is NEVER logged.
+tracing = { workspace = true }
+
+# Content-hash the polled snapshots to detect change without diffing (same crate
+# core already uses for its caches).
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
+
+# Comment ids returned by the create-comment endpoint.
+uuid = { version = "1.0", features = ["v4", "serde"] }
+
+[dev-dependencies]
+# Spin the REAL server router in-process for the round-trip tests.
+claude-commander-server = { path = "../claude-commander-server" }
+# Shared hermetic-server harness (telemetry off, tmux isolated, loopback bind).
+claude-commander-test-support = { path = "../claude-commander-test-support" }
+tempfile = "3.10"

@@ -58,6 +58,7 @@ pub fn build_router(state: AppState) -> Router {
         // -- workspace surface --
         .route("/workspace", get(workspace::snapshot))
         .route("/agent-states", get(workspace::agent_states))
+        .route("/pr-refresh", post(workspace::pr_refresh))
         .route("/create-options", get(workspace::create_options))
         .route("/comments/pending", get(review::pending))
         // -- cascade / push-stack --

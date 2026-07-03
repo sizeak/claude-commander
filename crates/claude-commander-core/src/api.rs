@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 
+use futures::StreamExt;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
@@ -59,6 +60,26 @@ pub struct CommanderService {
     /// re-capture every pane. A `fresh` call bypasses it with a zero-TTL
     /// detector instead.
     agent_detector: Arc<tokio::sync::Mutex<AgentStateDetector>>,
+    /// Latest bulk agent-state snapshot, maintained by the background poll loop
+    /// ([`Self::spawn_background_tasks`]). Once [`Self::agent_states_primed`] is
+    /// set, non-`fresh` [`Self::agent_states`] reads serve this cache rather than
+    /// re-detecting on demand, so every frontend (and a remote client polling the
+    /// route) sees the loop's liveness.
+    agent_states_cache: Arc<tokio::sync::RwLock<AgentStatesSnapshot>>,
+    /// Whether the poll loop has populated [`Self::agent_states_cache`] at least
+    /// once. Until then (and when no loop runs — CLI, tests) `agent_states`
+    /// falls back to on-demand detection.
+    agent_states_primed: Arc<std::sync::atomic::AtomicBool>,
+    /// Most recent per-project background-pull status, maintained by the pull
+    /// loop and surfaced in [`WorkspaceSnapshot::project_pull`].
+    pull_status: Arc<std::sync::Mutex<HashMap<ProjectId, PullStatus>>>,
+    /// Last PR-status fan-out time, for debouncing manual refresh bursts.
+    last_pr_check: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+    /// Signals the PR-status loop to run an immediate check (manual refresh).
+    pr_refresh: Arc<tokio::sync::Notify>,
+    /// Idempotency guard for [`Self::spawn_background_tasks`]: the loops spawn
+    /// once per service, even if both a local TUI and an embedded caller ask.
+    background_started: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Max entries kept in the operation ledger before the oldest are evicted.
@@ -107,6 +128,15 @@ impl CommanderService {
             next_op_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
             gh_available: Arc::new(tokio::sync::OnceCell::new()),
             agent_detector,
+            agent_states_cache: Arc::new(tokio::sync::RwLock::new(AgentStatesSnapshot {
+                states: HashMap::new(),
+                commander_running: false,
+            })),
+            agent_states_primed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            pull_status: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            last_pr_check: Arc::new(std::sync::Mutex::new(None)),
+            pr_refresh: Arc::new(tokio::sync::Notify::new()),
+            background_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -943,8 +973,9 @@ impl CommanderService {
     /// indicators, the recent-operations ledger, and server health. This is the
     /// single query a remote client polls to build the session tree.
     ///
-    /// `project_pull` is left empty here; the core background pull loop
-    /// (Phase D) is what populates per-project pull status.
+    /// `project_pull` reflects the background pull loop's latest per-project
+    /// status ([`Self::spawn_background_tasks`]); it is empty until the loop has
+    /// run (or when project auto-pull is disabled).
     pub async fn workspace_snapshot(&self) -> Result<WorkspaceSnapshot> {
         let gh_available = self.gh_available().await;
         let tmux_ok = self.check_tmux().await.is_ok();
@@ -967,7 +998,11 @@ impl CommanderService {
             sessions,
             cascade_paused,
             pending_comment_sessions,
-            project_pull: HashMap::new(),
+            project_pull: self
+                .pull_status
+                .lock()
+                .expect("pull status poisoned")
+                .clone(),
             operations: self.operations_snapshot(),
             server: ServerStatus {
                 gh_available,
@@ -1052,6 +1087,7 @@ impl CommanderService {
                 pane: Some("Creating session...".to_string()),
                 diff_text: String::new(),
                 diff_stat: None,
+                stats: None,
                 shell: None,
             });
         }
@@ -1074,6 +1110,7 @@ impl CommanderService {
             pane,
             diff_text: diff.as_ref().map(|d| d.diff.clone()).unwrap_or_default(),
             diff_stat: diff.as_ref().map(|d| d.summary()),
+            stats: diff.as_ref().map(|d| diff_stat_from_info(d)),
             shell,
         })
     }
@@ -1091,6 +1128,7 @@ impl CommanderService {
             pane: None,
             diff_text: diff.as_ref().map(|d| d.diff.clone()).unwrap_or_default(),
             diff_stat: diff.as_ref().map(|d| d.summary()),
+            stats: diff.as_ref().map(|d| diff_stat_from_info(d)),
             shell,
         })
     }
@@ -1243,31 +1281,351 @@ impl CommanderService {
         Ok(self.record_operation(OperationKind::PushStack, outcome))
     }
 
-    /// Bulk agent-state detection over active sessions. `fresh` bypasses the
-    /// shared TTL cache with a zero-TTL detector, forcing a re-capture. The
-    /// signature is kept stable for Phase D, which will serve these from the
-    /// background loop's cache instead of computing on demand.
+    /// Bulk agent-state snapshot over active sessions.
+    ///
+    /// When the background poll loop ([`Self::spawn_background_tasks`]) is
+    /// running, a non-`fresh` call serves its maintained cache (so the reported
+    /// `commander_running` and states reflect the loop's liveness, and a remote
+    /// client polling the route sees the same data the TUI does). Before the
+    /// loop's first tick — or when no loop runs (CLI, tests) — it falls back to
+    /// on-demand detection via the shared TTL-cached detector.
+    ///
+    /// `fresh` always bypasses caches with a zero-TTL detector, forcing a
+    /// re-capture, and folds the result back into the shared cache so the loop's
+    /// unread baseline advances too — this is what stops a session the operator
+    /// just watched go idle during an attach from being re-flagged unread on the
+    /// next poll tick.
     pub async fn agent_states(&self, fresh: bool) -> AgentStatesSnapshot {
-        let active = self.active_session_targets().await;
-        let states = if fresh {
+        if fresh {
+            let active = self.active_session_targets().await;
             let mut detector = AgentStateDetector::new(self.manager.tmux.clone(), Duration::ZERO);
-            detector.detect_all(&active).await
-        } else {
-            let mut detector = self.agent_detector.lock().await;
-            detector.detect_all(&active).await
-        };
-        // Phase D refines this to reflect background-loop liveness; a response
-        // here means the server computed states on demand, so report `true`.
+            let states = detector.detect_all(&active).await;
+            let mut cache = self.agent_states_cache.write().await;
+            cache.states = states;
+            self.agent_states_primed
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            return cache.clone();
+        }
+        if self
+            .agent_states_primed
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return self.agent_states_cache.read().await.clone();
+        }
+        let active = self.active_session_targets().await;
+        let mut detector = self.agent_detector.lock().await;
+        let states = detector.detect_all(&active).await;
         AgentStatesSnapshot {
             states,
             commander_running: true,
         }
     }
 
-    /// Request a PR-metadata refresh. Phase A stub: the core PR-refresh loop is
-    /// wired in Phase D, so this is a no-op acknowledgement today.
+    /// Request an immediate PR-metadata refresh. Wakes the background PR-status
+    /// loop ([`Self::spawn_background_tasks`]); if no loop is running (PR checks
+    /// disabled, or before startup) the notification is simply dropped.
     pub fn request_pr_refresh(&self) -> Result<()> {
+        self.pr_refresh.notify_one();
         Ok(())
+    }
+
+    /// Spawn the service-owned background loops: agent-state polling, PR-status
+    /// checks, project auto-pull, and cross-instance state-sync. Idempotent — a
+    /// second call (e.g. a local TUI and an embedded caller sharing one service)
+    /// is a no-op and returns empty handles.
+    ///
+    /// Every loop drives the same observable surface the frontends read: the
+    /// agent loop maintains [`Self::agent_states`]' cache and persists unread
+    /// transitions; the PR loop persists results via [`Self::apply_pr_results`];
+    /// the pull loop feeds [`WorkspaceSnapshot::project_pull`]; the sync loop
+    /// reloads the state file. Each wakes the [`StateStore`] change-feed on a
+    /// real change (either via a persisted mutation or [`StateStore::notify_change`]),
+    /// so a subscriber (the TUI's per-backend change-feed task) re-reads the
+    /// relevant snapshot — no frontend-specific event plumbing crosses the
+    /// backend seam.
+    ///
+    /// Intervals are read from config once here (matching the old TUI loops).
+    /// The returned [`BackgroundHandles`] let tests abort the loops; production
+    /// callers ignore them and let the tasks run for the process lifetime.
+    pub fn spawn_background_tasks(&self, opts: BackgroundOpts) -> BackgroundHandles {
+        // Idempotency: only the first caller spawns.
+        if self
+            .background_started
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .is_err()
+        {
+            return BackgroundHandles::default();
+        }
+
+        let config = self.config_store.read().clone();
+        let handles = vec![
+            self.spawn_agent_state_loop(
+                config.agent_state_poll_interval_ms,
+                opts.commander_enabled,
+                config.commander_program(),
+            ),
+            self.spawn_pr_status_loop(config.pr_check_interval_secs),
+            self.spawn_project_pull_loop(
+                config.project_pull_enabled,
+                config.project_pull_interval_secs,
+            ),
+            self.spawn_state_sync_loop(config.state_sync_interval_ms),
+        ];
+        BackgroundHandles { handles }
+    }
+
+    /// Poll every running session's (and the commander's) agent state on a fixed
+    /// cadence, maintain [`Self::agent_states_cache`], persist Working→Idle
+    /// transitions as unread, and wake the change-feed on any change. No-op loop
+    /// when `interval_ms` is 0.
+    fn spawn_agent_state_loop(
+        &self,
+        interval_ms: u64,
+        commander_enabled: bool,
+        commander_program: String,
+    ) -> tokio::task::JoinHandle<()> {
+        let service = self.clone();
+        let tmux = self.manager.tmux.clone();
+        let cache = self.agent_states_cache.clone();
+        let primed = self.agent_states_primed.clone();
+        let store = self.store.clone();
+        tokio::spawn(async move {
+            if interval_ms == 0 {
+                return;
+            }
+            let cache_ttl = Duration::from_millis(interval_ms.saturating_sub(500).max(500));
+            let mut detector = AgentStateDetector::new(tmux.clone(), cache_ttl);
+            let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+            let mut last_commander_running = false;
+            let sentinel = crate::commander::commander_sentinel_id();
+            loop {
+                interval.tick().await;
+                let mut sessions: Vec<(SessionId, String, String)> = {
+                    let state = store.read().await;
+                    state
+                        .sessions
+                        .values()
+                        .filter(|s| s.status == SessionStatus::Running)
+                        .map(|s| (s.id, s.tmux_session_name.clone(), s.program.clone()))
+                        .collect()
+                };
+                let commander_running =
+                    commander_enabled && crate::commander::is_running(&tmux).await;
+                if commander_running {
+                    sessions.push((
+                        sentinel,
+                        crate::commander::COMMANDER_TMUX_NAME.to_string(),
+                        commander_program.clone(),
+                    ));
+                }
+                // Quiet path: nothing to detect and the commander's state is
+                // unchanged — skip the tick (no cache write, no wake).
+                if poll_tick_can_skip(
+                    sessions.is_empty(),
+                    commander_running,
+                    last_commander_running,
+                ) {
+                    continue;
+                }
+                let states: HashMap<SessionId, AgentState> = if sessions.is_empty() {
+                    HashMap::new()
+                } else {
+                    detector.detect_all(&sessions).await
+                };
+                if !poll_tick_should_send(
+                    states.is_empty(),
+                    commander_running,
+                    last_commander_running,
+                ) {
+                    continue;
+                }
+                let commander_flipped = commander_running != last_commander_running;
+                last_commander_running = commander_running;
+
+                // Diff against the previous cache to flag agents that just
+                // finished a turn (Working→Idle), skipping the commander
+                // sentinel (it has no `WorktreeSession` to mark).
+                let prev = { cache.read().await.states.clone() };
+                let unread_ids: Vec<SessionId> = detect_unread_transitions(&prev, &states)
+                    .into_iter()
+                    .filter(|id| *id != sentinel)
+                    .collect();
+                let states_changed = states != prev;
+
+                {
+                    let mut c = cache.write().await;
+                    c.states = states;
+                    c.commander_running = commander_running;
+                }
+                primed.store(true, std::sync::atomic::Ordering::Relaxed);
+
+                // Wake the change-feed only when observable state actually
+                // changed (fresh states, or the commander flipped), so a steady
+                // row of idle agents doesn't trigger a snapshot re-fetch every
+                // tick. Persisting unread already bumps the feed; otherwise wake
+                // it explicitly. The cache is updated first so the snapshot the
+                // wake triggers reads the fresh states.
+                if !unread_ids.is_empty() {
+                    let _ = service.mark_unread(unread_ids).await;
+                } else if states_changed || commander_flipped {
+                    store.notify_change();
+                }
+            }
+        })
+    }
+
+    /// Fan out `gh pr list` across all sessions on a fixed cadence (and on
+    /// [`Self::request_pr_refresh`]), then persist results via
+    /// [`Self::apply_pr_results`]. When `interval_secs` is 0 the periodic tick is
+    /// disabled but a manual refresh still runs.
+    fn spawn_pr_status_loop(&self, interval_secs: u64) -> tokio::task::JoinHandle<()> {
+        let service = self.clone();
+        let store = self.store.clone();
+        let notify = self.pr_refresh.clone();
+        let last_check = self.last_pr_check.clone();
+        tokio::spawn(async move {
+            let mut ticker = (interval_secs > 0)
+                .then(|| tokio::time::interval(Duration::from_secs(interval_secs)));
+            loop {
+                match ticker.as_mut() {
+                    Some(t) => {
+                        tokio::select! {
+                            _ = t.tick() => {}
+                            _ = notify.notified() => {}
+                        }
+                    }
+                    None => notify.notified().await,
+                }
+                // Debounce rapid re-triggers (e.g. a double manual refresh) so we
+                // don't launch several concurrent sweeps.
+                {
+                    let mut lc = last_check.lock().expect("pr check time poisoned");
+                    let now = std::time::Instant::now();
+                    if !pr_check_debounce_passed(*lc, now, PR_CHECK_DEBOUNCE) {
+                        continue;
+                    }
+                    *lc = Some(now);
+                }
+                if !service.gh_available().await {
+                    continue;
+                }
+                let sessions_to_check: Vec<(SessionId, String, PathBuf)> = {
+                    let state = store.read().await;
+                    state
+                        .sessions
+                        .values()
+                        .filter(|s| s.status != SessionStatus::Creating)
+                        .filter_map(|s| {
+                            let project = state.projects.get(&s.project_id)?;
+                            Some((s.id, s.branch.clone(), project.repo_path.clone()))
+                        })
+                        .collect()
+                };
+                if sessions_to_check.is_empty() {
+                    continue;
+                }
+                let results: Vec<(SessionId, PrCheckResult)> =
+                    futures::stream::iter(sessions_to_check.into_iter().map(
+                        |(id, branch, repo_path)| async move {
+                            (
+                                id,
+                                crate::git::check_pr_for_branch(&repo_path, &branch).await,
+                            )
+                        },
+                    ))
+                    .buffer_unordered(PR_FANOUT_CONCURRENCY)
+                    .collect()
+                    .await;
+                if let Err(e) = service.apply_pr_results(results).await {
+                    debug!("apply_pr_results failed: {e}");
+                }
+            }
+        })
+    }
+
+    /// Fast-forward each project's main branch on a fixed cadence, recording the
+    /// per-project outcome in [`Self::pull_status`] (surfaced through
+    /// [`WorkspaceSnapshot::project_pull`]) and waking the change-feed when any
+    /// project's status changes. No-op loop when disabled or `interval_secs` 0.
+    fn spawn_project_pull_loop(
+        &self,
+        enabled: bool,
+        interval_secs: u64,
+    ) -> tokio::task::JoinHandle<()> {
+        let store = self.store.clone();
+        let pull_status = self.pull_status.clone();
+        tokio::spawn(async move {
+            if !enabled || interval_secs == 0 {
+                return;
+            }
+            // Startup grace so launch doesn't immediately hammer every project.
+            tokio::time::sleep(PROJECT_PULL_STARTUP_GRACE).await;
+            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            loop {
+                interval.tick().await;
+                let projects: Vec<(ProjectId, PathBuf, String)> = {
+                    let state = store.read().await;
+                    state
+                        .projects
+                        .values()
+                        .map(|p| (p.id, p.repo_path.clone(), p.main_branch.clone()))
+                        .collect()
+                };
+                if projects.is_empty() {
+                    continue;
+                }
+                let outcomes: Vec<(ProjectId, PullStatus)> =
+                    futures::stream::iter(projects.into_iter().map(
+                        |(id, repo_path, main_branch)| async move {
+                            let status = crate::git::run_project_pull(&repo_path, &main_branch)
+                                .await
+                                .to_status();
+                            (id, status)
+                        },
+                    ))
+                    .buffer_unordered(PROJECT_PULL_FANOUT_CONCURRENCY)
+                    .collect()
+                    .await;
+
+                let mut changed = false;
+                {
+                    let mut status = pull_status.lock().expect("pull status poisoned");
+                    for (id, outcome) in outcomes {
+                        if status.get(&id) != Some(&outcome) {
+                            status.insert(id, outcome);
+                            changed = true;
+                        }
+                    }
+                }
+                if changed {
+                    store.notify_change();
+                }
+            }
+        })
+    }
+
+    /// Reload the state file on a fixed cadence, waking the change-feed when
+    /// another instance mutated it. No-op loop when `interval_ms` is 0.
+    fn spawn_state_sync_loop(&self, interval_ms: u64) -> tokio::task::JoinHandle<()> {
+        let store = self.store.clone();
+        tokio::spawn(async move {
+            if interval_ms == 0 {
+                return;
+            }
+            let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
+            loop {
+                interval.tick().await;
+                match store.reload_if_changed().await {
+                    Ok(_) => {}
+                    Err(e) => debug!("State sync check failed: {e}"),
+                }
+            }
+        })
     }
 
     // -- Internal helpers for the workspace surface --
@@ -1362,6 +1720,116 @@ impl CommanderService {
 pub enum PreviewTarget {
     Session { id: SessionId, lines: Option<usize> },
     Project(ProjectId),
+}
+
+/// Project a computed [`DiffInfo`](crate::git::DiffInfo)'s counts onto the
+/// protocol [`DiffStat`] DTO carried in [`PreviewData`].
+fn diff_stat_from_info(d: &crate::git::DiffInfo) -> crate::api::DiffStat {
+    crate::api::DiffStat {
+        files_changed: d.files_changed,
+        lines_added: d.lines_added,
+        lines_removed: d.lines_removed,
+    }
+}
+
+/// Options for [`CommanderService::spawn_background_tasks`].
+#[derive(Debug, Clone, Default)]
+pub struct BackgroundOpts {
+    /// Whether the persistent commander session should be polled for its agent
+    /// state. Restart-required in the TUI (mirrors `commander_enabled_at_init`),
+    /// so it is passed in rather than re-read live.
+    pub commander_enabled: bool,
+}
+
+/// Abortable handles to the service's background loops (see
+/// [`CommanderService::spawn_background_tasks`]). Production callers ignore the
+/// value and let the loops run for the process lifetime; tests hold it and call
+/// [`Self::abort`] to stop them deterministically.
+#[derive(Default)]
+pub struct BackgroundHandles {
+    handles: Vec<tokio::task::JoinHandle<()>>,
+}
+
+impl BackgroundHandles {
+    /// Abort every background loop. Idempotent.
+    pub fn abort(&self) {
+        for h in &self.handles {
+            h.abort();
+        }
+    }
+
+    /// Whether this handle owns no loops — true for the no-op returned by a
+    /// second [`CommanderService::spawn_background_tasks`] call.
+    pub fn is_empty(&self) -> bool {
+        self.handles.is_empty()
+    }
+}
+
+/// Cap concurrent subprocess fan-outs (e.g. `gh pr list` across all sessions).
+/// Each call holds 3+ pipe FDs, so unbounded fan-out can EMFILE under the macOS
+/// launchd 256-FD default.
+const PR_FANOUT_CONCURRENCY: usize = 8;
+
+/// Cap concurrent project-branch pulls so a user with many projects doesn't
+/// spawn one `git fetch` per project at the same instant.
+const PROJECT_PULL_FANOUT_CONCURRENCY: usize = 4;
+
+/// Minimum gap between PR-status fan-outs, debouncing rapid manual triggers
+/// (e.g. a double manual refresh). It sits far below `pr_check_interval_secs`,
+/// so a manual refresh is still effectively immediate.
+const PR_CHECK_DEBOUNCE: Duration = Duration::from_secs(2);
+
+/// Grace period after startup before the first project-pull sweep, so launch
+/// doesn't immediately hammer every project.
+const PROJECT_PULL_STARTUP_GRACE: Duration = Duration::from_secs(5);
+
+/// Whether enough time has elapsed since the last PR-status check to spawn
+/// another (see [`PR_CHECK_DEBOUNCE`]). `None` (never checked) always passes.
+fn pr_check_debounce_passed(
+    last_check: Option<std::time::Instant>,
+    now: std::time::Instant,
+    debounce: Duration,
+) -> bool {
+    last_check.is_none_or(|t| now.saturating_duration_since(t) >= debounce)
+}
+
+/// Session ids whose agent just finished a turn: present as [`AgentState::Idle`]
+/// now but [`AgentState::Working`] in the previous poll. Drives the unread
+/// marker. An empty `prev` (never polled, or cleared after an attach) yields no
+/// transitions, so a freshly-populated baseline can't produce false unread.
+pub(crate) fn detect_unread_transitions(
+    prev: &HashMap<SessionId, AgentState>,
+    new: &HashMap<SessionId, AgentState>,
+) -> Vec<SessionId> {
+    new.iter()
+        .filter(|(id, state)| {
+            **state == AgentState::Idle && prev.get(id) == Some(&AgentState::Working)
+        })
+        .map(|(id, _)| *id)
+        .collect()
+}
+
+/// Whether the agent-state poll tick can skip entirely: nothing to detect (no
+/// running sessions and the commander isn't running) AND the commander's
+/// running state has not changed since the last emitted update. Skipping keeps
+/// the no-sessions path quiet — no cache write, no change-feed wake.
+fn poll_tick_can_skip(
+    sessions_empty: bool,
+    commander_running: bool,
+    last_commander_running: bool,
+) -> bool {
+    sessions_empty && !commander_running && !last_commander_running
+}
+
+/// Whether a poll tick (that wasn't skipped) should emit an update: when there
+/// are fresh agent states, or the commander's running state flipped — the
+/// latter is what lets the footer chip turn *off* on the trailing edge.
+fn poll_tick_should_send(
+    states_empty: bool,
+    commander_running: bool,
+    last_commander_running: bool,
+) -> bool {
+    !states_empty || commander_running != last_commander_running
 }
 
 /// Write the apply brief to a stable absolute path in the system temp dir
@@ -1559,10 +2027,10 @@ fn ensure_install_id(store: &Arc<StateStore>) -> String {
 // Construction that needs core's domain model is done by
 // `session_info_from_session` below.
 pub use claude_commander_protocol::api::{
-    AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
-    OperationKind, OperationOutcome, OperationStatus, PreviewData, ProgramInfo, ProjectInfo,
-    PullBlockReason, PullStatus, RenameSession, ReviewSnapshot, ServerStatus, SessionDetail,
-    SessionInfo, SetSection, ToggleReviewed, WorkspaceSnapshot,
+    AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, DiffStat,
+    NewComment, OperationKind, OperationOutcome, OperationStatus, PreviewData, ProgramInfo,
+    ProjectInfo, PullBlockReason, PullStatus, RenameSession, ReviewSnapshot, ServerStatus,
+    SessionDetail, SessionInfo, SetSection, ToggleReviewed, WorkspaceSnapshot,
 };
 
 /// Build a [`SessionInfo`] wire DTO from core's `WorktreeSession` domain model.
@@ -2324,9 +2792,139 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_pr_refresh_is_ok_stub() {
+    async fn request_pr_refresh_notifies_without_error() {
         let dir = tempfile::TempDir::new().unwrap();
         let svc = service(&dir);
+        // With no loop running the notification is simply dropped; the call must
+        // still succeed (a manual refresh before startup is harmless).
         assert!(svc.request_pr_refresh().is_ok());
+    }
+
+    // -- Background-loop helpers + caches (Phase D) --
+
+    #[test]
+    fn unread_transition_working_to_idle_is_flagged() {
+        let sid = SessionId::new();
+        let prev = HashMap::from([(sid, AgentState::Working)]);
+        let new = HashMap::from([(sid, AgentState::Idle)]);
+        assert_eq!(detect_unread_transitions(&prev, &new), vec![sid]);
+    }
+
+    #[test]
+    fn unread_transition_idle_to_idle_is_not_flagged() {
+        let sid = SessionId::new();
+        let prev = HashMap::from([(sid, AgentState::Idle)]);
+        let new = HashMap::from([(sid, AgentState::Idle)]);
+        assert!(detect_unread_transitions(&prev, &new).is_empty());
+    }
+
+    #[test]
+    fn unread_transition_empty_prev_is_not_flagged() {
+        // A cleared baseline (never polled, or reset after an attach) must not
+        // fabricate an unread from the first observation.
+        let sid = SessionId::new();
+        let new_idle = HashMap::from([(sid, AgentState::Idle)]);
+        let new_working = HashMap::from([(sid, AgentState::Working)]);
+        assert!(detect_unread_transitions(&HashMap::new(), &new_idle).is_empty());
+        assert!(detect_unread_transitions(&HashMap::new(), &new_working).is_empty());
+    }
+
+    #[test]
+    fn unread_transition_flags_commander_sentinel_so_loop_must_filter() {
+        // The detector treats the sentinel like any other id, so a commander
+        // Working→Idle WOULD be reported; the poll loop filters it out (the
+        // commander has no `WorktreeSession` to mark unread).
+        let sentinel = crate::commander::commander_sentinel_id();
+        let prev = HashMap::from([(sentinel, AgentState::Working)]);
+        let new = HashMap::from([(sentinel, AgentState::Idle)]);
+        assert_eq!(detect_unread_transitions(&prev, &new), vec![sentinel]);
+    }
+
+    #[test]
+    fn poll_tick_skip_and_send_decisions() {
+        // Skip only when there's nothing to detect and the commander's running
+        // state is unchanged.
+        assert!(poll_tick_can_skip(true, false, false));
+        assert!(!poll_tick_can_skip(true, true, true));
+        assert!(!poll_tick_can_skip(false, true, true));
+        // A commander flip (either edge) must not be skipped.
+        assert!(!poll_tick_can_skip(true, false, true));
+        assert!(!poll_tick_can_skip(true, true, false));
+
+        // Send on fresh states, or on a commander flip (so the chip can turn
+        // off on the trailing edge); stay quiet otherwise.
+        assert!(poll_tick_should_send(false, false, false));
+        assert!(poll_tick_should_send(true, true, false));
+        assert!(poll_tick_should_send(true, false, true));
+        assert!(!poll_tick_should_send(true, true, true));
+        assert!(!poll_tick_should_send(true, false, false));
+    }
+
+    #[test]
+    fn pr_check_debounce_allows_first_and_blocks_bursts() {
+        let base = std::time::Instant::now();
+        let debounce = Duration::from_secs(2);
+        assert!(pr_check_debounce_passed(None, base, debounce));
+        assert!(!pr_check_debounce_passed(
+            Some(base),
+            base + Duration::from_millis(500),
+            debounce
+        ));
+        assert!(pr_check_debounce_passed(
+            Some(base),
+            base + Duration::from_secs(2),
+            debounce
+        ));
+    }
+
+    #[tokio::test]
+    async fn agent_states_fresh_primes_cache_then_served_from_it() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        // Unprimed, non-fresh: on-demand path reports commander_running = true.
+        let before = svc.agent_states(false).await;
+        assert!(before.commander_running);
+        // A fresh call primes the cache (no active sessions → empty states,
+        // commander_running defaults to false in the cache).
+        let fresh = svc.agent_states(true).await;
+        assert!(fresh.states.is_empty());
+        // Once primed, the non-fresh read is served from the cache and so
+        // reflects the cached commander_running (false), not the on-demand true.
+        let after = svc.agent_states(false).await;
+        assert!(!after.commander_running);
+    }
+
+    #[tokio::test]
+    async fn spawn_background_tasks_is_idempotent() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let first = svc.spawn_background_tasks(BackgroundOpts::default());
+        assert!(!first.is_empty(), "first spawn starts the loops");
+        let second = svc.spawn_background_tasks(BackgroundOpts::default());
+        assert!(second.is_empty(), "second spawn is a no-op");
+        first.abort();
+    }
+
+    #[tokio::test]
+    async fn workspace_snapshot_surfaces_project_pull_cache() {
+        use crate::api::{PullBlockReason, PullStatus};
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (pid, _sid) = seed_project_session(&svc).await;
+        // The pull loop maintains this cache; inject an outcome directly to prove
+        // `workspace_snapshot` surfaces it in `project_pull`.
+        svc.pull_status.lock().unwrap().insert(
+            pid,
+            PullStatus::Blocked {
+                reason: PullBlockReason::Dirty,
+            },
+        );
+        let snap = svc.workspace_snapshot().await.unwrap();
+        assert_eq!(
+            snap.project_pull.get(&pid),
+            Some(&PullStatus::Blocked {
+                reason: PullBlockReason::Dirty
+            })
+        );
     }
 }

@@ -121,6 +121,44 @@ impl BlockReason {
     }
 }
 
+impl From<BlockReason> for claude_commander_protocol::api::PullBlockReason {
+    fn from(r: BlockReason) -> Self {
+        use claude_commander_protocol::api::PullBlockReason as P;
+        match r {
+            BlockReason::Dirty => P::Dirty,
+            BlockReason::Diverged => P::Diverged,
+            BlockReason::WorktreeConflict => P::WorktreeConflict,
+        }
+    }
+}
+
+impl From<claude_commander_protocol::api::PullBlockReason> for BlockReason {
+    fn from(r: claude_commander_protocol::api::PullBlockReason) -> Self {
+        use claude_commander_protocol::api::PullBlockReason as P;
+        match r {
+            P::Dirty => BlockReason::Dirty,
+            P::Diverged => BlockReason::Diverged,
+            P::WorktreeConflict => BlockReason::WorktreeConflict,
+        }
+    }
+}
+
+impl PullOutcome {
+    /// Project this pull outcome onto the protocol [`PullStatus`] DTO surfaced in
+    /// [`WorkspaceSnapshot::project_pull`](claude_commander_protocol::api::WorkspaceSnapshot).
+    pub fn to_status(self) -> claude_commander_protocol::api::PullStatus {
+        use claude_commander_protocol::api::PullStatus as S;
+        match self {
+            PullOutcome::Advanced => S::Advanced,
+            PullOutcome::UpToDate => S::UpToDate,
+            PullOutcome::Blocked(reason) => S::Blocked {
+                reason: reason.into(),
+            },
+            PullOutcome::SoftFail => S::SoftFail,
+        }
+    }
+}
+
 /// Execute one pull attempt for a project. Always best-effort: any
 /// unexpected git error returns `SoftFail` and logs at debug.
 ///
@@ -683,5 +721,32 @@ mod executor_tests {
         let local_main = git_capture(&local, &["rev-parse", "refs/heads/main"]);
         let origin_main = git_capture(&local, &["rev-parse", "refs/remotes/origin/main"]);
         assert_ne!(local_main, origin_main);
+    }
+
+    #[test]
+    fn pull_outcome_maps_onto_protocol_status() {
+        use claude_commander_protocol::api::{PullBlockReason, PullStatus};
+        assert_eq!(PullOutcome::Advanced.to_status(), PullStatus::Advanced);
+        assert_eq!(PullOutcome::UpToDate.to_status(), PullStatus::UpToDate);
+        assert_eq!(PullOutcome::SoftFail.to_status(), PullStatus::SoftFail);
+        assert_eq!(
+            PullOutcome::Blocked(BlockReason::Diverged).to_status(),
+            PullStatus::Blocked {
+                reason: PullBlockReason::Diverged
+            }
+        );
+    }
+
+    #[test]
+    fn block_reason_round_trips_through_protocol() {
+        use claude_commander_protocol::api::PullBlockReason;
+        for reason in [
+            BlockReason::Dirty,
+            BlockReason::Diverged,
+            BlockReason::WorktreeConflict,
+        ] {
+            let wire: PullBlockReason = reason.clone().into();
+            assert_eq!(BlockReason::from(wire), reason);
+        }
     }
 }

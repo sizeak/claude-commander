@@ -417,6 +417,12 @@ pub trait CommanderBackend: Send + Sync {
         Ok(())
     }
 
+    /// Trigger an immediate PR-metadata refresh. [`LocalBackend`] wakes its
+    /// background PR-status loop; a remote backend POSTs `/api/pr-refresh` so the
+    /// server re-checks. No default — every backend must route the request to
+    /// where PR polling actually happens.
+    async fn request_pr_refresh(&self) -> BResult<()>;
+
     // -- Projects --
 
     async fn add_project(&self, path: std::path::PathBuf) -> BResult<ProjectId>;

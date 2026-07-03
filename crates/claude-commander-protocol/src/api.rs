@@ -189,7 +189,7 @@ pub enum PullBlockReason {
 /// `git::PullOutcome`.
 ///
 /// FLUTTER: mirror this enum.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum PullStatus {
     /// Fast-forward applied.
@@ -301,10 +301,25 @@ pub struct PreviewData {
     #[serde(default)]
     pub pane: Option<String>,
     pub diff_text: String,
+    /// Human-readable one-line summary (e.g. `"3 file(s), +12 -4 lines"`).
     #[serde(default)]
     pub diff_stat: Option<String>,
+    /// Structured diff counts, so a client can rebuild its own diff view/stat
+    /// widget rather than re-parsing `diff_text`. `None` when there is no diff.
+    #[serde(default)]
+    pub stats: Option<DiffStat>,
     #[serde(default)]
     pub shell: Option<String>,
+}
+
+/// Numeric diff counts carried alongside [`PreviewData`].
+///
+/// FLUTTER: mirror this DTO.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct DiffStat {
+    pub files_changed: usize,
+    pub lines_added: usize,
+    pub lines_removed: usize,
 }
 
 /// A launch program option for the new-session picker.
@@ -547,12 +562,19 @@ mod tests {
             pane: Some("hello".to_string()),
             diff_text: "diff".to_string(),
             diff_stat: Some("1 file(s)".to_string()),
+            stats: Some(DiffStat {
+                files_changed: 1,
+                lines_added: 2,
+                lines_removed: 3,
+            }),
             shell: None,
         };
         let json = serde_json::to_string(&p).unwrap();
         let back: PreviewData = serde_json::from_str(&json).unwrap();
         assert_eq!(back.pane.as_deref(), Some("hello"));
         assert_eq!(back.diff_text, "diff");
+        let s = back.stats.unwrap();
+        assert_eq!((s.files_changed, s.lines_added, s.lines_removed), (1, 2, 3));
         assert!(back.shell.is_none());
     }
 

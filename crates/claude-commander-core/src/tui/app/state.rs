@@ -16,10 +16,32 @@ impl App {
                 snapshot,
                 states,
             } => {
+                let states = *states;
+                let is_local = backend_id == crate::backend::LOCAL_BACKEND_ID.0;
+                // Diff the OLD agent states (before we overwrite them) against
+                // the fresh ones: if the session whose review is open just went
+                // Working→Idle, it likely acted on applied comments — refresh the
+                // review view in place.
+                let review_refresh =
+                    is_local.then(|| self.review_refresh_on_transition(&states.states));
+
                 if let Some(handle) = self.backends.iter_mut().find(|h| h.id.0 == backend_id) {
                     handle.view.snapshot = *snapshot;
-                    handle.view.agent_states = *states;
+                    handle.view.agent_states = states.clone();
                     handle.view.connection = crate::backend::ConnectionState::Connected;
+                }
+
+                // The local backend drives the rendered agent-state map, the
+                // commander chip, and the project-pull badges (folded out of the
+                // snapshot the poll loops maintain). Single-backend this phase;
+                // Phase E merges every backend's states into one tree.
+                if is_local {
+                    self.ui_state.agent_states = states.states;
+                    self.ui_state.commander_running = states.commander_running;
+                    self.apply_project_pull_badges();
+                }
+                if let Some(Some((sid, title, prev_hash))) = review_refresh {
+                    self.spawn_review_refresh(sid, title, prev_hash, false);
                 }
                 self.refresh_list_items().await;
             }
@@ -72,14 +94,6 @@ impl App {
                     );
                 }
             }
-            StateUpdate::PrStatusReady { results } => {
-                // Persist the PR results, re-run section assignment, and refresh
-                // running sessions' tmux status bars — all server-side in the
-                // backend (status-bar config is a local-only capability).
-                let _ = self.local_arc().apply_pr_results(results).await;
-                self.refresh_local_view().await;
-                self.refresh_list_items().await;
-            }
             StateUpdate::EnrichedPrReady { session_id, info } => {
                 // Only apply if the session is still selected
                 if self.ui_state.selected_session_id == Some(session_id) {
@@ -126,42 +140,6 @@ impl App {
                 // The backend already removed its half-created session; the
                 // change feed refreshes the tree. Just surface the error.
                 self.ui_state.modal = Modal::Error { message };
-            }
-            StateUpdate::AgentStatesUpdated {
-                states,
-                commander_running,
-            } => {
-                self.ui_state.commander_running = commander_running;
-                // The commander has no `WorktreeSession`, so its sentinel id
-                // must not drive the unread/`mutate` path (which would take the
-                // write lock for a no-op `get_session_mut` miss every idle).
-                let sentinel = crate::commander::commander_sentinel_id();
-                let transitions = detect_unread_transitions(&self.ui_state.agent_states, &states);
-                // If the agent for the open review view just finished a turn, it
-                // likely acted on applied comments — fold its fresh edits into
-                // the view in place. Skip while a comment box is open (a rebuild
-                // would lose the in-progress draft's anchor).
-                let review_refresh = match &self.ui_state.modal {
-                    Modal::ReviewDiff(state)
-                        if state.comment.is_none() && transitions.contains(&state.session_id) =>
-                    {
-                        Some((state.session_id, state.title.clone(), state.content_hash))
-                    }
-                    _ => None,
-                };
-                if let Some((sid, title, prev_hash)) = review_refresh {
-                    self.spawn_review_refresh(sid, title, prev_hash, false);
-                }
-                let unread_ids: Vec<_> = transitions
-                    .into_iter()
-                    .filter(|sid| *sid != sentinel)
-                    .collect();
-                if !unread_ids.is_empty() {
-                    let _ = self.local_arc().mark_unread(unread_ids).await;
-                    self.refresh_local_view().await;
-                }
-                self.ui_state.agent_states = states;
-                self.refresh_list_items().await;
             }
             StateUpdate::CheckoutFetchComplete {
                 project_id: updated_project,
@@ -216,10 +194,6 @@ impl App {
                     *all_branches = entries;
                     self.refilter_checkout_branches();
                 }
-            }
-            StateUpdate::ExternalChange => {
-                debug!("External state change detected, refreshing UI");
-                self.refresh_list_items().await;
             }
             StateUpdate::Error { message } => {
                 self.ui_state.modal = Modal::Error { message };
@@ -317,38 +291,48 @@ impl App {
             StateUpdate::PushStackFinished { result } => {
                 self.handle_push_stack_finished(result).await;
             }
-            StateUpdate::ProjectPullFinished {
-                project_id,
-                outcome,
-            } => {
-                self.ui_state.project_pull_in_flight.remove(&project_id);
-                self.ui_state
-                    .last_project_pull
-                    .insert(project_id, Instant::now());
-                match outcome {
-                    PullOutcome::Advanced => {
-                        debug!("project pull: {} advanced", project_id);
-                        self.ui_state.project_pull_blocked.remove(&project_id);
-                        self.refresh_list_items().await;
-                    }
-                    PullOutcome::UpToDate => {
-                        self.ui_state.project_pull_blocked.remove(&project_id);
-                    }
-                    PullOutcome::Blocked(reason) => {
-                        debug!("project pull: {} blocked ({})", project_id, reason.as_str());
-                        self.ui_state
-                            .project_pull_blocked
-                            .insert(project_id, reason);
-                    }
-                    PullOutcome::SoftFail => {
-                        // Leave any existing blocked state alone: a fetch
-                        // failure doesn't tell us anything new about the
-                        // branch relation.
-                    }
-                }
-            }
             _ => {}
         }
+    }
+
+    /// Fold the workspace snapshot's per-project pull status into the render-side
+    /// `project_pull_blocked` badge map. The background pull loop maintains the
+    /// status server-side; only [`PullStatus::Blocked`] surfaces a badge (an
+    /// advance/up-to-date/soft-fail clears any prior one).
+    fn apply_project_pull_badges(&mut self) {
+        use crate::api::PullStatus;
+        self.ui_state.project_pull_blocked = self
+            .local_view()
+            .snapshot
+            .project_pull
+            .iter()
+            .filter_map(|(id, status)| match status {
+                PullStatus::Blocked { reason } => {
+                    Some((*id, crate::git::BlockReason::from(*reason)))
+                }
+                _ => None,
+            })
+            .collect();
+    }
+
+    /// If the review view is open (and no comment draft is in progress) for a
+    /// session that just transitioned Working→Idle between `self.ui_state`'s
+    /// current agent states and `new_states`, return the arguments for an
+    /// in-place review refresh.
+    fn review_refresh_on_transition(
+        &self,
+        new_states: &HashMap<SessionId, AgentState>,
+    ) -> Option<(SessionId, String, u64)> {
+        let Modal::ReviewDiff(state) = &self.ui_state.modal else {
+            return None;
+        };
+        if state.comment.is_some() {
+            return None;
+        }
+        let sid = state.session_id;
+        let was_working = self.ui_state.agent_states.get(&sid) == Some(&AgentState::Working);
+        let now_idle = new_states.get(&sid) == Some(&AgentState::Idle);
+        (was_working && now_idle).then(|| (sid, state.title.clone(), state.content_hash))
     }
 
     /// Re-run section assignment over every session against current config
@@ -928,19 +912,6 @@ pub(super) fn build_stacked_section_items(
     items
 }
 
-fn detect_unread_transitions(
-    prev: &HashMap<SessionId, AgentState>,
-    new: &HashMap<SessionId, AgentState>,
-) -> Vec<SessionId> {
-    let mut ids = Vec::new();
-    for (session_id, new_state) in new {
-        if *new_state == AgentState::Idle && prev.get(session_id) == Some(&AgentState::Working) {
-            ids.push(*session_id);
-        }
-    }
-    ids
-}
-
 /// Apply freshly-detected agent states for the sessions just viewed during an
 /// attach, leaving every other session's entry untouched.
 ///
@@ -1009,59 +980,9 @@ pub(super) fn stack_retarget_preview_from_snapshot(
 #[cfg(test)]
 mod unread_transition_tests {
     use super::*;
+    use crate::api::detect_unread_transitions;
     use crate::session::SessionId;
     use std::collections::HashMap;
-
-    #[test]
-    fn working_to_idle_marks_unread() {
-        let sid = SessionId::new();
-        let prev = HashMap::from([(sid, AgentState::Working)]);
-        let new = HashMap::from([(sid, AgentState::Idle)]);
-        assert_eq!(detect_unread_transitions(&prev, &new), vec![sid]);
-    }
-
-    #[test]
-    fn idle_to_idle_no_transition() {
-        let sid = SessionId::new();
-        let prev = HashMap::from([(sid, AgentState::Idle)]);
-        let new = HashMap::from([(sid, AgentState::Idle)]);
-        assert!(detect_unread_transitions(&prev, &new).is_empty());
-    }
-
-    #[test]
-    fn empty_cache_no_transition() {
-        let sid = SessionId::new();
-        let prev = HashMap::new();
-        let new = HashMap::from([(sid, AgentState::Idle)]);
-        assert!(
-            detect_unread_transitions(&prev, &new).is_empty(),
-            "cleared cache after attach must not trigger false unread"
-        );
-    }
-
-    #[test]
-    fn empty_cache_working_no_transition() {
-        let sid = SessionId::new();
-        let prev = HashMap::new();
-        let new = HashMap::from([(sid, AgentState::Working)]);
-        assert!(detect_unread_transitions(&prev, &new).is_empty());
-    }
-
-    #[test]
-    fn commander_sentinel_would_be_flagged_so_handler_must_filter_it() {
-        // The detector treats the sentinel like any other id, so a commander
-        // Working→Idle transition WOULD be reported as unread. The handler
-        // filters the sentinel out to avoid a no-op write-lock/`mutate` on a
-        // session that does not exist in `state.sessions`.
-        let sentinel = crate::commander::commander_sentinel_id();
-        let prev = HashMap::from([(sentinel, AgentState::Working)]);
-        let new = HashMap::from([(sentinel, AgentState::Idle)]);
-        assert_eq!(
-            detect_unread_transitions(&prev, &new),
-            vec![sentinel],
-            "if this stops flagging the sentinel, the handler's filter is dead code"
-        );
-    }
 
     #[test]
     fn viewed_refresh_preserves_background_unread() {

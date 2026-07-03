@@ -50,13 +50,10 @@ use crate::backend::{
 use crate::config::{BindableAction, Config, ConfigStore, StateStore};
 use crate::error::{Result, TuiError};
 use crate::git::{
-    AiSummary, BlockReason, DiffInfo, EnrichedPrInfo, PullOutcome, check_pr_for_branch, diff_hash,
-    fetch_branch_summary, fetch_enriched_pr, is_gh_available, run_project_pull,
+    AiSummary, BlockReason, DiffInfo, EnrichedPrInfo, diff_hash, fetch_branch_summary,
+    fetch_enriched_pr, is_gh_available,
 };
-use crate::session::{
-    AgentState, ProjectId, SessionId, SessionListItem, SessionManager, SessionStatus,
-};
-use crate::tmux::AgentStateDetector;
+use crate::session::{AgentState, ProjectId, SessionId, SessionListItem, SessionStatus};
 
 mod actions;
 mod background;
@@ -131,35 +128,6 @@ pub enum AttachTarget {
     /// a project shell — attached via the local backend by name. Local-only:
     /// these are absent from the workspace snapshot.
     LocalName(String),
-}
-
-/// Whether the agent-state poll tick can skip entirely: there is nothing to
-/// detect (no regular sessions and the commander isn't running) AND the
-/// commander's running state has not changed since the last emitted update.
-/// Skipping keeps the no-sessions path quiet — no event, no list rebuild.
-///
-/// The `!commander_running` term is what the docstring promises: a *running*
-/// commander always has agent state worth forwarding, so we never skip then.
-/// At the current call site `sessions_empty` already implies `!commander_running`
-/// (a running commander pushes its sentinel), so the term is belt-and-braces —
-/// but it keeps the predicate honest if the call site ever changes.
-fn poll_tick_can_skip(
-    sessions_empty: bool,
-    commander_running: bool,
-    last_commander_running: bool,
-) -> bool {
-    sessions_empty && !commander_running && !last_commander_running
-}
-
-/// Whether a poll tick (that wasn't skipped) should emit an update: when there
-/// are fresh agent states, or the commander's running state flipped — the
-/// latter is what lets the chip turn *off* on the trailing edge.
-fn poll_tick_should_send(
-    states_empty: bool,
-    commander_running: bool,
-    last_commander_running: bool,
-) -> bool {
-    !states_empty || commander_running != last_commander_running
 }
 
 /// Minimum left pane width as a percentage of the content area
@@ -942,8 +910,6 @@ pub struct AppUiState {
     pub clear_right_pane: bool,
     /// Left pane width as a percentage (adjustable at runtime via < / >)
     pub left_pane_pct: u16,
-    /// When the last PR status check was performed
-    pub last_pr_check: Option<Instant>,
     /// Whether the `gh` CLI is available
     pub gh_available: bool,
     /// When the last background preview fetch was spawned (None = not in flight)
@@ -980,21 +946,10 @@ pub struct AppUiState {
     pub view_mode: ViewMode,
     /// Pre-computed stack chain for the selected session (empty if not stacked).
     pub stack_chain: Vec<StackChainEntry>,
-    /// When each project last completed a background pull attempt
-    /// (success or block). Drives the per-project interval scheduler.
-    pub last_project_pull: HashMap<ProjectId, Instant>,
-    /// Projects whose most recent pull was held back, with the reason.
-    /// Cleared when a subsequent attempt advances or finds nothing to do.
+    /// Projects whose most recent background pull was held back, with the
+    /// reason. Folded out of the workspace snapshot's `project_pull` (which the
+    /// service's pull loop maintains) to drive the per-project row badge.
     pub project_pull_blocked: HashMap<ProjectId, BlockReason>,
-    /// Projects with a pull task currently in flight, so we don't double-spawn.
-    pub project_pull_in_flight: std::collections::HashSet<ProjectId>,
-    /// When the app launched. Used to give the background pull task a short
-    /// grace period before its first fire after startup.
-    pub started_at: Instant,
-    /// When the project-pull scheduler last swept the project list. A cheap
-    /// global throttle so the per-tick check doesn't acquire the state lock
-    /// and clone the project list on every render frame.
-    pub last_project_pull_sweep: Option<Instant>,
 }
 
 impl Default for AppUiState {
@@ -1030,7 +985,6 @@ impl Default for AppUiState {
             editor_command: None,
             clear_right_pane: false,
             left_pane_pct: DEFAULT_LEFT_PANE_PCT,
-            last_pr_check: None,
             gh_available: false,
             preview_update_spawned_at: None,
             review_refresh_in_flight: false,
@@ -1045,11 +999,7 @@ impl Default for AppUiState {
             modal_list_last_click: None,
             view_mode: ViewMode::default(),
             stack_chain: Vec::new(),
-            last_project_pull: HashMap::new(),
             project_pull_blocked: HashMap::new(),
-            project_pull_in_flight: std::collections::HashSet::new(),
-            started_at: Instant::now(),
-            last_project_pull_sweep: None,
         }
     }
 }
@@ -1533,12 +1483,10 @@ impl App {
         self.bootstrap_backend_views().await;
         self.spawn_backend_change_feeds();
 
-        // Check gh availability and do initial PR check
+        // Cache gh availability for the enriched-PR info fetch (the PR-status
+        // loop gates on its own cached probe inside the service).
         if self.config.pr_check_interval_secs > 0 {
             self.ui_state.gh_available = is_gh_available().await;
-            if self.ui_state.gh_available {
-                self.spawn_pr_status_check();
-            }
         }
 
         // Probe terminal graphics capability ONCE, here — BEFORE the background
@@ -1572,11 +1520,16 @@ impl App {
             let _ = tokio::task::spawn_blocking(crate::tui::syntax_highlight::warm_assets).await;
         });
 
-        // Start the cross-instance state-sync and agent-state poll loops. Both
-        // still clone `self.service` internals — the sole remaining PHASE-D seam,
-        // now confined to `background.rs` (see its module docs).
-        self.spawn_state_sync();
-        self.spawn_agent_poll();
+        // Start the service-owned background loops (agent-state polling,
+        // PR-status checks, project auto-pull, cross-instance state-sync). They
+        // run inside the service and reach the TUI as fresh snapshots via the
+        // backend change feed; a remote backend's server runs its own loops, so
+        // this local spawn is idempotent and no-ops if already started.
+        let _background = self
+            .service
+            .spawn_background_tasks(crate::api::BackgroundOpts {
+                commander_enabled: self.commander_enabled_at_init,
+            });
 
         // Restore the last-selected view if the user has previously chosen
         // one. If they haven't, fall back to the section-aware default:
@@ -1854,9 +1807,10 @@ impl App {
                         // Refresh agent state for just the sessions we viewed,
                         // via the backend, applying the fresh states directly.
                         // We do NOT clear the whole map: that would blank every
-                        // spinner until the next poll and wipe the unread
-                        // baseline. Applying viewed sessions directly (bypassing
-                        // the unread diff) avoids re-flagging them as unread.
+                        // spinner until the next poll. `agent_states(true)` also
+                        // advances the service loop's shared baseline to these
+                        // observed states, so the loop won't re-flag a
+                        // just-finished session on its next tick.
                         let viewed_ids: HashSet<SessionId> = self
                             .local_view()
                             .snapshot
@@ -1869,18 +1823,25 @@ impl App {
                             })
                             .map(|s| s.session_id)
                             .collect();
-                        if !viewed_ids.is_empty()
-                            && let Ok(fresh) = self.local_arc().agent_states(true).await
-                        {
-                            let refreshed: HashMap<SessionId, AgentState> = fresh
-                                .states
-                                .into_iter()
-                                .filter(|(id, _)| viewed_ids.contains(id))
-                                .collect();
-                            state::apply_viewed_session_refresh(
-                                &mut self.ui_state.agent_states,
-                                refreshed,
-                            );
+                        if !viewed_ids.is_empty() {
+                            // The service loop runs during the attach and may have
+                            // flagged a watched session unread when it went idle.
+                            // Clear unread for everything we actually saw — the
+                            // operator watched those turns finish.
+                            for id in &viewed_ids {
+                                let _ = self.local_arc().mark_read(*id).await;
+                            }
+                            if let Ok(fresh) = self.local_arc().agent_states(true).await {
+                                let refreshed: HashMap<SessionId, AgentState> = fresh
+                                    .states
+                                    .into_iter()
+                                    .filter(|(id, _)| viewed_ids.contains(id))
+                                    .collect();
+                                state::apply_viewed_session_refresh(
+                                    &mut self.ui_state.agent_states,
+                                    refreshed,
+                                );
+                            }
                             self.refresh_list_items().await;
                         }
 

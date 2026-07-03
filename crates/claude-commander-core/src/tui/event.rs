@@ -5,14 +5,13 @@
 //! - Application state updates
 //! - Render ticks
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::config::keybindings::{BindableAction, KeyBindings};
 use crate::git::{DiffInfo, EnrichedPrInfo};
-use crate::session::{AgentState, ProjectId, SessionId};
+use crate::session::{ProjectId, SessionId};
 
 use crossterm::event::{
     Event as CrosstermEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
@@ -67,17 +66,11 @@ pub enum StateUpdate {
     SessionRemoved { session_id: SessionId },
     /// Error occurred
     Error { message: String },
-    /// PR status results ready from background check
-    PrStatusReady {
-        results: Vec<(SessionId, crate::git::PrCheckResult)>,
-    },
     /// Session creation completed successfully
     SessionCreated { session_id: SessionId },
     /// Session creation failed. The backend removes its own half-created
     /// (`Creating`) session on failure, so this carries only the message.
     SessionCreateFailed { message: String },
-    /// State file was modified by another instance
-    ExternalChange,
     /// Enriched PR info ready from background fetch
     EnrichedPrReady {
         session_id: SessionId,
@@ -89,14 +82,6 @@ pub enum StateUpdate {
         result: Result<String, String>,
         /// Hash of the diff that was summarized (for cache keying)
         diff_hash: u64,
-    },
-    /// Agent states updated from background polling
-    AgentStatesUpdated {
-        states: HashMap<SessionId, AgentState>,
-        /// Whether the project-less commander session is currently running.
-        /// Polled alongside the regular sessions; feeds the footer status chip
-        /// (a synchronous renderer).
-        commander_running: bool,
     },
     /// A backend's change-feed fired: a fresh workspace snapshot (and agent
     /// states) fetched off the render path, to fold into that backend's cached
@@ -139,11 +124,6 @@ pub enum StateUpdate {
     /// how many branches pushed); `Err` carries a transport/backend error.
     PushStackFinished {
         result: std::result::Result<crate::api::OperationStatus, String>,
-    },
-    /// Background project-branch pull finished for one project.
-    ProjectPullFinished {
-        project_id: ProjectId,
-        outcome: crate::git::PullOutcome,
     },
     /// Review diff prepared off-thread: the parsed diff plus its warmed render
     /// caches (word-diff segments + syntax highlighting), ready to replace the

@@ -788,6 +788,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "claude-commander-remote"
+version = "0.23.0"
+dependencies = [
+ "async-trait",
+ "claude-commander-core",
+ "claude-commander-protocol",
+ "claude-commander-server",
+ "claude-commander-test-support",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "uuid",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "claude-commander-server"
 version = "0.23.0"
 dependencies = [

@@ -1,52 +1,24 @@
-//! Background tasks: preview updates, PR status checks, info fetching, AI
-//! summaries, cross-instance state sync, and agent-state polling.
+//! UI-triggered background fetches: preview/diff/shell data, the review-diff
+//! re-compose, enriched-PR info, and AI summaries.
 //!
-//! PHASE-D SEAM: this module is the one remaining place the TUI reaches past the
-//! `CommanderBackend` trait into `self.service` (the local `StateStore` +
-//! `SessionManager`/`TmuxExecutor`). Every `self.service.store()` /
-//! `self.service.session_manager()` access in the crate now lives here, in the
-//! loop-spawning methods below (`spawn_preview_update`, `spawn_pr_status_check`,
-//! `spawn_info_fetch`, `spawn_ai_summary_if_needed`, `spawn_state_sync`,
-//! `spawn_agent_poll`). Phase D moves this polling/refresh work behind the
-//! backend (server-side for a remote backend, an in-process cache for the local
-//! one) and a bulk agent-states cache, at which point these direct-service
-//! clones and the transitional `App::service` field are deleted. Until then
-//! they are deliberately confined to this module so the rest of the TUI is
-//! already backend-only.
-
-use futures::StreamExt;
+//! These are spawned in response to user actions (selection change, pane
+//! switch, hotkeys), never on a fixed tick, and they reach the data they need
+//! **through the [`CommanderBackend`](crate::backend::CommanderBackend) trait**
+//! — never the local `StateStore`/`SessionManager` directly. The periodic
+//! refresh loops (agent-state polling, PR-status checks, project auto-pull,
+//! cross-instance state-sync) that used to live here now run inside the service
+//! ([`CommanderService::spawn_background_tasks`](crate::api::CommanderService::spawn_background_tasks));
+//! their results reach the TUI as fresh snapshots via the backend change feed.
 
 use super::*;
-
-/// Cap concurrent subprocess fan-outs (e.g. `gh pr list` across all
-/// sessions). Each call holds 3+ pipe FDs, so unbounded fan-out can
-/// EMFILE under the macOS launchd 256-FD default.
-const PR_FANOUT_CONCURRENCY: usize = 8;
-
-/// Cap concurrent project-branch pulls so a user with many projects
-/// doesn't spawn one `git fetch` per project at the same instant.
-const PROJECT_PULL_FANOUT_CONCURRENCY: usize = 4;
-
-/// Minimum gap between PR-status fan-outs. Debounces rapid manual triggers
-/// (e.g. double-enter on the palette "Refresh PR status" action) so we don't
-/// launch several concurrent `gh pr list` sweeps at once. It sits far below
-/// `pr_check_interval_secs`, so a manual refresh is still effectively immediate
-/// — and the periodic caller already gates on that longer cadence, so this only
-/// bites bursts.
-const PR_CHECK_DEBOUNCE: Duration = Duration::from_secs(2);
-
-/// Whether enough time has elapsed since the last PR-status check to spawn
-/// another (see [`PR_CHECK_DEBOUNCE`]). `None` (never checked) always passes.
-fn pr_check_debounce_passed(last_check: Option<Instant>, now: Instant, debounce: Duration) -> bool {
-    last_check.is_none_or(|t| now.saturating_duration_since(t) >= debounce)
-}
 
 impl App {
     /// Spawn a background task to fetch preview/diff/shell data.
     ///
     /// The task runs in parallel with the main event loop so that
     /// keyboard input is never blocked by I/O. Results arrive as
-    /// `StateUpdate::PreviewReady` events.
+    /// `StateUpdate::PreviewReady` events. The fetch goes through the backend
+    /// trait, so a remote backend serves the same preview over the wire.
     pub(super) fn spawn_preview_update(&mut self) {
         // Skip if a fetch is already in flight (with 5s safety timeout)
         if let Some(spawned_at) = self.ui_state.preview_update_spawned_at {
@@ -58,7 +30,7 @@ impl App {
 
         let session_id = self.ui_state.selected_session_id;
         let project_id = self.ui_state.selected_project_id;
-        let mgr = self.service.session_manager().clone();
+        let backend = self.local_arc();
         let tx = self.event_loop.sender();
 
         self.ui_state.preview_update_spawned_at = Some(Instant::now());
@@ -70,7 +42,7 @@ impl App {
 
         tokio::spawn(async move {
             let (preview_content, diff_info, shell_content) =
-                fetch_preview_data(&mgr, session_id, project_id).await;
+                fetch_preview_data(&backend, session_id, project_id).await;
 
             debug!(
                 "Preview fetch complete, sending PreviewReady (preview_len={} diff_lines={})",
@@ -115,14 +87,14 @@ impl App {
         }
         self.ui_state.review_refresh_in_flight = true;
 
-        let service = self.service.clone();
+        let backend = self.local_arc();
         let tx = self.event_loop.sender();
         let highlight = self.theme.mode == crate::tui::theme::ColorMode::TrueColor;
         let text_fg = self.theme.review_palette().text;
 
         tokio::spawn(async move {
-            let refreshed = match service
-                .refresh_review_if_changed(&session_id, prev_hash)
+            let refreshed = match backend
+                .refresh_review_if_changed(session_id, prev_hash)
                 .await
             {
                 Ok(Some(snapshot)) => {
@@ -168,57 +140,6 @@ impl App {
         });
     }
 
-    /// Spawn a background task to check PR status for all sessions
-    pub(super) fn spawn_pr_status_check(&mut self) {
-        // Debounce rapid re-triggers so we don't fan out several concurrent
-        // `gh pr list` sweeps (e.g. double-enter on the palette action). The
-        // periodic caller already gates on the much longer
-        // `pr_check_interval_secs`, so in practice this only collapses bursts.
-        if !pr_check_debounce_passed(
-            self.ui_state.last_pr_check,
-            Instant::now(),
-            PR_CHECK_DEBOUNCE,
-        ) {
-            return;
-        }
-        self.ui_state.last_pr_check = Some(Instant::now());
-
-        let store = self.service.store().clone();
-        let tx = self.event_loop.sender();
-
-        tokio::spawn(async move {
-            // Collect session info under a brief read lock
-            let sessions_to_check: Vec<(SessionId, String, std::path::PathBuf)> = {
-                let state = store.read().await;
-                state
-                    .sessions
-                    .values()
-                    .filter(|s| s.status != SessionStatus::Creating)
-                    .filter_map(|s| {
-                        let project = state.projects.get(&s.project_id)?;
-                        Some((s.id, s.branch.clone(), project.repo_path.clone()))
-                    })
-                    .collect()
-            };
-
-            let results: Vec<_> = futures::stream::iter(sessions_to_check.into_iter().map(
-                |(session_id, branch, repo_path)| async move {
-                    let pr_result = check_pr_for_branch(&repo_path, &branch).await;
-                    (session_id, pr_result)
-                },
-            ))
-            .buffer_unordered(PR_FANOUT_CONCURRENCY)
-            .collect()
-            .await;
-
-            let _ = tx
-                .send(AppEvent::StateUpdate(StateUpdate::PrStatusReady {
-                    results,
-                }))
-                .await;
-        });
-    }
-
     /// Spawn background fetches for info pane data (enriched PR + AI summary).
     ///
     /// Only called from user-initiated actions (pane switch, selection change).
@@ -259,20 +180,18 @@ impl App {
             .is_none_or(|(sid, _)| *sid != session_id);
 
         if needs_enriched && self.ui_state.gh_available {
-            let store = self.service.store().clone();
+            // Resolve the project's repo path from the cached snapshot rather
+            // than the store — the backend seam owns the state.
+            let snapshot = &self.local_view().snapshot;
+            let repo_path = snapshot
+                .sessions
+                .iter()
+                .find(|s| s.session_id == session_id)
+                .and_then(|s| snapshot.projects.iter().find(|p| p.id == s.project_id))
+                .map(|p| p.repo_path.clone());
             let tx = self.event_loop.sender();
 
             tokio::spawn(async move {
-                // Look up the project repo path
-                let repo_path = {
-                    let state = store.read().await;
-                    state
-                        .sessions
-                        .get(&session_id)
-                        .and_then(|s| state.projects.get(&s.project_id))
-                        .map(|p| p.repo_path.clone())
-                };
-
                 let info = if let Some(repo_path) = repo_path {
                     fetch_enriched_pr(&repo_path, pr_number).await
                 } else {
@@ -289,91 +208,11 @@ impl App {
         }
     }
 
-    /// Walk the project list, decide which projects are due for a pull
-    /// this tick (respecting the `project_pull_interval_secs` cadence,
-    /// a 5s startup grace, and the in-flight set), and dispatch them via
-    /// `spawn_project_pulls`.
-    pub(super) async fn maybe_spawn_project_pulls(&mut self) {
-        // Honour a small grace period after startup so the first tick after
-        // launch doesn't immediately hammer every project.
-        const STARTUP_GRACE: Duration = Duration::from_secs(5);
-        if self.ui_state.started_at.elapsed() < STARTUP_GRACE {
-            return;
-        }
-
-        let interval = Duration::from_secs(self.config.project_pull_interval_secs);
-
-        // Cheap global throttle: a project can become due at most once per
-        // `interval`, so sweeping the project list (state lock + clone) more
-        // often than that on every render tick is wasted work. The per-project
-        // `last_project_pull` cadence still governs which projects actually run.
-        if let Some(last) = self.ui_state.last_project_pull_sweep
-            && last.elapsed() < interval
-        {
-            return;
-        }
-        self.ui_state.last_project_pull_sweep = Some(Instant::now());
-
-        let projects: Vec<(ProjectId, std::path::PathBuf, String)> = {
-            let state = self.service.store().read().await;
-            state
-                .projects
-                .values()
-                .map(|p| (p.id, p.repo_path.clone(), p.main_branch.clone()))
-                .collect()
-        };
-
-        let mut due: Vec<(ProjectId, std::path::PathBuf, String)> = Vec::new();
-        for (id, path, main) in projects {
-            if self.ui_state.project_pull_in_flight.contains(&id) {
-                continue;
-            }
-            let is_due = match self.ui_state.last_project_pull.get(&id) {
-                Some(t) => t.elapsed() >= interval,
-                None => true,
-            };
-            if is_due {
-                self.ui_state.project_pull_in_flight.insert(id);
-                due.push((id, path, main));
-            }
-        }
-
-        self.spawn_project_pulls(due);
-    }
-
-    /// Spawn background fast-forward pulls for each project listed in
-    /// `due`. Sends one `ProjectPullFinished` event per project as work
-    /// completes. The caller is responsible for marking the projects as
-    /// in-flight in `UiState` so we don't double-spawn.
-    pub(super) fn spawn_project_pulls(&self, due: Vec<(ProjectId, std::path::PathBuf, String)>) {
-        if due.is_empty() {
-            return;
-        }
-        let tx = self.event_loop.sender();
-        tokio::spawn(async move {
-            futures::stream::iter(due.into_iter().map(|(project_id, repo_path, main_branch)| {
-                let tx = tx.clone();
-                async move {
-                    let outcome = run_project_pull(&repo_path, &main_branch).await;
-                    let _ = tx
-                        .send(AppEvent::StateUpdate(StateUpdate::ProjectPullFinished {
-                            project_id,
-                            outcome,
-                        }))
-                        .await;
-                }
-            }))
-            .buffer_unordered(PROJECT_PULL_FANOUT_CONCURRENCY)
-            .for_each(|_| async {})
-            .await;
-        });
-    }
-
     /// Spawn AI summary generation for the given session.
     ///
     /// Called from the `GenerateSummary` hotkey handler. Always generates
-    /// (unless already in flight or AI is disabled). Computes a full branch
-    /// diff (committed vs main + uncommitted) and pipes it into Claude.
+    /// (unless already in flight or AI is disabled). The branch diff (committed
+    /// vs main + uncommitted) is computed by the backend and piped into Claude.
     pub(super) fn spawn_ai_summary_if_needed(&mut self, session_id: SessionId) {
         if !self.config.ai_summary_enabled {
             return;
@@ -391,217 +230,111 @@ impl App {
             .ai_summaries
             .insert(session_id, AiSummary::Loading);
 
-        let store = self.service.store().clone();
+        let backend = self.local_arc();
         let model = self.config.ai_summary_model.clone();
         let tx = self.event_loop.sender();
 
         tokio::spawn(async move {
-            let session_info = {
-                let state = store.read().await;
-                state.sessions.get(&session_id).and_then(|s| {
-                    let project = state.projects.get(&s.project_id)?;
-                    Some((s.worktree_path.clone(), project.main_branch.clone()))
-                })
-            };
-
-            let result = if let Some((worktree_path, main_branch)) = session_info {
-                let diff_text = crate::git::compute_branch_diff(&worktree_path, &main_branch).await;
-                let new_hash = diff_hash(&diff_text);
-                let summary_result = fetch_branch_summary(&diff_text, &model).await;
-                (summary_result, new_hash)
-            } else {
-                (Err("Session not found".to_string()), 0)
+            let (result, new_hash) = match backend.branch_diff(session_id).await {
+                Ok(diff_text) => {
+                    let new_hash = diff_hash(&diff_text);
+                    (fetch_branch_summary(&diff_text, &model).await, new_hash)
+                }
+                Err(e) => (Err(e.to_string()), 0),
             };
 
             let _ = tx
                 .send(AppEvent::StateUpdate(StateUpdate::AiSummaryReady {
                     session_id,
-                    result: result.0,
-                    diff_hash: result.1,
+                    result,
+                    diff_hash: new_hash,
                 }))
                 .await;
         });
     }
-
-    /// Spawn the cross-instance state-sync loop: periodically reloads the state
-    /// file and emits [`StateUpdate::ExternalChange`] when another instance
-    /// mutated it. No-op when `state_sync_interval_ms` is 0. (PHASE-D seam.)
-    pub(super) fn spawn_state_sync(&self) {
-        if self.config.state_sync_interval_ms == 0 {
-            return;
-        }
-        let store = self.service.store().clone();
-        let tx = self.event_loop.sender();
-        let interval_ms = self.config.state_sync_interval_ms;
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
-            loop {
-                interval.tick().await;
-                match store.reload_if_changed().await {
-                    Ok(true) => {
-                        let _ = tx
-                            .send(AppEvent::StateUpdate(StateUpdate::ExternalChange))
-                            .await;
-                    }
-                    Ok(false) => {}
-                    Err(e) => {
-                        debug!("State sync check failed: {}", e);
-                    }
-                }
-            }
-        });
-    }
-
-    /// Spawn the agent-state poll loop: on each tick detects the agent state of
-    /// every running session (plus the commander) and emits
-    /// [`StateUpdate::AgentStatesUpdated`] on any change. No-op when
-    /// `agent_state_poll_interval_ms` is 0. (PHASE-D seam.)
-    pub(super) fn spawn_agent_poll(&self) {
-        if self.config.agent_state_poll_interval_ms == 0 {
-            return;
-        }
-        let store = self.service.store().clone();
-        let tx = self.event_loop.sender();
-        let interval_ms = self.config.agent_state_poll_interval_ms;
-        let tmux = self.service.session_manager().tmux.clone();
-        // The commander is project-less and absent from `state.sessions`, so it
-        // is polled separately. Enablement is restart-required: the poll task
-        // and the footer chip share `commander_enabled_at_init` so the chip
-        // can't disagree when the live config is toggled.
-        let commander_enabled = self.commander_enabled_at_init;
-        let commander_program = self.config.commander_program();
-        let commander_tmux = tmux.clone();
-        tokio::spawn(async move {
-            let cache_ttl = Duration::from_millis(interval_ms.saturating_sub(500).max(500));
-            let mut detector = AgentStateDetector::new(tmux, cache_ttl);
-            let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
-            let mut last_commander_running = false;
-            loop {
-                interval.tick().await;
-                let mut sessions: Vec<(SessionId, String, String)> = {
-                    let state = store.read().await;
-                    state
-                        .sessions
-                        .values()
-                        .filter(|s| s.status == SessionStatus::Running)
-                        .map(|s| (s.id, s.tmux_session_name.clone(), s.program.clone()))
-                        .collect()
-                };
-                let commander_running =
-                    commander_enabled && crate::commander::is_running(&commander_tmux).await;
-                if commander_running {
-                    sessions.push((
-                        crate::commander::commander_sentinel_id(),
-                        crate::commander::COMMANDER_TMUX_NAME.to_string(),
-                        commander_program.clone(),
-                    ));
-                }
-                // Quiet path: nothing to detect and the commander's running
-                // state is unchanged — skip the tick (no list rebuild).
-                if poll_tick_can_skip(
-                    sessions.is_empty(),
-                    commander_running,
-                    last_commander_running,
-                ) {
-                    continue;
-                }
-                let states: HashMap<SessionId, AgentState> = if sessions.is_empty() {
-                    HashMap::new()
-                } else {
-                    detector.detect_all(&sessions).await
-                };
-                // Send on any real change: fresh states, or the commander
-                // flipped (so its chip can turn on *and* off).
-                if poll_tick_should_send(
-                    states.is_empty(),
-                    commander_running,
-                    last_commander_running,
-                ) {
-                    last_commander_running = commander_running;
-                    let _ = tx
-                        .send(AppEvent::StateUpdate(StateUpdate::AgentStatesUpdated {
-                            states,
-                            commander_running,
-                        }))
-                        .await;
-                }
-            }
-        });
-    }
 }
 
-/// Fetch preview/diff/shell data for the currently selected session or project.
-///
-/// Runs outside the main event loop so it never blocks keyboard input.
+/// Reconstruct a [`DiffInfo`] from a preview's raw diff text and structured
+/// counts. The TUI's diff pane + info-pane stat line render from this, so a
+/// remote backend's [`PreviewData`](crate::api::PreviewData) drives them
+/// identically.
+fn diff_info_from_preview(diff_text: String, stats: Option<crate::api::DiffStat>) -> Arc<DiffInfo> {
+    let line_count = diff_text.lines().count();
+    Arc::new(DiffInfo {
+        diff: diff_text,
+        files_changed: stats.map_or(0, |s| s.files_changed),
+        lines_added: stats.map_or(0, |s| s.lines_added),
+        lines_removed: stats.map_or(0, |s| s.lines_removed),
+        line_count,
+        computed_at: Instant::now(),
+        base_commit: String::new(),
+    })
+}
+
+/// Fetch preview/diff/shell data for the currently selected session or project
+/// through the backend trait. Runs outside the main event loop so it never
+/// blocks keyboard input. Mirrors the placeholder strings the old direct-manager
+/// path produced (so the rendered output is unchanged).
 pub(super) async fn fetch_preview_data(
-    mgr: &SessionManager,
+    backend: &Arc<dyn crate::backend::CommanderBackend>,
     session_id: Option<SessionId>,
     project_id: Option<ProjectId>,
 ) -> (String, Arc<DiffInfo>, String) {
+    let no_shell = || "No shell session. Press 's' to open one.".to_string();
     if let Some(sid) = session_id {
-        // Check if session is still Creating (no tmux session to capture yet)
-        let is_creating = {
-            let state = mgr.store.read().await;
-            state
-                .get_session(&sid)
-                .is_some_and(|s| s.status == SessionStatus::Creating)
-        };
-        if is_creating {
-            return (
-                "Creating session...".to_string(),
-                Arc::new(DiffInfo::empty()),
-                String::new(),
-            );
-        }
-
-        debug!(
-            "fetch_preview_data: fetching content/diff/shell for session {}",
-            sid
-        );
-        let (preview_result, diff_result, shell_result) = tokio::join!(
-            mgr.get_content(&sid),
-            mgr.get_diff(&sid),
-            mgr.get_shell_content(&sid),
-        );
-
-        let preview = preview_result.map(|c| c.content).unwrap_or_else(|e| {
-            debug!("fetch_preview_data: get_content error: {}", e);
-            "Unable to capture content".to_string()
-        });
-        let diff = diff_result.unwrap_or_else(|e| {
-            debug!("fetch_preview_data: get_diff error: {}", e);
-            Arc::new(DiffInfo::empty())
-        });
-        let shell = match shell_result {
-            Ok(Some(c)) => c.content,
-            Ok(None) => "No shell session. Press 's' to open one.".to_string(),
-            Err(e) => {
-                debug!("fetch_preview_data: get_shell_content error: {}", e);
-                "No shell session. Press 's' to open one.".to_string()
+        match backend
+            .preview(crate::api::PreviewTarget::Session {
+                id: sid,
+                lines: None,
+            })
+            .await
+        {
+            Ok(p) => {
+                let crate::api::PreviewData {
+                    pane,
+                    diff_text,
+                    stats,
+                    shell,
+                    ..
+                } = p;
+                (
+                    pane.unwrap_or_else(|| "Unable to capture content".to_string()),
+                    diff_info_from_preview(diff_text, stats),
+                    shell.unwrap_or_else(no_shell),
+                )
             }
-        };
-
-        (preview, diff, shell)
+            Err(e) => {
+                debug!("fetch_preview_data: session preview error: {e}");
+                (
+                    "Unable to capture content".to_string(),
+                    Arc::new(DiffInfo::empty()),
+                    no_shell(),
+                )
+            }
+        }
     } else if let Some(pid) = project_id {
-        debug!(
-            "fetch_preview_data: fetching diff/shell for project {}",
-            pid
-        );
-        let (diff_result, shell_result) = tokio::join!(
-            mgr.get_project_diff(&pid),
-            mgr.get_project_shell_content(&pid),
-        );
-
-        let diff = diff_result.unwrap_or_else(|e| {
-            debug!("fetch_preview_data: get_project_diff error: {}", e);
-            Arc::new(DiffInfo::empty())
-        });
-        let shell = match shell_result {
-            Ok(Some(c)) => c.content,
-            _ => "No shell session. Press 's' to open one.".to_string(),
-        };
-
-        (String::new(), diff, shell)
+        match backend
+            .preview(crate::api::PreviewTarget::Project(pid))
+            .await
+        {
+            Ok(p) => {
+                let crate::api::PreviewData {
+                    diff_text,
+                    stats,
+                    shell,
+                    ..
+                } = p;
+                (
+                    String::new(),
+                    diff_info_from_preview(diff_text, stats),
+                    shell.unwrap_or_else(no_shell),
+                )
+            }
+            Err(e) => {
+                debug!("fetch_preview_data: project preview error: {e}");
+                (String::new(), Arc::new(DiffInfo::empty()), no_shell())
+            }
+        }
     } else {
         debug!("fetch_preview_data: no selection");
         (
@@ -609,45 +342,5 @@ pub(super) async fn fetch_preview_data(
             Arc::new(DiffInfo::empty()),
             String::new(),
         )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pr_check_debounce_allows_first_check_and_blocks_bursts() {
-        let base = Instant::now();
-        let debounce = Duration::from_secs(2);
-
-        // Never checked before → always allowed.
-        assert!(pr_check_debounce_passed(None, base, debounce));
-
-        // Re-trigger inside the window → blocked (the burst case).
-        assert!(!pr_check_debounce_passed(
-            Some(base),
-            base + Duration::from_millis(500),
-            debounce
-        ));
-        // Just shy of the threshold → still blocked.
-        assert!(!pr_check_debounce_passed(
-            Some(base),
-            base + Duration::from_millis(1_999),
-            debounce
-        ));
-
-        // At the threshold → allowed.
-        assert!(pr_check_debounce_passed(
-            Some(base),
-            base + Duration::from_secs(2),
-            debounce
-        ));
-        // Well past it (e.g. the periodic cadence) → allowed.
-        assert!(pr_check_debounce_passed(
-            Some(base),
-            base + Duration::from_secs(120),
-            debounce
-        ));
     }
 }

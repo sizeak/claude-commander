@@ -1192,7 +1192,9 @@ impl App {
                 self.handle_open_pull_request().await;
             }
             UserCommand::RefreshPrStatus => {
-                self.spawn_pr_status_check();
+                // Wake the service's PR-status loop; refreshed results arrive via
+                // the backend change feed.
+                let _ = self.local_arc().request_pr_refresh().await;
             }
             UserCommand::OpenCommander => {
                 self.handle_open_commander().await;
