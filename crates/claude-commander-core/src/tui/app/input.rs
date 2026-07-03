@@ -1274,6 +1274,7 @@ impl App {
                     editing: None,
                     rows,
                     sections_state: SectionsState::default(),
+                    programs_state: ProgramsState::default(),
                     search: None,
                 });
             }

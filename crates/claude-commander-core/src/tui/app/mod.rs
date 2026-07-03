@@ -421,15 +421,17 @@ pub enum SettingsTab {
     Keybindings,
     Theme,
     Sections,
+    Programs,
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 5] = [
+    const ALL: [SettingsTab; 6] = [
         Self::General,
         Self::Conversation,
         Self::Keybindings,
         Self::Theme,
         Self::Sections,
+        Self::Programs,
     ];
 
     fn label(self) -> &'static str {
@@ -439,6 +441,7 @@ impl SettingsTab {
             Self::Keybindings => "Keybindings",
             Self::Theme => "Theme",
             Self::Sections => "Sections",
+            Self::Programs => "Programs",
         }
     }
 
@@ -448,17 +451,19 @@ impl SettingsTab {
             Self::Conversation => Self::Keybindings,
             Self::Keybindings => Self::Theme,
             Self::Theme => Self::Sections,
-            Self::Sections => Self::General,
+            Self::Sections => Self::Programs,
+            Self::Programs => Self::General,
         }
     }
 
     fn prev(self) -> Self {
         match self {
-            Self::General => Self::Sections,
+            Self::General => Self::Programs,
             Self::Conversation => Self::General,
             Self::Keybindings => Self::Conversation,
             Self::Theme => Self::Keybindings,
             Self::Sections => Self::Theme,
+            Self::Programs => Self::Sections,
         }
     }
 }
@@ -499,6 +504,38 @@ impl Default for SectionsState {
     }
 }
 
+/// Which pane is focused in the Programs tab
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ProgramsFocus {
+    #[default]
+    List,
+    Fields,
+}
+
+/// State for the Programs tab within the settings modal
+#[derive(Debug, Clone, Default)]
+pub struct ProgramsState {
+    /// Index into `config.programs`.
+    pub selected: usize,
+    pub focus: ProgramsFocus,
+    /// 0 = label, 1 = command.
+    pub field_selected: usize,
+    pub editing: Option<ProgramsEditing>,
+}
+
+/// Editing state for the Programs tab
+#[derive(Debug, Clone)]
+pub enum ProgramsEditing {
+    /// Renaming the selected entry's label (`r` in list focus).
+    RenamingLabel { value: Input },
+    /// Editing the selected field (label or command) in Fields focus.
+    EditingField { value: Input },
+    /// Step 1 of `n`: entering the new entry's label.
+    CreatingLabel { value: Input },
+    /// Step 2 of `n`: entering the new entry's command (prefilled from label).
+    CreatingCommand { label: String, value: Input },
+}
+
 /// State for the settings modal
 #[derive(Debug, Clone)]
 pub struct SettingsState {
@@ -509,6 +546,8 @@ pub struct SettingsState {
     pub rows: Vec<SettingsRow>,
     /// State for the Sections tab (lazily initialised on first tab switch)
     pub sections_state: SectionsState,
+    /// State for the Programs tab (lazily initialised on first tab switch)
+    pub programs_state: ProgramsState,
     /// Active search filter for the Keybindings tab. `Some` while the search
     /// box is focused (typing filters the shortcut list live); `None` when the
     /// list is browsed normally.
