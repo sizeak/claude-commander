@@ -845,6 +845,7 @@ fn worktree_item(
         created_at: session.created_at,
         agent_state: agent_states.get(&session.id).copied(),
         unread: session.unread,
+        keep_alive: session.keep_alive,
         // Set by refresh_list_items from UiState::lfs_pull_in_flight after the
         // items are built.
         lfs_pulling: false,

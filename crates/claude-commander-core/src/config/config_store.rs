@@ -23,6 +23,8 @@ struct InitSnapshot {
     ui_refresh_fps: u32,
     state_sync_interval_ms: u64,
     commander_enabled: bool,
+    hibernate_enabled: bool,
+    hibernate_check_interval_secs: u64,
 }
 
 impl InitSnapshot {
@@ -34,6 +36,8 @@ impl InitSnapshot {
             ui_refresh_fps: config.ui_refresh_fps,
             state_sync_interval_ms: config.state_sync_interval_ms,
             commander_enabled: config.commander_enabled,
+            hibernate_enabled: config.hibernate_enabled,
+            hibernate_check_interval_secs: config.hibernate_check_interval_secs,
         }
     }
 
@@ -44,6 +48,8 @@ impl InitSnapshot {
             && self.ui_refresh_fps == config.ui_refresh_fps
             && self.state_sync_interval_ms == config.state_sync_interval_ms
             && self.commander_enabled == config.commander_enabled
+            && self.hibernate_enabled == config.hibernate_enabled
+            && self.hibernate_check_interval_secs == config.hibernate_check_interval_secs
     }
 }
 
@@ -61,6 +67,9 @@ impl InitSnapshot {
 /// - `ui_refresh_fps` (event loop tick rate)
 /// - `state_sync_interval_ms` (state sync background task interval)
 /// - `commander_enabled` (captured by the agent-state poll task at spawn)
+/// - `hibernate_enabled` / `hibernate_check_interval_secs` (the hibernation
+///   loop is spawned once, with a fixed interval, at construction; the idle
+///   *threshold* is read live each tick and is not restart-required)
 ///
 /// Call [`restart_required`](Self::restart_required) to check whether any of
 /// those init-time values have diverged from the running config. The flag
@@ -323,6 +332,47 @@ mod tests {
             .unwrap();
 
         assert!(store.restart_required());
+    }
+
+    #[test]
+    fn test_restart_required_true_when_hibernate_fields_change() {
+        // The hibernation loop is spawned once, with a fixed interval, at
+        // construction — so enabling it or changing the check interval at
+        // runtime must surface the restart-required warning. (The idle timeout
+        // is read live and is asserted hot-reloadable below.)
+        for mutate in [
+            |c: &mut Config| c.hibernate_enabled = true,
+            |c: &mut Config| c.hibernate_check_interval_secs = 30,
+        ] {
+            let dir = TempDir::new().unwrap();
+            let config_path = dir.path().join("config.toml");
+            let config = Config::default();
+            write_config(&config_path, &config);
+            let store = ConfigStore::with_path(config, config_path);
+
+            store.mutate(mutate).unwrap();
+
+            assert!(store.restart_required());
+        }
+    }
+
+    #[test]
+    fn test_restart_not_required_when_hibernate_timeout_changes() {
+        // The idle timeout is read live each tick, so changing it must NOT
+        // demand a restart.
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let config = Config::default();
+        write_config(&config_path, &config);
+        let store = ConfigStore::with_path(config, config_path);
+
+        store
+            .mutate(|c| {
+                c.hibernate_idle_timeout_secs = 60;
+            })
+            .unwrap();
+
+        assert!(!store.restart_required());
     }
 
     #[test]

@@ -483,6 +483,10 @@ pub enum SessionListItem {
         created_at: chrono::DateTime<chrono::Utc>,
         agent_state: Option<AgentState>,
         unread: bool,
+        /// True when the user has opted this session out of auto-hibernation
+        /// (the keep-alive toggle). Surfaced as a tree-row marker so the flag is
+        /// visible without toggling it to find out.
+        keep_alive: bool,
         /// True while a background `git lfs pull` is materialising this
         /// session's LFS content (the worktree was created with smudging
         /// skipped). Drives the `⇣ LFS` row marker. Sourced from
@@ -715,6 +719,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             agent_state: None,
             unread: false,
+            keep_alive: false,
             lfs_pulling: false,
             stacked_child: false,
         };
@@ -887,6 +892,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             agent_state: None,
             unread: false,
+            keep_alive: false,
             lfs_pulling: false,
             stacked_child: false,
         };

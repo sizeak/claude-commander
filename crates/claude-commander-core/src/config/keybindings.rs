@@ -43,6 +43,7 @@ pub enum BindableAction {
     DeleteMergedPrSessions,
     RenameSession,
     RestartSession,
+    ToggleKeepAlive,
     RemoveProject,
     OpenInEditor,
     OpenPullRequest,
@@ -87,6 +88,7 @@ impl BindableAction {
         Self::NewSession,
         Self::RenameSession,
         Self::RestartSession,
+        Self::ToggleKeepAlive,
         Self::DeleteSession,
         Self::OpenInEditor,
         // Stacked & Cascade
@@ -153,6 +155,7 @@ impl BindableAction {
             Self::DeleteMergedPrSessions => "delete_merged_pr_sessions",
             Self::RenameSession => "rename_session",
             Self::RestartSession => "restart_session",
+            Self::ToggleKeepAlive => "toggle_keep_alive",
             Self::RemoveProject => "remove_project",
             Self::OpenInEditor => "open_in_editor",
             Self::OpenPullRequest => "open_pull_request",
@@ -203,6 +206,7 @@ impl BindableAction {
             Self::DeleteMergedPrSessions => "Delete sessions with merged PRs",
             Self::RenameSession => "Rename session",
             Self::RestartSession => "Restart session",
+            Self::ToggleKeepAlive => "Toggle keep-alive (never auto-hibernate)",
             Self::RemoveProject => "Remove project",
             Self::OpenInEditor => "Open in editor/IDE",
             Self::OpenPullRequest => "Open PR in browser",
@@ -259,6 +263,7 @@ impl BindableAction {
             Self::DeleteMergedPrSessions => "delete merged",
             Self::RenameSession => "rename",
             Self::RestartSession => "restart",
+            Self::ToggleKeepAlive => "keep alive",
             Self::RemoveProject => "remove project",
             Self::OpenInEditor => "edit",
             Self::OpenPullRequest => "open PR",
@@ -303,6 +308,7 @@ impl BindableAction {
             | Self::NewSession
             | Self::RenameSession
             | Self::RestartSession
+            | Self::ToggleKeepAlive
             | Self::DeleteSession
             | Self::OpenInEditor => "Sessions",
             Self::NewStackedSession
@@ -357,6 +363,7 @@ impl FromStr for BindableAction {
             "delete_merged_pr_sessions" => Ok(Self::DeleteMergedPrSessions),
             "rename_session" => Ok(Self::RenameSession),
             "restart_session" => Ok(Self::RestartSession),
+            "toggle_keep_alive" => Ok(Self::ToggleKeepAlive),
             "remove_project" => Ok(Self::RemoveProject),
             "open_in_editor" => Ok(Self::OpenInEditor),
             "open_pull_request" => Ok(Self::OpenPullRequest),
@@ -696,6 +703,9 @@ impl Default for KeyBindings {
             BindableAction::RestartSession,
             vec![kb(KeyCode::Char('R'), shift)],
         );
+        // ToggleKeepAlive has no default key — it's reachable via the command
+        // palette and can be bound explicitly in config. Keep-alive is a rarely
+        // toggled, opt-in control, so it doesn't claim a top-level hotkey.
         bindings.insert(
             BindableAction::RemoveProject,
             vec![kb(KeyCode::Char('D'), shift)],
@@ -1581,5 +1591,15 @@ mod tests {
         assert!(kb.keys_for(BindableAction::RenameSession).is_empty());
         let r = KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE);
         assert_eq!(kb.resolve(&r), Some(BindableAction::OpenReviewDiff));
+    }
+
+    #[test]
+    fn test_toggle_keep_alive_unbound_by_default() {
+        // Keep-alive is palette-only: no default hotkey, and Shift-K resolves
+        // to nothing so the key stays free.
+        let kb = KeyBindings::default();
+        assert!(kb.keys_for(BindableAction::ToggleKeepAlive).is_empty());
+        let shift_k = KeyEvent::new(KeyCode::Char('K'), KeyModifiers::SHIFT);
+        assert_eq!(kb.resolve(&shift_k), None);
     }
 }
