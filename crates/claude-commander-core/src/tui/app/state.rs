@@ -165,6 +165,10 @@ impl App {
                     Instant::now() + Duration::from_secs(3),
                 ));
                 self.reconcile_one_section_assignment(session_id).await;
+                // Materialise LFS content in the background (worktree was
+                // created with smudging skipped). Inserts into lfs_pull_in_flight
+                // before the refresh below so the marker shows on first paint.
+                self.spawn_lfs_pull(session_id).await;
                 self.refresh_list_items().await;
                 // Select the newly created session
                 self.select_session_in_tree(session_id);
@@ -381,6 +385,12 @@ impl App {
             }
             StateUpdate::PushStackFinished { result } => {
                 self.handle_push_stack_finished(result).await;
+            }
+            StateUpdate::LfsPullFinished { session_id } => {
+                if self.ui_state.lfs_pull_in_flight.remove(&session_id) {
+                    debug!("lfs pull finished for {}", session_id);
+                    self.refresh_list_items().await;
+                }
             }
             StateUpdate::ProjectPullFinished {
                 project_id,
@@ -613,7 +623,7 @@ impl App {
 
         let state = self.service.store().read().await;
 
-        let items = match self.ui_state.view_mode {
+        let mut items = match self.ui_state.view_mode {
             ViewMode::ProjectGrouped => {
                 build_project_grouped_items(&state, &self.ui_state.agent_states)
             }
@@ -632,6 +642,20 @@ impl App {
                 &self.ui_state.collapsed_sections,
             ),
         };
+
+        // Mark rows whose LFS content is still being pulled in the background.
+        // Sourced from UiState (not the persisted session) so it survives the
+        // store's read-modify-write cycle untouched.
+        if !self.ui_state.lfs_pull_in_flight.is_empty() {
+            for item in &mut items {
+                if let SessionListItem::Worktree {
+                    id, lfs_pulling, ..
+                } = item
+                {
+                    *lfs_pulling = self.ui_state.lfs_pull_in_flight.contains(id);
+                }
+            }
+        }
 
         let selectable: Vec<bool> = items.iter().map(|i| i.is_selectable()).collect();
         let group_starts: Vec<bool> = items.iter().map(|i| i.is_group_header()).collect();
@@ -822,6 +846,9 @@ fn worktree_item(
         agent_state: agent_states.get(&session.id).copied(),
         unread: session.unread,
         keep_alive: session.keep_alive,
+        // Set by refresh_list_items from UiState::lfs_pull_in_flight after the
+        // items are built.
+        lfs_pulling: false,
         stacked_child,
     }
 }

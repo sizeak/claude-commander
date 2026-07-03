@@ -202,6 +202,7 @@ fn make_worktree_with_id(id: SessionId) -> SessionListItem {
         agent_state: None,
         unread: false,
         keep_alive: false,
+        lfs_pulling: false,
         stacked_child: false,
     }
 }

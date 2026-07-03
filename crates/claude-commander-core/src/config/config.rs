@@ -104,6 +104,14 @@ pub struct Config {
     #[serde(alias = "pull_before_create")]
     pub fetch_before_create: bool,
 
+    /// Skip git-LFS smudging during `git worktree add` so session creation is
+    /// fast on LFS repos (the checkout leaves cheap pointer files). The real
+    /// LFS content is fetched afterwards with `git lfs pull` — asynchronously
+    /// in the TUI (with a `⇣ LFS` indicator) or synchronously on the CLI.
+    /// Default true.
+    #[serde(default = "default_true")]
+    pub skip_lfs_smudge: bool,
+
     /// Pass `--resume` to the program when restarting or recreating a session,
     /// so the agent picks up where it left off. When false, the program is
     /// started fresh.
@@ -415,6 +423,7 @@ impl Default for Config {
             project_pull_interval_secs: 3600,
             pr_review_labels: default_pr_review_labels(),
             fetch_before_create: true,
+            skip_lfs_smudge: true,
             resume_session: true,
             nix_develop: true,
             state_sync_interval_ms: 2000,
@@ -982,6 +991,7 @@ speed = 1.25
         assert_eq!(config.diff_cache_ttl_ms, 500);
         assert_eq!(config.pr_check_interval_secs, 120);
         assert!(config.fetch_before_create);
+        assert!(config.skip_lfs_smudge);
         assert!(config.resume_session);
         assert_eq!(config.state_sync_interval_ms, 2000);
         assert_eq!(config.agent_state_poll_interval_ms, 3000);
@@ -1006,6 +1016,17 @@ show_session_program = false
         )
         .unwrap();
         assert!(!cfg.show_session_program);
+    }
+
+    #[test]
+    fn test_skip_lfs_smudge_deserialise() {
+        // Missing → default true.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.skip_lfs_smudge);
+
+        // Explicit false survives round trip.
+        let cfg: Config = toml::from_str("skip_lfs_smudge = false\n").unwrap();
+        assert!(!cfg.skip_lfs_smudge);
     }
 
     #[test]

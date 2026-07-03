@@ -129,6 +129,7 @@ impl<'a> TreeList<'a> {
                     agent_state,
                     unread,
                     keep_alive,
+                    lfs_pulling,
                     stacked_child,
                     ..
                 } => {
@@ -229,6 +230,15 @@ impl<'a> TreeList<'a> {
                         spans.push(Span::styled(
                             format!("({})", program_name(program)),
                             Style::default().fg(self.theme.text_secondary),
+                        ));
+                    }
+
+                    if *lfs_pulling {
+                        spans.push(Span::styled(
+                            " ⇣ LFS",
+                            Style::default()
+                                .fg(self.theme.text_secondary)
+                                .add_modifier(Modifier::DIM),
                         ));
                     }
 

@@ -86,6 +86,7 @@ impl WorktreeManager {
             branch_name.to_string(),
             branch_exists,
             None,
+            false,
         )
         .await
     }
@@ -102,6 +103,7 @@ impl WorktreeManager {
         branch_name: String,
         branch_exists: bool,
         start_point: Option<String>,
+        skip_lfs_smudge: bool,
     ) -> Result<WorktreeInfo> {
         // Ensure worktrees directory exists
         tokio::fs::create_dir_all(&worktrees_dir)
@@ -110,26 +112,26 @@ impl WorktreeManager {
                 GitError::WorktreeError(format!("Failed to create worktrees dir: {}", e))
             })?;
 
-        let mut cmd = Command::new("git");
-        cmd.current_dir(&repo_path).arg("worktree").arg("add");
-
         if branch_exists {
-            // Checkout existing branch (start_point is not applicable here)
             debug!("Branch {} exists, checking out", branch_name);
             if start_point.is_some() {
                 debug!("Ignoring start_point for existing branch {}", branch_name);
             }
-            cmd.arg(&worktree_path).arg(&branch_name);
         } else {
-            // Create new branch, optionally from a specific start point
             debug!("Creating new branch {}", branch_name);
-            cmd.arg("-b").arg(&branch_name).arg(&worktree_path);
             if let Some(ref sp) = start_point {
                 debug!("Using start point {}", sp);
-                cmd.arg(sp);
             }
         }
 
+        let mut cmd = Command::from(build_worktree_add_command(
+            &repo_path,
+            &worktree_path,
+            &branch_name,
+            branch_exists,
+            start_point.as_deref(),
+            skip_lfs_smudge,
+        ));
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -278,6 +280,42 @@ impl WorktreeManager {
     }
 }
 
+/// Build the `git worktree add` command (working dir, args, and env — no stdio).
+///
+/// Returns a `std::process::Command` so callers can inspect args/env in tests;
+/// `run_create_worktree` converts it to a `tokio` command and adds stdio.
+/// When `skip_lfs_smudge` is set, `GIT_LFS_SKIP_SMUDGE=1` is injected so the
+/// checkout leaves LFS pointer files instead of smudging (downloading) every
+/// LFS object — the real content is fetched afterwards via `lfs::pull`.
+fn build_worktree_add_command(
+    repo_path: &Path,
+    worktree_path: &Path,
+    branch_name: &str,
+    branch_exists: bool,
+    start_point: Option<&str>,
+    skip_lfs_smudge: bool,
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new("git");
+    cmd.current_dir(repo_path).arg("worktree").arg("add");
+
+    if branch_exists {
+        // Checkout existing branch (start_point is not applicable here)
+        cmd.arg(worktree_path).arg(branch_name);
+    } else {
+        // Create new branch, optionally from a specific start point
+        cmd.arg("-b").arg(branch_name).arg(worktree_path);
+        if let Some(sp) = start_point {
+            cmd.arg(sp);
+        }
+    }
+
+    if skip_lfs_smudge {
+        cmd.env("GIT_LFS_SKIP_SMUDGE", "1");
+    }
+
+    cmd
+}
+
 /// Parse git worktree list --porcelain output
 fn parse_worktree_list(output: &str) -> Result<Vec<WorktreeInfo>> {
     let mut worktrees = Vec::new();
@@ -369,5 +407,70 @@ branch refs/heads/feature-branch
     fn test_parse_worktree_list_empty() {
         let worktrees = parse_worktree_list("").unwrap();
         assert!(worktrees.is_empty());
+    }
+
+    fn worktree_add_env(skip_lfs_smudge: bool) -> Vec<(String, Option<String>)> {
+        let cmd = build_worktree_add_command(
+            Path::new("/repo"),
+            Path::new("/repo/wt"),
+            "feature",
+            false,
+            Some("origin/main"),
+            skip_lfs_smudge,
+        );
+        cmd.get_envs()
+            .map(|(k, v)| {
+                (
+                    k.to_string_lossy().into_owned(),
+                    v.map(|v| v.to_string_lossy().into_owned()),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn test_worktree_add_skips_lfs_smudge_when_requested() {
+        let envs = worktree_add_env(true);
+        assert!(
+            envs.iter()
+                .any(|(k, v)| k == "GIT_LFS_SKIP_SMUDGE" && v.as_deref() == Some("1")),
+            "expected GIT_LFS_SKIP_SMUDGE=1, got {envs:?}"
+        );
+    }
+
+    #[test]
+    fn test_worktree_add_no_lfs_env_by_default() {
+        let envs = worktree_add_env(false);
+        assert!(
+            !envs.iter().any(|(k, _)| k == "GIT_LFS_SKIP_SMUDGE"),
+            "expected no GIT_LFS_SKIP_SMUDGE, got {envs:?}"
+        );
+    }
+
+    #[test]
+    fn test_worktree_add_args_for_new_branch() {
+        let cmd = build_worktree_add_command(
+            Path::new("/repo"),
+            Path::new("/repo/wt"),
+            "feature",
+            false,
+            Some("origin/main"),
+            false,
+        );
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                "/repo/wt",
+                "origin/main"
+            ]
+        );
     }
 }

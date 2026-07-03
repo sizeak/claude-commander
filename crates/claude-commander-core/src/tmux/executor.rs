@@ -406,12 +406,20 @@ impl Default for TmuxExecutor {
 ///
 /// tmux prints `can't find session: NAME` when the target session is absent,
 /// and `no server running on PATH` when there's no server at all (so, no
-/// sessions). Anything else — `server exited unexpectedly`, `lost server`,
-/// resource errors — is a failure we must NOT mistake for absence, or the
-/// state reconciler will wrongly mark a live session as Stopped.
+/// sessions). When the server is running but has *no sessions left* (e.g. the
+/// only session was just killed), `has-session -t NAME` can't anchor the target
+/// and fails with `no current target` / `no current session` instead — which
+/// still means the named session doesn't exist. Anything else — `server exited
+/// unexpectedly`, `lost server`, resource errors — is a failure we must NOT
+/// mistake for absence, or the state reconciler will wrongly mark a live
+/// session as Stopped.
 fn stderr_means_session_absent(stderr: &str) -> bool {
     let s = stderr.to_ascii_lowercase();
-    if s.contains("can't find session") || s.contains("no server running") {
+    if s.contains("can't find session")
+        || s.contains("no server running")
+        || s.contains("no current target")
+        || s.contains("no current session")
+    {
         return true;
     }
     // No tmux server has started at all: the socket file is missing, so
@@ -520,6 +528,12 @@ mod tests {
         assert!(stderr_means_session_absent(
             "error connecting to /tmp/tmux-1001/default (No such file or directory)"
         ));
+        // Server up but no sessions left (the only one was just killed): tmux
+        // can't resolve the target and says "no current target" rather than
+        // "can't find session". Still means the session is absent — must read
+        // as such so `ensure_session` recreates instead of erroring.
+        assert!(stderr_means_session_absent("no current target"));
+        assert!(stderr_means_session_absent("no current session"));
         // A transient connection failure tells us nothing about existence —
         // never mistake it for absence.
         assert!(!stderr_means_session_absent(

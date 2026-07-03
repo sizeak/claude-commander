@@ -136,6 +136,9 @@ pub enum StateUpdate {
         project_id: ProjectId,
         outcome: crate::git::PullOutcome,
     },
+    /// A background `git lfs pull` for a freshly-created session finished
+    /// (success or failure), so its `⇣ LFS` row marker can be cleared.
+    LfsPullFinished { session_id: SessionId },
     /// Review diff prepared off-thread: the parsed diff plus its warmed render
     /// caches (word-diff segments + syntax highlighting), ready to replace the
     /// loading spinner with the full review view. Boxed — the payload is large.

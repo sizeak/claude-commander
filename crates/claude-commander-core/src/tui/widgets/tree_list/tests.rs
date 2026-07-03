@@ -38,6 +38,7 @@ fn make_worktree_with_stack(title: &str, stacked_child: bool) -> SessionListItem
         agent_state: None,
         unread: false,
         keep_alive: false,
+        lfs_pulling: false,
         stacked_child,
     }
 }

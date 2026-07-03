@@ -160,6 +160,7 @@ fn test_session_list_with_sessions() {
                     agent_state: None,
                     unread: false,
                     keep_alive: false,
+                    lfs_pulling: false,
                     stacked_child: false,
                 },
                 SessionListItem::Worktree {
@@ -180,6 +181,7 @@ fn test_session_list_with_sessions() {
                     agent_state: None,
                     unread: false,
                     keep_alive: false,
+                    lfs_pulling: false,
                     stacked_child: false,
                 },
                 SessionListItem::Worktree {
@@ -200,6 +202,7 @@ fn test_session_list_with_sessions() {
                     agent_state: None,
                     unread: false,
                     keep_alive: false,
+                    lfs_pulling: false,
                     stacked_child: false,
                 },
             ];
@@ -252,6 +255,7 @@ fn test_session_list_with_pr_badges() {
                     agent_state: None,
                     unread: false,
                     keep_alive: false,
+                    lfs_pulling: false,
                     stacked_child: false,
                 },
                 SessionListItem::Worktree {
@@ -272,6 +276,7 @@ fn test_session_list_with_pr_badges() {
                     agent_state: None,
                     unread: false,
                     keep_alive: false,
+                    lfs_pulling: false,
                     stacked_child: false,
                 },
             ];
@@ -324,6 +329,7 @@ fn test_session_list_mixed_programs() {
                     agent_state: None,
                     unread: false,
                     keep_alive: false,
+                    lfs_pulling: false,
                     stacked_child: false,
                 },
                 SessionListItem::Worktree {
@@ -344,6 +350,7 @@ fn test_session_list_mixed_programs() {
                     agent_state: None,
                     unread: false,
                     keep_alive: false,
+                    lfs_pulling: false,
                     stacked_child: false,
                 },
             ];
@@ -396,6 +403,7 @@ fn test_session_list_with_numbers() {
                     agent_state: None,
                     unread: false,
                     keep_alive: false,
+                    lfs_pulling: false,
                     stacked_child: false,
                 },
                 SessionListItem::Worktree {
@@ -416,6 +424,7 @@ fn test_session_list_with_numbers() {
                     agent_state: None,
                     unread: false,
                     keep_alive: false,
+                    lfs_pulling: false,
                     stacked_child: false,
                 },
                 SessionListItem::Worktree {
@@ -436,6 +445,7 @@ fn test_session_list_with_numbers() {
                     agent_state: None,
                     unread: false,
                     keep_alive: false,
+                    lfs_pulling: false,
                     stacked_child: false,
                 },
             ];
@@ -1282,6 +1292,7 @@ fn test_session_list_creating_status() {
                     agent_state: None,
                     unread: false,
                     keep_alive: false,
+                    lfs_pulling: false,
                     stacked_child: false,
                 },
                 SessionListItem::Worktree {
@@ -1302,6 +1313,7 @@ fn test_session_list_creating_status() {
                     agent_state: None,
                     unread: false,
                     keep_alive: false,
+                    lfs_pulling: false,
                     stacked_child: false,
                 },
             ];
