@@ -1576,7 +1576,7 @@ impl App {
 
     /// Handle input modal submission. `program` is the command chosen in the
     /// new-session program picker, or `None` for flows without a picker (which
-    /// then fall back to `default_program` inside `prepare_session`).
+    /// then fall back to the first configured program inside `prepare_session`).
     pub(super) async fn handle_input_submit(
         &mut self,
         action: InputAction,

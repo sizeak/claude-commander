@@ -179,7 +179,7 @@ mod tests {
         let mut f = std::fs::File::create(&path).unwrap();
         writeln!(
             f,
-            "default_program = \"claude\"\n\n[server]\nport = 9999\ntoken = \"sekret\"\n"
+            "[[programs]]\nlabel = \"Claude\"\ncommand = \"claude\"\n\n[server]\nport = 9999\ntoken = \"sekret\"\n"
         )
         .unwrap();
 
@@ -200,7 +200,7 @@ mod tests {
         let mut f = std::fs::File::create(&path).unwrap();
         writeln!(
             f,
-            "default_program = \"claude\"\n\n[server]\nport = 9999\ntoken = \"sekret\"\n"
+            "[[programs]]\nlabel = \"Claude\"\ncommand = \"claude\"\n\n[server]\nport = 9999\ntoken = \"sekret\"\n"
         )
         .unwrap();
 
@@ -210,6 +210,6 @@ mod tests {
             .merge(Toml::file(&path))
             .extract()
             .expect("core Config must ignore the unknown [server] table");
-        assert_eq!(core.default_program, "claude");
+        assert_eq!(core.default_session_program(), "claude");
     }
 }

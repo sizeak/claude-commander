@@ -10,7 +10,7 @@
 //! `update` is a **partial** update over an explicit allow-list (see
 //! [`ConfigPatch`]). A full-replace `PUT` would let a remote client rewrite
 //! filesystem-path and program-launch fields (`worktrees_dir`, `editor`,
-//! `default_program`, …); restricting to a conservative set of benign
+//! `programs`, …); restricting to a conservative set of benign
 //! UI/timing fields keeps those off-limits even though they remain readable via
 //! `GET /config`.
 
@@ -37,7 +37,7 @@ pub async fn read(State(state): State<AppState>) -> Json<Config> {
 /// a conservative allow-list of benign UI/timing/behaviour options — may be
 /// changed. Filesystem-path fields (`worktrees_dir`, `log_file`,
 /// `commander_dir`, `per_repo_worktree_dirs`), program-launch fields
-/// (`default_program`, `shell_program`, `editor`, `editor_gui`,
+/// (`programs`, `shell_program`, `editor`, `editor_gui`,
 /// `commander_program`, `commander_enabled`, `nix_develop`), and complex nested
 /// tables (`keybindings`, `theme`, `sections`, `conversation`, `stt`,
 /// `telemetry`) are intentionally absent, so a request can neither set nor

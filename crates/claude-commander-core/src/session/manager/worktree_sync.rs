@@ -104,7 +104,7 @@ impl SessionManager {
                 wt.branch.clone(),
                 wt.branch.clone(),
                 wt.path.clone(),
-                self.config_store.read().default_program.clone(),
+                self.config_store.read().default_session_program(),
             );
             session.set_status(SessionStatus::Stopped);
             session.base_commit = Some(

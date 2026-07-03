@@ -457,7 +457,7 @@ async fn test_state_persistence() {
 async fn test_config_defaults() {
     let config = Config::default();
 
-    assert_eq!(config.default_program, "claude");
+    assert_eq!(config.default_session_program(), "claude");
     assert_eq!(config.branch_prefix, "");
     assert_eq!(config.max_concurrent_tmux, 16);
     assert_eq!(config.capture_cache_ttl_ms, 50);

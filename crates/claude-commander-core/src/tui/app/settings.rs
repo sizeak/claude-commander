@@ -14,11 +14,6 @@ impl App {
                 with_section_spacers(vec![
                     SettingsRow::header("Sessions & Worktrees"),
                     SettingsRow::text(
-                        "Default Program",
-                        c.default_program.clone(),
-                        "default_program",
-                    ),
-                    SettingsRow::text(
                         "Branch Prefix",
                         if c.branch_prefix.is_empty() {
                             "(none)".to_string()
@@ -911,7 +906,6 @@ impl App {
     pub(super) fn apply_settings_edit(&mut self, tab: SettingsTab, field_key: &str, value: &str) {
         match tab {
             SettingsTab::General => match field_key {
-                "default_program" => self.config.default_program = value.to_string(),
                 "branch_prefix" => self.config.branch_prefix = value.to_string(),
                 "shell_program" => self.config.shell_program = value.to_string(),
                 "worktrees_dir" => {
