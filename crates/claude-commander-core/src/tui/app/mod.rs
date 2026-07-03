@@ -45,9 +45,9 @@ use super::widgets::{
 };
 use crate::api::{CommanderService, DiffSide};
 use crate::backend::{
-    AttachConnection, AttachKind, BResult, BackendError, BackendHandle, BackendId, BackendView,
-    CommanderBackend, ConnectionState, LOCAL_BACKEND_ID, LocalBackend, PlaceholderBackend,
-    RemoteBackendFactory, SessionRef,
+    AttachConnection, AttachKind, BResult, BackendCapabilities, BackendError, BackendHandle,
+    BackendId, BackendView, CommanderBackend, ConnectionState, LOCAL_BACKEND_ID, LocalBackend,
+    PlaceholderBackend, RemoteBackendFactory, SessionRef,
 };
 use crate::config::{BindableAction, Config, ConfigStore, RemoteServerConfig, StateStore};
 use crate::error::{Result, TuiError};
@@ -944,6 +944,11 @@ pub struct AppUiState {
     /// `update_selection` so the (sync, backend-unaware) `is_command_available`
     /// can gate actions on a live backend. Always `true` for the local backend.
     pub selected_backend_connected: bool,
+    /// Capabilities of the backend owning the current selection. Cached in
+    /// `update_selection` (same reason as `selected_backend_connected`) so
+    /// `is_command_available` can hide local-only actions (e.g. open-in-editor)
+    /// for a remote-backed selection. Defaults to the all-on local set.
+    pub selected_backend_capabilities: BackendCapabilities,
     /// Whether the `cc-commander` tmux session is currently running. Cached from
     /// the background agent-state poll so the (sync) renderers — the footer chip
     /// — can read it without awaiting tmux.
@@ -1029,6 +1034,7 @@ impl Default for AppUiState {
             selected_session_id: None,
             selected_project_id: None,
             selected_backend_connected: true,
+            selected_backend_capabilities: BackendCapabilities::LOCAL,
             commander_running: false,
             attach_request: None,
             pending_open_review: None,
@@ -1077,10 +1083,14 @@ impl AppUiState {
             | BindableAction::DeleteSession
             | BindableAction::RenameSession
             | BindableAction::RestartSession
-            | BindableAction::OpenInEditor
             | BindableAction::OpenPullRequest
             | BindableAction::OpenReviewDiff
             | BindableAction::MoveToSection => has_session,
+            // Opening the operator's editor only works against a local worktree;
+            // a remote backend has no path on this machine.
+            BindableAction::OpenInEditor => {
+                has_session && self.selected_backend_capabilities.open_editor
+            }
             // Cascade merge is only meaningful from a session that's part of
             // a stack. We accept any selected session here; the handler is
             // cheap to no-op if the stack chain turns out to be length 1.
@@ -1354,6 +1364,7 @@ impl App {
             if session_gone || project_gone {
                 self.ui_state.selected_project_id = None;
                 self.ui_state.selected_backend_connected = true;
+                self.ui_state.selected_backend_capabilities = BackendCapabilities::LOCAL;
             }
         }
 

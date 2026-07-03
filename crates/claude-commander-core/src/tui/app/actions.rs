@@ -161,7 +161,17 @@ impl App {
                 kind: AttachKind::Shell,
             });
             self.ui_state.should_quit = true;
-        } else if let Some((_backend, project_id)) = self.ui_state.selected_project_id {
+        } else if let Some((backend, project_id)) = self.ui_state.selected_project_id {
+            // Project shells are a local tmux affordance; a remote backend can't
+            // host one, and the local `project_shell_name` lookup would fail on a
+            // remote project id with a confusing error.
+            if !self.backend_arc(backend).capabilities().shell_toggle {
+                self.ui_state.status_message = Some((
+                    "Shell is not available for remote projects".to_string(),
+                    Instant::now() + Duration::from_secs(3),
+                ));
+                return;
+            }
             // Project shells have no `SessionId` — resolve the name locally.
             let Some(be) = self.local_backend() else {
                 return;
@@ -247,18 +257,34 @@ impl App {
         if self.selected_session_is_creating() {
             return;
         }
-        let path = if let Some(sref) = self.ui_state.selected_session_id {
-            self.session(sref).map(|s| s.worktree_path.clone())
+        let (backend, path) = if let Some(sref) = self.ui_state.selected_session_id {
+            (
+                sref.backend,
+                self.session(sref).map(|s| s.worktree_path.clone()),
+            )
         } else if let Some((backend, project_id)) = self.ui_state.selected_project_id {
-            self.view_for(backend)
-                .snapshot
-                .projects
-                .iter()
-                .find(|p| p.id == project_id)
-                .map(|p| p.repo_path.clone())
+            (
+                backend,
+                self.view_for(backend)
+                    .snapshot
+                    .projects
+                    .iter()
+                    .find(|p| p.id == project_id)
+                    .map(|p| p.repo_path.clone()),
+            )
         } else {
-            None
+            return;
         };
+
+        // The editor launches on a local path; a remote backend's worktree
+        // lives on the server, so the path here would be meaningless.
+        if !self.backend_arc(backend).capabilities().open_editor {
+            self.ui_state.status_message = Some((
+                "Open in editor is not available for remote sessions".to_string(),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            return;
+        }
 
         let Some(path) = path else {
             return;

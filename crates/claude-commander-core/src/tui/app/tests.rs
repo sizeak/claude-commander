@@ -3281,3 +3281,138 @@ async fn cascade_resume_prefers_the_selections_backend_when_multiple_paused() {
     assert_eq!(backend_id, BackendId(0));
     assert_eq!(paused_sid, local_sid);
 }
+
+#[tokio::test]
+async fn ai_summary_routes_to_owning_backend_not_local() {
+    // A remote-backed session's AI summary must query the backend that owns it
+    // (which serves branch-diff over the wire), not the local backend — where
+    // the session id doesn't exist and the query would fail with a local error.
+    let (remote_snap, remote_sid, _pid) = snapshot_with_one_session();
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", remote_snap)]);
+    app.bootstrap_backend_views().await;
+    // Fill the remote view so `backend_of_session` finds the session there.
+    app.refresh_backend_view(BackendId(1)).await;
+    app.config.ai_summary_enabled = true;
+
+    app.spawn_ai_summary_if_needed(remote_sid);
+
+    // The spawned task queries the remote `MockBackend::branch_diff`, which
+    // returns `Unavailable { reason: "unimplemented in mock" }` — a signature
+    // only the mock produces. Had the fetch gone to the local backend, the error
+    // would be a local one (the session isn't in the local store).
+    let ev = app.event_loop.next().await.expect("summary event");
+    match ev {
+        AppEvent::StateUpdate(StateUpdate::AiSummaryReady {
+            session_id, result, ..
+        }) => {
+            assert_eq!(session_id, remote_sid);
+            let err = result.expect_err("mock branch_diff errs, so no summary text");
+            assert!(
+                err.contains("unimplemented in mock"),
+                "summary must query the remote backend, got: {err}"
+            );
+        }
+        other => panic!("expected AiSummaryReady, got {other:?}"),
+    }
+}
+
+#[test]
+fn open_in_editor_hidden_for_remote_backed_selection() {
+    // A session on a backend that can't drive the operator's local editor must
+    // not offer OpenInEditor in the palette.
+    let mut ui = AppUiState {
+        selected_session_id: Some(SessionRef::new(BackendId(1), SessionId::new())),
+        selected_project_id: Some((BackendId(1), ProjectId::new())),
+        selected_backend_connected: true,
+        selected_backend_capabilities: crate::backend::BackendCapabilities {
+            open_editor: false,
+            ..crate::backend::BackendCapabilities::LOCAL
+        },
+        ..AppUiState::default()
+    };
+    assert!(!ui.is_command_available(BindableAction::OpenInEditor));
+    // A backend that can drive the local editor keeps it available.
+    ui.selected_backend_capabilities = crate::backend::BackendCapabilities::LOCAL;
+    assert!(ui.is_command_available(BindableAction::OpenInEditor));
+}
+
+#[tokio::test]
+async fn open_in_editor_toasts_for_remote_session_instead_of_launching() {
+    let (remote_snap, remote_sid, remote_pid) = snapshot_with_one_session();
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", remote_snap)]);
+    app.bootstrap_backend_views().await;
+    app.refresh_backend_view(BackendId(1)).await;
+    app.ui_state.selected_session_id = Some(SessionRef::new(BackendId(1), remote_sid));
+    app.ui_state.selected_project_id = Some((BackendId(1), remote_pid));
+
+    app.handle_open_in_editor().await;
+
+    assert!(
+        app.ui_state.editor_command.is_none(),
+        "must not queue a local editor launch for a remote session"
+    );
+    assert!(
+        !app.ui_state.should_quit,
+        "must not tear down the TUI to launch an editor"
+    );
+    let (msg, _) = app
+        .ui_state
+        .status_message
+        .clone()
+        .expect("a toast explaining the editor is unavailable");
+    assert!(msg.contains("not available for remote"), "toast: {msg}");
+}
+
+#[tokio::test]
+async fn select_shell_toasts_for_remote_project_instead_of_local_lookup() {
+    let (remote_snap, _sid, remote_pid) = snapshot_with_one_session();
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", remote_snap)]);
+    app.bootstrap_backend_views().await;
+    app.refresh_backend_view(BackendId(1)).await;
+    // A remote project row is selected (no session).
+    app.ui_state.selected_project_id = Some((BackendId(1), remote_pid));
+    app.ui_state.selected_session_id = None;
+
+    app.handle_select_shell().await;
+
+    assert!(
+        app.ui_state.attach_request.is_none(),
+        "must not queue an attach for a remote project shell"
+    );
+    assert!(
+        !matches!(app.ui_state.modal, Modal::Error { .. }),
+        "must not surface the confusing local-lookup error modal"
+    );
+    let (msg, _) = app
+        .ui_state
+        .status_message
+        .clone()
+        .expect("a toast explaining the shell is unavailable");
+    assert!(msg.contains("not available for remote"), "toast: {msg}");
+}
+
+#[tokio::test]
+async fn stale_probe_result_ignored_while_unrelated_loading_modal_up() {
+    // The exact scenario the probe-nonce check exists for: a STALE probe result
+    // arriving while an unrelated Loading modal is up must NOT write config.
+    let mut app = make_test_app();
+    app.ui_state.modal = Modal::Loading {
+        title: "Something else".to_string(),
+        message: String::new(),
+        hint: None,
+    };
+    app.handle_state_update(StateUpdate::RemoteServerProbed {
+        nonce: app.probe_nonce.wrapping_sub(1), // stale — from a prior/aborted flow
+        server: server_cfg("buildbox", "http://buildbox:7878"),
+        result: Ok(true),
+    })
+    .await;
+    assert!(
+        app.config.remote_servers.is_empty(),
+        "a stale probe result must not persist a server"
+    );
+    assert!(
+        matches!(&app.ui_state.modal, Modal::Loading { title, .. } if title == "Something else"),
+        "the unrelated Loading modal must be left intact"
+    );
+}

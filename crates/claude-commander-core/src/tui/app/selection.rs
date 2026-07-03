@@ -53,6 +53,14 @@ impl App {
             .unwrap_or(true)
     }
 
+    /// Capabilities of backend `id`. A missing backend (stale id) falls back to
+    /// the local (all-on) set so callers don't wrongly gate.
+    fn backend_capabilities(&self, id: BackendId) -> crate::backend::BackendCapabilities {
+        self.backend(id)
+            .map(|h| h.backend.capabilities())
+            .unwrap_or(crate::backend::BackendCapabilities::LOCAL)
+    }
+
     /// Update selection tracking based on list position
     pub(super) fn update_selection(&mut self) {
         let old_session = self.ui_state.selected_session_id;
@@ -79,17 +87,21 @@ impl App {
                 self.ui_state.selected_project_id = Some((backend, id));
                 self.ui_state.selected_session_id = None;
                 self.ui_state.selected_backend_connected = self.backend_is_connected(backend);
+                self.ui_state.selected_backend_capabilities = self.backend_capabilities(backend);
             }
             Some(SelKind::Worktree(id, project_id)) => {
                 let backend = self.backend_of_session(id);
                 self.ui_state.selected_session_id = Some(SessionRef::new(backend, id));
                 self.ui_state.selected_project_id = Some((backend, project_id));
                 self.ui_state.selected_backend_connected = self.backend_is_connected(backend);
+                self.ui_state.selected_backend_capabilities = self.backend_capabilities(backend);
             }
             Some(SelKind::Clear) => {
                 self.ui_state.selected_session_id = None;
                 self.ui_state.selected_project_id = None;
                 self.ui_state.selected_backend_connected = true;
+                self.ui_state.selected_backend_capabilities =
+                    crate::backend::BackendCapabilities::LOCAL;
             }
             Some(SelKind::Keep) | None => {}
         }

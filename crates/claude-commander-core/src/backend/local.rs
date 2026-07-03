@@ -175,12 +175,7 @@ impl CommanderBackend for LocalBackend {
     fn capabilities(&self) -> BackendCapabilities {
         // The local backend runs on the operator's own machine, so every
         // affordance is available.
-        BackendCapabilities {
-            open_editor: true,
-            switcher_popup: true,
-            commander_session: true,
-            shell_toggle: true,
-        }
+        BackendCapabilities::LOCAL
     }
 
     fn as_any(&self) -> &dyn std::any::Any {

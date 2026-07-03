@@ -238,7 +238,9 @@ impl App {
             .ai_summaries
             .insert(session_id, AiSummary::Loading);
 
-        let backend = self.local_arc();
+        // Route to whichever backend owns the session; a remote backend serves
+        // the branch diff over the wire (GET /api/sessions/{id}/branch-diff).
+        let backend = self.backend_arc(self.backend_of_session(session_id));
         let model = self.config.ai_summary_model.clone();
         let tx = self.event_loop.sender();
 

@@ -134,6 +134,17 @@ pub struct BackendCapabilities {
     pub shell_toggle: bool,
 }
 
+impl BackendCapabilities {
+    /// Every affordance enabled — the local backend's set, and the default a
+    /// fresh selection assumes until it resolves the owning backend.
+    pub const LOCAL: Self = Self {
+        open_editor: true,
+        switcher_popup: true,
+        commander_session: true,
+        shell_toggle: true,
+    };
+}
+
 /// A change-feed handle: its generation counter advances whenever the backend's
 /// observable state changes, so a consumer re-reads a snapshot on each bump
 /// rather than polling on a fixed tick. Backed by a [`watch`] channel — for
