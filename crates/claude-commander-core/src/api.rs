@@ -332,6 +332,24 @@ impl CommanderService {
         Ok(crate::cli::find_session(&state, query).map(|s| s.tmux_session_name.clone()))
     }
 
+    /// Resolve a session query to its **shell** pane's tmux session name,
+    /// creating the paired shell session on demand (the `Ctrl+\` partner). The
+    /// shell counterpart of [`Self::resolve_tmux_session`], mirroring
+    /// [`crate::backend::LocalBackend::attach`]'s `AttachKind::Shell` arm so the
+    /// server's WebSocket attach and the local backend resolve the shell pane
+    /// through the same [`ensure_shell_session`](crate::session::SessionManager::ensure_shell_session).
+    /// `None` when the query matches no session.
+    pub async fn resolve_shell_tmux_session(&self, query: &str) -> Result<Option<String>> {
+        let session_id = {
+            let state = self.store.read().await;
+            crate::cli::find_session(&state, query).map(|s| s.id)
+        };
+        match session_id {
+            Some(id) => Ok(Some(self.manager.ensure_shell_session(&id).await?)),
+            None => Ok(None),
+        }
+    }
+
     pub async fn check_tmux(&self) -> Result<()> {
         self.manager.check_tmux().await
     }

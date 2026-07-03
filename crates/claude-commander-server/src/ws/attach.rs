@@ -25,7 +25,7 @@ use claude_commander_core::tmux::HeadlessAttach;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
-use super::protocol::{ClientControl, DetachReason, ServerControl};
+use super::protocol::{AttachKind, ClientControl, DetachReason, ServerControl};
 use crate::state::AppState;
 
 /// How long to wait for the mandatory `auth` then `attach` handshake frames
@@ -135,8 +135,8 @@ async fn attach_session(
     socket: &mut WebSocket,
     state: &AppState,
 ) -> Option<(String, HeadlessAttach)> {
-    let session_query = match next_control(socket).await {
-        Some(ClientControl::Attach { session_id }) => session_id,
+    let (session_query, kind) = match next_control(socket).await {
+        Some(ClientControl::Attach { session_id, kind }) => (session_id, kind),
         Some(_) => {
             let _ = send_control(
                 socket,
@@ -150,7 +150,20 @@ async fn attach_session(
         None => return None,
     };
 
-    let tmux_name = match state.service.resolve_tmux_session(&session_query).await {
+    // Resolve the requested pane to a tmux session name. The agent pane is the
+    // session's primary tmux session; the shell pane (`Ctrl+\` partner) is
+    // created on demand — the same split `LocalBackend::attach` makes, so both
+    // transports resolve panes through the identical service methods.
+    let resolved = match kind {
+        AttachKind::Agent => state.service.resolve_tmux_session(&session_query).await,
+        AttachKind::Shell => {
+            state
+                .service
+                .resolve_shell_tmux_session(&session_query)
+                .await
+        }
+    };
+    let tmux_name = match resolved {
         Ok(Some(name)) => name,
         Ok(None) => {
             let _ = send_control(

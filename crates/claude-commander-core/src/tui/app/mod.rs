@@ -45,7 +45,8 @@ use super::widgets::{
 use crate::api::{CommanderService, DiffSide};
 use crate::backend::{
     AttachConnection, AttachKind, BResult, BackendError, BackendHandle, BackendId, BackendView,
-    CommanderBackend, LOCAL_BACKEND_ID, LocalBackend, SessionRef,
+    CommanderBackend, ConnectionState, LOCAL_BACKEND_ID, LocalBackend, PlaceholderBackend,
+    RemoteBackendFactory, SessionRef,
 };
 use crate::config::{BindableAction, Config, ConfigStore, StateStore};
 use crate::error::{Result, TuiError};
@@ -891,10 +892,15 @@ pub struct AppUiState {
     /// Drives the `*` marker in the session list; refreshed on startup and
     /// whenever the review view closes.
     pub sessions_with_comments: HashSet<SessionId>,
-    /// Currently selected session (for preview/diff)
-    pub selected_session_id: Option<SessionId>,
-    /// Currently selected project
-    pub selected_project_id: Option<ProjectId>,
+    /// Currently selected session (for preview/diff), qualified by the backend
+    /// that owns it so actions route to the right machine.
+    pub selected_session_id: Option<SessionRef>,
+    /// Currently selected project, qualified by its owning backend.
+    pub selected_project_id: Option<(BackendId, ProjectId)>,
+    /// Whether the backend owning the current selection is connected. Cached in
+    /// `update_selection` so the (sync, backend-unaware) `is_command_available`
+    /// can gate actions on a live backend. Always `true` for the local backend.
+    pub selected_backend_connected: bool,
     /// Whether the `cc-commander` tmux session is currently running. Cached from
     /// the background agent-state poll so the (sync) renderers — the footer chip
     /// — can read it without awaiting tmux.
@@ -979,6 +985,7 @@ impl Default for AppUiState {
             should_quit: false,
             selected_session_id: None,
             selected_project_id: None,
+            selected_backend_connected: true,
             commander_running: false,
             attach_request: None,
             pending_open_review: None,
@@ -1013,8 +1020,13 @@ impl AppUiState {
     /// respect to `self` — safe to unit-test by constructing a default
     /// `AppUiState` and mutating a few fields.
     pub fn is_command_available(&self, action: BindableAction) -> bool {
-        let has_session = self.selected_session_id.is_some();
-        let has_project = self.selected_project_id.is_some();
+        // A degraded/connecting remote backend can't service actions against its
+        // sessions/projects, so gate those on the selected backend being live.
+        // The local backend is always connected, so single-machine setups are
+        // unaffected.
+        let connected = self.selected_backend_connected;
+        let has_session = self.selected_session_id.is_some() && connected;
+        let has_project = self.selected_project_id.is_some() && connected;
         match action {
             // Session-scoped actions require a selected session
             BindableAction::Select
@@ -1114,6 +1126,15 @@ pub struct App {
     /// render path reads synchronously, refreshed by a per-backend change-feed
     /// task via [`StateUpdate::BackendChanged`](crate::tui::event::StateUpdate).
     backends: Vec<BackendHandle>,
+    /// Builds a remote backend from its config entry. Injected by the binary so
+    /// core never links the remote client crate. Held past construction so the
+    /// config hot-reload path can build backends for servers added at runtime.
+    remote_factory: RemoteBackendFactory,
+    /// Monotonic allocator for remote [`BackendId`]s. Ids are stable for a
+    /// backend's lifetime and never reused, so an aborted feed task's in-flight
+    /// message can't land on a freshly-added backend that happened to reuse its
+    /// slot. Starts past the startup-assigned ids.
+    next_remote_backend_id: usize,
     /// Frontend-owned UI preferences (view mode, last selection, pane width),
     /// persisted to `tui.json` — kept out of `state.json` so backend/session
     /// data and local UI prefs never share a file. See [`crate::tui::prefs`].
@@ -1156,6 +1177,7 @@ impl App {
         config_store: Arc<ConfigStore>,
         store: Arc<StateStore>,
         frontend: crate::telemetry::FrontendInfo,
+        remote_factory: RemoteBackendFactory,
     ) -> Self {
         let config = config_store.read().clone();
         // Build the TUI prefs store from the same data dir as the state file
@@ -1168,7 +1190,17 @@ impl App {
         // Arcs). During the Phase-C transition both coexist; call sites migrate
         // from `service` onto `backends` incrementally.
         let local: Arc<dyn CommanderBackend> = Arc::new(LocalBackend::new(service.clone()));
-        let backends = vec![BackendHandle::new(LOCAL_BACKEND_ID, local)];
+        let mut backends = vec![BackendHandle::new(LOCAL_BACKEND_ID, local)];
+        // One backend per configured remote server, in declared order, starting
+        // at BackendId(1). A server that fails to construct becomes a
+        // permanently-degraded placeholder so it still shows in the tree.
+        for (i, server) in config.remote_servers.iter().enumerate() {
+            backends.push(Self::build_remote_handle(
+                BackendId(i + 1),
+                server,
+                &remote_factory,
+            ));
+        }
 
         let base = config
             .theme
@@ -1180,11 +1212,17 @@ impl App {
         let debounce = Duration::from_millis(config.session_number_debounce_ms);
         let commander_enabled_at_init = config.commander_enabled;
 
+        // Startup assigned remote ids 1..=len; the next allocation continues
+        // past them so re-added servers get fresh, never-reused ids.
+        let next_remote_backend_id = backends.len();
+
         Self {
             config,
             commander_enabled_at_init,
             service,
             backends,
+            remote_factory,
+            next_remote_backend_id,
             tui_prefs,
             ui_state: AppUiState::default(),
             event_loop: EventLoop::new(),
@@ -1198,11 +1236,128 @@ impl App {
         }
     }
 
+    /// Construct the [`BackendHandle`] for one configured remote server: the
+    /// real backend from the factory, or — if construction fails — a
+    /// [`PlaceholderBackend`] whose view is seeded `Degraded` with the reason, so
+    /// the server still appears in the tree as a permanently-errored header
+    /// rather than crashing startup or silently disappearing.
+    fn build_remote_handle(
+        id: BackendId,
+        server: &crate::config::RemoteServerConfig,
+        remote_factory: &RemoteBackendFactory,
+    ) -> BackendHandle {
+        match remote_factory(server) {
+            Ok(backend) => BackendHandle::new(id, backend),
+            Err(e) => {
+                warn!(
+                    "Remote backend '{}' failed to construct: {} — showing as degraded",
+                    server.name, e
+                );
+                let placeholder: Arc<dyn CommanderBackend> =
+                    Arc::new(PlaceholderBackend::new(server.name.clone(), e.to_string()));
+                let mut handle = BackendHandle::new(id, placeholder);
+                handle.view.connection = ConnectionState::Degraded {
+                    reason: e.to_string(),
+                };
+                handle
+            }
+        }
+    }
+
+    /// Reconcile the live backends against a hot-reloaded `remote_servers` list:
+    /// drop handles for removed/changed servers (their `Drop` aborts the polling
+    /// tasks), construct handles for added/changed servers, then reorder the Vec
+    /// to match config order (local stays first). Selection on a dropped backend
+    /// falls back to the local backend.
+    fn apply_remote_servers_reload(
+        &mut self,
+        old: &[crate::config::RemoteServerConfig],
+        new: &[crate::config::RemoteServerConfig],
+    ) {
+        let recon = reconcile_remote_servers(old, new);
+
+        // Remove dropped/changed backends. Capture their ids first so a
+        // selection pointing at one can fall back to local.
+        if !recon.removed.is_empty() {
+            let removed_ids: Vec<BackendId> = self
+                .backends
+                .iter()
+                .filter(|h| {
+                    h.id != LOCAL_BACKEND_ID && recon.removed.contains(&h.backend.descriptor().name)
+                })
+                .map(|h| h.id)
+                .collect();
+            // Dropping the handle aborts its feed tasks (see BackendHandle::drop).
+            self.backends
+                .retain(|h| h.id == LOCAL_BACKEND_ID || !removed_ids.contains(&h.id));
+
+            let session_gone = self
+                .ui_state
+                .selected_session_id
+                .is_some_and(|r| removed_ids.contains(&r.backend));
+            let project_gone = self
+                .ui_state
+                .selected_project_id
+                .is_some_and(|(b, _)| removed_ids.contains(&b));
+            if session_gone {
+                self.ui_state.selected_session_id = None;
+            }
+            if session_gone || project_gone {
+                self.ui_state.selected_project_id = None;
+                self.ui_state.selected_backend_connected = true;
+            }
+        }
+
+        // Construct and wire added/changed backends.
+        for server in &recon.added {
+            let id = BackendId(self.next_remote_backend_id);
+            self.next_remote_backend_id += 1;
+            let mut handle = Self::build_remote_handle(id, server, &self.remote_factory);
+            handle.feed_tasks = self.spawn_backend_feeds_for(&handle);
+            self.backends.push(handle);
+        }
+
+        // Reorder so the tree shows local first, then remotes in config order.
+        let position = |name: &str| new.iter().position(|s| s.name == name);
+        self.backends.sort_by_key(|h| {
+            if h.id == LOCAL_BACKEND_ID {
+                (0usize, 0usize)
+            } else {
+                (
+                    1,
+                    position(&h.backend.descriptor().name).unwrap_or(usize::MAX),
+                )
+            }
+        });
+    }
+
     // -- Backend accessors (Phase C) --
 
     /// The backend handle for `id`, if present.
     pub(super) fn backend(&self, id: BackendId) -> Option<&BackendHandle> {
         self.backends.iter().find(|h| h.id == id)
+    }
+
+    /// The backend trait object for `id`, cloneable into a spawned task. Falls
+    /// back to the local backend when the id is unknown (e.g. its server was
+    /// just removed) so callers never panic on a stale id.
+    pub(super) fn backend_arc(&self, id: BackendId) -> Arc<dyn CommanderBackend> {
+        self.backend(id)
+            .map(|h| h.backend.clone())
+            .unwrap_or_else(|| self.local_arc())
+    }
+
+    /// The backend trait object that owns session ref `r`.
+    pub(super) fn backend_for(&self, r: SessionRef) -> Arc<dyn CommanderBackend> {
+        self.backend_arc(r.backend)
+    }
+
+    /// The cached view of the backend that owns `r` (its snapshot + connection),
+    /// or the local view if the backend id is unknown.
+    pub(super) fn view_for(&self, backend: BackendId) -> &BackendView {
+        self.backend(backend)
+            .map(|h| &h.view)
+            .unwrap_or_else(|| self.local_view())
     }
 
     /// The local backend's cached view (single-backend convenience this phase).
@@ -1225,13 +1380,26 @@ impl App {
     /// `refresh_list_items` reflects it, rather than waiting a change-feed cycle
     /// (the change-feed task still delivers a redundant, idempotent refresh).
     pub(super) async fn refresh_local_view(&mut self) {
-        let backend = self.local_arc();
-        if let Ok(snapshot) = backend.workspace_snapshot().await {
-            self.backends[0].view.snapshot = snapshot;
-            self.backends[0].view.connection = crate::backend::ConnectionState::Connected;
-        }
-        if let Ok(states) = backend.agent_states(false).await {
-            self.backends[0].view.agent_states = states;
+        self.refresh_backend_view(LOCAL_BACKEND_ID).await;
+    }
+
+    /// Fetch a fresh snapshot + agent states into `id`'s cached view, so the
+    /// very next `refresh_list_items` reflects a just-issued mutation without
+    /// waiting a change-feed cycle. A failed fetch leaves the cached view (and
+    /// its connection state) untouched, so a degraded remote keeps its last
+    /// snapshot rather than blanking.
+    pub(super) async fn refresh_backend_view(&mut self, id: BackendId) {
+        let backend = self.backend_arc(id);
+        let snapshot = backend.workspace_snapshot().await;
+        let states = backend.agent_states(false).await;
+        if let Some(handle) = self.backends.iter_mut().find(|h| h.id == id) {
+            if let Ok(snapshot) = snapshot {
+                handle.view.snapshot = snapshot;
+                handle.view.connection = ConnectionState::Connected;
+            }
+            if let Ok(states) = states {
+                handle.view.agent_states = states;
+            }
         }
     }
 
@@ -1249,6 +1417,10 @@ impl App {
             self.backends[0].view.snapshot = snapshot;
             self.backends[0].view.connection = crate::backend::ConnectionState::Connected;
         }
+        // Mirror any test-injected agent states (set on `ui_state.agent_states`
+        // directly, since tmux isn't live in tests) into the local backend view,
+        // which is what `refresh_list_items` reads per-backend.
+        self.backends[0].view.agent_states.states = self.ui_state.agent_states.clone();
     }
 
     /// Look up a session in a backend's cached snapshot.
@@ -1422,13 +1594,52 @@ impl App {
     /// fetches a fresh snapshot + agent states and forwards them as
     /// [`StateUpdate::BackendChanged`] over the event channel. The task exits
     /// when the feed's sender is dropped (backend gone).
-    fn spawn_backend_change_feeds(&self) {
-        for handle in &self.backends {
+    fn spawn_backend_change_feeds(&mut self) {
+        for i in 0..self.backends.len() {
+            let tasks = self.spawn_backend_feeds_for(&self.backends[i]);
+            self.backends[i].feed_tasks = tasks;
+        }
+    }
+
+    /// Spawn the change-feed and (if the backend exposes one) connection-watch
+    /// tasks for a single backend handle, returning their [`JoinHandle`]s so the
+    /// handle can own (and, on drop, abort) them. Used at startup for every
+    /// backend and on config hot-reload for a newly-added remote backend.
+    fn spawn_backend_feeds_for(&self, handle: &BackendHandle) -> Vec<tokio::task::JoinHandle<()>> {
+        let mut tasks = Vec::new();
+
+        // Connection-watch task: forward the backend's health changes into the
+        // cached view so the server header re-renders live. Backends with a
+        // fixed health (local, placeholder) return `None` and spawn nothing.
+        if let Some(mut conn) = handle.backend.connection_watch() {
+            let backend_id = handle.id.0;
+            let tx = self.event_loop.sender();
+            tasks.push(tokio::spawn(async move {
+                loop {
+                    let state = conn.borrow().clone();
+                    if tx
+                        .send(AppEvent::StateUpdate(StateUpdate::BackendConnection {
+                            backend_id,
+                            state,
+                        }))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                    if conn.changed().await.is_err() {
+                        break;
+                    }
+                }
+            }));
+        }
+
+        {
             let backend_id = handle.id.0;
             let backend = handle.backend.clone();
             let mut feed = backend.change_feed();
             let tx = self.event_loop.sender();
-            tokio::spawn(async move {
+            tasks.push(tokio::spawn(async move {
                 while feed.changed().await {
                     let snapshot = match backend.workspace_snapshot().await {
                         Ok(s) => s,
@@ -1455,8 +1666,10 @@ impl App {
                         break;
                     }
                 }
-            });
+            }));
         }
+
+        tasks
     }
 
     /// Run the application
@@ -1854,7 +2067,8 @@ impl App {
                         // Alt-r inside the attached session queued its review
                         // diff — open it now so the next frame shows it.
                         if let Some(sid) = self.ui_state.pending_open_review.take() {
-                            self.ui_state.selected_session_id = Some(sid);
+                            let backend = self.backend_of_session(sid);
+                            self.ui_state.selected_session_id = Some(SessionRef::new(backend, sid));
                             self.handle_open_review().await;
                         }
                     }
@@ -1930,4 +2144,42 @@ impl App {
         info!("Terminal restore complete");
         Ok(())
     }
+}
+
+/// The result of diffing the configured `remote_servers` on a hot-reload,
+/// keyed by server *name* (the stable identity — `BackendId` is positional and
+/// config order can change). A server whose `url`/`token` changed appears in
+/// both `removed` and `added`, so it is torn down and rebuilt.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct RemoteServersReconcile {
+    /// Servers to construct (new, or changed since the old config).
+    pub added: Vec<crate::config::RemoteServerConfig>,
+    /// Names of servers to tear down (gone, or changed since the old config).
+    pub removed: Vec<String>,
+}
+
+/// Pure diff of two `remote_servers` lists → the add/remove decisions the TUI
+/// applies to its live `Vec<BackendHandle>`. Matching is by name; a name in
+/// both lists with an unchanged config is a no-op, while a changed config is a
+/// remove-then-add. Order differences alone produce no add/remove (the caller
+/// reorders separately).
+pub(super) fn reconcile_remote_servers(
+    old: &[crate::config::RemoteServerConfig],
+    new: &[crate::config::RemoteServerConfig],
+) -> RemoteServersReconcile {
+    let mut removed = Vec::new();
+    for o in old {
+        match new.iter().find(|n| n.name == o.name) {
+            Some(n) if n == o => {}            // unchanged: keep
+            _ => removed.push(o.name.clone()), // gone or changed
+        }
+    }
+    let mut added = Vec::new();
+    for n in new {
+        match old.iter().find(|o| o.name == n.name) {
+            Some(o) if o == n => {}     // unchanged: keep
+            _ => added.push(n.clone()), // new or changed
+        }
+    }
+    RemoteServersReconcile { added, removed }
 }

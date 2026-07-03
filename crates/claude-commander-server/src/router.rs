@@ -67,6 +67,7 @@ pub fn build_router(state: AppState) -> Router {
         // -- sessions --
         .route("/sessions", get(sessions::list).post(sessions::create))
         .route("/sessions/find", get(sessions::find))
+        .route("/sessions/unread", post(sessions::unread))
         .route("/sessions/{q}/detail", get(sessions::detail))
         .route("/sessions/{q}/pane", get(sessions::pane))
         .route("/sessions/{id}/kill", post(sessions::kill))

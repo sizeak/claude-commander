@@ -28,9 +28,16 @@ impl App {
             debug!("Preview update stale (>5s), spawning new one");
         }
 
-        let session_id = self.ui_state.selected_session_id;
-        let project_id = self.ui_state.selected_project_id;
-        let backend = self.local_arc();
+        // Preview reads from whichever backend owns the selection.
+        let sel_session = self.ui_state.selected_session_id;
+        let sel_project = self.ui_state.selected_project_id;
+        let backend_id = sel_session
+            .map(|r| r.backend)
+            .or_else(|| sel_project.map(|(b, _)| b))
+            .unwrap_or(LOCAL_BACKEND_ID);
+        let session_id = sel_session.map(|r| r.id);
+        let project_id = sel_project.map(|(_, p)| p);
+        let backend = self.backend_arc(backend_id);
         let tx = self.event_loop.sender();
 
         self.ui_state.preview_update_spawned_at = Some(Instant::now());
@@ -87,7 +94,7 @@ impl App {
         }
         self.ui_state.review_refresh_in_flight = true;
 
-        let backend = self.local_arc();
+        let backend = self.backend_arc(self.backend_of_session(session_id));
         let tx = self.event_loop.sender();
         let highlight = self.theme.mode == crate::tui::theme::ColorMode::TrueColor;
         let text_fg = self.theme.review_palette().text;
@@ -150,9 +157,10 @@ impl App {
             return;
         }
 
-        let Some(session_id) = self.ui_state.selected_session_id else {
+        let Some(sref) = self.ui_state.selected_session_id else {
             return;
         };
+        let session_id = sref.id;
 
         // Find the session's PR number and project repo path
         let session_info = self.ui_state.list_items.iter().find_map(|item| {
@@ -182,7 +190,7 @@ impl App {
         if needs_enriched && self.ui_state.gh_available {
             // Resolve the project's repo path from the cached snapshot rather
             // than the store — the backend seam owns the state.
-            let snapshot = &self.local_view().snapshot;
+            let snapshot = &self.view_for(sref.backend).snapshot;
             let repo_path = snapshot
                 .sessions
                 .iter()

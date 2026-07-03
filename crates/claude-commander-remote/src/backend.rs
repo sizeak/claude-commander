@@ -24,6 +24,7 @@ use claude_commander_core::backend::{
 };
 use claude_commander_core::comment::{ApplyOutcome, Comment};
 use claude_commander_core::session::{ProjectId, ScanResult, SessionId};
+use claude_commander_protocol::ws::AttachKind as WsAttachKind;
 use reqwest::{Client, RequestBuilder, Response, StatusCode, Url};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -52,6 +53,18 @@ pub(crate) struct RemoteInner {
 impl RemoteInner {
     pub(crate) fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The `/ws/attach` WebSocket URL for this server (scheme mapped, path
+    /// prefix preserved). Used by [`CommanderBackend::attach`].
+    fn ws_attach_url(&self) -> String {
+        crate::attach::ws_attach_url(self.base.as_str())
+    }
+
+    /// The raw bearer token, if configured. Crate-internal and only handed to
+    /// the attach handshake's `auth` frame — never logged.
+    fn token(&self) -> Option<&str> {
+        self.token.as_ref().map(|t| t.expose())
     }
 
     /// Build a `/api/<segments…>` URL against the base. `path_segments_mut`
@@ -335,6 +348,12 @@ impl CommanderBackend for RemoteBackend {
         BackendChangeFeed::new(self.poller.generation.clone())
     }
 
+    fn connection_watch(&self) -> Option<tokio::sync::watch::Receiver<ConnectionState>> {
+        // Expose the poller's connection watch so the TUI renders this server's
+        // health live (Connecting → Connected → Degraded) in its header.
+        Some(self.poller.connection.clone())
+    }
+
     // `startup_reconcile`, `reconcile_sections`, `reconcile_one_section`,
     // `record_feature`, `flush_telemetry`, `restart_session_fresh`, and
     // `apply_pr_results` all keep the trait defaults: the server reconciles and
@@ -592,16 +611,27 @@ impl CommanderBackend for RemoteBackend {
 
     async fn attach(
         &self,
-        _id: SessionId,
-        _cols: u16,
-        _rows: u16,
-        _kind: AttachKind,
+        id: SessionId,
+        cols: u16,
+        rows: u16,
+        kind: AttachKind,
     ) -> BResult<Box<dyn AttachConnection>> {
-        // Surfaced as a toast, not a crash: the WebSocket attach transport lands
-        // in Phase F.
-        Err(BackendError::Unavailable {
-            reason: "remote attach lands in a later phase".to_string(),
-        })
+        // Map core's transport-neutral `AttachKind` onto the wire enum. The
+        // server resolves the agent pane vs. the on-demand shell pane from this,
+        // mirroring `LocalBackend::attach`.
+        let pane = match kind {
+            AttachKind::Agent => WsAttachKind::Agent,
+            AttachKind::Shell => WsAttachKind::Shell,
+        };
+        crate::attach::connect(
+            &self.inner.ws_attach_url(),
+            self.inner.token(),
+            id.as_uuid().to_string(),
+            cols,
+            rows,
+            pane,
+        )
+        .await
     }
 }
 
@@ -612,15 +642,18 @@ mod tests {
     use std::sync::Arc;
 
     use claude_commander_core::api::CommanderService;
+    use claude_commander_core::backend::{AttachEnd, AttachStreams};
     use claude_commander_core::config::storage::AppState as CoreState;
     use claude_commander_core::config::{Config, ConfigStore, StateStore};
     use claude_commander_core::session::{Project, WorktreeSession};
     use claude_commander_core::telemetry::FrontendInfo;
+    use claude_commander_core::tmux::TmuxExecutor;
     use claude_commander_server::{AppState, AuthConfig};
     use claude_commander_test_support::{
         create_test_repo, spawn_server, test_state, tmux_available,
     };
     use tempfile::TempDir;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use crate::poller::PollConfig;
 
@@ -948,10 +981,49 @@ mod tests {
         // And the spec's own Debug is safe.
         let dbg = format!("{:?}", spec(ok_addr, Some(SECRET)));
         assert!(!dbg.contains(SECRET), "token leaked in spec Debug: {dbg}");
+
+        // -- Attach failure paths carry the token only in the (never-logged)
+        //    `auth` frame, so their errors must be clean too. --
+
+        // Connect refused (WS transport never opens) → Unavailable.
+        let dead_ws = unused_addr().await;
+        let refused_ws =
+            RemoteBackend::with_config(spec(dead_ws, Some(SECRET)), idle_config()).unwrap();
+        // `Box<dyn AttachConnection>` isn't `Debug`, so match rather than `expect_err`.
+        let refused_err = match refused_ws
+            .attach(SessionId::new(), 80, 24, AttachKind::Agent)
+            .await
+        {
+            Err(e) => e,
+            Ok(_) => panic!("attach to a dead server must fail"),
+        };
+        assert!(matches!(refused_err, BackendError::Unavailable { .. }));
+        assert_clean(&refused_err);
+
+        // Auth rejection at the handshake → Auth (no session/tmux needed).
+        let auth_data = TempDir::new().unwrap();
+        let auth_wt = TempDir::new().unwrap();
+        let auth_state = state_with_auth(
+            &auth_data,
+            &auth_wt,
+            AuthConfig::Token("a-different-real-token".to_string()),
+        );
+        let auth_addr = spawn_server(auth_state).await;
+        let bad_auth =
+            RemoteBackend::with_config(spec(auth_addr, Some(SECRET)), idle_config()).unwrap();
+        let attach_auth_err = match bad_auth
+            .attach(SessionId::new(), 80, 24, AttachKind::Agent)
+            .await
+        {
+            Err(e) => e,
+            Ok(_) => panic!("attach with a bad token must fail"),
+        };
+        assert!(matches!(attach_auth_err, BackendError::Auth));
+        assert_clean(&attach_auth_err);
     }
 
     #[tokio::test]
-    async fn attach_is_unavailable_for_now() {
+    async fn attach_connect_refused_is_unavailable() {
         let addr = unused_addr().await;
         let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
         // `Box<dyn AttachConnection>` isn't `Debug`, so match rather than unwrap.
@@ -961,7 +1033,32 @@ mod tests {
         {
             Err(BackendError::Unavailable { .. }) => {}
             Err(other) => panic!("expected Unavailable, got {other:?}"),
-            Ok(_) => panic!("remote attach must not succeed yet"),
+            Ok(_) => panic!("attach to a dead server must not succeed"),
+        }
+    }
+
+    /// A WS attach with the wrong token is rejected at the `auth` handshake frame
+    /// — before any session/tmux resolution — so this is hermetic without tmux.
+    #[tokio::test]
+    async fn attach_wrong_token_is_auth_error() {
+        let data_dir = TempDir::new().unwrap();
+        let worktrees_dir = TempDir::new().unwrap();
+        let state = state_with_auth(
+            &data_dir,
+            &worktrees_dir,
+            AuthConfig::Token("the-real-token".to_string()),
+        );
+        let addr = spawn_server(state).await;
+
+        let backend =
+            RemoteBackend::with_config(spec(addr, Some("the-wrong-token")), idle_config()).unwrap();
+        match backend
+            .attach(SessionId::new(), 80, 24, AttachKind::Agent)
+            .await
+        {
+            Err(BackendError::Auth) => {}
+            Err(other) => panic!("expected Auth, got {other:?}"),
+            Ok(_) => panic!("attach with a bad token must not succeed"),
         }
     }
 
@@ -1006,6 +1103,211 @@ mod tests {
 
         // Clean up the tmux session so its throwaway server tears down.
         let _ = service.kill_session(&sid).await;
+        drop(repo_temp_dir);
+        drop(data_dir);
+        drop(worktrees_dir);
+    }
+
+    /// Attaching to a session that doesn't exist yields the server's
+    /// "no such session" error *before* `ready`, classified to `NotFound`. No
+    /// tmux is spawned (the server resolves from its store), so this is hermetic.
+    #[tokio::test]
+    async fn attach_unknown_session_is_not_found() {
+        let (addr, _service, _d, _w) = serve_disabled().await;
+        let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
+        match backend
+            .attach(SessionId::new(), 80, 24, AttachKind::Agent)
+            .await
+        {
+            Err(BackendError::NotFound) => {}
+            Err(other) => panic!("expected NotFound, got {other:?}"),
+            Ok(_) => panic!("attach to an unknown session must not succeed"),
+        }
+    }
+
+    /// Read from `reader` until its accumulated output contains `needle`, or the
+    /// timeout elapses. Returns whether the needle was seen.
+    async fn read_until_contains(
+        reader: &mut (dyn tokio::io::AsyncRead + Send + Unpin),
+        needle: &str,
+        timeout: Duration,
+    ) -> bool {
+        let fut = async {
+            let mut acc = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                match reader.read(&mut buf).await {
+                    Ok(0) => return false,
+                    Ok(n) => {
+                        acc.extend_from_slice(&buf[..n]);
+                        if String::from_utf8_lossy(&acc).contains(needle) {
+                            return true;
+                        }
+                    }
+                    Err(_) => return false,
+                }
+            }
+        };
+        tokio::time::timeout(timeout, fut).await.unwrap_or(false)
+    }
+
+    /// tmux-gated end-to-end agent attach: create a session over HTTP, attach via
+    /// the WebSocket, type a command and observe its echo in the PTY output,
+    /// resize, then detach and assert the tmux session **survives** (detach ≠
+    /// kill). Self-skips without tmux (never `#[ignore]`).
+    #[tokio::test]
+    async fn attach_agent_round_trip_tmux() {
+        if !tmux_available().await {
+            eprintln!("Skipping test: tmux not available");
+            return;
+        }
+        let (repo_temp_dir, repo_path) = create_test_repo().await;
+        let data_dir = TempDir::new().unwrap();
+        let worktrees_dir = TempDir::new().unwrap();
+        let state = test_state(&data_dir, &worktrees_dir);
+        let service = state.service.clone();
+        let addr = spawn_server(state).await;
+
+        let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
+        backend.add_project(repo_path.clone()).await.unwrap();
+        let sid = backend
+            .create_session(CreateSessionOpts {
+                project_path: repo_path.clone(),
+                title: "remote-attach-agent".to_string(),
+                program: Some("bash".to_string()),
+                initial_prompt: None,
+                effort: None,
+                mode: None,
+                base_branch: None,
+                section: None,
+                stack_parent: None,
+            })
+            .await
+            .unwrap();
+
+        let tmux_name = service
+            .resolve_tmux_session(&sid.to_string())
+            .await
+            .unwrap()
+            .expect("session should resolve to a tmux name");
+
+        let conn = backend
+            .attach(sid, 80, 24, AttachKind::Agent)
+            .await
+            .expect("remote agent attach should reach ready");
+        let AttachStreams {
+            mut reader,
+            mut writer,
+            resizer,
+            mut terminator,
+        } = conn.split();
+
+        // Type a command; bash echoes the marker back through the PTY.
+        writer.write_all(b"echo cc_remote_marker\n").await.unwrap();
+        writer.flush().await.unwrap();
+        assert!(
+            read_until_contains(&mut *reader, "cc_remote_marker", Duration::from_secs(5)).await,
+            "attached PTY output should echo the typed marker"
+        );
+
+        // A resize is fire-and-forget; just prove it doesn't disrupt the stream.
+        resizer.resize(100, 30);
+
+        // Detach: leaves the tmux session running.
+        terminator.detach().await;
+        assert_eq!(terminator.wait().await, AttachEnd::Detached);
+
+        // The tmux session must survive the detach. Probe on the same isolated
+        // socket dir the harness created it on.
+        let tmux = TmuxExecutor::new().with_tmux_tmpdir(service.read_config().tmux_tmpdir);
+        let mut exists = false;
+        for _ in 0..50 {
+            if tmux.session_exists(&tmux_name).await.unwrap_or(false) {
+                exists = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(exists, "tmux session must survive a remote WS detach");
+
+        service.kill_session(&sid).await.unwrap();
+        drop(repo_temp_dir);
+        drop(data_dir);
+        drop(worktrees_dir);
+    }
+
+    /// tmux-gated shell-pane attach: the `kind: shell` attach frame drives the
+    /// server to create the on-demand `-sh` pane and bring it to `ready`. After a
+    /// detach the shell tmux session survives. Exercises the additive protocol
+    /// `kind` field end-to-end.
+    #[tokio::test]
+    async fn attach_shell_round_trip_tmux() {
+        if !tmux_available().await {
+            eprintln!("Skipping test: tmux not available");
+            return;
+        }
+        let (repo_temp_dir, repo_path) = create_test_repo().await;
+        let data_dir = TempDir::new().unwrap();
+        let worktrees_dir = TempDir::new().unwrap();
+        let state = test_state(&data_dir, &worktrees_dir);
+        let service = state.service.clone();
+        let addr = spawn_server(state).await;
+
+        let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
+        backend.add_project(repo_path.clone()).await.unwrap();
+        let sid = backend
+            .create_session(CreateSessionOpts {
+                project_path: repo_path.clone(),
+                title: "remote-attach-shell".to_string(),
+                program: Some("bash".to_string()),
+                initial_prompt: None,
+                effort: None,
+                mode: None,
+                base_branch: None,
+                section: None,
+                stack_parent: None,
+            })
+            .await
+            .unwrap();
+
+        let conn = backend
+            .attach(sid, 80, 24, AttachKind::Shell)
+            .await
+            .expect("remote shell attach should reach ready");
+        let AttachStreams {
+            reader,
+            writer,
+            resizer,
+            mut terminator,
+        } = conn.split();
+
+        // The shell pane's tmux session is the agent name + `-sh`.
+        let shell_name = service
+            .resolve_shell_tmux_session(&sid.to_string())
+            .await
+            .unwrap()
+            .expect("shell session should resolve/create");
+        assert!(shell_name.ends_with("-sh"), "got {shell_name}");
+
+        // Detach and confirm the shell session survives.
+        drop(reader);
+        drop(writer);
+        drop(resizer);
+        terminator.detach().await;
+        assert_eq!(terminator.wait().await, AttachEnd::Detached);
+
+        let tmux = TmuxExecutor::new().with_tmux_tmpdir(service.read_config().tmux_tmpdir);
+        let mut exists = false;
+        for _ in 0..50 {
+            if tmux.session_exists(&shell_name).await.unwrap_or(false) {
+                exists = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(exists, "shell tmux session must survive a remote WS detach");
+
+        service.kill_session(&sid).await.unwrap();
         drop(repo_temp_dir);
         drop(data_dir);
         drop(worktrees_dir);

@@ -309,8 +309,8 @@ fn ui_state_with(
     right_pane: RightPaneView,
 ) -> AppUiState {
     AppUiState {
-        selected_session_id: session,
-        selected_project_id: project,
+        selected_session_id: session.map(crate::backend::SessionRef::local),
+        selected_project_id: project.map(|p| (crate::backend::LOCAL_BACKEND_ID, p)),
         right_pane_view: right_pane,
         ..AppUiState::default()
     }
@@ -761,6 +761,7 @@ fn make_test_app() -> App {
         config_store,
         store,
         crate::telemetry::FrontendInfo::new("test", "0.0.0"),
+        crate::backend::no_remote_backends(),
     )
 }
 
@@ -1356,7 +1357,7 @@ async fn apply_section_move_keeps_moved_session_selected() {
         "the moved session should remain selected, got {selected_item:?}"
     );
     assert_eq!(
-        app.ui_state.selected_session_id,
+        app.ui_state.selected_session_id.map(|r| r.id),
         Some(s2_id),
         "selected_session_id should still track the moved session"
     );
@@ -2524,10 +2525,16 @@ async fn render_navigation_moves_selection_and_swaps_status_actions() {
         }
         other => panic!("expected the flaky-test worktree at index 2, got {other:?}"),
     };
-    assert_eq!(app.ui_state.selected_session_id, Some(selected_id));
+    assert_eq!(
+        app.ui_state.selected_session_id.map(|r| r.id),
+        Some(selected_id)
+    );
     // Characterization: selecting a worktree also stamps `selected_project_id`
     // with the session's parent project (it is not cleared to None).
-    assert_eq!(app.ui_state.selected_project_id, Some(selected_project));
+    assert_eq!(
+        app.ui_state.selected_project_id.map(|(_, p)| p),
+        Some(selected_project)
+    );
 
     // With a session selected, the status bar surfaces the session-scoped
     // action buttons (delete / review / edit) alongside the always-present
@@ -2558,7 +2565,7 @@ async fn selected_session_is_creating_tracks_selected_worktree_status() {
         } if title == "spinning-up" && *status == SessionStatus::Creating => Some(*id),
         _ => None,
     });
-    app.ui_state.selected_session_id = creating_id;
+    app.ui_state.selected_session_id = creating_id.map(crate::backend::SessionRef::local);
     assert!(
         app.selected_session_is_creating(),
         "a selected Creating session should be reported as creating"
@@ -2569,7 +2576,7 @@ async fn selected_session_is_creating_tracks_selected_worktree_status() {
         SessionListItem::Worktree { id, title, .. } if title == "fix-login" => Some(*id),
         _ => None,
     });
-    app.ui_state.selected_session_id = running_id;
+    app.ui_state.selected_session_id = running_id.map(crate::backend::SessionRef::local);
     assert!(!app.selected_session_is_creating());
 
     // No selection at all is not creating.
@@ -2601,4 +2608,315 @@ async fn selected_item_is_section_header_detects_header_rows() {
         .unwrap();
     app.ui_state.list_state.select(Some(worktree_idx));
     assert!(!app.selected_item_is_section_header());
+}
+
+// ---------------------------------------------------------------------------
+// Phase E: multi-backend tree, connection state, hot-reload reconcile
+// ---------------------------------------------------------------------------
+
+use super::reconcile_remote_servers;
+use crate::api::WorkspaceSnapshot;
+use crate::backend::{
+    BackendId, ConnectionState, RemoteBackendFactory, SessionRef, empty_snapshot, mock::MockBackend,
+};
+
+/// A snapshot carrying one running session under one project, for exercising a
+/// remote backend's tree contents / command gating.
+fn snapshot_with_one_session() -> (WorkspaceSnapshot, SessionId, ProjectId) {
+    use crate::session::{Project, SessionStatus, WorktreeSession};
+    let mut state = crate::config::AppState::default();
+    let project = Project::new("remote-proj", std::path::PathBuf::from("/tmp/rp"), "main");
+    let pid = project.id;
+    let mut sess = WorktreeSession::new(
+        pid,
+        "remote-sess",
+        "remote-br",
+        std::path::PathBuf::new(),
+        "claude",
+    );
+    sess.status = SessionStatus::Running;
+    let sid = sess.id;
+    let mut project = project;
+    project.add_worktree(sid);
+    state.projects.insert(pid, project);
+    state.sessions.insert(sid, sess);
+    (crate::api::workspace_snapshot_from_state(&state), sid, pid)
+}
+
+/// Build an `App` with the local backend plus one mock remote per `(name,
+/// snapshot)`, wired through the real `App::new` factory path.
+fn build_app_with_mock_remotes(servers: Vec<(&str, WorkspaceSnapshot)>) -> App {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let config_path = tmp.path().join("config.toml");
+    let state_path = tmp.path().join("state.json");
+    let mut config = Config::default();
+    config.telemetry.enabled = false;
+    let mut snapshots: std::collections::HashMap<String, WorkspaceSnapshot> = Default::default();
+    for (name, snap) in servers {
+        config
+            .remote_servers
+            .push(crate::config::RemoteServerConfig {
+                name: name.to_string(),
+                url: format!("http://{name}:7878"),
+                token: None,
+            });
+        snapshots.insert(name.to_string(), snap);
+    }
+    let config_store = Arc::new(ConfigStore::with_path(config, config_path));
+    let store = Arc::new(StateStore::with_path(AppState::new(), state_path));
+    std::mem::forget(tmp);
+    let factory: RemoteBackendFactory = Arc::new(move |cfg: &crate::config::RemoteServerConfig| {
+        let snap = snapshots
+            .get(&cfg.name)
+            .cloned()
+            .unwrap_or_else(empty_snapshot);
+        Ok(Arc::new(MockBackend::new(cfg.name.clone(), snap)) as Arc<dyn CommanderBackend>)
+    });
+    App::new(
+        config_store,
+        store,
+        crate::telemetry::FrontendInfo::new("test", "0.0.0"),
+        factory,
+    )
+}
+
+#[tokio::test]
+async fn single_local_backend_suppresses_server_header() {
+    // The C0 invariant: with only the local backend, no ServerHeader is emitted.
+    let mut app = make_test_app();
+    seed_render_scenario(&mut app).await;
+    app.ui_state.view_mode = ViewMode::ProjectGrouped;
+    app.refresh_list_items().await;
+    assert!(
+        !app.ui_state.list_items.iter().any(|i| i.is_server_header()),
+        "a lone local backend must not render a server header"
+    );
+}
+
+#[tokio::test]
+async fn multi_backend_tree_emits_server_headers_in_config_order_local_first() {
+    let mut app = build_app_with_mock_remotes(vec![
+        ("buildbox", empty_snapshot()),
+        ("ci", empty_snapshot()),
+    ]);
+    app.bootstrap_backend_views().await;
+    app.refresh_list_items().await;
+
+    let headers: Vec<(BackendId, String)> = app
+        .ui_state
+        .list_items
+        .iter()
+        .filter_map(|i| match i {
+            SessionListItem::ServerHeader { backend, name, .. } => Some((*backend, name.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        headers,
+        vec![
+            (BackendId(0), "local".to_string()),
+            (BackendId(1), "buildbox".to_string()),
+            (BackendId(2), "ci".to_string()),
+        ],
+        "server headers should be local-first, then config order"
+    );
+}
+
+#[tokio::test]
+async fn multi_backend_list_keys_are_unique() {
+    let (remote_snap, _sid, _pid) = snapshot_with_one_session();
+    let (local_snap, _s, _p) = snapshot_with_one_session();
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", remote_snap)]);
+    // Give the local backend some content too.
+    app.backends[0].view.snapshot = local_snap;
+    app.backends[0].view.connection = ConnectionState::Connected;
+    app.bootstrap_backend_views().await;
+    app.refresh_list_items().await;
+
+    let keys: Vec<String> = app.ui_state.list_items.iter().map(|i| i.key()).collect();
+    let unique: std::collections::HashSet<&String> = keys.iter().collect();
+    assert_eq!(
+        keys.len(),
+        unique.len(),
+        "list item keys must be unique: {keys:?}"
+    );
+}
+
+#[tokio::test]
+async fn factory_failure_yields_degraded_placeholder() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let mut config = Config::default();
+    config.telemetry.enabled = false;
+    config
+        .remote_servers
+        .push(crate::config::RemoteServerConfig {
+            name: "broken".to_string(),
+            url: "http://broken:7878".to_string(),
+            token: None,
+        });
+    let config_store = Arc::new(ConfigStore::with_path(
+        config,
+        tmp.path().join("config.toml"),
+    ));
+    let store = Arc::new(StateStore::with_path(
+        AppState::new(),
+        tmp.path().join("state.json"),
+    ));
+    std::mem::forget(tmp);
+    let factory: RemoteBackendFactory = Arc::new(|_cfg| {
+        Err(crate::backend::BackendError::InvalidRequest(
+            "bad url".to_string(),
+        ))
+    });
+    let app = App::new(
+        config_store,
+        store,
+        crate::telemetry::FrontendInfo::new("test", "0.0.0"),
+        factory,
+    );
+    // The broken server still occupies a handle, seeded Degraded with the reason.
+    let handle = app
+        .backend(BackendId(1))
+        .expect("placeholder handle present");
+    match &handle.view.connection {
+        ConnectionState::Degraded { reason } => assert!(reason.contains("bad url"), "{reason}"),
+        other => panic!("expected Degraded placeholder, got {other:?}"),
+    }
+    assert_eq!(handle.backend.descriptor().name, "broken");
+}
+
+#[test]
+fn is_command_available_false_when_selected_backend_degraded() {
+    // A session is selected but its owning backend is disconnected: session
+    // actions must be gated off.
+    let mut ui = AppUiState {
+        selected_session_id: Some(SessionRef::new(BackendId(1), SessionId::new())),
+        selected_project_id: Some((BackendId(1), ProjectId::new())),
+        selected_backend_connected: false,
+        ..AppUiState::default()
+    };
+    assert!(!ui.is_command_available(BindableAction::DeleteSession));
+    assert!(!ui.is_command_available(BindableAction::RestartSession));
+    // Flip to connected and the same action becomes available.
+    ui.selected_backend_connected = true;
+    assert!(ui.is_command_available(BindableAction::DeleteSession));
+}
+
+#[tokio::test]
+async fn degraded_server_header_renders_greyed_name_and_reason() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", empty_snapshot())]);
+    app.bootstrap_backend_views().await;
+    // Drive the remote to Degraded and fold it into the view as the watcher would.
+    app.handle_state_update(crate::tui::event::StateUpdate::BackendConnection {
+        backend_id: 1,
+        state: ConnectionState::Degraded {
+            reason: "connection refused".to_string(),
+        },
+    })
+    .await;
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    let text = buffer_lines(&terminal);
+    assert!(text.contains("buildbox"), "header should name the server");
+    assert!(
+        text.contains("connection refused"),
+        "degraded header should show the reason: {text}"
+    );
+}
+
+#[tokio::test]
+async fn selection_falls_back_to_local_when_backend_removed() {
+    let (remote_snap, sid, pid) = snapshot_with_one_session();
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", remote_snap)]);
+    app.bootstrap_backend_views().await;
+    app.refresh_list_items().await;
+    // Select the remote session.
+    app.ui_state.selected_session_id = Some(SessionRef::new(BackendId(1), sid));
+    app.ui_state.selected_project_id = Some((BackendId(1), pid));
+    app.ui_state.selected_backend_connected = true;
+
+    // Hot-reload removes the server.
+    let old = app.config.remote_servers.clone();
+    app.apply_remote_servers_reload(&old, &[]);
+
+    assert!(
+        app.backend(BackendId(1)).is_none(),
+        "removed backend's handle should be gone"
+    );
+    assert_eq!(
+        app.ui_state.selected_session_id, None,
+        "selection on a removed backend should fall back to local (cleared)"
+    );
+    assert!(app.ui_state.selected_backend_connected);
+}
+
+#[tokio::test]
+async fn hot_reload_adds_new_backend_handle() {
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", empty_snapshot())]);
+    app.bootstrap_backend_views().await;
+    let old = app.config.remote_servers.clone();
+    let new = vec![
+        crate::config::RemoteServerConfig {
+            name: "buildbox".to_string(),
+            url: "http://buildbox:7878".to_string(),
+            token: None,
+        },
+        crate::config::RemoteServerConfig {
+            name: "ci".to_string(),
+            url: "http://ci:7878".to_string(),
+            token: None,
+        },
+    ];
+    app.config.remote_servers = new.clone();
+    app.apply_remote_servers_reload(&old, &new);
+
+    // buildbox kept its id; ci got a fresh one.
+    assert_eq!(
+        app.backend(BackendId(1)).unwrap().backend.descriptor().name,
+        "buildbox"
+    );
+    let names: Vec<String> = app
+        .backends
+        .iter()
+        .map(|h| h.backend.descriptor().name)
+        .collect();
+    assert_eq!(names, vec!["local", "buildbox", "ci"]);
+}
+
+#[test]
+fn reconcile_remote_servers_detects_add_remove_change() {
+    let cfg = |name: &str, url: &str| crate::config::RemoteServerConfig {
+        name: name.to_string(),
+        url: url.to_string(),
+        token: None,
+    };
+    let old = vec![cfg("a", "http://a:1"), cfg("b", "http://b:1")];
+    // a unchanged, b's url changed, c added, (b removed+added via change).
+    let new = vec![
+        cfg("a", "http://a:1"),
+        cfg("b", "http://b:2"),
+        cfg("c", "http://c:1"),
+    ];
+    let recon = reconcile_remote_servers(&old, &new);
+    assert_eq!(recon.removed, vec!["b".to_string()]);
+    let added: Vec<String> = recon.added.iter().map(|s| s.name.clone()).collect();
+    assert_eq!(added, vec!["b".to_string(), "c".to_string()]);
+}
+
+#[test]
+fn reconcile_remote_servers_reorder_is_noop() {
+    let cfg = |name: &str| crate::config::RemoteServerConfig {
+        name: name.to_string(),
+        url: format!("http://{name}:1"),
+        token: None,
+    };
+    let old = vec![cfg("a"), cfg("b")];
+    let new = vec![cfg("b"), cfg("a")];
+    let recon = reconcile_remote_servers(&old, &new);
+    assert!(recon.added.is_empty());
+    assert!(recon.removed.is_empty());
 }

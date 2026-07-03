@@ -92,6 +92,14 @@ pub enum StateUpdate {
         snapshot: Box<crate::api::WorkspaceSnapshot>,
         states: Box<crate::api::AgentStatesSnapshot>,
     },
+    /// A backend's connection health changed (a remote server's poller moved
+    /// between Connecting/Connected/Degraded). Folded into that backend's
+    /// [`BackendView::connection`](crate::backend::BackendView) so its server
+    /// header re-renders live. `backend_id` indexes the `Vec<BackendHandle>`.
+    BackendConnection {
+        backend_id: usize,
+        state: crate::backend::ConnectionState,
+    },
     /// Background `git fetch origin` kicked off by the Checkout modal
     /// has finished — the modal should refresh its branch list if still open.
     CheckoutFetchComplete {

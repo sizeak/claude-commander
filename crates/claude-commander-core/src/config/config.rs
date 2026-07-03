@@ -27,6 +27,47 @@ pub struct ProgramEntry {
     pub command: String,
 }
 
+/// Connection details for one remote `claude-commander-server` the TUI drives
+/// alongside the local backend. Serialised as a `[[remote_servers]]` TOML table:
+///
+/// ```toml
+/// [[remote_servers]]
+/// name = "buildbox"
+/// url = "http://buildbox:7878"
+/// token = "..."
+/// ```
+///
+/// `Debug` is hand-written to redact `token`, so an accidental `{:?}` on the
+/// enclosing [`Config`] (which is logged on some error paths) can never leak the
+/// bearer secret. The binary maps this into the remote crate's
+/// `RemoteServerSpec` (whose `SecretString` gives the same guarantee on the
+/// wire-client side).
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteServerConfig {
+    /// Human-readable label shown as the server's tree header. Must be unique
+    /// and non-empty across all configured servers.
+    pub name: String,
+    /// Base URL of the server (scheme + host + port, e.g. `http://buildbox:7878`).
+    pub url: String,
+    /// Bearer token, or `None` for an auth-disabled (loopback) server.
+    #[serde(default)]
+    pub token: Option<String>,
+}
+
+impl std::fmt::Debug for RemoteServerConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print the token — redact its presence, not its value.
+        f.debug_struct("RemoteServerConfig")
+            .field("name", &self.name)
+            .field("url", &self.url)
+            .field(
+                "token",
+                &self.token.as_ref().map(|_| "<redacted>").unwrap_or("None"),
+            )
+            .finish()
+    }
+}
+
 /// Application configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -223,6 +264,13 @@ pub struct Config {
     /// Usage-telemetry settings (on by default, opt-out). See [`TelemetryConfig`].
     #[serde(default)]
     pub telemetry: TelemetryConfig,
+
+    /// Remote `claude-commander-server` instances the TUI drives alongside the
+    /// local backend. Each entry becomes a per-server node in the session tree,
+    /// in declared order after the always-present local backend. Empty by
+    /// default. Validated on load (see [`Config::validate_remote_servers`]).
+    #[serde(default)]
+    pub remote_servers: Vec<RemoteServerConfig>,
 }
 
 /// Conversation-mode (text-to-speech) settings.
@@ -421,6 +469,7 @@ impl Default for Config {
             conversation: ConversationConfig::default(),
             stt: SttConfig::default(),
             telemetry: TelemetryConfig::default(),
+            remote_servers: Vec::new(),
         }
     }
 }
@@ -450,7 +499,51 @@ impl Config {
             .extract()
             .map_err(|e| ConfigError::LoadFailed(e.to_string()))?;
 
+        config.validate_remote_servers()?;
+
         Ok(config)
+    }
+
+    /// Validate the configured [`remote_servers`](Self::remote_servers): names
+    /// must be non-empty and unique, and each `url` must parse as an absolute
+    /// URL with a host (so the backend factory can build a client). Returns the
+    /// first problem as a [`ConfigError::InvalidValue`], so a bad entry is
+    /// rejected at load with a clear message rather than surfacing later as a
+    /// silently-degraded backend.
+    pub fn validate_remote_servers(&self) -> Result<()> {
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for server in &self.remote_servers {
+            let name = server.name.trim();
+            if name.is_empty() {
+                return Err(ConfigError::InvalidValue {
+                    key: "remote_servers.name".to_string(),
+                    reason: "server name must not be empty".to_string(),
+                }
+                .into());
+            }
+            if !seen.insert(name) {
+                return Err(ConfigError::InvalidValue {
+                    key: "remote_servers.name".to_string(),
+                    reason: format!("duplicate server name '{name}'"),
+                }
+                .into());
+            }
+            let parsed = url::Url::parse(&server.url).map_err(|e| ConfigError::InvalidValue {
+                key: format!("remote_servers.{name}.url"),
+                reason: format!("invalid url '{}': {e}", server.url),
+            })?;
+            if parsed.cannot_be_a_base() || parsed.host().is_none() {
+                return Err(ConfigError::InvalidValue {
+                    key: format!("remote_servers.{name}.url"),
+                    reason: format!(
+                        "url '{}' must include a host (e.g. http://host:port)",
+                        server.url
+                    ),
+                }
+                .into());
+            }
+        }
+        Ok(())
     }
 
     /// Get the configuration file path
@@ -1138,6 +1231,116 @@ command = \"codex -m gpt-5\"
 
         let cfg: Config = toml::from_str("commander_enabled = true\n").unwrap();
         assert!(cfg.commander_enabled);
+    }
+
+    #[test]
+    fn test_remote_servers_default_empty() {
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.remote_servers.is_empty());
+        assert!(cfg.validate_remote_servers().is_ok());
+    }
+
+    #[test]
+    fn test_remote_servers_toml_roundtrip() {
+        let toml_src = r#"
+[[remote_servers]]
+name = "buildbox"
+url = "http://buildbox:7878"
+token = "abc123"
+
+[[remote_servers]]
+name = "loopback"
+url = "http://127.0.0.1:7878"
+"#;
+        let cfg: Config = toml::from_str(toml_src).expect("toml parse");
+        assert_eq!(cfg.remote_servers.len(), 2);
+        assert_eq!(cfg.remote_servers[0].name, "buildbox");
+        assert_eq!(cfg.remote_servers[0].url, "http://buildbox:7878");
+        assert_eq!(cfg.remote_servers[0].token.as_deref(), Some("abc123"));
+        // Token is optional.
+        assert_eq!(cfg.remote_servers[1].token, None);
+        assert!(cfg.validate_remote_servers().is_ok());
+    }
+
+    #[test]
+    fn test_remote_server_debug_redacts_token() {
+        let server = RemoteServerConfig {
+            name: "box".to_string(),
+            url: "http://box:7878".to_string(),
+            token: Some("SUPERSECRET".to_string()),
+        };
+        let dbg = format!("{server:?}");
+        assert!(!dbg.contains("SUPERSECRET"), "token leaked in Debug: {dbg}");
+        assert!(dbg.contains("box"));
+        assert!(dbg.contains("<redacted>"));
+
+        // A whole Config carrying the server must not leak it either.
+        let cfg = Config {
+            remote_servers: vec![server],
+            ..Config::default()
+        };
+        assert!(!format!("{cfg:?}").contains("SUPERSECRET"));
+    }
+
+    #[test]
+    fn test_validate_remote_servers_rejects_empty_name() {
+        let cfg = Config {
+            remote_servers: vec![RemoteServerConfig {
+                name: "  ".to_string(),
+                url: "http://box:7878".to_string(),
+                token: None,
+            }],
+            ..Config::default()
+        };
+        assert!(cfg.validate_remote_servers().is_err());
+    }
+
+    #[test]
+    fn test_validate_remote_servers_rejects_duplicate_names() {
+        let cfg = Config {
+            remote_servers: vec![
+                RemoteServerConfig {
+                    name: "box".to_string(),
+                    url: "http://a:7878".to_string(),
+                    token: None,
+                },
+                RemoteServerConfig {
+                    name: "box".to_string(),
+                    url: "http://b:7878".to_string(),
+                    token: None,
+                },
+            ],
+            ..Config::default()
+        };
+        let err = cfg.validate_remote_servers().unwrap_err();
+        assert!(err.to_string().contains("duplicate"), "{err}");
+    }
+
+    #[test]
+    fn test_validate_remote_servers_rejects_unparseable_url() {
+        let cfg = Config {
+            remote_servers: vec![RemoteServerConfig {
+                name: "box".to_string(),
+                url: "not a url".to_string(),
+                token: None,
+            }],
+            ..Config::default()
+        };
+        assert!(cfg.validate_remote_servers().is_err());
+    }
+
+    #[test]
+    fn test_validate_remote_servers_rejects_hostless_url() {
+        // A scheme with no host (e.g. a bare path) must be rejected.
+        let cfg = Config {
+            remote_servers: vec![RemoteServerConfig {
+                name: "box".to_string(),
+                url: "file:///etc/passwd".to_string(),
+                token: None,
+            }],
+            ..Config::default()
+        };
+        assert!(cfg.validate_remote_servers().is_err());
     }
 
     #[test]

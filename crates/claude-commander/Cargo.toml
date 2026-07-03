@@ -15,6 +15,10 @@ path = "src/main.rs"
 
 [dependencies]
 claude-commander-core = { path = "../claude-commander-core" }
+# HTTP client backend for remote servers. The binary owns this dependency (core
+# does not) and injects a factory closure into the TUI, so the dependency
+# direction stays bin → {core, remote}.
+claude-commander-remote = { path = "../claude-commander-remote" }
 
 # Async runtime (the `#[tokio::main]` entry point)
 tokio = { workspace = true }

@@ -212,6 +212,30 @@ pub async fn read(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Body for the batch mark-unread route: the session ids to flag.
+#[derive(Debug, Deserialize)]
+pub struct UnreadBody {
+    pub ids: Vec<String>,
+}
+
+/// `POST /sessions/unread` with `{ "ids": [...] }` → `mark_unread` → 204.
+///
+/// The batch counterpart to `read`: the remote client's palette bulk
+/// "mark unread" action posts every target id here. Unknown ids are silently
+/// skipped by the service (a no-op), matching the local backend.
+pub async fn unread(
+    State(state): State<AppState>,
+    Json(body): Json<UnreadBody>,
+) -> Result<StatusCode, ApiError> {
+    let ids = body
+        .ids
+        .iter()
+        .map(|id| parse_session_id(id))
+        .collect::<Result<Vec<_>, _>>()?;
+    state.service.mark_unread(ids).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[cfg(test)]
 mod tests {
     use axum::{
@@ -238,7 +262,89 @@ mod tests {
             .route("/sessions/{id}/preview", get(super::preview))
             .route("/sessions/{id}/branch-diff", get(super::branch_diff))
             .route("/sessions/{id}/read", post(super::read))
+            .route("/sessions/unread", post(super::unread))
             .with_state(state)
+    }
+
+    /// A hermetic [`AppState`] seeded with one project + one (read) session,
+    /// plus that session's id — for exercising the batch mark-unread route.
+    fn seeded_state(dir: &TempDir) -> (AppState, claude_commander_core::session::SessionId) {
+        use claude_commander_core::api::CommanderService;
+        use claude_commander_core::config::storage::AppState as CoreState;
+        use claude_commander_core::config::{Config, ConfigStore, StateStore};
+        use claude_commander_core::session::{Project, WorktreeSession};
+        use claude_commander_core::telemetry::FrontendInfo;
+        use std::sync::Arc;
+
+        let mut config = Config::default();
+        config.telemetry.enabled = false;
+        let mut core = CoreState::default();
+        let mut project = Project::new("p", std::path::PathBuf::from("/tmp/p"), "main");
+        let pid = project.id;
+        let mut sess = WorktreeSession::new(pid, "s", "s-br", std::path::PathBuf::new(), "claude");
+        sess.status = claude_commander_core::SessionStatus::Running;
+        sess.unread = false;
+        let sid = sess.id;
+        project.add_worktree(sid);
+        core.projects.insert(pid, project);
+        core.sessions.insert(sid, sess);
+
+        let config_store = Arc::new(ConfigStore::with_path(
+            config,
+            dir.path().join("config.toml"),
+        ));
+        // The store's `mutate` re-reads state from disk (crash-safe write cycle),
+        // so persist the seeded state before wrapping it — otherwise the first
+        // mutation would read an empty file and drop the session.
+        let state_path = dir.path().join("state.json");
+        std::fs::write(&state_path, serde_json::to_string(&core).unwrap()).unwrap();
+        let store = Arc::new(StateStore::with_path(core, state_path));
+        let service =
+            CommanderService::new(config_store, store, FrontendInfo::new("test", "0.0.0"));
+        (
+            AppState::new(service, crate::auth::AuthConfig::Disabled),
+            sid,
+        )
+    }
+
+    #[tokio::test]
+    async fn unread_marks_seeded_sessions() {
+        use axum::body::Body;
+        use axum::http::Request;
+        let dir = TempDir::new().unwrap();
+        let (state, sid) = seeded_state(&dir);
+
+        // Precondition: the seeded session is not unread.
+        let before = state.service.list_sessions(true).await.unwrap();
+        assert!(!before.iter().find(|s| s.session_id == sid).unwrap().unread);
+
+        let body = serde_json::json!({ "ids": [sid.as_uuid().to_string()] }).to_string();
+        let req = Request::post("/sessions/unread")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let (status, _) = crate::handlers::test_support::send(router(state.clone()), req).await;
+        assert_eq!(status, 204);
+
+        let after = state.service.list_sessions(true).await.unwrap();
+        assert!(
+            after.iter().find(|s| s.session_id == sid).unwrap().unread,
+            "session should be marked unread after POST /sessions/unread"
+        );
+    }
+
+    #[tokio::test]
+    async fn unread_bad_uuid_is_400() {
+        use axum::body::Body;
+        use axum::http::Request;
+        let dir = TempDir::new().unwrap();
+        let body = serde_json::json!({ "ids": ["not-a-uuid"] }).to_string();
+        let req = Request::post("/sessions/unread")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let (status, _) = crate::handlers::test_support::send(router(test_state(&dir)), req).await;
+        assert_eq!(status, 400);
     }
 
     #[tokio::test]

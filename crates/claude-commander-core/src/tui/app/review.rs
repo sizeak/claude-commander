@@ -1274,17 +1274,18 @@ impl DiffReviewState {
 impl App {
     /// Open the review view for the selected session.
     pub(super) async fn handle_open_review(&mut self) {
-        let Some(session_id) = self.ui_state.selected_session_id else {
+        let Some(sref) = self.ui_state.selected_session_id else {
             self.set_review_status("Select a session first");
             return;
         };
+        let session_id = sref.id;
 
         let title = self
-            .session(SessionRef::local(session_id))
+            .session(sref)
             .map(|s| s.title.clone())
             .unwrap_or_default();
 
-        match self.local_arc().open_review(session_id).await {
+        match self.backend_for(sref).open_review(session_id).await {
             Ok(snapshot) => {
                 if snapshot.diff.is_empty() {
                     self.set_review_status("No changes to review");
@@ -1433,7 +1434,8 @@ impl App {
         // None; `handle_select` queues the attach and quits the TUI loop,
         // which `run()` then picks up.
         if crate::config::keybindings::matches_review_toggle(&self.config.keybindings, &key) {
-            self.ui_state.selected_session_id = Some(state.session_id);
+            let backend = self.backend_of_session(state.session_id);
+            self.ui_state.selected_session_id = Some(SessionRef::new(backend, state.session_id));
             self.handle_select().await;
             return;
         }

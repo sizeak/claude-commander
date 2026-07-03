@@ -38,6 +38,13 @@ pub struct TuiPrefs {
     /// Last-focused project (used when no session was focused).
     #[serde(default)]
     pub last_selected_project: Option<ProjectId>,
+    /// Name of the backend that owned the last selection. Stored by *name*, not
+    /// by positional `BackendId`, because config order can change between
+    /// launches; restore resolves the name back to a backend and falls back to
+    /// the local backend when it no longer exists. `None`/absent means the local
+    /// backend (back-compat with prefs written before multi-backend).
+    #[serde(default)]
+    pub last_selected_backend: Option<String>,
     /// Persisted left-pane width, as a percentage of terminal width.
     #[serde(default)]
     pub left_pane_pct: Option<u16>,
@@ -65,6 +72,8 @@ impl From<LegacyStatePrefs> for TuiPrefs {
             view_mode: l.view_mode,
             last_selected_session: l.last_selected_session,
             last_selected_project: l.last_selected_project,
+            // Legacy state.json predates multi-backend; its selection is local.
+            last_selected_backend: None,
             left_pane_pct: l.left_pane_pct,
         }
     }
@@ -137,11 +146,18 @@ impl TuiPrefsStore {
         self.update(|p| p.view_mode = Some(view)).await;
     }
 
-    /// Persist the last-focused session/project selection.
-    pub async fn set_selection(&self, session: Option<SessionId>, project: Option<ProjectId>) {
+    /// Persist the last-focused session/project selection, qualified by the
+    /// owning backend's name (so it survives config-order changes).
+    pub async fn set_selection(
+        &self,
+        session: Option<SessionId>,
+        project: Option<ProjectId>,
+        backend: Option<String>,
+    ) {
         self.update(|p| {
             p.last_selected_session = session;
             p.last_selected_project = project;
+            p.last_selected_backend = backend;
         })
         .await;
     }
@@ -239,13 +255,16 @@ mod tests {
         {
             let store = TuiPrefsStore::load(dir.path());
             store.set_view_mode(ViewMode::ProjectGrouped).await;
-            store.set_selection(Some(session), Some(project)).await;
+            store
+                .set_selection(Some(session), Some(project), Some("buildbox".to_string()))
+                .await;
             store.set_left_pane_pct(30).await;
         }
         let reloaded = TuiPrefsStore::load(dir.path()).prefs();
         assert_eq!(reloaded.view_mode, Some(ViewMode::ProjectGrouped));
         assert_eq!(reloaded.last_selected_session, Some(session));
         assert_eq!(reloaded.last_selected_project, Some(project));
+        assert_eq!(reloaded.last_selected_backend.as_deref(), Some("buildbox"));
         assert_eq!(reloaded.left_pane_pct, Some(30));
     }
 }

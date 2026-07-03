@@ -102,11 +102,12 @@ impl App {
 
     /// Check if the selected session is in Creating state
     pub(super) fn selected_session_is_creating(&self) -> bool {
+        let selected = self.ui_state.selected_session_id.map(|r| r.id);
         self.ui_state.list_items.iter().any(|item| {
             matches!(
                 item,
                 SessionListItem::Worktree { id, status, .. }
-                if self.ui_state.selected_session_id == Some(*id)
+                if selected == Some(*id)
                     && *status == SessionStatus::Creating
             )
         })
@@ -121,22 +122,19 @@ impl App {
         if self.selected_session_is_creating() {
             return;
         }
-        let Some(session_id) = self.ui_state.selected_session_id else {
+        let Some(sref) = self.ui_state.selected_session_id else {
             info!("No session selected");
             return;
         };
         // Validate against the cached snapshot so a non-attachable session
         // reports immediately; the backend revives a dead-but-attachable tmux
         // session when the attach actually runs.
-        match self
-            .session(SessionRef::local(session_id))
-            .map(|s| s.status)
-        {
+        match self.session(sref).map(|s| s.status) {
             Some(status) if status.can_attach() => {
                 // Clear unread when attaching.
-                let _ = self.local_arc().mark_read(session_id).await;
+                let _ = self.backend_for(sref).mark_read(sref.id).await;
                 self.ui_state.attach_request = Some(AttachTarget::Session {
-                    session: SessionRef::local(session_id),
+                    session: sref,
                     kind: AttachKind::Agent,
                 });
                 self.ui_state.should_quit = true;
@@ -155,15 +153,15 @@ impl App {
         if self.selected_session_is_creating() {
             return;
         }
-        if let Some(session_id) = self.ui_state.selected_session_id {
+        if let Some(sref) = self.ui_state.selected_session_id {
             // The backend creates the `-sh` pair on demand; a failure surfaces
             // as an error modal once the attach runs.
             self.ui_state.attach_request = Some(AttachTarget::Session {
-                session: SessionRef::local(session_id),
+                session: sref,
                 kind: AttachKind::Shell,
             });
             self.ui_state.should_quit = true;
-        } else if let Some(project_id) = self.ui_state.selected_project_id {
+        } else if let Some((_backend, project_id)) = self.ui_state.selected_project_id {
             // Project shells have no `SessionId` — resolve the name locally.
             let Some(be) = self.local_backend() else {
                 return;
@@ -249,11 +247,10 @@ impl App {
         if self.selected_session_is_creating() {
             return;
         }
-        let path = if let Some(session_id) = self.ui_state.selected_session_id {
-            self.session(SessionRef::local(session_id))
-                .map(|s| s.worktree_path.clone())
-        } else if let Some(project_id) = self.ui_state.selected_project_id {
-            self.local_view()
+        let path = if let Some(sref) = self.ui_state.selected_session_id {
+            self.session(sref).map(|s| s.worktree_path.clone())
+        } else if let Some((backend, project_id)) = self.ui_state.selected_project_id {
+            self.view_for(backend)
                 .snapshot
                 .projects
                 .iter()
@@ -294,12 +291,10 @@ impl App {
     /// `pr_url` and launches the OS default handler (`open` on macOS,
     /// `xdg-open` on Linux, `cmd /c start` on Windows).
     pub(super) async fn handle_open_pull_request(&mut self) {
-        let Some(session_id) = self.ui_state.selected_session_id else {
+        let Some(sref) = self.ui_state.selected_session_id else {
             return;
         };
-        let pr_url = self
-            .session(SessionRef::local(session_id))
-            .and_then(|s| s.pr_url.clone());
+        let pr_url = self.session(sref).and_then(|s| s.pr_url.clone());
         let Some(url) = pr_url else {
             self.ui_state.status_message = Some((
                 "No PR associated with this session".to_string(),
@@ -381,9 +376,13 @@ impl App {
 
     /// Build the project picker for a new-session dialog: every project sorted
     /// by name, with `default` pre-selected.
-    async fn new_project_picker(&self, default: ProjectId) -> super::ProjectPicker {
+    async fn new_project_picker(
+        &self,
+        backend: BackendId,
+        default: ProjectId,
+    ) -> super::ProjectPicker {
         let mut choices: Vec<super::ProjectChoice> = self
-            .local_view()
+            .view_for(backend)
             .snapshot
             .projects
             .iter()
@@ -397,9 +396,44 @@ impl App {
         super::ProjectPicker::new(choices, default)
     }
 
+    /// The new-session program picker for `backend`. The local backend's list
+    /// comes from local config; a remote backend's comes from its
+    /// `create_options()` (falling back to local config if that query fails), so
+    /// the picker offers the harnesses that backend actually supports.
+    async fn new_program_picker_for(&self, backend: BackendId) -> super::ProgramPicker {
+        if backend == LOCAL_BACKEND_ID {
+            return self.new_program_picker();
+        }
+        match self.backend_arc(backend).create_options().await {
+            Ok(opts) if !opts.programs.is_empty() => {
+                let selected = opts
+                    .programs
+                    .iter()
+                    .position(|e| e.command == opts.default_program)
+                    .unwrap_or(0);
+                let choices = opts
+                    .programs
+                    .into_iter()
+                    .map(|p| crate::config::ProgramEntry {
+                        label: p.label,
+                        command: p.command,
+                    })
+                    .collect();
+                super::ProgramPicker { choices, selected }
+            }
+            _ => self.new_program_picker(),
+        }
+    }
+
     pub(super) async fn handle_new_session(&mut self) {
-        if let Some(project_id) = self.ui_state.selected_project_id {
-            let repo_path = self.project(project_id).map(|p| p.repo_path.clone());
+        if let Some((backend, project_id)) = self.ui_state.selected_project_id {
+            let repo_path = self
+                .view_for(backend)
+                .snapshot
+                .projects
+                .iter()
+                .find(|p| p.id == project_id)
+                .map(|p| p.repo_path.clone());
             let existing_branches = repo_path.and_then(|p| existing_branch_names(&p));
             // Capture the section under the cursor now, so a background list
             // refresh while the modal is open can't change where the new
@@ -409,7 +443,8 @@ impl App {
                 .list_state
                 .selected()
                 .and_then(|idx| super::selection::section_at(&self.ui_state.list_items, idx));
-            let project_picker = self.new_project_picker(project_id).await;
+            let project_picker = self.new_project_picker(backend, project_id).await;
+            let program_picker = self.new_program_picker_for(backend).await;
             self.ui_state.modal = Modal::Input {
                 title: "New Session".to_string(),
                 prompt: "Enter session name:".to_string(),
@@ -420,7 +455,7 @@ impl App {
                 },
                 existing_branches,
                 project_picker: Some(project_picker),
-                program_picker: Some(self.new_program_picker()),
+                program_picker: Some(program_picker),
                 focus: super::InputFocus::Name,
                 expanded: false,
             };
@@ -439,15 +474,16 @@ impl App {
     /// the current topmost member. Selecting a standalone session starts a
     /// new stack rooted there.
     pub(super) async fn handle_new_stacked_session(&mut self) {
-        let Some(selected_session_id) = self.ui_state.selected_session_id else {
+        let Some(sref) = self.ui_state.selected_session_id else {
             self.ui_state.status_message = Some((
                 "Select a session to stack on top of".to_string(),
                 Instant::now() + Duration::from_secs(3),
             ));
             return;
         };
+        let selected_session_id = sref.id;
         let resolved = {
-            let snap = &self.local_view().snapshot;
+            let snap = &self.view_for(sref.backend).snapshot;
             snap.sessions
                 .iter()
                 .find(|s| s.session_id == selected_session_id)
@@ -472,8 +508,15 @@ impl App {
         let Some((project_id, parent_session_id, parent_branch, parent_title)) = resolved else {
             return;
         };
-        let repo_path = self.project(project_id).map(|p| p.repo_path.clone());
+        let repo_path = self
+            .view_for(sref.backend)
+            .snapshot
+            .projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .map(|p| p.repo_path.clone());
         let existing_branches = repo_path.and_then(|p| existing_branch_names(&p));
+        let program_picker = self.new_program_picker_for(sref.backend).await;
         self.ui_state.modal = Modal::Input {
             title: format!("New Session Stacked on \"{}\"", parent_title),
             prompt: "Enter session name:".to_string(),
@@ -485,7 +528,7 @@ impl App {
             },
             existing_branches,
             project_picker: None,
-            program_picker: Some(self.new_program_picker()),
+            program_picker: Some(program_picker),
             focus: super::InputFocus::Name,
             expanded: false,
         };
@@ -495,14 +538,14 @@ impl App {
     /// session's stack and merge main → base → each descendant. Pauses on
     /// the first conflict; surface the outcome as a status-message toast.
     pub(super) async fn handle_cascade_merge_main(&mut self) {
-        let Some(selected_session_id) = self.ui_state.selected_session_id else {
+        let Some(sref) = self.ui_state.selected_session_id else {
             self.ui_state.status_message = Some((
                 "Select a session in a stack to cascade from".to_string(),
                 Instant::now() + Duration::from_secs(3),
             ));
             return;
         };
-        self.run_cascade_action(selected_session_id, CascadeAction::Start);
+        self.run_cascade_action(sref, CascadeAction::Start);
     }
 
     /// Handle `Cascade resume` — continue a previously paused cascade.
@@ -515,13 +558,15 @@ impl App {
             ));
             return;
         };
-        self.run_cascade_action(sid, CascadeAction::Resume);
+        // Cascade state is tracked per-backend; the footer's resume currently
+        // targets the local backend's paused cascade.
+        self.run_cascade_action(SessionRef::local(sid), CascadeAction::Resume);
     }
 
     /// Handle `Push stack` — push every branch in the selected session's
     /// stack to origin, in base→leaf order, on a background task.
     pub(super) fn handle_push_stack(&mut self) {
-        let Some(session_id) = self.ui_state.selected_session_id else {
+        let Some(sref) = self.ui_state.selected_session_id else {
             self.ui_state.status_message = Some((
                 "Select a session in a stack to push".to_string(),
                 Instant::now() + Duration::from_secs(3),
@@ -538,8 +583,10 @@ impl App {
         ));
 
         // The backend detects agent states itself, so the TUI no longer passes
-        // its cached map. Records the outcome in the operation ledger.
-        let backend = self.local_arc();
+        // its cached map. Records the outcome in the operation ledger. Route to
+        // the backend that owns the session.
+        let backend = self.backend_for(sref);
+        let session_id = sref.id;
         let tx = self.event_loop.sender();
         tokio::spawn(async move {
             let result = backend
@@ -597,7 +644,7 @@ impl App {
         }
     }
 
-    fn run_cascade_action(&mut self, session_id: SessionId, action: CascadeAction) {
+    fn run_cascade_action(&mut self, sref: SessionRef, action: CascadeAction) {
         // Close any open modal (e.g. the palette that dispatched us) and
         // drop a "running" toast immediately so the TUI redraws with neither
         // blocked before the cascade starts. The cascade itself runs on a
@@ -613,8 +660,10 @@ impl App {
         ));
 
         // The backend detects agent states itself and records the outcome in
-        // the operation ledger, returning the recorded status.
-        let backend = self.local_arc();
+        // the operation ledger, returning the recorded status. Route to the
+        // backend that owns the session the cascade is anchored on.
+        let backend = self.backend_for(sref);
+        let session_id = sref.id;
         let tx = self.event_loop.sender();
         tokio::spawn(async move {
             let result = match action {
@@ -660,7 +709,7 @@ impl App {
     /// off `git fetch origin` in a background task so the list can be
     /// refreshed once remote changes are pulled in.
     pub(super) async fn handle_checkout_branch(&mut self) {
-        let Some(project_id) = self.ui_state.selected_project_id else {
+        let Some((_backend, project_id)) = self.ui_state.selected_project_id else {
             self.ui_state.status_message = Some((
                 "Select a project first (use N to add one)".to_string(),
                 Instant::now() + Duration::from_secs(3),
@@ -796,17 +845,21 @@ impl App {
         // and the worktree directory still comes out sensibly because
         // `sanitize_name` handles slashes and special chars. `base_branch`
         // forks the worktree from the existing branch.
-        self.spawn_create_session(crate::api::CreateSessionOpts {
-            project_path,
-            title: branch_name.clone(),
-            program: None,
-            initial_prompt: None,
-            effort: None,
-            mode: None,
-            base_branch: Some(branch_name),
-            section: None,
-            stack_parent: None,
-        });
+        let backend_id = self.backend_of_project(project_id);
+        self.spawn_create_session(
+            backend_id,
+            crate::api::CreateSessionOpts {
+                project_path,
+                title: branch_name.clone(),
+                program: None,
+                initial_prompt: None,
+                effort: None,
+                mode: None,
+                base_branch: Some(branch_name),
+                section: None,
+                stack_parent: None,
+            },
+        );
     }
 
     /// Open the quick-switch palette in the given mode.
@@ -1004,7 +1057,9 @@ impl App {
                     SessionListItem::Worktree { id, .. } => {
                         project_names.insert(*id, current_project_name.clone());
                     }
-                    SessionListItem::SectionHeader { .. } | SessionListItem::Spacer => {}
+                    SessionListItem::SectionHeader { .. }
+                    | SessionListItem::ServerHeader { .. }
+                    | SessionListItem::Spacer => {}
                 }
             }
 
@@ -1078,7 +1133,7 @@ impl App {
     /// Handle remove project - show confirmation (only when a project row is selected)
     pub(super) fn handle_remove_project(&mut self) {
         if self.ui_state.selected_session_id.is_none()
-            && let Some(project_id) = self.ui_state.selected_project_id
+            && let Some((_backend, project_id)) = self.ui_state.selected_project_id
         {
             self.ui_state.modal = Modal::Confirm {
                 title: "Remove Project".to_string(),
@@ -1090,7 +1145,7 @@ impl App {
 
     /// Handle restart session - show confirmation
     pub(super) fn handle_restart_session(&mut self) {
-        if let Some(session_id) = self.ui_state.selected_session_id {
+        if let Some(session_id) = self.ui_state.selected_session_id.map(|r| r.id) {
             let message = if self.config.resume_session {
                 "This will kill the current tmux session and start a fresh one.\nClaude will pick up where it left off via /resume.".to_string()
             } else {
@@ -1109,12 +1164,11 @@ impl App {
         if self.selected_session_is_creating() {
             return;
         }
-        if let Some(session_id) = self.ui_state.selected_session_id {
-            let title = self
-                .session(SessionRef::local(session_id))
-                .map(|s| s.title.clone());
+        if let Some(sref) = self.ui_state.selected_session_id {
+            let session_id = sref.id;
+            let title = self.session(sref).map(|s| s.title.clone());
             let retarget = super::state::stack_retarget_preview_from_snapshot(
-                &self.local_view().snapshot,
+                &self.view_for(sref.backend).snapshot,
                 session_id,
             );
             self.ui_state.modal = Modal::Confirm {
@@ -1189,10 +1243,10 @@ impl App {
     fn delete_session_immediately(&mut self, session_id: SessionId) {
         // When deleting the focused row, drop the selection now; the
         // change-feed refresh clamps the cursor once the session is gone.
-        if self.ui_state.selected_session_id == Some(session_id) {
+        if self.ui_state.selected_session_id.map(|r| r.id) == Some(session_id) {
             self.ui_state.selected_session_id = None;
         }
-        let backend = self.local_arc();
+        let backend = self.backend_arc(self.backend_of_session(session_id));
         let tx = self.event_loop.sender();
         tokio::spawn(async move {
             if let Err(e) = backend.delete_session(session_id).await {
@@ -1279,7 +1333,7 @@ impl App {
             ));
             return;
         }
-        let Some(session_id) = self.ui_state.selected_session_id else {
+        let Some(session_id) = self.ui_state.selected_session_id.map(|r| r.id) else {
             return;
         };
         let mode = PaletteMode::SectionPicker { session_id };
@@ -1303,8 +1357,12 @@ impl App {
         session_id: SessionId,
         target: Option<String>,
     ) {
-        let _ = self.local_arc().set_section(session_id, target).await;
-        self.refresh_local_view().await;
+        let backend_id = self.backend_of_session(session_id);
+        let _ = self
+            .backend_arc(backend_id)
+            .set_section(session_id, target)
+            .await;
+        self.refresh_backend_view(backend_id).await;
         self.refresh_list_items().await;
 
         // The session has moved to a new position in the rebuilt list. Keep it
@@ -1319,13 +1377,11 @@ impl App {
     /// Only the displayed title is changed; the underlying worktree, branch,
     /// and tmux session keep their original names.
     pub(super) async fn handle_rename_session(&mut self) {
-        let Some(session_id) = self.ui_state.selected_session_id else {
+        let Some(sref) = self.ui_state.selected_session_id else {
             return;
         };
-        let Some(current_title) = self
-            .session(SessionRef::local(session_id))
-            .map(|s| s.title.clone())
-        else {
+        let session_id = sref.id;
+        let Some(current_title) = self.session(sref).map(|s| s.title.clone()) else {
             return;
         };
         self.ui_state.modal = Modal::Input {
@@ -1346,8 +1402,12 @@ impl App {
     /// the new row immediately; `SessionCreated` (which selects it) or
     /// `SessionCreateFailed` completes the flow. On failure the backend removes
     /// its own half-created session.
-    pub(super) fn spawn_create_session(&self, opts: crate::api::CreateSessionOpts) {
-        let backend = self.local_arc();
+    pub(super) fn spawn_create_session(
+        &self,
+        backend_id: BackendId,
+        opts: crate::api::CreateSessionOpts,
+    ) {
+        let backend = self.backend_arc(backend_id);
         let tx = self.event_loop.sender();
         tokio::spawn(async move {
             let update = match backend.create_session(opts).await {
@@ -1382,24 +1442,34 @@ impl App {
                     return;
                 }
                 self.ui_state.modal = Modal::None;
-                let Some(project_path) = self.project(project_id).map(|p| p.repo_path.clone())
+                let backend_id = self.backend_of_project(project_id);
+                let Some(project_path) = self
+                    .view_for(backend_id)
+                    .snapshot
+                    .projects
+                    .iter()
+                    .find(|p| p.id == project_id)
+                    .map(|p| p.repo_path.clone())
                 else {
                     self.ui_state.modal = Modal::Error {
                         message: "Project not found".to_string(),
                     };
                     return;
                 };
-                self.spawn_create_session(crate::api::CreateSessionOpts {
-                    project_path,
-                    title: value,
-                    program,
-                    initial_prompt: None,
-                    effort: None,
-                    mode: None,
-                    base_branch: None,
-                    section,
-                    stack_parent: None,
-                });
+                self.spawn_create_session(
+                    backend_id,
+                    crate::api::CreateSessionOpts {
+                        project_path,
+                        title: value,
+                        program,
+                        initial_prompt: None,
+                        effort: None,
+                        mode: None,
+                        base_branch: None,
+                        section,
+                        stack_parent: None,
+                    },
+                );
             }
             InputAction::CreateStackedSession {
                 project_id,
@@ -1414,24 +1484,34 @@ impl App {
                     return;
                 }
                 self.ui_state.modal = Modal::None;
-                let Some(project_path) = self.project(project_id).map(|p| p.repo_path.clone())
+                let backend_id = self.backend_of_project(project_id);
+                let Some(project_path) = self
+                    .view_for(backend_id)
+                    .snapshot
+                    .projects
+                    .iter()
+                    .find(|p| p.id == project_id)
+                    .map(|p| p.repo_path.clone())
                 else {
                     self.ui_state.modal = Modal::Error {
                         message: "Project not found".to_string(),
                     };
                     return;
                 };
-                self.spawn_create_session(crate::api::CreateSessionOpts {
-                    project_path,
-                    title: value,
-                    program,
-                    initial_prompt: None,
-                    effort: None,
-                    mode: None,
-                    base_branch: None,
-                    section: None,
-                    stack_parent: Some(parent_session_id),
-                });
+                self.spawn_create_session(
+                    backend_id,
+                    crate::api::CreateSessionOpts {
+                        project_path,
+                        title: value,
+                        program,
+                        initial_prompt: None,
+                        effort: None,
+                        mode: None,
+                        base_branch: None,
+                        section: None,
+                        stack_parent: Some(parent_session_id),
+                    },
+                );
             }
             InputAction::AddProject => {
                 let expanded = crate::tui::path_completer::expand_tilde(value.trim());
@@ -1474,8 +1554,12 @@ impl App {
                     ));
                     return;
                 }
-                let _ = self.local_arc().rename_session(session_id, new_title).await;
-                self.refresh_local_view().await;
+                let backend_id = self.backend_of_session(session_id);
+                let _ = self
+                    .backend_arc(backend_id)
+                    .rename_session(session_id, new_title)
+                    .await;
+                self.refresh_backend_view(backend_id).await;
                 self.refresh_list_items().await;
             }
             InputAction::ScanDirectory => {
@@ -1580,13 +1664,18 @@ impl App {
                 ));
             }
             ConfirmAction::RestartSession { session_id } => {
-                match self.local_arc().restart_session(session_id).await {
+                let backend_id = self.backend_of_session(session_id);
+                match self
+                    .backend_arc(backend_id)
+                    .restart_session(session_id)
+                    .await
+                {
                     Ok(_) => {
                         self.ui_state.status_message = Some((
                             "Session restarted".to_string(),
                             Instant::now() + Duration::from_secs(3),
                         ));
-                        self.refresh_local_view().await;
+                        self.refresh_backend_view(backend_id).await;
                         self.refresh_list_items().await;
                     }
                     Err(e) => {
@@ -1602,12 +1691,13 @@ impl App {
                 // drop the project (and its sessions) from state. Spawn it so
                 // the worktree removals never block the UI; the change feed
                 // refreshes the tree on completion.
+                let backend_id = self.backend_of_project(project_id);
                 self.ui_state.selected_project_id = None;
                 self.ui_state.status_message = Some((
                     "Removing project…".to_string(),
                     Instant::now() + Duration::from_secs(3),
                 ));
-                let backend = self.local_arc();
+                let backend = self.backend_arc(backend_id);
                 let tx = self.event_loop.sender();
                 tokio::spawn(async move {
                     if let Err(e) = backend.remove_project(project_id).await {

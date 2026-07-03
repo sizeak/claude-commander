@@ -112,6 +112,7 @@ impl App {
         match self.service.reload_config() {
             Ok(true) => {
                 debug!("Config hot-reloaded from disk");
+                let old_servers = self.config.remote_servers.clone();
                 self.config = self.service.read_config();
                 let base = self
                     .config
@@ -121,6 +122,13 @@ impl App {
                     .and_then(Theme::from_preset)
                     .unwrap_or_default();
                 self.theme = base.with_overrides(&self.config.theme);
+
+                // Reconcile the live backends against the new remote-server list
+                // (add/remove/rebuild handles) when it changed.
+                let new_servers = self.config.remote_servers.clone();
+                if old_servers != new_servers {
+                    self.apply_remote_servers_reload(&old_servers, &new_servers);
+                }
             }
             Ok(false) => {}
             Err(e) => {

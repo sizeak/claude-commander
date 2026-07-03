@@ -30,11 +30,20 @@ tokio = { workspace = true }
 async-trait = "0.1"
 
 # HTTP client. rustls (not OpenSSL) to keep the pure-Rust lean, matching core's
-# own reqwest usage. tokio-tungstenite (remote WS attach) is Phase F — not here.
+# own reqwest usage.
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",
 ] }
+
+# WebSocket client for the interactive attach transport. rustls (webpki roots) to
+# match reqwest's TLS stack — no OpenSSL. Same pin/features as the Flutter
+# client's cdylib so both speak the wire protocol over the one locked version.
+tokio-tungstenite = { version = "0.24", default-features = false, features = [
+    "connect",
+    "rustls-tls-webpki-roots",
+] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 
 # Serialization (request bodies + response decode).
 serde = { workspace = true }

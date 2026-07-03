@@ -6,30 +6,92 @@ use super::*;
 /// double-click that triggers `UserCommand::Select`.
 pub(super) const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
 
+/// The identifying bits copied out of the selected list row, so the item's
+/// immutable borrow of `list_items` ends before we resolve the owning backend
+/// and mutate the selection fields.
+enum SelKind {
+    Project(ProjectId),
+    Worktree(SessionId, ProjectId),
+    /// A header row: clears both selections.
+    Clear,
+    /// A spacer: leaves the selection untouched.
+    Keep,
+}
+
 impl App {
+    /// The backend that owns session `id`, by scanning cached snapshots. Session
+    /// ids are globally unique (UUIDs), so at most one backend matches; defaults
+    /// to the local backend when none does (e.g. a stale ref).
+    pub(super) fn backend_of_session(&self, id: SessionId) -> BackendId {
+        self.backends
+            .iter()
+            .find(|h| h.view.snapshot.sessions.iter().any(|s| s.session_id == id))
+            .map(|h| h.id)
+            .unwrap_or(LOCAL_BACKEND_ID)
+    }
+
+    /// The backend that owns project `id`, by scanning cached snapshots.
+    /// Defaults to the local backend when none matches.
+    pub(super) fn backend_of_project(&self, id: ProjectId) -> BackendId {
+        self.backends
+            .iter()
+            .find(|h| h.view.snapshot.projects.iter().any(|p| p.id == id))
+            .map(|h| h.id)
+            .unwrap_or(LOCAL_BACKEND_ID)
+    }
+
+    /// Whether backend `id`'s cached connection is `Connected`. A missing
+    /// backend (stale id) counts as connected so callers don't wrongly gate.
+    fn backend_is_connected(&self, id: BackendId) -> bool {
+        self.backend(id)
+            .map(|h| {
+                matches!(
+                    h.view.connection,
+                    crate::backend::ConnectionState::Connected
+                )
+            })
+            .unwrap_or(true)
+    }
+
     /// Update selection tracking based on list position
     pub(super) fn update_selection(&mut self) {
         let old_session = self.ui_state.selected_session_id;
         let was_on_project = old_session.is_none() && self.ui_state.selected_project_id.is_some();
 
-        if let Some(idx) = self.ui_state.list_state.selected()
-            && let Some(item) = self.ui_state.list_items.get(idx)
-        {
-            match item {
-                SessionListItem::Project { id, .. } => {
-                    self.ui_state.selected_project_id = Some(*id);
-                    self.ui_state.selected_session_id = None;
-                }
-                SessionListItem::Worktree { id, project_id, .. } => {
-                    self.ui_state.selected_session_id = Some(*id);
-                    self.ui_state.selected_project_id = Some(*project_id);
-                }
-                SessionListItem::SectionHeader { .. } => {
-                    self.ui_state.selected_session_id = None;
-                    self.ui_state.selected_project_id = None;
-                }
-                SessionListItem::Spacer => {}
+        let selected =
+            self.ui_state
+                .list_state
+                .selected()
+                .and_then(|idx| self.ui_state.list_items.get(idx))
+                .map(|item| match item {
+                    SessionListItem::Project { id, .. } => SelKind::Project(*id),
+                    SessionListItem::Worktree { id, project_id, .. } => {
+                        SelKind::Worktree(*id, *project_id)
+                    }
+                    SessionListItem::SectionHeader { .. }
+                    | SessionListItem::ServerHeader { .. } => SelKind::Clear,
+                    SessionListItem::Spacer => SelKind::Keep,
+                });
+
+        match selected {
+            Some(SelKind::Project(id)) => {
+                let backend = self.backend_of_project(id);
+                self.ui_state.selected_project_id = Some((backend, id));
+                self.ui_state.selected_session_id = None;
+                self.ui_state.selected_backend_connected = self.backend_is_connected(backend);
             }
+            Some(SelKind::Worktree(id, project_id)) => {
+                let backend = self.backend_of_session(id);
+                self.ui_state.selected_session_id = Some(SessionRef::new(backend, id));
+                self.ui_state.selected_project_id = Some((backend, project_id));
+                self.ui_state.selected_backend_connected = self.backend_is_connected(backend);
+            }
+            Some(SelKind::Clear) => {
+                self.ui_state.selected_session_id = None;
+                self.ui_state.selected_project_id = None;
+                self.ui_state.selected_backend_connected = true;
+            }
+            Some(SelKind::Keep) | None => {}
         }
 
         let now_on_project = self.ui_state.selected_session_id.is_none()

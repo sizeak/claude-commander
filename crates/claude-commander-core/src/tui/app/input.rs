@@ -973,7 +973,10 @@ impl App {
             Some(QuickSwitchItem::Session(m)) => {
                 let session_id = m.session_id;
                 self.ui_state.modal = Modal::None;
-                self.ui_state.selected_session_id = Some(session_id);
+                self.ui_state.selected_session_id = Some(SessionRef::new(
+                    self.backend_of_session(session_id),
+                    session_id,
+                ));
                 if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
                     matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
                 }) {
@@ -1286,7 +1289,7 @@ impl App {
             UserCommand::GenerateSummary => {
                 // Context-specific: only works when Info pane is showing
                 if self.ui_state.right_pane_view == RightPaneView::Info
-                    && let Some(session_id) = self.ui_state.selected_session_id
+                    && let Some(session_id) = self.ui_state.selected_session_id.map(|r| r.id)
                 {
                     self.spawn_ai_summary_if_needed(session_id);
                 }
@@ -1304,8 +1307,8 @@ impl App {
                 // write is logged (not surfaced) inside the prefs store — the
                 // runtime behaviour is correct either way.
                 self.tui_prefs.set_view_mode(new_view).await;
-                let selected_session = self.ui_state.selected_session_id;
-                let selected_project = self.ui_state.selected_project_id;
+                let selected_session = self.ui_state.selected_session_id.map(|r| r.id);
+                let selected_project = self.ui_state.selected_project_id.map(|(_, p)| p);
                 self.refresh_list_items().await;
                 // Restore selection after rebuilding the list
                 if let Some(sid) = selected_session {

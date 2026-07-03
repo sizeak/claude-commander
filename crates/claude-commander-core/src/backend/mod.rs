@@ -22,6 +22,9 @@
 
 pub mod error;
 pub mod local;
+#[cfg(test)]
+pub mod mock;
+pub mod placeholder;
 pub mod run_local;
 
 use std::sync::Arc;
@@ -41,7 +44,36 @@ use crate::session::{ProjectId, SessionId};
 
 pub use error::{BResult, BackendError};
 pub use local::LocalBackend;
+pub use placeholder::PlaceholderBackend;
 pub use run_local::{RunLocalError, run_local};
+
+/// Builds a remote [`CommanderBackend`] from its [`RemoteServerConfig`], injected
+/// into [`App`](crate::tui::App) at construction so **core never depends on the
+/// remote client crate** — the binary owns the dependency direction and passes a
+/// closure that calls `claude_commander_remote::RemoteBackend::new`.
+///
+/// Returning `Err` means the backend couldn't be constructed at all (a malformed
+/// URL, say); the TUI substitutes a permanently-degraded
+/// [`PlaceholderBackend`] so the server still shows in the tree with its error,
+/// rather than crashing or vanishing.
+pub type RemoteBackendFactory = Arc<
+    dyn Fn(&crate::config::RemoteServerConfig) -> BResult<Arc<dyn CommanderBackend>> + Send + Sync,
+>;
+
+/// A [`RemoteBackendFactory`] that constructs no remote backends — every server
+/// is rejected as unavailable. For contexts with no remote client wired in
+/// (tests, and any frontend that only drives the local backend). When the
+/// config has no `remote_servers`, it is never actually invoked.
+pub fn no_remote_backends() -> RemoteBackendFactory {
+    Arc::new(|cfg| {
+        Err(BackendError::Unavailable {
+            reason: format!(
+                "remote backends are not available in this context ({})",
+                cfg.name
+            ),
+        })
+    })
+}
 
 /// Whether a backend runs in-process or talks to a remote server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,8 +206,9 @@ impl BackendView {
 }
 
 /// An empty [`WorkspaceSnapshot`] placeholder (no projects/sessions). Used to
-/// seed a [`BackendView`] before its first real snapshot lands.
-fn empty_snapshot() -> WorkspaceSnapshot {
+/// seed a [`BackendView`] before its first real snapshot lands (and by tests to
+/// stand up a [`MockBackend`](mock::MockBackend)).
+pub(crate) fn empty_snapshot() -> WorkspaceSnapshot {
     WorkspaceSnapshot {
         projects: Vec::new(),
         sessions: Vec::new(),
@@ -193,10 +226,19 @@ fn empty_snapshot() -> WorkspaceSnapshot {
 
 /// One backend the TUI drives: its id, the trait object (cloneable across
 /// `tokio::spawn`), and the cached [`BackendView`].
+///
+/// A handle owns the background tasks feeding its view (the change-feed and, for
+/// a remote backend, the connection-watch task). Dropping the handle aborts
+/// them, so removing a backend on config hot-reload tears down its polling
+/// rather than leaking a task that would poll a server forever (the task holds
+/// its own `Arc` to the backend, so dropping the handle alone wouldn't stop it).
 pub struct BackendHandle {
     pub id: BackendId,
     pub backend: Arc<dyn CommanderBackend>,
     pub view: BackendView,
+    /// Background feed tasks; aborted on drop. Populated by the TUI after
+    /// spawning; empty until then and for backends with no feeds.
+    pub feed_tasks: Vec<tokio::task::JoinHandle<()>>,
 }
 
 impl BackendHandle {
@@ -206,6 +248,15 @@ impl BackendHandle {
             id,
             backend,
             view: BackendView::connecting(),
+            feed_tasks: Vec::new(),
+        }
+    }
+}
+
+impl Drop for BackendHandle {
+    fn drop(&mut self) {
+        for task in &self.feed_tasks {
+            task.abort();
         }
     }
 }
@@ -320,6 +371,15 @@ pub trait CommanderBackend: Send + Sync {
 
     /// A change-feed whose generation advances when observable state changes.
     fn change_feed(&self) -> BackendChangeFeed;
+
+    /// A reactive watch on this backend's [`ConnectionState`], if it has one.
+    /// The local and placeholder backends have a fixed health (always
+    /// `Connected` / permanently `Degraded`), so the default is `None`; a remote
+    /// backend overrides this to expose its poller's connection watch, letting
+    /// the TUI update the server header live as the link comes and goes.
+    fn connection_watch(&self) -> Option<watch::Receiver<ConnectionState>> {
+        None
+    }
 
     /// One-time startup reconciliation (drop stale `Creating` sessions, reset
     /// transient stack states, sync status against live tmux, re-run section

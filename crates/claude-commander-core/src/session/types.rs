@@ -545,6 +545,15 @@ pub enum SessionListItem {
         /// set to `false`.
         stacked_child: bool,
     },
+    /// A per-backend header grouping one server's projects and sessions.
+    /// Emitted only when more than one backend is configured — a lone local
+    /// backend is suppressed, so single-server trees render exactly as before.
+    /// Carries the connection health so the header can render live status.
+    ServerHeader {
+        backend: crate::backend::BackendId,
+        name: String,
+        connection: crate::backend::ConnectionState,
+    },
     /// A section header (used only when config.sections is non-empty).
     SectionHeader {
         name: String,
@@ -565,6 +574,7 @@ impl SessionListItem {
         match self {
             Self::Project { id, .. } => format!("project:{}", id),
             Self::Worktree { id, .. } => format!("worktree:{}", id),
+            Self::ServerHeader { backend, .. } => format!("server:{}", backend.0),
             Self::SectionHeader { name, .. } => format!("section:{}", name),
             Self::Spacer => "spacer".to_string(),
         }
@@ -585,10 +595,18 @@ impl SessionListItem {
         !matches!(self, Self::Spacer)
     }
 
-    /// Whether this row begins a group — a project or section header.
+    /// Whether this row begins a group — a project, section, or server header.
     /// Group-jump navigation moves between these rows.
     pub fn is_group_header(&self) -> bool {
-        matches!(self, Self::Project { .. } | Self::SectionHeader { .. })
+        matches!(
+            self,
+            Self::Project { .. } | Self::SectionHeader { .. } | Self::ServerHeader { .. }
+        )
+    }
+
+    /// Whether this row is a server header (a per-backend grouping row).
+    pub fn is_server_header(&self) -> bool {
+        matches!(self, Self::ServerHeader { .. })
     }
 }
 

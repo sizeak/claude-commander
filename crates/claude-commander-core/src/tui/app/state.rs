@@ -45,6 +45,14 @@ impl App {
                 }
                 self.refresh_list_items().await;
             }
+            StateUpdate::BackendConnection { backend_id, state } => {
+                if let Some(handle) = self.backends.iter_mut().find(|h| h.id.0 == backend_id) {
+                    handle.view.connection = state;
+                }
+                // Re-render the tree so the server header reflects the new
+                // health (and command gating re-evaluates).
+                self.refresh_list_items().await;
+            }
             StateUpdate::ContentUpdated { session_id, .. } => {
                 debug!("Content updated for session {}", session_id);
             }
@@ -75,8 +83,9 @@ impl App {
                 self.ui_state.preview_update_spawned_at = None;
 
                 // Only apply if selection hasn't changed since the fetch started
-                if session_id == self.ui_state.selected_session_id
-                    && project_id == self.ui_state.selected_project_id
+                // (compare ids; session/project ids are unique across backends)
+                if session_id == self.ui_state.selected_session_id.map(|r| r.id)
+                    && project_id == self.ui_state.selected_project_id.map(|(_, p)| p)
                 {
                     debug!(
                         "Applying PreviewReady (preview_len={} diff_lines={} elapsed={:?})",
@@ -96,7 +105,7 @@ impl App {
             }
             StateUpdate::EnrichedPrReady { session_id, info } => {
                 // Only apply if the session is still selected
-                if self.ui_state.selected_session_id == Some(session_id) {
+                if self.ui_state.selected_session_id.map(|r| r.id) == Some(session_id) {
                     self.ui_state.enriched_pr = info.map(|pr| (session_id, pr));
                 } else {
                     debug!("Discarding stale EnrichedPrReady for {}", session_id);
@@ -359,37 +368,53 @@ impl App {
             self.ui_state.view_mode = ViewMode::ProjectGrouped;
         }
 
-        // Read the change-feed-maintained cached snapshot. No store access on
+        // Read the change-feed-maintained cached snapshots. No store access on
         // the refresh path: a backend mutation bumps the change feed, whose task
         // fetches a fresh snapshot and folds it into the `BackendView` via
-        // `StateUpdate::BackendChanged` before this runs. Single-backend this
-        // phase; Phase E merges every backend's snapshot into one tree.
-        let snapshot = self.local_view().snapshot.clone();
-
-        let items = match self.ui_state.view_mode {
-            ViewMode::ProjectGrouped => {
-                build_project_grouped_items(&snapshot, &self.ui_state.agent_states)
+        // `StateUpdate::BackendChanged` before this runs. Each backend
+        // contributes its own subtree under a per-server header — except when a
+        // lone local backend is configured, where the header is suppressed so
+        // the tree renders exactly as a single-machine setup always has.
+        let single_backend = self.backends.len() == 1;
+        let mut items: Vec<SessionListItem> = Vec::new();
+        for handle in &self.backends {
+            let snapshot = &handle.view.snapshot;
+            let agent_states = &handle.view.agent_states.states;
+            if !single_backend {
+                items.push(SessionListItem::ServerHeader {
+                    backend: handle.id,
+                    name: handle.backend.descriptor().name,
+                    connection: handle.view.connection.clone(),
+                });
             }
-            ViewMode::SectionGrouped => build_section_grouped_items(
-                &snapshot,
-                &self.config.sections,
-                self.config.in_progress_limit,
-                &self.ui_state.agent_states,
-                &self.ui_state.collapsed_sections,
-            ),
-            ViewMode::SectionStacks => build_stacked_section_items(
-                &snapshot,
-                &self.config.sections,
-                self.config.in_progress_limit,
-                &self.ui_state.agent_states,
-                &self.ui_state.collapsed_sections,
-            ),
-        };
+            let mut backend_items = match self.ui_state.view_mode {
+                ViewMode::ProjectGrouped => build_project_grouped_items(snapshot, agent_states),
+                ViewMode::SectionGrouped => build_section_grouped_items(
+                    snapshot,
+                    &self.config.sections,
+                    self.config.in_progress_limit,
+                    agent_states,
+                    &self.ui_state.collapsed_sections,
+                ),
+                ViewMode::SectionStacks => build_stacked_section_items(
+                    snapshot,
+                    &self.config.sections,
+                    self.config.in_progress_limit,
+                    agent_states,
+                    &self.ui_state.collapsed_sections,
+                ),
+            };
+            items.append(&mut backend_items);
+        }
 
         let selectable: Vec<bool> = items.iter().map(|i| i.is_selectable()).collect();
         let group_starts: Vec<bool> = items.iter().map(|i| i.is_group_header()).collect();
         self.ui_state.list_items = items;
-        self.ui_state.cascade_paused = snapshot.cascade_paused.is_some();
+        // The footer's "resume cascade" hint shows if *any* backend is paused.
+        self.ui_state.cascade_paused = self
+            .backends
+            .iter()
+            .any(|h| h.view.snapshot.cascade_paused.is_some());
         if matches!(self.ui_state.view_mode, ViewMode::ProjectGrouped) {
             self.ui_state
                 .list_state
@@ -399,56 +424,68 @@ impl App {
         }
         self.ui_state.list_state.set_group_starts(group_starts);
 
-        // Pre-compute stack chain for the selected session
-        self.ui_state.stack_chain.clear();
-        let by_id = session_index(&snapshot);
-        if let Some(session_id) = self.ui_state.selected_session_id
-            && let Some(session) = by_id.get(&session_id).copied()
-        {
-            let project_sessions: Vec<&SessionInfo> = snapshot
-                .projects
-                .iter()
-                .find(|p| p.id == session.project_id)
-                .map(|p| {
-                    p.session_ids
-                        .iter()
-                        .filter_map(|sid| by_id.get(sid).copied())
-                        .collect()
-                })
-                .unwrap_or_default();
-            // Walk up to the stack base
-            let mut base = session_id;
-            for _ in 0..project_sessions.len() {
-                let base_session = project_sessions.iter().find(|s| s.session_id == base);
-                match base_session
-                    .and_then(|s| crate::session::resolve_stack_parent(*s, &project_sessions))
-                {
-                    Some(parent) => base = parent,
-                    None => break,
+        // Pre-compute stack chain for the selected session, from the snapshot of
+        // the backend that owns it (stacks never span backends). Built into an
+        // owned vec inside the snapshot-borrow scope, then moved into ui_state,
+        // so the immutable borrow of `self` ends before the mutation.
+        let stack_chain = self.ui_state.selected_session_id.map(|sref| {
+            let snapshot = &self.view_for(sref.backend).snapshot;
+            let session_id = sref.id;
+            let by_id = session_index(snapshot);
+            let mut entries: Vec<StackChainEntry> = Vec::new();
+            if let Some(session) = by_id.get(&session_id).copied() {
+                let project_sessions: Vec<&SessionInfo> = snapshot
+                    .projects
+                    .iter()
+                    .find(|p| p.id == session.project_id)
+                    .map(|p| {
+                        p.session_ids
+                            .iter()
+                            .filter_map(|sid| by_id.get(sid).copied())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                // Walk up to the stack base
+                let mut base = session_id;
+                for _ in 0..project_sessions.len() {
+                    let base_session = project_sessions.iter().find(|s| s.session_id == base);
+                    match base_session
+                        .and_then(|s| crate::session::resolve_stack_parent(*s, &project_sessions))
+                    {
+                        Some(parent) => base = parent,
+                        None => break,
+                    }
                 }
-            }
-            let chain = crate::session::stack_chain_from_base(base, &project_sessions);
-            if chain.len() > 1 {
-                for &sid in &chain {
-                    if let Some(s) = by_id.get(&sid).copied() {
-                        self.ui_state.stack_chain.push(StackChainEntry {
-                            title: s.title.clone(),
-                            status: s.status,
-                            is_current: sid == session_id,
-                        });
+                let chain = crate::session::stack_chain_from_base(base, &project_sessions);
+                if chain.len() > 1 {
+                    for &sid in &chain {
+                        if let Some(s) = by_id.get(&sid).copied() {
+                            entries.push(StackChainEntry {
+                                title: s.title.clone(),
+                                status: s.status,
+                                is_current: sid == session_id,
+                            });
+                        }
                     }
                 }
             }
-        }
+            entries
+        });
+        self.ui_state.stack_chain = stack_chain.unwrap_or_default();
     }
 
-    /// Save current selection to persisted UI prefs
+    /// Save current selection to persisted UI prefs, qualified by the owning
+    /// backend's name so it survives a config reorder.
     pub(super) async fn save_selection(&self) {
+        let session = self.ui_state.selected_session_id;
+        let project = self.ui_state.selected_project_id;
+        let backend_id = session
+            .map(|r| r.backend)
+            .or_else(|| project.map(|(b, _)| b));
+        let backend_name =
+            backend_id.and_then(|id| self.backend(id).map(|h| h.backend.descriptor().name));
         self.tui_prefs
-            .set_selection(
-                self.ui_state.selected_session_id,
-                self.ui_state.selected_project_id,
-            )
+            .set_selection(session.map(|r| r.id), project.map(|(_, p)| p), backend_name)
             .await;
     }
 
@@ -478,7 +515,9 @@ impl App {
             SessionListItem::Project { id, .. } => {
                 last_session.is_none() && last_project.is_some_and(|p| p == *id)
             }
-            SessionListItem::SectionHeader { .. } | SessionListItem::Spacer => false,
+            SessionListItem::SectionHeader { .. }
+            | SessionListItem::ServerHeader { .. }
+            | SessionListItem::Spacer => false,
         });
 
         if let Some(idx) = target_idx {

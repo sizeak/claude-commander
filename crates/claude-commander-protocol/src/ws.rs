@@ -30,7 +30,14 @@ pub enum ClientControl {
     Auth { token: String },
     /// Second frame: attach to a session. `session_id` is resolved exactly like
     /// the HTTP API's `find_session` (full UUID, ID prefix, or exact title).
-    Attach { session_id: String },
+    /// `kind` selects the agent pane (default) or the paired shell pane; it is
+    /// omitted on the wire for an agent attach, so an old client's
+    /// `{"type":"attach","session_id":…}` frame parses unchanged.
+    Attach {
+        session_id: String,
+        #[serde(default, skip_serializing_if = "AttachKind::is_agent")]
+        kind: AttachKind,
+    },
     /// Resize the remote PTY. Sent whenever the client's terminal viewport
     /// changes.
     Resize { cols: u16, rows: u16 },
@@ -52,6 +59,29 @@ pub enum ServerControl {
     /// A handshake or steady-state error. `message` is safe to surface to the
     /// user; it never contains the auth token.
     Error { message: String },
+}
+
+/// Which pane of a session to attach to. Mirrors core's `backend::AttachKind`
+/// but lives here so the wire shape has one source of truth. Serialized inside
+/// [`ClientControl::Attach`]; [`Agent`](Self::Agent) is the default and is
+/// omitted on the wire (see the `skip_serializing_if` on the field), so the
+/// frame an old client sends is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachKind {
+    /// The agent (e.g. Claude) pane — the session's primary tmux session.
+    #[default]
+    Agent,
+    /// The paired shell pane (Ctrl+\ toggles here), created on demand.
+    Shell,
+}
+
+impl AttachKind {
+    /// Whether this is the default agent pane. Used to skip serializing the
+    /// field for an agent attach so the wire form matches the pre-`kind` frame.
+    pub fn is_agent(&self) -> bool {
+        matches!(self, AttachKind::Agent)
+    }
 }
 
 /// Why an attach ended. Serialized as part of [`ServerControl::Detached`].
@@ -110,12 +140,45 @@ mod tests {
 
     #[test]
     fn client_attach_round_trip() {
+        // An agent attach omits `kind` on the wire (byte-identical to the
+        // pre-`kind` frame), so old and new peers agree.
         let msg = ClientControl::Attach {
             session_id: "abc123".into(),
+            kind: AttachKind::Agent,
         };
         let json = serde_json::to_string(&msg).unwrap();
         assert_eq!(json, r#"{"type":"attach","session_id":"abc123"}"#);
         assert_eq!(ClientControl::from_text(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn client_attach_shell_round_trip() {
+        // A shell attach carries `kind` explicitly.
+        let msg = ClientControl::Attach {
+            session_id: "abc123".into(),
+            kind: AttachKind::Shell,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert_eq!(
+            json,
+            r#"{"type":"attach","session_id":"abc123","kind":"shell"}"#
+        );
+        assert_eq!(ClientControl::from_text(&json).unwrap(), msg);
+    }
+
+    #[test]
+    fn old_attach_frame_without_kind_parses_as_agent() {
+        // Backward compatibility: a frame from a client that predates the `kind`
+        // field must still parse, defaulting to the agent pane.
+        let parsed =
+            ClientControl::from_text(r#"{"type":"attach","session_id":"abc123"}"#).unwrap();
+        assert_eq!(
+            parsed,
+            ClientControl::Attach {
+                session_id: "abc123".into(),
+                kind: AttachKind::Agent,
+            }
+        );
     }
 
     #[test]

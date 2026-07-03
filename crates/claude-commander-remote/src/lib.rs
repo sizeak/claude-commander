@@ -37,7 +37,7 @@
 //! | `apply_comments` | `POST /api/sessions/{id}/comments/apply` |
 //! | `toggle_file_reviewed` | `POST /api/sessions/{id}/files/reviewed` |
 //! | `fetch_diff_blob` | `GET /api/sessions/{id}/blob?side=&path=` |
-//! | `attach` | *(Phase F: WebSocket → `Unavailable` for now)* |
+//! | `attach` | `GET /ws/attach` (WebSocket; see [`attach`]) |
 //!
 //! # Change-feed + connection health
 //!
@@ -51,6 +51,7 @@
 //! [`RemoteBackend::connection_feed`] after an
 //! [`as_any`](claude_commander_core::backend::CommanderBackend::as_any) downcast.
 
+mod attach;
 mod backend;
 mod backoff;
 mod error;

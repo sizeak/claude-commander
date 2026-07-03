@@ -79,6 +79,10 @@ two-face = { version = "0.4", default-features = false, features = [
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 directories = "5.0"
+# URL parsing for validating configured remote-server base URLs at load time,
+# so a malformed `[[remote_servers]]` url is rejected with a clear error rather
+# than surfacing only when the backend is constructed.
+url = "2.5"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 regex = "1.10"
 

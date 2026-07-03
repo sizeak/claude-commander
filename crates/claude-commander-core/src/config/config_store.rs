@@ -200,6 +200,10 @@ impl ConfigStore {
             .merge(Toml::file(&self.config_path))
             .extract()
             .map_err(|e| ConfigError::LoadFailed(e.to_string()))?;
+        // Reject a hot-reloaded edit that introduces an invalid remote-server
+        // list; `reload_if_changed` propagates the error and keeps the previous
+        // in-memory config, so a bad manual edit can't poison the running TUI.
+        config.validate_remote_servers()?;
         Ok(config)
     }
 }
