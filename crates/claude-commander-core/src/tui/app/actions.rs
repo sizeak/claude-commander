@@ -1249,6 +1249,33 @@ impl App {
         }
     }
 
+    /// Toggle keep-alive on the selected session (opt out of / back into
+    /// auto-hibernation). Non-destructive, so it applies immediately and
+    /// reports via a transient status message.
+    pub(super) async fn handle_toggle_keep_alive(&mut self) {
+        let Some(session_id) = self.ui_state.selected_session_id else {
+            return;
+        };
+        match self.service.toggle_keep_alive(&session_id).await {
+            Ok(keep_alive) => {
+                let msg = if keep_alive {
+                    "Keep-alive on — session won't auto-hibernate"
+                } else {
+                    "Keep-alive off — idle session may auto-hibernate"
+                };
+                self.ui_state.status_message =
+                    Some((msg.to_string(), Instant::now() + Duration::from_secs(3)));
+                self.refresh_list_items().await;
+            }
+            Err(e) => {
+                self.ui_state.status_message = Some((
+                    format!("Failed to toggle keep-alive: {e}"),
+                    Instant::now() + Duration::from_secs(3),
+                ));
+            }
+        }
+    }
+
     /// Handle delete session - show confirmation
     pub(super) async fn handle_delete_session(&mut self) {
         if self.selected_session_is_creating() {

@@ -321,6 +321,43 @@ async fn main() -> Result<()> {
             println!("Session deleted: {}", info.title);
         }
 
+        Some(Commands::KeepAlive { session, on, off }) => {
+            setup_logging(cli.debug, false)?;
+
+            let service =
+                claude_commander_core::api::CommanderService::for_cli(config, frontend())?;
+
+            let info = match service.find_session_exact(&session).await? {
+                claude_commander_core::cli::SessionLookup::Found(i) => i,
+                claude_commander_core::cli::SessionLookup::NotFound => {
+                    eprintln!("Session not found: {}", session);
+                    eprintln!("Use 'claude-commander list' to see available sessions.");
+                    std::process::exit(1);
+                }
+                claude_commander_core::cli::SessionLookup::Ambiguous(n) => {
+                    eprintln!(
+                        "\"{}\" matches {} sessions. Use the exact title or full ID.",
+                        session, n
+                    );
+                    std::process::exit(1);
+                }
+            };
+
+            // `on`/`off` set explicitly; with neither flag, toggle.
+            let keep_alive = if on {
+                service.set_keep_alive(&info.session_id, true).await?
+            } else if off {
+                service.set_keep_alive(&info.session_id, false).await?
+            } else {
+                service.toggle_keep_alive(&info.session_id).await?
+            };
+            println!(
+                "Keep-alive {} for \"{}\"",
+                if keep_alive { "on" } else { "off" },
+                info.title
+            );
+        }
+
         Some(Commands::Log { session, lines }) => {
             setup_logging(cli.debug, false)?;
 

@@ -68,6 +68,11 @@ impl CommanderService {
         let comments = Arc::new(CommentStore::new(data_dir.join("comments")));
         let reviewed = Arc::new(ReviewedStore::new(data_dir.join("reviewed")));
         let telemetry = init_telemetry(&config_store, &store, &frontend);
+        // NB: the idle-hibernation loop is NOT started here. `new` is shared by
+        // one-shot CLI commands (via `for_cli`), and a tokio runtime is always
+        // present under `#[tokio::main]`, so starting it here would let any CLI
+        // command trigger a hibernation pass. Long-lived frontends call
+        // `start_hibernation_loop` explicitly after construction instead.
         Self {
             manager,
             store,
@@ -76,6 +81,15 @@ impl CommanderService {
             reviewed,
             telemetry,
         }
+    }
+
+    /// Start the background idle-hibernation policy loop. Long-lived frontends
+    /// (the TUI) call this once after construction; one-shot CLI paths do not,
+    /// so a CLI command can never trigger a hibernation pass as a side effect.
+    /// No-op unless `hibernate_enabled` is set, the check interval is non-zero,
+    /// and a tokio runtime is present.
+    pub fn start_hibernation_loop(&self) {
+        self.manager.spawn_hibernation_loop(self.telemetry.clone());
     }
 
     pub fn for_cli(
@@ -386,6 +400,18 @@ impl CommanderService {
         self.manager.delete_session(id).await
     }
 
+    /// Set a session's keep-alive flag (opt-out of auto-hibernation).
+    pub async fn set_keep_alive(&self, id: &SessionId, keep_alive: bool) -> Result<bool> {
+        self.telemetry.feature("session.set_keep_alive");
+        self.manager.set_keep_alive(id, keep_alive).await
+    }
+
+    /// Toggle a session's keep-alive flag, returning the new value.
+    pub async fn toggle_keep_alive(&self, id: &SessionId) -> Result<bool> {
+        self.telemetry.feature("session.toggle_keep_alive");
+        self.manager.toggle_keep_alive(id).await
+    }
+
     // -- Review / comments --
 
     /// Open the review diff for a session: compose the base→working-tree diff,
@@ -658,6 +684,19 @@ impl CommanderService {
         );
         self.manager.tmux.send_keys(&tmux_name, &prompt).await?;
         self.manager.tmux.send_keys(&tmux_name, "Enter").await?;
+
+        // Delivering a prompt flips an idle agent back to working without
+        // attaching or changing status, so bump last_active_at: a concurrent
+        // hibernation pass then sees a fresh stamp and won't kill the session we
+        // just handed work to (its still_hibernatable re-check compares stamps).
+        let sid = *session_id;
+        self.store
+            .mutate(move |state| {
+                if let Some(session) = state.get_session_mut(&sid) {
+                    session.touch();
+                }
+            })
+            .await?;
 
         // Mark the delivered comments applied.
         for ann in comments

@@ -172,6 +172,18 @@ pub struct WorktreeSession {
     /// `None` for sessions never attached since adopting the field.
     #[serde(default)]
     pub last_attached_at: Option<DateTime<Utc>>,
+    /// User opt-out of auto-hibernation. When true, the background
+    /// hibernation policy never stops this session regardless of how long it
+    /// has been idle. Toggled per-session from the TUI/CLI.
+    #[serde(default)]
+    pub keep_alive: bool,
+    /// Set when this session was stopped by the auto-hibernation policy (as
+    /// opposed to a manual kill). Drives the wake path to resume the prior
+    /// agent conversation *even when* the global `resume_session` config is
+    /// off — hibernation is only non-destructive with `--resume`. Cleared when
+    /// the session is next recreated.
+    #[serde(default)]
+    pub hibernated: bool,
 }
 
 impl WorktreeSession {
@@ -219,6 +231,8 @@ impl WorktreeSession {
             current_section: None,
             entered_section_at: now,
             last_attached_at: None,
+            keep_alive: false,
+            hibernated: false,
         }
     }
 
@@ -266,6 +280,8 @@ impl WorktreeSession {
             current_section: None,
             entered_section_at: now,
             last_attached_at: None,
+            keep_alive: false,
+            hibernated: false,
         }
     }
 
@@ -467,6 +483,10 @@ pub enum SessionListItem {
         created_at: chrono::DateTime<chrono::Utc>,
         agent_state: Option<AgentState>,
         unread: bool,
+        /// True when the user has opted this session out of auto-hibernation
+        /// (the keep-alive toggle). Surfaced as a tree-row marker so the flag is
+        /// visible without toggling it to find out.
+        keep_alive: bool,
         /// True while a background `git lfs pull` is materialising this
         /// session's LFS content (the worktree was created with smudging
         /// skipped). Drives the `⇣ LFS` row marker. Sourced from
@@ -699,6 +719,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             agent_state: None,
             unread: false,
+            keep_alive: false,
             lfs_pulling: false,
             stacked_child: false,
         };
@@ -871,6 +892,7 @@ mod tests {
             created_at: chrono::Utc::now(),
             agent_state: None,
             unread: false,
+            keep_alive: false,
             lfs_pulling: false,
             stacked_child: false,
         };
@@ -1107,6 +1129,27 @@ mod tests {
         let s: WorktreeSession = serde_json::from_value(json).unwrap();
         assert_eq!(s.pr_base_branch, None);
         assert_eq!(s.stack_parent_session_id, None);
+        // Hibernation fields must default for pre-feature state.json files.
+        assert!(!s.keep_alive);
+        assert!(!s.hibernated);
+    }
+
+    #[test]
+    fn serde_round_trip_hibernation_fields_persist() {
+        let mut s = WorktreeSession::new(
+            ProjectId::new(),
+            "t",
+            "b",
+            PathBuf::from("/tmp/wt"),
+            "claude",
+        );
+        s.keep_alive = true;
+        s.hibernated = true;
+
+        let json = serde_json::to_string(&s).unwrap();
+        let roundtripped: WorktreeSession = serde_json::from_str(&json).unwrap();
+        assert!(roundtripped.keep_alive);
+        assert!(roundtripped.hibernated);
     }
 
     #[test]

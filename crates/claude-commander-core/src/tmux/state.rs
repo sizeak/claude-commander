@@ -36,6 +36,15 @@ impl AgentStateDetector {
     ///
     /// `kind` selects the harness-specific pattern rules.
     pub async fn detect(&mut self, kind: AgentKind, tmux_session_name: &str) -> AgentState {
+        // Unrecognised harnesses have no reliable idle signal: `content_state`
+        // falls back to `Idle` for them, which would let the hibernation loop
+        // mistake an active non-agent session (a build, a shell, a custom
+        // wrapper) for idle and kill it. Report `Unknown` — callers treat it as
+        // active — without consulting tmux or the cache.
+        if kind == AgentKind::Unknown {
+            return AgentState::Unknown;
+        }
+
         // Check cache
         if let Some((state, cached_at)) = self.cache.get(tmux_session_name)
             && cached_at.elapsed() < self.cache_ttl
@@ -120,11 +129,8 @@ impl AgentStateDetector {
 
         for (session_id, tmux_name, program) in sessions {
             let kind = AgentKind::from_program(program);
-            let state = if kind == AgentKind::Unknown {
-                AgentState::Unknown
-            } else {
-                self.detect(kind, tmux_name).await
-            };
+            // `detect` short-circuits Unknown kinds to `Unknown` itself.
+            let state = self.detect(kind, tmux_name).await;
             results.insert(*session_id, state);
         }
 
@@ -195,6 +201,26 @@ mod tests {
              now-stamped entry; a `<=`/`==` mutant would have hit and left the \
              original future instant in place (elapsed == 0)"
         );
+    }
+
+    // -- unknown-kind short-circuit --
+
+    #[tokio::test]
+    async fn test_detect_unknown_kind_short_circuits_before_cache() {
+        // An unrecognised harness must report Unknown (treated as active by the
+        // hibernation loop), NOT fall through to the content heuristic's Idle.
+        // Proven by seeding the cache with Idle: the Unknown-kind guard runs
+        // before the cache check, so it must win and return Unknown. Without the
+        // guard, `detect` would hit the fresh cache entry and return Idle —
+        // which is exactly the read that would get an active session hibernated.
+        let executor = TmuxExecutor::new();
+        let mut detector = AgentStateDetector::new(executor, Duration::from_secs(3600));
+        detector
+            .cache
+            .insert("uk-sess".to_string(), (AgentState::Idle, Instant::now()));
+
+        let state = detector.detect(AgentKind::Unknown, "uk-sess").await;
+        assert_eq!(state, AgentState::Unknown);
     }
 
     // -- detect_all filtering --

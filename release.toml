@@ -48,6 +48,9 @@ allow-branch = ["main"]
 # idempotent: `^pkgver=.*$` matches the already-rewritten line and replaces it
 # with the identical `pkgver={{version}}`, so `exactly = 1` is satisfied on
 # every pass and the regex always matches the single (root/workspace) version.
+# NOTE: cargo-release resolves these file paths relative to the *representative
+# crate's* manifest directory (crates/claude-commander/), not the workspace
+# root. The PKGBUILD lives at the workspace root, so we hop up two levels.
 pre-release-replacements = [
-  { file = "packaging/aur/PKGBUILD", search = "^pkgver=.*$", replace = "pkgver={{version}}", exactly = 1 },
+  { file = "../../packaging/aur/PKGBUILD", search = "^pkgver=.*$", replace = "pkgver={{version}}", exactly = 1 },
 ]

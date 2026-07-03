@@ -1062,6 +1062,7 @@ impl AppUiState {
             | BindableAction::DeleteSession
             | BindableAction::RenameSession
             | BindableAction::RestartSession
+            | BindableAction::ToggleKeepAlive
             | BindableAction::OpenInEditor
             | BindableAction::OpenPullRequest
             | BindableAction::OpenReviewDiff
@@ -1223,6 +1224,11 @@ impl App {
         self.cleanup_stale_merging_sessions().await;
         self.sync_session_states().await;
         self.reconcile_section_assignments().await;
+
+        // Start the idle-hibernation loop now we're in the long-lived TUI
+        // runtime (no-op unless enabled in config). Deliberately not started in
+        // CommanderService::new so one-shot CLI commands never trigger it.
+        self.service.start_hibernation_loop();
 
         // Check gh availability and do initial PR check
         if self.config.pr_check_interval_secs > 0 {
