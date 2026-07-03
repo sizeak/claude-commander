@@ -56,7 +56,6 @@ use crate::git::{
 };
 use crate::session::{
     AgentState, ProjectId, SessionId, SessionListItem, SessionManager, SessionStatus,
-    WorktreeSession,
 };
 use crate::tmux::AgentStateDetector;
 
@@ -1288,6 +1287,15 @@ impl App {
             .sessions
             .iter()
             .find(|s| s.session_id == r.id)
+    }
+
+    /// Look up a project in the local backend's cached snapshot.
+    pub(super) fn project(&self, id: ProjectId) -> Option<&crate::api::ProjectInfo> {
+        self.local_view()
+            .snapshot
+            .projects
+            .iter()
+            .find(|p| p.id == id)
     }
 
     /// Fetch an initial snapshot + agent states for every backend, so the first

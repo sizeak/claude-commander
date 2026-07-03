@@ -466,28 +466,24 @@ impl App {
     /// Build the project picker for a new-session dialog: every project sorted
     /// by name, with `default` pre-selected.
     async fn new_project_picker(&self, default: ProjectId) -> super::ProjectPicker {
-        let mut choices: Vec<super::ProjectChoice> = {
-            let state = self.service.store().read().await;
-            state
-                .projects
-                .values()
-                .map(|p| super::ProjectChoice {
-                    id: p.id,
-                    name: p.name.clone(),
-                    repo_path: p.repo_path.clone(),
-                })
-                .collect()
-        };
+        let mut choices: Vec<super::ProjectChoice> = self
+            .local_view()
+            .snapshot
+            .projects
+            .iter()
+            .map(|p| super::ProjectChoice {
+                id: p.id,
+                name: p.name.clone(),
+                repo_path: p.repo_path.clone(),
+            })
+            .collect();
         choices.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         super::ProjectPicker::new(choices, default)
     }
 
     pub(super) async fn handle_new_session(&mut self) {
         if let Some(project_id) = self.ui_state.selected_project_id {
-            let repo_path = {
-                let state = self.service.store().read().await;
-                state.get_project(&project_id).map(|p| p.repo_path.clone())
-            };
+            let repo_path = self.project(project_id).map(|p| p.repo_path.clone());
             let existing_branches = repo_path.and_then(|p| existing_branch_names(&p));
             // Capture the section under the cursor now, so a background list
             // refresh while the modal is open can't change where the new
@@ -535,29 +531,32 @@ impl App {
             return;
         };
         let resolved = {
-            let state = self.service.store().read().await;
-            state
-                .get_session(&selected_session_id)
+            let snap = &self.local_view().snapshot;
+            snap.sessions
+                .iter()
+                .find(|s| s.session_id == selected_session_id)
                 .and_then(|selected| {
                     let project_id = selected.project_id;
-                    let project = state.get_project(&project_id)?;
-                    let project_sessions: Vec<&WorktreeSession> = project
-                        .worktrees
+                    let project = snap.projects.iter().find(|p| p.id == project_id)?;
+                    let project_sessions: Vec<&crate::api::SessionInfo> = project
+                        .session_ids
                         .iter()
-                        .filter_map(|sid| state.sessions.get(sid))
+                        .filter_map(|sid| snap.sessions.iter().find(|s| s.session_id == *sid))
                         .collect();
                     let top_id = crate::session::stack_top(selected_session_id, &project_sessions);
-                    let top = state.get_session(&top_id)?;
-                    Some((project_id, top.id, top.branch.clone(), top.title.clone()))
+                    let top = snap.sessions.iter().find(|s| s.session_id == top_id)?;
+                    Some((
+                        project_id,
+                        top.session_id,
+                        top.branch.clone(),
+                        top.title.clone(),
+                    ))
                 })
         };
         let Some((project_id, parent_session_id, parent_branch, parent_title)) = resolved else {
             return;
         };
-        let repo_path = {
-            let state = self.service.store().read().await;
-            state.get_project(&project_id).map(|p| p.repo_path.clone())
-        };
+        let repo_path = self.project(project_id).map(|p| p.repo_path.clone());
         let existing_branches = repo_path.and_then(|p| existing_branch_names(&p));
         self.ui_state.modal = Modal::Input {
             title: format!("New Session Stacked on \"{}\"", parent_title),
@@ -592,10 +591,7 @@ impl App {
 
     /// Handle `Cascade resume` — continue a previously paused cascade.
     pub(super) async fn handle_cascade_resume(&mut self) {
-        let paused_at = {
-            let state = self.service.store().read().await;
-            state.cascade_paused_at
-        };
+        let paused_at = self.local_view().snapshot.cascade_paused;
         let Some(sid) = paused_at else {
             self.ui_state.status_message = Some((
                 "No cascade in progress".to_string(),
@@ -669,12 +665,13 @@ impl App {
 
     /// Handle `Cascade abandon` — clear the paused state without merging.
     pub(super) async fn handle_cascade_abandon(&mut self) {
-        match self.service.cascade_abandon().await {
+        match self.local_arc().cascade_abandon().await {
             Ok(()) => {
                 self.ui_state.status_message = Some((
                     "Cascade pause cleared".to_string(),
                     Instant::now() + Duration::from_secs(3),
                 ));
+                self.refresh_local_view().await;
                 self.refresh_list_items().await;
             }
             Err(e) => {
@@ -736,13 +733,10 @@ impl App {
                 at,
                 sessions_merged,
             }) => {
-                let title = {
-                    let state = self.service.store().read().await;
-                    state
-                        .get_session(&at)
-                        .map(|s| s.title.clone())
-                        .unwrap_or_else(|| at.to_string())
-                };
+                let title = self
+                    .session(SessionRef::local(at))
+                    .map(|s| s.title.clone())
+                    .unwrap_or_else(|| at.to_string());
                 self.ui_state.status_message = Some((
                     format!(
                         "Cascade paused at '{title}' ({sessions_merged} merged). Resolve conflicts and run `Cascade resume`."
@@ -773,16 +767,13 @@ impl App {
             return;
         };
 
-        let repo_path = {
-            let state = self.service.store().read().await;
-            match state.get_project(&project_id) {
-                Some(p) => p.repo_path.clone(),
-                None => {
-                    self.ui_state.modal = Modal::Error {
-                        message: "Project not found".to_string(),
-                    };
-                    return;
-                }
+        let repo_path = match self.project(project_id) {
+            Some(p) => p.repo_path.clone(),
+            None => {
+                self.ui_state.modal = Modal::Error {
+                    message: "Project not found".to_string(),
+                };
+                return;
             }
         };
 
@@ -961,27 +952,31 @@ impl App {
     /// Non-empty queries are ranked by fuzzy score (best match first);
     /// empty queries fall back to alphabetical title order.
     pub(super) async fn gather_quick_switch_matches(&self, query: &str) -> Vec<QuickSwitchMatch> {
-        let state = self.service.store().read().await;
         let mut scored: Vec<(i64, QuickSwitchMatch)> = Vec::new();
 
-        for session in state.sessions.values() {
+        for session in &self.local_view().snapshot.sessions {
             if session.status == SessionStatus::Creating {
                 continue;
             }
-            let Some(score) = session.fuzzy_score(query) else {
+            // Best fuzzy score across title/branch/program — mirrors
+            // `WorktreeSession::fuzzy_score` over the DTO fields.
+            let Some(score) = [
+                session.title.as_str(),
+                session.branch.as_str(),
+                session.program.as_str(),
+            ]
+            .iter()
+            .filter_map(|s| crate::fuzzy::fuzzy_score(s, query))
+            .max() else {
                 continue;
             };
-            let project_name = state
-                .get_project(&session.project_id)
-                .map(|p| p.name.clone())
-                .unwrap_or_default();
             scored.push((
                 score,
                 QuickSwitchMatch {
-                    session_id: session.id,
+                    session_id: session.session_id,
                     title: session.title.clone(),
                     branch: session.branch.clone(),
-                    project_name,
+                    project_name: session.project_name.clone(),
                     status: session.status,
                 },
             ));
@@ -1261,15 +1256,14 @@ impl App {
     /// open a single confirmation that names the count. No-op (with a
     /// transient status message) when nothing qualifies.
     pub(super) async fn handle_delete_merged_pr_sessions(&mut self) {
-        let merged: Vec<(SessionId, String)> = {
-            let state = self.service.store().read().await;
-            state
-                .sessions
-                .values()
-                .filter(|s| s.pr_is_merged())
-                .map(|s| (s.id, s.branch.clone()))
-                .collect()
-        };
+        let merged: Vec<(SessionId, String)> = self
+            .local_view()
+            .snapshot
+            .sessions
+            .iter()
+            .filter(|s| s.pr_merged || s.pr_state == crate::git::PrState::Merged)
+            .map(|s| (s.session_id, s.branch.clone()))
+            .collect();
 
         if merged.is_empty() {
             self.ui_state.status_message = Some((
@@ -1693,12 +1687,13 @@ impl App {
                     return;
                 }
 
-                match self.service.add_project(path).await {
+                match self.local_arc().add_project(path).await {
                     Ok(project_id) => {
                         self.ui_state.status_message = Some((
                             format!("Added project {}", project_id),
                             Instant::now() + Duration::from_secs(3),
                         ));
+                        self.refresh_local_view().await;
                         self.refresh_list_items().await;
                         // Select the newly added project
                         if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
@@ -1723,15 +1718,8 @@ impl App {
                     ));
                     return;
                 }
-                let _ = self
-                    .service
-                    .store()
-                    .mutate(move |state| {
-                        if let Some(session) = state.get_session_mut(&session_id) {
-                            session.title = new_title;
-                        }
-                    })
-                    .await;
+                let _ = self.local_arc().rename_session(session_id, new_title).await;
+                self.refresh_local_view().await;
                 self.refresh_list_items().await;
             }
             InputAction::ScanDirectory => {
@@ -1752,12 +1740,13 @@ impl App {
 
                 // If the path itself is a git repo, just add it directly
                 if path.join(".git").exists() {
-                    match self.service.add_project(path).await {
+                    match self.local_arc().add_project(path).await {
                         Ok(project_id) => {
                             self.ui_state.status_message = Some((
                                 format!("Added project {}", project_id),
                                 Instant::now() + Duration::from_secs(3),
                             ));
+                            self.refresh_local_view().await;
                             self.refresh_list_items().await;
                             if let Some(idx) =
                                 self.ui_state.list_items.iter().position(|item| {
@@ -1783,7 +1772,7 @@ impl App {
                     hint: None,
                 };
 
-                match self.service.scan_directory(&path).await {
+                match self.local_arc().scan_directory(path.clone()).await {
                     Ok(result) => {
                         if result.added == 0 && result.skipped == 0 {
                             self.ui_state.modal = Modal::Error {
@@ -1800,6 +1789,7 @@ impl App {
                                 ),
                                 Instant::now() + Duration::from_secs(5),
                             ));
+                            self.refresh_local_view().await;
                             self.refresh_list_items().await;
                         }
                     }
@@ -1855,12 +1845,13 @@ impl App {
                 }
             }
             ConfirmAction::RestartSession { session_id } => {
-                match self.service.restart_session(&session_id).await {
+                match self.local_arc().restart_session(session_id).await {
                     Ok(_) => {
                         self.ui_state.status_message = Some((
                             "Session restarted".to_string(),
                             Instant::now() + Duration::from_secs(3),
                         ));
+                        self.refresh_local_view().await;
                         self.refresh_list_items().await;
                     }
                     Err(e) => {
