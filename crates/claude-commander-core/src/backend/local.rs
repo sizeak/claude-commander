@@ -552,7 +552,9 @@ mod tests {
         let be = backend(&dir);
         let snap = be.agent_states(false).await.unwrap();
         assert!(snap.states.is_empty());
-        assert!(snap.commander_running);
+        // The test config has the commander disabled, so the unprimed fallback
+        // must report it as not running (it no longer hardcodes `true`).
+        assert!(!snap.commander_running);
     }
 
     #[tokio::test]

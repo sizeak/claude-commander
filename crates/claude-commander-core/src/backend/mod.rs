@@ -2,8 +2,14 @@
 //! the stores together itself.
 //!
 //! A [`CommanderBackend`] is everything the session tree, preview, review view,
-//! and attach flow need, expressed over **protocol DTOs** only — no core domain
-//! types cross the trait surface. Two implementations exist:
+//! and attach flow need, expressed over **protocol DTOs** wherever a dedicated
+//! wire type exists. A handful of core domain types that are themselves
+//! `Serialize`/`Deserialize` still cross the surface where no separate DTO was
+//! carved out — [`Comment`](crate::comment::Comment) and
+//! [`ApplyOutcome`](crate::comment::ApplyOutcome) (review comments),
+//! [`ScanResult`](crate::session::ScanResult) (directory scan), and
+//! [`PrCheckResult`](crate::git::PrCheckResult) — so they serialize over the
+//! wire unchanged. Two implementations exist:
 //!
 //! - [`LocalBackend`](local::LocalBackend): wraps an in-process
 //!   [`CommanderService`](crate::api::CommanderService); this is what the TUI

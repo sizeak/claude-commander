@@ -838,7 +838,6 @@ pub enum InputAction {
     CreateStackedSession {
         project_id: ProjectId,
         parent_session_id: SessionId,
-        parent_branch: String,
     },
     AddProject,
     ScanDirectory,
@@ -1504,15 +1503,6 @@ impl App {
             .sessions
             .iter()
             .find(|s| s.session_id == r.id)
-    }
-
-    /// Look up a project in the local backend's cached snapshot.
-    pub(super) fn project(&self, id: ProjectId) -> Option<&crate::api::ProjectInfo> {
-        self.local_view()
-            .snapshot
-            .projects
-            .iter()
-            .find(|p| p.id == id)
     }
 
     /// The local backend concretely, for the local-only affordances the trait

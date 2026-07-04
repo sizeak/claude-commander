@@ -3462,6 +3462,55 @@ async fn checkout_branch_lists_remote_project_branches_via_backend() {
 }
 
 #[tokio::test]
+async fn checkout_branch_submits_against_remote_backend() {
+    // Pressing Enter in the Checkout modal on a remote project must spawn the
+    // create against the *owning* backend, resolving the project's repo path
+    // from that backend's snapshot — not the local view (which would 404 with
+    // "Project not found").
+    let (remote_snap, _sid, remote_pid) = snapshot_with_one_session();
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", remote_snap)]);
+    app.bootstrap_backend_views().await;
+    app.refresh_backend_view(BackendId(1)).await;
+
+    // Drive the create through the same submission entry point the Enter key
+    // uses, so a regression in project resolution is caught end-to-end.
+    app.start_checkout_session(remote_pid, "feature-x".to_string())
+        .await;
+
+    assert!(
+        !matches!(&app.ui_state.modal, Modal::Error { .. }),
+        "remote checkout must not raise a 'Project not found' error modal"
+    );
+
+    let mock = app
+        .backend(BackendId(1))
+        .unwrap()
+        .backend
+        .as_any()
+        .downcast_ref::<MockBackend>()
+        .unwrap();
+    let mut created = None;
+    for _ in 0..50 {
+        if let Some(opts) = mock.created_sessions().into_iter().next() {
+            created = Some(opts);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let created = created.expect("create must be spawned against the remote backend");
+    assert_eq!(
+        created.project_path,
+        std::path::PathBuf::from("/tmp/rp"),
+        "the remote project's repo_path must be used"
+    );
+    assert_eq!(
+        created.base_branch.as_deref(),
+        Some("feature-x"),
+        "the checked-out branch must be the base branch"
+    );
+}
+
+#[tokio::test]
 async fn delete_merged_pr_sessions_sweeps_remote_backends() {
     // A merged-PR session living on a remote backend must be swept by the bulk
     // "Delete merged-PR sessions" command — candidates come from every backend

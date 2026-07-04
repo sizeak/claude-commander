@@ -535,15 +535,10 @@ impl App {
                         .collect();
                     let top_id = crate::session::stack_top(selected_session_id, &project_sessions);
                     let top = snap.sessions.iter().find(|s| s.session_id == top_id)?;
-                    Some((
-                        project_id,
-                        top.session_id,
-                        top.branch.clone(),
-                        top.title.clone(),
-                    ))
+                    Some((project_id, top.session_id, top.title.clone()))
                 })
         };
-        let Some((project_id, parent_session_id, parent_branch, parent_title)) = resolved else {
+        let Some((project_id, parent_session_id, parent_title)) = resolved else {
             return;
         };
         let repo_path = self
@@ -567,7 +562,6 @@ impl App {
             on_submit: InputAction::CreateStackedSession {
                 project_id,
                 parent_session_id,
-                parent_branch,
             },
             existing_branches,
             project_picker: None,
@@ -910,7 +904,17 @@ impl App {
             return;
         }
 
-        let Some(project_path) = self.project(project_id).map(|p| p.repo_path.clone()) else {
+        // Resolve the project in its *owning* backend's snapshot — a remote
+        // project isn't in the local view, so the local-only lookup would 404.
+        let backend_id = self.backend_of_project(project_id);
+        let Some(project_path) = self
+            .view_for(backend_id)
+            .snapshot
+            .projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .map(|p| p.repo_path.clone())
+        else {
             self.ui_state.modal = Modal::Error {
                 message: "Project not found".to_string(),
             };
@@ -923,7 +927,6 @@ impl App {
         // and the worktree directory still comes out sensibly because
         // `sanitize_name` handles slashes and special chars. `base_branch`
         // forks the worktree from the existing branch.
-        let backend_id = self.backend_of_project(project_id);
         self.spawn_create_session(
             backend_id,
             crate::api::CreateSessionOpts {
@@ -1652,9 +1655,9 @@ impl App {
         };
     }
 
-    /// Create a session on the local backend off-thread. `create_session`
-    /// commits the `Creating` placeholder early, so the change feed surfaces
-    /// the new row immediately; `SessionCreated` (which selects it) or
+    /// Create a session on backend `backend_id` off-thread (local or remote).
+    /// `create_session` commits the `Creating` placeholder early, so the change
+    /// feed surfaces the new row immediately; `SessionCreated` (which selects it) or
     /// `SessionCreateFailed` completes the flow. On failure the backend removes
     /// its own half-created session.
     pub(super) fn spawn_create_session(
@@ -1729,7 +1732,6 @@ impl App {
             InputAction::CreateStackedSession {
                 project_id,
                 parent_session_id,
-                parent_branch: _parent_branch,
             } => {
                 if value.trim().is_empty() {
                     self.ui_state.status_message = Some((
@@ -1778,6 +1780,11 @@ impl App {
                     return;
                 }
 
+                // Deliberately local-only this phase: the path input's existence
+                // check and completer both resolve against *this* machine's
+                // filesystem, so the path is only meaningful on the local
+                // backend. Remote add-project routing is deferred until there's
+                // a server-side path completer to pick a remote path with.
                 match self.local_arc().add_project(path).await {
                     Ok(project_id) => {
                         self.ui_state.status_message = Some((
@@ -1867,6 +1874,10 @@ impl App {
                     hint: None,
                 };
 
+                // Local-only this phase for the same reason as add-project above:
+                // the scanned directory is a local filesystem path. Remote
+                // scan/add routing is deferred until a server-side path picker
+                // exists.
                 match self.local_arc().scan_directory(path.clone()).await {
                     Ok(result) => {
                         if result.added == 0 && result.skipped == 0 {

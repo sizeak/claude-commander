@@ -35,6 +35,8 @@ pub struct MockBackend {
     fail: Mutex<bool>,
     /// Sessions passed to [`Self::delete_session`], for call-recording asserts.
     deleted: Mutex<Vec<SessionId>>,
+    /// Options passed to [`Self::create_session`], for call-recording asserts.
+    created: Mutex<Vec<CreateSessionOpts>>,
     /// Count of [`Self::request_pr_refresh`] calls, for call-recording asserts.
     pr_refresh_calls: Mutex<usize>,
     conn_tx: watch::Sender<ConnectionState>,
@@ -61,6 +63,7 @@ impl MockBackend {
             branches: Mutex::new(Vec::new()),
             fail: Mutex::new(false),
             deleted: Mutex::new(Vec::new()),
+            created: Mutex::new(Vec::new()),
             pr_refresh_calls: Mutex::new(0),
             conn_tx,
             conn_rx,
@@ -89,6 +92,11 @@ impl MockBackend {
     /// Session ids passed to [`Self::delete_session`], in call order.
     pub fn deleted_sessions(&self) -> Vec<SessionId> {
         self.deleted.lock().unwrap().clone()
+    }
+
+    /// Options passed to [`Self::create_session`], in call order.
+    pub fn created_sessions(&self) -> Vec<CreateSessionOpts> {
+        self.created.lock().unwrap().clone()
     }
 
     /// How many times [`Self::request_pr_refresh`] has been called.
@@ -183,8 +191,9 @@ impl CommanderBackend for MockBackend {
         Ok(Vec::new())
     }
 
-    async fn create_session(&self, _opts: CreateSessionOpts) -> BResult<SessionId> {
+    async fn create_session(&self, opts: CreateSessionOpts) -> BResult<SessionId> {
         self.guard()?;
+        self.created.lock().unwrap().push(opts);
         Ok(SessionId::new())
     }
 

@@ -187,7 +187,11 @@ impl App {
             .as_ref()
             .is_none_or(|(sid, _)| *sid != session_id);
 
-        if needs_enriched && self.ui_state.gh_available {
+        let backend_kind = self
+            .backend(sref.backend)
+            .map(|h| h.backend.descriptor().kind)
+            .unwrap_or(crate::backend::BackendKind::Local);
+        if should_fetch_enriched_pr(needs_enriched, self.ui_state.gh_available, backend_kind) {
             // Resolve the project's repo path from the cached snapshot rather
             // than the store — the backend seam owns the state.
             let snapshot = &self.view_for(sref.backend).snapshot;
@@ -352,5 +356,44 @@ pub(super) async fn fetch_preview_data(
             Arc::new(DiffInfo::empty()),
             String::new(),
         )
+    }
+}
+
+/// Whether to spawn the local `gh` enriched-PR fetch for the selected session.
+///
+/// Only the local backend can shell out to `gh` against a project's on-disk
+/// repo path; a remote session's repository lives server-side, so running `gh`
+/// locally would query the wrong (or no) repo. For a remote session we skip the
+/// wasted subprocess and leave the info pane showing the base PR data. Pure so
+/// the gate is unit-testable without a live backend.
+fn should_fetch_enriched_pr(
+    needs_enriched: bool,
+    gh_available: bool,
+    backend_kind: crate::backend::BackendKind,
+) -> bool {
+    needs_enriched && gh_available && backend_kind == crate::backend::BackendKind::Local
+}
+
+#[cfg(test)]
+mod enriched_pr_gate_tests {
+    use super::should_fetch_enriched_pr;
+    use crate::backend::BackendKind;
+
+    #[test]
+    fn local_session_fetches_when_needed_and_available() {
+        assert!(should_fetch_enriched_pr(true, true, BackendKind::Local));
+    }
+
+    #[test]
+    fn remote_session_never_fetches() {
+        // The load-bearing case: even with everything else satisfied, a remote
+        // session must not spawn the local `gh` subprocess.
+        assert!(!should_fetch_enriched_pr(true, true, BackendKind::Remote));
+    }
+
+    #[test]
+    fn local_session_skips_when_gh_unavailable_or_not_needed() {
+        assert!(!should_fetch_enriched_pr(false, true, BackendKind::Local));
+        assert!(!should_fetch_enriched_pr(true, false, BackendKind::Local));
     }
 }

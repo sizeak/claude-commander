@@ -174,8 +174,17 @@ mod tests {
     /// Every variant's `Display` is non-empty and — since no path takes a token
     /// — free of anything token-shaped. Guards the "never leak a bearer token"
     /// invariant against future edits.
+    ///
+    /// This covers the *local* construction paths only. The end-to-end guarantee
+    /// (an actual bearer token threaded through a failing remote call never
+    /// surfaces in the resulting `BackendError`) is exercised by
+    /// `token_never_appears_in_errors` in `claude-commander-remote`'s
+    /// `backend.rs`.
     #[test]
     fn display_is_populated_and_tokenless() {
+        // A recognisable sentinel standing in for a bearer token: no variant is
+        // constructed with it, so it must never appear in any `Display`.
+        const TOKEN_SENTINEL: &str = "s3cr3t-bearer-token-value";
         let variants = [
             BackendError::Local(CoreError::Tmux(TmuxError::NotInstalled)),
             BackendError::Unavailable {
@@ -191,6 +200,7 @@ mod tests {
             let s = v.to_string();
             assert!(!s.is_empty());
             assert!(!s.to_lowercase().contains("bearer"));
+            assert!(!s.contains(TOKEN_SENTINEL));
         }
     }
 }

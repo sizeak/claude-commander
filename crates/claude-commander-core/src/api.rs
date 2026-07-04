@@ -1339,11 +1339,19 @@ impl CommanderService {
             return self.agent_states_cache.read().await.clone();
         }
         let active = self.active_session_targets().await;
-        let mut detector = self.agent_detector.lock().await;
-        let states = detector.detect_all(&active).await;
+        let states = {
+            let mut detector = self.agent_detector.lock().await;
+            detector.detect_all(&active).await
+        };
+        // Mirror the fresh/loop arms: never fabricate `commander_running`.
+        // `is_running` short-circuits when the commander is disabled, so no
+        // tmux probe happens in the common (disabled) case.
+        let commander_enabled = self.config_store.read().commander_enabled;
+        let commander_running =
+            commander_enabled && crate::commander::is_running(&self.manager.tmux).await;
         AgentStatesSnapshot {
             states,
-            commander_running: true,
+            commander_running,
         }
     }
 
@@ -2956,6 +2964,26 @@ mod tests {
         // reflects the corrected commander_running.
         let after = svc.agent_states(false).await;
         assert!(!after.commander_running);
+    }
+
+    #[tokio::test]
+    async fn agent_states_unprimed_reports_commander_running_honestly() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        // No background loop has run and no fresh call has primed the cache, so
+        // this exercises the on-demand fallback arm. With the commander disabled
+        // in the test config it must report `commander_running = false`, not the
+        // old hardcoded `true`.
+        assert!(
+            !svc.agent_states_primed
+                .load(std::sync::atomic::Ordering::Relaxed),
+            "precondition: the cache must be unprimed"
+        );
+        let snap = svc.agent_states(false).await;
+        assert!(
+            !snap.commander_running,
+            "unprimed fallback must compute commander_running (disabled → false)"
+        );
     }
 
     #[tokio::test]

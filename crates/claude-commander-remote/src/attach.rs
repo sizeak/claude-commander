@@ -298,13 +298,20 @@ async fn await_ready(
 
 /// Classify a server `error` frame received *before* `ready`. The message is the
 /// server's own text (never token-bearing): the fixed auth-rejection phrase maps
-/// to [`BackendError::Auth`], a "no such session" to [`BackendError::NotFound`],
+/// to [`BackendError::Auth`], the no-session frame to [`BackendError::NotFound`],
 /// anything else to [`BackendError::Server`].
+///
+/// Both pre-ready sentinels are matched *exactly* (or, for the no-session case,
+/// as a `"{constant}: detail"` prefix should the server ever attach detail) —
+/// never by substring. A generic `"failed to attach: {tmux error}"` frame can
+/// embed tmux's own "no such session" wording, and a `contains` check would
+/// misclassify it as [`NotFound`](BackendError::NotFound).
 fn handshake_error(message: &str) -> BackendError {
     use claude_commander_protocol::ws::{WS_ERR_AUTH, WS_ERR_NO_SESSION};
     if message == WS_ERR_AUTH {
         BackendError::Auth
-    } else if message.contains(WS_ERR_NO_SESSION) {
+    } else if message == WS_ERR_NO_SESSION || message.starts_with(&format!("{WS_ERR_NO_SESSION}: "))
+    {
         BackendError::NotFound
     } else {
         BackendError::Server(message.to_string())
@@ -449,6 +456,13 @@ mod tests {
         match handshake_error("failed to attach: boom") {
             BackendError::Server(m) => assert_eq!(m, "failed to attach: boom"),
             other => panic!("expected Server, got {other:?}"),
+        }
+        // A generic attach failure whose *detail* happens to embed tmux's own
+        // "no such session" wording must NOT be misclassified as NotFound — the
+        // pre-ready no-session frame is the constant verbatim, not a substring.
+        match handshake_error("failed to attach: no such session: foo") {
+            BackendError::Server(_) => {}
+            other => panic!("embedded 'no such session' must stay Server, got {other:?}"),
         }
     }
 
