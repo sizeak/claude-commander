@@ -23,6 +23,14 @@ impl App {
                 // the fresh ones: if the session whose review is open just went
                 // Working→Idle, it likely acted on applied comments — refresh the
                 // review view in place.
+                //
+                // Gated to the local backend for now because the transition is
+                // diffed against `ui_state.agent_states`, which only the local
+                // backend populates (see the `if is_local` block below). A remote
+                // session's review therefore won't auto-refresh on idle yet. The
+                // fix is to diff against the per-backend `handle.view.agent_states`
+                // (old vs. `*states`) here instead — deferred to a follow-up, since
+                // it also needs the review-open backend threaded through.
                 let review_refresh =
                     is_local.then(|| self.review_refresh_on_transition(&states.states));
 
@@ -132,14 +140,24 @@ impl App {
                         .insert(session_id, AiSummary::Error(msg));
                 }
             },
-            StateUpdate::SessionCreated { session_id } => {
+            StateUpdate::SessionCreated {
+                session_id,
+                backend_id,
+            } => {
                 debug!("Session created: {}", session_id);
+                let backend_id = BackendId(backend_id);
                 self.ui_state.modal = Modal::None;
                 self.ui_state.status_message = Some((
                     format!("Created session {}", session_id),
                     Instant::now() + Duration::from_secs(3),
                 ));
-                self.reconcile_one_section_assignment(session_id).await;
+                // Reconcile the section on (and refresh the view of) the OWNING
+                // backend — not always the local one — so the new row is present
+                // in that backend's cached view before we try to select it.
+                // Selecting before the view carried the session was the bug that
+                // left a remote create half-landed (no reconcile, no selection).
+                self.reconcile_one_section_assignment(backend_id, session_id)
+                    .await;
                 self.refresh_list_items().await;
                 // Select the newly created session
                 self.select_session_in_tree(session_id);
@@ -216,6 +234,73 @@ impl App {
                     *fetching = false;
                     *all_branches = super::actions::branch_entries_from_pairs(branches);
                     self.refilter_checkout_branches();
+                }
+            }
+            StateUpdate::CheckoutBranchesLoaded {
+                project_id: updated_project,
+                branches,
+            } => {
+                // The initial (no-fetch) listing: fill the list but leave the
+                // `fetching` spinner up, since the fetch-refresh is still running.
+                if let Modal::CheckoutBranch {
+                    project_id,
+                    all_branches,
+                    ..
+                } = &mut self.ui_state.modal
+                    && *project_id == updated_project
+                {
+                    *all_branches = super::actions::branch_entries_from_pairs(branches);
+                    self.refilter_checkout_branches();
+                }
+            }
+            StateUpdate::RestartFinished { backend_id, result } => {
+                let backend_id = BackendId(backend_id);
+                match result {
+                    Ok(()) => {
+                        self.ui_state.status_message = Some((
+                            "Session restarted".to_string(),
+                            Instant::now() + Duration::from_secs(3),
+                        ));
+                        self.refresh_backend_view(backend_id).await;
+                        self.refresh_list_items().await;
+                    }
+                    Err(e) => {
+                        self.ui_state.modal = Modal::Error {
+                            message: format!("Failed to restart: {e}"),
+                        };
+                    }
+                }
+            }
+            StateUpdate::SessionMutationApplied {
+                backend_id,
+                session_id,
+            } => {
+                self.refresh_backend_view(BackendId(backend_id)).await;
+                self.refresh_list_items().await;
+                // The session may have moved position (rename re-sorts, a section
+                // move relocates it); keep it selected and refresh its preview.
+                if self.select_session_in_tree(session_id) {
+                    self.spawn_preview_update();
+                }
+            }
+            StateUpdate::NewSessionProgramsLoaded { project_id, picker } => {
+                // Patch the picker only if a New Session (plain or stacked) modal
+                // for the same project is still open; the user may have dismissed
+                // it or moved on to another project.
+                if let Modal::Input {
+                    program_picker,
+                    on_submit,
+                    ..
+                } = &mut self.ui_state.modal
+                    && program_picker.is_some()
+                    && matches!(
+                        on_submit,
+                        InputAction::CreateSession { project_id: pid, .. }
+                        | InputAction::CreateStackedSession { project_id: pid, .. }
+                            if *pid == project_id
+                    )
+                {
+                    *program_picker = Some(picker);
                 }
             }
             StateUpdate::Error { message } => {
@@ -367,10 +452,19 @@ impl App {
         self.refresh_local_view().await;
     }
 
-    /// Re-run section assignment for a single freshly created session.
-    pub(super) async fn reconcile_one_section_assignment(&mut self, session_id: SessionId) {
-        let _ = self.local_arc().reconcile_one_section(session_id).await;
-        self.refresh_local_view().await;
+    /// Re-run section assignment for a single freshly created session on the
+    /// backend that owns it, then refresh that backend's cached view so the new
+    /// (possibly re-sectioned) row is present before the caller selects it.
+    pub(super) async fn reconcile_one_section_assignment(
+        &mut self,
+        backend_id: BackendId,
+        session_id: SessionId,
+    ) {
+        let _ = self
+            .backend_arc(backend_id)
+            .reconcile_one_section(session_id)
+            .await;
+        self.refresh_backend_view(backend_id).await;
     }
 
     pub(super) async fn refresh_list_items(&mut self) {

@@ -999,7 +999,7 @@ impl App {
                 session_id, target, ..
             }) => {
                 self.ui_state.modal = Modal::None;
-                self.apply_section_move(session_id, target).await;
+                self.apply_section_move(session_id, target);
             }
             Some(QuickSwitchItem::RemoteServerRemove { name, .. }) => {
                 self.ui_state.modal = Modal::Confirm {

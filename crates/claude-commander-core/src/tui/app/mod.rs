@@ -1109,6 +1109,13 @@ impl AppUiState {
             BindableAction::GenerateSummary => {
                 has_session && self.right_pane_view == RightPaneView::Info
             }
+            // Creating a session or checking out a branch issues a request to the
+            // selected project's backend (create-options / branch list). A
+            // degraded/connecting remote can't service those and the awaits would
+            // stall, so gate on that backend being live. Nothing selected keeps
+            // `connected` true (local default), so single-machine setups and the
+            // no-selection case are unaffected.
+            BindableAction::NewSession | BindableAction::CheckoutBranch => connected,
             // All other actions are always available
             _ => true,
         }
@@ -1853,7 +1860,7 @@ impl App {
         self.restore_selection().await;
 
         // Surface any pending review comments left from a previous run.
-        self.refresh_comment_indicators().await;
+        self.refresh_comment_indicators();
 
         // Bring the mic listener up eagerly (when STT is enabled) so a global
         // hotkey can toggle recording even before the conversation is opened.

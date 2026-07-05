@@ -20,6 +20,27 @@ fn test_delete_confirm_message_names_session() {
 }
 
 #[test]
+fn restart_confirm_message_local_promises_resume_remote_stays_neutral() {
+    use super::actions::restart_confirm_message;
+    // Local sessions: the client's `resume_session` governs the wording, so it
+    // can promise `/resume`.
+    assert!(restart_confirm_message(true, true, Some("x")).contains("/resume"));
+    assert!(restart_confirm_message(true, false, Some("x")).contains("/resume"));
+    // Remote sessions: resume behaviour lives in the server's config, which the
+    // client can't read — so the wording must NOT promise it, and should name
+    // the session.
+    let remote = restart_confirm_message(false, true, Some("my-sess"));
+    assert!(
+        !remote.contains("/resume"),
+        "remote restart must not promise resume semantics: {remote}"
+    );
+    assert!(
+        remote.contains("my-sess"),
+        "should name the session: {remote}"
+    );
+}
+
+#[test]
 fn test_delete_confirm_message_falls_back_without_title() {
     let message = delete_confirm_message(None, None);
     assert!(message.contains("this session"));
@@ -382,6 +403,22 @@ fn test_is_command_available_generate_summary_requires_info_pane_and_session() {
     // session but preview pane → hidden
     let s = ui_state_with(Some(SessionId::new()), None, RightPaneView::Preview);
     assert!(!s.is_command_available(BindableAction::GenerateSummary));
+}
+
+#[test]
+fn new_session_and_checkout_gated_on_selected_backend_connected() {
+    // A degraded/connecting remote backend can't service create-options or a
+    // branch listing, and awaiting them would stall the event loop — so both
+    // commands must drop out of the palette when the selected backend is down.
+    let mut s = ui_state_with(None, Some(ProjectId::new()), RightPaneView::Preview);
+    s.selected_backend_connected = false;
+    assert!(!s.is_command_available(BindableAction::NewSession));
+    assert!(!s.is_command_available(BindableAction::CheckoutBranch));
+
+    // A live backend keeps them available.
+    s.selected_backend_connected = true;
+    assert!(s.is_command_available(BindableAction::NewSession));
+    assert!(s.is_command_available(BindableAction::CheckoutBranch));
 }
 
 #[test]
@@ -1341,10 +1378,19 @@ async fn apply_section_move_keeps_moved_session_selected() {
     app.refresh_list_items().await;
 
     // Move session two into "Beta" — it was in the "In Progress" catch-all.
-    // `apply_section_move` refreshes the cached view itself, so the rebuilt
-    // tree reflects the move without a manual sync here.
-    app.apply_section_move(s2_id, Some("Beta".to_string()))
-        .await;
+    // The move runs on a background task that posts `SessionMutationApplied`
+    // once the store is updated; drive that event to apply the view/tree refresh
+    // and reselection (as the event loop would).
+    app.apply_section_move(s2_id, Some("Beta".to_string()));
+    loop {
+        match app.event_loop.next().await.expect("a completion event") {
+            AppEvent::StateUpdate(su @ StateUpdate::SessionMutationApplied { .. }) => {
+                app.handle_state_update(su).await;
+                break;
+            }
+            _ => continue,
+        }
+    }
 
     let selected_idx = app
         .ui_state
@@ -3448,6 +3494,23 @@ async fn checkout_branch_lists_remote_project_branches_via_backend() {
     app.ui_state.selected_project_id = Some((BackendId(1), remote_pid));
     app.handle_checkout_branch().await;
 
+    // The modal opens immediately with an empty, spinning list; the initial
+    // listing and fetch-refresh arrive on background tasks. Drive the events the
+    // spawned task posts until the list is populated.
+    for _ in 0..10 {
+        if matches!(&app.ui_state.modal, Modal::CheckoutBranch { all_branches, .. } if !all_branches.is_empty())
+        {
+            break;
+        }
+        match app.event_loop.next().await.expect("a checkout event") {
+            AppEvent::StateUpdate(su @ StateUpdate::CheckoutBranchesLoaded { .. })
+            | AppEvent::StateUpdate(su @ StateUpdate::CheckoutFetchComplete { .. }) => {
+                app.handle_state_update(su).await;
+            }
+            _ => continue,
+        }
+    }
+
     match &app.ui_state.modal {
         Modal::CheckoutBranch { all_branches, .. } => {
             let names: Vec<&str> = all_branches.iter().map(|b| b.local_name.as_str()).collect();
@@ -3678,4 +3741,258 @@ async fn restore_selection_resolves_remembered_remote_backend() {
         SessionListItem::Worktree { id, .. } => assert_eq!(*id, remote_sid),
         other => panic!("expected the remote session row, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Review-view write paths route to the owning backend, not the local service
+// ---------------------------------------------------------------------------
+
+/// The `MockBackend` behind backend `id` in `app`, for call-recording asserts.
+fn remote_mock(app: &App, id: BackendId) -> &MockBackend {
+    app.backend(id)
+        .unwrap()
+        .backend
+        .as_any()
+        .downcast_ref::<MockBackend>()
+        .unwrap()
+}
+
+/// An `App` with one mock remote whose single session's view is populated, plus
+/// the session id, for driving the review view against a remote-owned session.
+async fn app_with_remote_session() -> (App, SessionId) {
+    let (remote_snap, remote_sid, _pid) = snapshot_with_one_session();
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", remote_snap)]);
+    app.bootstrap_backend_views().await;
+    // Populate the remote view so `backend_of_session` resolves to it.
+    app.refresh_backend_view(BackendId(1)).await;
+    (app, remote_sid)
+}
+
+/// A two-file text diff review state for `sid` (first selectable line is a.rs's
+/// context line, so `build_draft((0, 0), …)` yields a New-side comment).
+fn review_state_for(sid: SessionId) -> Box<DiffReviewState> {
+    let diff = crate::git::parse_unified_diff(
+        "\
+diff --git a/a.rs b/a.rs
+--- a/a.rs
++++ b/a.rs
+@@ -1,2 +1,3 @@
+ fn main() {
++    let y = 3;
+ }
+",
+    );
+    Box::new(DiffReviewState::new(
+        sid,
+        "t".to_string(),
+        "main".to_string(),
+        diff,
+        Vec::new(),
+    ))
+}
+
+#[tokio::test]
+async fn review_create_comment_routes_to_owning_backend() {
+    let (mut app, remote_sid) = app_with_remote_session().await;
+    let mut state = review_state_for(remote_sid);
+    // Open the comment box over the first selectable line with some text.
+    state.comment = Some(super::review::CommentDraft {
+        input: Input::from("nit: rename"),
+        range: (0, 0),
+    });
+    let enter = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Enter,
+        crossterm::event::KeyModifiers::NONE,
+    );
+
+    app.handle_review_key(enter, state).await;
+
+    assert_eq!(
+        remote_mock(&app, BackendId(1)).created_comment_sessions(),
+        vec![remote_sid],
+        "create_comment must route to the backend that owns the session"
+    );
+}
+
+#[tokio::test]
+async fn review_apply_comments_routes_to_owning_backend() {
+    let (mut app, remote_sid) = app_with_remote_session().await;
+    let state = review_state_for(remote_sid);
+    let apply = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('a'),
+        crossterm::event::KeyModifiers::NONE,
+    );
+
+    app.handle_review_key(apply, state).await;
+
+    assert_eq!(
+        remote_mock(&app, BackendId(1)).applied_comment_sessions(),
+        vec![remote_sid],
+        "apply_comments must route to the backend that owns the session"
+    );
+}
+
+#[tokio::test]
+async fn review_toggle_file_reviewed_routes_to_owning_backend() {
+    let (mut app, remote_sid) = app_with_remote_session().await;
+    let state = review_state_for(remote_sid);
+    let mark = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('m'),
+        crossterm::event::KeyModifiers::NONE,
+    );
+
+    app.handle_review_key(mark, state).await;
+
+    assert_eq!(
+        remote_mock(&app, BackendId(1)).toggled_reviewed_files(),
+        vec![(remote_sid, "a.rs".to_string())],
+        "toggle_file_reviewed must route to the owning backend, by display path"
+    );
+}
+
+#[tokio::test]
+async fn review_reload_comments_routes_to_owning_backend() {
+    let (mut app, remote_sid) = app_with_remote_session().await;
+    let mut state = review_state_for(remote_sid);
+
+    app.reload_review_comments(&mut state).await;
+
+    assert_eq!(
+        remote_mock(&app, BackendId(1)).listed_comment_sessions(),
+        vec![remote_sid],
+        "reloading comments must list from the owning backend"
+    );
+}
+
+#[tokio::test]
+async fn review_image_fetch_routes_to_owning_backend() {
+    use crate::api::DiffSide;
+    let (mut app, remote_sid) = app_with_remote_session().await;
+    // A review state whose only file is a modified binary image.
+    let state = DiffReviewState::new(
+        remote_sid,
+        "t".to_string(),
+        "main".to_string(),
+        crate::git::ParsedDiff {
+            files: vec![modified_image_file("logo.png")],
+        },
+        Vec::new(),
+    );
+
+    app.ensure_review_image(&state).await;
+
+    // The fetch runs in a spawned task that records the call, then emits a
+    // `ReviewImageLoaded` event — await events until it lands, then assert the
+    // remote mock (not the local backend) served the blob.
+    for _ in 0..10 {
+        match app.event_loop.next().await {
+            Some(AppEvent::StateUpdate(StateUpdate::ReviewImageLoaded { .. })) => break,
+            _ => continue,
+        }
+    }
+    assert_eq!(
+        remote_mock(&app, BackendId(1)).fetched_diff_blobs(),
+        vec![(remote_sid, DiffSide::New, "logo.png".to_string())],
+        "fetch_diff_blob must route to the backend that owns the session"
+    );
+}
+
+#[tokio::test]
+async fn restart_confirm_spawns_against_owning_backend_and_toasts() {
+    // Confirming a restart must spawn the restart on the OWNING backend (not the
+    // local one) off the event loop, then toast on the `RestartFinished` event.
+    let (app, remote_sid) = app_with_remote_session().await;
+    let mut app = app;
+
+    app.handle_confirm(super::ConfirmAction::RestartSession {
+        session_id: remote_sid,
+    })
+    .await;
+
+    // Drive the completion event the spawned restart posts.
+    loop {
+        match app.event_loop.next().await.expect("a restart event") {
+            AppEvent::StateUpdate(su @ StateUpdate::RestartFinished { .. }) => {
+                app.handle_state_update(su).await;
+                break;
+            }
+            _ => continue,
+        }
+    }
+
+    assert_eq!(
+        remote_mock(&app, BackendId(1)).restarted_sessions(),
+        vec![remote_sid],
+        "restart must route to the backend that owns the session"
+    );
+    let (msg, _) = app
+        .ui_state
+        .status_message
+        .clone()
+        .expect("a status toast after restart");
+    assert!(msg.contains("restarted"), "toast: {msg}");
+}
+
+#[tokio::test]
+async fn remote_session_created_selects_row_and_reconciles_owning_backend() {
+    // A SessionCreated event for a remote-owned session must refresh + reconcile
+    // that backend (not the local one) BEFORE selecting, so the new row is
+    // present in the tree and lands selected — the "half-lands" bug otherwise
+    // no-ops the reconcile and selects nothing.
+    let (remote_snap, _sid, _pid) = snapshot_with_one_session();
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", remote_snap)]);
+    app.bootstrap_backend_views().await;
+    app.refresh_backend_view(BackendId(1)).await;
+
+    // The mock's create_session appends a new session (fresh id) to its snapshot
+    // and returns that id — mirroring a real backend committing the row.
+    let new_id = remote_mock(&app, BackendId(1))
+        .create_session(crate::api::CreateSessionOpts {
+            project_path: std::path::PathBuf::from("/tmp/rp"),
+            title: "new".to_string(),
+            program: None,
+            initial_prompt: None,
+            effort: None,
+            mode: None,
+            base_branch: None,
+            section: None,
+            stack_parent: None,
+        })
+        .await
+        .unwrap();
+
+    app.handle_state_update(StateUpdate::SessionCreated {
+        session_id: new_id,
+        backend_id: BackendId(1).0,
+    })
+    .await;
+
+    assert_eq!(
+        remote_mock(&app, BackendId(1)).reconciled_sessions(),
+        vec![new_id],
+        "section reconcile must route to the backend that owns the new session"
+    );
+    assert_eq!(
+        app.ui_state.selected_session_id.map(|r| r.id),
+        Some(new_id),
+        "the newly created remote session should land selected in the tree"
+    );
+}
+
+#[tokio::test]
+async fn pending_comment_markers_union_every_backend_view() {
+    // A remote session with a pending comment in its view must show the `*`
+    // marker without any per-backend network query.
+    let (mut remote_snap, remote_sid, _pid) = snapshot_with_one_session();
+    remote_snap.pending_comment_sessions = vec![remote_sid];
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", remote_snap)]);
+    app.bootstrap_backend_views().await;
+    app.refresh_backend_view(BackendId(1)).await;
+
+    app.refresh_comment_indicators();
+
+    assert!(
+        app.ui_state.sessions_with_comments.contains(&remote_sid),
+        "a remote session's pending-comment marker must come from its cached view"
+    );
 }

@@ -28,7 +28,7 @@
 //! | `mark_unread` | *(no server route yet → `Unavailable`)* |
 //! | `add_project` | `POST /api/projects` → `{id}` |
 //! | `remove_project` | `DELETE /api/projects/{id}` |
-//! | `scan_directory` | `GET /api/projects/scan?dir=` |
+//! | `scan_directory` | `POST /api/projects/scan` → `{path}` |
 //! | `cascade_merge` / `push_stack` | `POST /api/sessions/{id}/cascade` / `…/push-stack` |
 //! | `cascade_resume` / `cascade_abandon` | `POST /api/cascade/resume` / `…/abandon` |
 //! | `list_comments` / `open_review` | `GET /api/sessions/{id}/comments` / `…/review` |

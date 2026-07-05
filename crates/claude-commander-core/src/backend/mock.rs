@@ -37,8 +37,22 @@ pub struct MockBackend {
     deleted: Mutex<Vec<SessionId>>,
     /// Options passed to [`Self::create_session`], for call-recording asserts.
     created: Mutex<Vec<CreateSessionOpts>>,
+    /// Sessions passed to [`Self::reconcile_one_section`], for routing asserts.
+    reconciled: Mutex<Vec<SessionId>>,
+    /// Sessions passed to [`Self::restart_session`], for routing asserts.
+    restarted: Mutex<Vec<SessionId>>,
     /// Count of [`Self::request_pr_refresh`] calls, for call-recording asserts.
     pr_refresh_calls: Mutex<usize>,
+    /// Sessions passed to [`Self::list_comments`], for routing asserts.
+    listed_comments: Mutex<Vec<SessionId>>,
+    /// Sessions passed to [`Self::create_comment`], for routing asserts.
+    created_comments: Mutex<Vec<SessionId>>,
+    /// Sessions passed to [`Self::apply_comments`], for routing asserts.
+    applied_comments: Mutex<Vec<SessionId>>,
+    /// `(session, display_path)` passed to [`Self::toggle_file_reviewed`].
+    toggled_reviewed: Mutex<Vec<(SessionId, String)>>,
+    /// `(session, side, path)` passed to [`Self::fetch_diff_blob`].
+    fetched_blobs: Mutex<Vec<(SessionId, DiffSide, String)>>,
     conn_tx: watch::Sender<ConnectionState>,
     conn_rx: watch::Receiver<ConnectionState>,
     gen_tx: watch::Sender<u64>,
@@ -64,7 +78,14 @@ impl MockBackend {
             fail: Mutex::new(false),
             deleted: Mutex::new(Vec::new()),
             created: Mutex::new(Vec::new()),
+            reconciled: Mutex::new(Vec::new()),
+            restarted: Mutex::new(Vec::new()),
             pr_refresh_calls: Mutex::new(0),
+            listed_comments: Mutex::new(Vec::new()),
+            created_comments: Mutex::new(Vec::new()),
+            applied_comments: Mutex::new(Vec::new()),
+            toggled_reviewed: Mutex::new(Vec::new()),
+            fetched_blobs: Mutex::new(Vec::new()),
             conn_tx,
             conn_rx,
             gen_tx,
@@ -99,9 +120,44 @@ impl MockBackend {
         self.created.lock().unwrap().clone()
     }
 
+    /// Sessions passed to [`Self::reconcile_one_section`], in call order.
+    pub fn reconciled_sessions(&self) -> Vec<SessionId> {
+        self.reconciled.lock().unwrap().clone()
+    }
+
+    /// Sessions passed to [`Self::restart_session`], in call order.
+    pub fn restarted_sessions(&self) -> Vec<SessionId> {
+        self.restarted.lock().unwrap().clone()
+    }
+
     /// How many times [`Self::request_pr_refresh`] has been called.
     pub fn pr_refresh_count(&self) -> usize {
         *self.pr_refresh_calls.lock().unwrap()
+    }
+
+    /// Sessions passed to [`Self::list_comments`], in call order.
+    pub fn listed_comment_sessions(&self) -> Vec<SessionId> {
+        self.listed_comments.lock().unwrap().clone()
+    }
+
+    /// Sessions passed to [`Self::create_comment`], in call order.
+    pub fn created_comment_sessions(&self) -> Vec<SessionId> {
+        self.created_comments.lock().unwrap().clone()
+    }
+
+    /// Sessions passed to [`Self::apply_comments`], in call order.
+    pub fn applied_comment_sessions(&self) -> Vec<SessionId> {
+        self.applied_comments.lock().unwrap().clone()
+    }
+
+    /// `(session, display_path)` pairs passed to [`Self::toggle_file_reviewed`].
+    pub fn toggled_reviewed_files(&self) -> Vec<(SessionId, String)> {
+        self.toggled_reviewed.lock().unwrap().clone()
+    }
+
+    /// `(session, side, path)` tuples passed to [`Self::fetch_diff_blob`].
+    pub fn fetched_diff_blobs(&self) -> Vec<(SessionId, DiffSide, String)> {
+        self.fetched_blobs.lock().unwrap().clone()
     }
 
     fn guard(&self) -> BResult<()> {
@@ -194,15 +250,43 @@ impl CommanderBackend for MockBackend {
     async fn create_session(&self, opts: CreateSessionOpts) -> BResult<SessionId> {
         self.guard()?;
         self.created.lock().unwrap().push(opts);
-        Ok(SessionId::new())
+        let id = SessionId::new();
+        // Surface the new session in the served snapshot so a TUI refresh picks
+        // it up (mirrors a real backend committing the row), by cloning an
+        // existing session's shape under the fresh id. Leaves the snapshot
+        // unchanged when the mock has no template session.
+        {
+            let mut snap = self.snapshot.lock().unwrap();
+            if let Some(mut created) = snap.sessions.first().cloned() {
+                let project_id = created.project_id;
+                created.session_id = id;
+                created.id = id.to_string();
+                created.title = "created".to_string();
+                snap.sessions.push(created);
+                // The project-grouped tree renders from each project's
+                // `session_ids`, so register the new session there too.
+                if let Some(project) = snap.projects.iter_mut().find(|p| p.id == project_id) {
+                    project.session_ids.push(id);
+                }
+            }
+        }
+        Ok(id)
+    }
+
+    async fn reconcile_one_section(&self, id: SessionId) -> BResult<()> {
+        self.guard()?;
+        self.reconciled.lock().unwrap().push(id);
+        Ok(())
     }
 
     async fn kill_session(&self, _id: SessionId) -> BResult<()> {
         self.guard()
     }
 
-    async fn restart_session(&self, _id: SessionId) -> BResult<()> {
-        self.guard()
+    async fn restart_session(&self, id: SessionId) -> BResult<()> {
+        self.guard()?;
+        self.restarted.lock().unwrap().push(id);
+        Ok(())
     }
 
     async fn delete_session(&self, id: SessionId) -> BResult<()> {
@@ -262,8 +346,9 @@ impl CommanderBackend for MockBackend {
         self.unimpl()
     }
 
-    async fn list_comments(&self, _id: SessionId) -> BResult<Vec<Comment>> {
+    async fn list_comments(&self, id: SessionId) -> BResult<Vec<Comment>> {
         self.guard()?;
+        self.listed_comments.lock().unwrap().push(id);
         Ok(Vec::new())
     }
 
@@ -280,8 +365,9 @@ impl CommanderBackend for MockBackend {
         Ok(None)
     }
 
-    async fn create_comment(&self, _id: SessionId, _draft: NewComment) -> BResult<Uuid> {
+    async fn create_comment(&self, id: SessionId, _draft: NewComment) -> BResult<Uuid> {
         self.guard()?;
+        self.created_comments.lock().unwrap().push(id);
         Ok(Uuid::new_v4())
     }
 
@@ -289,22 +375,29 @@ impl CommanderBackend for MockBackend {
         self.guard()
     }
 
-    async fn apply_comments(&self, _id: SessionId) -> BResult<ApplyOutcome> {
-        self.unimpl()
+    async fn apply_comments(&self, id: SessionId) -> BResult<ApplyOutcome> {
+        self.guard()?;
+        self.applied_comments.lock().unwrap().push(id);
+        Ok(ApplyOutcome::Nothing)
     }
 
-    async fn toggle_file_reviewed(&self, _id: SessionId, _display_path: String) -> BResult<bool> {
+    async fn toggle_file_reviewed(&self, id: SessionId, display_path: String) -> BResult<bool> {
         self.guard()?;
+        self.toggled_reviewed
+            .lock()
+            .unwrap()
+            .push((id, display_path));
         Ok(false)
     }
 
     async fn fetch_diff_blob(
         &self,
-        _id: SessionId,
-        _side: DiffSide,
-        _path: String,
+        id: SessionId,
+        side: DiffSide,
+        path: String,
     ) -> BResult<Vec<u8>> {
         self.guard()?;
+        self.fetched_blobs.lock().unwrap().push((id, side, path));
         Ok(Vec::new())
     }
 

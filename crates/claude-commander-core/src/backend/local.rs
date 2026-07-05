@@ -136,14 +136,11 @@ impl LocalBackend {
     /// project-shell equivalent of [`CommanderBackend::attach`]'s agent-pane
     /// resolution). Recreates the shell if its pane died.
     pub async fn project_shell_name(&self, project_id: ProjectId) -> BResult<String> {
-        // `get_project_shell_attach_command` returns `tmux attach-session -t
-        // <name>`; the caller wants just the name.
-        let cmd = self
+        Ok(self
             .service
             .session_manager()
-            .get_project_shell_attach_command(&project_id)
-            .await?;
-        Ok(cmd.rsplit(' ').next().unwrap_or(&cmd).to_string())
+            .get_project_shell_session_name(&project_id)
+            .await?)
     }
 
     /// Create or revive the persistent commander tmux session and return its

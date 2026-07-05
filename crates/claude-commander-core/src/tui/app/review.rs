@@ -1375,10 +1375,10 @@ impl App {
 
     /// Reload the session's comments and re-anchor them against the current
     /// diff (used after create/delete/apply, which don't change the diff).
-    async fn reload_review_comments(&mut self, state: &mut DiffReviewState) {
-        let mut anns = self
-            .service
-            .list_comments(&state.session_id)
+    pub(super) async fn reload_review_comments(&mut self, state: &mut DiffReviewState) {
+        let backend = self.backend_arc(self.backend_of_session(state.session_id));
+        let mut anns = backend
+            .list_comments(state.session_id)
             .await
             .unwrap_or_default();
         crate::comment::reanchor_comments(&mut anns, &state.diff);
@@ -1397,13 +1397,17 @@ impl App {
         state.comments = anns;
     }
 
-    /// Rescan the comment store and refresh the set of sessions with pending
-    /// comments (drives the session-list `*` marker). Run at startup to surface
-    /// comments left over from a previous run.
-    pub(super) async fn refresh_comment_indicators(&mut self) {
-        if let Ok(set) = self.service.sessions_with_pending_comments().await {
-            self.ui_state.sessions_with_comments = set;
-        }
+    /// Refresh the set of sessions with pending comments (drives the
+    /// session-list `*` marker). Run at startup to surface comments left over
+    /// from a previous run. Unions the pending-comment ids each backend already
+    /// carries in its cached snapshot, so a remote session's marker shows
+    /// without a network call — no per-backend query, no local-only bias.
+    pub(super) fn refresh_comment_indicators(&mut self) {
+        self.ui_state.sessions_with_comments = self
+            .backends
+            .iter()
+            .flat_map(|h| h.view.snapshot.pending_comment_sessions.iter().copied())
+            .collect();
     }
 
     /// Handle a key while the review view is open. `state` has been moved out
@@ -1490,7 +1494,8 @@ impl App {
             }
             KeyCode::Char('d') if state.focus == ReviewFocus::Body => {
                 if let Some(id) = state.comment_at_cursor() {
-                    if let Err(e) = self.service.delete_comment(&state.session_id, id).await {
+                    let backend = self.backend_arc(self.backend_of_session(state.session_id));
+                    if let Err(e) = backend.delete_comment(state.session_id, id).await {
                         self.set_review_status(&format!("Delete failed: {e}"));
                     } else {
                         self.reload_review_comments(&mut state).await;
@@ -1503,9 +1508,9 @@ impl App {
             // focus); marking advances to the next unreviewed file.
             KeyCode::Char('m') => {
                 if let Some(file) = state.current_file().cloned() {
-                    match self
-                        .service
-                        .toggle_file_reviewed(&state.session_id, &file)
+                    let backend = self.backend_arc(self.backend_of_session(state.session_id));
+                    match backend
+                        .toggle_file_reviewed(state.session_id, file.display_path().to_string())
                         .await
                     {
                         Ok(now_reviewed) => {
@@ -1574,24 +1579,16 @@ impl App {
             .borrow_mut()
             .insert(key, ImageEntry::Pending);
 
-        let (worktree, base) = match self.service.review_blob_source(&state.session_id).await {
-            Ok(src) => src,
-            Err(e) => {
-                self.review_images
-                    .borrow_mut()
-                    .insert((path, side), ImageEntry::Failed(e.to_string()));
-                return;
-            }
-        };
-
+        let backend = self.backend_arc(self.backend_of_session(state.session_id));
+        let sid = state.session_id;
         let tx = self.event_loop.sender();
         let generation = self.review_image_gen.get();
         tokio::spawn(async move {
-            let bytes = match side {
-                DiffSide::Old => crate::git::read_base_blob(&worktree, &base, &path).await,
-                DiffSide::New => crate::git::read_worktree_file(&worktree, &path).await,
-            };
-            // Decode off the async runtime — it's CPU-bound.
+            // Fetch the blob bytes through the backend that owns the session — a
+            // local git read, or a remote fetch over the wire — then decode off
+            // the async runtime, since decoding is CPU-bound. A fetch failure is
+            // reported as `Failed` via the same event path as a decode failure.
+            let bytes = backend.fetch_diff_blob(sid, side, path.clone()).await;
             let image = match bytes {
                 Err(e) => Err(format!("read failed: {e}")),
                 Ok(b) => tokio::task::spawn_blocking(move || {
@@ -1629,7 +1626,8 @@ impl App {
                 }
                 let range = draft.range;
                 if let Some(ann) = state.build_draft(range, draft.input.value().to_string()) {
-                    match self.service.create_comment(&state.session_id, ann).await {
+                    let backend = self.backend_arc(self.backend_of_session(state.session_id));
+                    match backend.create_comment(state.session_id, ann).await {
                         Ok(_) => {
                             state.visual_anchor = None;
                             self.reload_review_comments(state).await;
@@ -1653,7 +1651,8 @@ impl App {
     /// Apply staged comments and report the outcome.
     async fn apply_review(&mut self, state: &mut DiffReviewState) {
         use crate::comment::ApplyOutcome;
-        match self.service.apply_comments(&state.session_id).await {
+        let backend = self.backend_arc(self.backend_of_session(state.session_id));
+        match backend.apply_comments(state.session_id).await {
             Ok(ApplyOutcome::Nothing) => self.set_review_status("No staged comments to apply"),
             Ok(ApplyOutcome::Blocked { drifted }) => self.set_review_status(&format!(
                 "{} drifted comment(s) block apply — review or delete them",

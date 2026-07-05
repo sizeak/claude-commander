@@ -67,7 +67,13 @@ pub enum StateUpdate {
     /// Error occurred
     Error { message: String },
     /// Session creation completed successfully
-    SessionCreated { session_id: SessionId },
+    SessionCreated {
+        session_id: SessionId,
+        /// Backend the session was created on, so the handler refreshes the
+        /// right view (and section-reconciles the right backend) before it
+        /// tries to select the new row. Indexes the `Vec<BackendHandle>`.
+        backend_id: usize,
+    },
     /// Session creation failed. The backend removes its own half-created
     /// (`Creating`) session on failure, so this carries only the message.
     SessionCreateFailed { message: String },
@@ -111,12 +117,42 @@ pub enum StateUpdate {
         backend_id: usize,
         state: crate::backend::ConnectionState,
     },
+    /// The Checkout modal's initial (no-fetch) branch listing finished on a
+    /// background task — populate the modal's list without clearing `fetching`,
+    /// since the fetch-refresh is still running and will clear it. Spawned so a
+    /// slow remote listing never blocks the event loop before the modal opens.
+    CheckoutBranchesLoaded {
+        project_id: ProjectId,
+        branches: Vec<(String, bool)>,
+    },
     /// Background `git fetch origin` kicked off by the Checkout modal
     /// has finished — the modal should refresh its branch list if still open.
     CheckoutFetchComplete {
         project_id: ProjectId,
         /// Fresh branch list produced after the fetch completed.
         branches: Vec<(String, bool)>,
+    },
+    /// A background session restart finished. `Ok` toasts success; `Err` carries
+    /// a transport/backend error string. `backend_id` indexes the backend the
+    /// restart ran on, so the post-op refresh hits the right view.
+    RestartFinished {
+        backend_id: usize,
+        result: std::result::Result<(), String>,
+    },
+    /// A background per-session mutation (rename, section move) applied — refresh
+    /// the owning backend's view + tree and keep the session selected. Spawned so
+    /// a slow remote mutation never blocks the event loop.
+    SessionMutationApplied {
+        backend_id: usize,
+        session_id: SessionId,
+    },
+    /// A newly-opened New Session modal's program picker finished loading from a
+    /// remote backend's `create_options` on a background task — patch the picker
+    /// in place if that modal is still open for the same project. Spawned so a
+    /// slow remote never blocks the event loop before the modal appears.
+    NewSessionProgramsLoaded {
+        project_id: ProjectId,
+        picker: super::app::ProgramPicker,
     },
     /// Preview/diff/shell data ready from background fetch
     PreviewReady {

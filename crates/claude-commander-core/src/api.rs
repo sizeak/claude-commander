@@ -738,8 +738,8 @@ impl CommanderService {
     }
 
     /// Resolve the worktree path and review base for a session under a brief
-    /// read lock. Shared by `open_review`, `refresh_review_if_changed`,
-    /// `review_blob_source` and `fetch_diff_blob`.
+    /// read lock. Shared by `open_review`, `refresh_review_if_changed` and
+    /// `fetch_diff_blob`.
     async fn review_target(&self, session_id: &SessionId) -> Result<(PathBuf, ReviewBase)> {
         let state = self.store.read().await;
         let session = state
@@ -785,16 +785,6 @@ impl CommanderService {
             reviewed,
             content_hash,
         })
-    }
-
-    /// A session's worktree path and the resolved base git ref the review diff
-    /// is computed against. These are the inputs a background image fetch needs
-    /// to read blob bytes (via `crate::git::read_base_blob`/`read_worktree_file`)
-    /// without holding the non-`Send` service handle across the task boundary.
-    pub async fn review_blob_source(&self, session_id: &SessionId) -> Result<(PathBuf, String)> {
-        let (worktree_path, review_base) = self.review_target(session_id).await?;
-        let base = review_base.git_ref(&worktree_path).await;
-        Ok((worktree_path, base))
     }
 
     /// Fetch the raw bytes of one side of a binary file in a session's review

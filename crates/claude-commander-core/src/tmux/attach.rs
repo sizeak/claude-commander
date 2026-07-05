@@ -171,8 +171,12 @@ pub struct AttachConfig {
     /// is forwarded to the pane verbatim.
     pub switcher_enabled: bool,
     /// The tmux session name currently attached, for the switcher popup and the
-    /// voice feedback `tmux display-message`. `None` (e.g. a remote attach)
-    /// disables both.
+    /// voice feedback `tmux display-message`. The TUI sets this for remote
+    /// attaches too (the session's tmux name rides in on the wire), so it's
+    /// normally `Some`. The switcher is gated separately by `switcher_enabled`
+    /// (off for remote), and the voice `display-message` is best-effort — it
+    /// runs against the operator's local tmux, so for a remote session it may
+    /// simply target a name that isn't there. `None` disables both.
     pub session_name: Option<String>,
 }
 

@@ -323,6 +323,15 @@ fn handshake_error(message: &str) -> BackendError {
 /// honours `resize`/`detach` control actions, answers pings, and publishes the
 /// terminal [`AttachEnd`]. Returns (and closes the socket) on the first teardown
 /// condition.
+///
+/// Wedge case: the server→caller `write_all` applies backpressure by design, so
+/// a caller that stops *reading* its `to_caller` end without *dropping* it can
+/// stall this branch — a `detach`/`resize` from `control_rx` still lands (that's
+/// a separate select branch), but a server-side end can't be surfaced until the
+/// stalled write unblocks or the caller drops the stream. In practice the
+/// caller is the attach [`RemoteTerminator`], whose `Drop` aborts the pump task, so
+/// the stall is bounded by the caller releasing its handle rather than being
+/// unbounded.
 async fn run_pump(
     mut ws_write: SplitSink<WsStream, Message>,
     mut ws_read: SplitStream<WsStream>,

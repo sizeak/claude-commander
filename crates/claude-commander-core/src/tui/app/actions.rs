@@ -57,6 +57,32 @@ pub(super) fn delete_confirm_message(
     message
 }
 
+/// The Restart-confirmation body. A local session's resume behaviour is
+/// governed by this client's `resume_session` config, so the message can
+/// promise `/resume` semantics. A remote session's resume behaviour lives in
+/// the server's config, which this client can't read — so it gets neutral
+/// wording naming the session and promising no resume.
+pub(super) fn restart_confirm_message(
+    is_local: bool,
+    resume_session: bool,
+    title: Option<&str>,
+) -> String {
+    if !is_local {
+        let subject = match title {
+            Some(title) => format!("\"{title}\""),
+            None => "this session".to_string(),
+        };
+        return format!(
+            "Restart session {subject}?\nThis will kill its tmux session and start a fresh one."
+        );
+    }
+    if resume_session {
+        "This will kill the current tmux session and start a fresh one.\nClaude will pick up where it left off via /resume.".to_string()
+    } else {
+        "This will kill the current tmux session and start a fresh one.\nIf you want to pick up where you left off, you can use /resume.".to_string()
+    }
+}
+
 /// One mouse-wheel step over a list selection: move a single row, clamping
 /// at the ends rather than wrapping like keyboard navigation — a wheel tick
 /// at the bottom of a list jumping back to the top would be disorienting.
@@ -426,33 +452,35 @@ impl App {
         picker
     }
 
-    /// The new-session program picker for `backend`. The local backend's list
-    /// comes from local config; a remote backend's comes from its
-    /// `create_options()` (falling back to local config if that query fails), so
-    /// the picker offers the harnesses that backend actually supports.
-    async fn new_program_picker_for(&self, backend: BackendId) -> super::ProgramPicker {
+    /// For a remote `backend`, spawn a background task that loads its
+    /// `create_options` and posts [`StateUpdate::NewSessionProgramsLoaded`] to
+    /// patch the just-opened New Session modal's program picker with the
+    /// harnesses that backend actually supports. No-op for the local backend
+    /// (its picker comes from local config and is set synchronously) so the
+    /// event loop never blocks on a remote `create_options` request.
+    fn spawn_remote_program_picker(&self, backend: BackendId, project_id: ProjectId) {
         if backend == LOCAL_BACKEND_ID {
-            return self.new_program_picker();
+            return;
         }
-        match self.backend_arc(backend).create_options().await {
-            Ok(opts) if !opts.programs.is_empty() => {
-                let selected = opts
-                    .programs
-                    .iter()
-                    .position(|e| e.command == opts.default_program)
-                    .unwrap_or(0);
-                let choices = opts
-                    .programs
-                    .into_iter()
-                    .map(|p| crate::config::ProgramEntry {
-                        label: p.label,
-                        command: p.command,
-                    })
-                    .collect();
-                super::ProgramPicker { choices, selected }
-            }
-            _ => self.new_program_picker(),
-        }
+        let backend = self.backend_arc(backend);
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let Some(picker) = backend
+                .create_options()
+                .await
+                .ok()
+                .and_then(program_picker_from_options)
+            else {
+                // Query failed or offered no programs — leave the local fallback
+                // picker the modal already shows.
+                return;
+            };
+            let _ = tx
+                .send(AppEvent::StateUpdate(
+                    StateUpdate::NewSessionProgramsLoaded { project_id, picker },
+                ))
+                .await;
+        });
     }
 
     pub(super) async fn handle_new_session(&mut self) {
@@ -481,7 +509,9 @@ impl App {
                 .selected()
                 .and_then(|idx| super::selection::section_at(&self.ui_state.list_items, idx));
             let project_picker = self.new_project_picker(backend, project_id).await;
-            let program_picker = self.new_program_picker_for(backend).await;
+            // Open with the local-config picker immediately; for a remote
+            // backend, a background task swaps in its supported programs when
+            // `create_options` returns, so the modal never waits on that request.
             self.ui_state.modal = Modal::Input {
                 title: "New Session".to_string(),
                 prompt: "Enter session name:".to_string(),
@@ -492,11 +522,12 @@ impl App {
                 },
                 existing_branches,
                 project_picker: Some(project_picker),
-                program_picker: Some(program_picker),
+                program_picker: Some(self.new_program_picker()),
                 focus: super::InputFocus::Name,
                 expanded: false,
                 mask: false,
             };
+            self.spawn_remote_program_picker(backend, project_id);
         } else {
             self.ui_state.status_message = Some((
                 "Select a project first (use N to add one)".to_string(),
@@ -554,7 +585,9 @@ impl App {
         } else {
             None
         };
-        let program_picker = self.new_program_picker_for(sref.backend).await;
+        // Open with the local-config picker immediately; for a remote backend a
+        // background task swaps in its supported programs (keyed by project) so
+        // the modal never waits on `create_options`.
         self.ui_state.modal = Modal::Input {
             title: format!("New Session Stacked on \"{}\"", parent_title),
             prompt: "Enter session name:".to_string(),
@@ -565,11 +598,12 @@ impl App {
             },
             existing_branches,
             project_picker: None,
-            program_picker: Some(program_picker),
+            program_picker: Some(self.new_program_picker()),
             focus: super::InputFocus::Name,
             expanded: false,
             mask: false,
         };
+        self.spawn_remote_program_picker(sref.backend, project_id);
     }
 
     /// Handle `Cascade merge main` — walk to the base of the selected
@@ -804,51 +838,48 @@ impl App {
         }
         let backend = self.backend_arc(backend_id);
 
-        let all_branches = match backend.list_branches(project_id, false).await {
-            Ok(infos) => {
-                branch_entries_from_pairs(infos.into_iter().map(|b| (b.name, b.is_remote)))
-            }
-            Err(e) => {
-                self.ui_state.modal = Modal::Error {
-                    message: format!("Failed to list branches: {}", e),
-                };
-                return;
-            }
-        };
-
-        let filtered = all_branches.clone();
+        // Open the modal immediately with an empty, spinning list — both the
+        // initial (no-fetch) listing and the fetch-refresh run on background
+        // tasks so a slow/remote backend never blocks the event loop. The repo
+        // lives where the backend runs (locally in-process, remotely
+        // server-side), so both listings go through the backend.
         self.ui_state.modal = Modal::CheckoutBranch {
             project_id,
             query: super::Input::default(),
-            all_branches,
-            filtered,
+            all_branches: Vec::new(),
+            filtered: Vec::new(),
             selected_idx: 0,
             scroll: 0,
             fetching: true,
         };
 
-        // Kick off a fetch-refresh in the background; when it finishes, post a
-        // CheckoutFetchComplete state update so the modal (if still open) can
-        // refresh its list. The backend runs the `git fetch` where the repo
-        // actually lives (locally in-process, remotely server-side).
         let tx = self.event_loop.sender();
-        let backend_bg = backend.clone();
         tokio::spawn(async move {
-            let branches = backend_bg
+            // Phase 1: the fast, no-fetch listing populates the modal while the
+            // spinner stays up. Phase 2: the fetch-refresh replaces it and clears
+            // the spinner. A failed listing yields an empty list rather than an
+            // error modal — the user can retry or type a branch name.
+            let initial = backend
+                .list_branches(project_id, false)
+                .await
+                .map(pairs_from_branches)
+                .unwrap_or_default();
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::CheckoutBranchesLoaded {
+                    project_id,
+                    branches: initial,
+                }))
+                .await;
+
+            let fetched = backend
                 .list_branches(project_id, true)
                 .await
-                .map(|infos| {
-                    infos
-                        .into_iter()
-                        .map(|b| (b.name, b.is_remote))
-                        .collect::<Vec<_>>()
-                })
+                .map(pairs_from_branches)
                 .unwrap_or_default();
-
             let _ = tx
                 .send(AppEvent::StateUpdate(StateUpdate::CheckoutFetchComplete {
                     project_id,
-                    branches,
+                    branches: fetched,
                 }))
                 .await;
         });
@@ -1256,16 +1287,19 @@ impl App {
 
     /// Handle restart session - show confirmation
     pub(super) fn handle_restart_session(&mut self) {
-        if let Some(session_id) = self.ui_state.selected_session_id.map(|r| r.id) {
-            let message = if self.config.resume_session {
-                "This will kill the current tmux session and start a fresh one.\nClaude will pick up where it left off via /resume.".to_string()
-            } else {
-                "This will kill the current tmux session and start a fresh one.\nIf you want to pick up where you left off, you can use /resume.".to_string()
-            };
+        if let Some(sref) = self.ui_state.selected_session_id {
+            let title = self.session(sref).map(|s| s.title.clone());
+            let message = restart_confirm_message(
+                sref.backend == LOCAL_BACKEND_ID,
+                self.config.resume_session,
+                title.as_deref(),
+            );
             self.ui_state.modal = Modal::Confirm {
                 title: "Restart Session".to_string(),
                 message,
-                on_confirm: ConfirmAction::RestartSession { session_id },
+                on_confirm: ConfirmAction::RestartSession {
+                    session_id: sref.id,
+                },
             };
         }
     }
@@ -1609,25 +1643,22 @@ impl App {
     /// "Auto" entry, which must fully re-evaluate from the predicates
     /// rather than honour the forward-only rule that `apply_assignment`
     /// uses for the background poller.
-    pub(super) async fn apply_section_move(
-        &mut self,
-        session_id: SessionId,
-        target: Option<String>,
-    ) {
+    pub(super) fn apply_section_move(&mut self, session_id: SessionId, target: Option<String>) {
+        // Spawn the section move so a slow/degraded remote never blocks the event
+        // loop; `SessionMutationApplied` refreshes the view/tree, reselects the
+        // (relocated) session, and refreshes its preview.
         let backend_id = self.backend_of_session(session_id);
-        let _ = self
-            .backend_arc(backend_id)
-            .set_section(session_id, target)
-            .await;
-        self.refresh_backend_view(backend_id).await;
-        self.refresh_list_items().await;
-
-        // The session has moved to a new position in the rebuilt list. Keep it
-        // selected by finding its new index and moving the cursor there, then
-        // refresh the preview pane for the (unchanged) selection.
-        if self.select_session_in_tree(session_id) {
-            self.spawn_preview_update();
-        }
+        let backend = self.backend_arc(backend_id);
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let _ = backend.set_section(session_id, target).await;
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::SessionMutationApplied {
+                    backend_id: backend_id.0,
+                    session_id,
+                }))
+                .await;
+        });
     }
 
     /// Handle rename session - show input modal pre-filled with current title.
@@ -1669,7 +1700,10 @@ impl App {
         let tx = self.event_loop.sender();
         tokio::spawn(async move {
             let update = match backend.create_session(opts).await {
-                Ok(session_id) => StateUpdate::SessionCreated { session_id },
+                Ok(session_id) => StateUpdate::SessionCreated {
+                    session_id,
+                    backend_id: backend_id.0,
+                },
                 Err(e) => StateUpdate::SessionCreateFailed {
                     message: format!("Failed to create session: {e}"),
                 },
@@ -1816,13 +1850,21 @@ impl App {
                     ));
                     return;
                 }
+                // Spawn the rename so a slow/degraded remote never blocks the
+                // event loop; `SessionMutationApplied` refreshes the view/tree
+                // and keeps the renamed session selected.
                 let backend_id = self.backend_of_session(session_id);
-                let _ = self
-                    .backend_arc(backend_id)
-                    .rename_session(session_id, new_title)
-                    .await;
-                self.refresh_backend_view(backend_id).await;
-                self.refresh_list_items().await;
+                let backend = self.backend_arc(backend_id);
+                let tx = self.event_loop.sender();
+                tokio::spawn(async move {
+                    let _ = backend.rename_session(session_id, new_title).await;
+                    let _ = tx
+                        .send(AppEvent::StateUpdate(StateUpdate::SessionMutationApplied {
+                            backend_id: backend_id.0,
+                            session_id,
+                        }))
+                        .await;
+                });
             }
             InputAction::ScanDirectory => {
                 let expanded = crate::tui::path_completer::expand_tilde(value.trim());
@@ -2013,26 +2055,27 @@ impl App {
                 ));
             }
             ConfirmAction::RestartSession { session_id } => {
+                // Spawn the restart so a slow/degraded remote never blocks the
+                // event loop; `RestartFinished` refreshes the view and toasts.
                 let backend_id = self.backend_of_session(session_id);
-                match self
-                    .backend_arc(backend_id)
-                    .restart_session(session_id)
-                    .await
-                {
-                    Ok(_) => {
-                        self.ui_state.status_message = Some((
-                            "Session restarted".to_string(),
-                            Instant::now() + Duration::from_secs(3),
-                        ));
-                        self.refresh_backend_view(backend_id).await;
-                        self.refresh_list_items().await;
-                    }
-                    Err(e) => {
-                        self.ui_state.modal = Modal::Error {
-                            message: format!("Failed to restart: {}", e),
-                        };
-                    }
-                }
+                self.ui_state.status_message = Some((
+                    "Restarting session…".to_string(),
+                    Instant::now() + Duration::from_secs(30),
+                ));
+                let backend = self.backend_arc(backend_id);
+                let tx = self.event_loop.sender();
+                tokio::spawn(async move {
+                    let result = backend
+                        .restart_session(session_id)
+                        .await
+                        .map_err(|e| e.to_string());
+                    let _ = tx
+                        .send(AppEvent::StateUpdate(StateUpdate::RestartFinished {
+                            backend_id: backend_id.0,
+                            result,
+                        }))
+                        .await;
+                });
             }
             ConfirmAction::RemoveProject { project_id } => {
                 // `backend.remove_project` owns the teardown — kill the project
@@ -2111,6 +2154,34 @@ pub(super) fn existing_branch_names(repo_path: &std::path::Path) -> Option<Vec<S
             None
         }
     }
+}
+
+/// Flatten a backend's `BranchInfo` list into the `(name, is_remote)` pairs the
+/// Checkout state updates carry (and [`branch_entries_from_pairs`] consumes).
+fn pairs_from_branches(infos: Vec<crate::api::BranchInfo>) -> Vec<(String, bool)> {
+    infos.into_iter().map(|b| (b.name, b.is_remote)).collect()
+}
+
+/// Build a `ProgramPicker` from a backend's `create_options`, or `None` when the
+/// options carry no programs (the caller falls back to the local-config picker).
+fn program_picker_from_options(opts: crate::api::CreateOptions) -> Option<super::ProgramPicker> {
+    if opts.programs.is_empty() {
+        return None;
+    }
+    let selected = opts
+        .programs
+        .iter()
+        .position(|e| e.command == opts.default_program)
+        .unwrap_or(0);
+    let choices = opts
+        .programs
+        .into_iter()
+        .map(|p| crate::config::ProgramEntry {
+            label: p.label,
+            command: p.command,
+        })
+        .collect();
+    Some(super::ProgramPicker { choices, selected })
 }
 
 /// Load the branch list for a repo path and convert each entry into
