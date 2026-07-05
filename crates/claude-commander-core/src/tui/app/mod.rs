@@ -115,6 +115,80 @@ fn should_auto_restart_ended(session_name: &str, consecutive_ends: u8) -> bool {
         && consecutive_ends < 3
 }
 
+/// Fetch a backend's workspace snapshot + agent states and forward them as a
+/// [`StateUpdate::BackendChanged`] over `tx`. Shared by the per-backend
+/// change-feed task and the post-mutation forced refresh
+/// ([`App::spawn_backend_view_refresh`]) so both deliver identical updates off
+/// the event loop. A failed snapshot fetch is skipped (the cached view keeps its
+/// last-good contents) without killing a long-lived feed loop; a failed
+/// agent-states fetch falls back to empty. Returns `false` only when the event
+/// channel has closed, so a feed loop knows to stop.
+async fn fetch_and_send_backend_change(
+    backend_id: usize,
+    backend: Arc<dyn CommanderBackend>,
+    tx: tokio::sync::mpsc::Sender<AppEvent>,
+) -> bool {
+    let snapshot = match backend.workspace_snapshot().await {
+        Ok(s) => s,
+        Err(e) => {
+            debug!("Snapshot refresh for backend {backend_id} failed: {e}");
+            return true;
+        }
+    };
+    let states =
+        backend
+            .agent_states(false)
+            .await
+            .unwrap_or_else(|_| crate::api::AgentStatesSnapshot {
+                states: Default::default(),
+                commander_running: false,
+            });
+    tx.send(AppEvent::StateUpdate(StateUpdate::BackendChanged {
+        backend_id,
+        snapshot: Box::new(snapshot),
+        states: Box::new(states),
+    }))
+    .await
+    .is_ok()
+}
+
+/// The status-toast text to surface when the attach loop ends on `result`, or
+/// `None` for a clean end (user detached / session ended, handled elsewhere)
+/// that needs no toast. A mid-attach transport error must not silently drop the
+/// operator back to the tree — the remote attach path promises a toast — so it
+/// maps to a message here. Pure so the mapping is unit-testable without the
+/// (headless-untestable) attach loop.
+pub(super) fn attach_end_toast(result: &crate::tmux::AttachResult) -> Option<String> {
+    match result {
+        crate::tmux::AttachResult::Error(e) => Some(format!("Attach failed: {e}")),
+        _ => None,
+    }
+}
+
+/// What startup should do given the local tmux probe result and whether any
+/// remote servers are configured.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum TmuxStartup {
+    /// tmux is available — start normally.
+    Proceed,
+    /// tmux is unavailable but remotes are configured — run remote-only,
+    /// marking the local backend Degraded with this reason.
+    DegradeLocal(String),
+    /// tmux is unavailable and no remotes are configured — nothing to drive.
+    Abort(String),
+}
+
+/// Decide how [`App::run`] reacts to the local tmux probe. `tmux_err` is the
+/// probe's error message (`None` when tmux is present). Kept as a pure fn so the
+/// branch logic is unit-testable without spawning the (headless-untestable) TUI.
+pub(super) fn tmux_startup_decision(tmux_err: Option<String>, has_remotes: bool) -> TmuxStartup {
+    match (tmux_err, has_remotes) {
+        (None, _) => TmuxStartup::Proceed,
+        (Some(reason), true) => TmuxStartup::DegradeLocal(reason),
+        (Some(reason), false) => TmuxStartup::Abort(reason),
+    }
+}
+
 /// What the TUI attaches to once it tears down for an attach. Set by the
 /// select / shell / commander handlers and consumed by the attach loop in
 /// [`App::run`], which drives it over [`crate::tmux::run_attach`].
@@ -1740,27 +1814,7 @@ impl App {
             let tx = self.event_loop.sender();
             tasks.push(tokio::spawn(async move {
                 while feed.changed().await {
-                    let snapshot = match backend.workspace_snapshot().await {
-                        Ok(s) => s,
-                        Err(e) => {
-                            debug!("Change-feed snapshot for backend {backend_id} failed: {e}");
-                            continue;
-                        }
-                    };
-                    let states = backend.agent_states(false).await.unwrap_or_else(|_| {
-                        crate::api::AgentStatesSnapshot {
-                            states: Default::default(),
-                            commander_running: false,
-                        }
-                    });
-                    if tx
-                        .send(AppEvent::StateUpdate(StateUpdate::BackendChanged {
-                            backend_id,
-                            snapshot: Box::new(snapshot),
-                            states: Box::new(states),
-                        }))
-                        .await
-                        .is_err()
+                    if !fetch_and_send_backend_change(backend_id, backend.clone(), tx.clone()).await
                     {
                         break;
                     }
@@ -1771,10 +1825,39 @@ impl App {
         tasks
     }
 
+    /// Force a snapshot + agent-state refresh of backend `id` off the event
+    /// loop, delivered via [`StateUpdate::BackendChanged`] (which folds it in and
+    /// re-renders). Use after a user-initiated mutation so the tree reflects it
+    /// promptly without awaiting two remote GETs on the render path — the
+    /// change-feed task would eventually deliver an identical, idempotent
+    /// update, but this forces it now rather than a poll cycle later.
+    pub(super) fn spawn_backend_view_refresh(&self, id: BackendId) {
+        let backend = self.backend_arc(id);
+        let tx = self.event_loop.sender();
+        tokio::spawn(fetch_and_send_backend_change(id.0, backend, tx));
+    }
+
     /// Run the application
     pub async fn run(&mut self) -> Result<()> {
-        // Check tmux is available
-        self.service.check_tmux().await?;
+        // tmux drives every *local* session, but a remote-only operator can work
+        // entirely against configured servers. So a failed local tmux probe only
+        // aborts when there are no remotes; otherwise we degrade the local
+        // backend and carry on (its Degraded header, set after bootstrap below,
+        // explains why local sessions are unavailable).
+        let tmux_result = self.service.check_tmux().await;
+        let has_remotes = !self.config.remote_servers.is_empty();
+        let local_tmux_degraded = match tmux_startup_decision(
+            tmux_result.as_ref().err().map(|e| e.to_string()),
+            has_remotes,
+        ) {
+            TmuxStartup::Proceed => None,
+            TmuxStartup::DegradeLocal(reason) => {
+                warn!("tmux unavailable; running remote-only ({reason})");
+                Some(reason)
+            }
+            // Guaranteed `Err` here — propagate the original tmux error.
+            TmuxStartup::Abort(_) => return tmux_result,
+        };
 
         // One-time setup: reconcile each backend (drop stale Creating sessions,
         // reset transient stack states, sync status against live tmux, re-run
@@ -1793,6 +1876,16 @@ impl App {
         // the first list refresh, then start a per-backend change-feed task so
         // subsequent store/remote changes fold in off the render path.
         self.bootstrap_backend_views().await;
+        // If tmux is down but we're running remote-only, override the local
+        // backend's (otherwise Connected) header to Degraded so the tree shows
+        // why local sessions can't be driven.
+        if let Some(reason) = local_tmux_degraded
+            && let Some(handle) = self.backends.iter_mut().find(|h| h.id == LOCAL_BACKEND_ID)
+        {
+            handle.view.connection = ConnectionState::Degraded {
+                reason: format!("tmux unavailable: {reason}"),
+            };
+        }
         self.spawn_backend_change_feeds();
 
         // Cache gh availability for the enriched-PR info fetch (the PR-status
@@ -2115,7 +2208,16 @@ impl App {
                                     }
                                 }
                                 other => {
-                                    info!("Attach ended: {other:?}");
+                                    // A transport error (e.g. a remote WS drop)
+                                    // must toast rather than silently return to
+                                    // the tree; a clean detach just ends quietly.
+                                    if let Some(msg) = attach_end_toast(&other) {
+                                        warn!("{msg}");
+                                        self.ui_state.status_message =
+                                            Some((msg, Instant::now() + Duration::from_secs(4)));
+                                    } else {
+                                        info!("Attach ended: {other:?}");
+                                    }
                                     break;
                                 }
                             }

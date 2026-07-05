@@ -1285,87 +1285,82 @@ impl App {
             .map(|s| s.title.clone())
             .unwrap_or_default();
 
-        match self.backend_for(sref).open_review(session_id).await {
-            Ok(snapshot) => {
-                if snapshot.diff.is_empty() {
-                    self.set_review_status("No changes to review");
-                    return;
-                }
-                // Opt-out: build each file's render caches lazily on first
-                // navigation instead. Opens instantly; the first view of a large
-                // file can be briefly janky.
-                if !self.config.precompute_review_caches {
-                    let content_hash = snapshot.content_hash;
-                    let mut state = DiffReviewState::new(
-                        session_id,
-                        title,
-                        snapshot.base,
-                        snapshot.diff,
-                        snapshot.comments,
-                    );
-                    state.content_hash = content_hash;
-                    state.reviewed = snapshot.reviewed.into_iter().collect();
-                    state.select_first_unreviewed();
-                    self.reset_review_images();
-                    self.ensure_review_image(&state).await;
-                    self.ui_state.modal = Modal::ReviewDiff(Box::new(state));
-                    return;
-                }
-                // Default: precompute every file's render caches (word-diff
-                // segments + syntax highlighting) up front on a worker thread
-                // while a spinner shows, then swap in the ready-to-render view —
-                // trading the open-time wait for instant file switching.
-                let file_count = snapshot.diff.files.len();
-                self.ui_state.modal = Modal::Loading {
-                    title: "Preparing review".to_string(),
-                    message: format!(
-                        "Highlighting {file_count} file{}…",
-                        if file_count == 1 { "" } else { "s" }
-                    ),
-                    hint: Some(
-                        "Disable \"Precompute Review Caches\" in settings to skip this".to_string(),
-                    ),
-                };
-                let highlight = self.theme.mode == ColorMode::TrueColor;
-                let text_fg = self.theme.review_palette().text;
-                let tx = self.event_loop.sender();
-                let base = snapshot.base;
-                let diff = snapshot.diff;
-                let comments = snapshot.comments;
-                let reviewed = snapshot.reviewed;
-                let content_hash = snapshot.content_hash;
-                tokio::spawn(async move {
-                    // The precompute is CPU-bound and synchronous, so keep it off
-                    // the async worker pool; hand the diff back out with its
-                    // segments rather than cloning it.
-                    let (diff, segments) = tokio::task::spawn_blocking(move || {
-                        let segments = precompute_review_caches(&diff, highlight, text_fg);
-                        (diff, segments)
-                    })
-                    .await
-                    .expect("review precompute task panicked");
+        // Put the loading spinner up first, then fetch the review OFF the event
+        // loop. `open_review` composes the base→working-tree diff — for a remote
+        // session that's an HTTP GET with a 30s ceiling on a hung server, which
+        // must never block the render loop. The precompute (when enabled) runs
+        // in the same task, so there is a single modal covering fetch +
+        // highlighting rather than one modal for each. On completion the task
+        // posts `ReviewPrepared` (ready view), or `ReviewOpenFailed` for a
+        // no-changes / errored fetch.
+        self.ui_state.modal = Modal::Loading {
+            title: "Preparing review".to_string(),
+            message: "Loading changes…".to_string(),
+            hint: Some(
+                "Disable \"Precompute Review Caches\" in settings to skip highlighting".to_string(),
+            ),
+        };
+
+        let precompute = self.config.precompute_review_caches;
+        let highlight = self.theme.mode == ColorMode::TrueColor;
+        let text_fg = self.theme.review_palette().text;
+        let backend = self.backend_for(sref);
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let snapshot = match backend.open_review(session_id).await {
+                Ok(s) => s,
+                Err(e) => {
                     let _ = tx
-                        .send(AppEvent::StateUpdate(StateUpdate::ReviewPrepared {
-                            prepared: Box::new(ReviewPrepared {
-                                session_id,
-                                title,
-                                base,
-                                diff,
-                                comments,
-                                reviewed,
-                                segments,
-                                content_hash,
-                            }),
+                        .send(AppEvent::StateUpdate(StateUpdate::ReviewOpenFailed {
+                            error: Some(e.to_string()),
                         }))
                         .await;
-                });
+                    return;
+                }
+            };
+            if snapshot.diff.is_empty() {
+                let _ = tx
+                    .send(AppEvent::StateUpdate(StateUpdate::ReviewOpenFailed {
+                        error: None,
+                    }))
+                    .await;
+                return;
             }
-            Err(e) => {
-                self.ui_state.modal = Modal::Error {
-                    message: format!("Failed to open review: {e}"),
-                };
-            }
-        }
+            let base = snapshot.base;
+            let comments = snapshot.comments;
+            let reviewed = snapshot.reviewed;
+            let content_hash = snapshot.content_hash;
+            // Default: precompute every file's render caches (word-diff segments
+            // + syntax highlighting) up front so file switching is instant. The
+            // precompute is CPU-bound and synchronous, so keep it off the async
+            // worker pool; hand the diff back out with its segments rather than
+            // cloning it. Opt-out (`precompute` off): send no segments so each
+            // file's caches build lazily on first navigation.
+            let (diff, segments) = if precompute {
+                tokio::task::spawn_blocking(move || {
+                    let segments = precompute_review_caches(&snapshot.diff, highlight, text_fg);
+                    (snapshot.diff, segments)
+                })
+                .await
+                .expect("review precompute task panicked")
+            } else {
+                (snapshot.diff, Vec::new())
+            };
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::ReviewPrepared {
+                    prepared: Box::new(ReviewPrepared {
+                        session_id,
+                        title,
+                        base,
+                        diff,
+                        comments,
+                        reviewed,
+                        segments,
+                        content_hash,
+                    }),
+                }))
+                .await;
+        });
     }
 
     pub(super) fn set_review_status(&mut self, msg: &str) {

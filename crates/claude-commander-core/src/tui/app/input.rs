@@ -1163,7 +1163,7 @@ impl App {
                 self.handle_cascade_resume().await;
             }
             UserCommand::CascadeAbandon => {
-                self.handle_cascade_abandon().await;
+                self.handle_cascade_abandon();
             }
             UserCommand::PushStack => {
                 self.handle_push_stack();

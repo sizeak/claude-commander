@@ -349,11 +349,12 @@ impl CommanderBackend for RemoteBackend {
     fn capabilities(&self) -> BackendCapabilities {
         // Every capability here is an operator-local affordance the server host
         // can't satisfy: opening the operator's editor, a `tmux display-popup`
-        // switcher on the server, a dedicated commander tmux session, and the
-        // in-session Ctrl+\ shell-toggle (which flips panes on the *local* tmux
-        // server). Remote shell *attach* arrives in Phase F, but that's a
-        // separate `AttachKind`, not this in-session toggle — so all four stay
-        // honestly off.
+        // switcher on the server, a dedicated commander tmux session, and
+        // *project* shells (a local tmux affordance keyed on a local project id).
+        // Note `shell_toggle` gates only the project-shell path — the in-session
+        // Ctrl+\ toggle to a session's own shell pane works fine over WS
+        // (e2e-tested) via a separate `AttachKind::Shell`, independent of this
+        // flag. The name reads broader than it acts; left unchanged this round.
         BackendCapabilities {
             open_editor: false,
             switcher_popup: false,

@@ -52,6 +52,12 @@ impl App {
                 if let Some(Some((sid, title, prev_hash))) = review_refresh {
                     self.spawn_review_refresh(sid, title, prev_hash, false);
                 }
+                // Re-derive the session-list pending-comment (`*`) markers from
+                // every backend's cached snapshot. The startup call runs before
+                // remote snapshots exist (bootstrap skips remotes), so without
+                // this a remote's pending markers would never render and a
+                // cross-frontend marker change would never propagate.
+                self.refresh_comment_indicators();
                 self.refresh_list_items().await;
             }
             StateUpdate::BackendConnection { backend_id, state } => {
@@ -261,8 +267,10 @@ impl App {
                             "Session restarted".to_string(),
                             Instant::now() + Duration::from_secs(3),
                         ));
-                        self.refresh_backend_view(backend_id).await;
-                        self.refresh_list_items().await;
+                        // Refresh off the event loop; BackendChanged folds the
+                        // fresh view in and re-renders (no post-refresh
+                        // selection depends on it here).
+                        self.spawn_backend_view_refresh(backend_id);
                     }
                     Err(e) => {
                         self.ui_state.modal = Modal::Error {
@@ -329,6 +337,24 @@ impl App {
                     self.reset_review_images();
                     self.ensure_review_image(&state).await;
                     self.ui_state.modal = Modal::ReviewDiff(Box::new(state));
+                }
+            }
+            StateUpdate::ReviewOpenFailed { error } => {
+                // Only act while our own loading spinner is up (a later event
+                // could have replaced the modal). `None` → no changes (toast);
+                // `Some` → the fetch failed (error modal).
+                if matches!(self.ui_state.modal, Modal::Loading { .. }) {
+                    match error {
+                        Some(e) => {
+                            self.ui_state.modal = Modal::Error {
+                                message: format!("Failed to open review: {e}"),
+                            };
+                        }
+                        None => {
+                            self.ui_state.modal = Modal::None;
+                            self.set_review_status("No changes to review");
+                        }
+                    }
                 }
             }
             StateUpdate::ReviewImageLoaded {
@@ -400,6 +426,9 @@ impl App {
             StateUpdate::PushStackFinished { backend_id, result } => {
                 self.handle_push_stack_finished(BackendId(backend_id), result)
                     .await;
+            }
+            StateUpdate::CascadeAbandonFinished { backend_id, result } => {
+                self.handle_cascade_abandon_finished(BackendId(backend_id), result);
             }
             _ => {}
         }

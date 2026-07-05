@@ -216,6 +216,9 @@ state_sync_interval_ms = 2000
 # create/delete/review/attach parity over HTTP + WebSocket). Manage these
 # from the palette ("Add remote server" / "Remove remote server", which
 # includes a connection test) or by hand here — the file is hot-reloaded.
+# These are a list-of-tables, so unlike the scalar options above they are
+# NOT editable from the in-app settings modal; use the palette commands.
+# The name "local" is reserved for the built-in local machine.
 # [[remote_servers]]
 # name = "buildbox"              # unique display name (the tree header)
 # url = "http://buildbox:7878"   # base URL of claude-commander-server

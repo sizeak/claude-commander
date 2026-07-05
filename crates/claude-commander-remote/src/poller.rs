@@ -145,15 +145,20 @@ async fn run(
 }
 
 /// Move the connection watch into `Degraded` on a failed poll, notifying
-/// watchers only on the *transition* into degraded — mirror the Connected
-/// side's guard so a run of failed polls doesn't spam the connection watch.
-/// An already-degraded state stays put (reason and all). Returns whether a
-/// notification was sent.
+/// watchers on the transition into degraded *and* whenever the failure reason
+/// changes while already degraded — so a shifting fault (refused → 503) surfaces
+/// its current cause rather than being pinned to the first one. A repeated
+/// failure with an unchanged reason is still deduped (mirroring the Connected
+/// side's guard) so a run of identical failed polls doesn't spam the watch.
+/// Returns whether a notification was sent.
 fn mark_degraded(conn_tx: &watch::Sender<ConnectionState>, reason: String) -> bool {
-    conn_tx.send_if_modified(|state| {
-        if matches!(state, ConnectionState::Degraded { .. }) {
-            false
-        } else {
+    conn_tx.send_if_modified(|state| match state {
+        ConnectionState::Degraded { reason: existing } if *existing == reason => false,
+        ConnectionState::Degraded { reason: existing } => {
+            *existing = reason;
+            true
+        }
+        _ => {
             *state = ConnectionState::Degraded { reason };
             true
         }
@@ -165,7 +170,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn consecutive_failures_notify_connection_watch_once() {
+    fn consecutive_failures_with_same_reason_notify_once() {
         let (tx, mut rx) = watch::channel(ConnectionState::Connecting);
 
         // First failure transitions Connecting → Degraded and notifies.
@@ -173,9 +178,31 @@ mod tests {
         assert!(rx.has_changed().unwrap());
         rx.borrow_and_update();
 
-        // Second failure is already degraded — no further notification.
-        assert!(!mark_degraded(&tx, "boom again".to_string()));
+        // Second failure with the *same* reason is a no-op — no further
+        // notification (the every-poll spam guard).
+        assert!(!mark_degraded(&tx, "boom".to_string()));
         assert!(!rx.has_changed().unwrap());
+    }
+
+    #[test]
+    fn degraded_reason_change_notifies_with_new_reason() {
+        let (tx, mut rx) = watch::channel(ConnectionState::Connecting);
+
+        // First failure → Degraded { "connection refused" }.
+        assert!(mark_degraded(&tx, "connection refused".to_string()));
+        assert!(rx.has_changed().unwrap());
+        rx.borrow_and_update();
+
+        // A later poll fails differently (e.g. a 503 now, not a refused
+        // connection). Still degraded, but the reason moved — watchers must be
+        // notified with the *fresh* reason rather than being stuck on the old
+        // one.
+        assert!(mark_degraded(&tx, "server error 503".to_string()));
+        assert!(rx.has_changed().unwrap());
+        assert!(matches!(
+            &*rx.borrow_and_update(),
+            ConnectionState::Degraded { reason } if reason == "server error 503"
+        ));
     }
 
     #[test]

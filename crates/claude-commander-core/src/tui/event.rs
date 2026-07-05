@@ -184,12 +184,25 @@ pub enum StateUpdate {
         backend_id: usize,
         result: std::result::Result<crate::api::OperationStatus, String>,
     },
+    /// `Cascade abandon` background task finished — the paused cascade was
+    /// cleared (or the clear failed). Spawned so a slow/remote backend never
+    /// blocks the event loop; the TUI refreshes and toasts on arrival.
+    CascadeAbandonFinished {
+        /// Backend whose paused cascade was abandoned.
+        backend_id: usize,
+        result: std::result::Result<(), String>,
+    },
     /// Review diff prepared off-thread: the parsed diff plus its warmed render
     /// caches (word-diff segments + syntax highlighting), ready to replace the
     /// loading spinner with the full review view. Boxed — the payload is large.
     ReviewPrepared {
         prepared: Box<super::app::ReviewPrepared>,
     },
+    /// The open-review fetch (now spawned off the event loop) finished without a
+    /// viewable diff: `None` means the session has no changes (a status toast),
+    /// `Some(err)` means the fetch failed (an error modal). Distinct from
+    /// [`ReviewPrepared`](Self::ReviewPrepared), which carries a ready view.
+    ReviewOpenFailed { error: Option<String> },
     /// A binary review image finished loading off-thread: decoded bytes for one
     /// side of one file, ready to build a render protocol from (on the main
     /// thread, which owns the `Picker`). `Arc` keeps the enum cheap to clone.

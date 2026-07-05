@@ -535,6 +535,16 @@ impl Config {
                 }
                 .into());
             }
+            // "local" is the built-in local backend's descriptor name; the TUI's
+            // selection persistence and per-backend lookups are name-keyed, so a
+            // remote sharing it would collide with the local node.
+            if name.eq_ignore_ascii_case("local") {
+                return Err(ConfigError::InvalidValue {
+                    key: "remote_servers.name".to_string(),
+                    reason: "server name 'local' is reserved for the local machine".to_string(),
+                }
+                .into());
+            }
             if !seen.insert(name) {
                 return Err(ConfigError::InvalidValue {
                     key: "remote_servers.name".to_string(),
@@ -1392,6 +1402,27 @@ url = "http://127.0.0.1:7878"
         };
         let err = cfg.validate_remote_servers().unwrap_err();
         assert!(err.to_string().contains("duplicate"), "{err}");
+    }
+
+    #[test]
+    fn test_validate_remote_servers_rejects_reserved_local_name() {
+        // "local" is the local backend's own descriptor name; a remote server
+        // sharing it would collide with the name-keyed selection lookups.
+        for name in ["local", "Local", "LOCAL"] {
+            let cfg = Config {
+                remote_servers: vec![RemoteServerConfig {
+                    name: name.to_string(),
+                    url: "http://a:7878".to_string(),
+                    token: None,
+                }],
+                ..Config::default()
+            };
+            let err = cfg.validate_remote_servers().unwrap_err();
+            assert!(
+                err.to_string().contains("reserved"),
+                "name '{name}' should be rejected as reserved: {err}"
+            );
+        }
     }
 
     #[test]

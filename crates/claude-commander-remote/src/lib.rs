@@ -25,7 +25,7 @@
 //! | `delete_session` | `DELETE /api/sessions/{id}` |
 //! | `rename_session` / `set_section` | `PATCH /api/sessions/{id}` (tagged `op`) |
 //! | `mark_read` | `POST /api/sessions/{id}/read` |
-//! | `mark_unread` | *(no server route yet → `Unavailable`)* |
+//! | `mark_unread` | `POST /api/sessions/unread` (batch) |
 //! | `add_project` | `POST /api/projects` → `{id}` |
 //! | `remove_project` | `DELETE /api/projects/{id}` |
 //! | `scan_directory` | `POST /api/projects/scan` → `{path}` |

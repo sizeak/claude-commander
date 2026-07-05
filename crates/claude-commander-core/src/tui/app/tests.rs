@@ -3980,19 +3980,142 @@ async fn remote_session_created_selects_row_and_reconciles_owning_backend() {
 }
 
 #[tokio::test]
+async fn open_review_shows_loading_immediately_and_routes_fetch_error() {
+    // handle_open_review must NOT block the event loop on the (remote) fetch: it
+    // shows the loading spinner and hands the fetch to a spawned task. The mock's
+    // open_review is unavailable, so the task posts ReviewOpenFailed{Some}.
+    let (mut app, remote_sid) = app_with_remote_session().await;
+    app.ui_state.selected_session_id = Some(SessionRef::new(BackendId(1), remote_sid));
+
+    app.handle_open_review().await;
+    assert!(
+        matches!(app.ui_state.modal, Modal::Loading { .. }),
+        "the spinner must be up immediately, before the fetch completes"
+    );
+
+    loop {
+        match app.event_loop.next().await.expect("a review-open event") {
+            AppEvent::StateUpdate(su @ StateUpdate::ReviewOpenFailed { .. }) => {
+                app.handle_state_update(su).await;
+                break;
+            }
+            _ => continue,
+        }
+    }
+    assert!(
+        matches!(app.ui_state.modal, Modal::Error { .. }),
+        "a failed fetch must surface an error modal, not silently return"
+    );
+}
+
+#[tokio::test]
+async fn review_open_failed_none_reports_no_changes() {
+    // A no-changes fetch (error: None) closes the spinner and toasts, rather
+    // than opening an empty review.
+    let (mut app, _remote_sid) = app_with_remote_session().await;
+    app.ui_state.modal = Modal::Loading {
+        title: "Preparing review".to_string(),
+        message: "Loading changes…".to_string(),
+        hint: None,
+    };
+    app.handle_state_update(StateUpdate::ReviewOpenFailed { error: None })
+        .await;
+    assert!(matches!(app.ui_state.modal, Modal::None));
+    let (msg, _) = app.ui_state.status_message.clone().expect("a status toast");
+    assert!(msg.contains("No changes"), "toast: {msg}");
+}
+
+#[tokio::test]
+async fn bulk_merged_pr_delete_runs_sequentially_in_one_task() {
+    // The merged-PR bulk delete must run as ONE sequential task (sessions can
+    // share a git repo, and concurrent worktree removals race). Assert every
+    // session is deleted via its owning backend, in order, from a single call.
+    let backend: Arc<dyn CommanderBackend> = Arc::new(MockBackend::new("b", empty_snapshot()));
+    let ids: Vec<SessionId> = (0..3).map(|_| SessionId::new()).collect();
+    let deletes: Vec<(Arc<dyn CommanderBackend>, SessionId)> =
+        ids.iter().map(|id| (backend.clone(), *id)).collect();
+    let (tx, _rx) = tokio::sync::mpsc::channel(16);
+
+    super::actions::delete_sessions_in_sequence(deletes, tx).await;
+
+    let mock = backend.as_any().downcast_ref::<MockBackend>().unwrap();
+    assert_eq!(
+        mock.deleted_sessions(),
+        ids,
+        "all sessions must be deleted, in batch order, on the one task"
+    );
+}
+
+#[test]
+fn attach_transport_error_maps_to_toast() {
+    // A mid-attach transport error must surface a toast, not vanish.
+    let toast = attach_end_toast(&crate::tmux::AttachResult::Error("ws dropped".to_string()));
+    assert_eq!(toast.as_deref(), Some("Attach failed: ws dropped"));
+}
+
+#[test]
+fn attach_clean_detach_has_no_toast() {
+    // A clean detach (or a session end handled by its own arm) needs no toast.
+    assert_eq!(attach_end_toast(&crate::tmux::AttachResult::Detached), None);
+    assert_eq!(
+        attach_end_toast(&crate::tmux::AttachResult::SessionEnded),
+        None
+    );
+}
+
+#[test]
+fn tmux_startup_proceeds_when_tmux_present_regardless_of_remotes() {
+    assert_eq!(tmux_startup_decision(None, false), TmuxStartup::Proceed);
+    assert_eq!(tmux_startup_decision(None, true), TmuxStartup::Proceed);
+}
+
+#[test]
+fn tmux_startup_degrades_local_when_tmux_down_but_remotes_configured() {
+    // A remote-only operator must not be locked out by a missing local tmux.
+    assert_eq!(
+        tmux_startup_decision(Some("tmux not found".to_string()), true),
+        TmuxStartup::DegradeLocal("tmux not found".to_string()),
+    );
+}
+
+#[test]
+fn tmux_startup_aborts_when_tmux_down_and_no_remotes() {
+    // With nothing else to drive, a missing tmux is still a hard error.
+    assert_eq!(
+        tmux_startup_decision(Some("tmux not found".to_string()), false),
+        TmuxStartup::Abort("tmux not found".to_string()),
+    );
+}
+
+#[tokio::test]
 async fn pending_comment_markers_union_every_backend_view() {
-    // A remote session with a pending comment in its view must show the `*`
-    // marker without any per-backend network query.
+    // A remote backend's first snapshot arrives via `BackendChanged` (the poller
+    // delivers it — bootstrap skips remotes). Folding it in must re-derive the
+    // session-list `*` markers so a remote session's pending comment lights up
+    // in production, without any per-backend network query.
     let (mut remote_snap, remote_sid, _pid) = snapshot_with_one_session();
     remote_snap.pending_comment_sessions = vec![remote_sid];
-    let mut app = build_app_with_mock_remotes(vec![("buildbox", remote_snap)]);
+    // The mock's view starts empty; the pending id only arrives with the
+    // BackendChanged snapshot below, so this exercises the real production path.
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", empty_snapshot())]);
     app.bootstrap_backend_views().await;
-    app.refresh_backend_view(BackendId(1)).await;
+    assert!(
+        !app.ui_state.sessions_with_comments.contains(&remote_sid),
+        "no marker before the remote's snapshot has landed"
+    );
 
-    app.refresh_comment_indicators();
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: BackendId(1).0,
+        snapshot: Box::new(remote_snap),
+        states: Box::new(crate::api::AgentStatesSnapshot {
+            states: Default::default(),
+            commander_running: false,
+        }),
+    })
+    .await;
 
     assert!(
         app.ui_state.sessions_with_comments.contains(&remote_sid),
-        "a remote session's pending-comment marker must come from its cached view"
+        "folding a backend snapshot must re-derive pending-comment markers"
     );
 }

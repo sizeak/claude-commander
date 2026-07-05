@@ -9,6 +9,26 @@ enum CascadeAction {
     Resume,
 }
 
+/// Delete each `(owning-backend, session-id)` pair strictly one at a time on a
+/// single task. Sessions in the same repo must not have their worktrees removed
+/// concurrently — parallel `git worktree remove` in one repo races — so the
+/// batch is sequential rather than one task per session. A per-session failure
+/// is surfaced but does not abort the rest of the batch.
+pub(super) async fn delete_sessions_in_sequence(
+    deletes: Vec<(Arc<dyn CommanderBackend>, SessionId)>,
+    tx: tokio::sync::mpsc::Sender<AppEvent>,
+) {
+    for (backend, sid) in deletes {
+        if let Err(e) = backend.delete_session(sid).await {
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::Error {
+                    message: format!("Failed to delete session: {e}"),
+                }))
+                .await;
+        }
+    }
+}
+
 /// Maximum number of rows rendered in a scrollable list modal at once.
 ///
 /// Shared between the render layer and the input handler so the scroll
@@ -697,8 +717,8 @@ impl App {
         backend_id: BackendId,
         result: std::result::Result<crate::api::OperationStatus, String>,
     ) {
-        self.refresh_backend_view(backend_id).await;
-        self.refresh_list_items().await;
+        // Refresh off the event loop; BackendChanged re-renders the tree.
+        self.spawn_backend_view_refresh(backend_id);
         let (msg, secs) = match result {
             Ok(status) => match status.outcome {
                 crate::api::OperationOutcome::Succeeded { detail } => {
@@ -719,7 +739,7 @@ impl App {
     /// Handle `Cascade abandon` — clear the paused state without merging,
     /// on whichever backend's cascade is paused (see
     /// [`paused_cascade_backend`](Self::paused_cascade_backend)).
-    pub(super) async fn handle_cascade_abandon(&mut self) {
+    pub(super) fn handle_cascade_abandon(&mut self) {
         let Some((backend_id, _)) = self.paused_cascade_backend() else {
             self.ui_state.status_message = Some((
                 "No cascade in progress".to_string(),
@@ -727,22 +747,35 @@ impl App {
             ));
             return;
         };
-        match self.backend_arc(backend_id).cascade_abandon().await {
+        // Spawn so a slow/remote backend never blocks the event loop;
+        // `CascadeAbandonFinished` refreshes the view and toasts on completion.
+        let backend = self.backend_arc(backend_id);
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let result = backend.cascade_abandon().await.map_err(|e| e.to_string());
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::CascadeAbandonFinished {
+                    backend_id: backend_id.0,
+                    result,
+                }))
+                .await;
+        });
+    }
+
+    pub(super) fn handle_cascade_abandon_finished(
+        &mut self,
+        backend_id: BackendId,
+        result: std::result::Result<(), String>,
+    ) {
+        let (msg, secs) = match result {
             Ok(()) => {
-                self.ui_state.status_message = Some((
-                    "Cascade pause cleared".to_string(),
-                    Instant::now() + Duration::from_secs(3),
-                ));
-                self.refresh_backend_view(backend_id).await;
-                self.refresh_list_items().await;
+                // Refresh off the event loop; BackendChanged re-renders the tree.
+                self.spawn_backend_view_refresh(backend_id);
+                ("Cascade pause cleared".to_string(), 3)
             }
-            Err(e) => {
-                self.ui_state.status_message = Some((
-                    format!("Cascade abandon failed: {e}"),
-                    Instant::now() + Duration::from_secs(5),
-                ));
-            }
-        }
+            Err(e) => (format!("Cascade abandon failed: {e}"), 5),
+        };
+        self.ui_state.status_message = Some((msg, Instant::now() + Duration::from_secs(secs)));
     }
 
     fn run_cascade_action(&mut self, sref: SessionRef, action: CascadeAction) {
@@ -787,8 +820,8 @@ impl App {
         backend_id: BackendId,
         result: std::result::Result<crate::api::OperationStatus, String>,
     ) {
-        self.refresh_backend_view(backend_id).await;
-        self.refresh_list_items().await;
+        // Refresh off the event loop; BackendChanged re-renders the tree.
+        self.spawn_backend_view_refresh(backend_id);
         let (msg, secs) = match result {
             Ok(status) => match status.outcome {
                 crate::api::OperationOutcome::Succeeded { detail } => {
@@ -2046,9 +2079,23 @@ impl App {
             }
             ConfirmAction::DeleteMergedPrSessions { session_ids } => {
                 let total = session_ids.len();
-                for sid in session_ids {
-                    self.delete_session_immediately(sid);
+                // Drop selection now if the focused row is in the batch; the
+                // change-feed refresh clamps the cursor once they're gone.
+                if let Some(sel) = self.ui_state.selected_session_id.map(|r| r.id)
+                    && session_ids.contains(&sel)
+                {
+                    self.ui_state.selected_session_id = None;
                 }
+                // Sequence the whole batch through ONE task: several of these
+                // sessions can live in the same git repo, and concurrent
+                // `git worktree remove` calls in one repo race. Per-session
+                // routing to the owning backend is preserved.
+                let deletes: Vec<(Arc<dyn CommanderBackend>, SessionId)> = session_ids
+                    .iter()
+                    .map(|sid| (self.backend_arc(self.backend_of_session(*sid)), *sid))
+                    .collect();
+                let tx = self.event_loop.sender();
+                tokio::spawn(delete_sessions_in_sequence(deletes, tx));
                 self.ui_state.status_message = Some((
                     format!("Deleting {total} merged-PR session(s)…"),
                     Instant::now() + Duration::from_secs(3),
