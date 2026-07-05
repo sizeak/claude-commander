@@ -2875,6 +2875,132 @@ async fn degraded_server_header_renders_greyed_name_and_reason() {
 }
 
 #[tokio::test]
+async fn pull_blocked_badges_union_remote_backend_snapshot() {
+    // A remote snapshot carries a blocked project pull. Folding it must surface
+    // the badge — even though the block is on a remote, not the local backend.
+    // Against a builder that reads only `local_view()`, the remote's blocked
+    // project never lands in `project_pull_blocked`: red.
+    use crate::api::{PullBlockReason, PullStatus};
+    let (mut remote_snap, _sid, pid) = snapshot_with_one_session();
+    remote_snap.project_pull.insert(
+        pid,
+        PullStatus::Blocked {
+            reason: PullBlockReason::Dirty,
+        },
+    );
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", empty_snapshot())]);
+    app.bootstrap_backend_views().await;
+    assert!(
+        !app.ui_state.project_pull_blocked.contains_key(&pid),
+        "no badge before the remote's blocked-pull snapshot has landed"
+    );
+
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: BackendId(1).0,
+        snapshot: Box::new(remote_snap),
+        states: Box::new(crate::api::AgentStatesSnapshot {
+            states: Default::default(),
+            commander_running: false,
+        }),
+    })
+    .await;
+
+    assert!(
+        app.ui_state.project_pull_blocked.contains_key(&pid),
+        "folding a remote snapshot with a blocked pull must surface its badge"
+    );
+}
+
+#[tokio::test]
+async fn local_connection_degrades_from_tmux_ok_false_and_stays_degraded() {
+    // A local snapshot fetched while tmux is down reports `server.tmux_ok=false`.
+    // Folding it must degrade the local header — and a subsequent fold (tmux
+    // still down) must NOT flip it back to Connected. Against HEAD the fold set
+    // `connection = Connected` unconditionally, so the first fold already
+    // un-gated local commands: red.
+    let mut app = make_test_app();
+    let degraded_snap = empty_snapshot();
+    assert!(
+        !degraded_snap.server.tmux_ok,
+        "fixture precondition: empty_snapshot reports tmux down"
+    );
+    let states = || {
+        Box::new(crate::api::AgentStatesSnapshot {
+            states: Default::default(),
+            commander_running: false,
+        })
+    };
+
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: BackendId(0).0,
+        snapshot: Box::new(degraded_snap),
+        states: states(),
+    })
+    .await;
+    assert!(
+        matches!(
+            app.local_view().connection,
+            ConnectionState::Degraded { .. }
+        ),
+        "tmux_ok=false must degrade the local header, got {:?}",
+        app.local_view().connection
+    );
+
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: BackendId(0).0,
+        snapshot: Box::new(empty_snapshot()),
+        states: states(),
+    })
+    .await;
+    assert!(
+        matches!(
+            app.local_view().connection,
+            ConnectionState::Degraded { .. }
+        ),
+        "a later fold with tmux still down must not un-degrade the local header, got {:?}",
+        app.local_view().connection
+    );
+}
+
+#[tokio::test]
+async fn remote_connection_stays_watch_owned_across_snapshot_fold() {
+    // A remote's health is owned by its connection-watch task. Once the watch
+    // reports Degraded, a snapshot fold (e.g. a slow in-flight fetch completing
+    // after the poller gave up) must NOT resurrect the header to Connected.
+    // Against HEAD the fold set `connection = Connected` for every backend: red.
+    let (remote_snap, _sid, _pid) = snapshot_with_one_session();
+    assert!(
+        remote_snap.server.tmux_ok,
+        "fixture precondition: the remote snapshot reports tmux up"
+    );
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", remote_snap.clone())]);
+    app.bootstrap_backend_views().await;
+
+    app.handle_state_update(StateUpdate::BackendConnection {
+        backend_id: BackendId(1).0,
+        state: ConnectionState::Degraded {
+            reason: "connection refused".to_string(),
+        },
+    })
+    .await;
+
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: BackendId(1).0,
+        snapshot: Box::new(remote_snap),
+        states: Box::new(crate::api::AgentStatesSnapshot {
+            states: Default::default(),
+            commander_running: false,
+        }),
+    })
+    .await;
+
+    match &app.backend(BackendId(1)).unwrap().view.connection {
+        ConnectionState::Degraded { reason } => assert_eq!(reason, "connection refused"),
+        other => panic!("remote connection must stay watch-owned Degraded, got {other:?}"),
+    }
+}
+
+#[tokio::test]
 async fn selection_falls_back_to_local_when_backend_removed() {
     let (remote_snap, sid, pid) = snapshot_with_one_session();
     let mut app = build_app_with_mock_remotes(vec![("buildbox", remote_snap)]);

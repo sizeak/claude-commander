@@ -80,6 +80,10 @@ pub struct CommanderService {
     /// Idempotency guard for [`Self::spawn_background_tasks`]: the loops spawn
     /// once per service, even if both a local TUI and an embedded caller ask.
     background_started: Arc<std::sync::atomic::AtomicBool>,
+    /// Short-TTL cache of the last `tmux -V` probe result, so per-client
+    /// [`Self::workspace_snapshot`] polling (~2s cadence) doesn't fork a
+    /// subprocess on every poll. See [`Self::cached_tmux_ok`].
+    tmux_ok_cache: Arc<std::sync::Mutex<Option<(std::time::Instant, bool)>>>,
 }
 
 /// Max entries kept in the operation ledger before the oldest are evicted.
@@ -88,6 +92,12 @@ const OPERATION_LEDGER_CAP: usize = 32;
 /// TTL for the shared agent-state detector cache used by non-`fresh`
 /// `agent_states` polls.
 const AGENT_STATE_CACHE_TTL: Duration = Duration::from_millis(1000);
+
+/// TTL for the [`CommanderService::workspace_snapshot`] tmux-availability cache.
+/// Long enough that a 2s client poll reuses the last probe rather than forking
+/// `tmux -V` every time, short enough that tmux coming up/going down surfaces
+/// within a few seconds.
+const TMUX_OK_CACHE_TTL: Duration = Duration::from_secs(5);
 
 impl CommanderService {
     /// Construct the service. `frontend` identifies the embedding application
@@ -137,6 +147,7 @@ impl CommanderService {
             last_pr_check: Arc::new(std::sync::Mutex::new(None)),
             pr_refresh: Arc::new(tokio::sync::Notify::new()),
             background_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            tmux_ok_cache: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
@@ -350,8 +361,52 @@ impl CommanderService {
         }
     }
 
+    /// Resolve a session query to the tmux session name for the requested pane,
+    /// **reviving** a dead tmux session and **stamping** `last_attached_at` — the
+    /// exact preparation [`crate::backend::LocalBackend::attach`] performs before
+    /// spawning its bridge. The server's WebSocket attach handler routes through
+    /// this so a remote attach reaches parity with a local one: a session whose
+    /// tmux died is recreated (agent resumed, status bar reconfigured) rather than
+    /// failing with a raw error, and every attach updates MRU ordering.
+    /// `None` when the query matches no session.
+    pub async fn resolve_attach_session(
+        &self,
+        query: &str,
+        kind: crate::backend::AttachKind,
+    ) -> Result<Option<String>> {
+        let session_id = {
+            let state = self.store.read().await;
+            crate::cli::find_session(&state, query).map(|s| s.id)
+        };
+        let Some(id) = session_id else {
+            return Ok(None);
+        };
+        let tmux_name = match kind {
+            crate::backend::AttachKind::Agent => self.manager.ensure_attachable(&id).await?,
+            crate::backend::AttachKind::Shell => self.manager.ensure_shell_session(&id).await?,
+        };
+        self.mark_attached(&id).await?;
+        Ok(Some(tmux_name))
+    }
+
     pub async fn check_tmux(&self) -> Result<()> {
         self.manager.check_tmux().await
+    }
+
+    /// tmux availability with a short-TTL cache ([`TMUX_OK_CACHE_TTL`]) so a
+    /// per-client `workspace_snapshot` poll doesn't fork `tmux -V` every call.
+    /// The lock is never held across the probe `.await`; two concurrent stale
+    /// callers may both re-probe once (a benign, self-healing race).
+    async fn cached_tmux_ok(&self) -> bool {
+        if let Some((at, ok)) = *self.tmux_ok_cache.lock().expect("tmux_ok_cache poisoned")
+            && at.elapsed() < TMUX_OK_CACHE_TTL
+        {
+            return ok;
+        }
+        let ok = self.check_tmux().await.is_ok();
+        *self.tmux_ok_cache.lock().expect("tmux_ok_cache poisoned") =
+            Some((std::time::Instant::now(), ok));
+        ok
     }
 
     // -- Mutations --
@@ -986,7 +1041,7 @@ impl CommanderService {
     /// run (or when project auto-pull is disabled).
     pub async fn workspace_snapshot(&self) -> Result<WorkspaceSnapshot> {
         let gh_available = self.gh_available().await;
-        let tmux_ok = self.check_tmux().await.is_ok();
+        let tmux_ok = self.cached_tmux_ok().await;
         let pending = self.sessions_with_pending_comments().await?;
 
         let (projects, sessions, cascade_paused) = {
@@ -2137,7 +2192,7 @@ fn build_project_info_list(state: &AppState) -> Vec<ProjectInfo> {
 }
 
 fn build_session_info_list(state: &AppState, include_stopped: bool) -> Vec<SessionInfo> {
-    let mut entries = Vec::new();
+    let mut entries: Vec<(String, SessionInfo)> = Vec::new();
     for project in state.projects.values() {
         for session in project
             .worktrees
@@ -2145,10 +2200,24 @@ fn build_session_info_list(state: &AppState, include_stopped: bool) -> Vec<Sessi
             .filter_map(|id| state.sessions.get(id))
             .filter(|s| include_stopped || s.status.is_active())
         {
-            entries.push(session_info_from_session(session, &project.name));
+            entries.push((
+                project.name.clone(),
+                session_info_from_session(session, &project.name),
+            ));
         }
     }
-    entries
+    // Canonicalize the order so it never depends on `state.projects`' HashMap
+    // iteration order (which would leak into the serialized snapshot and make
+    // the wire output nondeterministic across processes/polls). Key: project
+    // name, then the session's `created_at`, then its id as a final stable
+    // tiebreaker for sessions sharing a timestamp.
+    entries.sort_by(|(a_name, a), (b_name, b)| {
+        a_name
+            .cmp(b_name)
+            .then(a.created_at.cmp(&b.created_at))
+            .then(a.session_id.cmp(&b.session_id))
+    });
+    entries.into_iter().map(|(_, info)| info).collect()
 }
 
 /// Build a [`WorkspaceSnapshot`] purely from persisted state, with no live
@@ -2207,7 +2276,7 @@ mod tests {
     use super::*;
     use crate::comment::CommentSide;
     use crate::git::PrState;
-    use crate::session::{Project, ProjectId, SessionStatus, WorktreeSession};
+    use crate::session::{Project, ProjectId, SessionId, SessionStatus, WorktreeSession};
     use std::path::PathBuf;
 
     fn make_project(name: &str) -> Project {
@@ -2235,6 +2304,52 @@ mod tests {
             state.sessions.insert(s.id, s);
         }
         state
+    }
+
+    #[test]
+    fn build_session_info_list_order_is_canonical_not_insertion_order() {
+        // Six single-session projects (names p0..p5) built up front, then
+        // inserted into two states in OPPOSITE orders. The serialized session
+        // order must equal the project-name-sorted order in BOTH — never the
+        // HashMap iteration order of `state.projects`. Against an unsorted
+        // builder the reverse (and almost always the forward) insertion diverges
+        // from the canonical order for six projects: red.
+        let mut fixtures: Vec<(Project, WorktreeSession)> = (0..6)
+            .map(|i| {
+                let p = make_project(&format!("p{i}"));
+                let s = make_session_for_project("s", p.id);
+                (p, s)
+            })
+            .collect();
+        // Canonical order: by project name, i.e. the p0..p5 build order.
+        let expected: Vec<SessionId> = fixtures.iter().map(|(_, s)| s.id).collect();
+
+        let build = |order: &[(Project, WorktreeSession)]| -> Vec<SessionId> {
+            let mut state = AppState::new();
+            for (p, s) in order {
+                let mut proj = p.clone();
+                proj.add_worktree(s.id);
+                state.projects.insert(proj.id, proj);
+                state.sessions.insert(s.id, s.clone());
+            }
+            build_session_info_list(&state, true)
+                .into_iter()
+                .map(|si| si.session_id)
+                .collect()
+        };
+
+        let forward = build(&fixtures);
+        fixtures.reverse();
+        let reverse = build(&fixtures);
+
+        assert_eq!(
+            forward, expected,
+            "forward-insertion session order must be canonical (name-sorted)"
+        );
+        assert_eq!(
+            reverse, expected,
+            "reverse-insertion session order must be canonical (name-sorted)"
+        );
     }
 
     #[test]
@@ -2535,6 +2650,37 @@ mod tests {
             .await
             .unwrap();
         (pid, sid)
+    }
+
+    #[tokio::test]
+    async fn cached_tmux_ok_serves_within_ttl_and_repopulates() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+
+        // A fresh cache entry is served verbatim without re-probing tmux. Poking
+        // BOTH booleans and getting each back proves a genuine cache hit (the
+        // real probe can only match one of them).
+        for poked in [true, false] {
+            *svc.tmux_ok_cache.lock().unwrap() = Some((std::time::Instant::now(), poked));
+            assert_eq!(
+                svc.cached_tmux_ok().await,
+                poked,
+                "a fresh cache entry must be served without re-probing"
+            );
+        }
+
+        // An empty cache populates a fresh entry.
+        *svc.tmux_ok_cache.lock().unwrap() = None;
+        let _ = svc.cached_tmux_ok().await;
+        let (at, _) = svc
+            .tmux_ok_cache
+            .lock()
+            .unwrap()
+            .expect("cache must be populated after a probe");
+        assert!(
+            at.elapsed() < TMUX_OK_CACHE_TTL,
+            "a miss must store a fresh entry"
+        );
     }
 
     #[tokio::test]

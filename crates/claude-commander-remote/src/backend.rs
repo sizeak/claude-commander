@@ -39,6 +39,17 @@ use crate::spec::{RemoteServerSpec, SecretString};
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Overall per-request ceiling (a slow branch-diff still fits comfortably).
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Tighter per-request bound for interactive review reads/writes (list/create/
+/// delete comment, toggle-reviewed): these are quick store/file operations, so
+/// a user who fires one and waits shouldn't sit through the 30s
+/// [`REQUEST_TIMEOUT`] when a server has wedged — a few seconds surfaces the
+/// failure while still tolerating a slow link.
+const REVIEW_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Per-request bound for `apply_comments`. Longer than [`REVIEW_WRITE_TIMEOUT`]
+/// because the server does more work here — it recomposes a fresh review diff,
+/// re-anchors every comment, then detects the agent's state and sends keys into
+/// tmux — but still well under [`REQUEST_TIMEOUT`].
+const APPLY_COMMENTS_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The shared, cloneable core of a [`RemoteBackend`]: the HTTP client, the
 /// resolved base URL, and the (redacted) bearer token. The poll task holds an
@@ -113,7 +124,18 @@ impl RemoteInner {
     }
 
     async fn get_json<T: DeserializeOwned>(&self, url: Url) -> BResult<T> {
-        let response = self.send(self.client.get(url)).await?;
+        self.get_json_within(url, REQUEST_TIMEOUT).await
+    }
+
+    /// [`Self::get_json`] with a per-request `timeout` overriding the client-wide
+    /// [`REQUEST_TIMEOUT`] (used by interactive review reads — see
+    /// [`REVIEW_WRITE_TIMEOUT`]).
+    async fn get_json_within<T: DeserializeOwned>(
+        &self,
+        url: Url,
+        timeout: Duration,
+    ) -> BResult<T> {
+        let response = self.send(self.client.get(url).timeout(timeout)).await?;
         let response = self.check(response).await?;
         decode_json(response).await
     }
@@ -158,14 +180,39 @@ impl RemoteInner {
     /// POST with no body, decoding the JSON response (cascade routes → 202 +
     /// `OperationStatus`).
     async fn post_empty_json<T: DeserializeOwned>(&self, url: Url) -> BResult<T> {
-        let response = self.send(self.client.post(url)).await?;
+        self.post_empty_json_within(url, REQUEST_TIMEOUT).await
+    }
+
+    /// [`Self::post_empty_json`] with a per-request `timeout` overriding the
+    /// client-wide [`REQUEST_TIMEOUT`] (used by `apply_comments` — see
+    /// [`APPLY_COMMENTS_TIMEOUT`]).
+    async fn post_empty_json_within<T: DeserializeOwned>(
+        &self,
+        url: Url,
+        timeout: Duration,
+    ) -> BResult<T> {
+        let response = self.send(self.client.post(url).timeout(timeout)).await?;
         let response = self.check(response).await?;
         decode_json(response).await
     }
 
     /// POST a JSON body, decoding the JSON response (create routes → 201 + id).
     async fn post_json<T: DeserializeOwned, B: Serialize>(&self, url: Url, body: &B) -> BResult<T> {
-        let response = self.send(self.client.post(url).json(body)).await?;
+        self.post_json_within(url, body, REQUEST_TIMEOUT).await
+    }
+
+    /// [`Self::post_json`] with a per-request `timeout` overriding the
+    /// client-wide [`REQUEST_TIMEOUT`] (used by interactive review writes — see
+    /// [`REVIEW_WRITE_TIMEOUT`]).
+    async fn post_json_within<T: DeserializeOwned, B: Serialize>(
+        &self,
+        url: Url,
+        body: &B,
+        timeout: Duration,
+    ) -> BResult<T> {
+        let response = self
+            .send(self.client.post(url).json(body).timeout(timeout))
+            .await?;
         let response = self.check(response).await?;
         decode_json(response).await
     }
@@ -193,7 +240,14 @@ impl RemoteInner {
 
     /// DELETE, discarding the (204) response.
     async fn delete_ok(&self, url: Url) -> BResult<()> {
-        let response = self.send(self.client.delete(url)).await?;
+        self.delete_ok_within(url, REQUEST_TIMEOUT).await
+    }
+
+    /// [`Self::delete_ok`] with a per-request `timeout` overriding the
+    /// client-wide [`REQUEST_TIMEOUT`] (used by interactive review writes — see
+    /// [`REVIEW_WRITE_TIMEOUT`]).
+    async fn delete_ok_within(&self, url: Url, timeout: Duration) -> BResult<()> {
+        let response = self.send(self.client.delete(url).timeout(timeout)).await?;
         self.check(response).await?;
         Ok(())
     }
@@ -571,7 +625,7 @@ impl CommanderBackend for RemoteBackend {
 
     async fn list_comments(&self, id: SessionId) -> BResult<Vec<Comment>> {
         self.inner
-            .get_json(self.session_url(id, &["comments"]))
+            .get_json_within(self.session_url(id, &["comments"]), REVIEW_WRITE_TIMEOUT)
             .await
     }
 
@@ -593,7 +647,11 @@ impl CommanderBackend for RemoteBackend {
     async fn create_comment(&self, id: SessionId, draft: NewComment) -> BResult<Uuid> {
         let env: IdEnvelope<Uuid> = self
             .inner
-            .post_json(self.session_url(id, &["comments"]), &draft)
+            .post_json_within(
+                self.session_url(id, &["comments"]),
+                &draft,
+                REVIEW_WRITE_TIMEOUT,
+            )
             .await?;
         Ok(env.id)
     }
@@ -601,13 +659,19 @@ impl CommanderBackend for RemoteBackend {
     async fn delete_comment(&self, id: SessionId, comment_id: Uuid) -> BResult<()> {
         let cid = comment_id.to_string();
         self.inner
-            .delete_ok(self.session_url(id, &["comments", &cid]))
+            .delete_ok_within(
+                self.session_url(id, &["comments", &cid]),
+                REVIEW_WRITE_TIMEOUT,
+            )
             .await
     }
 
     async fn apply_comments(&self, id: SessionId) -> BResult<ApplyOutcome> {
         self.inner
-            .post_empty_json(self.session_url(id, &["comments", "apply"]))
+            .post_empty_json_within(
+                self.session_url(id, &["comments", "apply"]),
+                APPLY_COMMENTS_TIMEOUT,
+            )
             .await
     }
 
@@ -615,7 +679,11 @@ impl CommanderBackend for RemoteBackend {
         let body = ToggleReviewed { display_path };
         let out: ReviewedBody = self
             .inner
-            .post_json(self.session_url(id, &["files", "reviewed"]), &body)
+            .post_json_within(
+                self.session_url(id, &["files", "reviewed"]),
+                &body,
+                REVIEW_WRITE_TIMEOUT,
+            )
             .await?;
         Ok(out.reviewed)
     }
@@ -685,6 +753,34 @@ mod tests {
 
     /// A distinctive token that must never surface in an error or log line.
     const SECRET: &str = "TOKEN_DO_NOT_LEAK_9f3a1c";
+
+    /// Interactive review reads/writes must be bounded tighter than the 30s
+    /// [`REQUEST_TIMEOUT`] so a wedged server surfaces promptly, and the
+    /// heavier `apply_comments` must sit between the two: strictly above the
+    /// quick-write bound (it recomposes a diff + drives tmux) yet strictly
+    /// below the overall ceiling. Asserted at the constant level rather than by
+    /// wall-clock so it stays deterministic. Red against HEAD: neither
+    /// [`REVIEW_WRITE_TIMEOUT`] nor [`APPLY_COMMENTS_TIMEOUT`] existed, so the
+    /// symbols don't resolve.
+    #[test]
+    fn review_timeouts_are_bounded_between_write_and_request_ceiling() {
+        assert!(
+            REVIEW_WRITE_TIMEOUT < APPLY_COMMENTS_TIMEOUT,
+            "quick review writes must be tighter than the apply bound"
+        );
+        assert!(
+            APPLY_COMMENTS_TIMEOUT < REQUEST_TIMEOUT,
+            "apply_comments must stay under the overall request ceiling"
+        );
+        // The tightest interactive bound must still cover the TCP connect
+        // budget (which reqwest counts inside the total request timeout), or a
+        // healthy-but-slow-to-connect link could time out with no budget left
+        // for the response.
+        assert!(
+            REVIEW_WRITE_TIMEOUT >= CONNECT_TIMEOUT,
+            "review-write budget must at least cover the connect budget"
+        );
+    }
 
     fn fast_config() -> PollConfig {
         PollConfig {

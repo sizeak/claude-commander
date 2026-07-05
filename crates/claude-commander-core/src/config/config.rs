@@ -1363,7 +1363,11 @@ url = "http://127.0.0.1:7878"
             }],
             ..Config::default()
         };
-        assert!(cfg.validate_remote_servers().is_err());
+        let err = cfg.validate_remote_servers().unwrap_err();
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "empty name must be rejected with an empty-name reason: {err}"
+        );
     }
 
     #[test]
@@ -1435,7 +1439,11 @@ url = "http://127.0.0.1:7878"
             }],
             ..Config::default()
         };
-        assert!(cfg.validate_remote_servers().is_err());
+        let err = cfg.validate_remote_servers().unwrap_err();
+        assert!(
+            err.to_string().contains("invalid url"),
+            "an unparseable url must be rejected with a parse-failure reason: {err}"
+        );
     }
 
     #[test]
@@ -1449,7 +1457,11 @@ url = "http://127.0.0.1:7878"
             }],
             ..Config::default()
         };
-        assert!(cfg.validate_remote_servers().is_err());
+        let err = cfg.validate_remote_servers().unwrap_err();
+        assert!(
+            err.to_string().contains("must include a host"),
+            "a hostless url must be rejected with a missing-host reason: {err}"
+        );
     }
 
     #[test]

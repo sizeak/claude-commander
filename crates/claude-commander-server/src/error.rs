@@ -106,15 +106,22 @@ impl ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let status = self.status();
-        let body = Json(json!({
-            "error": {
-                "kind": self.kind(),
-                "message": self.0.to_string(),
-            }
-        }));
-        (status, body).into_response()
+        error_response(self.status(), self.kind(), self.0.to_string())
     }
+}
+
+/// Render the uniform `{"error": {"kind", "message"}}` body at `status`. Shared
+/// by [`ApiError`] and the bearer-auth middleware so *every* error response —
+/// including a 401 from the auth layer, which isn't backed by a [`CoreError`] —
+/// carries the same envelope a client can parse.
+pub fn error_response(status: StatusCode, kind: &str, message: impl Into<String>) -> Response {
+    let body = Json(json!({
+        "error": {
+            "kind": kind,
+            "message": message.into(),
+        }
+    }));
+    (status, body).into_response()
 }
 
 #[cfg(test)]

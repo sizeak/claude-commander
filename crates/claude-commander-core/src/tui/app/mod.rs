@@ -152,6 +152,35 @@ async fn fetch_and_send_backend_change(
     .is_ok()
 }
 
+/// Derive a backend's connection health from a freshly-folded workspace
+/// snapshot, or `None` when the snapshot must not touch it.
+///
+/// Only the **local** backend's connection is snapshot-derived: `server.tmux_ok
+/// == false` means local sessions can't be driven, so its header shows
+/// `Degraded` and stays there until tmux recovers (a snapshot still fetches fine
+/// without tmux, reporting `tmux_ok=false`, so folding one must not silently
+/// flip the header back to `Connected` and un-gate local commands). A **remote**
+/// backend's health is owned exclusively by its connection-watch task
+/// ([`StateUpdate::BackendConnection`]), so a snapshot fold returns `None` and
+/// leaves `view.connection` untouched — otherwise a slow in-flight fetch
+/// completing after the poller went `Degraded` would pin the header `Connected`
+/// for the rest of the outage.
+fn connection_from_snapshot(
+    is_local: bool,
+    snapshot: &crate::api::WorkspaceSnapshot,
+) -> Option<ConnectionState> {
+    if !is_local {
+        return None;
+    }
+    Some(if snapshot.server.tmux_ok {
+        ConnectionState::Connected
+    } else {
+        ConnectionState::Degraded {
+            reason: "tmux unavailable".to_string(),
+        }
+    })
+}
+
 /// The status-toast text to surface when the attach loop ends on `result`, or
 /// `None` for a clean end (user detached / session ended, handled elsewhere)
 /// that needs no toast. A mid-attach transport error must not silently drop the
@@ -1548,7 +1577,13 @@ impl App {
         if let Some(handle) = self.backends.iter_mut().find(|h| h.id == id) {
             if let Ok(snapshot) = snapshot {
                 handle.view.snapshot = snapshot;
-                handle.view.connection = ConnectionState::Connected;
+                // Local: derive connection from the snapshot's tmux health;
+                // remote: leave it to the connection-watch task (returns None).
+                if let Some(conn) =
+                    connection_from_snapshot(id == LOCAL_BACKEND_ID, &handle.view.snapshot)
+                {
+                    handle.view.connection = conn;
+                }
             }
             if let Ok(states) = states {
                 handle.view.agent_states = states;
@@ -1751,7 +1786,15 @@ impl App {
                 (Ok(snapshot), Ok(states)) => {
                     handle.view.snapshot = snapshot;
                     handle.view.agent_states = states;
-                    handle.view.connection = crate::backend::ConnectionState::Connected;
+                    // Only the local backend reaches this arm (remotes `continue`
+                    // above). Its connection derives from the snapshot's tmux
+                    // health — the single source of truth also used by every
+                    // subsequent fold — so a tmux-down startup shows Degraded here
+                    // rather than being overridden separately in `run()`.
+                    let is_local = handle.id == LOCAL_BACKEND_ID;
+                    if let Some(conn) = connection_from_snapshot(is_local, &handle.view.snapshot) {
+                        handle.view.connection = conn;
+                    }
                 }
                 (Err(e), _) | (_, Err(e)) => {
                     warn!("Initial snapshot for backend {:?} failed: {}", handle.id, e);
@@ -1842,22 +1885,24 @@ impl App {
         // tmux drives every *local* session, but a remote-only operator can work
         // entirely against configured servers. So a failed local tmux probe only
         // aborts when there are no remotes; otherwise we degrade the local
-        // backend and carry on (its Degraded header, set after bootstrap below,
-        // explains why local sessions are unavailable).
+        // backend and carry on. The Degraded header isn't set here: it's derived
+        // from the local snapshot's `server.tmux_ok` in `bootstrap_backend_views`
+        // (and every later fold), the single source of truth — so a tmux-down
+        // startup shows Degraded without a second override that folds would
+        // fight.
         let tmux_result = self.service.check_tmux().await;
         let has_remotes = !self.config.remote_servers.is_empty();
-        let local_tmux_degraded = match tmux_startup_decision(
+        match tmux_startup_decision(
             tmux_result.as_ref().err().map(|e| e.to_string()),
             has_remotes,
         ) {
-            TmuxStartup::Proceed => None,
+            TmuxStartup::Proceed => {}
             TmuxStartup::DegradeLocal(reason) => {
                 warn!("tmux unavailable; running remote-only ({reason})");
-                Some(reason)
             }
             // Guaranteed `Err` here — propagate the original tmux error.
             TmuxStartup::Abort(_) => return tmux_result,
-        };
+        }
 
         // One-time setup: reconcile each backend (drop stale Creating sessions,
         // reset transient stack states, sync status against live tmux, re-run
@@ -1876,16 +1921,6 @@ impl App {
         // the first list refresh, then start a per-backend change-feed task so
         // subsequent store/remote changes fold in off the render path.
         self.bootstrap_backend_views().await;
-        // If tmux is down but we're running remote-only, override the local
-        // backend's (otherwise Connected) header to Degraded so the tree shows
-        // why local sessions can't be driven.
-        if let Some(reason) = local_tmux_degraded
-            && let Some(handle) = self.backends.iter_mut().find(|h| h.id == LOCAL_BACKEND_ID)
-        {
-            handle.view.connection = ConnectionState::Degraded {
-                reason: format!("tmux unavailable: {reason}"),
-            };
-        }
         self.spawn_backend_change_feeds();
 
         // Cache gh availability for the enriched-PR info fetch (the PR-status

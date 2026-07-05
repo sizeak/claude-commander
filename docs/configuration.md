@@ -226,6 +226,12 @@ state_sync_interval_ms = 2000
 #                                # started with --allow-no-auth (loopback)
 ```
 
+A remote server's `token` is **operator-equivalent**: anyone holding it can create
+sessions (which run arbitrary programs on that machine) and address projects by
+server-side path. Treat it like an SSH key — don't commit it, don't share it, and
+scope it to people you'd give a shell. On disk this file is protected only by its
+`0600` permissions, so keep those intact.
+
 ## Conversation mode (TTS)
 
 Press **`Alt-c`** to open a full-screen **conversation overlay** — a chat with a dedicated

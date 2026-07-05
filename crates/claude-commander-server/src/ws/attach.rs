@@ -152,19 +152,19 @@ async fn attach_session(
         None => return None,
     };
 
-    // Resolve the requested pane to a tmux session name. The agent pane is the
-    // session's primary tmux session; the shell pane (`Ctrl+\` partner) is
-    // created on demand — the same split `LocalBackend::attach` makes, so both
-    // transports resolve panes through the identical service methods.
-    let resolved = match kind {
-        AttachKind::Agent => state.service.resolve_tmux_session(&session_query).await,
-        AttachKind::Shell => {
-            state
-                .service
-                .resolve_shell_tmux_session(&session_query)
-                .await
-        }
+    // Resolve the requested pane to a tmux session name through the same service
+    // method `LocalBackend::attach` uses, so both transports get identical
+    // revive-on-attach (a dead agent tmux session is recreated) and MRU-stamp
+    // (`last_attached_at`) behaviour. The agent pane is the session's primary
+    // tmux session; the shell pane (`Ctrl+\` partner) is created on demand.
+    let core_kind = match kind {
+        AttachKind::Agent => claude_commander_core::backend::AttachKind::Agent,
+        AttachKind::Shell => claude_commander_core::backend::AttachKind::Shell,
     };
+    let resolved = state
+        .service
+        .resolve_attach_session(&session_query, core_kind)
+        .await;
     let tmux_name = match resolved {
         Ok(Some(name)) => name,
         Ok(None) => {

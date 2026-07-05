@@ -37,7 +37,14 @@ impl App {
                 if let Some(handle) = self.backends.iter_mut().find(|h| h.id.0 == backend_id) {
                     handle.view.snapshot = *snapshot;
                     handle.view.agent_states = states.clone();
-                    handle.view.connection = crate::backend::ConnectionState::Connected;
+                    // The local backend's connection derives from the snapshot's
+                    // tmux health; a remote backend's is owned by its
+                    // connection-watch task, so a fold must not touch it.
+                    if let Some(conn) =
+                        super::connection_from_snapshot(is_local, &handle.view.snapshot)
+                    {
+                        handle.view.connection = conn;
+                    }
                 }
 
                 // The local backend drives the rendered agent-state map, the
@@ -47,8 +54,11 @@ impl App {
                 if is_local {
                     self.ui_state.agent_states = states.states;
                     self.ui_state.commander_running = states.commander_running;
-                    self.apply_project_pull_badges();
                 }
+                // Pull badges union every backend's snapshot (project ids are
+                // globally unique), so a remote's blocked pull must be re-folded
+                // on any backend change — not only local ones.
+                self.apply_project_pull_badges();
                 if let Some(Some((sid, title, prev_hash))) = review_refresh {
                     self.spawn_review_refresh(sid, title, prev_hash, false);
                 }
@@ -440,11 +450,13 @@ impl App {
     /// advance/up-to-date/soft-fail clears any prior one).
     fn apply_project_pull_badges(&mut self) {
         use crate::api::PullStatus;
+        // Union across every backend's snapshot: remote snapshots carry
+        // `project_pull` too, and project ids are globally unique, so a blocked
+        // pull on any server must surface a badge — not only the local one.
         self.ui_state.project_pull_blocked = self
-            .local_view()
-            .snapshot
-            .project_pull
+            .backends
             .iter()
+            .flat_map(|handle| handle.view.snapshot.project_pull.iter())
             .filter_map(|(id, status)| match status {
                 PullStatus::Blocked { reason } => {
                     Some((*id, crate::git::BlockReason::from(*reason)))
