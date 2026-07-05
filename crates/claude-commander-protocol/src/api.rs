@@ -285,6 +285,13 @@ pub struct WorkspaceSnapshot {
 /// FLUTTER: mirror this DTO.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentStatesSnapshot {
+    /// Per-session agent state, keyed by session id. NOTE: when a commander is
+    /// running, this map also carries one synthetic entry under the commander
+    /// *sentinel* id — a fixed reserved `SessionId` that does not correspond to
+    /// any real session/worktree. Clients that iterate `states` to render
+    /// per-session rows must skip it; it exists only to drive the commander
+    /// chip's own state. Its running-ness is also surfaced via
+    /// `commander_running` below.
     pub states: BTreeMap<SessionId, AgentState>,
     /// Whether a commander agent process appears to be running anywhere (used
     /// by the client to distinguish "no data yet" from "nothing running").

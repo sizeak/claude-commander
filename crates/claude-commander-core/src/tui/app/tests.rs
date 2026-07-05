@@ -3763,7 +3763,7 @@ async fn refresh_pr_status_fans_out_to_connected_backends_only() {
         reason: "down".to_string(),
     };
 
-    app.refresh_pr_status_all().await;
+    app.refresh_pr_status_all();
 
     let count = |id| {
         app.backend(id)
@@ -3774,7 +3774,17 @@ async fn refresh_pr_status_fans_out_to_connected_backends_only() {
             .unwrap()
             .pr_refresh_count()
     };
-    assert_eq!(count(BackendId(1)), 1, "connected remote gets the refresh");
+    // The fan-out is spawned off the event loop; poll for the connected remote's
+    // refresh to land.
+    let mut got = false;
+    for _ in 0..50 {
+        if count(BackendId(1)) == 1 {
+            got = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(got, "connected remote gets the refresh");
     assert_eq!(count(BackendId(2)), 0, "degraded remote is skipped");
 }
 
@@ -4020,6 +4030,146 @@ async fn review_image_fetch_routes_to_owning_backend() {
         remote_mock(&app, BackendId(1)).fetched_diff_blobs(),
         vec![(remote_sid, DiffSide::New, "logo.png".to_string())],
         "fetch_diff_blob must route to the backend that owns the session"
+    );
+}
+
+#[test]
+fn is_loopback_url_flags_loopback_hosts() {
+    use super::is_loopback_url;
+    // Loopback: the heuristic that warns about a self-referential remote server.
+    assert!(is_loopback_url("http://localhost:7878"));
+    assert!(is_loopback_url("http://LocalHost:7878"));
+    assert!(is_loopback_url("http://127.0.0.1:7878"));
+    assert!(is_loopback_url("http://127.1.2.3:7878")); // any 127.x.x.x
+    assert!(is_loopback_url("http://[::1]:7878"));
+    assert!(is_loopback_url("http://user@localhost:7878")); // userinfo stripped
+    assert!(is_loopback_url("http://localhost")); // no port
+    // Non-loopback: a real remote host.
+    assert!(!is_loopback_url("https://buildbox:7878"));
+    assert!(!is_loopback_url("http://192.168.1.10:7878"));
+    assert!(!is_loopback_url("http://example.com"));
+}
+
+#[tokio::test]
+async fn select_does_not_block_event_loop_on_mark_read() {
+    // Enter-to-attach is the hottest action; its `mark_read` is a remote POST
+    // with a client ceiling. It must be spawned fire-and-forget so the handler
+    // returns immediately (the attach itself stamps MRU server-side).
+    let (mut app, remote_sid) = app_with_remote_session().await;
+    let sref = crate::backend::SessionRef::new(BackendId(1), remote_sid);
+    app.ui_state.selected_session_id = Some(sref);
+
+    // Hold mark_read open: were it awaited inline, handle_select would never
+    // return and the timeout below would fire.
+    let gate = remote_mock(&app, BackendId(1)).block_mark_read();
+
+    tokio::time::timeout(std::time::Duration::from_millis(500), app.handle_select())
+        .await
+        .expect("handle_select must not block on the remote mark_read POST");
+
+    // The attach is still requested synchronously.
+    assert!(app.ui_state.should_quit, "attach must be requested");
+    assert!(
+        app.ui_state.attach_request.is_some(),
+        "attach target must be set"
+    );
+
+    // Releasing the gate lets the spawned mark_read complete and record.
+    gate.notify_one();
+    let mut recorded = false;
+    for _ in 0..50 {
+        if remote_mock(&app, BackendId(1))
+            .read_marked_sessions()
+            .contains(&remote_sid)
+        {
+            recorded = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        recorded,
+        "mark_read must still be delivered to the owning backend"
+    );
+}
+
+/// Dispatch a `BackendChanged` fold for backend `id` carrying `new_states`,
+/// after seeding that backend's cached (old) states with `old_states`.
+async fn fold_backend_states(
+    app: &mut App,
+    id: BackendId,
+    old_states: BTreeMap<SessionId, AgentState>,
+    new_states: BTreeMap<SessionId, AgentState>,
+) {
+    app.backend_mut_for_test(id).view.agent_states.states = old_states;
+    let snapshot = app.view_for(id).snapshot.clone();
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: id.0,
+        snapshot: Box::new(snapshot),
+        states: Box::new(crate::api::AgentStatesSnapshot {
+            states: new_states,
+            commander_running: false,
+        }),
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn remote_review_auto_refreshes_on_working_to_idle() {
+    // With a remote session's review open, a per-backend Working→Idle transition
+    // must trigger the same in-place review refresh the local path gives.
+    let (mut app, remote_sid) = app_with_remote_session().await;
+    app.ui_state.modal = Modal::ReviewDiff(review_state_for(remote_sid));
+
+    fold_backend_states(
+        &mut app,
+        BackendId(1),
+        BTreeMap::from([(remote_sid, AgentState::Working)]),
+        BTreeMap::from([(remote_sid, AgentState::Idle)]),
+    )
+    .await;
+
+    let mut refreshed = false;
+    for _ in 0..50 {
+        if remote_mock(&app, BackendId(1))
+            .review_refreshed_sessions()
+            .contains(&remote_sid)
+        {
+            refreshed = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        refreshed,
+        "a remote session's review must auto-refresh on Working→Idle"
+    );
+}
+
+#[tokio::test]
+async fn remote_review_no_refresh_without_transition() {
+    // Idle→Idle (no Working→Idle edge) must NOT trigger a review refresh.
+    let (mut app, remote_sid) = app_with_remote_session().await;
+    app.ui_state.modal = Modal::ReviewDiff(review_state_for(remote_sid));
+
+    fold_backend_states(
+        &mut app,
+        BackendId(1),
+        BTreeMap::from([(remote_sid, AgentState::Idle)]),
+        BTreeMap::from([(remote_sid, AgentState::Idle)]),
+    )
+    .await;
+
+    // Give any (erroneously) spawned refresh a chance to land before asserting.
+    for _ in 0..10 {
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        remote_mock(&app, BackendId(1))
+            .review_refreshed_sessions()
+            .is_empty(),
+        "no transition means no review refresh"
     );
 }
 

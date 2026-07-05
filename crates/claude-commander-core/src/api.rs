@@ -1360,16 +1360,26 @@ impl CommanderService {
     /// next poll tick.
     pub async fn agent_states(&self, fresh: bool) -> AgentStatesSnapshot {
         if fresh {
-            let active = self.active_session_targets().await;
-            let mut detector = AgentStateDetector::new(self.manager.tmux.clone(), Duration::ZERO);
-            let states = detector.detect_all(&active).await;
             // Recompute commander liveness the same way the poll loop does, so a
             // fresh read (and any non-fresh read served from the primed cache
             // afterwards, including a remote client's) reflects the commander's
             // real state rather than a stale flag left in the cache.
-            let commander_enabled = self.config_store.read().commander_enabled;
+            let (commander_enabled, commander_program) = {
+                let c = self.config_store.read();
+                (c.commander_enabled, c.commander_program())
+            };
             let commander_running =
                 commander_enabled && crate::commander::is_running(&self.manager.tmux).await;
+            // Include the commander's sentinel target when it's live so the
+            // rebuilt cache carries its state too — otherwise the commander chip
+            // blinks empty for one tick after an attach primes the cache.
+            let active = with_commander_target(
+                self.active_session_targets().await,
+                commander_running,
+                &commander_program,
+            );
+            let mut detector = AgentStateDetector::new(self.manager.tmux.clone(), Duration::ZERO);
+            let states = detector.detect_all(&active).await;
             let mut cache = self.agent_states_cache.write().await;
             cache.states = states;
             cache.commander_running = commander_running;
@@ -1498,7 +1508,7 @@ impl CommanderService {
             let sentinel = crate::commander::commander_sentinel_id();
             loop {
                 interval.tick().await;
-                let mut sessions: Vec<(SessionId, String, String)> = {
+                let sessions: Vec<(SessionId, String, String)> = {
                     let state = store.read().await;
                     state
                         .sessions
@@ -1509,13 +1519,8 @@ impl CommanderService {
                 };
                 let commander_running =
                     commander_enabled && crate::commander::is_running(&tmux).await;
-                if commander_running {
-                    sessions.push((
-                        sentinel,
-                        crate::commander::COMMANDER_TMUX_NAME.to_string(),
-                        commander_program.clone(),
-                    ));
-                }
+                let sessions =
+                    with_commander_target(sessions, commander_running, &commander_program);
                 // Quiet path: nothing to detect and the commander's state is
                 // unchanged — skip the tick (no cache write, no wake). But if the
                 // cache still holds states from a previous tick (the last running
@@ -1911,6 +1916,27 @@ pub(crate) fn detect_unread_transitions(
         })
         .map(|(id, _)| *id)
         .collect()
+}
+
+/// Append the commander's sentinel detection target to `active` when the
+/// commander is running, so its agent state is detected alongside real
+/// sessions. The sentinel is a reserved id with no `WorktreeSession`; callers
+/// that flag unread transitions must filter it out. Shared by the poll loop and
+/// the `fresh` [`CommanderService::agent_states`] rebuild so both carry the
+/// commander's state (keeping the footer chip from blinking empty for a tick).
+fn with_commander_target(
+    mut active: Vec<(SessionId, String, String)>,
+    commander_running: bool,
+    commander_program: &str,
+) -> Vec<(SessionId, String, String)> {
+    if commander_running {
+        active.push((
+            crate::commander::commander_sentinel_id(),
+            crate::commander::COMMANDER_TMUX_NAME.to_string(),
+            commander_program.to_string(),
+        ));
+    }
+    active
 }
 
 /// Whether the agent-state poll tick can skip entirely: nothing to detect (no
@@ -3070,6 +3096,25 @@ mod tests {
             base + Duration::from_secs(2),
             debounce
         ));
+    }
+
+    #[test]
+    fn with_commander_target_appends_sentinel_only_when_running() {
+        // The poll loop and the fresh rebuild both include the commander's
+        // sentinel target when it's live, so a fresh `agent_states(true)` after
+        // an attach carries the commander's own state (no one-tick chip blink).
+        let sentinel = crate::commander::commander_sentinel_id();
+
+        let running = with_commander_target(Vec::new(), true, "claude");
+        assert_eq!(running.len(), 1, "the sentinel target must be appended");
+        assert_eq!(running[0].0, sentinel);
+        assert_eq!(running[0].1, crate::commander::COMMANDER_TMUX_NAME);
+        assert_eq!(running[0].2, "claude", "the commander program is carried");
+
+        assert!(
+            with_commander_target(Vec::new(), false, "claude").is_empty(),
+            "no sentinel when the commander isn't running"
+        );
     }
 
     #[tokio::test]

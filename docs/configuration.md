@@ -232,6 +232,15 @@ server-side path. Treat it like an SSH key — don't commit it, don't share it, 
 scope it to people you'd give a shell. On disk this file is protected only by its
 `0600` permissions, so keep those intact.
 
+Don't add a remote server that shares this machine's `state.json` (for example a
+loopback `http://localhost:7878` server backed by the same data directory as your
+local instance). Its sessions are already shown under the local machine, so they
+would appear twice — once under the local root and once under the server header —
+and rows under the server header could be misrouted to the local backend. A
+loopback server is fine only when it runs against a **separate** data directory.
+claude-commander logs a warning when a configured server's URL is a loopback
+address as a reminder.
+
 ## Conversation mode (TTS)
 
 Press **`Alt-c`** to open a full-screen **conversation overlay** — a chat with a dedicated

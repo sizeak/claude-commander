@@ -1212,7 +1212,7 @@ impl App {
             UserCommand::RefreshPrStatus => {
                 // Wake every connected backend's PR-status loop; refreshed
                 // results arrive via each backend's change feed.
-                self.refresh_pr_status_all().await;
+                self.refresh_pr_status_all();
             }
             UserCommand::AddRemoteServer => {
                 self.handle_add_remote_server();

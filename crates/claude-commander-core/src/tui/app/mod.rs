@@ -1421,6 +1421,17 @@ impl App {
         server: &crate::config::RemoteServerConfig,
         remote_factory: &RemoteBackendFactory,
     ) -> BackendHandle {
+        // A loopback server that shares this machine's `state.json` would
+        // double-render every session and misroute rows under its header to the
+        // local backend. A loopback server with its OWN data dir is legitimate,
+        // so this is a warn-only heuristic, not a hard block.
+        if is_loopback_url(&server.url) {
+            warn!(
+                "Remote server '{}' points at a loopback address ({}); if it shares this \
+                 machine's state.json, sessions will appear twice — give it a separate data dir",
+                server.name, server.url
+            );
+        }
         match remote_factory(server) {
             Ok(backend) => BackendHandle::new(id, backend),
             Err(e) => {
@@ -2447,4 +2458,27 @@ pub(super) fn reconcile_remote_servers(
         }
     }
     RemoteServersReconcile { added, removed }
+}
+
+/// Whether `url`'s host is a loopback address (`localhost`, `127.0.0.0/8`, or
+/// `::1`). Used to warn about a self-referential remote server — one sharing
+/// this machine's state would double-render sessions. A cheap string heuristic
+/// (not full URL parsing): strip the scheme, authority separators, and any
+/// userinfo/port, then match the host.
+pub(super) fn is_loopback_url(url: &str) -> bool {
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let authority = after_scheme
+        .split(['/', '?', '#'])
+        .next()
+        .unwrap_or(after_scheme);
+    // Drop any `user:pass@` userinfo prefix.
+    let host_port = authority.rsplit('@').next().unwrap_or(authority);
+    // Bracketed IPv6 (`[::1]:port`) vs. `host:port` — a bare `:` split would
+    // mangle an IPv6 literal, so peel the brackets first.
+    let host = if let Some(rest) = host_port.strip_prefix('[') {
+        rest.split(']').next().unwrap_or("")
+    } else {
+        host_port.split(':').next().unwrap_or(host_port)
+    };
+    host.eq_ignore_ascii_case("localhost") || host == "::1" || host.starts_with("127.")
 }

@@ -43,6 +43,13 @@ pub struct MockBackend {
     restarted: Mutex<Vec<SessionId>>,
     /// Count of [`Self::request_pr_refresh`] calls, for call-recording asserts.
     pr_refresh_calls: Mutex<usize>,
+    /// Sessions passed to [`Self::mark_read`], for call-recording asserts.
+    read_marked: Mutex<Vec<SessionId>>,
+    /// When set, [`Self::mark_read`] awaits this gate before recording — lets a
+    /// test hold the call open to prove the caller doesn't block on it.
+    mark_read_gate: Mutex<Option<std::sync::Arc<tokio::sync::Notify>>>,
+    /// Sessions passed to [`Self::refresh_review_if_changed`], for routing asserts.
+    review_refreshed: Mutex<Vec<SessionId>>,
     /// Sessions passed to [`Self::list_comments`], for routing asserts.
     listed_comments: Mutex<Vec<SessionId>>,
     /// Sessions passed to [`Self::create_comment`], for routing asserts.
@@ -81,6 +88,9 @@ impl MockBackend {
             reconciled: Mutex::new(Vec::new()),
             restarted: Mutex::new(Vec::new()),
             pr_refresh_calls: Mutex::new(0),
+            read_marked: Mutex::new(Vec::new()),
+            mark_read_gate: Mutex::new(None),
+            review_refreshed: Mutex::new(Vec::new()),
             listed_comments: Mutex::new(Vec::new()),
             created_comments: Mutex::new(Vec::new()),
             applied_comments: Mutex::new(Vec::new()),
@@ -133,6 +143,25 @@ impl MockBackend {
     /// How many times [`Self::request_pr_refresh`] has been called.
     pub fn pr_refresh_count(&self) -> usize {
         *self.pr_refresh_calls.lock().unwrap()
+    }
+
+    /// Sessions passed to [`Self::mark_read`], in call order.
+    pub fn read_marked_sessions(&self) -> Vec<SessionId> {
+        self.read_marked.lock().unwrap().clone()
+    }
+
+    /// Gate [`Self::mark_read`] on the returned [`Notify`]: the call parks until
+    /// the test calls `notify_one`, so a test can prove the caller returned
+    /// without awaiting the mark-read. Returns the notify handle to release with.
+    pub fn block_mark_read(&self) -> std::sync::Arc<tokio::sync::Notify> {
+        let gate = std::sync::Arc::new(tokio::sync::Notify::new());
+        *self.mark_read_gate.lock().unwrap() = Some(gate.clone());
+        gate
+    }
+
+    /// Sessions passed to [`Self::refresh_review_if_changed`], in call order.
+    pub fn review_refreshed_sessions(&self) -> Vec<SessionId> {
+        self.review_refreshed.lock().unwrap().clone()
     }
 
     /// Sessions passed to [`Self::list_comments`], in call order.
@@ -303,8 +332,14 @@ impl CommanderBackend for MockBackend {
         self.guard()
     }
 
-    async fn mark_read(&self, _id: SessionId) -> BResult<()> {
-        self.guard()
+    async fn mark_read(&self, id: SessionId) -> BResult<()> {
+        self.guard()?;
+        let gate = self.mark_read_gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
+        self.read_marked.lock().unwrap().push(id);
+        Ok(())
     }
 
     async fn mark_unread(&self, _ids: Vec<SessionId>) -> BResult<()> {
@@ -358,10 +393,11 @@ impl CommanderBackend for MockBackend {
 
     async fn refresh_review_if_changed(
         &self,
-        _id: SessionId,
+        id: SessionId,
         _prev_hash: u64,
     ) -> BResult<Option<ReviewSnapshot>> {
         self.guard()?;
+        self.review_refreshed.lock().unwrap().push(id);
         Ok(None)
     }
 

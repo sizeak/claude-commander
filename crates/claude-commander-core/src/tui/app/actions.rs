@@ -177,8 +177,15 @@ impl App {
         // session when the attach actually runs.
         match self.session(sref).map(|s| s.status) {
             Some(status) if status.can_attach() => {
-                // Clear unread when attaching.
-                let _ = self.backend_for(sref).mark_read(sref.id).await;
+                // Clear unread when attaching. Fire-and-forget: on a remote
+                // backend this is a POST with the client ceiling, and ordering
+                // doesn't matter (the attach stamps MRU separately server-side),
+                // so it must not block Enter-to-attach on the event loop.
+                let backend = self.backend_for(sref);
+                let id = sref.id;
+                tokio::spawn(async move {
+                    let _ = backend.mark_read(id).await;
+                });
                 self.ui_state.attach_request = Some(AttachTarget::Session {
                     session: sref,
                     kind: AttachKind::Agent,
@@ -1364,14 +1371,25 @@ impl App {
     /// backend is always connected; a degraded remote is skipped, since its
     /// link is down and the request would only error. Each backend routes the
     /// request to where its PR polling actually happens (local loop / server).
-    pub(super) async fn refresh_pr_status_all(&self) {
-        for handle in &self.backends {
-            let connected = handle.id == LOCAL_BACKEND_ID
-                || matches!(handle.view.connection, ConnectionState::Connected);
-            if connected {
-                let _ = handle.backend.request_pr_refresh().await;
+    pub(super) fn refresh_pr_status_all(&self) {
+        // Snapshot the connected backends, then fan out in one spawned task so a
+        // slow/blocked remote POST doesn't stall the event loop. A degraded
+        // remote is skipped (its link is down and the request would only error);
+        // the local backend is always connected.
+        let backends: Vec<Arc<dyn CommanderBackend>> = self
+            .backends
+            .iter()
+            .filter(|handle| {
+                handle.id == LOCAL_BACKEND_ID
+                    || matches!(handle.view.connection, ConnectionState::Connected)
+            })
+            .map(|handle| handle.backend.clone())
+            .collect();
+        tokio::spawn(async move {
+            for backend in backends {
+                let _ = backend.request_pr_refresh().await;
             }
-        }
+        });
     }
 
     /// Sweep every project for sessions whose PR has merged on GitHub and

@@ -24,15 +24,20 @@ impl App {
                 // Working→Idle, it likely acted on applied comments — refresh the
                 // review view in place.
                 //
-                // Gated to the local backend for now because the transition is
-                // diffed against `ui_state.agent_states`, which only the local
-                // backend populates (see the `if is_local` block below). A remote
-                // session's review therefore won't auto-refresh on idle yet. The
-                // fix is to diff against the per-backend `handle.view.agent_states`
-                // (old vs. `*states`) here instead — deferred to a follow-up, since
-                // it also needs the review-open backend threaded through.
-                let review_refresh =
-                    is_local.then(|| self.review_refresh_on_transition(&states.states));
+                // The local backend diffs against `ui_state.agent_states` (the
+                // rendered map it maintains); a remote backend diffs against its
+                // own per-backend `view.agent_states` captured here before the
+                // fold below overwrites them. Either way `spawn_review_refresh`
+                // routes to the session's owning backend.
+                let review_refresh = if is_local {
+                    self.review_refresh_on_transition(&self.ui_state.agent_states, &states.states)
+                } else {
+                    self.backends
+                        .iter()
+                        .find(|h| h.id.0 == backend_id)
+                        .map(|h| h.view.agent_states.states.clone())
+                        .and_then(|old| self.review_refresh_on_transition(&old, &states.states))
+                };
 
                 if let Some(handle) = self.backends.iter_mut().find(|h| h.id.0 == backend_id) {
                     handle.view.snapshot = *snapshot;
@@ -59,7 +64,7 @@ impl App {
                 // globally unique), so a remote's blocked pull must be re-folded
                 // on any backend change — not only local ones.
                 self.apply_project_pull_badges();
-                if let Some(Some((sid, title, prev_hash))) = review_refresh {
+                if let Some((sid, title, prev_hash)) = review_refresh {
                     self.spawn_review_refresh(sid, title, prev_hash, false);
                 }
                 // Re-derive the session-list pending-comment (`*`) markers from
@@ -467,11 +472,17 @@ impl App {
     }
 
     /// If the review view is open (and no comment draft is in progress) for a
-    /// session that just transitioned Working→Idle between `self.ui_state`'s
-    /// current agent states and `new_states`, return the arguments for an
-    /// in-place review refresh.
+    /// session that just transitioned Working→Idle between `old_states` and
+    /// `new_states`, return the arguments for an in-place review refresh.
+    ///
+    /// The local path passes `ui_state.agent_states` as `old_states` (the
+    /// rendered map it maintains); a remote backend passes its per-backend
+    /// `view.agent_states` from before the fold overwrote them. The viewed
+    /// session's id is globally unique, so a backend whose states don't mention
+    /// it never spuriously triggers a refresh for another backend's session.
     fn review_refresh_on_transition(
         &self,
+        old_states: &BTreeMap<SessionId, AgentState>,
         new_states: &BTreeMap<SessionId, AgentState>,
     ) -> Option<(SessionId, String, u64)> {
         let Modal::ReviewDiff(state) = &self.ui_state.modal else {
@@ -481,7 +492,7 @@ impl App {
             return None;
         }
         let sid = state.session_id;
-        let was_working = self.ui_state.agent_states.get(&sid) == Some(&AgentState::Working);
+        let was_working = old_states.get(&sid) == Some(&AgentState::Working);
         let now_idle = new_states.get(&sid) == Some(&AgentState::Idle);
         (was_working && now_idle).then(|| (sid, state.title.clone(), state.content_hash))
     }

@@ -86,6 +86,12 @@ impl StateStore {
     /// external change. This is the local backend's change notification — a
     /// consumer re-reads [`Self::read`] on each bump rather than polling on a
     /// fixed tick. See [`crate::backend`].
+    ///
+    /// Receiver-version subtlety: the consumer must call `changed().await`
+    /// before any `borrow_and_update()`. A fresh receiver's first `changed()`
+    /// fires on the next generation bump; consuming it up front (marking the
+    /// current generation as seen) would swallow the first post-subscribe bump
+    /// and lose the corresponding change notification.
     pub fn subscribe(&self) -> watch::Receiver<u64> {
         self.generation.subscribe()
     }

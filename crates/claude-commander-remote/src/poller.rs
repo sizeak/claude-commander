@@ -76,6 +76,13 @@ impl ConnectionFeed {
 /// Owns the spawned poll task and the receiver ends of its two watches. Aborting
 /// the task on `Drop` prevents an orphaned poll loop from outliving the backend.
 pub(crate) struct Poller {
+    // Receiver-version subtlety: `change_feed()` clones this receiver, and a
+    // cloned `watch::Receiver` inherits the source's last-seen version. This
+    // stored receiver is therefore never consumed (`borrow_and_update`) — it
+    // stays pinned at the initial generation (0) so a clone's first
+    // `changed().await` still fires on the poll loop's first bump. Consuming it
+    // here would mark that bump as already-seen and reintroduce a startup race
+    // where the initial remote snapshot is never fetched.
     pub(crate) generation: watch::Receiver<u64>,
     pub(crate) connection: watch::Receiver<ConnectionState>,
     handle: JoinHandle<()>,
