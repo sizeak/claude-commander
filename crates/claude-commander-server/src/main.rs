@@ -4,7 +4,7 @@
 use std::net::SocketAddr;
 
 use clap::Parser;
-use claude_commander_core::api::CommanderService;
+use claude_commander_core::api::{BackgroundOpts, CommanderService};
 use claude_commander_core::telemetry::FrontendInfo;
 use tracing::{info, warn};
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
@@ -128,7 +128,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         warn!("--tls requested; TLS support requires the `tls` build feature (not yet wired)");
     }
 
-    let service = CommanderService::for_cli(claude_commander_core::Config::load()?, frontend())?;
+    let config = claude_commander_core::Config::load()?;
+    let commander_enabled = config.commander_enabled;
+    let service = CommanderService::for_cli(config, frontend())?;
+    // Drive the same background loops the local TUI runs (agent-state polling,
+    // PR-status checks, project auto-pull, state-sync) so remote clients see live
+    // data via `/workspace` + `/agent-states` polls. Handles run for the process
+    // lifetime; we don't need to hold them.
+    let _background = service.spawn_background_tasks(BackgroundOpts { commander_enabled });
     // The server is a long-lived frontend, so drive the idle-hibernation loop
     // (no-op unless hibernate_enabled and the check interval is non-zero), just
     // as the TUI does. Without this a server-only deployment — the many-idle-

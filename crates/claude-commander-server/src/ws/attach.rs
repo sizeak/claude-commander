@@ -25,7 +25,9 @@ use claude_commander_core::tmux::HeadlessAttach;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
-use super::protocol::{ClientControl, DetachReason, ServerControl};
+use super::protocol::{
+    AttachKind, ClientControl, DetachReason, ServerControl, WS_ERR_AUTH, WS_ERR_NO_SESSION,
+};
 use crate::state::AppState;
 
 /// How long to wait for the mandatory `auth` then `attach` handshake frames
@@ -107,7 +109,7 @@ async fn authenticate(socket: &mut WebSocket, state: &AppState) -> bool {
                 let _ = send_control(
                     socket,
                     &ServerControl::Error {
-                        message: "authentication failed".into(),
+                        message: WS_ERR_AUTH.into(),
                     },
                 )
                 .await;
@@ -135,8 +137,8 @@ async fn attach_session(
     socket: &mut WebSocket,
     state: &AppState,
 ) -> Option<(String, HeadlessAttach)> {
-    let session_query = match next_control(socket).await {
-        Some(ClientControl::Attach { session_id }) => session_id,
+    let (session_query, kind) = match next_control(socket).await {
+        Some(ClientControl::Attach { session_id, kind }) => (session_id, kind),
         Some(_) => {
             let _ = send_control(
                 socket,
@@ -150,13 +152,26 @@ async fn attach_session(
         None => return None,
     };
 
-    let tmux_name = match state.service.resolve_tmux_session(&session_query).await {
+    // Resolve the requested pane to a tmux session name through the same service
+    // method `LocalBackend::attach` uses, so both transports get identical
+    // revive-on-attach (a dead agent tmux session is recreated) and MRU-stamp
+    // (`last_attached_at`) behaviour. The agent pane is the session's primary
+    // tmux session; the shell pane (`Ctrl+\` partner) is created on demand.
+    let core_kind = match kind {
+        AttachKind::Agent => claude_commander_core::backend::AttachKind::Agent,
+        AttachKind::Shell => claude_commander_core::backend::AttachKind::Shell,
+    };
+    let resolved = state
+        .service
+        .resolve_attach_session(&session_query, core_kind)
+        .await;
+    let tmux_name = match resolved {
         Ok(Some(name)) => name,
         Ok(None) => {
             let _ = send_control(
                 socket,
                 &ServerControl::Error {
-                    message: "no such session".into(),
+                    message: WS_ERR_NO_SESSION.into(),
                 },
             )
             .await;

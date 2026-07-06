@@ -183,6 +183,7 @@ pub fn create_session(
         model: None,
         base_branch,
         section: None,
+        stack_parent: None,
     };
     let resp = client()
         .post(format!("{}/api/sessions", base(&base_url)))

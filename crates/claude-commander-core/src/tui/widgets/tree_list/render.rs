@@ -246,6 +246,48 @@ impl<'a> TreeList<'a> {
 
                     ListItem::new(line)
                 }
+                SessionListItem::ServerHeader {
+                    name, connection, ..
+                } => {
+                    use crate::backend::ConnectionState;
+                    // A filled dot coloured by health, the server name, and a
+                    // short status note. Degraded greys the name and shows the
+                    // reason so a down server reads as inert, not active.
+                    let (dot_color, name_style, note) = match connection {
+                        ConnectionState::Connected => (
+                            self.theme.status_running,
+                            Style::default()
+                                .fg(self.theme.text_primary)
+                                .add_modifier(Modifier::BOLD),
+                            None,
+                        ),
+                        ConnectionState::Connecting => (
+                            self.theme.text_secondary,
+                            Style::default()
+                                .fg(self.theme.text_secondary)
+                                .add_modifier(Modifier::BOLD),
+                            Some(("connecting…".to_string(), self.theme.text_secondary)),
+                        ),
+                        ConnectionState::Degraded { reason } => (
+                            self.theme.modal_warning,
+                            Style::default()
+                                .fg(self.theme.text_secondary)
+                                .add_modifier(Modifier::BOLD | Modifier::DIM),
+                            Some((reason.clone(), self.theme.modal_warning)),
+                        ),
+                    };
+                    let mut spans: Vec<Span<'static>> = vec![
+                        Span::styled("● ", Style::default().fg(dot_color)),
+                        Span::styled(name.clone(), name_style),
+                    ];
+                    if let Some((text, color)) = note {
+                        spans.push(Span::styled(
+                            format!(" ({text})"),
+                            Style::default().fg(color),
+                        ));
+                    }
+                    ListItem::new(Line::from(spans))
+                }
                 SessionListItem::SectionHeader {
                     name,
                     count,

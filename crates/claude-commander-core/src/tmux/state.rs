@@ -5,7 +5,7 @@
 //! pattern rules live on [`AgentKind`]; this module owns the tmux capture and
 //! result caching mechanics and dispatches to the right harness.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, Instant};
 
 use tracing::debug;
@@ -124,8 +124,8 @@ impl AgentStateDetector {
     pub async fn detect_all(
         &mut self,
         sessions: &[(SessionId, String, String)],
-    ) -> HashMap<SessionId, AgentState> {
-        let mut results = HashMap::new();
+    ) -> BTreeMap<SessionId, AgentState> {
+        let mut results = BTreeMap::new();
 
         for (session_id, tmux_name, program) in sessions {
             let kind = AgentKind::from_program(program);

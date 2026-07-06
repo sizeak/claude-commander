@@ -6,4 +6,6 @@
 //! shape by construction. This module re-exports them so the existing
 //! `super::protocol::{...}` import paths in [`super::attach`] keep working.
 
-pub use claude_commander_protocol::ws::{ClientControl, DetachReason, ServerControl};
+pub use claude_commander_protocol::ws::{
+    AttachKind, ClientControl, DetachReason, ServerControl, WS_ERR_AUTH, WS_ERR_NO_SESSION,
+};

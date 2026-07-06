@@ -19,9 +19,11 @@
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::path::Path;
 
+use async_trait::async_trait;
 use tokio::io::{ReadHalf, WriteHalf};
 use tracing::{info, warn};
 
+use crate::backend::{AttachEnd, AttachResizer, AttachStreams, AttachTerminator};
 use crate::error::Result;
 use crate::tmux::isolation::TmuxTmpdir;
 
@@ -52,9 +54,19 @@ impl HeadlessAttach {
         let (pty, pts) = pty_process::open()?;
         pty.resize(pty_process::Size::new(rows, cols))?;
 
-        let cmd = pty_process::Command::new("tmux")
+        let mut cmd = pty_process::Command::new("tmux")
             .args(["attach-session", "-t", session_name])
             .with_tmux_tmpdir(tmux_tmpdir);
+        // `tmux attach` refuses to start (or degrades to no IO) when the
+        // inherited TERM is missing or "dumb" — the norm for headless hosts
+        // (systemd units, CI runners). The bridge's pty does no rendering of
+        // its own — bytes stream raw to the far client, whose real terminal
+        // is what matters — so pin a capable TERM in that case. An inherited
+        // real TERM (the local TUI attach path) is left untouched so tmux
+        // emits sequences for the terminal actually displaying them.
+        if let Some(term) = fallback_term(std::env::var("TERM").ok().as_deref()) {
+            cmd = cmd.env("TERM", term);
+        }
         let child = cmd.spawn(pts)?;
 
         info!("Spawned tmux attach-session for {}", session_name);
@@ -92,6 +104,47 @@ impl HeadlessAttach {
         let (reader, writer) = tokio::io::split(self.pty);
         let guard = ChildGuard { child: self.child };
         (reader, writer, resize, guard)
+    }
+
+    /// Consume the bridge into the transport-agnostic [`AttachStreams`] the
+    /// generalized attach loop drives: boxed PTY halves, an [`AttachResizer`]
+    /// wrapping the `TIOCSWINSZ` ioctl, and a [`PtyTerminator`] owning the
+    /// `tmux attach-session` child. Both the local backend's `attach` and the
+    /// CLI's [`attach_to_session`](super::attach_to_session) build their streams
+    /// this way, so there is exactly one PTY→streams adapter.
+    pub fn into_streams(self) -> AttachStreams {
+        let (reader, writer, resize, child) = self.split();
+        let resizer = AttachResizer::new(move |cols, rows| resize.resize(cols, rows));
+        AttachStreams {
+            reader: Box::new(reader),
+            writer: Box::new(writer),
+            resizer,
+            terminator: Box::new(PtyTerminator { child }),
+        }
+    }
+}
+
+/// [`AttachTerminator`] for a local PTY attach: owns the `tmux attach-session`
+/// [`ChildGuard`]. `detach` kills the attach client (leaving the tmux session +
+/// its program running); `wait` reports how the client exited.
+pub struct PtyTerminator {
+    child: ChildGuard,
+}
+
+#[async_trait]
+impl AttachTerminator for PtyTerminator {
+    async fn detach(&mut self) {
+        self.child.kill().await;
+    }
+
+    async fn wait(&mut self) -> AttachEnd {
+        match self.child.wait().await {
+            // A clean exit is a tmux detach (Ctrl+B D / our own kill).
+            Ok(status) if status.success() => AttachEnd::Detached,
+            // A non-clean exit means the pane's process/session ended.
+            Ok(_) => AttachEnd::SessionEnded,
+            Err(e) => AttachEnd::Error(e.to_string()),
+        }
     }
 }
 
@@ -161,5 +214,36 @@ impl Drop for ChildGuard {
         // reaped by tokio's background machinery. This is the safety net for
         // ungraceful drops — graceful paths should call `kill().await`.
         let _ = self.child.start_kill();
+    }
+}
+
+/// The TERM to force on the bridge child when the inherited one can't drive
+/// `tmux attach`: `None` leaves a genuine terminal's TERM untouched.
+fn fallback_term(current: Option<&str>) -> Option<&'static str> {
+    match current {
+        Some(t) if !t.is_empty() && t != "dumb" && t != "unknown" => None,
+        _ => Some("xterm-256color"),
+    }
+}
+
+#[cfg(test)]
+mod term_tests {
+    use super::fallback_term;
+
+    #[test]
+    fn headless_terms_get_a_capable_fallback() {
+        // Unset/dumb/unknown/empty: the states found on CI runners and
+        // systemd units, where tmux attach exits immediately without this.
+        assert_eq!(fallback_term(None), Some("xterm-256color"));
+        assert_eq!(fallback_term(Some("dumb")), Some("xterm-256color"));
+        assert_eq!(fallback_term(Some("unknown")), Some("xterm-256color"));
+        assert_eq!(fallback_term(Some("")), Some("xterm-256color"));
+    }
+
+    #[test]
+    fn real_terminals_are_left_untouched() {
+        assert_eq!(fallback_term(Some("xterm-256color")), None);
+        assert_eq!(fallback_term(Some("tmux-256color")), None);
+        assert_eq!(fallback_term(Some("screen")), None);
     }
 }

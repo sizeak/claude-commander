@@ -120,6 +120,12 @@ fn refresh_branch_hint(
     existing_branches: &mut Option<Vec<String>>,
     picker: &mut super::ProjectPicker,
 ) {
+    // A remote backend's picker disables the local gix hint (its repo path is
+    // server-side); don't scan and don't fabricate a misleading hint.
+    if !picker.branch_hint_enabled {
+        *existing_branches = None;
+        return;
+    }
     let Some(path) = picker.selected_repo_path() else {
         *existing_branches = None;
         return;
@@ -973,7 +979,10 @@ impl App {
             Some(QuickSwitchItem::Session(m)) => {
                 let session_id = m.session_id;
                 self.ui_state.modal = Modal::None;
-                self.ui_state.selected_session_id = Some(session_id);
+                self.ui_state.selected_session_id = Some(SessionRef::new(
+                    self.backend_of_session(session_id),
+                    session_id,
+                ));
                 if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
                     matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
                 }) {
@@ -990,7 +999,16 @@ impl App {
                 session_id, target, ..
             }) => {
                 self.ui_state.modal = Modal::None;
-                self.apply_section_move(session_id, target).await;
+                self.apply_section_move(session_id, target);
+            }
+            Some(QuickSwitchItem::RemoteServerRemove { name, .. }) => {
+                self.ui_state.modal = Modal::Confirm {
+                    title: "Remove Remote Server".to_string(),
+                    message: format!(
+                        "Remove remote server \"{name}\"?\n\nSessions keep running on the server; this only removes it from this TUI's config."
+                    ),
+                    on_confirm: ConfirmAction::RemoveRemoteServer { name },
+                };
             }
             None => {}
         }
@@ -1101,7 +1119,7 @@ impl App {
         // Commands handled by an instrumented service method (and pure
         // navigation noise) map to `None` — see `UserCommand::telemetry_feature`.
         if let Some(feature) = cmd.telemetry_feature() {
-            self.service.telemetry().feature(feature);
+            self.record_feature(feature);
         }
         match cmd {
             UserCommand::NavigateUp => {
@@ -1145,7 +1163,7 @@ impl App {
                 self.handle_cascade_resume().await;
             }
             UserCommand::CascadeAbandon => {
-                self.handle_cascade_abandon().await;
+                self.handle_cascade_abandon();
             }
             UserCommand::PushStack => {
                 self.handle_push_stack();
@@ -1195,7 +1213,15 @@ impl App {
                 self.handle_open_pull_request().await;
             }
             UserCommand::RefreshPrStatus => {
-                self.spawn_pr_status_check();
+                // Wake every connected backend's PR-status loop; refreshed
+                // results arrive via each backend's change feed.
+                self.refresh_pr_status_all();
+            }
+            UserCommand::AddRemoteServer => {
+                self.handle_add_remote_server();
+            }
+            UserCommand::RemoveRemoteServer => {
+                self.handle_remove_remote_server();
             }
             UserCommand::OpenCommander => {
                 self.handle_open_commander().await;
@@ -1288,7 +1314,7 @@ impl App {
             UserCommand::GenerateSummary => {
                 // Context-specific: only works when Info pane is showing
                 if self.ui_state.right_pane_view == RightPaneView::Info
-                    && let Some(session_id) = self.ui_state.selected_session_id
+                    && let Some(session_id) = self.ui_state.selected_session_id.map(|r| r.id)
                 {
                     self.spawn_ai_summary_if_needed(session_id);
                 }
@@ -1302,22 +1328,12 @@ impl App {
                 }
                 let new_view = self.ui_state.view_mode.next();
                 self.ui_state.view_mode = new_view;
-                // Persist the chosen view so it survives restarts. We don't
-                // care if this fails (disk full, locked file) — the runtime
-                // behaviour is correct either way and the user will just see
-                // the default view on the next launch.
-                if let Err(err) = self
-                    .service
-                    .store()
-                    .mutate(move |state| {
-                        state.view_mode = Some(new_view);
-                    })
-                    .await
-                {
-                    warn!("Failed to persist view_mode: {}", err);
-                }
-                let selected_session = self.ui_state.selected_session_id;
-                let selected_project = self.ui_state.selected_project_id;
+                // Persist the chosen view so it survives restarts. A failed
+                // write is logged (not surfaced) inside the prefs store — the
+                // runtime behaviour is correct either way.
+                self.tui_prefs.set_view_mode(new_view).await;
+                let selected_session = self.ui_state.selected_session_id.map(|r| r.id);
+                let selected_project = self.ui_state.selected_project_id.map(|(_, p)| p);
                 self.refresh_list_items().await;
                 // Restore selection after rebuilding the list
                 if let Some(sid) = selected_session {
@@ -1530,6 +1546,7 @@ mod tests {
             program_picker: None,
             focus: crate::tui::app::InputFocus::Name,
             expanded: false,
+            mask: false,
         }
     }
 
@@ -1722,6 +1739,7 @@ diff --git a/a.rs b/a.rs
             program_picker: program,
             focus: InputFocus::Name,
             expanded: false,
+            mask: false,
         }
     }
 

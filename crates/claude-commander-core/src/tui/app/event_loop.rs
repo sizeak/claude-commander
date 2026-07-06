@@ -39,29 +39,15 @@ impl App {
                 needs_tick |= self.process_event(event).await;
             }
 
-            // Periodic background work (only on Tick)
+            // Periodic background work (only on Tick). The PR-status,
+            // project-pull, agent-state, and state-sync loops now run inside the
+            // service (see `CommanderService::spawn_background_tasks`); the tick
+            // only refreshes the rendered list and the preview pane.
             if needs_tick {
                 self.refresh_list_items().await;
 
                 // Spawn non-blocking preview update
                 self.spawn_preview_update();
-
-                // Periodic PR status check
-                if self.ui_state.gh_available && self.config.pr_check_interval_secs > 0 {
-                    let interval = Duration::from_secs(self.config.pr_check_interval_secs);
-                    let should_check = self
-                        .ui_state
-                        .last_pr_check
-                        .is_none_or(|t| t.elapsed() >= interval);
-                    if should_check {
-                        self.spawn_pr_status_check();
-                    }
-                }
-
-                // Periodic project-branch pull
-                if self.config.project_pull_enabled && self.config.project_pull_interval_secs > 0 {
-                    self.maybe_spawn_project_pulls().await;
-                }
             }
 
             if self.ui_state.should_quit {
@@ -126,6 +112,7 @@ impl App {
         match self.service.reload_config() {
             Ok(true) => {
                 debug!("Config hot-reloaded from disk");
+                let old_servers = self.config.remote_servers.clone();
                 self.config = self.service.read_config();
                 let base = self
                     .config
@@ -135,6 +122,13 @@ impl App {
                     .and_then(Theme::from_preset)
                     .unwrap_or_default();
                 self.theme = base.with_overrides(&self.config.theme);
+
+                // Reconcile the live backends against the new remote-server list
+                // (add/remove/rebuild handles) when it changed.
+                let new_servers = self.config.remote_servers.clone();
+                if old_servers != new_servers {
+                    self.apply_remote_servers_reload(&old_servers, &new_servers);
+                }
             }
             Ok(false) => {}
             Err(e) => {

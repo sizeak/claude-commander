@@ -1,10 +1,88 @@
 //! State management: state updates, session sync, list refresh, selection persistence.
 
 use super::*;
+use crate::api::{ProjectInfo, SessionInfo, WorkspaceSnapshot};
+use std::collections::BTreeMap;
+// Used only by the tree-builder tests below, which build a snapshot from a
+// hand-constructed `AppState` via the same projection production used before
+// the change-feed cache landed.
+#[cfg(test)]
+use crate::api::workspace_snapshot_from_state;
 
 impl App {
     pub(super) async fn handle_state_update(&mut self, update: StateUpdate) {
         match update {
+            StateUpdate::BackendChanged {
+                backend_id,
+                snapshot,
+                states,
+            } => {
+                let states = *states;
+                let is_local = backend_id == crate::backend::LOCAL_BACKEND_ID.0;
+                // Diff the OLD agent states (before we overwrite them) against
+                // the fresh ones: if the session whose review is open just went
+                // Working→Idle, it likely acted on applied comments — refresh the
+                // review view in place.
+                //
+                // The local backend diffs against `ui_state.agent_states` (the
+                // rendered map it maintains); a remote backend diffs against its
+                // own per-backend `view.agent_states` captured here before the
+                // fold below overwrites them. Either way `spawn_review_refresh`
+                // routes to the session's owning backend.
+                let review_refresh = if is_local {
+                    self.review_refresh_on_transition(&self.ui_state.agent_states, &states.states)
+                } else {
+                    self.backends
+                        .iter()
+                        .find(|h| h.id.0 == backend_id)
+                        .map(|h| h.view.agent_states.states.clone())
+                        .and_then(|old| self.review_refresh_on_transition(&old, &states.states))
+                };
+
+                if let Some(handle) = self.backends.iter_mut().find(|h| h.id.0 == backend_id) {
+                    handle.view.snapshot = *snapshot;
+                    handle.view.agent_states = states.clone();
+                    // The local backend's connection derives from the snapshot's
+                    // tmux health; a remote backend's is owned by its
+                    // connection-watch task, so a fold must not touch it.
+                    if let Some(conn) =
+                        super::connection_from_snapshot(is_local, &handle.view.snapshot)
+                    {
+                        handle.view.connection = conn;
+                    }
+                }
+
+                // The local backend drives the rendered agent-state map, the
+                // commander chip, and the project-pull badges (folded out of the
+                // snapshot the poll loops maintain). Single-backend this phase;
+                // Phase E merges every backend's states into one tree.
+                if is_local {
+                    self.ui_state.agent_states = states.states;
+                    self.ui_state.commander_running = states.commander_running;
+                }
+                // Pull badges union every backend's snapshot (project ids are
+                // globally unique), so a remote's blocked pull must be re-folded
+                // on any backend change — not only local ones.
+                self.apply_project_pull_badges();
+                if let Some((sid, title, prev_hash)) = review_refresh {
+                    self.spawn_review_refresh(sid, title, prev_hash, false);
+                }
+                // Re-derive the session-list pending-comment (`*`) markers from
+                // every backend's cached snapshot. The startup call runs before
+                // remote snapshots exist (bootstrap skips remotes), so without
+                // this a remote's pending markers would never render and a
+                // cross-frontend marker change would never propagate.
+                self.refresh_comment_indicators();
+                self.refresh_list_items().await;
+            }
+            StateUpdate::BackendConnection { backend_id, state } => {
+                if let Some(handle) = self.backends.iter_mut().find(|h| h.id.0 == backend_id) {
+                    handle.view.connection = state;
+                }
+                // Re-render the tree so the server header reflects the new
+                // health (and command gating re-evaluates).
+                self.refresh_list_items().await;
+            }
             StateUpdate::ContentUpdated { session_id, .. } => {
                 debug!("Content updated for session {}", session_id);
             }
@@ -35,8 +113,9 @@ impl App {
                 self.ui_state.preview_update_spawned_at = None;
 
                 // Only apply if selection hasn't changed since the fetch started
-                if session_id == self.ui_state.selected_session_id
-                    && project_id == self.ui_state.selected_project_id
+                // (compare ids; session/project ids are unique across backends)
+                if session_id == self.ui_state.selected_session_id.map(|r| r.id)
+                    && project_id == self.ui_state.selected_project_id.map(|(_, p)| p)
                 {
                     debug!(
                         "Applying PreviewReady (preview_len={} diff_lines={} elapsed={:?})",
@@ -54,84 +133,9 @@ impl App {
                     );
                 }
             }
-            StateUpdate::PrStatusReady { results } => {
-                let sections = self.config.sections.clone();
-                let now = chrono::Utc::now();
-                let _ = self
-                    .service
-                    .store()
-                    .mutate(move |state| {
-                        for (session_id, result) in &results {
-                            let Some(session) = state.get_session_mut(session_id) else {
-                                continue;
-                            };
-                            match result {
-                                PrCheckResult::Found(info) => {
-                                    session.pr_number = Some(info.number);
-                                    session.pr_url = Some(info.url.clone());
-                                    session.pr_state = Some(info.state);
-                                    session.pr_draft = info.is_draft;
-                                    session.pr_labels = info.labels.clone();
-                                    session.pr_merged = info.merged();
-                                    session.review_decision = info.review_decision;
-                                    session.pr_reviewers = info.reviewers.clone();
-                                    session.pr_base_branch = info.base_ref_name.clone();
-                                }
-                                PrCheckResult::NotFound => {
-                                    // Authoritative "no PR" — clear cached fields so
-                                    // stale data (e.g. after a PR was deleted) doesn't
-                                    // linger.
-                                    session.pr_number = None;
-                                    session.pr_url = None;
-                                    session.pr_state = None;
-                                    session.pr_draft = false;
-                                    session.pr_labels.clear();
-                                    session.pr_merged = false;
-                                    session.review_decision = None;
-                                    session.pr_reviewers.clear();
-                                    session.pr_base_branch = None;
-                                }
-                                PrCheckResult::FetchFailed => {
-                                    // Transient error (gh missing, network, auth) —
-                                    // preserve cached PR state including `pr_base_branch`
-                                    // so the PR-stack topology doesn't flicker off and
-                                    // sessions don't collapse to a flat list.
-                                }
-                            }
-                        }
-                        for session in state.sessions.values_mut() {
-                            crate::session::apply_assignment(session, &sections, now);
-                        }
-                    })
-                    .await;
-
-                // Update tmux status bars for running sessions with PR info.
-                // Snapshot under the lock, then release before async tmux I/O.
-                let status_bar_updates: Vec<_> = {
-                    let state = self.service.store().read().await;
-                    state
-                        .sessions
-                        .values()
-                        .filter(|s| s.status == SessionStatus::Running)
-                        .map(|s| {
-                            let info = self.service.status_bar_info(s, &state);
-                            (s.tmux_session_name.clone(), info)
-                        })
-                        .collect()
-                };
-                for (tmux_name, info) in &status_bar_updates {
-                    self.service
-                        .session_manager()
-                        .tmux
-                        .configure_status_bar(tmux_name, info)
-                        .await;
-                }
-
-                self.refresh_list_items().await;
-            }
             StateUpdate::EnrichedPrReady { session_id, info } => {
                 // Only apply if the session is still selected
-                if self.ui_state.selected_session_id == Some(session_id) {
+                if self.ui_state.selected_session_id.map(|r| r.id) == Some(session_id) {
                     self.ui_state.enriched_pr = info.map(|pr| (session_id, pr));
                 } else {
                     debug!("Discarding stale EnrichedPrReady for {}", session_id);
@@ -157,80 +161,87 @@ impl App {
                         .insert(session_id, AiSummary::Error(msg));
                 }
             },
-            StateUpdate::SessionCreated { session_id } => {
+            StateUpdate::SessionCreated {
+                session_id,
+                backend_id,
+            } => {
                 debug!("Session created: {}", session_id);
+                let backend_id = BackendId(backend_id);
                 self.ui_state.modal = Modal::None;
                 self.ui_state.status_message = Some((
                     format!("Created session {}", session_id),
                     Instant::now() + Duration::from_secs(3),
                 ));
-                self.reconcile_one_section_assignment(session_id).await;
+                // Reconcile the section on (and refresh the view of) the OWNING
+                // backend — not always the local one — so the new row is present
+                // in that backend's cached view before we try to select it.
+                // Selecting before the view carried the session was the bug that
+                // left a remote create half-landed (no reconcile, no selection).
+                self.reconcile_one_section_assignment(backend_id, session_id)
+                    .await;
                 // Materialise LFS content in the background (worktree was
                 // created with smudging skipped). Inserts into lfs_pull_in_flight
                 // before the refresh below so the marker shows on first paint.
+                // Self-guards to local sessions (remote worktrees are
+                // server-side; the id won't resolve in the local view).
                 self.spawn_lfs_pull(session_id).await;
                 self.refresh_list_items().await;
                 // Select the newly created session
                 self.select_session_in_tree(session_id);
                 self.spawn_preview_update();
             }
-            StateUpdate::SessionCreateFailed {
-                session_id,
-                message,
-            } => {
+            StateUpdate::SessionCreateFailed { message } => {
                 debug!("Session creation failed: {}", message);
-                let _ = self
-                    .service
-                    .session_manager()
-                    .remove_creating_session(&session_id)
-                    .await;
-                self.refresh_list_items().await;
+                // The backend already removed its half-created session; the
+                // change feed refreshes the tree. Just surface the error.
                 self.ui_state.modal = Modal::Error { message };
             }
-            StateUpdate::AgentStatesUpdated {
-                states,
-                commander_running,
+            StateUpdate::RemoteServerProbed {
+                nonce,
+                server,
+                result,
             } => {
-                self.ui_state.commander_running = commander_running;
-                // The commander has no `WorktreeSession`, so its sentinel id
-                // must not drive the unread/`mutate` path (which would take the
-                // write lock for a no-op `get_session_mut` miss every idle).
-                let sentinel = crate::commander::commander_sentinel_id();
-                let transitions = detect_unread_transitions(&self.ui_state.agent_states, &states);
-                // If the agent for the open review view just finished a turn, it
-                // likely acted on applied comments — fold its fresh edits into
-                // the view in place. Skip while a comment box is open (a rebuild
-                // would lose the in-progress draft's anchor).
-                let review_refresh = match &self.ui_state.modal {
-                    Modal::ReviewDiff(state)
-                        if state.comment.is_none() && transitions.contains(&state.session_id) =>
-                    {
-                        Some((state.session_id, state.title.clone(), state.content_hash))
-                    }
-                    _ => None,
-                };
-                if let Some((sid, title, prev_hash)) = review_refresh {
-                    self.spawn_review_refresh(sid, title, prev_hash, false);
+                // Only meaningful while the add-server Loading modal from the
+                // SAME flow is up: the nonce rejects a stale probe landing
+                // while some unrelated Loading modal happens to be shown.
+                if nonce != self.probe_nonce
+                    || !matches!(self.ui_state.modal, Modal::Loading { .. })
+                {
+                    return;
                 }
-                let unread_ids: Vec<_> = transitions
-                    .into_iter()
-                    .filter(|sid| *sid != sentinel)
-                    .collect();
-                if !unread_ids.is_empty() {
-                    let _ = self
-                        .service
-                        .store()
-                        .mutate(move |state| {
-                            for sid in &unread_ids {
-                                if let Some(session) = state.get_session_mut(sid) {
-                                    session.unread = true;
-                                }
+                match result {
+                    Ok(tmux_ok) => {
+                        let name = server.name.clone();
+                        match self.add_remote_server_to_config(server) {
+                            Ok(()) => {
+                                self.ui_state.modal = Modal::None;
+                                let msg = if tmux_ok {
+                                    format!("Added remote server \"{name}\"")
+                                } else {
+                                    format!(
+                                        "Added remote server \"{name}\" (warning: tmux unavailable on server)"
+                                    )
+                                };
+                                self.ui_state.status_message =
+                                    Some((msg, Instant::now() + Duration::from_secs(4)));
+                                self.refresh_list_items().await;
                             }
-                        })
-                        .await;
+                            Err(e) => {
+                                self.ui_state.modal = Modal::Error {
+                                    message: format!("Failed to save server: {e}"),
+                                };
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let name = server.name.clone();
+                        self.ui_state.modal = Modal::Confirm {
+                            title: "Connection Test Failed".to_string(),
+                            message: format!("{e}\n\nSave \"{name}\" anyway?"),
+                            on_confirm: ConfirmAction::AddRemoteServerAnyway { server },
+                        };
+                    }
                 }
-                self.ui_state.agent_states = states;
-                self.refresh_list_items().await;
             }
             StateUpdate::CheckoutFetchComplete {
                 project_id: updated_project,
@@ -248,47 +259,78 @@ impl App {
                     && *project_id == updated_project
                 {
                     *fetching = false;
-
-                    // Reconstruct BranchEntry list from (name, is_remote) pairs,
-                    // mirroring `load_branch_entries`'s dedup behavior.
-                    let mut local_names: std::collections::HashSet<String> =
-                        std::collections::HashSet::new();
-                    let mut entries: Vec<BranchEntry> = Vec::new();
-                    for (name, is_remote) in &branches {
-                        if !is_remote {
-                            local_names.insert(name.clone());
-                            entries.push(BranchEntry {
-                                local_name: name.clone(),
-                                display_name: name.clone(),
-                                is_remote: false,
-                            });
-                        }
-                    }
-                    for (name, is_remote) in &branches {
-                        if !is_remote {
-                            continue;
-                        }
-                        let local = name
-                            .split_once('/')
-                            .map(|(_, rest)| rest.to_string())
-                            .unwrap_or_else(|| name.clone());
-                        if local_names.contains(&local) {
-                            continue;
-                        }
-                        entries.push(BranchEntry {
-                            local_name: local,
-                            display_name: name.clone(),
-                            is_remote: true,
-                        });
-                    }
-
-                    *all_branches = entries;
+                    *all_branches = super::actions::branch_entries_from_pairs(branches);
                     self.refilter_checkout_branches();
                 }
             }
-            StateUpdate::ExternalChange => {
-                debug!("External state change detected, refreshing UI");
+            StateUpdate::CheckoutBranchesLoaded {
+                project_id: updated_project,
+                branches,
+            } => {
+                // The initial (no-fetch) listing: fill the list but leave the
+                // `fetching` spinner up, since the fetch-refresh is still running.
+                if let Modal::CheckoutBranch {
+                    project_id,
+                    all_branches,
+                    ..
+                } = &mut self.ui_state.modal
+                    && *project_id == updated_project
+                {
+                    *all_branches = super::actions::branch_entries_from_pairs(branches);
+                    self.refilter_checkout_branches();
+                }
+            }
+            StateUpdate::RestartFinished { backend_id, result } => {
+                let backend_id = BackendId(backend_id);
+                match result {
+                    Ok(()) => {
+                        self.ui_state.status_message = Some((
+                            "Session restarted".to_string(),
+                            Instant::now() + Duration::from_secs(3),
+                        ));
+                        // Refresh off the event loop; BackendChanged folds the
+                        // fresh view in and re-renders (no post-refresh
+                        // selection depends on it here).
+                        self.spawn_backend_view_refresh(backend_id);
+                    }
+                    Err(e) => {
+                        self.ui_state.modal = Modal::Error {
+                            message: format!("Failed to restart: {e}"),
+                        };
+                    }
+                }
+            }
+            StateUpdate::SessionMutationApplied {
+                backend_id,
+                session_id,
+            } => {
+                self.refresh_backend_view(BackendId(backend_id)).await;
                 self.refresh_list_items().await;
+                // The session may have moved position (rename re-sorts, a section
+                // move relocates it); keep it selected and refresh its preview.
+                if self.select_session_in_tree(session_id) {
+                    self.spawn_preview_update();
+                }
+            }
+            StateUpdate::NewSessionProgramsLoaded { project_id, picker } => {
+                // Patch the picker only if a New Session (plain or stacked) modal
+                // for the same project is still open; the user may have dismissed
+                // it or moved on to another project.
+                if let Modal::Input {
+                    program_picker,
+                    on_submit,
+                    ..
+                } = &mut self.ui_state.modal
+                    && program_picker.is_some()
+                    && matches!(
+                        on_submit,
+                        InputAction::CreateSession { project_id: pid, .. }
+                        | InputAction::CreateStackedSession { project_id: pid, .. }
+                            if *pid == project_id
+                    )
+                {
+                    *program_picker = Some(picker);
+                }
             }
             StateUpdate::Error { message } => {
                 self.ui_state.modal = Modal::Error { message };
@@ -316,6 +358,24 @@ impl App {
                     self.reset_review_images();
                     self.ensure_review_image(&state).await;
                     self.ui_state.modal = Modal::ReviewDiff(Box::new(state));
+                }
+            }
+            StateUpdate::ReviewOpenFailed { error } => {
+                // Only act while our own loading spinner is up (a later event
+                // could have replaced the modal). `None` → no changes (toast);
+                // `Some` → the fetch failed (error modal).
+                if matches!(self.ui_state.modal, Modal::Loading { .. }) {
+                    match error {
+                        Some(e) => {
+                            self.ui_state.modal = Modal::Error {
+                                message: format!("Failed to open review: {e}"),
+                            };
+                        }
+                        None => {
+                            self.ui_state.modal = Modal::None;
+                            self.set_review_status("No changes to review");
+                        }
+                    }
                 }
             }
             StateUpdate::ReviewImageLoaded {
@@ -380,11 +440,16 @@ impl App {
                     None => {}
                 }
             }
-            StateUpdate::CascadeFinished { result } => {
-                self.handle_cascade_finished(result).await;
+            StateUpdate::CascadeFinished { backend_id, result } => {
+                self.handle_cascade_finished(BackendId(backend_id), result)
+                    .await;
             }
-            StateUpdate::PushStackFinished { result } => {
-                self.handle_push_stack_finished(result).await;
+            StateUpdate::PushStackFinished { backend_id, result } => {
+                self.handle_push_stack_finished(BackendId(backend_id), result)
+                    .await;
+            }
+            StateUpdate::CascadeAbandonFinished { backend_id, result } => {
+                self.handle_cascade_abandon_finished(BackendId(backend_id), result);
             }
             StateUpdate::LfsPullFinished { session_id } => {
                 if self.ui_state.lfs_pull_in_flight.remove(&session_id) {
@@ -392,222 +457,78 @@ impl App {
                     self.refresh_list_items().await;
                 }
             }
-            StateUpdate::ProjectPullFinished {
-                project_id,
-                outcome,
-            } => {
-                self.ui_state.project_pull_in_flight.remove(&project_id);
-                self.ui_state
-                    .last_project_pull
-                    .insert(project_id, Instant::now());
-                match outcome {
-                    PullOutcome::Advanced => {
-                        debug!("project pull: {} advanced", project_id);
-                        self.ui_state.project_pull_blocked.remove(&project_id);
-                        self.refresh_list_items().await;
-                    }
-                    PullOutcome::UpToDate => {
-                        self.ui_state.project_pull_blocked.remove(&project_id);
-                    }
-                    PullOutcome::Blocked(reason) => {
-                        debug!("project pull: {} blocked ({})", project_id, reason.as_str());
-                        self.ui_state
-                            .project_pull_blocked
-                            .insert(project_id, reason);
-                    }
-                    PullOutcome::SoftFail => {
-                        // Leave any existing blocked state alone: a fetch
-                        // failure doesn't tell us anything new about the
-                        // branch relation.
-                    }
-                }
-            }
             _ => {}
         }
     }
 
-    pub(super) async fn cleanup_stale_creating_sessions(&self) {
-        let creating_ids: Vec<SessionId> = {
-            let state = self.service.store().read().await;
-            state
-                .sessions
-                .values()
-                .filter(|s| s.status == SessionStatus::Creating)
-                .map(|s| s.id)
-                .collect()
-        };
-
-        if !creating_ids.is_empty() {
-            warn!(
-                "Cleaning up {} stale Creating session(s) from previous run",
-                creating_ids.len()
-            );
-            let _ = self
-                .service
-                .store()
-                .mutate(move |state| {
-                    for sid in &creating_ids {
-                        state.remove_session(sid);
-                    }
-                })
-                .await;
-        }
-    }
-
-    /// Reset any sessions left in transient stack-operation states to `Running`.
-    ///
-    /// Both `Merging` and `Pushing` are transient — they're only valid while
-    /// a cascade-merge or push-stack step is actively running. If the process
-    /// died mid-op the git state is whatever it was, but the session-level
-    /// status is stale and must be cleared so the UI doesn't show a spinner
-    /// forever. `CascadePaused` is deliberately not touched: it's the durable
-    /// signal that a conflict is outstanding, and pairs with the persisted
-    /// `cascade_paused_at`.
-    pub(super) async fn cleanup_stale_merging_sessions(&self) {
-        let stale_ids: Vec<SessionId> = {
-            let state = self.service.store().read().await;
-            state
-                .sessions
-                .values()
-                .filter(|s| matches!(s.status, SessionStatus::Merging | SessionStatus::Pushing))
-                .map(|s| s.id)
-                .collect()
-        };
-
-        if !stale_ids.is_empty() {
-            warn!(
-                "Resetting {} stale Merging/Pushing session(s) to Running",
-                stale_ids.len()
-            );
-            let _ = self
-                .service
-                .store()
-                .mutate(move |state| {
-                    for sid in &stale_ids {
-                        if let Some(session) = state.get_session_mut(sid) {
-                            session.set_status(SessionStatus::Running);
-                        }
-                    }
-                })
-                .await;
-        }
-    }
-
-    /// Sync app state with actual tmux session state
-    ///
-    /// This method checks all active sessions and updates their status
-    /// if the corresponding tmux session no longer exists or the pane is dead.
-    pub(super) async fn sync_session_states(&self) {
-        let session_ids: Vec<(SessionId, String)> = {
-            let state = self.service.store().read().await;
-            state
-                .sessions
-                .values()
-                .filter(|s| s.status.is_active() && s.status != SessionStatus::Creating)
-                .map(|s| (s.id, s.tmux_session_name.clone()))
-                .collect()
-        };
-
-        for (session_id, tmux_name) in session_ids {
-            let should_mark_stopped = if let Ok(exists) = self
-                .service
-                .session_manager()
-                .tmux
-                .session_exists(&tmux_name)
-                .await
-            {
-                if !exists {
-                    true
-                } else {
-                    // Session exists, but check if pane is dead (program exited)
-                    self.service
-                        .session_manager()
-                        .tmux
-                        .is_pane_dead(&tmux_name)
-                        .await
-                        .unwrap_or(false)
+    /// Fold the workspace snapshot's per-project pull status into the render-side
+    /// `project_pull_blocked` badge map. The background pull loop maintains the
+    /// status server-side; only [`PullStatus::Blocked`] surfaces a badge (an
+    /// advance/up-to-date/soft-fail clears any prior one).
+    fn apply_project_pull_badges(&mut self) {
+        use crate::api::PullStatus;
+        // Union across every backend's snapshot: remote snapshots carry
+        // `project_pull` too, and project ids are globally unique, so a blocked
+        // pull on any server must surface a badge — not only the local one.
+        self.ui_state.project_pull_blocked = self
+            .backends
+            .iter()
+            .flat_map(|handle| handle.view.snapshot.project_pull.iter())
+            .filter_map(|(id, status)| match status {
+                PullStatus::Blocked { reason } => {
+                    Some((*id, crate::git::BlockReason::from(*reason)))
                 }
-            } else {
-                false
-            };
-
-            if should_mark_stopped {
-                // Kill the tmux session if it exists but pane is dead
-                let _ = self
-                    .service
-                    .session_manager()
-                    .tmux
-                    .kill_session(&tmux_name)
-                    .await;
-
-                let _ = self
-                    .service
-                    .store()
-                    .mutate(move |state| {
-                        if let Some(session) = state.get_session_mut(&session_id) {
-                            session.set_status(SessionStatus::Stopped);
-                        }
-                    })
-                    .await;
-            }
-        }
-
-        // Sync unmanaged worktrees for all projects
-        let project_ids: Vec<ProjectId> = {
-            let state = self.service.store().read().await;
-            state.projects.keys().copied().collect()
-        };
-        for project_id in project_ids {
-            if let Err(e) = self
-                .service
-                .session_manager()
-                .sync_worktrees(&project_id)
-                .await
-            {
-                debug!("Failed to sync worktrees for project {}: {}", project_id, e);
-            }
-        }
+                _ => None,
+            })
+            .collect();
     }
 
-    /// Run `apply_assignment` over every session against the current
-    /// `[[sections]]` config. Used at startup to reconcile state.json with
-    /// possibly-changed config.
+    /// If the review view is open (and no comment draft is in progress) for a
+    /// session that just transitioned Working→Idle between `old_states` and
+    /// `new_states`, return the arguments for an in-place review refresh.
+    ///
+    /// The local path passes `ui_state.agent_states` as `old_states` (the
+    /// rendered map it maintains); a remote backend passes its per-backend
+    /// `view.agent_states` from before the fold overwrote them. The viewed
+    /// session's id is globally unique, so a backend whose states don't mention
+    /// it never spuriously triggers a refresh for another backend's session.
+    fn review_refresh_on_transition(
+        &self,
+        old_states: &BTreeMap<SessionId, AgentState>,
+        new_states: &BTreeMap<SessionId, AgentState>,
+    ) -> Option<(SessionId, String, u64)> {
+        let Modal::ReviewDiff(state) = &self.ui_state.modal else {
+            return None;
+        };
+        if state.comment.is_some() {
+            return None;
+        }
+        let sid = state.session_id;
+        let was_working = old_states.get(&sid) == Some(&AgentState::Working);
+        let now_idle = new_states.get(&sid) == Some(&AgentState::Idle);
+        (was_working && now_idle).then(|| (sid, state.title.clone(), state.content_hash))
+    }
+
+    /// Re-run section assignment over every session against current config
+    /// (after a live config change), then refresh the cached view + tree.
     pub(super) async fn reconcile_section_assignments(&mut self) {
-        let sections = self.config.sections.clone();
-        let now = chrono::Utc::now();
-        let _ = self
-            .service
-            .store()
-            .mutate(move |state| {
-                if sections.is_empty()
-                    && state.sessions.values().all(|s| s.current_section.is_none())
-                {
-                    return;
-                }
-                for session in state.sessions.values_mut() {
-                    crate::session::apply_assignment(session, &sections, now);
-                }
-            })
-            .await;
+        let _ = self.local_arc().reconcile_sections().await;
+        self.refresh_local_view().await;
     }
 
-    /// Run `apply_assignment` for a single session — used after creating a
-    /// session, where the rest of the session set is already reconciled.
-    pub(super) async fn reconcile_one_section_assignment(&mut self, session_id: SessionId) {
-        if self.config.sections.is_empty() {
-            return;
-        }
-        let sections = self.config.sections.clone();
-        let now = chrono::Utc::now();
+    /// Re-run section assignment for a single freshly created session on the
+    /// backend that owns it, then refresh that backend's cached view so the new
+    /// (possibly re-sectioned) row is present before the caller selects it.
+    pub(super) async fn reconcile_one_section_assignment(
+        &mut self,
+        backend_id: BackendId,
+        session_id: SessionId,
+    ) {
         let _ = self
-            .service
-            .store()
-            .mutate(move |state| {
-                if let Some(session) = state.get_session_mut(&session_id) {
-                    crate::session::apply_assignment(session, &sections, now);
-                }
-            })
+            .backend_arc(backend_id)
+            .reconcile_one_section(session_id)
             .await;
+        self.refresh_backend_view(backend_id).await;
     }
 
     pub(super) async fn refresh_list_items(&mut self) {
@@ -621,27 +542,44 @@ impl App {
             self.ui_state.view_mode = ViewMode::ProjectGrouped;
         }
 
-        let state = self.service.store().read().await;
-
-        let mut items = match self.ui_state.view_mode {
-            ViewMode::ProjectGrouped => {
-                build_project_grouped_items(&state, &self.ui_state.agent_states)
+        // Read the change-feed-maintained cached snapshots. No store access on
+        // the refresh path: a backend mutation bumps the change feed, whose task
+        // fetches a fresh snapshot and folds it into the `BackendView` via
+        // `StateUpdate::BackendChanged` before this runs. Each backend
+        // contributes its own subtree under a per-server header — except when a
+        // lone local backend is configured, where the header is suppressed so
+        // the tree renders exactly as a single-machine setup always has.
+        let single_backend = self.backends.len() == 1;
+        let mut items: Vec<SessionListItem> = Vec::new();
+        for handle in &self.backends {
+            let snapshot = &handle.view.snapshot;
+            let agent_states = &handle.view.agent_states.states;
+            if !single_backend {
+                items.push(SessionListItem::ServerHeader {
+                    backend: handle.id,
+                    name: handle.backend.descriptor().name,
+                    connection: handle.view.connection.clone(),
+                });
             }
-            ViewMode::SectionGrouped => build_section_grouped_items(
-                &state,
-                &self.config.sections,
-                self.config.in_progress_limit,
-                &self.ui_state.agent_states,
-                &self.ui_state.collapsed_sections,
-            ),
-            ViewMode::SectionStacks => build_stacked_section_items(
-                &state,
-                &self.config.sections,
-                self.config.in_progress_limit,
-                &self.ui_state.agent_states,
-                &self.ui_state.collapsed_sections,
-            ),
-        };
+            let mut backend_items = match self.ui_state.view_mode {
+                ViewMode::ProjectGrouped => build_project_grouped_items(snapshot, agent_states),
+                ViewMode::SectionGrouped => build_section_grouped_items(
+                    snapshot,
+                    &self.config.sections,
+                    self.config.in_progress_limit,
+                    agent_states,
+                    &self.ui_state.collapsed_sections,
+                ),
+                ViewMode::SectionStacks => build_stacked_section_items(
+                    snapshot,
+                    &self.config.sections,
+                    self.config.in_progress_limit,
+                    agent_states,
+                    &self.ui_state.collapsed_sections,
+                ),
+            };
+            items.append(&mut backend_items);
+        }
 
         // Mark rows whose LFS content is still being pulled in the background.
         // Sourced from UiState (not the persisted session) so it survives the
@@ -660,7 +598,11 @@ impl App {
         let selectable: Vec<bool> = items.iter().map(|i| i.is_selectable()).collect();
         let group_starts: Vec<bool> = items.iter().map(|i| i.is_group_header()).collect();
         self.ui_state.list_items = items;
-        self.ui_state.cascade_paused = state.cascade_paused_at.is_some();
+        // The footer's "resume cascade" hint shows if *any* backend is paused.
+        self.ui_state.cascade_paused = self
+            .backends
+            .iter()
+            .any(|h| h.view.snapshot.cascade_paused.is_some());
         if matches!(self.ui_state.view_mode, ViewMode::ProjectGrouped) {
             self.ui_state
                 .list_state
@@ -670,96 +612,127 @@ impl App {
         }
         self.ui_state.list_state.set_group_starts(group_starts);
 
-        // Pre-compute stack chain for the selected session
-        self.ui_state.stack_chain.clear();
-        if let Some(session_id) = self.ui_state.selected_session_id
-            && let Some(session) = state.sessions.get(&session_id)
-        {
-            let project_sessions: Vec<&WorktreeSession> = state
-                .projects
-                .get(&session.project_id)
-                .map(|p| {
-                    p.worktrees
-                        .iter()
-                        .filter_map(|sid| state.sessions.get(sid))
-                        .collect()
-                })
-                .unwrap_or_default();
-            // Walk up to the stack base
-            let mut base = session_id;
-            for _ in 0..project_sessions.len() {
-                let base_session = project_sessions.iter().find(|s| s.id == base);
-                match base_session
-                    .and_then(|s| crate::session::resolve_stack_parent(s, &project_sessions))
-                {
-                    Some(parent) => base = parent,
-                    None => break,
+        // Pre-compute stack chain for the selected session, from the snapshot of
+        // the backend that owns it (stacks never span backends). Built into an
+        // owned vec inside the snapshot-borrow scope, then moved into ui_state,
+        // so the immutable borrow of `self` ends before the mutation.
+        let stack_chain = self.ui_state.selected_session_id.map(|sref| {
+            let snapshot = &self.view_for(sref.backend).snapshot;
+            let session_id = sref.id;
+            let by_id = session_index(snapshot);
+            let mut entries: Vec<StackChainEntry> = Vec::new();
+            if let Some(session) = by_id.get(&session_id).copied() {
+                let project_sessions: Vec<&SessionInfo> = snapshot
+                    .projects
+                    .iter()
+                    .find(|p| p.id == session.project_id)
+                    .map(|p| {
+                        p.session_ids
+                            .iter()
+                            .filter_map(|sid| by_id.get(sid).copied())
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                // Walk up to the stack base
+                let mut base = session_id;
+                for _ in 0..project_sessions.len() {
+                    let base_session = project_sessions.iter().find(|s| s.session_id == base);
+                    match base_session
+                        .and_then(|s| crate::session::resolve_stack_parent(*s, &project_sessions))
+                    {
+                        Some(parent) => base = parent,
+                        None => break,
+                    }
                 }
-            }
-            let chain = crate::session::stack_chain_from_base(base, &project_sessions);
-            if chain.len() > 1 {
-                for &sid in &chain {
-                    if let Some(s) = state.sessions.get(&sid) {
-                        self.ui_state.stack_chain.push(StackChainEntry {
-                            title: s.title.clone(),
-                            status: s.status,
-                            is_current: sid == session_id,
-                        });
+                let chain = crate::session::stack_chain_from_base(base, &project_sessions);
+                if chain.len() > 1 {
+                    for &sid in &chain {
+                        if let Some(s) = by_id.get(&sid).copied() {
+                            entries.push(StackChainEntry {
+                                title: s.title.clone(),
+                                status: s.status,
+                                is_current: sid == session_id,
+                            });
+                        }
                     }
                 }
             }
-        }
+            entries
+        });
+        self.ui_state.stack_chain = stack_chain.unwrap_or_default();
     }
 
-    /// Save current selection to persisted state
+    /// Save current selection to persisted UI prefs, qualified by the owning
+    /// backend's name so it survives a config reorder.
     pub(super) async fn save_selection(&self) {
-        let session_id = self.ui_state.selected_session_id;
-        let project_id = self.ui_state.selected_project_id;
-        let _ = self
-            .service
-            .store()
-            .mutate(move |state| {
-                state.last_selected_session = session_id;
-                state.last_selected_project = project_id;
-            })
+        let session = self.ui_state.selected_session_id;
+        let project = self.ui_state.selected_project_id;
+        let backend_id = session
+            .map(|r| r.backend)
+            .or_else(|| project.map(|(b, _)| b));
+        let backend_name =
+            backend_id.and_then(|id| self.backend(id).map(|h| h.backend.descriptor().name));
+        self.tui_prefs
+            .set_selection(session.map(|r| r.id), project.map(|(_, p)| p), backend_name)
             .await;
     }
 
-    /// Save left pane width to persisted state
+    /// Save left pane width to persisted UI prefs
     pub(super) async fn save_left_pane_pct(&self) {
-        let pct = self.ui_state.left_pane_pct;
-        let _ = self
-            .service
-            .store()
-            .mutate(move |state| {
-                state.left_pane_pct = Some(pct);
-            })
+        self.tui_prefs
+            .set_left_pane_pct(self.ui_state.left_pane_pct)
             .await;
     }
 
-    /// Restore selection and UI preferences from persisted state
+    /// Restore selection and UI preferences from persisted UI prefs
     pub(super) async fn restore_selection(&mut self) {
-        let (last_session, last_project, left_pane_pct) = {
-            let state = self.service.store().read().await;
-            (
-                state.last_selected_session,
-                state.last_selected_project,
-                state.left_pane_pct,
-            )
-        };
+        let prefs = self.tui_prefs.prefs();
+        let (last_session, last_project, left_pane_pct, last_backend) = (
+            prefs.last_selected_session,
+            prefs.last_selected_project,
+            prefs.left_pane_pct,
+            prefs.last_selected_backend.clone(),
+        );
 
         if let Some(pct) = left_pane_pct {
             self.ui_state.left_pane_pct = pct.clamp(MIN_LEFT_PANE_PCT, MAX_LEFT_PANE_PCT);
         }
 
-        // Try to find the last selected session or project in the list
-        let target_idx = self.ui_state.list_items.iter().position(|item| match item {
+        // Resolve the remembered backend *name* back to its current id (config
+        // order can change between launches). An unknown/absent name resolves to
+        // the local backend.
+        let preferred_backend = last_backend
+            .and_then(|name| {
+                self.backends
+                    .iter()
+                    .find(|h| h.backend.descriptor().name == name)
+                    .map(|h| h.id)
+            })
+            .unwrap_or(LOCAL_BACKEND_ID);
+
+        let row_matches = |item: &SessionListItem| match item {
             SessionListItem::Worktree { id, .. } => last_session.is_some_and(|s| s == *id),
             SessionListItem::Project { id, .. } => {
                 last_session.is_none() && last_project.is_some_and(|p| p == *id)
             }
-            SessionListItem::SectionHeader { .. } | SessionListItem::Spacer => false,
-        });
+            SessionListItem::SectionHeader { .. }
+            | SessionListItem::ServerHeader { .. }
+            | SessionListItem::Spacer => false,
+        };
+        let owning_backend = |item: &SessionListItem| match item {
+            SessionListItem::Worktree { id, .. } => Some(self.backend_of_session(*id)),
+            SessionListItem::Project { id, .. } => Some(self.backend_of_project(*id)),
+            _ => None,
+        };
+
+        // Prefer a matching row on the remembered backend; if that backend is
+        // gone (or the row moved), fall back to the first match on any backend.
+        let target_idx = self
+            .ui_state
+            .list_items
+            .iter()
+            .position(|item| row_matches(item) && owning_backend(item) == Some(preferred_backend))
+            .or_else(|| self.ui_state.list_items.iter().position(row_matches));
 
         if let Some(idx) = target_idx {
             self.ui_state.list_state.select(Some(idx));
@@ -776,11 +749,13 @@ impl App {
 /// Root-list sessions (unstacked + stack bases) are sorted newest-first by
 /// `created_at`; stacked children follow their root in parent→child (stack
 /// position) order at the single deeper indent.
-fn build_session_order(sessions: &[&WorktreeSession]) -> Vec<(SessionId, bool)> {
-    let mut root_sessions: Vec<&WorktreeSession> = Vec::new();
-    let mut children_by_parent: HashMap<SessionId, Vec<&WorktreeSession>> = HashMap::new();
+pub(super) fn build_session_order<S: crate::session::SessionNode>(
+    sessions: &[&S],
+) -> Vec<(SessionId, bool)> {
+    let mut root_sessions: Vec<&S> = Vec::new();
+    let mut children_by_parent: HashMap<SessionId, Vec<&S>> = HashMap::new();
     for s in sessions {
-        match crate::session::resolve_stack_parent(s, sessions) {
+        match crate::session::resolve_stack_parent(*s, sessions) {
             Some(parent_id) => {
                 children_by_parent.entry(parent_id).or_default().push(s);
             }
@@ -790,25 +765,25 @@ fn build_session_order(sessions: &[&WorktreeSession]) -> Vec<(SessionId, bool)> 
         }
     }
 
-    root_sessions.sort_by_key(|s| std::cmp::Reverse(s.created_at));
+    root_sessions.sort_by_key(|s| std::cmp::Reverse(s.node_created_at()));
     for children in children_by_parent.values_mut() {
-        children.sort_by_key(|s| s.created_at);
+        children.sort_by_key(|s| s.node_created_at());
     }
 
     let mut out = Vec::new();
     for root in root_sessions {
-        out.push((root.id, false));
+        out.push((root.node_id(), false));
         // to_visit is a LIFO stack; reverse the initial children and every
         // subsequent children-of-children push so pop() yields them in
         // ascending created_at order.
-        let mut to_visit: Vec<&WorktreeSession> = children_by_parent
-            .get(&root.id)
+        let mut to_visit: Vec<&S> = children_by_parent
+            .get(&root.node_id())
             .cloned()
             .unwrap_or_default();
         to_visit.reverse();
         while let Some(next) = to_visit.pop() {
-            out.push((next.id, true));
-            if let Some(grandchildren) = children_by_parent.get(&next.id) {
+            out.push((next.node_id(), true));
+            if let Some(grandchildren) = children_by_parent.get(&next.node_id()) {
                 for gc in grandchildren.iter().rev() {
                     to_visit.push(gc);
                 }
@@ -819,8 +794,8 @@ fn build_session_order(sessions: &[&WorktreeSession]) -> Vec<(SessionId, bool)> 
 }
 
 fn worktree_item(
-    session: &crate::session::WorktreeSession,
-    agent_states: &HashMap<SessionId, AgentState>,
+    session: &SessionInfo,
+    agent_states: &BTreeMap<SessionId, AgentState>,
     project_name_prefix: Option<&str>,
     stacked_child: bool,
 ) -> SessionListItem {
@@ -829,7 +804,7 @@ fn worktree_item(
         None => session.title.clone(),
     };
     SessionListItem::Worktree {
-        id: session.id,
+        id: session.session_id,
         project_id: session.project_id,
         title,
         branch: session.branch.clone(),
@@ -838,12 +813,15 @@ fn worktree_item(
         pr_number: session.pr_number,
         pr_url: session.pr_url.clone(),
         pr_merged: session.pr_merged,
-        pr_state: session.pr_state,
+        // The DTO carries the already-effective PR state; the list item's
+        // renderer re-applies `effective_pr_state`, which is idempotent on
+        // `Some`, so wrapping preserves the previous rendering exactly.
+        pr_state: Some(session.pr_state),
         pr_draft: session.pr_draft,
         pr_labels: session.pr_labels.clone(),
-        worktree_path: session.worktree_path.clone(),
+        worktree_path: std::path::PathBuf::from(&session.worktree_path),
         created_at: session.created_at,
-        agent_state: agent_states.get(&session.id).copied(),
+        agent_state: agent_states.get(&session.session_id).copied(),
         unread: session.unread,
         keep_alive: session.keep_alive,
         // Set by refresh_list_items from UiState::lfs_pull_in_flight after the
@@ -853,12 +831,22 @@ fn worktree_item(
     }
 }
 
-fn build_project_grouped_items(
-    state: &crate::config::AppState,
-    agent_states: &HashMap<SessionId, AgentState>,
+/// Index a snapshot's sessions by id for O(1) lookup during tree building.
+fn session_index(snapshot: &WorkspaceSnapshot) -> HashMap<SessionId, &SessionInfo> {
+    snapshot
+        .sessions
+        .iter()
+        .map(|s| (s.session_id, s))
+        .collect()
+}
+
+pub(super) fn build_project_grouped_items(
+    snapshot: &WorkspaceSnapshot,
+    agent_states: &BTreeMap<SessionId, AgentState>,
 ) -> Vec<SessionListItem> {
+    let by_id = session_index(snapshot);
     let mut items = Vec::new();
-    let mut projects: Vec<_> = state.projects.values().collect();
+    let mut projects: Vec<&ProjectInfo> = snapshot.projects.iter().collect();
     projects.sort_by(|a, b| a.name.cmp(&b.name));
 
     for project in projects {
@@ -867,19 +855,19 @@ fn build_project_grouped_items(
             name: project.name.clone(),
             repo_path: project.repo_path.clone(),
             main_branch: project.main_branch.clone(),
-            worktree_count: project.worktrees.len(),
+            worktree_count: project.session_ids.len(),
             nested: false,
         });
 
         // Use stack-aware ordering so stacked children render indented
         // directly beneath their stack base.
-        let sessions: Vec<&WorktreeSession> = project
-            .worktrees
+        let sessions: Vec<&SessionInfo> = project
+            .session_ids
             .iter()
-            .filter_map(|sid| state.sessions.get(sid))
+            .filter_map(|sid| by_id.get(sid).copied())
             .collect();
         for (sid, stacked_child) in build_session_order(&sessions) {
-            if let Some(session) = state.sessions.get(&sid) {
+            if let Some(session) = by_id.get(&sid).copied() {
                 items.push(worktree_item(session, agent_states, None, stacked_child));
             }
         }
@@ -905,17 +893,17 @@ fn resolve_section_limit(
         .and_then(|s| s.max_sessions)
 }
 
-fn build_section_grouped_items(
-    state: &crate::config::AppState,
+pub(super) fn build_section_grouped_items(
+    snapshot: &WorkspaceSnapshot,
     sections: &[crate::session::SectionConfig],
     in_progress_limit: Option<u32>,
-    agent_states: &HashMap<SessionId, AgentState>,
+    agent_states: &BTreeMap<SessionId, AgentState>,
     collapsed_sections: &std::collections::HashSet<String>,
 ) -> Vec<SessionListItem> {
-    let sessions: Vec<crate::session::WorktreeSession> = state.sessions.values().cloned().collect();
-    let groups = crate::session::build_sections(&sessions, sections);
+    let by_id = session_index(snapshot);
+    let groups = crate::session::build_sections(&snapshot.sessions, sections);
 
-    let mut projects: Vec<_> = state.projects.values().collect();
+    let mut projects: Vec<&ProjectInfo> = snapshot.projects.iter().collect();
     projects.sort_by(|a, b| a.name.cmp(&b.name));
 
     let mut items = Vec::new();
@@ -941,7 +929,7 @@ fn build_section_grouped_items(
             Default::default();
         let mut project_order: Vec<crate::session::ProjectId> = Vec::new();
         for sid in &group.sessions {
-            if let Some(session) = state.sessions.get(sid) {
+            if let Some(session) = by_id.get(sid) {
                 by_project.entry(session.project_id).or_default().push(*sid);
                 if !project_order.contains(&session.project_id) {
                     project_order.push(session.project_id);
@@ -967,7 +955,7 @@ fn build_section_grouped_items(
             });
             if let Some(sids) = project_sessions {
                 for sid in sids {
-                    if let Some(session) = state.sessions.get(sid) {
+                    if let Some(session) = by_id.get(sid).copied() {
                         items.push(worktree_item(session, agent_states, None, false));
                     }
                 }
@@ -981,11 +969,11 @@ fn build_section_grouped_items(
 /// the whole stack lands in the section chosen by its newest leaf (with
 /// `section_override` walked closest-to-leaf-first), and stack indentation is
 /// preserved via `stacked_child: true` on non-root members.
-fn build_stacked_section_items(
-    state: &crate::config::AppState,
+pub(super) fn build_stacked_section_items(
+    snapshot: &WorkspaceSnapshot,
     sections: &[crate::session::SectionConfig],
     in_progress_limit: Option<u32>,
-    agent_states: &HashMap<SessionId, AgentState>,
+    agent_states: &BTreeMap<SessionId, AgentState>,
     collapsed_sections: &std::collections::HashSet<String>,
 ) -> Vec<SessionListItem> {
     use chrono::{DateTime, Utc};
@@ -1002,9 +990,11 @@ fn build_stacked_section_items(
         order: Vec<(SessionId, bool)>,
     }
 
+    let by_id = session_index(snapshot);
+
     // Stable project order. Ties on `name` (unusual but possible) fall
     // back to project id so we never depend on HashMap iteration order.
-    let mut projects: Vec<_> = state.projects.values().collect();
+    let mut projects: Vec<&ProjectInfo> = snapshot.projects.iter().collect();
     projects.sort_by(|a, b| a.name.cmp(&b.name).then(a.id.cmp(&b.id)));
 
     // section_name → project_id → Vec<GroupRender>
@@ -1019,25 +1009,29 @@ fn build_stacked_section_items(
         // Sort by (created_at, id) so any downstream max_by_key on this
         // slice (e.g. fan-out children with identical created_at in
         // `stack_top`) picks a deterministic winner.
-        let mut project_sessions: Vec<&WorktreeSession> = state
+        let mut project_sessions: Vec<&SessionInfo> = snapshot
             .sessions
-            .values()
+            .iter()
             .filter(|s| s.project_id == project.id)
             .collect();
         if project_sessions.is_empty() {
             continue;
         }
-        project_sessions.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        project_sessions.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then(a.session_id.cmp(&b.session_id))
+        });
 
         // Bucket every session by its stack root (returns self for
         // unstacked). Track first-encounter root order so we iterate
         // groups deterministically below without leaking
         // HashMap-iteration order into the output.
-        let mut groups: std::collections::HashMap<SessionId, Vec<&WorktreeSession>> =
+        let mut groups: std::collections::HashMap<SessionId, Vec<&SessionInfo>> =
             std::collections::HashMap::new();
         let mut group_roots: Vec<SessionId> = Vec::new();
         for s in &project_sessions {
-            let root_id = crate::session::stack_root(s.id, &project_sessions);
+            let root_id = crate::session::stack_root(s.session_id, &project_sessions);
             if !groups.contains_key(&root_id) {
                 group_roots.push(root_id);
             }
@@ -1048,7 +1042,7 @@ fn build_stacked_section_items(
             let members = groups.remove(&root_id).unwrap_or_default();
             // Pick the leaf in the whole subgraph; its section drives placement.
             let leaf_id = crate::session::stack_top(root_id, &project_sessions);
-            let Some(leaf) = members.iter().find(|s| s.id == leaf_id).copied() else {
+            let Some(leaf) = members.iter().find(|s| s.session_id == leaf_id).copied() else {
                 continue;
             };
 
@@ -1056,9 +1050,13 @@ fn build_stacked_section_items(
             // wins (stale ones are skipped, see below); overrides on off-path
             // siblings are not considered.
             let mut effective: Option<String> = None;
-            let mut cursor = leaf.id;
+            let mut cursor = leaf.session_id;
             for _ in 0..project_sessions.len() {
-                let Some(cur) = project_sessions.iter().find(|s| s.id == cursor).copied() else {
+                let Some(cur) = project_sessions
+                    .iter()
+                    .find(|s| s.session_id == cursor)
+                    .copied()
+                else {
                     break;
                 };
                 // Only a *valid* override stops the walk. A stale override
@@ -1094,7 +1092,7 @@ fn build_stacked_section_items(
                 .entry(project.id)
                 .or_default()
                 .push(GroupRender {
-                    sort_key: leaf.entered_section_at,
+                    sort_key: leaf.entered_section_at.unwrap_or_default(),
                     leaf_id,
                     order,
                 });
@@ -1161,7 +1159,7 @@ fn build_stacked_section_items(
                 .sort_by(|a, b| a.sort_key.cmp(&b.sort_key).then(a.leaf_id.cmp(&b.leaf_id)));
             for group in groups_in_proj {
                 for (sid, stacked_child) in group.order {
-                    if let Some(session) = state.sessions.get(&sid) {
+                    if let Some(session) = by_id.get(&sid).copied() {
                         items.push(worktree_item(session, agent_states, None, stacked_child));
                     }
                 }
@@ -1169,19 +1167,6 @@ fn build_stacked_section_items(
         }
     }
     items
-}
-
-fn detect_unread_transitions(
-    prev: &HashMap<SessionId, AgentState>,
-    new: &HashMap<SessionId, AgentState>,
-) -> Vec<SessionId> {
-    let mut ids = Vec::new();
-    for (session_id, new_state) in new {
-        if *new_state == AgentState::Idle && prev.get(session_id) == Some(&AgentState::Working) {
-            ids.push(*session_id);
-        }
-    }
-    ids
 }
 
 /// Apply freshly-detected agent states for the sessions just viewed during an
@@ -1195,68 +1180,66 @@ fn detect_unread_transitions(
 /// their own transitions are never re-flagged as unread. Every other session
 /// keeps its prior state, preserving the baseline a later poll diffs against.
 pub(super) fn apply_viewed_session_refresh(
-    agent_states: &mut HashMap<SessionId, AgentState>,
-    refreshed: HashMap<SessionId, AgentState>,
+    agent_states: &mut BTreeMap<SessionId, AgentState>,
+    refreshed: BTreeMap<SessionId, AgentState>,
 ) {
     agent_states.extend(refreshed);
+}
+
+/// Preview the stack-retarget that deleting `session_id` would trigger, derived
+/// from a workspace snapshot: `(number of direct stacked children, branch they'd
+/// be retargeted onto)`. Returns `None` when the session has no direct stacked
+/// children, so the delete confirmation only mentions retargeting when it
+/// actually applies.
+///
+/// DTO twin of [`AppState::stack_retarget_preview`](crate::config::storage::AppState::stack_retarget_preview):
+/// the delete-confirm dialog derives its preview from the cached snapshot rather
+/// than reading the store, so a remote backend's snapshot drives it identically.
+pub(super) fn stack_retarget_preview_from_snapshot(
+    snapshot: &WorkspaceSnapshot,
+    session_id: SessionId,
+) -> Option<(usize, String)> {
+    let deleted = snapshot
+        .sessions
+        .iter()
+        .find(|s| s.session_id == session_id)?;
+    let project_id = deleted.project_id;
+    let main_branch = snapshot
+        .projects
+        .iter()
+        .find(|p| p.id == project_id)?
+        .main_branch
+        .clone();
+    let project_sessions: Vec<&SessionInfo> = snapshot
+        .sessions
+        .iter()
+        .filter(|s| s.project_id == project_id)
+        .collect();
+
+    let child_ids: Vec<SessionId> = project_sessions
+        .iter()
+        .filter(|s| {
+            crate::session::resolve_stack_parent(**s, &project_sessions) == Some(session_id)
+        })
+        .map(|s| s.session_id)
+        .collect();
+    if child_ids.is_empty() {
+        return None;
+    }
+
+    let new_base_branch = crate::session::resolve_stack_parent(deleted, &project_sessions)
+        .and_then(|pid| project_sessions.iter().find(|s| s.session_id == pid))
+        .map(|p| p.branch.clone())
+        .unwrap_or(main_branch);
+    Some((child_ids.len(), new_base_branch))
 }
 
 #[cfg(test)]
 mod unread_transition_tests {
     use super::*;
+    use crate::api::detect_unread_transitions;
     use crate::session::SessionId;
-    use std::collections::HashMap;
-
-    #[test]
-    fn working_to_idle_marks_unread() {
-        let sid = SessionId::new();
-        let prev = HashMap::from([(sid, AgentState::Working)]);
-        let new = HashMap::from([(sid, AgentState::Idle)]);
-        assert_eq!(detect_unread_transitions(&prev, &new), vec![sid]);
-    }
-
-    #[test]
-    fn idle_to_idle_no_transition() {
-        let sid = SessionId::new();
-        let prev = HashMap::from([(sid, AgentState::Idle)]);
-        let new = HashMap::from([(sid, AgentState::Idle)]);
-        assert!(detect_unread_transitions(&prev, &new).is_empty());
-    }
-
-    #[test]
-    fn empty_cache_no_transition() {
-        let sid = SessionId::new();
-        let prev = HashMap::new();
-        let new = HashMap::from([(sid, AgentState::Idle)]);
-        assert!(
-            detect_unread_transitions(&prev, &new).is_empty(),
-            "cleared cache after attach must not trigger false unread"
-        );
-    }
-
-    #[test]
-    fn empty_cache_working_no_transition() {
-        let sid = SessionId::new();
-        let prev = HashMap::new();
-        let new = HashMap::from([(sid, AgentState::Working)]);
-        assert!(detect_unread_transitions(&prev, &new).is_empty());
-    }
-
-    #[test]
-    fn commander_sentinel_would_be_flagged_so_handler_must_filter_it() {
-        // The detector treats the sentinel like any other id, so a commander
-        // Working→Idle transition WOULD be reported as unread. The handler
-        // filters the sentinel out to avoid a no-op write-lock/`mutate` on a
-        // session that does not exist in `state.sessions`.
-        let sentinel = crate::commander::commander_sentinel_id();
-        let prev = HashMap::from([(sentinel, AgentState::Working)]);
-        let new = HashMap::from([(sentinel, AgentState::Idle)]);
-        assert_eq!(
-            detect_unread_transitions(&prev, &new),
-            vec![sentinel],
-            "if this stops flagging the sentinel, the handler's filter is dead code"
-        );
-    }
+    use std::collections::BTreeMap;
 
     #[test]
     fn viewed_refresh_preserves_background_unread() {
@@ -1268,17 +1251,17 @@ mod unread_transition_tests {
         let b = SessionId::new();
 
         // Pre-attach baseline: both working.
-        let mut agent_states = HashMap::from([(a, AgentState::Working), (b, AgentState::Working)]);
+        let mut agent_states = BTreeMap::from([(a, AgentState::Working), (b, AgentState::Working)]);
 
         // Detach refreshes only the viewed session, now observed idle.
-        apply_viewed_session_refresh(&mut agent_states, HashMap::from([(a, AgentState::Idle)]));
+        apply_viewed_session_refresh(&mut agent_states, BTreeMap::from([(a, AgentState::Idle)]));
 
         // A reflects its observed state; B's baseline is untouched (not wiped).
         assert_eq!(agent_states.get(&a), Some(&AgentState::Idle));
         assert_eq!(agent_states.get(&b), Some(&AgentState::Working));
 
         // Next background poll reports both idle.
-        let poll = HashMap::from([(a, AgentState::Idle), (b, AgentState::Idle)]);
+        let poll = BTreeMap::from([(a, AgentState::Idle), (b, AgentState::Idle)]);
         let unread = detect_unread_transitions(&agent_states, &poll);
 
         // Only B is flagged: A's finish was watched, B's was not. A wholesale
@@ -1428,7 +1411,11 @@ mod stack_order_tests {
         }
     }
 
-    fn appstate_from(sessions: Vec<WorktreeSession>) -> crate::config::AppState {
+    /// Build the DTO [`WorkspaceSnapshot`] the tree builders now consume, from a
+    /// list of domain sessions — same shaped input as before, projected through
+    /// the production `workspace_snapshot_from_state` so tests exercise the real
+    /// conversion path.
+    fn appstate_from(sessions: Vec<WorktreeSession>) -> WorkspaceSnapshot {
         let mut state = crate::config::AppState::default();
         // Group sessions by their project_id so projects with multiple
         // worktrees stay linked correctly.
@@ -1448,7 +1435,38 @@ mod stack_order_tests {
             state.projects.get_mut(&pid).unwrap().add_worktree(s.id);
             state.sessions.insert(s.id, s);
         }
-        state
+        workspace_snapshot_from_state(&state)
+    }
+
+    #[test]
+    fn retarget_preview_reports_children_and_new_base() {
+        let pid = ProjectId::new();
+        let base = {
+            let mut s = make_session("base", "base-br", 0);
+            s.project_id = pid;
+            s
+        };
+        let child = {
+            let mut s = make_session("child", "child-br", 5);
+            s.project_id = pid;
+            s.stack_parent_session_id = Some(base.id);
+            s
+        };
+        let base_id = base.id;
+        let child_id = child.id;
+        let snapshot = appstate_from(vec![base, child]);
+
+        // Deleting the stack base retargets its one child onto the project's
+        // main branch (the base was the stack root).
+        assert_eq!(
+            stack_retarget_preview_from_snapshot(&snapshot, base_id),
+            Some((1, "main".to_string()))
+        );
+        // The leaf child has no stacked children → no retarget preview.
+        assert_eq!(
+            stack_retarget_preview_from_snapshot(&snapshot, child_id),
+            None
+        );
     }
 
     #[test]
@@ -1465,7 +1483,7 @@ mod stack_order_tests {
 
         let state = appstate_from(vec![base.clone(), child.clone()]);
         let sections = vec![section_named("Open"), section_named("Review")];
-        let agent_states = HashMap::new();
+        let agent_states = BTreeMap::new();
         let collapsed = std::collections::HashSet::new();
 
         let items = build_stacked_section_items(&state, &sections, None, &agent_states, &collapsed);
@@ -1546,7 +1564,7 @@ mod stack_order_tests {
             &state,
             &sections,
             None,
-            &HashMap::new(),
+            &BTreeMap::new(),
             &std::collections::HashSet::new(),
         );
 
@@ -1592,7 +1610,7 @@ mod stack_order_tests {
             &state,
             &sections,
             None,
-            &HashMap::new(),
+            &BTreeMap::new(),
             &std::collections::HashSet::new(),
         );
 
@@ -1639,7 +1657,7 @@ mod stack_order_tests {
             &state,
             &sections,
             None,
-            &HashMap::new(),
+            &BTreeMap::new(),
             &std::collections::HashSet::new(),
         );
 
@@ -1713,7 +1731,7 @@ mod stack_order_tests {
             &state,
             &sections,
             None,
-            &HashMap::new(),
+            &BTreeMap::new(),
             &std::collections::HashSet::new(),
         );
 
@@ -1791,13 +1809,13 @@ mod stack_order_tests {
         let collapsed = std::collections::HashSet::new();
 
         let first =
-            build_stacked_section_items(&state, &sections, None, &HashMap::new(), &collapsed);
+            build_stacked_section_items(&state, &sections, None, &BTreeMap::new(), &collapsed);
         // Call many times — every iteration constructs fresh internal
         // HashMaps with a new RandomState, so any non-determinism shows up
         // here. 32 calls is well past the birthday-paradox threshold.
         for _ in 0..32 {
             let again =
-                build_stacked_section_items(&state, &sections, None, &HashMap::new(), &collapsed);
+                build_stacked_section_items(&state, &sections, None, &BTreeMap::new(), &collapsed);
             assert_eq!(
                 again, first,
                 "build_stacked_section_items must produce identical output on every call"
@@ -1823,7 +1841,7 @@ mod stack_order_tests {
             &state,
             &sections,
             None,
-            &HashMap::new(),
+            &BTreeMap::new(),
             &std::collections::HashSet::new(),
         );
 
@@ -1903,7 +1921,7 @@ mod stack_order_tests {
             &state,
             &sections,
             None,
-            &HashMap::new(),
+            &BTreeMap::new(),
             &std::collections::HashSet::new(),
         );
 
@@ -1932,7 +1950,7 @@ mod stack_order_tests {
             &state,
             &sections,
             Some(2),
-            &HashMap::new(),
+            &BTreeMap::new(),
             &std::collections::HashSet::new(),
         );
 
@@ -1962,7 +1980,7 @@ mod stack_order_tests {
             &state,
             &sections,
             Some(1),
-            &HashMap::new(),
+            &BTreeMap::new(),
             &std::collections::HashSet::new(),
         );
 
@@ -1998,5 +2016,170 @@ mod stack_order_tests {
             vec![(child.id, false), (base.id, false)],
             "child with PR targeting main should pop to the root list"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Perf baseline: tree building over a large seeded state.
+    //
+    // The tree builders (`build_project_grouped_items` /
+    // `build_section_grouped_items` / `build_stacked_section_items`) currently
+    // read the local `AppState` directly. The Phase C refactor moves them onto
+    // DTO snapshots behind a backend trait; this seeder + `#[ignore]`d timing
+    // test pin the current cost so the refactor can prove it did not regress
+    // tree building for local users.
+    //
+    // `seed_large_state` is intentionally reusable (`pub(super)`) so Phase C can
+    // feed the *same* shaped state into the DTO-based builders and compare
+    // apples-to-apples. Run with:
+    //   cargo test -p claude-commander-core tree_build_perf_baseline -- --ignored --nocapture
+    // -----------------------------------------------------------------------
+
+    /// Build a deterministic `AppState` with `n_projects` projects, each holding
+    /// `sessions_per_project` sessions. Roughly one in five sessions is a
+    /// stacked child of the session before it (exercising `resolve_stack_parent`
+    /// and the stack-ordering path), and sessions are round-robin assigned a
+    /// `current_section` so the section builders have populated buckets. Also
+    /// returns matching `agent_states` (one entry per session, cycling through
+    /// the agent states) and a `sections` config for the section views.
+    ///
+    /// All timestamps are derived from a fixed base + per-session offset so the
+    /// output ordering is fully determined (no wall-clock reads leak in).
+    #[allow(clippy::type_complexity)]
+    pub(super) fn seed_large_state(
+        n_projects: usize,
+        sessions_per_project: usize,
+    ) -> (
+        crate::config::AppState,
+        BTreeMap<SessionId, AgentState>,
+        Vec<crate::session::SectionConfig>,
+    ) {
+        use chrono::TimeZone;
+        let base = Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap();
+        let section_names = ["Review", "Ready", "Blocked"];
+        let sections: Vec<crate::session::SectionConfig> =
+            section_names.iter().map(|n| section_named(n)).collect();
+        let agent_cycle = [
+            AgentState::Working,
+            AgentState::Idle,
+            AgentState::WaitingForInput,
+            AgentState::Unknown,
+        ];
+
+        let mut state = crate::config::AppState::default();
+        let mut agent_states = BTreeMap::new();
+        let mut global_idx: i64 = 0;
+
+        for p in 0..n_projects {
+            let project = crate::session::Project::new(
+                format!("project-{p:02}"),
+                PathBuf::from("/tmp/repo"),
+                "main",
+            );
+            let project_id = project.id;
+            state.projects.insert(project_id, project);
+
+            let mut prev_in_project: Option<SessionId> = None;
+            for s in 0..sessions_per_project {
+                let mut session = WorktreeSession::new(
+                    project_id,
+                    format!("session-{p:02}-{s:03}"),
+                    format!("branch-{p:02}-{s:03}"),
+                    PathBuf::from("/tmp/wt"),
+                    if s % 3 == 0 { "codex" } else { "claude" },
+                );
+                let ts = base + ChronoDuration::seconds(global_idx);
+                session.created_at = ts;
+                session.entered_section_at = ts;
+                // Every 5th session (that has a predecessor) stacks on the one
+                // before it, forming short chains within the project.
+                if s % 5 == 0 && s != 0 {
+                    session.stack_parent_session_id = prev_in_project;
+                }
+                // Spread sessions across the catch-all + configured sections.
+                session.current_section = match s % 4 {
+                    0 => None, // In Progress catch-all
+                    other => Some(section_names[other - 1].to_string()),
+                };
+                session.unread = s % 7 == 0;
+                if s % 6 == 0 {
+                    session.pr_number = Some(1000 + global_idx as u32);
+                    session.pr_state = Some(crate::git::PrState::Open);
+                }
+
+                agent_states.insert(session.id, agent_cycle[(global_idx as usize) % 4]);
+                prev_in_project = Some(session.id);
+
+                let sid = session.id;
+                state.sessions.insert(sid, session);
+                state
+                    .projects
+                    .get_mut(&project_id)
+                    .unwrap()
+                    .add_worktree(sid);
+                global_idx += 1;
+            }
+        }
+        (state, agent_states, sections)
+    }
+
+    #[test]
+    #[ignore = "perf baseline; run explicitly with --ignored --nocapture"]
+    fn tree_build_perf_baseline() {
+        // ~100 sessions across ~10 projects, matching the Phase C brief.
+        let (state, agent_states, sections) = seed_large_state(10, 10);
+        let session_count = state.sessions.len();
+        assert!(
+            session_count >= 100,
+            "expected at least 100 sessions, got {session_count}"
+        );
+        let collapsed = std::collections::HashSet::new();
+        // Project into the DTO snapshot the builders now consume, once, outside
+        // the timed loop — we measure the builders, not snapshot construction
+        // (the cached snapshot is built on change, not per refresh).
+        let snapshot = workspace_snapshot_from_state(&state);
+
+        // Warm up so the first-touch allocation cost doesn't dominate the timing.
+        for _ in 0..50 {
+            std::hint::black_box(build_project_grouped_items(&snapshot, &agent_states));
+        }
+
+        let iterations = 2_000u32;
+        let time = |label: &str, f: &mut dyn FnMut()| {
+            let start = std::time::Instant::now();
+            for _ in 0..iterations {
+                f();
+            }
+            let per = start.elapsed() / iterations;
+            println!("{label:<28} {per:?}/build ({session_count} sessions)");
+            // Generous ceiling: a build of ~100 sessions is microsecond-scale;
+            // 5ms leaves multiple orders of magnitude of slack while still
+            // catching a catastrophic regression (e.g. an accidental O(n^2)).
+            assert!(
+                per < std::time::Duration::from_millis(5),
+                "{label} regressed: {per:?}/build exceeds the 5ms ceiling"
+            );
+        };
+
+        time("project_grouped", &mut || {
+            std::hint::black_box(build_project_grouped_items(&snapshot, &agent_states));
+        });
+        time("section_grouped", &mut || {
+            std::hint::black_box(build_section_grouped_items(
+                &snapshot,
+                &sections,
+                Some(5),
+                &agent_states,
+                &collapsed,
+            ));
+        });
+        time("section_stacks", &mut || {
+            std::hint::black_box(build_stacked_section_items(
+                &snapshot,
+                &sections,
+                Some(5),
+                &agent_states,
+                &collapsed,
+            ));
+        });
     }
 }

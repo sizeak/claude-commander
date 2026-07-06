@@ -181,6 +181,22 @@ When attached to a session (via `Enter` or `claude-commander attach`):
 | `Ctrl-Space` | Open the in-session switcher popup to jump to another claude-commander session without detaching |
 | `Ctrl-.` | Open the session worktree in your editor (requires a terminal that emits CSI-u or xterm modifyOtherKeys sequences for Ctrl-.) |
 
+### Remote Servers
+
+The TUI can manage sessions on other machines running `claude-commander-server`.
+Each configured server appears as its own node in the session tree, with that
+server's projects and sessions underneath — create, delete, restart, review
+diffs, and attach to remote terminals exactly as you would locally (attach
+streams over WebSocket). Live agent-state dots and PR chips come from the
+server's own background refresh, and an unreachable server degrades to a
+greyed node with the error shown, retrying in the background without ever
+blocking local work.
+
+Add or remove servers from the command palette (**"Add remote server"** walks
+name → URL → token with a connection test), or edit `[[remote_servers]]` in
+the config file directly — see [Configuration](docs/configuration.md). Changes
+hot-reload; no restart needed.
+
 ## Documentation
 
 - **[Usage guide](docs/usage.md)** — CLI commands, the session list, PR stacks (cascade merge / push stack), and AI summaries

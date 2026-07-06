@@ -5,14 +5,13 @@
 //! - Application state updates
 //! - Render ticks
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use crate::config::keybindings::{BindableAction, KeyBindings};
 use crate::git::{DiffInfo, EnrichedPrInfo};
-use crate::session::{AgentState, ProjectId, SessionId};
+use crate::session::{ProjectId, SessionId};
 
 use crossterm::event::{
     Event as CrosstermEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
@@ -67,19 +66,28 @@ pub enum StateUpdate {
     SessionRemoved { session_id: SessionId },
     /// Error occurred
     Error { message: String },
-    /// PR status results ready from background check
-    PrStatusReady {
-        results: Vec<(SessionId, crate::git::PrCheckResult)>,
-    },
     /// Session creation completed successfully
-    SessionCreated { session_id: SessionId },
-    /// Session creation failed
-    SessionCreateFailed {
+    SessionCreated {
         session_id: SessionId,
-        message: String,
+        /// Backend the session was created on, so the handler refreshes the
+        /// right view (and section-reconciles the right backend) before it
+        /// tries to select the new row. Indexes the `Vec<BackendHandle>`.
+        backend_id: usize,
     },
-    /// State file was modified by another instance
-    ExternalChange,
+    /// Session creation failed. The backend removes its own half-created
+    /// (`Creating`) session on failure, so this carries only the message.
+    SessionCreateFailed { message: String },
+    /// Result of the add-remote-server connection probe. `Ok(tmux_ok)` means
+    /// the server answered a workspace-snapshot request (reachable + auth
+    /// accepted); the flag carries its tmux health for the success toast.
+    RemoteServerProbed {
+        /// Matches `App::probe_nonce` at spawn time; a stale probe (the user
+        /// dismissed the flow and possibly opened some other Loading modal)
+        /// is dropped instead of writing config.
+        nonce: u64,
+        server: crate::config::RemoteServerConfig,
+        result: Result<bool, String>,
+    },
     /// Enriched PR info ready from background fetch
     EnrichedPrReady {
         session_id: SessionId,
@@ -92,13 +100,30 @@ pub enum StateUpdate {
         /// Hash of the diff that was summarized (for cache keying)
         diff_hash: u64,
     },
-    /// Agent states updated from background polling
-    AgentStatesUpdated {
-        states: HashMap<SessionId, AgentState>,
-        /// Whether the project-less commander session is currently running.
-        /// Polled alongside the regular sessions; feeds the footer status chip
-        /// (a synchronous renderer).
-        commander_running: bool,
+    /// A backend's change-feed fired: a fresh workspace snapshot (and agent
+    /// states) fetched off the render path, to fold into that backend's cached
+    /// [`BackendView`](crate::backend::BackendView). `backend_id` indexes the
+    /// TUI's `Vec<BackendHandle>`.
+    BackendChanged {
+        backend_id: usize,
+        snapshot: Box<crate::api::WorkspaceSnapshot>,
+        states: Box<crate::api::AgentStatesSnapshot>,
+    },
+    /// A backend's connection health changed (a remote server's poller moved
+    /// between Connecting/Connected/Degraded). Folded into that backend's
+    /// [`BackendView::connection`](crate::backend::BackendView) so its server
+    /// header re-renders live. `backend_id` indexes the `Vec<BackendHandle>`.
+    BackendConnection {
+        backend_id: usize,
+        state: crate::backend::ConnectionState,
+    },
+    /// The Checkout modal's initial (no-fetch) branch listing finished on a
+    /// background task — populate the modal's list without clearing `fetching`,
+    /// since the fetch-refresh is still running and will clear it. Spawned so a
+    /// slow remote listing never blocks the event loop before the modal opens.
+    CheckoutBranchesLoaded {
+        project_id: ProjectId,
+        branches: Vec<(String, bool)>,
     },
     /// Background `git fetch origin` kicked off by the Checkout modal
     /// has finished — the modal should refresh its branch list if still open.
@@ -106,6 +131,28 @@ pub enum StateUpdate {
         project_id: ProjectId,
         /// Fresh branch list produced after the fetch completed.
         branches: Vec<(String, bool)>,
+    },
+    /// A background session restart finished. `Ok` toasts success; `Err` carries
+    /// a transport/backend error string. `backend_id` indexes the backend the
+    /// restart ran on, so the post-op refresh hits the right view.
+    RestartFinished {
+        backend_id: usize,
+        result: std::result::Result<(), String>,
+    },
+    /// A background per-session mutation (rename, section move) applied — refresh
+    /// the owning backend's view + tree and keep the session selected. Spawned so
+    /// a slow remote mutation never blocks the event loop.
+    SessionMutationApplied {
+        backend_id: usize,
+        session_id: SessionId,
+    },
+    /// A newly-opened New Session modal's program picker finished loading from a
+    /// remote backend's `create_options` on a background task — patch the picker
+    /// in place if that modal is still open for the same project. Spawned so a
+    /// slow remote never blocks the event loop before the modal appears.
+    NewSessionProgramsLoaded {
+        project_id: ProjectId,
+        picker: super::app::ProgramPicker,
     },
     /// Preview/diff/shell data ready from background fetch
     PreviewReady {
@@ -121,20 +168,29 @@ pub enum StateUpdate {
         shell_content: String,
     },
     /// Cascade-merge background task finished (completed, paused on conflict,
-    /// or errored). The TUI refreshes and shows an appropriate toast.
+    /// or errored). The TUI refreshes and shows a toast from the recorded
+    /// [`OperationStatus`](crate::api::OperationStatus). `Err` carries a
+    /// transport/backend error string (the operation never recorded).
     CascadeFinished {
-        result: std::result::Result<crate::session::CascadeOutcome, String>,
+        /// Backend the cascade ran on, so the post-op refresh hits the right view.
+        backend_id: usize,
+        result: std::result::Result<crate::api::OperationStatus, String>,
     },
-    /// Push-stack background task finished. `Ok` carries the number of
-    /// sessions pushed before the task ended; `Err` carries the git error
-    /// from the first failed push (later sessions not attempted).
+    /// Push-stack background task finished. `Ok` carries the recorded
+    /// [`OperationStatus`](crate::api::OperationStatus) (its `detail` summarises
+    /// how many branches pushed); `Err` carries a transport/backend error.
     PushStackFinished {
-        result: std::result::Result<crate::session::PushStackOutcome, String>,
+        /// Backend the push ran on, so the post-op refresh hits the right view.
+        backend_id: usize,
+        result: std::result::Result<crate::api::OperationStatus, String>,
     },
-    /// Background project-branch pull finished for one project.
-    ProjectPullFinished {
-        project_id: ProjectId,
-        outcome: crate::git::PullOutcome,
+    /// `Cascade abandon` background task finished — the paused cascade was
+    /// cleared (or the clear failed). Spawned so a slow/remote backend never
+    /// blocks the event loop; the TUI refreshes and toasts on arrival.
+    CascadeAbandonFinished {
+        /// Backend whose paused cascade was abandoned.
+        backend_id: usize,
+        result: std::result::Result<(), String>,
     },
     /// A background `git lfs pull` for a freshly-created session finished
     /// (success or failure), so its `⇣ LFS` row marker can be cleared.
@@ -145,6 +201,11 @@ pub enum StateUpdate {
     ReviewPrepared {
         prepared: Box<super::app::ReviewPrepared>,
     },
+    /// The open-review fetch (now spawned off the event loop) finished without a
+    /// viewable diff: `None` means the session has no changes (a status toast),
+    /// `Some(err)` means the fetch failed (an error modal). Distinct from
+    /// [`ReviewPrepared`](Self::ReviewPrepared), which carries a ready view.
+    ReviewOpenFailed { error: Option<String> },
     /// A binary review image finished loading off-thread: decoded bytes for one
     /// side of one file, ready to build a render protocol from (on the main
     /// thread, which owns the `Picker`). `Arc` keeps the enum cheap to clone.
@@ -221,6 +282,10 @@ pub enum UserCommand {
     OpenPullRequest,
     /// Force an immediate PR-status re-check for all sessions (palette-only)
     RefreshPrStatus,
+    /// Add a remote server: chained name/URL/token inputs + connection test (palette-only)
+    AddRemoteServer,
+    /// Remove a configured remote server via a picker (palette-only)
+    RemoveRemoteServer,
     /// Open (creating if needed) the persistent commander session
     OpenCommander,
     /// Open/close the full-screen conversation overlay (TTS conversation mode)
@@ -355,6 +420,8 @@ impl UserCommand {
             UserCommand::OpenInEditor => Some("editor.open"),
             UserCommand::OpenPullRequest => Some("pr.open"),
             UserCommand::RefreshPrStatus => Some("pr.refresh_status"),
+            UserCommand::AddRemoteServer => Some("server.add_remote"),
+            UserCommand::RemoveRemoteServer => Some("server.remove_remote"),
             UserCommand::OpenCommander => Some("commander.open"),
             UserCommand::ToggleConversationOverlay => Some("conversation.toggle"),
             UserCommand::ToggleVoiceInput => Some("stt.toggle_voice"),
@@ -418,6 +485,8 @@ impl From<BindableAction> for UserCommand {
             BindableAction::MoveToSection => Self::MoveToSection,
             BindableAction::ToggleSection => Self::ToggleSection,
             BindableAction::ToggleViewMode => Self::ToggleViewMode,
+            BindableAction::AddRemoteServer => Self::AddRemoteServer,
+            BindableAction::RemoveRemoteServer => Self::RemoveRemoteServer,
         }
     }
 }
@@ -957,6 +1026,28 @@ mod tests {
             UserCommand::from(BindableAction::RefreshPrStatus),
             UserCommand::RefreshPrStatus
         ));
+    }
+
+    #[test]
+    fn test_remote_server_actions_map_from_palette_and_record_telemetry() {
+        // Palette-only commands: reachable via the BindableAction conversion,
+        // and both record a feature at the handle_command chokepoint.
+        assert!(matches!(
+            UserCommand::from(BindableAction::AddRemoteServer),
+            UserCommand::AddRemoteServer
+        ));
+        assert!(matches!(
+            UserCommand::from(BindableAction::RemoveRemoteServer),
+            UserCommand::RemoveRemoteServer
+        ));
+        assert_eq!(
+            UserCommand::AddRemoteServer.telemetry_feature(),
+            Some("server.add_remote")
+        );
+        assert_eq!(
+            UserCommand::RemoveRemoteServer.telemetry_feature(),
+            Some("server.remove_remote")
+        );
     }
 
     #[test]

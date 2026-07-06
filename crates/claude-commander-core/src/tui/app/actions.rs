@@ -9,6 +9,26 @@ enum CascadeAction {
     Resume,
 }
 
+/// Delete each `(owning-backend, session-id)` pair strictly one at a time on a
+/// single task. Sessions in the same repo must not have their worktrees removed
+/// concurrently — parallel `git worktree remove` in one repo races — so the
+/// batch is sequential rather than one task per session. A per-session failure
+/// is surfaced but does not abort the rest of the batch.
+pub(super) async fn delete_sessions_in_sequence(
+    deletes: Vec<(Arc<dyn CommanderBackend>, SessionId)>,
+    tx: tokio::sync::mpsc::Sender<AppEvent>,
+) {
+    for (backend, sid) in deletes {
+        if let Err(e) = backend.delete_session(sid).await {
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::Error {
+                    message: format!("Failed to delete session: {e}"),
+                }))
+                .await;
+        }
+    }
+}
+
 /// Maximum number of rows rendered in a scrollable list modal at once.
 ///
 /// Shared between the render layer and the input handler so the scroll
@@ -57,6 +77,32 @@ pub(super) fn delete_confirm_message(
     message
 }
 
+/// The Restart-confirmation body. A local session's resume behaviour is
+/// governed by this client's `resume_session` config, so the message can
+/// promise `/resume` semantics. A remote session's resume behaviour lives in
+/// the server's config, which this client can't read — so it gets neutral
+/// wording naming the session and promising no resume.
+pub(super) fn restart_confirm_message(
+    is_local: bool,
+    resume_session: bool,
+    title: Option<&str>,
+) -> String {
+    if !is_local {
+        let subject = match title {
+            Some(title) => format!("\"{title}\""),
+            None => "this session".to_string(),
+        };
+        return format!(
+            "Restart session {subject}?\nThis will kill its tmux session and start a fresh one."
+        );
+    }
+    if resume_session {
+        "This will kill the current tmux session and start a fresh one.\nClaude will pick up where it left off via /resume.".to_string()
+    } else {
+        "This will kill the current tmux session and start a fresh one.\nIf you want to pick up where you left off, you can use /resume.".to_string()
+    }
+}
+
 /// One mouse-wheel step over a list selection: move a single row, clamping
 /// at the ends rather than wrapping like keyboard navigation — a wheel tick
 /// at the bottom of a list jumping back to the top would be disorienting.
@@ -102,11 +148,12 @@ impl App {
 
     /// Check if the selected session is in Creating state
     pub(super) fn selected_session_is_creating(&self) -> bool {
+        let selected = self.ui_state.selected_session_id.map(|r| r.id);
         self.ui_state.list_items.iter().any(|item| {
             matches!(
                 item,
                 SessionListItem::Worktree { id, status, .. }
-                if self.ui_state.selected_session_id == Some(*id)
+                if selected == Some(*id)
                     && *status == SessionStatus::Creating
             )
         })
@@ -121,40 +168,36 @@ impl App {
         if self.selected_session_is_creating() {
             return;
         }
-        if let Some(session_id) = self.ui_state.selected_session_id {
-            info!("Getting attach command for session: {}", session_id);
-            match self
-                .service
-                .session_manager()
-                .get_attach_command(&session_id)
-                .await
-            {
-                Ok(cmd) => {
-                    info!("Got attach command: {}", cmd);
-                    // Clear unread flag when attaching
-                    let sid = session_id;
-                    let _ = self
-                        .service
-                        .store()
-                        .mutate(move |state| {
-                            if let Some(session) = state.get_session_mut(&sid) {
-                                session.unread = false;
-                            }
-                        })
-                        .await;
-                    self.ui_state.attach_command = Some(cmd);
-                    self.ui_state.should_quit = true;
-                    info!("Set should_quit = true");
-                }
-                Err(e) => {
-                    info!("Failed to get attach command: {}", e);
-                    self.ui_state.modal = Modal::Error {
-                        message: format!("Cannot attach: {}", e),
-                    };
-                }
-            }
-        } else {
+        let Some(sref) = self.ui_state.selected_session_id else {
             info!("No session selected");
+            return;
+        };
+        // Validate against the cached snapshot so a non-attachable session
+        // reports immediately; the backend revives a dead-but-attachable tmux
+        // session when the attach actually runs.
+        match self.session(sref).map(|s| s.status) {
+            Some(status) if status.can_attach() => {
+                // Clear unread when attaching. Fire-and-forget: on a remote
+                // backend this is a POST with the client ceiling, and ordering
+                // doesn't matter (the attach stamps MRU separately server-side),
+                // so it must not block Enter-to-attach on the event loop.
+                let backend = self.backend_for(sref);
+                let id = sref.id;
+                tokio::spawn(async move {
+                    let _ = backend.mark_read(id).await;
+                });
+                self.ui_state.attach_request = Some(AttachTarget::Session {
+                    session: sref,
+                    kind: AttachKind::Agent,
+                });
+                self.ui_state.should_quit = true;
+            }
+            Some(_) => {
+                self.ui_state.modal = Modal::Error {
+                    message: "Cannot attach: session is not running".to_string(),
+                };
+            }
+            None => {}
         }
     }
 
@@ -163,114 +206,41 @@ impl App {
         if self.selected_session_is_creating() {
             return;
         }
-        if let Some(session_id) = self.ui_state.selected_session_id {
-            match self
-                .service
-                .session_manager()
-                .get_shell_attach_command(&session_id)
-                .await
-            {
-                Ok(cmd) => {
-                    self.ui_state.attach_command = Some(cmd);
+        if let Some(sref) = self.ui_state.selected_session_id {
+            // The backend creates the `-sh` pair on demand; a failure surfaces
+            // as an error modal once the attach runs.
+            self.ui_state.attach_request = Some(AttachTarget::Session {
+                session: sref,
+                kind: AttachKind::Shell,
+            });
+            self.ui_state.should_quit = true;
+        } else if let Some((backend, project_id)) = self.ui_state.selected_project_id {
+            // Project shells are a local tmux affordance; a remote backend can't
+            // host one, and the local `project_shell_name` lookup would fail on a
+            // remote project id with a confusing error.
+            if !self.backend_arc(backend).capabilities().shell_toggle {
+                self.ui_state.status_message = Some((
+                    "Shell is not available for remote projects".to_string(),
+                    Instant::now() + Duration::from_secs(3),
+                ));
+                return;
+            }
+            // Project shells have no `SessionId` — resolve the name locally.
+            let Some(be) = self.local_backend() else {
+                return;
+            };
+            match be.project_shell_name(project_id).await {
+                Ok(name) => {
+                    self.ui_state.attach_request = Some(AttachTarget::LocalName(name));
                     self.ui_state.should_quit = true;
                 }
                 Err(e) => {
                     self.ui_state.modal = Modal::Error {
-                        message: format!("Cannot open shell: {}", e),
-                    };
-                }
-            }
-        } else if let Some(project_id) = self.ui_state.selected_project_id {
-            match self
-                .service
-                .session_manager()
-                .get_project_shell_attach_command(&project_id)
-                .await
-            {
-                Ok(cmd) => {
-                    self.ui_state.attach_command = Some(cmd);
-                    self.ui_state.should_quit = true;
-                }
-                Err(e) => {
-                    self.ui_state.modal = Modal::Error {
-                        message: format!("Cannot open shell: {}", e),
+                        message: format!("Cannot open shell: {e}"),
                     };
                 }
             }
         }
-    }
-
-    /// Resolve the shell toggle pair for a given tmux session name.
-    ///
-    /// If the current session is a Claude session, returns the shell session name
-    /// (creating it if needed). If the current session is already a shell session
-    /// (ends with "-sh"), returns the Claude session name.
-    pub(super) async fn resolve_shell_toggle_pair(
-        &mut self,
-        current_tmux_name: &str,
-    ) -> crate::error::Result<String> {
-        if current_tmux_name.ends_with("-sh") {
-            // We're in a shell session — the Claude session is the name without "-sh"
-            let claude_name = current_tmux_name.trim_end_matches("-sh").to_string();
-            // Verify the Claude session exists
-            if self
-                .service
-                .session_manager()
-                .tmux
-                .session_exists(&claude_name)
-                .await?
-            {
-                return Ok(claude_name);
-            }
-            return Err(crate::error::Error::Session(
-                crate::error::SessionError::TmuxSessionNotFound(claude_name),
-            ));
-        }
-
-        // We're in a Claude session — find the matching session ID and ensure shell exists
-        let session_id = {
-            let state = self.service.store().read().await;
-            state
-                .sessions
-                .values()
-                .find(|s| s.tmux_session_name == current_tmux_name)
-                .map(|s| s.id)
-        };
-
-        if let Some(session_id) = session_id {
-            let shell_name = self
-                .service
-                .session_manager()
-                .ensure_shell_session(&session_id)
-                .await?;
-            return Ok(shell_name);
-        }
-
-        // Try project-level shell
-        let project_id = {
-            let state = self.service.store().read().await;
-            state
-                .projects
-                .values()
-                .find(|p| p.shell_tmux_session_name.as_deref() == Some(current_tmux_name))
-                .map(|p| p.id)
-        };
-
-        if let Some(project_id) = project_id {
-            let shell_name = self
-                .service
-                .session_manager()
-                .ensure_project_shell_session(&project_id)
-                .await?;
-            return Ok(shell_name);
-        }
-
-        Err(crate::error::Error::Session(
-            crate::error::SessionError::TmuxSessionNotFound(format!(
-                "No session found for tmux name: {}",
-                current_tmux_name
-            )),
-        ))
     }
 
     /// Open the editor for the worktree associated with a given tmux session
@@ -287,14 +257,13 @@ impl App {
             .unwrap_or(tmux_session_name)
             .to_string();
 
-        let path = {
-            let state = self.service.store().read().await;
-            state
-                .sessions
-                .values()
-                .find(|s| s.tmux_session_name == lookup_name)
-                .map(|s| s.worktree_path.clone())
-        };
+        let path = self
+            .local_view()
+            .snapshot
+            .sessions
+            .iter()
+            .find(|s| s.tmux_session_name == lookup_name)
+            .map(|s| std::path::PathBuf::from(&s.worktree_path));
 
         let Some(path) = path else {
             warn!(
@@ -341,19 +310,35 @@ impl App {
         if self.selected_session_is_creating() {
             return;
         }
-        let path = {
-            let state = self.service.store().read().await;
-            if let Some(session_id) = self.ui_state.selected_session_id {
-                state
-                    .sessions
-                    .get(&session_id)
-                    .map(|s| s.worktree_path.clone())
-            } else if let Some(project_id) = self.ui_state.selected_project_id {
-                state.projects.get(&project_id).map(|p| p.repo_path.clone())
-            } else {
-                None
-            }
+        let (backend, path) = if let Some(sref) = self.ui_state.selected_session_id {
+            (
+                sref.backend,
+                self.session(sref)
+                    .map(|s| std::path::PathBuf::from(&s.worktree_path)),
+            )
+        } else if let Some((backend, project_id)) = self.ui_state.selected_project_id {
+            (
+                backend,
+                self.view_for(backend)
+                    .snapshot
+                    .projects
+                    .iter()
+                    .find(|p| p.id == project_id)
+                    .map(|p| p.repo_path.clone()),
+            )
+        } else {
+            return;
         };
+
+        // The editor launches on a local path; a remote backend's worktree
+        // lives on the server, so the path here would be meaningless.
+        if !self.backend_arc(backend).capabilities().open_editor {
+            self.ui_state.status_message = Some((
+                "Open in editor is not available for remote sessions".to_string(),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            return;
+        }
 
         let Some(path) = path else {
             return;
@@ -386,16 +371,10 @@ impl App {
     /// `pr_url` and launches the OS default handler (`open` on macOS,
     /// `xdg-open` on Linux, `cmd /c start` on Windows).
     pub(super) async fn handle_open_pull_request(&mut self) {
-        let Some(session_id) = self.ui_state.selected_session_id else {
+        let Some(sref) = self.ui_state.selected_session_id else {
             return;
         };
-        let pr_url = {
-            let state = self.service.store().read().await;
-            state
-                .sessions
-                .get(&session_id)
-                .and_then(|s| s.pr_url.clone())
-        };
+        let pr_url = self.session(sref).and_then(|s| s.pr_url.clone());
         let Some(url) = pr_url else {
             self.ui_state.status_message = Some((
                 "No PR associated with this session".to_string(),
@@ -436,21 +415,19 @@ impl App {
             return;
         }
 
-        // Reuse the TUI's existing tmux executor (shared semaphore) rather than
-        // constructing a second one. `ensure_session` re-checks the live flag
-        // and short-circuits with `CommanderDisabled` before touching tmux — a
-        // backstop for the toggle-off-while-running edge above the snapshot.
+        // The commander is a local-only session (no `SessionId`); ensure it via
+        // the local backend, which reuses the shared tmux executor and re-checks
+        // the live flag (short-circuiting with `CommanderDisabled` — a backstop
+        // for the toggle-off-while-running edge above the snapshot).
+        let Some(be) = self.local_backend() else {
+            return;
+        };
         let cmd = crate::cli_args::cli_command();
-        let result = crate::commander::ensure_session(
-            &self.config,
-            &self.service.session_manager().tmux,
-            &cmd,
-        )
-        .await;
+        let result = be.ensure_commander(&self.config, &cmd).await;
 
         match result {
             Ok(name) => {
-                self.ui_state.attach_command = Some(format!("attach {name}"));
+                self.ui_state.attach_request = Some(AttachTarget::LocalName(name));
                 self.ui_state.should_quit = true;
             }
             Err(crate::Error::Session(crate::error::SessionError::CommanderDisabled)) => {
@@ -479,30 +456,78 @@ impl App {
 
     /// Build the project picker for a new-session dialog: every project sorted
     /// by name, with `default` pre-selected.
-    async fn new_project_picker(&self, default: ProjectId) -> super::ProjectPicker {
-        let mut choices: Vec<super::ProjectChoice> = {
-            let state = self.service.store().read().await;
-            state
-                .projects
-                .values()
-                .map(|p| super::ProjectChoice {
-                    id: p.id,
-                    name: p.name.clone(),
-                    repo_path: p.repo_path.clone(),
-                })
-                .collect()
-        };
+    async fn new_project_picker(
+        &self,
+        backend: BackendId,
+        default: ProjectId,
+    ) -> super::ProjectPicker {
+        let mut choices: Vec<super::ProjectChoice> = self
+            .view_for(backend)
+            .snapshot
+            .projects
+            .iter()
+            .map(|p| super::ProjectChoice {
+                id: p.id,
+                name: p.name.clone(),
+                repo_path: p.repo_path.clone(),
+            })
+            .collect();
         choices.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-        super::ProjectPicker::new(choices, default)
+        let mut picker = super::ProjectPicker::new(choices, default);
+        // The existing-branch hint scans the repo locally; only meaningful for a
+        // local project (a remote project's path lives on the server).
+        picker.branch_hint_enabled = backend == LOCAL_BACKEND_ID;
+        picker
+    }
+
+    /// For a remote `backend`, spawn a background task that loads its
+    /// `create_options` and posts [`StateUpdate::NewSessionProgramsLoaded`] to
+    /// patch the just-opened New Session modal's program picker with the
+    /// harnesses that backend actually supports. No-op for the local backend
+    /// (its picker comes from local config and is set synchronously) so the
+    /// event loop never blocks on a remote `create_options` request.
+    fn spawn_remote_program_picker(&self, backend: BackendId, project_id: ProjectId) {
+        if backend == LOCAL_BACKEND_ID {
+            return;
+        }
+        let backend = self.backend_arc(backend);
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let Some(picker) = backend
+                .create_options()
+                .await
+                .ok()
+                .and_then(program_picker_from_options)
+            else {
+                // Query failed or offered no programs — leave the local fallback
+                // picker the modal already shows.
+                return;
+            };
+            let _ = tx
+                .send(AppEvent::StateUpdate(
+                    StateUpdate::NewSessionProgramsLoaded { project_id, picker },
+                ))
+                .await;
+        });
     }
 
     pub(super) async fn handle_new_session(&mut self) {
-        if let Some(project_id) = self.ui_state.selected_project_id {
-            let repo_path = {
-                let state = self.service.store().read().await;
-                state.get_project(&project_id).map(|p| p.repo_path.clone())
+        if let Some((backend, project_id)) = self.ui_state.selected_project_id {
+            let repo_path = self
+                .view_for(backend)
+                .snapshot
+                .projects
+                .iter()
+                .find(|p| p.id == project_id)
+                .map(|p| p.repo_path.clone());
+            // The existing-branch collision hint runs a local gix scan; only
+            // compute it for a local project (a remote project's `repo_path` is
+            // a server-side path this machine can't read).
+            let existing_branches = if backend == LOCAL_BACKEND_ID {
+                repo_path.and_then(|p| existing_branch_names(&p))
+            } else {
+                None
             };
-            let existing_branches = repo_path.and_then(|p| existing_branch_names(&p));
             // Capture the section under the cursor now, so a background list
             // refresh while the modal is open can't change where the new
             // session lands.
@@ -511,7 +536,10 @@ impl App {
                 .list_state
                 .selected()
                 .and_then(|idx| super::selection::section_at(&self.ui_state.list_items, idx));
-            let project_picker = self.new_project_picker(project_id).await;
+            let project_picker = self.new_project_picker(backend, project_id).await;
+            // Open with the local-config picker immediately; for a remote
+            // backend, a background task swaps in its supported programs when
+            // `create_options` returns, so the modal never waits on that request.
             self.ui_state.modal = Modal::Input {
                 title: "New Session".to_string(),
                 prompt: "Enter session name:".to_string(),
@@ -525,7 +553,9 @@ impl App {
                 program_picker: Some(self.new_program_picker()),
                 focus: super::InputFocus::Name,
                 expanded: false,
+                mask: false,
             };
+            self.spawn_remote_program_picker(backend, project_id);
         } else {
             self.ui_state.status_message = Some((
                 "Select a project first (use N to add one)".to_string(),
@@ -541,38 +571,51 @@ impl App {
     /// the current topmost member. Selecting a standalone session starts a
     /// new stack rooted there.
     pub(super) async fn handle_new_stacked_session(&mut self) {
-        let Some(selected_session_id) = self.ui_state.selected_session_id else {
+        let Some(sref) = self.ui_state.selected_session_id else {
             self.ui_state.status_message = Some((
                 "Select a session to stack on top of".to_string(),
                 Instant::now() + Duration::from_secs(3),
             ));
             return;
         };
+        let selected_session_id = sref.id;
         let resolved = {
-            let state = self.service.store().read().await;
-            state
-                .get_session(&selected_session_id)
+            let snap = &self.view_for(sref.backend).snapshot;
+            snap.sessions
+                .iter()
+                .find(|s| s.session_id == selected_session_id)
                 .and_then(|selected| {
                     let project_id = selected.project_id;
-                    let project = state.get_project(&project_id)?;
-                    let project_sessions: Vec<&WorktreeSession> = project
-                        .worktrees
+                    let project = snap.projects.iter().find(|p| p.id == project_id)?;
+                    let project_sessions: Vec<&crate::api::SessionInfo> = project
+                        .session_ids
                         .iter()
-                        .filter_map(|sid| state.sessions.get(sid))
+                        .filter_map(|sid| snap.sessions.iter().find(|s| s.session_id == *sid))
                         .collect();
                     let top_id = crate::session::stack_top(selected_session_id, &project_sessions);
-                    let top = state.get_session(&top_id)?;
-                    Some((project_id, top.id, top.branch.clone(), top.title.clone()))
+                    let top = snap.sessions.iter().find(|s| s.session_id == top_id)?;
+                    Some((project_id, top.session_id, top.title.clone()))
                 })
         };
-        let Some((project_id, parent_session_id, parent_branch, parent_title)) = resolved else {
+        let Some((project_id, parent_session_id, parent_title)) = resolved else {
             return;
         };
-        let repo_path = {
-            let state = self.service.store().read().await;
-            state.get_project(&project_id).map(|p| p.repo_path.clone())
+        let repo_path = self
+            .view_for(sref.backend)
+            .snapshot
+            .projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .map(|p| p.repo_path.clone());
+        // Local-only hint: a remote project's `repo_path` is server-side.
+        let existing_branches = if sref.backend == LOCAL_BACKEND_ID {
+            repo_path.and_then(|p| existing_branch_names(&p))
+        } else {
+            None
         };
-        let existing_branches = repo_path.and_then(|p| existing_branch_names(&p));
+        // Open with the local-config picker immediately; for a remote backend a
+        // background task swaps in its supported programs (keyed by project) so
+        // the modal never waits on `create_options`.
         self.ui_state.modal = Modal::Input {
             title: format!("New Session Stacked on \"{}\"", parent_title),
             prompt: "Enter session name:".to_string(),
@@ -580,50 +623,67 @@ impl App {
             on_submit: InputAction::CreateStackedSession {
                 project_id,
                 parent_session_id,
-                parent_branch,
             },
             existing_branches,
             project_picker: None,
             program_picker: Some(self.new_program_picker()),
             focus: super::InputFocus::Name,
             expanded: false,
+            mask: false,
         };
+        self.spawn_remote_program_picker(sref.backend, project_id);
     }
 
     /// Handle `Cascade merge main` — walk to the base of the selected
     /// session's stack and merge main → base → each descendant. Pauses on
     /// the first conflict; surface the outcome as a status-message toast.
     pub(super) async fn handle_cascade_merge_main(&mut self) {
-        let Some(selected_session_id) = self.ui_state.selected_session_id else {
+        let Some(sref) = self.ui_state.selected_session_id else {
             self.ui_state.status_message = Some((
                 "Select a session in a stack to cascade from".to_string(),
                 Instant::now() + Duration::from_secs(3),
             ));
             return;
         };
-        self.run_cascade_action(selected_session_id, CascadeAction::Start);
+        self.run_cascade_action(sref, CascadeAction::Start);
     }
 
     /// Handle `Cascade resume` — continue a previously paused cascade.
+    /// Cascade state is per-backend and a cascade started on a remote can
+    /// pause there, so resolve which backend is paused (preferring the
+    /// selection's backend when several are) rather than assuming local.
     pub(super) async fn handle_cascade_resume(&mut self) {
-        let paused_at = {
-            let state = self.service.store().read().await;
-            state.cascade_paused_at
-        };
-        let Some(sid) = paused_at else {
+        let Some((backend_id, sid)) = self.paused_cascade_backend() else {
             self.ui_state.status_message = Some((
                 "No cascade in progress".to_string(),
                 Instant::now() + Duration::from_secs(3),
             ));
             return;
         };
-        self.run_cascade_action(sid, CascadeAction::Resume);
+        self.run_cascade_action(SessionRef::new(backend_id, sid), CascadeAction::Resume);
+    }
+
+    /// The backend (and paused-at session) whose cascade is paused, if any.
+    /// When more than one backend has a paused cascade, prefer the one owning
+    /// the current selection so the footer action acts where the user is.
+    pub(super) fn paused_cascade_backend(&self) -> Option<(BackendId, SessionId)> {
+        let paused: Vec<(BackendId, SessionId)> = self
+            .backends
+            .iter()
+            .filter_map(|h| h.view.snapshot.cascade_paused.map(|sid| (h.id, sid)))
+            .collect();
+        if let Some(sref) = self.ui_state.selected_session_id
+            && let Some(hit) = paused.iter().find(|(b, _)| *b == sref.backend)
+        {
+            return Some(*hit);
+        }
+        paused.first().copied()
     }
 
     /// Handle `Push stack` — push every branch in the selected session's
     /// stack to origin, in base→leaf order, on a background task.
     pub(super) fn handle_push_stack(&mut self) {
-        let Some(session_id) = self.ui_state.selected_session_id else {
+        let Some(sref) = self.ui_state.selected_session_id else {
             self.ui_state.status_message = Some((
                 "Select a session in a stack to push".to_string(),
                 Instant::now() + Duration::from_secs(3),
@@ -639,16 +699,21 @@ impl App {
             Instant::now() + Duration::from_secs(30),
         ));
 
-        let agent_states = self.ui_state.agent_states.clone();
-        let mgr = self.service.session_manager().clone();
+        // The backend detects agent states itself, so the TUI no longer passes
+        // its cached map. Records the outcome in the operation ledger. Route to
+        // the backend that owns the session.
+        let backend = self.backend_for(sref);
+        let backend_id = sref.backend.0;
+        let session_id = sref.id;
         let tx = self.event_loop.sender();
         tokio::spawn(async move {
-            let result = mgr
-                .push_stack(&session_id, &agent_states)
+            let result = backend
+                .push_stack(session_id)
                 .await
                 .map_err(|e| e.to_string());
             let _ = tx
                 .send(AppEvent::StateUpdate(StateUpdate::PushStackFinished {
+                    backend_id,
                     result,
                 }))
                 .await;
@@ -657,50 +722,71 @@ impl App {
 
     pub(super) async fn handle_push_stack_finished(
         &mut self,
-        result: std::result::Result<crate::session::PushStackOutcome, String>,
+        backend_id: BackendId,
+        result: std::result::Result<crate::api::OperationStatus, String>,
     ) {
-        self.refresh_list_items().await;
-        match result {
-            Ok(outcome) => {
-                let msg = if outcome.sessions_pushed == 0 {
-                    "Push stack complete (nothing to push)".to_string()
-                } else {
-                    format!(
-                        "Push stack complete: pushed {} branch(es)",
-                        outcome.sessions_pushed
-                    )
-                };
-                self.ui_state.status_message = Some((msg, Instant::now() + Duration::from_secs(5)));
-            }
-            Err(e) => {
-                self.ui_state.status_message = Some((
-                    format!("Push stack failed: {e}"),
-                    Instant::now() + Duration::from_secs(15),
-                ));
-            }
-        }
+        // Refresh off the event loop; BackendChanged re-renders the tree.
+        self.spawn_backend_view_refresh(backend_id);
+        let (msg, secs) = match result {
+            Ok(status) => match status.outcome {
+                crate::api::OperationOutcome::Succeeded { detail } => {
+                    (format!("Push stack complete: {detail}"), 5)
+                }
+                crate::api::OperationOutcome::Paused { detail } => {
+                    (format!("Push stack paused: {detail}"), 15)
+                }
+                crate::api::OperationOutcome::Failed { error } => {
+                    (format!("Push stack failed: {error}"), 15)
+                }
+            },
+            Err(e) => (format!("Push stack failed: {e}"), 15),
+        };
+        self.ui_state.status_message = Some((msg, Instant::now() + Duration::from_secs(secs)));
     }
 
-    /// Handle `Cascade abandon` — clear the paused state without merging.
-    pub(super) async fn handle_cascade_abandon(&mut self) {
-        match self.service.cascade_abandon().await {
+    /// Handle `Cascade abandon` — clear the paused state without merging,
+    /// on whichever backend's cascade is paused (see
+    /// [`paused_cascade_backend`](Self::paused_cascade_backend)).
+    pub(super) fn handle_cascade_abandon(&mut self) {
+        let Some((backend_id, _)) = self.paused_cascade_backend() else {
+            self.ui_state.status_message = Some((
+                "No cascade in progress".to_string(),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            return;
+        };
+        // Spawn so a slow/remote backend never blocks the event loop;
+        // `CascadeAbandonFinished` refreshes the view and toasts on completion.
+        let backend = self.backend_arc(backend_id);
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let result = backend.cascade_abandon().await.map_err(|e| e.to_string());
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::CascadeAbandonFinished {
+                    backend_id: backend_id.0,
+                    result,
+                }))
+                .await;
+        });
+    }
+
+    pub(super) fn handle_cascade_abandon_finished(
+        &mut self,
+        backend_id: BackendId,
+        result: std::result::Result<(), String>,
+    ) {
+        let (msg, secs) = match result {
             Ok(()) => {
-                self.ui_state.status_message = Some((
-                    "Cascade pause cleared".to_string(),
-                    Instant::now() + Duration::from_secs(3),
-                ));
-                self.refresh_list_items().await;
+                // Refresh off the event loop; BackendChanged re-renders the tree.
+                self.spawn_backend_view_refresh(backend_id);
+                ("Cascade pause cleared".to_string(), 3)
             }
-            Err(e) => {
-                self.ui_state.status_message = Some((
-                    format!("Cascade abandon failed: {e}"),
-                    Instant::now() + Duration::from_secs(5),
-                ));
-            }
-        }
+            Err(e) => (format!("Cascade abandon failed: {e}"), 5),
+        };
+        self.ui_state.status_message = Some((msg, Instant::now() + Duration::from_secs(secs)));
     }
 
-    fn run_cascade_action(&mut self, session_id: SessionId, action: CascadeAction) {
+    fn run_cascade_action(&mut self, sref: SessionRef, action: CascadeAction) {
         // Close any open modal (e.g. the palette that dispatched us) and
         // drop a "running" toast immediately so the TUI redraws with neither
         // blocked before the cascade starts. The cascade itself runs on a
@@ -715,17 +801,22 @@ impl App {
             Instant::now() + Duration::from_secs(30),
         ));
 
-        let agent_states = self.ui_state.agent_states.clone();
-        let mgr = self.service.session_manager().clone();
+        // The backend detects agent states itself and records the outcome in
+        // the operation ledger, returning the recorded status. Route to the
+        // backend that owns the session the cascade is anchored on.
+        let backend = self.backend_for(sref);
+        let backend_id = sref.backend.0;
+        let session_id = sref.id;
         let tx = self.event_loop.sender();
         tokio::spawn(async move {
             let result = match action {
-                CascadeAction::Start => mgr.cascade_merge_stack(&session_id, &agent_states).await,
-                CascadeAction::Resume => mgr.cascade_resume(&agent_states).await,
+                CascadeAction::Start => backend.cascade_merge(session_id).await,
+                CascadeAction::Resume => backend.cascade_resume().await,
             };
             let result = result.map_err(|e| e.to_string());
             let _ = tx
                 .send(AppEvent::StateUpdate(StateUpdate::CascadeFinished {
+                    backend_id,
                     result,
                 }))
                 .await;
@@ -734,52 +825,36 @@ impl App {
 
     pub(super) async fn handle_cascade_finished(
         &mut self,
-        result: std::result::Result<crate::session::CascadeOutcome, String>,
+        backend_id: BackendId,
+        result: std::result::Result<crate::api::OperationStatus, String>,
     ) {
-        self.refresh_list_items().await;
-        match result {
-            Ok(crate::session::CascadeOutcome::Complete { sessions_merged }) => {
-                let msg = if sessions_merged == 0 {
-                    "Cascade complete (nothing to merge)".to_string()
-                } else {
-                    format!("Cascade complete: merged {sessions_merged} session(s)")
-                };
-                self.ui_state.status_message = Some((msg, Instant::now() + Duration::from_secs(5)));
-            }
-            Ok(crate::session::CascadeOutcome::PausedOnConflict {
-                at,
-                sessions_merged,
-            }) => {
-                let title = {
-                    let state = self.service.store().read().await;
-                    state
-                        .get_session(&at)
-                        .map(|s| s.title.clone())
-                        .unwrap_or_else(|| at.to_string())
-                };
-                self.ui_state.status_message = Some((
-                    format!(
-                        "Cascade paused at '{title}' ({sessions_merged} merged). Resolve conflicts and run `Cascade resume`."
-                    ),
-                    Instant::now() + Duration::from_secs(15),
-                ));
-            }
-            Err(e) => {
-                self.ui_state.status_message = Some((
-                    format!("Cascade failed: {e}"),
-                    Instant::now() + Duration::from_secs(10),
-                ));
-            }
-        }
+        // Refresh off the event loop; BackendChanged re-renders the tree.
+        self.spawn_backend_view_refresh(backend_id);
+        let (msg, secs) = match result {
+            Ok(status) => match status.outcome {
+                crate::api::OperationOutcome::Succeeded { detail } => {
+                    (format!("Cascade complete: {detail}"), 5)
+                }
+                crate::api::OperationOutcome::Paused { detail } => (
+                    format!("Cascade {detail}. Resolve conflicts and run `Cascade resume`."),
+                    15,
+                ),
+                crate::api::OperationOutcome::Failed { error } => {
+                    (format!("Cascade failed: {error}"), 10)
+                }
+            },
+            Err(e) => (format!("Cascade failed: {e}"), 10),
+        };
+        self.ui_state.status_message = Some((msg, Instant::now() + Duration::from_secs(secs)));
     }
 
     /// Open the Checkout Branch modal.
     ///
-    /// Loads the current list of branches synchronously via gix and kicks
-    /// off `git fetch origin` in a background task so the list can be
-    /// refreshed once remote changes are pulled in.
+    /// Loads the current branch list through the owning backend (local or
+    /// remote) without a fetch, then kicks off a fetch-refresh in a background
+    /// task so newly-pushed remote branches appear once the fetch lands.
     pub(super) async fn handle_checkout_branch(&mut self) {
-        let Some(project_id) = self.ui_state.selected_project_id else {
+        let Some((_backend, project_id)) = self.ui_state.selected_project_id else {
             self.ui_state.status_message = Some((
                 "Select a project first (use N to add one)".to_string(),
                 Instant::now() + Duration::from_secs(3),
@@ -787,69 +862,65 @@ impl App {
             return;
         };
 
-        let repo_path = {
-            let state = self.service.store().read().await;
-            match state.get_project(&project_id) {
-                Some(p) => p.repo_path.clone(),
-                None => {
-                    self.ui_state.modal = Modal::Error {
-                        message: "Project not found".to_string(),
-                    };
-                    return;
-                }
-            }
-        };
+        // Resolve the backend that owns the project and confirm the project is
+        // present in its cached view — for both local and remote projects.
+        let backend_id = self.backend_of_project(project_id);
+        if !self
+            .view_for(backend_id)
+            .snapshot
+            .projects
+            .iter()
+            .any(|p| p.id == project_id)
+        {
+            self.ui_state.modal = Modal::Error {
+                message: "Project not found".to_string(),
+            };
+            return;
+        }
+        let backend = self.backend_arc(backend_id);
 
-        let all_branches = match load_branch_entries(&repo_path) {
-            Ok(b) => b,
-            Err(e) => {
-                self.ui_state.modal = Modal::Error {
-                    message: format!("Failed to list branches: {}", e),
-                };
-                return;
-            }
-        };
-
-        let filtered = all_branches.clone();
+        // Open the modal immediately with an empty, spinning list — both the
+        // initial (no-fetch) listing and the fetch-refresh run on background
+        // tasks so a slow/remote backend never blocks the event loop. The repo
+        // lives where the backend runs (locally in-process, remotely
+        // server-side), so both listings go through the backend.
         self.ui_state.modal = Modal::CheckoutBranch {
             project_id,
             query: super::Input::default(),
-            all_branches,
-            filtered,
+            all_branches: Vec::new(),
+            filtered: Vec::new(),
             selected_idx: 0,
             scroll: 0,
             fetching: true,
         };
 
-        // Spawn `git fetch origin` in the background; when it finishes,
-        // post a CheckoutFetchComplete state update so the modal (if still
-        // open) can refresh its list.
         let tx = self.event_loop.sender();
-        let repo_path_bg = repo_path.clone();
         tokio::spawn(async move {
-            let _ = tokio::process::Command::new("git")
-                .current_dir(&repo_path_bg)
-                .args(["fetch", "origin"])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .output()
+            // Phase 1: the fast, no-fetch listing populates the modal while the
+            // spinner stays up. Phase 2: the fetch-refresh replaces it and clears
+            // the spinner. A failed listing yields an empty list rather than an
+            // error modal — the user can retry or type a branch name.
+            let initial = backend
+                .list_branches(project_id, false)
+                .await
+                .map(pairs_from_branches)
+                .unwrap_or_default();
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::CheckoutBranchesLoaded {
+                    project_id,
+                    branches: initial,
+                }))
                 .await;
 
-            // Re-list branches after the fetch. Run the sync gix call in a
-            // blocking task so we don't stall the async runtime.
-            let branches = tokio::task::spawn_blocking(move || {
-                crate::git::GitBackend::open(&repo_path_bg)
-                    .and_then(|b| b.list_branches())
-                    .unwrap_or_default()
-            })
-            .await
-            .unwrap_or_default();
-
+            let fetched = backend
+                .list_branches(project_id, true)
+                .await
+                .map(pairs_from_branches)
+                .unwrap_or_default();
             let _ = tx
                 .send(AppEvent::StateUpdate(StateUpdate::CheckoutFetchComplete {
                     project_id,
-                    branches,
+                    branches: fetched,
                 }))
                 .await;
         });
@@ -905,57 +976,44 @@ impl App {
             return;
         }
 
+        // Resolve the project in its *owning* backend's snapshot — a remote
+        // project isn't in the local view, so the local-only lookup would 404.
+        let backend_id = self.backend_of_project(project_id);
+        let Some(project_path) = self
+            .view_for(backend_id)
+            .snapshot
+            .projects
+            .iter()
+            .find(|p| p.id == project_id)
+            .map(|p| p.repo_path.clone())
+        else {
+            self.ui_state.modal = Modal::Error {
+                message: "Project not found".to_string(),
+            };
+            return;
+        };
+
         // Use the branch name verbatim as the session title. This keeps
         // `display_branch` from rendering a redundant `[branch]` annotation
         // in the list (it short-circuits on exact title == branch match)
         // and the worktree directory still comes out sensibly because
-        // `sanitize_name` handles slashes and special chars.
-        let title = branch_name.clone();
-
-        let session_id = match self
-            .service
-            .session_manager()
-            .prepare_session(&project_id, title, None, Some(branch_name.clone()))
-            .await
-        {
-            Ok(id) => id,
-            Err(e) => {
-                self.ui_state.modal = Modal::Error {
-                    message: format!("Failed to create session: {}", e),
-                };
-                return;
-            }
-        };
-
-        // Refresh list and select the new placeholder
-        self.refresh_list_items().await;
-        self.select_session_in_tree(session_id);
-
-        // Spawn background task for heavy work (same pattern as NewSession)
-        let session_manager = self.service.session_manager().clone();
-        let tx = self.event_loop.sender();
-        tokio::spawn(async move {
-            match session_manager
-                .finalize_session(&session_id, None, None)
-                .await
-            {
-                Ok(sid) => {
-                    let _ = tx
-                        .send(AppEvent::StateUpdate(StateUpdate::SessionCreated {
-                            session_id: sid,
-                        }))
-                        .await;
-                }
-                Err(e) => {
-                    let _ = tx
-                        .send(AppEvent::StateUpdate(StateUpdate::SessionCreateFailed {
-                            session_id,
-                            message: format!("Failed to create session: {}", e),
-                        }))
-                        .await;
-                }
-            }
-        });
+        // `sanitize_name` handles slashes and special chars. `base_branch`
+        // forks the worktree from the existing branch.
+        self.spawn_create_session(
+            backend_id,
+            crate::api::CreateSessionOpts {
+                project_path,
+                title: branch_name.clone(),
+                program: None,
+                initial_prompt: None,
+                effort: None,
+                mode: None,
+                model: None,
+                base_branch: Some(branch_name),
+                section: None,
+                stack_parent: None,
+            },
+        );
     }
 
     /// Open the quick-switch palette in the given mode.
@@ -975,30 +1033,41 @@ impl App {
     /// Non-empty queries are ranked by fuzzy score (best match first);
     /// empty queries fall back to alphabetical title order.
     pub(super) async fn gather_quick_switch_matches(&self, query: &str) -> Vec<QuickSwitchMatch> {
-        let state = self.service.store().read().await;
         let mut scored: Vec<(i64, QuickSwitchMatch)> = Vec::new();
 
-        for session in state.sessions.values() {
-            if session.status == SessionStatus::Creating {
-                continue;
+        // Every backend's sessions, not just local — the palette mirrors the
+        // whole tree (and the refilter path already builds from `list_items`,
+        // which spans all backends). `project_name` carries the session's own
+        // project label, matching how the tree groups it; selection resolves
+        // the owning backend by session id (`backend_of_session`).
+        for handle in &self.backends {
+            for session in &handle.view.snapshot.sessions {
+                if session.status == SessionStatus::Creating {
+                    continue;
+                }
+                // Best fuzzy score across title/branch/program — mirrors
+                // `WorktreeSession::fuzzy_score` over the DTO fields.
+                let Some(score) = [
+                    session.title.as_str(),
+                    session.branch.as_str(),
+                    session.program.as_str(),
+                ]
+                .iter()
+                .filter_map(|s| crate::fuzzy::fuzzy_score(s, query))
+                .max() else {
+                    continue;
+                };
+                scored.push((
+                    score,
+                    QuickSwitchMatch {
+                        session_id: session.session_id,
+                        title: session.title.clone(),
+                        branch: session.branch.clone(),
+                        project_name: session.project_name.clone(),
+                        status: session.status,
+                    },
+                ));
             }
-            let Some(score) = session.fuzzy_score(query) else {
-                continue;
-            };
-            let project_name = state
-                .get_project(&session.project_id)
-                .map(|p| p.name.clone())
-                .unwrap_or_default();
-            scored.push((
-                score,
-                QuickSwitchMatch {
-                    session_id: session.id,
-                    title: session.title.clone(),
-                    branch: session.branch.clone(),
-                    project_name,
-                    status: session.status,
-                },
-            ));
         }
 
         if query.is_empty() {
@@ -1048,6 +1117,9 @@ impl App {
         let mut out: Vec<QuickSwitchItem> = Vec::new();
         if let PaletteMode::SectionPicker { session_id } = eff_mode {
             return self.gather_section_picker_items(session_id, eff_query);
+        }
+        if eff_mode == PaletteMode::RemoteServerPicker {
+            return self.gather_remote_server_picker_items(eff_query);
         }
         if eff_mode == PaletteMode::Unified {
             for m in self.gather_quick_switch_matches(eff_query).await {
@@ -1133,6 +1205,26 @@ impl App {
             return;
         }
 
+        // Remote-server picker: same shape — re-filter the server rows and stop.
+        if eff_mode == PaletteMode::RemoteServerPicker {
+            let server_items = self.gather_remote_server_picker_items(eff_query);
+            if let Modal::QuickSwitch {
+                matches,
+                selected_idx,
+                scroll,
+                ..
+            } = &mut self.ui_state.modal
+            {
+                *matches = server_items;
+                if *selected_idx >= matches.len() {
+                    *selected_idx = matches.len().saturating_sub(1);
+                }
+                *scroll = 0;
+                *scroll = adjust_list_scroll(*selected_idx, *scroll, LIST_MAX_VISIBLE);
+            }
+            return;
+        }
+
         // Build the session rows synchronously from list_items so the refilter
         // can run without awaiting the store lock on every keystroke.
         let mut scored_sessions: Vec<(i64, QuickSwitchMatch)> = Vec::new();
@@ -1149,7 +1241,9 @@ impl App {
                     SessionListItem::Worktree { id, .. } => {
                         project_names.insert(*id, current_project_name.clone());
                     }
-                    SessionListItem::SectionHeader { .. } | SessionListItem::Spacer => {}
+                    SessionListItem::SectionHeader { .. }
+                    | SessionListItem::ServerHeader { .. }
+                    | SessionListItem::Spacer => {}
                 }
             }
 
@@ -1223,7 +1317,7 @@ impl App {
     /// Handle remove project - show confirmation (only when a project row is selected)
     pub(super) fn handle_remove_project(&mut self) {
         if self.ui_state.selected_session_id.is_none()
-            && let Some(project_id) = self.ui_state.selected_project_id
+            && let Some((_backend, project_id)) = self.ui_state.selected_project_id
         {
             self.ui_state.modal = Modal::Confirm {
                 title: "Remove Project".to_string(),
@@ -1235,16 +1329,19 @@ impl App {
 
     /// Handle restart session - show confirmation
     pub(super) fn handle_restart_session(&mut self) {
-        if let Some(session_id) = self.ui_state.selected_session_id {
-            let message = if self.config.resume_session {
-                "This will kill the current tmux session and start a fresh one.\nClaude will pick up where it left off via /resume.".to_string()
-            } else {
-                "This will kill the current tmux session and start a fresh one.\nIf you want to pick up where you left off, you can use /resume.".to_string()
-            };
+        if let Some(sref) = self.ui_state.selected_session_id {
+            let title = self.session(sref).map(|s| s.title.clone());
+            let message = restart_confirm_message(
+                sref.backend == LOCAL_BACKEND_ID,
+                self.config.resume_session,
+                title.as_deref(),
+            );
             self.ui_state.modal = Modal::Confirm {
                 title: "Restart Session".to_string(),
                 message,
-                on_confirm: ConfirmAction::RestartSession { session_id },
+                on_confirm: ConfirmAction::RestartSession {
+                    session_id: sref.id,
+                },
             };
         }
     }
@@ -1256,7 +1353,11 @@ impl App {
         let Some(session_id) = self.ui_state.selected_session_id else {
             return;
         };
-        match self.service.toggle_keep_alive(&session_id).await {
+        match self
+            .backend_arc(session_id.backend)
+            .toggle_keep_alive(session_id.id)
+            .await
+        {
             Ok(keep_alive) => {
                 let msg = if keep_alive {
                     "Keep-alive on — session won't auto-hibernate"
@@ -1281,12 +1382,13 @@ impl App {
         if self.selected_session_is_creating() {
             return;
         }
-        if let Some(session_id) = self.ui_state.selected_session_id {
-            let (title, retarget) = {
-                let state = self.service.store().read().await;
-                let title = state.get_session(&session_id).map(|s| s.title.clone());
-                (title, state.stack_retarget_preview(&session_id))
-            };
+        if let Some(sref) = self.ui_state.selected_session_id {
+            let session_id = sref.id;
+            let title = self.session(sref).map(|s| s.title.clone());
+            let retarget = super::state::stack_retarget_preview_from_snapshot(
+                &self.view_for(sref.backend).snapshot,
+                session_id,
+            );
             self.ui_state.modal = Modal::Confirm {
                 title: "Delete Session".to_string(),
                 message: delete_confirm_message(
@@ -1298,19 +1400,45 @@ impl App {
         }
     }
 
+    /// Trigger a PR-metadata refresh on every connected backend. The local
+    /// backend is always connected; a degraded remote is skipped, since its
+    /// link is down and the request would only error. Each backend routes the
+    /// request to where its PR polling actually happens (local loop / server).
+    pub(super) fn refresh_pr_status_all(&self) {
+        // Snapshot the connected backends, then fan out in one spawned task so a
+        // slow/blocked remote POST doesn't stall the event loop. A degraded
+        // remote is skipped (its link is down and the request would only error);
+        // the local backend is always connected.
+        let backends: Vec<Arc<dyn CommanderBackend>> = self
+            .backends
+            .iter()
+            .filter(|handle| {
+                handle.id == LOCAL_BACKEND_ID
+                    || matches!(handle.view.connection, ConnectionState::Connected)
+            })
+            .map(|handle| handle.backend.clone())
+            .collect();
+        tokio::spawn(async move {
+            for backend in backends {
+                let _ = backend.request_pr_refresh().await;
+            }
+        });
+    }
+
     /// Sweep every project for sessions whose PR has merged on GitHub and
     /// open a single confirmation that names the count. No-op (with a
     /// transient status message) when nothing qualifies.
     pub(super) async fn handle_delete_merged_pr_sessions(&mut self) {
-        let merged: Vec<(SessionId, String)> = {
-            let state = self.service.store().read().await;
-            state
-                .sessions
-                .values()
-                .filter(|s| s.pr_is_merged())
-                .map(|s| (s.id, s.branch.clone()))
-                .collect()
-        };
+        // Sweep every backend's view, not just local — a merged-PR session on a
+        // remote server is just as eligible, and the delete path already routes
+        // per-session via `backend_of_session`.
+        let merged: Vec<(SessionId, String)> = self
+            .backends
+            .iter()
+            .flat_map(|h| h.view.snapshot.sessions.iter())
+            .filter(|s| s.pr_merged || s.pr_state == crate::git::PrState::Merged)
+            .map(|s| (s.session_id, s.branch.clone()))
+            .collect();
 
         if merged.is_empty() {
             self.ui_state.status_message = Some((
@@ -1351,73 +1479,29 @@ impl App {
     /// Shared by the `DeleteSession` and `DeleteMergedPrSessions` confirm
     /// arms. Clears `selected_session_id` only when it matches the removed
     /// session — bulk callers leave the user's current selection alone.
-    async fn delete_session_immediately(
-        &mut self,
-        session_id: SessionId,
-    ) -> crate::error::Result<()> {
-        let cleanup_data = {
-            let state = self.service.store().read().await;
-            state.get_session(&session_id).map(|s| {
-                let repo_path = state
-                    .get_project(&s.project_id)
-                    .map(|p| p.repo_path.clone());
-                (
-                    s.tmux_session_name.clone(),
-                    s.shell_tmux_session_name.clone(),
-                    s.worktree_path.clone(),
-                    repo_path,
-                )
-            })
-        };
-
-        // Remove from state, re-pointing stacked children onto the parent and
-        // returning the durable PR-base edits — planned atomically with the
-        // removal inside the mutate closure.
-        let pr_retargets = self
-            .service
-            .store()
-            .mutate(move |state| state.remove_session_retargeting_children(&session_id).1)
-            .await?;
-
-        // Durably retarget child PRs on GitHub off the UI thread (best-effort).
-        if !pr_retargets.is_empty() {
-            tokio::spawn(crate::session::SessionManager::retarget_child_prs(
-                pr_retargets,
-            ));
-        }
-
-        // When deleting the session under the cursor, remember its row so we
-        // can land the cursor on whatever slides up into that slot (nearest
-        // selectable) once the list is rebuilt, rather than snapping to the
-        // top. Bulk callers deleting a non-selected session leave the cursor
-        // alone.
-        let deleting_selected = self.ui_state.selected_session_id == Some(session_id);
-        let prev_idx = self.ui_state.list_state.selected();
-        if deleting_selected {
+    /// Delete a session without blocking the UI. `backend.delete_session` owns
+    /// the whole teardown — kill tmux, remove the worktree, re-point stacked
+    /// children onto the parent, and retarget their PRs — so this just clears
+    /// the selection (if the focused row is going away) and spawns the call;
+    /// the change feed refreshes the tree on completion and a failure surfaces
+    /// as an error toast. Shared by the single and bulk delete confirmations.
+    fn delete_session_immediately(&mut self, session_id: SessionId) {
+        // When deleting the focused row, drop the selection now; the
+        // change-feed refresh clamps the cursor once the session is gone.
+        if self.ui_state.selected_session_id.map(|r| r.id) == Some(session_id) {
             self.ui_state.selected_session_id = None;
         }
-        self.refresh_list_items().await;
-        if deleting_selected && let Some(idx) = prev_idx {
-            self.ui_state.list_state.select_nearest(idx);
-        }
-
-        if let Some((tmux_name, shell_tmux_name, worktree_path, repo_path)) = cleanup_data {
-            let tmux = self.service.session_manager().tmux.clone();
-            let tx = self.event_loop.sender();
-            tokio::spawn(async move {
-                background::cleanup_session_tmux(
-                    &tmux,
-                    &tmux_name,
-                    shell_tmux_name.as_deref(),
-                    repo_path
-                        .as_ref()
-                        .map(|rp| (worktree_path.as_path(), rp.as_path())),
-                    &tx,
-                )
-                .await;
-            });
-        }
-        Ok(())
+        let backend = self.backend_arc(self.backend_of_session(session_id));
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            if let Err(e) = backend.delete_session(session_id).await {
+                let _ = tx
+                    .send(AppEvent::StateUpdate(StateUpdate::Error {
+                        message: format!("Failed to delete session: {e}"),
+                    }))
+                    .await;
+            }
+        });
     }
 
     /// Whether the currently selected list item is a section header.
@@ -1494,7 +1578,7 @@ impl App {
             ));
             return;
         }
-        let Some(session_id) = self.ui_state.selected_session_id else {
+        let Some(session_id) = self.ui_state.selected_session_id.map(|r| r.id) else {
             return;
         };
         let mode = PaletteMode::SectionPicker { session_id };
@@ -1508,58 +1592,169 @@ impl App {
         };
     }
 
+    /// Handle "add remote server" — step 1 of the chained flow: prompt for a
+    /// display name. URL and token follow; submission of the token step runs
+    /// an async connection probe before writing config.
+    pub(super) fn handle_add_remote_server(&mut self) {
+        self.ui_state.modal = Modal::Input {
+            title: "Add Remote Server".to_string(),
+            prompt: "Server name (shown as the tree header):".to_string(),
+            value: super::Input::default(),
+            on_submit: InputAction::AddRemoteServerName,
+            existing_branches: None,
+            project_picker: None,
+            program_picker: None,
+            focus: super::InputFocus::Name,
+            expanded: false,
+            mask: false,
+        };
+    }
+
+    /// Handle "remove remote server" — open the palette in remote-server
+    /// picker mode. Not gated on the server count: an empty config just
+    /// reports there's nothing to remove.
+    pub(super) fn handle_remove_remote_server(&mut self) {
+        if self.config.remote_servers.is_empty() {
+            self.ui_state.status_message = Some((
+                "No remote servers configured".to_string(),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            return;
+        }
+        let matches = self.gather_remote_server_picker_items("");
+        self.ui_state.modal = Modal::QuickSwitch {
+            mode: PaletteMode::RemoteServerPicker,
+            query: super::Input::default(),
+            matches,
+            selected_idx: 0,
+            scroll: 0,
+        };
+    }
+
+    /// Build the remove-server picker rows: one per configured server,
+    /// filtered by name/url substring.
+    pub(super) fn gather_remote_server_picker_items(
+        &self,
+        filter_query: &str,
+    ) -> Vec<QuickSwitchItem> {
+        let q = filter_query.to_lowercase();
+        self.config
+            .remote_servers
+            .iter()
+            .filter(|s| {
+                q.is_empty()
+                    || s.name.to_lowercase().contains(&q)
+                    || s.url.to_lowercase().contains(&q)
+            })
+            .map(|s| QuickSwitchItem::RemoteServerRemove {
+                name: s.name.clone(),
+                label: format!("{} ({})", s.name, s.url),
+            })
+            .collect()
+    }
+
+    /// Persist a new `[[remote_servers]]` entry to config.toml (validating the
+    /// combined list first) and wire up its live backend handle. Returns a
+    /// user-facing error string on failure so callers can toast/modal it.
+    pub(super) fn add_remote_server_to_config(
+        &mut self,
+        server: crate::config::RemoteServerConfig,
+    ) -> std::result::Result<(), String> {
+        let old = self.config.remote_servers.clone();
+        let mut cfg = self.service.read_config();
+        cfg.remote_servers.push(server);
+        cfg.validate_remote_servers().map_err(|e| e.to_string())?;
+        self.service.update_config(cfg).map_err(|e| e.to_string())?;
+        self.config = self.service.read_config();
+        let new = self.config.remote_servers.clone();
+        self.apply_remote_servers_reload(&old, &new);
+        Ok(())
+    }
+
+    /// Remove a `[[remote_servers]]` entry by name from config.toml and drop
+    /// its live backend handle (selection falls back to local).
+    pub(super) fn remove_remote_server_from_config(
+        &mut self,
+        name: &str,
+    ) -> std::result::Result<(), String> {
+        let old = self.config.remote_servers.clone();
+        let mut cfg = self.service.read_config();
+        cfg.remote_servers.retain(|s| s.name != name);
+        self.service.update_config(cfg).map_err(|e| e.to_string())?;
+        self.config = self.service.read_config();
+        let new = self.config.remote_servers.clone();
+        self.apply_remote_servers_reload(&old, &new);
+        Ok(())
+    }
+
+    /// Kick off the async connection probe for a candidate server: build a
+    /// backend via the injected factory and fetch a workspace snapshot (which
+    /// exercises reachability, auth, and reports the server's tmux health).
+    /// The outcome arrives as [`StateUpdate::RemoteServerProbed`].
+    pub(super) fn spawn_remote_server_probe(&mut self, server: crate::config::RemoteServerConfig) {
+        self.ui_state.modal = Modal::Loading {
+            title: "Add Remote Server".to_string(),
+            message: format!("Testing connection to {}…", server.url),
+            hint: None,
+        };
+        // Nonce ties the eventual result to THIS flow: a probe that lands
+        // after the user dismissed the modal (and some other Loading modal
+        // happens to be up) must be dropped, not written to config.
+        self.probe_nonce = self.probe_nonce.wrapping_add(1);
+        let nonce = self.probe_nonce;
+        let factory = self.remote_factory.clone();
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let result = match factory(&server) {
+                Ok(backend) => match backend.workspace_snapshot().await {
+                    Ok(snap) => Ok(snap.server.tmux_ok),
+                    Err(e) => Err(e.to_string()),
+                },
+                Err(e) => Err(e.to_string()),
+            };
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::RemoteServerProbed {
+                    nonce,
+                    server,
+                    result,
+                }))
+                .await;
+        });
+    }
+
     /// Apply a manual section move chosen in the picker palette.
     /// `target = Some(name)` sets the override; `target = None` is the
     /// "Auto" entry, which must fully re-evaluate from the predicates
     /// rather than honour the forward-only rule that `apply_assignment`
     /// uses for the background poller.
-    pub(super) async fn apply_section_move(
-        &mut self,
-        session_id: SessionId,
-        target: Option<String>,
-    ) {
-        let sections = self.config.sections.clone();
-        let now = chrono::Utc::now();
-        let _ = self
-            .service
-            .store()
-            .mutate(move |state| {
-                if let Some(session) = state.get_session_mut(&session_id) {
-                    match target {
-                        Some(name) => {
-                            session.section_override = Some(name);
-                            crate::session::apply_assignment(session, &sections, now);
-                        }
-                        None => {
-                            crate::session::clear_override_and_reassign(session, &sections, now);
-                        }
-                    }
-                }
-            })
-            .await;
-        self.refresh_list_items().await;
-
-        // The session has moved to a new position in the rebuilt list. Keep it
-        // selected by finding its new index and moving the cursor there, then
-        // refresh the preview pane for the (unchanged) selection.
-        if self.select_session_in_tree(session_id) {
-            self.spawn_preview_update();
-        }
+    pub(super) fn apply_section_move(&mut self, session_id: SessionId, target: Option<String>) {
+        // Spawn the section move so a slow/degraded remote never blocks the event
+        // loop; `SessionMutationApplied` refreshes the view/tree, reselects the
+        // (relocated) session, and refreshes its preview.
+        let backend_id = self.backend_of_session(session_id);
+        let backend = self.backend_arc(backend_id);
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let _ = backend.set_section(session_id, target).await;
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::SessionMutationApplied {
+                    backend_id: backend_id.0,
+                    session_id,
+                }))
+                .await;
+        });
     }
 
     /// Handle rename session - show input modal pre-filled with current title.
     /// Only the displayed title is changed; the underlying worktree, branch,
     /// and tmux session keep their original names.
     pub(super) async fn handle_rename_session(&mut self) {
-        let Some(session_id) = self.ui_state.selected_session_id else {
+        let Some(sref) = self.ui_state.selected_session_id else {
             return;
         };
-        let current_title = {
-            let state = self.service.store().read().await;
-            match state.get_session(&session_id) {
-                Some(s) => s.title.clone(),
-                None => return,
-            }
+        let session_id = sref.id;
+        let Some(current_title) = self.session(sref).map(|s| s.title.clone()) else {
+            return;
         };
         self.ui_state.modal = Modal::Input {
             title: "Rename Session".to_string(),
@@ -1571,12 +1766,40 @@ impl App {
             program_picker: None,
             focus: super::InputFocus::Name,
             expanded: false,
+            mask: false,
         };
+    }
+
+    /// Create a session on backend `backend_id` off-thread (local or remote).
+    /// `create_session` commits the `Creating` placeholder early, so the change
+    /// feed surfaces the new row immediately; `SessionCreated` (which selects it) or
+    /// `SessionCreateFailed` completes the flow. On failure the backend removes
+    /// its own half-created session.
+    pub(super) fn spawn_create_session(
+        &self,
+        backend_id: BackendId,
+        opts: crate::api::CreateSessionOpts,
+    ) {
+        let backend = self.backend_arc(backend_id);
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let update = match backend.create_session(opts).await {
+                Ok(session_id) => StateUpdate::SessionCreated {
+                    session_id,
+                    backend_id: backend_id.0,
+                },
+                Err(e) => StateUpdate::SessionCreateFailed {
+                    message: format!("Failed to create session: {e}"),
+                },
+            };
+            let _ = tx.send(AppEvent::StateUpdate(update)).await;
+        });
     }
 
     /// Handle input modal submission. `program` is the command chosen in the
     /// new-session program picker, or `None` for flows without a picker (which
-    /// then fall back to the first configured program inside `prepare_session`).
+    /// then fall back to the first configured program inside `prepare_session`,
+    /// on whichever backend owns the target project).
     pub(super) async fn handle_input_submit(
         &mut self,
         action: InputAction,
@@ -1595,76 +1818,40 @@ impl App {
                     ));
                     return;
                 }
-
-                // Insert placeholder session immediately (no blocking modal)
                 self.ui_state.modal = Modal::None;
-                let session_id = match self
-                    .service
-                    .session_manager()
-                    .prepare_session(&project_id, value, program, None)
-                    .await
-                {
-                    Ok(id) => id,
-                    Err(e) => {
-                        self.ui_state.modal = Modal::Error {
-                            message: format!("Failed to create session: {}", e),
-                        };
-                        return;
-                    }
+                let backend_id = self.backend_of_project(project_id);
+                let Some(project_path) = self
+                    .view_for(backend_id)
+                    .snapshot
+                    .projects
+                    .iter()
+                    .find(|p| p.id == project_id)
+                    .map(|p| p.repo_path.clone())
+                else {
+                    self.ui_state.modal = Modal::Error {
+                        message: "Project not found".to_string(),
+                    };
+                    return;
                 };
-
-                // Place the new session in the section the cursor was in when
-                // the modal opened, before the list refresh below renders it.
-                if let Some(name) = section {
-                    let sections = self.config.sections.clone();
-                    let now = chrono::Utc::now();
-                    let _ = self
-                        .service
-                        .store()
-                        .mutate(move |state| {
-                            if let Some(session) = state.get_session_mut(&session_id) {
-                                crate::session::place_created_session(
-                                    session, &name, &sections, now,
-                                );
-                            }
-                        })
-                        .await;
-                }
-
-                // Refresh list and select the new placeholder
-                self.refresh_list_items().await;
-                self.select_session_in_tree(session_id);
-
-                // Spawn background task for heavy work
-                let session_manager = self.service.session_manager().clone();
-                let tx = self.event_loop.sender();
-                tokio::spawn(async move {
-                    match session_manager
-                        .finalize_session(&session_id, None, None)
-                        .await
-                    {
-                        Ok(sid) => {
-                            let _ = tx
-                                .send(AppEvent::StateUpdate(StateUpdate::SessionCreated {
-                                    session_id: sid,
-                                }))
-                                .await;
-                        }
-                        Err(e) => {
-                            let _ = tx
-                                .send(AppEvent::StateUpdate(StateUpdate::SessionCreateFailed {
-                                    session_id,
-                                    message: format!("Failed to create session: {}", e),
-                                }))
-                                .await;
-                        }
-                    }
-                });
+                self.spawn_create_session(
+                    backend_id,
+                    crate::api::CreateSessionOpts {
+                        project_path,
+                        title: value,
+                        program,
+                        initial_prompt: None,
+                        effort: None,
+                        mode: None,
+                        model: None,
+                        base_branch: None,
+                        section,
+                        stack_parent: None,
+                    },
+                );
             }
             InputAction::CreateStackedSession {
                 project_id,
                 parent_session_id,
-                parent_branch: _parent_branch,
             } => {
                 if value.trim().is_empty() {
                     self.ui_state.status_message = Some((
@@ -1673,73 +1860,36 @@ impl App {
                     ));
                     return;
                 }
-
-                // Insert placeholder session immediately (no blocking modal)
                 self.ui_state.modal = Modal::None;
-                let session_id = match self
-                    .service
-                    .session_manager()
-                    .prepare_session(&project_id, value, program, None)
-                    .await
-                {
-                    Ok(id) => id,
-                    Err(e) => {
-                        self.ui_state.modal = Modal::Error {
-                            message: format!("Failed to create session: {}", e),
-                        };
-                        return;
-                    }
-                };
-
-                // Mark the new placeholder as stacked on the parent; finalize
-                // reads `stack_parent_session_id` to fork the worktree branch
-                // from the parent's branch and to inject the PR-base context
-                // into the Claude launch command.
-                if let Err(e) = self
-                    .service
-                    .store()
-                    .mutate(move |state| {
-                        if let Some(s) = state.get_session_mut(&session_id) {
-                            s.stack_parent_session_id = Some(parent_session_id);
-                        }
-                    })
-                    .await
-                {
+                let backend_id = self.backend_of_project(project_id);
+                let Some(project_path) = self
+                    .view_for(backend_id)
+                    .snapshot
+                    .projects
+                    .iter()
+                    .find(|p| p.id == project_id)
+                    .map(|p| p.repo_path.clone())
+                else {
                     self.ui_state.modal = Modal::Error {
-                        message: format!("Failed to save state: {}", e),
+                        message: "Project not found".to_string(),
                     };
                     return;
-                }
-
-                // Refresh list and select the new placeholder
-                self.refresh_list_items().await;
-                self.select_session_in_tree(session_id);
-
-                // Spawn background task for heavy work
-                let session_manager = self.service.session_manager().clone();
-                let tx = self.event_loop.sender();
-                tokio::spawn(async move {
-                    match session_manager
-                        .finalize_session(&session_id, None, None)
-                        .await
-                    {
-                        Ok(sid) => {
-                            let _ = tx
-                                .send(AppEvent::StateUpdate(StateUpdate::SessionCreated {
-                                    session_id: sid,
-                                }))
-                                .await;
-                        }
-                        Err(e) => {
-                            let _ = tx
-                                .send(AppEvent::StateUpdate(StateUpdate::SessionCreateFailed {
-                                    session_id,
-                                    message: format!("Failed to create session: {}", e),
-                                }))
-                                .await;
-                        }
-                    }
-                });
+                };
+                self.spawn_create_session(
+                    backend_id,
+                    crate::api::CreateSessionOpts {
+                        project_path,
+                        title: value,
+                        program,
+                        initial_prompt: None,
+                        effort: None,
+                        mode: None,
+                        model: None,
+                        base_branch: None,
+                        section: None,
+                        stack_parent: Some(parent_session_id),
+                    },
+                );
             }
             InputAction::AddProject => {
                 let expanded = crate::tui::path_completer::expand_tilde(value.trim());
@@ -1751,12 +1901,18 @@ impl App {
                     return;
                 }
 
-                match self.service.add_project(path).await {
+                // Deliberately local-only this phase: the path input's existence
+                // check and completer both resolve against *this* machine's
+                // filesystem, so the path is only meaningful on the local
+                // backend. Remote add-project routing is deferred until there's
+                // a server-side path completer to pick a remote path with.
+                match self.local_arc().add_project(path).await {
                     Ok(project_id) => {
                         self.ui_state.status_message = Some((
                             format!("Added project {}", project_id),
                             Instant::now() + Duration::from_secs(3),
                         ));
+                        self.refresh_local_view().await;
                         self.refresh_list_items().await;
                         // Select the newly added project
                         if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
@@ -1781,16 +1937,21 @@ impl App {
                     ));
                     return;
                 }
-                let _ = self
-                    .service
-                    .store()
-                    .mutate(move |state| {
-                        if let Some(session) = state.get_session_mut(&session_id) {
-                            session.title = new_title;
-                        }
-                    })
-                    .await;
-                self.refresh_list_items().await;
+                // Spawn the rename so a slow/degraded remote never blocks the
+                // event loop; `SessionMutationApplied` refreshes the view/tree
+                // and keeps the renamed session selected.
+                let backend_id = self.backend_of_session(session_id);
+                let backend = self.backend_arc(backend_id);
+                let tx = self.event_loop.sender();
+                tokio::spawn(async move {
+                    let _ = backend.rename_session(session_id, new_title).await;
+                    let _ = tx
+                        .send(AppEvent::StateUpdate(StateUpdate::SessionMutationApplied {
+                            backend_id: backend_id.0,
+                            session_id,
+                        }))
+                        .await;
+                });
             }
             InputAction::ScanDirectory => {
                 let expanded = crate::tui::path_completer::expand_tilde(value.trim());
@@ -1810,12 +1971,13 @@ impl App {
 
                 // If the path itself is a git repo, just add it directly
                 if path.join(".git").exists() {
-                    match self.service.add_project(path).await {
+                    match self.local_arc().add_project(path).await {
                         Ok(project_id) => {
                             self.ui_state.status_message = Some((
                                 format!("Added project {}", project_id),
                                 Instant::now() + Duration::from_secs(3),
                             ));
+                            self.refresh_local_view().await;
                             self.refresh_list_items().await;
                             if let Some(idx) =
                                 self.ui_state.list_items.iter().position(|item| {
@@ -1841,7 +2003,11 @@ impl App {
                     hint: None,
                 };
 
-                match self.service.scan_directory(&path).await {
+                // Local-only this phase for the same reason as add-project above:
+                // the scanned directory is a local filesystem path. Remote
+                // scan/add routing is deferred until a server-side path picker
+                // exists.
+                match self.local_arc().scan_directory(path.clone()).await {
                     Ok(result) => {
                         if result.added == 0 && result.skipped == 0 {
                             self.ui_state.modal = Modal::Error {
@@ -1858,6 +2024,7 @@ impl App {
                                 ),
                                 Instant::now() + Duration::from_secs(5),
                             ));
+                            self.refresh_local_view().await;
                             self.refresh_list_items().await;
                         }
                     }
@@ -1868,6 +2035,89 @@ impl App {
                     }
                 }
             }
+            InputAction::AddRemoteServerName => {
+                let name = value.trim().to_string();
+                if name.is_empty() {
+                    self.ui_state.status_message = Some((
+                        "Server name cannot be empty".to_string(),
+                        Instant::now() + Duration::from_secs(3),
+                    ));
+                    self.handle_add_remote_server();
+                    return;
+                }
+                if self.config.remote_servers.iter().any(|s| s.name == name) {
+                    self.ui_state.status_message = Some((
+                        format!("A remote server named \"{name}\" already exists"),
+                        Instant::now() + Duration::from_secs(3),
+                    ));
+                    self.handle_add_remote_server();
+                    return;
+                }
+                self.ui_state.modal = Modal::Input {
+                    title: "Add Remote Server".to_string(),
+                    prompt: format!("Server URL for \"{name}\" (e.g. http://host:7878):"),
+                    value: "http://".into(),
+                    on_submit: InputAction::AddRemoteServerUrl { name },
+                    existing_branches: None,
+                    project_picker: None,
+                    program_picker: None,
+                    focus: super::InputFocus::Name,
+                    expanded: false,
+                    mask: false,
+                };
+            }
+            InputAction::AddRemoteServerUrl { name } => {
+                let url = value.trim().to_string();
+                // Validate the same way config loading does: a candidate list
+                // containing just this entry catches empty/unparseable/hostless
+                // URLs without duplicating the rules here.
+                let mut candidate = self.service.read_config();
+                candidate.remote_servers = vec![crate::config::RemoteServerConfig {
+                    name: name.clone(),
+                    url: url.clone(),
+                    token: None,
+                }];
+                if let Err(e) = candidate.validate_remote_servers() {
+                    self.ui_state.status_message = Some((
+                        format!("Invalid URL: {e}"),
+                        Instant::now() + Duration::from_secs(4),
+                    ));
+                    self.ui_state.modal = Modal::Input {
+                        title: "Add Remote Server".to_string(),
+                        prompt: format!("Server URL for \"{name}\" (e.g. http://host:7878):"),
+                        value: url.into(),
+                        on_submit: InputAction::AddRemoteServerUrl { name },
+                        existing_branches: None,
+                        project_picker: None,
+                        program_picker: None,
+                        focus: super::InputFocus::Name,
+                        expanded: false,
+                        mask: false,
+                    };
+                    return;
+                }
+                self.ui_state.modal = Modal::Input {
+                    title: "Add Remote Server".to_string(),
+                    prompt: "Bearer token (leave empty for --allow-no-auth servers):".to_string(),
+                    value: super::Input::default(),
+                    on_submit: InputAction::AddRemoteServerToken { name, url },
+                    existing_branches: None,
+                    project_picker: None,
+                    program_picker: None,
+                    focus: super::InputFocus::Name,
+                    expanded: false,
+                    mask: true,
+                };
+            }
+            InputAction::AddRemoteServerToken { name, url } => {
+                let token = value.trim();
+                let server = crate::config::RemoteServerConfig {
+                    name,
+                    url,
+                    token: (!token.is_empty()).then(|| token.to_string()),
+                };
+                self.spawn_remote_server_probe(server);
+            }
         }
     }
 
@@ -1875,125 +2125,114 @@ impl App {
     pub(super) async fn handle_confirm(&mut self, action: ConfirmAction) {
         match action {
             ConfirmAction::DeleteSession { session_id } => {
-                match self.delete_session_immediately(session_id).await {
-                    Ok(()) => {
-                        self.ui_state.status_message = Some((
-                            "Session deleted".to_string(),
-                            Instant::now() + Duration::from_secs(3),
-                        ));
-                    }
-                    Err(e) => {
-                        self.ui_state.modal = Modal::Error {
-                            message: format!("Failed to save state: {}", e),
-                        };
-                    }
-                }
+                self.delete_session_immediately(session_id);
+                self.ui_state.status_message = Some((
+                    "Deleting session…".to_string(),
+                    Instant::now() + Duration::from_secs(3),
+                ));
             }
             ConfirmAction::DeleteMergedPrSessions { session_ids } => {
                 let total = session_ids.len();
-                let mut succeeded = 0usize;
-                let mut last_error: Option<String> = None;
-                for sid in session_ids {
-                    match self.delete_session_immediately(sid).await {
-                        Ok(()) => succeeded += 1,
-                        Err(e) => last_error = Some(e.to_string()),
-                    }
+                // Drop selection now if the focused row is in the batch; the
+                // change-feed refresh clamps the cursor once they're gone.
+                if let Some(sel) = self.ui_state.selected_session_id.map(|r| r.id)
+                    && session_ids.contains(&sel)
+                {
+                    self.ui_state.selected_session_id = None;
                 }
-                if let Some(err) = last_error {
-                    self.ui_state.modal = Modal::Error {
-                        message: format!(
-                            "Deleted {succeeded}/{total} merged-PR session(s) before a state-save failure: {err}"
-                        ),
-                    };
-                } else {
-                    self.ui_state.status_message = Some((
-                        format!("Deleted {succeeded} merged-PR session(s)"),
-                        Instant::now() + Duration::from_secs(3),
-                    ));
-                }
+                // Sequence the whole batch through ONE task: several of these
+                // sessions can live in the same git repo, and concurrent
+                // `git worktree remove` calls in one repo race. Per-session
+                // routing to the owning backend is preserved.
+                let deletes: Vec<(Arc<dyn CommanderBackend>, SessionId)> = session_ids
+                    .iter()
+                    .map(|sid| (self.backend_arc(self.backend_of_session(*sid)), *sid))
+                    .collect();
+                let tx = self.event_loop.sender();
+                tokio::spawn(delete_sessions_in_sequence(deletes, tx));
+                self.ui_state.status_message = Some((
+                    format!("Deleting {total} merged-PR session(s)…"),
+                    Instant::now() + Duration::from_secs(3),
+                ));
             }
             ConfirmAction::RestartSession { session_id } => {
-                match self.service.restart_session(&session_id).await {
-                    Ok(_) => {
+                // Spawn the restart so a slow/degraded remote never blocks the
+                // event loop; `RestartFinished` refreshes the view and toasts.
+                let backend_id = self.backend_of_session(session_id);
+                self.ui_state.status_message = Some((
+                    "Restarting session…".to_string(),
+                    Instant::now() + Duration::from_secs(30),
+                ));
+                let backend = self.backend_arc(backend_id);
+                let tx = self.event_loop.sender();
+                tokio::spawn(async move {
+                    let result = backend
+                        .restart_session(session_id)
+                        .await
+                        .map_err(|e| e.to_string());
+                    let _ = tx
+                        .send(AppEvent::StateUpdate(StateUpdate::RestartFinished {
+                            backend_id: backend_id.0,
+                            result,
+                        }))
+                        .await;
+                });
+            }
+            ConfirmAction::RemoveProject { project_id } => {
+                // `backend.remove_project` owns the teardown — kill the project
+                // shell + each session's tmux and remove every worktree, then
+                // drop the project (and its sessions) from state. Spawn it so
+                // the worktree removals never block the UI; the change feed
+                // refreshes the tree on completion.
+                let backend_id = self.backend_of_project(project_id);
+                self.ui_state.selected_project_id = None;
+                self.ui_state.status_message = Some((
+                    "Removing project…".to_string(),
+                    Instant::now() + Duration::from_secs(3),
+                ));
+                let backend = self.backend_arc(backend_id);
+                let tx = self.event_loop.sender();
+                tokio::spawn(async move {
+                    if let Err(e) = backend.remove_project(project_id).await {
+                        let _ = tx
+                            .send(AppEvent::StateUpdate(StateUpdate::Error {
+                                message: format!("Failed to remove project: {e}"),
+                            }))
+                            .await;
+                    }
+                });
+            }
+            ConfirmAction::AddRemoteServerAnyway { server } => {
+                let name = server.name.clone();
+                match self.add_remote_server_to_config(server) {
+                    Ok(()) => {
                         self.ui_state.status_message = Some((
-                            "Session restarted".to_string(),
-                            Instant::now() + Duration::from_secs(3),
+                            format!("Added remote server \"{name}\" (untested)"),
+                            Instant::now() + Duration::from_secs(4),
                         ));
                         self.refresh_list_items().await;
                     }
                     Err(e) => {
                         self.ui_state.modal = Modal::Error {
-                            message: format!("Failed to restart: {}", e),
+                            message: format!("Failed to save server: {e}"),
                         };
                     }
                 }
             }
-            ConfirmAction::RemoveProject { project_id } => {
-                // 1. Capture project and session data before removal
-                let cleanup_data = {
-                    let state = self.service.store().read().await;
-                    state.get_project(&project_id).map(|project| {
-                        let repo_path = project.repo_path.clone();
-                        let shell_tmux = project.shell_tmux_session_name.clone();
-                        let sessions: Vec<_> = project
-                            .worktrees
-                            .iter()
-                            .filter_map(|sid| {
-                                state.get_session(sid).map(|s| {
-                                    (
-                                        s.tmux_session_name.clone(),
-                                        s.shell_tmux_session_name.clone(),
-                                        s.worktree_path.clone(),
-                                    )
-                                })
-                            })
-                            .collect();
-                        (repo_path, shell_tmux, sessions)
-                    })
-                };
-
-                // 2. Remove from state immediately so the UI updates
-                if let Err(e) = self
-                    .service
-                    .store()
-                    .mutate(move |state| {
-                        state.remove_project(&project_id);
-                    })
-                    .await
-                {
-                    self.ui_state.modal = Modal::Error {
-                        message: format!("Failed to save state: {}", e),
-                    };
-                    return;
-                }
-                self.ui_state.selected_project_id = None;
-                self.ui_state.status_message = Some((
-                    "Project removed".to_string(),
-                    Instant::now() + Duration::from_secs(3),
-                ));
-                self.refresh_list_items().await;
-
-                // 3. Spawn background cleanup (kill all tmux sessions + remove worktrees)
-                if let Some((repo_path, shell_tmux, sessions)) = cleanup_data {
-                    let tmux = self.service.session_manager().tmux.clone();
-                    let tx = self.event_loop.sender();
-                    tokio::spawn(async move {
-                        // Kill project shell tmux session
-                        if let Some(ref shell_name) = shell_tmux {
-                            let _ = tmux.kill_session(shell_name).await;
-                        }
-                        // Kill all session tmux sessions + remove worktrees
-                        for (tmux_name, shell_tmux_name, worktree_path) in &sessions {
-                            background::cleanup_session_tmux(
-                                &tmux,
-                                tmux_name,
-                                shell_tmux_name.as_deref(),
-                                Some((worktree_path.as_path(), repo_path.as_path())),
-                                &tx,
-                            )
-                            .await;
-                        }
-                    });
+            ConfirmAction::RemoveRemoteServer { name } => {
+                match self.remove_remote_server_from_config(&name) {
+                    Ok(()) => {
+                        self.ui_state.status_message = Some((
+                            format!("Removed remote server \"{name}\""),
+                            Instant::now() + Duration::from_secs(4),
+                        ));
+                        self.refresh_list_items().await;
+                    }
+                    Err(e) => {
+                        self.ui_state.modal = Modal::Error {
+                            message: format!("Failed to remove server: {e}"),
+                        };
+                    }
                 }
             }
         }
@@ -2018,6 +2257,34 @@ pub(super) fn existing_branch_names(repo_path: &std::path::Path) -> Option<Vec<S
     }
 }
 
+/// Flatten a backend's `BranchInfo` list into the `(name, is_remote)` pairs the
+/// Checkout state updates carry (and [`branch_entries_from_pairs`] consumes).
+fn pairs_from_branches(infos: Vec<crate::api::BranchInfo>) -> Vec<(String, bool)> {
+    infos.into_iter().map(|b| (b.name, b.is_remote)).collect()
+}
+
+/// Build a `ProgramPicker` from a backend's `create_options`, or `None` when the
+/// options carry no programs (the caller falls back to the local-config picker).
+fn program_picker_from_options(opts: crate::api::CreateOptions) -> Option<super::ProgramPicker> {
+    if opts.programs.is_empty() {
+        return None;
+    }
+    let selected = opts
+        .programs
+        .iter()
+        .position(|e| e.command == opts.default_program)
+        .unwrap_or(0);
+    let choices = opts
+        .programs
+        .into_iter()
+        .map(|p| crate::config::ProgramEntry {
+            label: p.label,
+            command: p.command,
+        })
+        .collect();
+    Some(super::ProgramPicker { choices, selected })
+}
+
 /// Load the branch list for a repo path and convert each entry into
 /// a `BranchEntry` suitable for the Checkout modal.
 ///
@@ -2025,7 +2292,21 @@ pub(super) fn existing_branch_names(repo_path: &std::path::Path) -> Option<Vec<S
 /// we keep only the local entry — it's what we'd check out anyway.
 pub(super) fn load_branch_entries(repo_path: &std::path::Path) -> Result<Vec<BranchEntry>> {
     let backend = crate::git::GitBackend::open(repo_path)?;
-    let branches = backend.list_branches()?;
+    Ok(branch_entries_from_pairs(backend.list_branches()?))
+}
+
+/// Convert raw `(name, is_remote)` branch pairs — as produced by
+/// [`GitBackend::list_branches`](crate::git::GitBackend::list_branches) or a
+/// backend's [`list_branches`](crate::backend::CommanderBackend::list_branches)
+/// (`BranchInfo`) — into the `BranchEntry` list the Checkout modal shows.
+///
+/// For branches that exist both locally and as remote tracking refs we keep only
+/// the local entry — it's what we'd check out anyway. The single source of truth
+/// for this dedup, shared by the initial load and the post-fetch refresh.
+pub(super) fn branch_entries_from_pairs(
+    branches: impl IntoIterator<Item = (String, bool)>,
+) -> Vec<BranchEntry> {
+    let branches: Vec<(String, bool)> = branches.into_iter().collect();
 
     let mut local_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut entries: Vec<BranchEntry> = Vec::new();
@@ -2061,5 +2342,5 @@ pub(super) fn load_branch_entries(repo_path: &std::path::Path) -> Result<Vec<Bra
         });
     }
 
-    Ok(entries)
+    entries
 }

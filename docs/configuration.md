@@ -241,7 +241,36 @@ state_sync_interval_ms = 2000
 # quit = ["q", "Ctrl-c"]
 # toggle_pane = ["Tab"]
 # toggle_keep_alive = ["K"]                # palette-only by default; bind a key here
+
+# Remote claude-commander servers. Each entry adds a server node to the
+# session tree with that server's projects and sessions under it (full
+# create/delete/review/attach parity over HTTP + WebSocket). Manage these
+# from the palette ("Add remote server" / "Remove remote server", which
+# includes a connection test) or by hand here — the file is hot-reloaded.
+# These are a list-of-tables, so unlike the scalar options above they are
+# NOT editable from the in-app settings modal; use the palette commands.
+# The name "local" is reserved for the built-in local machine.
+# [[remote_servers]]
+# name = "buildbox"              # unique display name (the tree header)
+# url = "http://buildbox:7878"   # base URL of claude-commander-server
+# token = "..."                  # bearer token; omit only for servers
+#                                # started with --allow-no-auth (loopback)
 ```
+
+A remote server's `token` is **operator-equivalent**: anyone holding it can create
+sessions (which run arbitrary programs on that machine) and address projects by
+server-side path. Treat it like an SSH key — don't commit it, don't share it, and
+scope it to people you'd give a shell. On disk this file is protected only by its
+`0600` permissions, so keep those intact.
+
+Don't add a remote server that shares this machine's `state.json` (for example a
+loopback `http://localhost:7878` server backed by the same data directory as your
+local instance). Its sessions are already shown under the local machine, so they
+would appear twice — once under the local root and once under the server header —
+and rows under the server header could be misrouted to the local backend. A
+loopback server is fine only when it runs against a **separate** data directory.
+claude-commander logs a warning when a configured server's URL is a loopback
+address as a reminder.
 
 ## Idle-session hibernation
 

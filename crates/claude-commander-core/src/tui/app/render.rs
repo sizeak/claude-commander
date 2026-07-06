@@ -250,7 +250,7 @@ impl App {
         };
 
         // Build the info content based on current selection
-        let content = if let Some(session_id) = self.ui_state.selected_session_id {
+        let content = if let Some(session_id) = self.ui_state.selected_session_id.map(|r| r.id) {
             // Find the session data from list_items (includes all needed fields)
             let session_data = self.ui_state.list_items.iter().find_map(|item| {
                 if let SessionListItem::Worktree {
@@ -330,7 +330,7 @@ impl App {
             } else {
                 InfoContent::Empty
             }
-        } else if let Some(project_id) = self.ui_state.selected_project_id {
+        } else if let Some((_backend, project_id)) = self.ui_state.selected_project_id {
             let project_data = self.ui_state.list_items.iter().find_map(|item| {
                 if let SessionListItem::Project {
                     id,

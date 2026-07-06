@@ -66,6 +66,17 @@ pub struct _SessionInfo {
     pub review_decision: Option<ReviewDecision>,
     pub pr_reviewers: Vec<String>,
     pub created_at: DateTime<Utc>,
+    pub unread: bool,
+    pub stack_parent_session_id: Option<SessionId>,
+    pub pr_base_branch: Option<String>,
+    pub pr_merged: bool,
+    pub current_section: Option<String>,
+    pub section_override: Option<String>,
+    pub entered_section_at: Option<DateTime<Utc>>,
+    pub last_attached_at: Option<DateTime<Utc>>,
+    pub worktree_path: String,
+    pub tmux_session_name: String,
+    pub keep_alive: bool,
 }
 
 // Phase 2 needs the detail shape: the session's live agent sub-state plus the

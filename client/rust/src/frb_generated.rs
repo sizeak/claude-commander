@@ -988,6 +988,17 @@ const _: fn() = || {
         let _: Option<crate::api::mirrors::ReviewDecision> = SessionInfo.review_decision;
         let _: Vec<String> = SessionInfo.pr_reviewers;
         let _: chrono::DateTime<chrono::Utc> = SessionInfo.created_at;
+        let _: bool = SessionInfo.unread;
+        let _: Option<crate::api::mirrors::SessionId> = SessionInfo.stack_parent_session_id;
+        let _: Option<String> = SessionInfo.pr_base_branch;
+        let _: bool = SessionInfo.pr_merged;
+        let _: Option<String> = SessionInfo.current_section;
+        let _: Option<String> = SessionInfo.section_override;
+        let _: Option<chrono::DateTime<chrono::Utc>> = SessionInfo.entered_section_at;
+        let _: Option<chrono::DateTime<chrono::Utc>> = SessionInfo.last_attached_at;
+        let _: String = SessionInfo.worktree_path;
+        let _: String = SessionInfo.tmux_session_name;
+        let _: bool = SessionInfo.keep_alive;
     }
 };
 
@@ -1235,6 +1246,17 @@ impl SseDecode for Option<String> {
     }
 }
 
+impl SseDecode for Option<chrono::DateTime<chrono::Utc>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<chrono::DateTime<chrono::Utc>>::sse_decode(deserializer));
+        } else {
+            return None;
+        }
+    }
+}
+
 impl SseDecode for Option<crate::api::mirrors::ReviewDecision> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
@@ -1268,6 +1290,17 @@ impl SseDecode for Option<crate::api::mirrors::SessionDetail> {
             return Some(<crate::api::mirrors::SessionDetail>::sse_decode(
                 deserializer,
             ));
+        } else {
+            return None;
+        }
+    }
+}
+
+impl SseDecode for Option<crate::api::mirrors::SessionId> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_decode(deserializer: &mut flutter_rust_bridge::for_generated::SseDeserializer) -> Self {
+        if (<bool>::sse_decode(deserializer)) {
+            return Some(<crate::api::mirrors::SessionId>::sse_decode(deserializer));
         } else {
             return None;
         }
@@ -1495,6 +1528,20 @@ impl SseDecode for crate::api::mirrors::SessionInfo {
             <Option<crate::api::mirrors::ReviewDecision>>::sse_decode(deserializer);
         let mut var_prReviewers = <Vec<String>>::sse_decode(deserializer);
         let mut var_createdAt = <chrono::DateTime<chrono::Utc>>::sse_decode(deserializer);
+        let mut var_unread = <bool>::sse_decode(deserializer);
+        let mut var_stackParentSessionId =
+            <Option<crate::api::mirrors::SessionId>>::sse_decode(deserializer);
+        let mut var_prBaseBranch = <Option<String>>::sse_decode(deserializer);
+        let mut var_prMerged = <bool>::sse_decode(deserializer);
+        let mut var_currentSection = <Option<String>>::sse_decode(deserializer);
+        let mut var_sectionOverride = <Option<String>>::sse_decode(deserializer);
+        let mut var_enteredSectionAt =
+            <Option<chrono::DateTime<chrono::Utc>>>::sse_decode(deserializer);
+        let mut var_lastAttachedAt =
+            <Option<chrono::DateTime<chrono::Utc>>>::sse_decode(deserializer);
+        let mut var_worktreePath = <String>::sse_decode(deserializer);
+        let mut var_tmuxSessionName = <String>::sse_decode(deserializer);
+        let mut var_keepAlive = <bool>::sse_decode(deserializer);
         return crate::api::mirrors::SessionInfo {
             id: var_id,
             session_id: var_sessionId,
@@ -1512,6 +1559,17 @@ impl SseDecode for crate::api::mirrors::SessionInfo {
             review_decision: var_reviewDecision,
             pr_reviewers: var_prReviewers,
             created_at: var_createdAt,
+            unread: var_unread,
+            stack_parent_session_id: var_stackParentSessionId,
+            pr_base_branch: var_prBaseBranch,
+            pr_merged: var_prMerged,
+            current_section: var_currentSection,
+            section_override: var_sectionOverride,
+            entered_section_at: var_enteredSectionAt,
+            last_attached_at: var_lastAttachedAt,
+            worktree_path: var_worktreePath,
+            tmux_session_name: var_tmuxSessionName,
+            keep_alive: var_keepAlive,
         };
     }
 }
@@ -2045,6 +2103,17 @@ impl flutter_rust_bridge::IntoDart for FrbWrapper<crate::api::mirrors::SessionIn
             self.0.review_decision.into_into_dart().into_dart(),
             self.0.pr_reviewers.into_into_dart().into_dart(),
             self.0.created_at.into_into_dart().into_dart(),
+            self.0.unread.into_into_dart().into_dart(),
+            self.0.stack_parent_session_id.into_into_dart().into_dart(),
+            self.0.pr_base_branch.into_into_dart().into_dart(),
+            self.0.pr_merged.into_into_dart().into_dart(),
+            self.0.current_section.into_into_dart().into_dart(),
+            self.0.section_override.into_into_dart().into_dart(),
+            self.0.entered_section_at.into_into_dart().into_dart(),
+            self.0.last_attached_at.into_into_dart().into_dart(),
+            self.0.worktree_path.into_into_dart().into_dart(),
+            self.0.tmux_session_name.into_into_dart().into_dart(),
+            self.0.keep_alive.into_into_dart().into_dart(),
         ]
         .into_dart()
     }
@@ -2333,6 +2402,16 @@ impl SseEncode for Option<String> {
     }
 }
 
+impl SseEncode for Option<chrono::DateTime<chrono::Utc>> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <chrono::DateTime<chrono::Utc>>::sse_encode(value, serializer);
+        }
+    }
+}
+
 impl SseEncode for Option<crate::api::mirrors::ReviewDecision> {
     // Codec=Sse (Serialization based), see doc to use other codecs
     fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
@@ -2359,6 +2438,16 @@ impl SseEncode for Option<crate::api::mirrors::SessionDetail> {
         <bool>::sse_encode(self.is_some(), serializer);
         if let Some(value) = self {
             <crate::api::mirrors::SessionDetail>::sse_encode(value, serializer);
+        }
+    }
+}
+
+impl SseEncode for Option<crate::api::mirrors::SessionId> {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    fn sse_encode(self, serializer: &mut flutter_rust_bridge::for_generated::SseSerializer) {
+        <bool>::sse_encode(self.is_some(), serializer);
+        if let Some(value) = self {
+            <crate::api::mirrors::SessionId>::sse_encode(value, serializer);
         }
     }
 }
@@ -2566,6 +2655,20 @@ impl SseEncode for crate::api::mirrors::SessionInfo {
         <Option<crate::api::mirrors::ReviewDecision>>::sse_encode(self.review_decision, serializer);
         <Vec<String>>::sse_encode(self.pr_reviewers, serializer);
         <chrono::DateTime<chrono::Utc>>::sse_encode(self.created_at, serializer);
+        <bool>::sse_encode(self.unread, serializer);
+        <Option<crate::api::mirrors::SessionId>>::sse_encode(
+            self.stack_parent_session_id,
+            serializer,
+        );
+        <Option<String>>::sse_encode(self.pr_base_branch, serializer);
+        <bool>::sse_encode(self.pr_merged, serializer);
+        <Option<String>>::sse_encode(self.current_section, serializer);
+        <Option<String>>::sse_encode(self.section_override, serializer);
+        <Option<chrono::DateTime<chrono::Utc>>>::sse_encode(self.entered_section_at, serializer);
+        <Option<chrono::DateTime<chrono::Utc>>>::sse_encode(self.last_attached_at, serializer);
+        <String>::sse_encode(self.worktree_path, serializer);
+        <String>::sse_encode(self.tmux_session_name, serializer);
+        <bool>::sse_encode(self.keep_alive, serializer);
     }
 }
 

@@ -14,7 +14,7 @@ use tower_http::{
 use tracing::warn;
 
 use crate::auth::require_bearer;
-use crate::handlers::{blobs, config, health, projects, review, sessions};
+use crate::handlers::{blobs, cascade, config, health, projects, review, sessions, workspace};
 use crate::state::AppState;
 use crate::ws;
 
@@ -55,14 +55,33 @@ pub fn build_router(state: AppState) -> Router {
     let cors = cors_layer(&state.cors_allowed_origins);
 
     let api = Router::new()
+        // -- workspace surface --
+        .route("/workspace", get(workspace::snapshot))
+        .route("/agent-states", get(workspace::agent_states))
+        .route("/pr-refresh", post(workspace::pr_refresh))
+        .route("/create-options", get(workspace::create_options))
+        .route("/comments/pending", get(review::pending))
+        // -- cascade / push-stack --
+        .route("/cascade/resume", post(cascade::resume))
+        .route("/cascade/abandon", post(cascade::abandon))
         // -- sessions --
         .route("/sessions", get(sessions::list).post(sessions::create))
         .route("/sessions/find", get(sessions::find))
+        .route("/sessions/unread", post(sessions::unread))
         .route("/sessions/{q}/detail", get(sessions::detail))
         .route("/sessions/{q}/pane", get(sessions::pane))
         .route("/sessions/{id}/kill", post(sessions::kill))
         .route("/sessions/{id}/restart", post(sessions::restart))
-        .route("/sessions/{id}", delete(sessions::delete))
+        .route(
+            "/sessions/{id}",
+            delete(sessions::delete).patch(sessions::patch),
+        )
+        .route("/sessions/{id}/preview", get(sessions::preview))
+        .route("/sessions/{id}/branch-diff", get(sessions::branch_diff))
+        .route("/sessions/{id}/read", post(sessions::read))
+        .route("/sessions/{id}/keep-alive", post(sessions::keep_alive))
+        .route("/sessions/{id}/cascade", post(cascade::cascade))
+        .route("/sessions/{id}/push-stack", post(cascade::push_stack))
         // -- review + comments --
         .route("/sessions/{id}/review", get(review::open))
         .route("/sessions/{id}/review/refresh", get(review::refresh))
@@ -82,9 +101,12 @@ pub fn build_router(state: AppState) -> Router {
         // -- blobs --
         .route("/sessions/{id}/blob", get(blobs::fetch))
         // -- projects --
-        .route("/projects", post(projects::add))
-        .route("/projects/scan", get(projects::scan))
+        .route("/projects", get(projects::list).post(projects::add))
+        .route("/projects/scan", post(projects::scan))
         .route("/projects/ensure", post(projects::ensure))
+        .route("/projects/{id}", delete(projects::delete))
+        .route("/projects/{id}/branches", get(projects::branches))
+        .route("/projects/{id}/preview", get(projects::preview))
         // -- config + health --
         .route("/config", get(config::read).patch(config::update))
         .route("/config/reload", post(config::reload))

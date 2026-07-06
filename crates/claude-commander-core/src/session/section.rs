@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::git::{PrState, ReviewDecision};
-use crate::session::{SessionId, WorktreeSession};
+use crate::session::{SessionId, SessionNode, WorktreeSession};
 
 /// Declarative predicate matching a session to a section.
 /// All declared fields must match (AND); undeclared fields are ignored.
@@ -200,8 +200,8 @@ pub struct RenderedSection {
 /// [`apply_assignment`]). A `current_section` referring to a section no
 /// longer in config falls back to "In Progress". Within each group they are
 /// sorted by `entered_section_at` ascending (oldest first).
-pub fn build_sections(
-    sessions: &[WorktreeSession],
+pub fn build_sections<S: SessionNode>(
+    sessions: &[S],
     sections: &[SectionConfig],
 ) -> Vec<RenderedSection> {
     // Bucket 0 = In Progress; buckets 1..=N = user sections.
@@ -209,8 +209,8 @@ pub fn build_sections(
         (0..=sections.len()).map(|_| Vec::new()).collect();
 
     for session in sessions {
-        let idx = display_index(session.current_section.as_deref(), sections);
-        buckets[idx].push((session.id, session.entered_section_at));
+        let idx = display_index(session.node_current_section(), sections);
+        buckets[idx].push((session.node_id(), session.node_entered_section_at()));
     }
 
     buckets
@@ -1145,7 +1145,7 @@ mod tests {
             },
         ];
 
-        let groups = build_sections(&[], &sections);
+        let groups = build_sections::<WorktreeSession>(&[], &sections);
 
         assert_eq!(groups.len(), 3);
         assert_eq!(groups[0].name, IN_PROGRESS);
@@ -1188,7 +1188,7 @@ mod tests {
             ..Default::default()
         }];
 
-        let groups = build_sections(&[], &sections);
+        let groups = build_sections::<WorktreeSession>(&[], &sections);
 
         assert_eq!(groups.first().unwrap().name, "In Progress");
     }

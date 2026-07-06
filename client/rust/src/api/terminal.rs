@@ -19,7 +19,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use crate::frb_generated::StreamSink;
 use anyhow::Context;
-use claude_commander_protocol::ws::{ClientControl, ServerControl};
+use claude_commander_protocol::ws::{AttachKind, ClientControl, ServerControl};
 use futures_util::{SinkExt, StreamExt};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
@@ -232,7 +232,11 @@ async fn attach_inner(
         .context("failed to send auth frame")?;
     write
         .send(Message::Text(
-            ClientControl::Attach { session_id }.to_text()?,
+            ClientControl::Attach {
+                session_id,
+                kind: AttachKind::Agent,
+            }
+            .to_text()?,
         ))
         .await
         .context("failed to send attach frame")?;

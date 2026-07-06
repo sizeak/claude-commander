@@ -95,6 +95,7 @@ impl Fixture {
                 model: None,
                 base_branch: None,
                 section: None,
+                stack_parent: None,
             }))
             .expect("create session")
     }

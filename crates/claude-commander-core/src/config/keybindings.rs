@@ -68,6 +68,8 @@ pub enum BindableAction {
     MoveToSection,
     ToggleSection,
     ToggleViewMode,
+    AddRemoteServer,
+    RemoveRemoteServer,
 }
 
 impl BindableAction {
@@ -106,6 +108,9 @@ impl BindableAction {
         Self::OpenPullRequest,
         Self::RefreshPrStatus,
         Self::DeleteMergedPrSessions,
+        // Remote Servers
+        Self::AddRemoteServer,
+        Self::RemoveRemoteServer,
         // Sections & View
         Self::ToggleViewMode,
         Self::MoveToSection,
@@ -180,6 +185,8 @@ impl BindableAction {
             Self::MoveToSection => "move_to_section",
             Self::ToggleSection => "toggle_section",
             Self::ToggleViewMode => "toggle_view_mode",
+            Self::AddRemoteServer => "add_remote_server",
+            Self::RemoveRemoteServer => "remove_remote_server",
         }
     }
 
@@ -231,6 +238,8 @@ impl BindableAction {
             Self::MoveToSection => "Move session to section…",
             Self::ToggleSection => "Collapse/expand section",
             Self::ToggleViewMode => "Cycle project / sections / section stacks view",
+            Self::AddRemoteServer => "Add remote server",
+            Self::RemoveRemoteServer => "Remove remote server",
         }
     }
 
@@ -288,6 +297,8 @@ impl BindableAction {
             Self::MoveToSection => "move",
             Self::ToggleSection => "toggle section",
             Self::ToggleViewMode => "view mode",
+            Self::AddRemoteServer => "add server",
+            Self::RemoveRemoteServer => "remove server",
         }
     }
 
@@ -322,6 +333,7 @@ impl BindableAction {
             Self::OpenPullRequest | Self::RefreshPrStatus | Self::DeleteMergedPrSessions => {
                 "Pull Requests"
             }
+            Self::AddRemoteServer | Self::RemoveRemoteServer => "Remote Servers",
             Self::ToggleViewMode | Self::MoveToSection | Self::ToggleSection => "Sections & View",
             Self::OpenReviewDiff
             | Self::GenerateSummary
@@ -388,6 +400,8 @@ impl FromStr for BindableAction {
             "move_to_section" => Ok(Self::MoveToSection),
             "toggle_section" => Ok(Self::ToggleSection),
             "toggle_view_mode" => Ok(Self::ToggleViewMode),
+            "add_remote_server" => Ok(Self::AddRemoteServer),
+            "remove_remote_server" => Ok(Self::RemoveRemoteServer),
             _ => Err(format!("unknown action: {s}")),
         }
     }
@@ -1290,6 +1304,22 @@ mod tests {
     }
 
     #[test]
+    fn test_remote_server_actions_palette_only() {
+        // Palette-only: no default hotkey resolves to them, but they must
+        // still round-trip through TOML so a user who binds them doesn't hit
+        // "unknown action".
+        let kb = KeyBindings::default();
+        for (action, name) in [
+            (BindableAction::AddRemoteServer, "add_remote_server"),
+            (BindableAction::RemoveRemoteServer, "remove_remote_server"),
+        ] {
+            assert!(kb.keys_for(action).is_empty());
+            assert_eq!(name.parse::<BindableAction>().unwrap(), action);
+            assert_eq!(action.config_name(), name);
+        }
+    }
+
+    #[test]
     fn test_defaults_match_current_bindings() {
         let kb = KeyBindings::default();
 
@@ -1440,6 +1470,7 @@ mod tests {
                 "Stacked & Cascade",
                 "Projects",
                 "Pull Requests",
+                "Remote Servers",
                 "Sections & View",
                 "Review & AI",
                 "Layout",

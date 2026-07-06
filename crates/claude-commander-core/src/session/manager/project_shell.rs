@@ -75,8 +75,17 @@ impl SessionManager {
         Ok(shell_name)
     }
 
-    /// Get attach command for the project shell session (creates it if needed)
+    /// Get attach command for the project shell session (creates it if needed).
     pub async fn get_project_shell_attach_command(&self, project_id: &ProjectId) -> Result<String> {
+        let shell_name = self.get_project_shell_session_name(project_id).await?;
+        Ok(format!("tmux attach-session -t {}", shell_name))
+    }
+
+    /// Ensure the project shell session exists and its pane is alive, returning
+    /// its tmux name. The name half of [`Self::get_project_shell_attach_command`]
+    /// (which formats this into an attach command) — callers that only need the
+    /// name use this rather than re-parsing the command string.
+    pub async fn get_project_shell_session_name(&self, project_id: &ProjectId) -> Result<String> {
         let shell_name = self.ensure_project_shell_session(project_id).await?;
 
         // Verify tmux session exists and pane is alive
@@ -113,7 +122,7 @@ impl SessionManager {
             .into());
         }
 
-        Ok(format!("tmux attach-session -t {}", shell_name))
+        Ok(shell_name)
     }
 
     /// Get captured content for the project shell session

@@ -23,6 +23,27 @@ fn frontend() -> claude_commander_core::telemetry::FrontendInfo {
     claude_commander_core::telemetry::FrontendInfo::new(claude_commander_core::APP_NAME, VERSION)
 }
 
+/// The remote-backend factory injected into the TUI. Keeps core free of a
+/// dependency on the HTTP client crate: core hands each `[[remote_servers]]`
+/// config entry to this closure, which maps it to a `RemoteServerSpec` and
+/// builds a `RemoteBackend`. A construction failure (malformed URL, etc.) is
+/// surfaced as a `BackendError` that the TUI renders as a degraded server.
+fn remote_backend_factory() -> claude_commander_core::backend::RemoteBackendFactory {
+    use claude_commander_remote::{RemoteBackend, RemoteServerSpec, SecretString};
+    std::sync::Arc::new(|cfg: &claude_commander_core::config::RemoteServerConfig| {
+        let spec = RemoteServerSpec {
+            name: cfg.name.clone(),
+            base_url: cfg.url.clone(),
+            token: cfg.token.clone().map(SecretString::new),
+        };
+        let backend = RemoteBackend::new(spec)?;
+        Ok(std::sync::Arc::new(backend)
+            as std::sync::Arc<
+                dyn claude_commander_core::backend::CommanderBackend,
+            >)
+    })
+}
+
 fn setup_logging(debug: bool, to_file: bool) -> Result<()> {
     let filter = if debug {
         EnvFilter::new("debug")
@@ -175,7 +196,7 @@ async fn main() -> Result<()> {
             let config_store = std::sync::Arc::new(ConfigStore::new(config.clone())?);
             let app_state = AppState::load_or_exit();
             let store = std::sync::Arc::new(StateStore::new(app_state)?);
-            let mut app = App::new(config_store, store, frontend());
+            let mut app = App::new(config_store, store, frontend(), remote_backend_factory());
             app.run().await?;
         }
 
@@ -408,6 +429,7 @@ async fn main() -> Result<()> {
                     model,
                     base_branch,
                     section,
+                    stack_parent: None,
                 })
                 .await
             {

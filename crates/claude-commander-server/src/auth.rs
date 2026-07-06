@@ -8,7 +8,10 @@ use std::sync::Arc;
 
 use axum::{
     extract::State,
-    http::{StatusCode, header::AUTHORIZATION},
+    http::{
+        StatusCode,
+        header::{AUTHORIZATION, HeaderValue, WWW_AUTHENTICATE},
+    },
     middleware::Next,
     response::Response,
 };
@@ -71,21 +74,38 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-/// Tower middleware enforcing the bearer token on `/api` routes.
+/// Tower middleware enforcing the bearer token on `/api` routes. A rejection
+/// uses the same `{"error": {"kind", "message"}}` envelope as every handler
+/// error (via [`crate::error::error_response`]) plus a `WWW-Authenticate: Bearer`
+/// challenge, so a client parses an auth failure identically to any other.
 pub async fn require_bearer(
     State(auth): State<Arc<AuthConfig>>,
     request: axum::extract::Request,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Response {
     let header = request
         .headers()
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
     if auth.authorizes(header) {
-        Ok(next.run(request).await)
+        next.run(request).await
     } else {
-        Err(StatusCode::UNAUTHORIZED)
+        unauthorized_response()
     }
+}
+
+/// The standard 401 response: the shared error envelope (`kind: "auth"`) plus a
+/// `WWW-Authenticate: Bearer` challenge header.
+fn unauthorized_response() -> Response {
+    let mut response = crate::error::error_response(
+        StatusCode::UNAUTHORIZED,
+        "auth",
+        "missing or invalid bearer token",
+    );
+    response
+        .headers_mut()
+        .insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+    response
 }
 
 #[cfg(test)]
@@ -101,16 +121,19 @@ mod tests {
             .layer(from_fn_with_state(auth, require_bearer))
     }
 
-    async fn status_of(router: Router, header: Option<&str>) -> StatusCode {
+    async fn response_of(router: Router, header: Option<&str>) -> axum::response::Response {
         let mut req = Request::builder().uri("/ping");
         if let Some(h) = header {
             req = req.header(AUTHORIZATION, h);
         }
-        let resp = router
+        router
             .oneshot(req.body(Body::empty()).unwrap())
             .await
-            .unwrap();
-        resp.status()
+            .unwrap()
+    }
+
+    async fn status_of(router: Router, header: Option<&str>) -> StatusCode {
+        response_of(router, header).await.status()
     }
 
     #[test]
@@ -149,6 +172,33 @@ mod tests {
         assert_eq!(
             status_of(router, Some("Bearer nope")).await,
             StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn rejection_carries_error_envelope_and_challenge() {
+        // A 401 from the auth layer must match the handler error envelope
+        // (`{"error":{"kind","message"}}`) and advertise the scheme. Red against
+        // HEAD, which returned a bare `StatusCode::UNAUTHORIZED` with an empty
+        // body and no `WWW-Authenticate` header.
+        use axum::body::to_bytes;
+
+        let router = protected_router(AuthConfig::Token("s3cret".into()));
+        let resp = response_of(router, Some("Bearer nope")).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.headers()
+                .get(WWW_AUTHENTICATE)
+                .and_then(|v| v.to_str().ok()),
+            Some("Bearer"),
+            "a 401 must advertise the bearer challenge"
+        );
+        let body = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"]["kind"], "auth");
+        assert!(
+            json["error"]["message"].is_string(),
+            "envelope must carry a message string, got {json}"
         );
     }
 

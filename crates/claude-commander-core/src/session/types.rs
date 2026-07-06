@@ -338,6 +338,78 @@ impl WorktreeSession {
     }
 }
 
+/// The read-only view of a session the stack-resolution and section-grouping
+/// algorithms need. Implemented by both the in-process [`WorktreeSession`]
+/// domain model and the wire [`SessionInfo`](claude_commander_protocol::api::SessionInfo)
+/// DTO, so the same algorithms drive the local TUI tree and a remote client's
+/// tree without the algorithms being duplicated per representation.
+///
+/// A trait (rather than a converting view-struct) keeps the hot builders
+/// allocation-free — `stack_top`/`stack_root` are called per-session inside the
+/// section-stacks builder, so the generic monomorphised form matters for the
+/// tree-build perf budget.
+pub trait SessionNode {
+    fn node_id(&self) -> SessionId;
+    fn node_branch(&self) -> &str;
+    fn node_pr_base_branch(&self) -> Option<&str>;
+    fn node_stack_parent_session_id(&self) -> Option<SessionId>;
+    fn node_created_at(&self) -> DateTime<Utc>;
+    /// Cached section the session currently sits in (`None` = In Progress).
+    fn node_current_section(&self) -> Option<&str>;
+    /// When the session entered its current section (drives in-section sort).
+    fn node_entered_section_at(&self) -> DateTime<Utc>;
+}
+
+impl SessionNode for WorktreeSession {
+    fn node_id(&self) -> SessionId {
+        self.id
+    }
+    fn node_branch(&self) -> &str {
+        &self.branch
+    }
+    fn node_pr_base_branch(&self) -> Option<&str> {
+        self.pr_base_branch.as_deref()
+    }
+    fn node_stack_parent_session_id(&self) -> Option<SessionId> {
+        self.stack_parent_session_id
+    }
+    fn node_created_at(&self) -> DateTime<Utc> {
+        self.created_at
+    }
+    fn node_current_section(&self) -> Option<&str> {
+        self.current_section.as_deref()
+    }
+    fn node_entered_section_at(&self) -> DateTime<Utc> {
+        self.entered_section_at
+    }
+}
+
+impl SessionNode for claude_commander_protocol::api::SessionInfo {
+    fn node_id(&self) -> SessionId {
+        self.session_id
+    }
+    fn node_branch(&self) -> &str {
+        &self.branch
+    }
+    fn node_pr_base_branch(&self) -> Option<&str> {
+        self.pr_base_branch.as_deref()
+    }
+    fn node_stack_parent_session_id(&self) -> Option<SessionId> {
+        self.stack_parent_session_id
+    }
+    fn node_created_at(&self) -> DateTime<Utc> {
+        self.created_at
+    }
+    fn node_current_section(&self) -> Option<&str> {
+        self.current_section.as_deref()
+    }
+    fn node_entered_section_at(&self) -> DateTime<Utc> {
+        // The wire DTO carries this as `Option` (older clients may omit it);
+        // treat an absent value as the epoch default so ordering is total.
+        self.entered_section_at.unwrap_or_default()
+    }
+}
+
 /// Resolve the stack parent of a session within its project.
 ///
 /// `project_sessions` is expected to contain every session belonging to the
@@ -353,20 +425,20 @@ impl WorktreeSession {
 ///    `stack_parent_session_id` hint set at creation time. Only honour it if
 ///    the referenced session still exists in the project.
 /// 3. Otherwise, the session is not stacked.
-pub fn resolve_stack_parent(
-    session: &WorktreeSession,
-    project_sessions: &[&WorktreeSession],
+pub fn resolve_stack_parent<S: SessionNode>(
+    session: &S,
+    project_sessions: &[&S],
 ) -> Option<SessionId> {
-    if let Some(base) = session.pr_base_branch.as_deref() {
+    if let Some(base) = session.node_pr_base_branch() {
         return project_sessions
             .iter()
-            .find(|s| s.id != session.id && s.branch == base)
-            .map(|s| s.id);
+            .find(|s| s.node_id() != session.node_id() && s.node_branch() == base)
+            .map(|s| s.node_id());
     }
-    let parent_id = session.stack_parent_session_id?;
+    let parent_id = session.node_stack_parent_session_id()?;
     project_sessions
         .iter()
-        .any(|s| s.id == parent_id)
+        .any(|s| s.node_id() == parent_id)
         .then_some(parent_id)
 }
 
@@ -380,16 +452,16 @@ pub fn resolve_stack_parent(
 /// When a session has multiple direct stacked children (branching), the
 /// walker prefers the most recently created one, so the "top" is
 /// deterministic and matches what the user most likely intends.
-pub fn stack_top(session_id: SessionId, project_sessions: &[&WorktreeSession]) -> SessionId {
+pub fn stack_top<S: SessionNode>(session_id: SessionId, project_sessions: &[&S]) -> SessionId {
     let mut current = session_id;
     // Bounded by number of sessions to avoid ever spinning on a corrupted cycle.
     for _ in 0..project_sessions.len() {
         let next_child = project_sessions
             .iter()
-            .filter(|s| resolve_stack_parent(s, project_sessions) == Some(current))
-            .max_by_key(|s| s.created_at);
+            .filter(|s| resolve_stack_parent(**s, project_sessions) == Some(current))
+            .max_by_key(|s| s.node_created_at());
         match next_child {
-            Some(child) => current = child.id,
+            Some(child) => current = child.node_id(),
             None => return current,
         }
     }
@@ -406,12 +478,12 @@ pub fn stack_top(session_id: SessionId, project_sessions: &[&WorktreeSession]) -
 /// On fan-out (one parent with multiple children), every descendant resolves
 /// to the same root, so callers can use this to group an entire stack
 /// subgraph by a single identifier.
-pub fn stack_root(session_id: SessionId, project_sessions: &[&WorktreeSession]) -> SessionId {
+pub fn stack_root<S: SessionNode>(session_id: SessionId, project_sessions: &[&S]) -> SessionId {
     let mut current = session_id;
     // Bounded by session count to be safe against any malformed cycle.
     for _ in 0..project_sessions.len() {
-        let this = project_sessions.iter().find(|s| s.id == current);
-        match this.and_then(|s| resolve_stack_parent(s, project_sessions)) {
+        let this = project_sessions.iter().find(|s| s.node_id() == current);
+        match this.and_then(|s| resolve_stack_parent(*s, project_sessions)) {
             Some(parent) => current = parent,
             None => return current,
         }
@@ -428,20 +500,20 @@ pub fn stack_root(session_id: SessionId, project_sessions: &[&WorktreeSession]) 
 ///
 /// The starting `base_id` is always the first element of the returned vector,
 /// even when it has no children.
-pub fn stack_chain_from_base(
+pub fn stack_chain_from_base<S: SessionNode>(
     base_id: SessionId,
-    project_sessions: &[&WorktreeSession],
+    project_sessions: &[&S],
 ) -> Vec<SessionId> {
     let mut chain = vec![base_id];
     let mut current = base_id;
     for _ in 0..project_sessions.len() {
         let next_child = project_sessions
             .iter()
-            .filter(|s| resolve_stack_parent(s, project_sessions) == Some(current))
-            .max_by_key(|s| s.created_at);
+            .filter(|s| resolve_stack_parent(**s, project_sessions) == Some(current))
+            .max_by_key(|s| s.node_created_at());
         match next_child {
             Some(child) => {
-                current = child.id;
+                current = child.node_id();
                 chain.push(current);
             }
             None => break,
@@ -498,6 +570,15 @@ pub enum SessionListItem {
         /// set to `false`.
         stacked_child: bool,
     },
+    /// A per-backend header grouping one server's projects and sessions.
+    /// Emitted only when more than one backend is configured — a lone local
+    /// backend is suppressed, so single-server trees render exactly as before.
+    /// Carries the connection health so the header can render live status.
+    ServerHeader {
+        backend: crate::backend::BackendId,
+        name: String,
+        connection: crate::backend::ConnectionState,
+    },
     /// A section header (used only when config.sections is non-empty).
     SectionHeader {
         name: String,
@@ -518,6 +599,7 @@ impl SessionListItem {
         match self {
             Self::Project { id, .. } => format!("project:{}", id),
             Self::Worktree { id, .. } => format!("worktree:{}", id),
+            Self::ServerHeader { backend, .. } => format!("server:{}", backend.0),
             Self::SectionHeader { name, .. } => format!("section:{}", name),
             Self::Spacer => "spacer".to_string(),
         }
@@ -538,10 +620,18 @@ impl SessionListItem {
         !matches!(self, Self::Spacer)
     }
 
-    /// Whether this row begins a group — a project or section header.
+    /// Whether this row begins a group — a project, section, or server header.
     /// Group-jump navigation moves between these rows.
     pub fn is_group_header(&self) -> bool {
-        matches!(self, Self::Project { .. } | Self::SectionHeader { .. })
+        matches!(
+            self,
+            Self::Project { .. } | Self::SectionHeader { .. } | Self::ServerHeader { .. }
+        )
+    }
+
+    /// Whether this row is a server header (a per-backend grouping row).
+    pub fn is_server_header(&self) -> bool {
+        matches!(self, Self::ServerHeader { .. })
     }
 }
 
@@ -1059,7 +1149,10 @@ mod tests {
         // returned chain starts with it (the caller may look up the session
         // separately).
         let base_id = SessionId::new();
-        assert_eq!(stack_chain_from_base(base_id, &[]), vec![base_id]);
+        assert_eq!(
+            stack_chain_from_base::<WorktreeSession>(base_id, &[]),
+            vec![base_id]
+        );
     }
 
     #[test]
@@ -1096,7 +1189,7 @@ mod tests {
     fn stack_root_missing_session_returns_starting_id() {
         // Defensive: walking from an id not in the slice just returns that id.
         let phantom = SessionId::new();
-        assert_eq!(stack_root(phantom, &[]), phantom);
+        assert_eq!(stack_root::<WorktreeSession>(phantom, &[]), phantom);
     }
 
     #[test]
@@ -1239,5 +1332,100 @@ mod tests {
         assert!(section.is_group_header());
 
         assert!(!SessionListItem::Spacer.is_group_header());
+    }
+}
+
+/// The stack-resolution helpers are generic over [`SessionNode`]; the local
+/// [`WorktreeSession`] path is covered by the tests above. These prove the same
+/// algorithms drive the wire [`SessionInfo`] DTO identically, so a remote
+/// client builds the same session tree from the network — the whole point of
+/// making the helpers generic in Phase C.
+#[cfg(test)]
+mod session_info_stack_node_tests {
+    use super::*;
+    use chrono::{Duration as ChronoDuration, Utc};
+    use claude_commander_protocol::api::SessionInfo;
+
+    /// Minimal `SessionInfo` with a fixed project, so only the stack-relevant
+    /// fields (branch / pr_base_branch / stack_parent / created_at) vary.
+    fn info(branch: &str, created_offset_secs: i64) -> SessionInfo {
+        let session_id = SessionId::new();
+        SessionInfo {
+            id: session_id.as_uuid().to_string(),
+            session_id,
+            title: branch.to_string(),
+            branch: branch.to_string(),
+            status: SessionStatus::Running,
+            program: "claude".to_string(),
+            project_id: ProjectId::new(),
+            project_name: "p".to_string(),
+            pr_number: None,
+            pr_url: None,
+            pr_state: crate::git::PrState::Open,
+            pr_draft: false,
+            pr_labels: Vec::new(),
+            review_decision: None,
+            pr_reviewers: Vec::new(),
+            created_at: Utc::now() + ChronoDuration::seconds(created_offset_secs),
+            unread: false,
+            stack_parent_session_id: None,
+            pr_base_branch: None,
+            pr_merged: false,
+            current_section: None,
+            section_override: None,
+            entered_section_at: None,
+            last_attached_at: None,
+            keep_alive: false,
+            worktree_path: String::new(),
+            tmux_session_name: String::new(),
+        }
+    }
+
+    #[test]
+    fn resolve_stack_parent_matches_pr_base_branch_on_session_info() {
+        let base = info("base-br", 0);
+        let mut child = info("child-br", 10);
+        child.pr_base_branch = Some("base-br".to_string());
+        let sessions = [&base, &child];
+        assert_eq!(
+            resolve_stack_parent(&child, &sessions),
+            Some(base.session_id),
+            "SessionInfo PR base should resolve to the matching session, as it does for WorktreeSession"
+        );
+        assert_eq!(
+            resolve_stack_parent(&base, &sessions),
+            None,
+            "the base itself is unstacked"
+        );
+    }
+
+    #[test]
+    fn resolve_stack_parent_falls_back_to_local_link_on_session_info() {
+        let base = info("base-br", 0);
+        let mut child = info("child-br", 10);
+        child.stack_parent_session_id = Some(base.session_id);
+        let sessions = [&base, &child];
+        assert_eq!(
+            resolve_stack_parent(&child, &sessions),
+            Some(base.session_id)
+        );
+    }
+
+    #[test]
+    fn stack_root_and_chain_walk_session_info_dtos() {
+        // base <- mid <- leaf via local links.
+        let base = info("base", 0);
+        let mut mid = info("mid", 10);
+        mid.stack_parent_session_id = Some(base.session_id);
+        let mut leaf = info("leaf", 20);
+        leaf.stack_parent_session_id = Some(mid.session_id);
+        let sessions = [&base, &mid, &leaf];
+
+        assert_eq!(stack_root(leaf.session_id, &sessions), base.session_id);
+        assert_eq!(stack_top(base.session_id, &sessions), leaf.session_id);
+        assert_eq!(
+            stack_chain_from_base(base.session_id, &sessions),
+            vec![base.session_id, mid.session_id, leaf.session_id]
+        );
     }
 }

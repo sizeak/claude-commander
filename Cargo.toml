@@ -6,9 +6,14 @@ members = ["crates/*"]
 # targets. Exclude it from the core workspace so `cargo build` for the
 # TUI/CLI/server never pulls in its (reqwest/tungstenite/android) dep tree.
 exclude = ["client"]
-# Plain `cargo build`/`cargo test` build only the core lib + TUI/CLI binary, so
-# TUI-only users never compile the server crate's web stack (axum/tower/hyper).
-default-members = ["crates/claude-commander-core", "crates/claude-commander"]
+# Plain `cargo build`/`cargo test` build only the core lib + TUI/CLI binary plus
+# the remote client (a thin reqwest layer core already links), so TUI-only users
+# never compile the server crate's web stack (axum/tower/hyper).
+default-members = [
+    "crates/claude-commander-core",
+    "crates/claude-commander",
+    "crates/claude-commander-remote",
+]
 
 [workspace.package]
 version = "0.24.0"

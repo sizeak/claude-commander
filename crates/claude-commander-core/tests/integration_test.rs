@@ -432,6 +432,136 @@ async fn test_session_manager_restart() {
     drop(worktrees_dir);
 }
 
+/// Regression: deleting a *Stopped* session must still remove its git
+/// worktree. `delete_session` used to only run worktree cleanup when the
+/// session was active, so a stopped session's worktree leaked on disk.
+#[tokio::test]
+async fn test_delete_stopped_session_removes_worktree() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let state_temp_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+    let config = Config {
+        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        ..Config::default()
+    };
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
+    let store = create_isolated_store(&state_temp_dir);
+    let manager = SessionManager::new(config_store, store.clone(), "");
+
+    let project_id = manager.add_project(repo_path).await.unwrap();
+    let session_id = manager
+        .prepare_session(
+            &project_id,
+            "doomed".to_string(),
+            Some("bash".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+    let session_id = manager
+        .finalize_session(&session_id, None, None)
+        .await
+        .unwrap();
+
+    let worktree_path = {
+        store
+            .read()
+            .await
+            .get_session(&session_id)
+            .unwrap()
+            .worktree_path
+            .clone()
+    };
+    assert!(worktree_path.exists(), "worktree should be created");
+
+    // Stop the session (kill tmux, keep the worktree) so it is inactive.
+    manager.kill_session(&session_id, false).await.unwrap();
+    assert!(
+        worktree_path.exists(),
+        "worktree should survive a stop with remove_worktree=false"
+    );
+
+    // Deleting the stopped session must remove the worktree.
+    manager.delete_session(&session_id).await.unwrap();
+    assert!(
+        !worktree_path.exists(),
+        "deleting a stopped session must remove its worktree"
+    );
+    assert!(
+        store.read().await.get_session(&session_id).is_none(),
+        "session should be gone from state"
+    );
+
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
+    drop(worktrees_dir);
+}
+
+/// Regression: removing a project must remove its sessions' git worktrees,
+/// including stopped ones. `remove_project` used to only kill tmux and leave
+/// worktrees on disk.
+#[tokio::test]
+async fn test_remove_project_removes_session_worktrees() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let state_temp_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+    let config = Config {
+        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        ..Config::default()
+    };
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
+    let store = create_isolated_store(&state_temp_dir);
+    let manager = SessionManager::new(config_store, store.clone(), "");
+
+    let project_id = manager.add_project(repo_path).await.unwrap();
+    let session_id = manager
+        .prepare_session(&project_id, "s".to_string(), Some("bash".to_string()), None)
+        .await
+        .unwrap();
+    let session_id = manager
+        .finalize_session(&session_id, None, None)
+        .await
+        .unwrap();
+    let worktree_path = {
+        store
+            .read()
+            .await
+            .get_session(&session_id)
+            .unwrap()
+            .worktree_path
+            .clone()
+    };
+    assert!(worktree_path.exists(), "worktree should be created");
+
+    // Stop the session first — the leak was specifically on inactive sessions.
+    manager.kill_session(&session_id, false).await.unwrap();
+    assert!(worktree_path.exists());
+
+    manager.remove_project(&project_id).await.unwrap();
+    assert!(
+        !worktree_path.exists(),
+        "removing a project must remove its sessions' worktrees"
+    );
+    assert!(
+        store.read().await.get_project(&project_id).is_none(),
+        "project should be gone from state"
+    );
+
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
+    drop(worktrees_dir);
+}
+
 #[tokio::test]
 async fn test_state_persistence() {
     let temp_dir = TempDir::new().unwrap();
@@ -1187,6 +1317,93 @@ async fn read_base_blob_resolves_lfs_pointer_to_real_bytes() {
         .await
         .expect("read_worktree_file should succeed");
     assert_eq!(new, png, "new side should be the real image bytes");
+}
+
+/// Regression: a create that fails AFTER `git worktree add` (e.g. the tmux
+/// step fails) must remove the just-created worktree, or the leaked
+/// registration makes every retry with the same title fail with
+/// "'<branch>' is already used by worktree at ...".
+#[tokio::test]
+async fn test_failed_finalize_removes_created_worktree() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let state_temp_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+
+    // A tmux socket dir far past the unix socket path limit (~108 bytes)
+    // makes `tmux new-session` fail reliably — but only after the git
+    // worktree has already been created. Built by hand rather than via
+    // `create_isolated_config_store`, which would overwrite `tmux_tmpdir`
+    // with its own (working) isolated socket dir; the long path still lives
+    // inside the temp dir, and tmux fails before ever starting a server, so
+    // isolation holds.
+    // The dir must EXIST: tmux silently falls back to the default /tmp socket
+    // (escaping isolation!) when TMUX_TMPDIR doesn't exist, but fails with
+    // "error connecting … (File name too long)" when it does and the socket
+    // path exceeds the sockaddr_un limit.
+    let long_socket_dir = state_temp_dir.path().join("a".repeat(150));
+    std::fs::create_dir_all(&long_socket_dir).unwrap();
+    let config = Config {
+        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        tmux_tmpdir: Some(long_socket_dir),
+        ..Config::default()
+    };
+    let config_path = state_temp_dir.path().join("config.toml");
+    std::fs::write(&config_path, toml::to_string_pretty(&config).unwrap()).unwrap();
+    let config_store = Arc::new(ConfigStore::with_path(config, config_path));
+    let store = create_isolated_store(&state_temp_dir);
+    let manager = SessionManager::new(config_store, store.clone(), "");
+
+    let project_id = manager.add_project(repo_path.clone()).await.unwrap();
+    let session_id = manager
+        .prepare_session(
+            &project_id,
+            "doomed".to_string(),
+            Some("bash".to_string()),
+            None,
+        )
+        .await
+        .expect("prepare_session should succeed");
+
+    let result = manager.finalize_session(&session_id, None, None).await;
+    assert!(
+        result.is_err(),
+        "tmux step must fail with an over-long socket path"
+    );
+
+    // The half-created worktree is gone from disk…
+    let leftovers: Vec<_> = std::fs::read_dir(worktrees_dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "failed create leaked worktree entries: {leftovers:?}"
+    );
+
+    // …and unregistered from git, so retrying the same title succeeds once
+    // tmux works again.
+    let out = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(&repo_path)
+        .args(["worktree", "list"])
+        .output()
+        .await
+        .unwrap();
+    let listing = String::from_utf8_lossy(&out.stdout);
+    assert_eq!(
+        listing.lines().count(),
+        1,
+        "git still has the failed worktree registered:\n{listing}"
+    );
+
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
+    drop(worktrees_dir);
 }
 
 #[tokio::test]

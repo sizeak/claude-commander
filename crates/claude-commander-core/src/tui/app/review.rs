@@ -1274,101 +1274,93 @@ impl DiffReviewState {
 impl App {
     /// Open the review view for the selected session.
     pub(super) async fn handle_open_review(&mut self) {
-        let Some(session_id) = self.ui_state.selected_session_id else {
+        let Some(sref) = self.ui_state.selected_session_id else {
             self.set_review_status("Select a session first");
             return;
         };
+        let session_id = sref.id;
 
-        let title = {
-            let state = self.service.store().read().await;
-            state
-                .sessions
-                .get(&session_id)
-                .map(|s| s.title.clone())
-                .unwrap_or_default()
+        let title = self
+            .session(sref)
+            .map(|s| s.title.clone())
+            .unwrap_or_default();
+
+        // Put the loading spinner up first, then fetch the review OFF the event
+        // loop. `open_review` composes the base→working-tree diff — for a remote
+        // session that's an HTTP GET with a 30s ceiling on a hung server, which
+        // must never block the render loop. The precompute (when enabled) runs
+        // in the same task, so there is a single modal covering fetch +
+        // highlighting rather than one modal for each. On completion the task
+        // posts `ReviewPrepared` (ready view), or `ReviewOpenFailed` for a
+        // no-changes / errored fetch.
+        self.ui_state.modal = Modal::Loading {
+            title: "Preparing review".to_string(),
+            message: "Loading changes…".to_string(),
+            hint: Some(
+                "Disable \"Precompute Review Caches\" in settings to skip highlighting".to_string(),
+            ),
         };
 
-        match self.service.open_review(&session_id).await {
-            Ok(snapshot) => {
-                if snapshot.diff.is_empty() {
-                    self.set_review_status("No changes to review");
-                    return;
-                }
-                // Opt-out: build each file's render caches lazily on first
-                // navigation instead. Opens instantly; the first view of a large
-                // file can be briefly janky.
-                if !self.config.precompute_review_caches {
-                    let content_hash = snapshot.content_hash;
-                    let mut state = DiffReviewState::new(
-                        session_id,
-                        title,
-                        snapshot.base,
-                        snapshot.diff,
-                        snapshot.comments,
-                    );
-                    state.content_hash = content_hash;
-                    state.reviewed = snapshot.reviewed.into_iter().collect();
-                    state.select_first_unreviewed();
-                    self.reset_review_images();
-                    self.ensure_review_image(&state).await;
-                    self.ui_state.modal = Modal::ReviewDiff(Box::new(state));
-                    return;
-                }
-                // Default: precompute every file's render caches (word-diff
-                // segments + syntax highlighting) up front on a worker thread
-                // while a spinner shows, then swap in the ready-to-render view —
-                // trading the open-time wait for instant file switching.
-                let file_count = snapshot.diff.files.len();
-                self.ui_state.modal = Modal::Loading {
-                    title: "Preparing review".to_string(),
-                    message: format!(
-                        "Highlighting {file_count} file{}…",
-                        if file_count == 1 { "" } else { "s" }
-                    ),
-                    hint: Some(
-                        "Disable \"Precompute Review Caches\" in settings to skip this".to_string(),
-                    ),
-                };
-                let highlight = self.theme.mode == ColorMode::TrueColor;
-                let text_fg = self.theme.review_palette().text;
-                let tx = self.event_loop.sender();
-                let base = snapshot.base;
-                let diff = snapshot.diff;
-                let comments = snapshot.comments;
-                let reviewed = snapshot.reviewed;
-                let content_hash = snapshot.content_hash;
-                tokio::spawn(async move {
-                    // The precompute is CPU-bound and synchronous, so keep it off
-                    // the async worker pool; hand the diff back out with its
-                    // segments rather than cloning it.
-                    let (diff, segments) = tokio::task::spawn_blocking(move || {
-                        let segments = precompute_review_caches(&diff, highlight, text_fg);
-                        (diff, segments)
-                    })
-                    .await
-                    .expect("review precompute task panicked");
+        let precompute = self.config.precompute_review_caches;
+        let highlight = self.theme.mode == ColorMode::TrueColor;
+        let text_fg = self.theme.review_palette().text;
+        let backend = self.backend_for(sref);
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let snapshot = match backend.open_review(session_id).await {
+                Ok(s) => s,
+                Err(e) => {
                     let _ = tx
-                        .send(AppEvent::StateUpdate(StateUpdate::ReviewPrepared {
-                            prepared: Box::new(ReviewPrepared {
-                                session_id,
-                                title,
-                                base,
-                                diff,
-                                comments,
-                                reviewed,
-                                segments,
-                                content_hash,
-                            }),
+                        .send(AppEvent::StateUpdate(StateUpdate::ReviewOpenFailed {
+                            error: Some(e.to_string()),
                         }))
                         .await;
-                });
+                    return;
+                }
+            };
+            if snapshot.diff.is_empty() {
+                let _ = tx
+                    .send(AppEvent::StateUpdate(StateUpdate::ReviewOpenFailed {
+                        error: None,
+                    }))
+                    .await;
+                return;
             }
-            Err(e) => {
-                self.ui_state.modal = Modal::Error {
-                    message: format!("Failed to open review: {e}"),
-                };
-            }
-        }
+            let base = snapshot.base;
+            let comments = snapshot.comments;
+            let reviewed = snapshot.reviewed;
+            let content_hash = snapshot.content_hash;
+            // Default: precompute every file's render caches (word-diff segments
+            // + syntax highlighting) up front so file switching is instant. The
+            // precompute is CPU-bound and synchronous, so keep it off the async
+            // worker pool; hand the diff back out with its segments rather than
+            // cloning it. Opt-out (`precompute` off): send no segments so each
+            // file's caches build lazily on first navigation.
+            let (diff, segments) = if precompute {
+                tokio::task::spawn_blocking(move || {
+                    let segments = precompute_review_caches(&snapshot.diff, highlight, text_fg);
+                    (snapshot.diff, segments)
+                })
+                .await
+                .expect("review precompute task panicked")
+            } else {
+                (snapshot.diff, Vec::new())
+            };
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::ReviewPrepared {
+                    prepared: Box::new(ReviewPrepared {
+                        session_id,
+                        title,
+                        base,
+                        diff,
+                        comments,
+                        reviewed,
+                        segments,
+                        content_hash,
+                    }),
+                }))
+                .await;
+        });
     }
 
     pub(super) fn set_review_status(&mut self, msg: &str) {
@@ -1378,10 +1370,10 @@ impl App {
 
     /// Reload the session's comments and re-anchor them against the current
     /// diff (used after create/delete/apply, which don't change the diff).
-    async fn reload_review_comments(&mut self, state: &mut DiffReviewState) {
-        let mut anns = self
-            .service
-            .list_comments(&state.session_id)
+    pub(super) async fn reload_review_comments(&mut self, state: &mut DiffReviewState) {
+        let backend = self.backend_arc(self.backend_of_session(state.session_id));
+        let mut anns = backend
+            .list_comments(state.session_id)
             .await
             .unwrap_or_default();
         crate::comment::reanchor_comments(&mut anns, &state.diff);
@@ -1400,13 +1392,17 @@ impl App {
         state.comments = anns;
     }
 
-    /// Rescan the comment store and refresh the set of sessions with pending
-    /// comments (drives the session-list `*` marker). Run at startup to surface
-    /// comments left over from a previous run.
-    pub(super) async fn refresh_comment_indicators(&mut self) {
-        if let Ok(set) = self.service.sessions_with_pending_comments().await {
-            self.ui_state.sessions_with_comments = set;
-        }
+    /// Refresh the set of sessions with pending comments (drives the
+    /// session-list `*` marker). Run at startup to surface comments left over
+    /// from a previous run. Unions the pending-comment ids each backend already
+    /// carries in its cached snapshot, so a remote session's marker shows
+    /// without a network call — no per-backend query, no local-only bias.
+    pub(super) fn refresh_comment_indicators(&mut self) {
+        self.ui_state.sessions_with_comments = self
+            .backends
+            .iter()
+            .flat_map(|h| h.view.snapshot.pending_comment_sessions.iter().copied())
+            .collect();
     }
 
     /// Handle a key while the review view is open. `state` has been moved out
@@ -1437,7 +1433,8 @@ impl App {
         // None; `handle_select` queues the attach and quits the TUI loop,
         // which `run()` then picks up.
         if crate::config::keybindings::matches_review_toggle(&self.config.keybindings, &key) {
-            self.ui_state.selected_session_id = Some(state.session_id);
+            let backend = self.backend_of_session(state.session_id);
+            self.ui_state.selected_session_id = Some(SessionRef::new(backend, state.session_id));
             self.handle_select().await;
             return;
         }
@@ -1449,7 +1446,7 @@ impl App {
         // don't flow through an instrumented service method. Comment create /
         // delete / apply and reviewed-toggle are recorded at the service layer.
         if let Some(feature) = review_key_feature(nav_code, state.focus) {
-            self.service.telemetry().feature(feature);
+            self.record_feature(feature);
         }
         match nav_code {
             // Esc cancels an in-progress selection first; otherwise closes.
@@ -1478,7 +1475,7 @@ impl App {
             // files don't inflate the metric.
             KeyCode::Char('o') => {
                 if state.can_toggle_image_side() {
-                    self.service.telemetry().feature("review.toggle_image_side");
+                    self.record_feature("review.toggle_image_side");
                 }
                 state.toggle_image_side();
             }
@@ -1492,7 +1489,8 @@ impl App {
             }
             KeyCode::Char('d') if state.focus == ReviewFocus::Body => {
                 if let Some(id) = state.comment_at_cursor() {
-                    if let Err(e) = self.service.delete_comment(&state.session_id, id).await {
+                    let backend = self.backend_arc(self.backend_of_session(state.session_id));
+                    if let Err(e) = backend.delete_comment(state.session_id, id).await {
                         self.set_review_status(&format!("Delete failed: {e}"));
                     } else {
                         self.reload_review_comments(&mut state).await;
@@ -1505,9 +1503,9 @@ impl App {
             // focus); marking advances to the next unreviewed file.
             KeyCode::Char('m') => {
                 if let Some(file) = state.current_file().cloned() {
-                    match self
-                        .service
-                        .toggle_file_reviewed(&state.session_id, &file)
+                    let backend = self.backend_arc(self.backend_of_session(state.session_id));
+                    match backend
+                        .toggle_file_reviewed(state.session_id, file.display_path().to_string())
                         .await
                     {
                         Ok(now_reviewed) => {
@@ -1576,24 +1574,16 @@ impl App {
             .borrow_mut()
             .insert(key, ImageEntry::Pending);
 
-        let (worktree, base) = match self.service.review_blob_source(&state.session_id).await {
-            Ok(src) => src,
-            Err(e) => {
-                self.review_images
-                    .borrow_mut()
-                    .insert((path, side), ImageEntry::Failed(e.to_string()));
-                return;
-            }
-        };
-
+        let backend = self.backend_arc(self.backend_of_session(state.session_id));
+        let sid = state.session_id;
         let tx = self.event_loop.sender();
         let generation = self.review_image_gen.get();
         tokio::spawn(async move {
-            let bytes = match side {
-                DiffSide::Old => crate::git::read_base_blob(&worktree, &base, &path).await,
-                DiffSide::New => crate::git::read_worktree_file(&worktree, &path).await,
-            };
-            // Decode off the async runtime — it's CPU-bound.
+            // Fetch the blob bytes through the backend that owns the session — a
+            // local git read, or a remote fetch over the wire — then decode off
+            // the async runtime, since decoding is CPU-bound. A fetch failure is
+            // reported as `Failed` via the same event path as a decode failure.
+            let bytes = backend.fetch_diff_blob(sid, side, path.clone()).await;
             let image = match bytes {
                 Err(e) => Err(format!("read failed: {e}")),
                 Ok(b) => tokio::task::spawn_blocking(move || {
@@ -1631,7 +1621,8 @@ impl App {
                 }
                 let range = draft.range;
                 if let Some(ann) = state.build_draft(range, draft.input.value().to_string()) {
-                    match self.service.create_comment(&state.session_id, ann).await {
+                    let backend = self.backend_arc(self.backend_of_session(state.session_id));
+                    match backend.create_comment(state.session_id, ann).await {
                         Ok(_) => {
                             state.visual_anchor = None;
                             self.reload_review_comments(state).await;
@@ -1655,7 +1646,8 @@ impl App {
     /// Apply staged comments and report the outcome.
     async fn apply_review(&mut self, state: &mut DiffReviewState) {
         use crate::comment::ApplyOutcome;
-        match self.service.apply_comments(&state.session_id).await {
+        let backend = self.backend_arc(self.backend_of_session(state.session_id));
+        match backend.apply_comments(state.session_id).await {
             Ok(ApplyOutcome::Nothing) => self.set_review_status("No staged comments to apply"),
             Ok(ApplyOutcome::Blocked { drifted }) => self.set_review_status(&format!(
                 "{} drifted comment(s) block apply — review or delete them",

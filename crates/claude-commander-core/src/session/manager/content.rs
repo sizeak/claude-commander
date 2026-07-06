@@ -5,7 +5,20 @@ use super::*;
 impl SessionManager {
     /// Attach to a session (returns tmux session name for external attach)
     pub async fn get_attach_command(&self, session_id: &SessionId) -> Result<String> {
-        info!("get_attach_command called for session: {}", session_id);
+        let tmux_name = self.ensure_attachable(session_id).await?;
+        let cmd = format!("tmux attach-session -t {}", tmux_name);
+        info!("Returning attach command: {}", cmd);
+        Ok(cmd)
+    }
+
+    /// Ensure a session's tmux session is live and attachable, returning its
+    /// tmux session name. Validates the session can be attached, and recreates
+    /// the tmux session (resuming the agent and reconfiguring the status bar)
+    /// when it is missing or its pane has died — so every frontend's attach
+    /// path (TUI, CLI, and the backend trait) gets the same revive-on-attach
+    /// behaviour rather than failing on a stale session.
+    pub async fn ensure_attachable(&self, session_id: &SessionId) -> Result<String> {
+        info!("ensure_attachable called for session: {}", session_id);
 
         let (tmux_name, worktree_path, title, program, hibernated, status_bar) = {
             let state = self.store.read().await;
@@ -89,9 +102,7 @@ impl SessionManager {
                 .await;
         }
 
-        let cmd = format!("tmux attach-session -t {}", tmux_name);
-        info!("Returning attach command: {}", cmd);
-        Ok(cmd)
+        Ok(tmux_name)
     }
 
     /// Get captured content for a session

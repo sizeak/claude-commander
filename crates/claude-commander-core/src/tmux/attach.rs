@@ -12,6 +12,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, info, warn};
 
+use crate::backend::{AttachEnd, AttachResizer, AttachStreams, AttachTerminator};
 use crate::error::Result;
 
 /// Classification of a raw stdin burst by the local attach's keystroke
@@ -142,22 +143,49 @@ pub struct AttachOutcome {
     pub final_session: String,
 }
 
-/// Async PTY attachment - runs entirely within tokio
+/// Configuration for one interactive attach, driven by [`run_attach`]. Bundles
+/// the keystroke-interception policy and the local-only affordances (switcher
+/// popup, voice) so the transport-agnostic loop keeps a single signature.
 ///
-/// Spawns `tmux attach-session` in a PTY and bridges stdin/stdout asynchronously.
-/// Returns when the user detaches (Ctrl+Q or Ctrl+B D) or the session ends.
-///
-/// `editor_triggers` is a list of byte patterns that, when seen on stdin,
-/// cause the attach loop to exit with [`AttachResult::OpenEditor`]. Callers
-/// compute these from the user's `OpenInEditor` keybindings — typically a
-/// single control byte for `Ctrl-<letter>` bindings, or CSI-u/modifyOtherKeys
-/// sequences for `Ctrl-<non-letter>` bindings. Bindings that cannot be
-/// detected in raw stdin (e.g. a bare letter) should simply be omitted.
+/// `editor_triggers` is a list of byte patterns that, when seen on stdin, cause
+/// the attach loop to exit with [`AttachResult::OpenEditor`]. Callers compute
+/// these from the user's `OpenInEditor` keybindings — typically a single
+/// control byte for `Ctrl-<letter>` bindings, or CSI-u/modifyOtherKeys
+/// sequences for `Ctrl-<non-letter>` bindings. Bindings that cannot be detected
+/// in raw stdin (e.g. a bare letter) should simply be omitted.
 ///
 /// When `intercept_ctrl_z` is true, Ctrl+Z (`0x1A`) bytes are stripped from
 /// stdin before reaching the pane. Use this for Claude sessions where SIGTSTP
 /// would freeze the pane with no shell to recover from. Leave it false for
 /// shell sessions, where Ctrl+Z is genuinely useful for job control.
+pub struct AttachConfig {
+    pub editor_triggers: Vec<Vec<u8>>,
+    pub review_triggers: Vec<Vec<u8>>,
+    pub voice_triggers: Vec<Vec<u8>>,
+    pub voice_listener: Option<mpsc::UnboundedSender<crate::conversation::ListenerCommand>>,
+    pub recording: Arc<AtomicBool>,
+    pub intercept_ctrl_z: bool,
+    /// Whether the in-session Ctrl+Space switcher popup is available. It's a
+    /// local capability (runs `tmux display-popup`/`switch-client` against the
+    /// operator's own server), so a remote attach sets this false and Ctrl+Space
+    /// is forwarded to the pane verbatim.
+    pub switcher_enabled: bool,
+    /// The tmux session name currently attached, for the switcher popup and the
+    /// voice feedback `tmux display-message`. The TUI sets this for remote
+    /// attaches too (the session's tmux name rides in on the wire), so it's
+    /// normally `Some`. The switcher is gated separately by `switcher_enabled`
+    /// (off for remote), and the voice `display-message` is best-effort — it
+    /// runs against the operator's local tmux, so for a remote session it may
+    /// simply target a name that isn't there. `None` disables both.
+    pub session_name: Option<String>,
+}
+
+/// Async PTY attachment by tmux session name — the CLI/local entry point.
+///
+/// Spawns `tmux attach-session` in a PTY, wraps it as [`AttachStreams`], and
+/// drives it through [`run_attach`]. Returns when the user detaches (Ctrl+Q or
+/// Ctrl+B D) or the session ends.
+#[allow(clippy::too_many_arguments)]
 pub async fn attach_to_session(
     session_name: &str,
     editor_triggers: Vec<Vec<u8>>,
@@ -167,70 +195,74 @@ pub async fn attach_to_session(
     recording: Arc<AtomicBool>,
     intercept_ctrl_z: bool,
 ) -> Result<AttachOutcome> {
-    // Get terminal size
     let (cols, rows) = terminal::size().unwrap_or((80, 24));
-
-    // Spawn the transport-agnostic bridge: it opens+sizes the PTY and spawns
-    // `tmux attach-session` in it. The local adapter below layers raw-mode,
-    // SIGWINCH, and hotkey interception on top — none of which live in the
-    // bridge, so the server can reuse the same spawn.
     // Local TUI/CLI attach talks to the user's own tmux server, so no socket-dir
     // isolation (unlike the server's WS attach, which honours `tmux_tmpdir`).
-    let bridge = super::HeadlessAttach::spawn(session_name, cols, rows, None)?;
-    let resize = bridge.resize_handle();
-    let (pty_reader, pty_writer, _resize_handle, mut child_guard) = bridge.split();
-
-    // Enter raw mode
-    info!("Enabling raw mode for PTY session");
-    enable_raw_mode()?;
-
-    // Shared state for the in-session switcher: the popup task updates
-    // `current_session` after a successful `tmux switch-client`, and the
-    // attach outcome reports it back to the caller so subsequent state
-    // (shell-toggle pair, editor open) uses the right session.
-    let current_session = Arc::new(Mutex::new(session_name.to_string()));
-    let popup_open = Arc::new(AtomicBool::new(false));
-    // Shared mic state: the stdin task flips it on each Alt-V. Owned by the
-    // caller (`ConversationRuntime.recording`) and shared in, so an external
-    // IPC toggle and the post-attach UI observe the same flag — no syncing.
-    let recording_flag = recording;
-
-    // Run the async I/O loop
-    info!("Starting async I/O loop");
-    let result = run_async_loop(
-        pty_reader,
-        pty_writer,
-        resize,
-        &mut child_guard,
+    let streams = super::HeadlessAttach::spawn(session_name, cols, rows, None)?.into_streams();
+    let cfg = AttachConfig {
         editor_triggers,
         review_triggers,
         voice_triggers,
         voice_listener,
-        recording_flag.clone(),
+        recording,
         intercept_ctrl_z,
+        switcher_enabled: true,
+        session_name: Some(session_name.to_string()),
+    };
+    run_attach(streams, cfg).await
+}
+
+/// Drive one interactive attach over transport-agnostic [`AttachStreams`]
+/// (a local PTY, or a remote WebSocket via the backend). Enters raw mode, pumps
+/// stdin/stdout through the [`classify_input`] interception state machine,
+/// forwards SIGWINCH resizes to the [`AttachResizer`], and tears the attach down
+/// (via [`AttachTerminator::detach`]) on exit. The TUI supplies streams from
+/// `backend.attach(...)`; the CLI wraps a local PTY via [`attach_to_session`].
+pub async fn run_attach(streams: AttachStreams, cfg: AttachConfig) -> Result<AttachOutcome> {
+    let AttachStreams {
+        reader,
+        writer,
+        resizer,
+        mut terminator,
+    } = streams;
+
+    info!("Enabling raw mode for attach session");
+    enable_raw_mode()?;
+
+    // Shared state for the in-session switcher: the popup task updates
+    // `current_session` after a successful `tmux switch-client`, and the attach
+    // outcome reports it back to the caller so subsequent state (shell-toggle
+    // pair, editor open) uses the right session.
+    let current_session = Arc::new(Mutex::new(cfg.session_name.clone().unwrap_or_default()));
+    let popup_open = Arc::new(AtomicBool::new(false));
+
+    info!("Starting async I/O loop");
+    let result = run_async_loop(
+        reader,
+        writer,
+        resizer,
+        &mut terminator,
+        &cfg,
         current_session.clone(),
         popup_open,
     )
     .await;
     info!("Async I/O loop ended with result: {:?}", result);
 
-    // Restore terminal
     info!("Disabling raw mode");
     let _ = disable_raw_mode();
     let _ = std::io::stdout().flush();
 
-    // Flush any leftover input at the kernel level BEFORE child cleanup
-    info!("Flushing stdin with tcflush (before child wait)");
+    // Flush any leftover input at the kernel level before teardown.
     flush_stdin();
     log_pending_stdin("after first tcflush");
 
-    // Ensure child is cleaned up
-    info!("Waiting for child process");
-    let _ = child_guard.wait().await;
-    info!("Child process finished");
+    // Deterministic teardown: kill the attach client (idempotent if it already
+    // exited). Detaches the client; the tmux session + program keep running.
+    info!("Detaching attach transport");
+    terminator.detach().await;
 
-    // Flush again after child exits
-    info!("Flushing stdin with tcflush (after child wait)");
+    // Flush again after teardown to discard stale input.
     flush_stdin();
     log_pending_stdin("after second tcflush");
 
@@ -239,7 +271,7 @@ pub async fn attach_to_session(
         "Attach complete, result: {:?}, final session: {}, recording: {}",
         result,
         final_session,
-        recording_flag.load(Ordering::Acquire)
+        cfg.recording.load(Ordering::Acquire)
     );
 
     Ok(AttachOutcome {
@@ -350,34 +382,39 @@ pub fn flush_stdin() {
     let _ = tcflush(std::io::stdin(), FlushArg::TCIFLUSH);
 }
 
-// Internal plumbing for the attach I/O loop; the arguments are all distinct
-// channels/handles/policies with no natural grouping worth a struct here.
-#[allow(clippy::too_many_arguments)]
+// Internal plumbing for the attach I/O loop. Generic over the transport: the
+// byte streams are boxed trait objects (a local PTY or a remote socket), and
+// termination is observed via the [`AttachTerminator`] rather than a concrete
+// child handle.
 async fn run_async_loop(
-    mut pty_reader: tokio::io::ReadHalf<pty_process::Pty>,
-    mut pty_writer: tokio::io::WriteHalf<pty_process::Pty>,
-    resize: super::ResizeHandle,
-    child: &mut super::ChildGuard,
-    editor_triggers: Vec<Vec<u8>>,
-    review_triggers: Vec<Vec<u8>>,
-    voice_triggers: Vec<Vec<u8>>,
-    voice_listener: Option<mpsc::UnboundedSender<crate::conversation::ListenerCommand>>,
-    recording_flag: Arc<AtomicBool>,
-    intercept_ctrl_z: bool,
+    mut reader: Box<dyn tokio::io::AsyncRead + Send + Unpin>,
+    mut writer: Box<dyn tokio::io::AsyncWrite + Send + Unpin>,
+    resizer: AttachResizer,
+    terminator: &mut Box<dyn AttachTerminator>,
+    cfg: &AttachConfig,
     current_session: Arc<Mutex<String>>,
     popup_open: Arc<AtomicBool>,
 ) -> AttachResult {
+    // Clone the interception policy out of `cfg` so the spawned tasks can own it.
+    let editor_triggers = cfg.editor_triggers.clone();
+    let review_triggers = cfg.review_triggers.clone();
+    let voice_triggers = cfg.voice_triggers.clone();
+    let voice_listener = cfg.voice_listener.clone();
+    let recording_flag = cfg.recording.clone();
+    let intercept_ctrl_z = cfg.intercept_ctrl_z;
+    let switcher_enabled = cfg.switcher_enabled;
+
     // Channel for shutdown signal
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<AttachResult>(1);
 
-    // Task 1: PTY output -> stdout
+    // Task 1: transport output -> stdout
     let stdout_shutdown = shutdown_tx.clone();
     let stdout_task = tokio::spawn(async move {
         let mut stdout = tokio::io::stdout();
         let mut buf = [0u8; 4096];
 
         loop {
-            match pty_reader.read(&mut buf).await {
+            match reader.read(&mut buf).await {
                 Ok(0) => {
                     let _ = stdout_shutdown.send(AttachResult::SessionEnded).await;
                     break;
@@ -444,15 +481,25 @@ async fn run_async_loop(
                             break;
                         }
                         InputAction::OpenSwitcher(filtered) => {
-                            // Open the switcher popup over the attached pane and
-                            // spawn the task that runs `tmux display-popup`
-                            // followed by `tmux switch-client` on selection. The
-                            // attach loop keeps running so the user stays "in"
-                            // the pane the whole time.
-                            if popup_open
-                                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                                .is_ok()
+                            // The in-session switcher is a local capability
+                            // (`tmux display-popup`/`switch-client` on the
+                            // operator's own server). When disabled (e.g. a
+                            // remote attach) Ctrl+Space is just forwarded.
+                            if switcher_enabled
+                                && popup_open
+                                    .compare_exchange(
+                                        false,
+                                        true,
+                                        Ordering::AcqRel,
+                                        Ordering::Acquire,
+                                    )
+                                    .is_ok()
                             {
+                                // Open the switcher popup over the attached pane
+                                // and spawn the task that runs `tmux
+                                // display-popup` then `tmux switch-client` on
+                                // selection. The attach loop keeps running so
+                                // the user stays "in" the pane the whole time.
                                 debug!("Ctrl+Space detected, spawning switcher popup");
                                 let popup_open = popup_open.clone();
                                 let current_session = current_session.clone();
@@ -463,10 +510,10 @@ async fn run_async_loop(
                             if filtered.is_empty() {
                                 continue;
                             }
-                            if pty_writer.write_all(&filtered).await.is_err() {
+                            if writer.write_all(&filtered).await.is_err() {
                                 break;
                             }
-                            let _ = pty_writer.flush().await;
+                            let _ = writer.flush().await;
                         }
                         InputAction::ToggleVoice(filtered) => {
                             // Toggle the mic via the listener channel and stay in
@@ -494,10 +541,10 @@ async fn run_async_loop(
                             if filtered.is_empty() {
                                 continue;
                             }
-                            if pty_writer.write_all(&filtered).await.is_err() {
+                            if writer.write_all(&filtered).await.is_err() {
                                 break;
                             }
-                            let _ = pty_writer.flush().await;
+                            let _ = writer.flush().await;
                         }
                         InputAction::Forward(out) => {
                             if intercept_ctrl_z && out.len() != data.len() {
@@ -506,10 +553,10 @@ async fn run_async_loop(
                             if out.is_empty() {
                                 continue;
                             }
-                            if pty_writer.write_all(&out).await.is_err() {
+                            if writer.write_all(&out).await.is_err() {
                                 break;
                             }
-                            let _ = pty_writer.flush().await;
+                            let _ = writer.flush().await;
                         }
                     }
                 }
@@ -530,25 +577,29 @@ async fn run_async_loop(
             loop {
                 sigwinch.recv().await;
                 if let Ok((cols, rows)) = terminal::size() {
-                    resize.resize(cols, rows);
+                    resizer.resize(cols, rows);
                 }
             }
         }
     });
 
     #[cfg(not(unix))]
-    let resize_task = tokio::spawn(async {});
+    let resize_task = tokio::spawn(async move {
+        // Keep `resizer` owned on non-unix so the signature matches.
+        let _ = resizer;
+    });
 
-    // Wait for shutdown signal or child exit
+    // Wait for a shutdown signal (an intercepted hotkey) or the transport
+    // ending on its own (PTY EOF / detach key / socket close).
     let result = tokio::select! {
         result = shutdown_rx.recv() => {
             result.unwrap_or(AttachResult::Detached)
         }
-        status = child.wait() => {
-            match status {
-                Ok(s) if s.success() => AttachResult::Detached,
-                Ok(_) => AttachResult::SessionEnded,
-                Err(_) => AttachResult::SessionEnded,
+        end = terminator.wait() => {
+            match end {
+                AttachEnd::Detached => AttachResult::Detached,
+                AttachEnd::SessionEnded => AttachResult::SessionEnded,
+                AttachEnd::Error(e) => AttachResult::Error(e),
             }
         }
     };

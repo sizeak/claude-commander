@@ -159,6 +159,7 @@ async fn ws_attach_streams_and_detach_keeps_session_alive() {
             model: None,
             base_branch: None,
             section: None,
+            stack_parent: None,
         })
         .await
         .unwrap();
@@ -241,6 +242,196 @@ async fn ws_attach_streams_and_detach_keeps_session_alive() {
     );
 
     // -- now actually kill it to clean up --
+    service.kill_session(&session_id).await.unwrap();
+
+    drop(repo_temp_dir);
+    drop(data_dir);
+    drop(worktrees_dir);
+}
+
+/// WS agent-attach must revive a session whose tmux died server-side (parity
+/// with `LocalBackend::attach`, which routes through `ensure_attachable`). Kill
+/// the tmux session out from under the server, then WS-attach to the agent pane:
+/// the handshake must still reach `ready` and the tmux session must be alive
+/// again. Against a handler that resolves the pane with a bare store lookup this
+/// is red — the attach spawns against a dead session name and never readies.
+#[tokio::test]
+async fn ws_agent_attach_revives_dead_tmux_session() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let data_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+    let state = test_state(&data_dir, &worktrees_dir);
+    let service = state.service.clone();
+    let addr = spawn_server(state).await;
+
+    service.add_project(repo_path.clone()).await.unwrap();
+    let session_id = service
+        .create_session(claude_commander_core::api::CreateSessionOpts {
+            project_path: repo_path.clone(),
+            title: "ws-revive".to_string(),
+            program: Some("bash".to_string()),
+            initial_prompt: None,
+            effort: None,
+            mode: None,
+            model: None,
+            base_branch: None,
+            section: None,
+            stack_parent: None,
+        })
+        .await
+        .unwrap();
+
+    let tmux_name = service
+        .resolve_tmux_session(&session_id.to_string())
+        .await
+        .unwrap()
+        .expect("session should resolve to a tmux name");
+
+    // Kill the tmux session out from under the server (pin the probe to the
+    // isolated socket dir the session lives on).
+    let tmux = TmuxExecutor::new().with_tmux_tmpdir(service.read_config().tmux_tmpdir);
+    tmux.kill_session(&tmux_name).await.unwrap();
+    assert!(
+        !tmux.session_exists(&tmux_name).await.unwrap(),
+        "precondition: tmux session should be dead before the attach"
+    );
+
+    // WS-attach to the AGENT pane; the handshake must still reach `ready`.
+    let url = format!("ws://{addr}/ws/attach");
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    ws.send(Message::Text(
+        r#"{"type":"auth","token":"unused"}"#.to_string(),
+    ))
+    .await
+    .unwrap();
+    ws.send(Message::Text(
+        serde_json::json!({"type":"attach","session_id": session_id.to_string()}).to_string(),
+    ))
+    .await
+    .unwrap();
+
+    let ready = next_text_frame(&mut ws)
+        .await
+        .expect("should receive a control frame after handshake");
+    let parsed: serde_json::Value = serde_json::from_str(&ready).unwrap();
+    assert_eq!(
+        parsed["type"], "ready",
+        "agent attach to a dead session must revive it and reach `ready`, got: {ready}"
+    );
+
+    // The tmux session must be back.
+    let mut revived = false;
+    for _ in 0..50 {
+        if tmux.session_exists(&tmux_name).await.unwrap_or(false) {
+            revived = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        revived,
+        "agent attach must recreate the dead tmux session {tmux_name}"
+    );
+
+    ws.send(Message::Text(r#"{"type":"detach"}"#.to_string()))
+        .await
+        .unwrap();
+    drain_until_close(&mut ws, Duration::from_secs(5)).await;
+    service.kill_session(&session_id).await.unwrap();
+
+    drop(repo_temp_dir);
+    drop(data_dir);
+    drop(worktrees_dir);
+}
+
+/// A WS attach must stamp `last_attached_at` (server-side MRU), matching
+/// `LocalBackend::attach`'s `mark_attached`. Freshly created it is `None`; after
+/// a successful WS attach it must be `Some`. Red against a handler that resolves
+/// the pane without stamping.
+#[tokio::test]
+async fn ws_attach_stamps_last_attached_at() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let data_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+    let state = test_state(&data_dir, &worktrees_dir);
+    let service = state.service.clone();
+    let addr = spawn_server(state).await;
+
+    service.add_project(repo_path.clone()).await.unwrap();
+    let session_id = service
+        .create_session(claude_commander_core::api::CreateSessionOpts {
+            project_path: repo_path.clone(),
+            title: "ws-mru".to_string(),
+            program: Some("bash".to_string()),
+            initial_prompt: None,
+            effort: None,
+            mode: None,
+            model: None,
+            base_branch: None,
+            section: None,
+            stack_parent: None,
+        })
+        .await
+        .unwrap();
+
+    assert!(
+        service
+            .store()
+            .read()
+            .await
+            .get_session(&session_id)
+            .unwrap()
+            .last_attached_at
+            .is_none(),
+        "precondition: a freshly created session has no last_attached_at"
+    );
+
+    let url = format!("ws://{addr}/ws/attach");
+    let (mut ws, _resp) = tokio_tungstenite::connect_async(&url).await.unwrap();
+    ws.send(Message::Text(
+        r#"{"type":"auth","token":"unused"}"#.to_string(),
+    ))
+    .await
+    .unwrap();
+    ws.send(Message::Text(
+        serde_json::json!({"type":"attach","session_id": session_id.to_string()}).to_string(),
+    ))
+    .await
+    .unwrap();
+    let ready = next_text_frame(&mut ws)
+        .await
+        .expect("should receive a control frame after handshake");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&ready).unwrap()["type"],
+        "ready"
+    );
+
+    assert!(
+        service
+            .store()
+            .read()
+            .await
+            .get_session(&session_id)
+            .unwrap()
+            .last_attached_at
+            .is_some(),
+        "a WS attach must stamp last_attached_at (MRU parity with LocalBackend)"
+    );
+
+    ws.send(Message::Text(r#"{"type":"detach"}"#.to_string()))
+        .await
+        .unwrap();
+    drain_until_close(&mut ws, Duration::from_secs(5)).await;
     service.kill_session(&session_id).await.unwrap();
 
     drop(repo_temp_dir);

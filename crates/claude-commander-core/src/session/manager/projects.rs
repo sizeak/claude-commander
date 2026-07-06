@@ -148,20 +148,15 @@ impl SessionManager {
             let _ = self.tmux.kill_session(shell_name).await;
         }
 
-        // Kill all sessions' tmux processes
-        {
-            let state = self.store.read().await;
-            for session_id in &project.worktrees {
-                if let Some(session) = state.get_session(session_id) {
-                    if session.status.is_active()
-                        && let Err(e) = self.tmux.kill_session(&session.tmux_session_name).await
-                    {
-                        warn!("Failed to kill tmux session: {}", e);
-                    }
-                    if let Some(ref shell_name) = session.shell_tmux_session_name {
-                        let _ = self.tmux.kill_session(shell_name).await;
-                    }
-                }
+        // Tear down each session: kill its tmux (a no-op when stopped) AND
+        // remove its git worktree. `kill_session(_, true)` does both uniformly
+        // regardless of status — removing only tmux here leaked the worktrees.
+        for session_id in &project.worktrees {
+            if let Err(e) = self.kill_session(session_id, true).await {
+                warn!(
+                    "Failed to tear down session {} while removing project: {}",
+                    session_id, e
+                );
             }
         }
 
