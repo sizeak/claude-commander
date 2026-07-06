@@ -1503,7 +1503,21 @@ mod tests {
         // detach raced the pump's stream-EOF teardown against any in-flight
         // server frame and could observe SessionEnded on slow runners.
         terminator.detach().await;
-        assert_eq!(terminator.wait().await, AttachEnd::Detached);
+        let end = terminator.wait().await;
+        if end != AttachEnd::Detached {
+            // Diagnostics for the CI-only SessionEnded: capture what the
+            // isolated tmux server actually holds so the failure explains
+            // itself instead of needing another blind CI cycle.
+            let tmux = TmuxExecutor::new().with_tmux_tmpdir(service.read_config().tmux_tmpdir);
+            let ls = tmux.execute(&["list-sessions"]).await;
+            let dead = tmux.is_pane_dead(&shell_name).await;
+            let pane = tmux
+                .execute(&["capture-pane", "-p", "-t", &shell_name])
+                .await;
+            panic!(
+                "expected Detached, got {end:?}\n  tmux ls: {ls:?}\n  {shell_name} pane dead: {dead:?}\n  pane content: {pane:?}"
+            );
+        }
         drop(reader);
         drop(writer);
         drop(resizer);
