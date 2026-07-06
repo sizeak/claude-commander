@@ -220,6 +220,41 @@ impl App {
         }
     }
 
+    /// Kick off a background `git lfs pull` for a session created with the
+    /// LFS smudge skipped, so large files hydrate without blocking creation.
+    /// Local sessions only: the worktree path in a remote session's snapshot
+    /// is server-side, and the server host runs its own hydration.
+    pub(super) async fn spawn_lfs_pull(&mut self, session_id: SessionId) {
+        if !self.config.skip_lfs_smudge {
+            return;
+        }
+        if !self.ui_state.lfs_pull_in_flight.insert(session_id) {
+            return;
+        }
+        let worktree_path = self
+            .local_view()
+            .snapshot
+            .sessions
+            .iter()
+            .find(|s| s.session_id == session_id)
+            .map(|s| s.worktree_path.clone());
+        let Some(worktree_path) = worktree_path else {
+            self.ui_state.lfs_pull_in_flight.remove(&session_id);
+            return;
+        };
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            if let Err(e) = crate::git::lfs::pull(&worktree_path).await {
+                warn!(error = %e, "background git lfs pull failed");
+            }
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::LfsPullFinished {
+                    session_id,
+                }))
+                .await;
+        });
+    }
+
     /// Spawn AI summary generation for the given session.
     ///
     /// Called from the `GenerateSummary` hotkey handler. Always generates

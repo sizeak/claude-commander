@@ -128,6 +128,8 @@ impl<'a> TreeList<'a> {
                     pr_labels,
                     agent_state,
                     unread,
+                    keep_alive,
+                    lfs_pulling,
                     stacked_child,
                     ..
                 } => {
@@ -169,6 +171,13 @@ impl<'a> TreeList<'a> {
                         spans.push(Span::styled(
                             format!(" {COMMENT_MARKER}"),
                             Style::default().fg(self.theme.diff_file_header),
+                        ));
+                    }
+                    if *keep_alive {
+                        // Anchored: opted out of auto-hibernation.
+                        spans.push(Span::styled(
+                            format!(" {KEEP_ALIVE_MARKER}"),
+                            Style::default().fg(self.theme.text_accent),
                         ));
                     }
                     if let Some(shown_branch) = crate::session::display_branch(title, branch) {
@@ -221,6 +230,15 @@ impl<'a> TreeList<'a> {
                         spans.push(Span::styled(
                             format!("({})", program_name(program)),
                             Style::default().fg(self.theme.text_secondary),
+                        ));
+                    }
+
+                    if *lfs_pulling {
+                        spans.push(Span::styled(
+                            " ⇣ LFS",
+                            Style::default()
+                                .fg(self.theme.text_secondary)
+                                .add_modifier(Modifier::DIM),
                         ));
                     }
 

@@ -73,6 +73,11 @@ pub struct SessionInfo {
     /// Most recent attach time, for the MRU session switcher ordering.
     #[serde(default)]
     pub last_attached_at: Option<DateTime<Utc>>,
+    /// Whether the session is exempt from idle hibernation (shows the anchor
+    /// marker). Additive with default so pre-hibernation payloads parse.
+    /// FLUTTER: mirror lags; field is #[serde(default)].
+    #[serde(default)]
+    pub keep_alive: bool,
     /// Absolute path to the session's git worktree.
     #[serde(default)]
     pub worktree_path: PathBuf,
@@ -149,6 +154,8 @@ pub struct CreateSessionOpts {
     pub effort: Option<String>,
     #[serde(default)]
     pub mode: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
     #[serde(default)]
     pub base_branch: Option<String>,
     #[serde(default)]
@@ -399,6 +406,7 @@ mod tests {
             initial_prompt: None,
             effort: None,
             mode: None,
+            model: None,
             base_branch: None,
             section: None,
             stack_parent: Some(parent),

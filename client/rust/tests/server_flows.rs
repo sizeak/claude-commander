@@ -92,6 +92,7 @@ impl Fixture {
                 initial_prompt: None,
                 effort: None,
                 mode: None,
+                model: None,
                 base_branch: None,
                 section: None,
             }))

@@ -332,6 +332,11 @@ impl CommanderBackend for MockBackend {
         self.guard()
     }
 
+    async fn toggle_keep_alive(&self, _id: SessionId) -> BResult<bool> {
+        self.guard()?;
+        Ok(true)
+    }
+
     async fn mark_read(&self, id: SessionId) -> BResult<()> {
         self.guard()?;
         let gate = self.mark_read_gate.lock().unwrap().clone();

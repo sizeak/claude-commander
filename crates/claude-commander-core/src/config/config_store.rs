@@ -23,6 +23,8 @@ struct InitSnapshot {
     ui_refresh_fps: u32,
     state_sync_interval_ms: u64,
     commander_enabled: bool,
+    hibernate_enabled: bool,
+    hibernate_check_interval_secs: u64,
 }
 
 impl InitSnapshot {
@@ -34,6 +36,8 @@ impl InitSnapshot {
             ui_refresh_fps: config.ui_refresh_fps,
             state_sync_interval_ms: config.state_sync_interval_ms,
             commander_enabled: config.commander_enabled,
+            hibernate_enabled: config.hibernate_enabled,
+            hibernate_check_interval_secs: config.hibernate_check_interval_secs,
         }
     }
 
@@ -44,6 +48,8 @@ impl InitSnapshot {
             && self.ui_refresh_fps == config.ui_refresh_fps
             && self.state_sync_interval_ms == config.state_sync_interval_ms
             && self.commander_enabled == config.commander_enabled
+            && self.hibernate_enabled == config.hibernate_enabled
+            && self.hibernate_check_interval_secs == config.hibernate_check_interval_secs
     }
 }
 
@@ -61,6 +67,9 @@ impl InitSnapshot {
 /// - `ui_refresh_fps` (event loop tick rate)
 /// - `state_sync_interval_ms` (state sync background task interval)
 /// - `commander_enabled` (captured by the agent-state poll task at spawn)
+/// - `hibernate_enabled` / `hibernate_check_interval_secs` (the hibernation
+///   loop is spawned once, with a fixed interval, at construction; the idle
+///   *threshold* is read live each tick and is not restart-required)
 ///
 /// Call [`restart_required`](Self::restart_required) to check whether any of
 /// those init-time values have diverged from the running config. The flag
@@ -171,8 +180,11 @@ impl ConfigStore {
         debug!("Config file mtime changed, reloading");
 
         let new_config = self.load_from_disk()?;
+        let reloaded_mtime = std::fs::metadata(&self.config_path)
+            .and_then(|m| m.modified())
+            .ok();
         *self.config.write().expect("config lock poisoned") = new_config;
-        *self.last_mtime.write().expect("mtime lock poisoned") = current_mtime;
+        *self.last_mtime.write().expect("mtime lock poisoned") = reloaded_mtime;
 
         Ok(true)
     }
@@ -189,28 +201,18 @@ impl ConfigStore {
 
     /// Load config from `self.config_path` using the standard layered resolution.
     fn load_from_disk(&self) -> Result<Config> {
-        use crate::error::ConfigError;
-        use figment::{
-            Figment,
-            providers::{Format, Serialized, Toml},
-        };
-
-        let config: Config = Figment::new()
-            .merge(Serialized::defaults(Config::default()))
-            .merge(Toml::file(&self.config_path))
-            .extract()
-            .map_err(|e| ConfigError::LoadFailed(e.to_string()))?;
-        // Reject a hot-reloaded edit that introduces an invalid remote-server
-        // list; `reload_if_changed` propagates the error and keeps the previous
-        // in-memory config, so a bad manual edit can't poison the running TUI.
-        config.validate_remote_servers()?;
-        Ok(config)
+        // `load_from_path` runs config-file migrations and validates the
+        // remote-server list; `reload_if_changed` propagates any error and
+        // keeps the previous in-memory config, so a bad manual edit can't
+        // poison the running TUI.
+        Config::load_from_path(&self.config_path)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::ProgramEntry;
     use tempfile::TempDir;
 
     fn write_config(path: &std::path::Path, config: &Config) {
@@ -256,14 +258,17 @@ mod tests {
         // Sleep briefly so mtime differs (filesystem granularity)
         std::thread::sleep(std::time::Duration::from_millis(50));
         let edited = Config {
-            default_program: "external-edit".to_string(),
+            programs: vec![ProgramEntry {
+                label: "External Edit".to_string(),
+                command: "external-edit".to_string(),
+            }],
             ..Config::default()
         };
         write_config(&config_path, &edited);
 
         // Should detect the change
         assert!(store.reload_if_changed().unwrap());
-        assert_eq!(store.read().default_program, "external-edit");
+        assert_eq!(store.read().default_session_program(), "external-edit");
 
         // Second call should not reload again
         assert!(!store.reload_if_changed().unwrap());
@@ -281,12 +286,15 @@ mod tests {
 
         store
             .mutate(|c| {
-                c.default_program = "mutated".to_string();
+                c.programs = vec![ProgramEntry {
+                    label: "Mutated".to_string(),
+                    command: "mutated".to_string(),
+                }];
             })
             .unwrap();
 
         // In-memory value updated
-        assert_eq!(store.read().default_program, "mutated");
+        assert_eq!(store.read().default_session_program(), "mutated");
 
         // On-disk value updated
         let disk_content = std::fs::read_to_string(&config_path).unwrap();
@@ -351,6 +359,47 @@ mod tests {
     }
 
     #[test]
+    fn test_restart_required_true_when_hibernate_fields_change() {
+        // The hibernation loop is spawned once, with a fixed interval, at
+        // construction — so enabling it or changing the check interval at
+        // runtime must surface the restart-required warning. (The idle timeout
+        // is read live and is asserted hot-reloadable below.)
+        for mutate in [
+            |c: &mut Config| c.hibernate_enabled = true,
+            |c: &mut Config| c.hibernate_check_interval_secs = 30,
+        ] {
+            let dir = TempDir::new().unwrap();
+            let config_path = dir.path().join("config.toml");
+            let config = Config::default();
+            write_config(&config_path, &config);
+            let store = ConfigStore::with_path(config, config_path);
+
+            store.mutate(mutate).unwrap();
+
+            assert!(store.restart_required());
+        }
+    }
+
+    #[test]
+    fn test_restart_not_required_when_hibernate_timeout_changes() {
+        // The idle timeout is read live each tick, so changing it must NOT
+        // demand a restart.
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+        let config = Config::default();
+        write_config(&config_path, &config);
+        let store = ConfigStore::with_path(config, config_path);
+
+        store
+            .mutate(|c| {
+                c.hibernate_idle_timeout_secs = 60;
+            })
+            .unwrap();
+
+        assert!(!store.restart_required());
+    }
+
+    #[test]
     fn test_restart_required_reverts_when_changed_back() {
         let dir = TempDir::new().unwrap();
         let config_path = dir.path().join("config.toml");
@@ -391,7 +440,10 @@ mod tests {
         // Change only hot-reloadable fields — should NOT require restart
         store
             .mutate(|c| {
-                c.default_program = "different".to_string();
+                c.programs = vec![ProgramEntry {
+                    label: "Different".to_string(),
+                    command: "different".to_string(),
+                }];
                 c.dim_unfocused_preview = false;
                 c.leader_key = "f1".to_string();
             })
@@ -406,12 +458,35 @@ mod tests {
         let config_path = dir.path().join("config.toml");
 
         let config = Config {
-            default_program: "test-program".to_string(),
+            programs: vec![ProgramEntry {
+                label: "Test Program".to_string(),
+                command: "test-program".to_string(),
+            }],
             ..Config::default()
         };
         write_config(&config_path, &config);
 
         let store = ConfigStore::with_path(config, config_path);
-        assert_eq!(store.read().default_program, "test-program");
+        assert_eq!(store.read().default_session_program(), "test-program");
+    }
+
+    #[test]
+    fn test_reload_if_changed_runs_config_migrations() {
+        let dir = TempDir::new().unwrap();
+        let config_path = dir.path().join("config.toml");
+
+        let config = Config::default();
+        write_config(&config_path, &config);
+        let store = ConfigStore::with_path(config, config_path.clone());
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        std::fs::write(&config_path, "default_program = \"codex\"\n").unwrap();
+
+        assert!(store.reload_if_changed().unwrap());
+        assert_eq!(store.read().default_session_program(), "codex");
+        let migrated = std::fs::read_to_string(config_path).unwrap();
+        assert!(!migrated.contains("default_program"));
+        assert!(migrated.contains("command = \"codex\""));
+        assert!(!store.reload_if_changed().unwrap());
     }
 }

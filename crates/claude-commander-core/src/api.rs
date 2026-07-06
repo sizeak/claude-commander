@@ -25,7 +25,7 @@ use crate::git::{
 use crate::reviewed::ReviewedStore;
 use crate::session::{
     AgentState, CascadeOutcome, ProjectId, ScanResult, SessionId, SessionManager, SessionStatus,
-    WorktreeSession, apply_assignment, clear_override_and_reassign, program_with_claude_flags,
+    WorktreeSession, apply_assignment, clear_override_and_reassign, program_with_agent_flags,
 };
 use crate::telemetry::{ConfigSnapshot, EnvFingerprint, FrontendInfo, Telemetry};
 use crate::tmux::{AgentStateDetector, StatusBarInfo, TmuxExecutor};
@@ -123,6 +123,11 @@ impl CommanderService {
         let comments = Arc::new(CommentStore::new(data_dir.join("comments")));
         let reviewed = Arc::new(ReviewedStore::new(data_dir.join("reviewed")));
         let telemetry = init_telemetry(&config_store, &store, &frontend);
+        // NB: the idle-hibernation loop is NOT started here. `new` is shared by
+        // one-shot CLI commands (via `for_cli`), and a tokio runtime is always
+        // present under `#[tokio::main]`, so starting it here would let any CLI
+        // command trigger a hibernation pass. Long-lived frontends call
+        // `start_hibernation_loop` explicitly after construction instead.
         let agent_detector = Arc::new(tokio::sync::Mutex::new(AgentStateDetector::new(
             manager.tmux.clone(),
             AGENT_STATE_CACHE_TTL,
@@ -149,6 +154,15 @@ impl CommanderService {
             background_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tmux_ok_cache: Arc::new(std::sync::Mutex::new(None)),
         }
+    }
+
+    /// Start the background idle-hibernation policy loop. Long-lived frontends
+    /// (the TUI) call this once after construction; one-shot CLI paths do not,
+    /// so a CLI command can never trigger a hibernation pass as a side effect.
+    /// No-op unless `hibernate_enabled` is set, the check interval is non-zero,
+    /// and a tokio runtime is present.
+    pub fn start_hibernation_loop(&self) {
+        self.manager.spawn_hibernation_loop(self.telemetry.clone());
     }
 
     pub fn for_cli(
@@ -419,12 +433,16 @@ impl CommanderService {
             .program
             .as_deref()
             .map(str::to_string)
-            .unwrap_or_else(|| self.config_store.read().default_program.clone());
+            .unwrap_or_else(|| self.config_store.read().default_session_program());
 
         validate_program_flags(&opts, &base_program)?;
 
-        let program =
-            program_with_claude_flags(&base_program, opts.mode.as_deref(), opts.effort.as_deref());
+        let program = program_with_agent_flags(
+            &base_program,
+            opts.mode.as_deref(),
+            opts.effort.as_deref(),
+            opts.model.as_deref(),
+        );
 
         let path = {
             let backend = GitBackend::discover(&opts.project_path)?;
@@ -478,6 +496,24 @@ impl CommanderService {
         if let Err(e) = result {
             let _ = self.manager.remove_creating_session(&session_id).await;
             return Err(e);
+        }
+
+        // When smudging was skipped, the worktree holds LFS pointer files. The
+        // TUI pulls the real content in the background, but a CLI invocation
+        // exits right after this call, so pull synchronously here (best-effort)
+        // to leave a usable worktree behind.
+        if self.config_store.read().skip_lfs_smudge {
+            let worktree_path = {
+                let state = self.store.read().await;
+                state
+                    .get_session(&session_id)
+                    .map(|s| s.worktree_path.clone())
+            };
+            if let Some(worktree_path) = worktree_path
+                && let Err(e) = crate::git::lfs::pull(&worktree_path).await
+            {
+                tracing::warn!(error = %e, "git lfs pull after session create failed");
+            }
         }
 
         Ok(session_id)
@@ -754,6 +790,18 @@ impl CommanderService {
         self.manager.delete_session(id).await
     }
 
+    /// Set a session's keep-alive flag (opt-out of auto-hibernation).
+    pub async fn set_keep_alive(&self, id: &SessionId, keep_alive: bool) -> Result<bool> {
+        self.telemetry.feature("session.set_keep_alive");
+        self.manager.set_keep_alive(id, keep_alive).await
+    }
+
+    /// Toggle a session's keep-alive flag, returning the new value.
+    pub async fn toggle_keep_alive(&self, id: &SessionId) -> Result<bool> {
+        self.telemetry.feature("session.toggle_keep_alive");
+        self.manager.toggle_keep_alive(id).await
+    }
+
     // -- Review / comments --
 
     /// Open the review diff for a session: compose the base→working-tree diff,
@@ -1016,6 +1064,19 @@ impl CommanderService {
         );
         self.manager.tmux.send_keys(&tmux_name, &prompt).await?;
         self.manager.tmux.send_keys(&tmux_name, "Enter").await?;
+
+        // Delivering a prompt flips an idle agent back to working without
+        // attaching or changing status, so bump last_active_at: a concurrent
+        // hibernation pass then sees a fresh stamp and won't kill the session we
+        // just handed work to (its still_hibernatable re-check compares stamps).
+        let sid = *session_id;
+        self.store
+            .mutate(move |state| {
+                if let Some(session) = state.get_session_mut(&sid) {
+                    session.touch();
+                }
+            })
+            .await?;
 
         // Mark the delivered comments applied.
         for ann in comments
@@ -1295,7 +1356,7 @@ impl CommanderService {
     pub fn create_options(&self) -> CreateOptions {
         let config = self.config_store.read();
         CreateOptions {
-            default_program: config.default_program.clone(),
+            default_program: config.default_session_program(),
             programs: config
                 .programs
                 .iter()
@@ -2090,6 +2151,15 @@ pub fn validate_program_flags(opts: &CreateSessionOpts, resolved_program: &str) 
         ))
         .into());
     }
+    // `--model` is understood by both Claude and Codex.
+    if opts.model.is_some() && !kind.supports_model_flag() {
+        return Err(SessionError::InvalidProgram(format!(
+            "--model is only supported for programs that accept it, e.g. \
+             claude or codex (got {:?})",
+            resolved_program
+        ))
+        .into());
+    }
     Ok(())
 }
 
@@ -2192,6 +2262,7 @@ fn session_info_from_session(session: &WorktreeSession, project_name: &str) -> S
         section_override: session.section_override.clone(),
         entered_section_at: Some(session.entered_section_at),
         last_attached_at: session.last_attached_at,
+        keep_alive: session.keep_alive,
         worktree_path: session.worktree_path.clone(),
         tmux_session_name: session.tmux_session_name.clone(),
     }
@@ -2485,6 +2556,7 @@ mod tests {
             initial_prompt: None,
             effort: Some("high".to_string()),
             mode: None,
+            model: None,
             base_branch: None,
             section: None,
             stack_parent: None,
@@ -2502,6 +2574,7 @@ mod tests {
             initial_prompt: None,
             effort: None,
             mode: Some("auto".to_string()),
+            model: None,
             base_branch: None,
             section: None,
             stack_parent: None,
@@ -2519,11 +2592,47 @@ mod tests {
             initial_prompt: Some("hello".to_string()),
             effort: Some("high".to_string()),
             mode: Some("auto".to_string()),
+            model: Some("opus".to_string()),
             base_branch: None,
             section: None,
             stack_parent: None,
         };
         validate_program_flags(&opts, "claude").unwrap();
+    }
+
+    #[test]
+    fn validate_rejects_unknown_program_with_model() {
+        let opts = CreateSessionOpts {
+            project_path: PathBuf::from("/tmp/repo"),
+            title: "test".to_string(),
+            program: Some("bash".to_string()),
+            initial_prompt: None,
+            effort: None,
+            mode: None,
+            model: Some("opus".to_string()),
+            base_branch: None,
+            section: None,
+            stack_parent: None,
+        };
+        let err = validate_program_flags(&opts, "bash").unwrap_err();
+        assert!(err.to_string().contains("--model"));
+    }
+
+    #[test]
+    fn validate_allows_codex_with_model() {
+        let opts = CreateSessionOpts {
+            project_path: PathBuf::from("/tmp/repo"),
+            title: "test".to_string(),
+            program: Some("codex".to_string()),
+            initial_prompt: None,
+            effort: None,
+            mode: None,
+            model: Some("gpt-5".to_string()),
+            base_branch: None,
+            section: None,
+            stack_parent: None,
+        };
+        validate_program_flags(&opts, "codex").unwrap();
     }
 
     #[test]
@@ -2564,6 +2673,7 @@ mod tests {
             initial_prompt: None,
             effort: None,
             mode: None,
+            model: None,
             base_branch: None,
             section: None,
             stack_parent: None,
@@ -2872,7 +2982,7 @@ mod tests {
     async fn create_options_from_config() {
         let dir = tempfile::TempDir::new().unwrap();
         let config = Config {
-            default_program: "claude".to_string(),
+            default_program: Some("claude".to_string()),
             programs: vec![crate::config::ProgramEntry {
                 label: "Claude (Opus)".to_string(),
                 command: "claude --model opus".to_string(),
@@ -2885,7 +2995,9 @@ mod tests {
         };
         let svc = service_with_config(&dir, config);
         let opts = svc.create_options();
-        assert_eq!(opts.default_program, "claude");
+        // Post-programs-migration semantics: the first configured program is
+        // the default; the legacy `default_program` scalar is only a fallback.
+        assert_eq!(opts.default_program, "claude --model opus");
         assert_eq!(opts.programs.len(), 1);
         assert_eq!(opts.programs[0].label, "Claude (Opus)");
         assert_eq!(opts.sections, vec!["Open PRs".to_string()]);

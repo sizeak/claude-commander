@@ -36,6 +36,10 @@ const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦
 /// review view's comment marker.
 const COMMENT_MARKER: char = '*';
 
+/// Marker shown on a session row the user has kept alive (opted out of
+/// auto-hibernation) — an anchor: the session stays put and won't hibernate.
+const KEEP_ALIVE_MARKER: char = '⚓';
+
 /// Tree list widget for displaying hierarchical sessions
 pub struct TreeList<'a> {
     /// Items to display

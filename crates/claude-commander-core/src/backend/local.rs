@@ -293,6 +293,10 @@ impl CommanderBackend for LocalBackend {
         Ok(self.service.mark_read(&id).await?)
     }
 
+    async fn toggle_keep_alive(&self, id: SessionId) -> BResult<bool> {
+        Ok(self.service.toggle_keep_alive(&id).await?)
+    }
+
     async fn mark_unread(&self, ids: Vec<SessionId>) -> BResult<()> {
         Ok(self.service.mark_unread(ids).await?)
     }

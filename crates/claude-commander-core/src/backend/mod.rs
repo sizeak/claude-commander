@@ -480,6 +480,10 @@ pub trait CommanderBackend: Send + Sync {
     async fn set_section(&self, id: SessionId, section: Option<String>) -> BResult<()>;
     /// Clear a session's unread flag.
     async fn mark_read(&self, id: SessionId) -> BResult<()>;
+    /// Flip a session's keep-alive (hibernation-exempt) flag; returns the new
+    /// value. The flag lives with the session's owning host, so remote
+    /// backends toggle it server-side.
+    async fn toggle_keep_alive(&self, id: SessionId) -> BResult<bool>;
     /// Mark a batch of sessions unread (paired with [`Self::mark_read`]).
     async fn mark_unread(&self, ids: Vec<SessionId>) -> BResult<()>;
 

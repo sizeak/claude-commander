@@ -22,7 +22,7 @@ impl SessionManager {
         program: Option<String>,
         base_branch: Option<String>,
     ) -> Result<SessionId> {
-        let program = program.unwrap_or_else(|| self.config_store.read().default_program.clone());
+        let program = program.unwrap_or_else(|| self.config_store.read().default_session_program());
 
         // Validate project exists
         {
@@ -236,6 +236,7 @@ impl SessionManager {
             (exists, preexisted, sp)
         };
         let worktree_path = worktrees_dir.join(&worktree_name);
+        let skip_lfs_smudge = self.config_store.read().skip_lfs_smudge;
         let worktree_create_start = std::time::Instant::now();
         let worktree_info = WorktreeManager::run_create_worktree(
             worktrees_dir,
@@ -244,6 +245,7 @@ impl SessionManager {
             branch_name.clone(),
             branch_exists,
             start_point,
+            skip_lfs_smudge,
         )
         .await?;
         info!(
@@ -408,7 +410,15 @@ impl SessionManager {
     /// Restart a session (kill tmux and recreate, optionally with --resume)
     #[instrument(skip(self))]
     pub async fn restart_session(&self, session_id: &SessionId) -> Result<()> {
-        let (tmux_session_name, shell_tmux_name, worktree_path, title, program, status_bar) = {
+        let (
+            tmux_session_name,
+            shell_tmux_name,
+            worktree_path,
+            title,
+            program,
+            hibernated,
+            status_bar,
+        ) = {
             let state = self.store.read().await;
             let session = state
                 .get_session(session_id)
@@ -419,23 +429,35 @@ impl SessionManager {
                 session.worktree_path.clone(),
                 session.title.clone(),
                 session.program.clone(),
+                session.hibernated,
                 self.status_bar_info(session, &state),
             )
         };
+
+        // Bump last_active_at *before* the destructive kill. A hibernation pass
+        // that snapshotted this session earlier compares the stamp at its
+        // pre-kill recheck ([`still_hibernatable`]); bumping it now means an
+        // in-flight restart — pane killed, not yet recreated — presents a
+        // changed stamp, so the racing hibernate bails instead of killing the
+        // pane we are about to rebuild. (set_status(Running) below re-stamps it,
+        // but that lands only after recreation.)
+        let sid = *session_id;
+        self.store
+            .mutate(move |state| {
+                if let Some(session) = state.get_session_mut(&sid) {
+                    session.touch();
+                }
+            })
+            .await?;
 
         self.kill_tmux_sessions(&tmux_session_name, shell_tmux_name.as_deref())
             .await;
 
         // Create a fresh tmux session, resuming the prior agent session if
-        // configured. Each harness has its own resume syntax; an unrecognised
-        // program has none, so it launches fresh.
-        let resume_program = if self.config_store.read().resume_session {
-            AgentKind::from_program(&program)
-                .resume_command(&program)
-                .unwrap_or_else(|| program.clone())
-        } else {
-            program.clone()
-        };
+        // configured, or unconditionally when this session was auto-hibernated
+        // (resume is what makes hibernation non-destructive).
+        let force_resume = self.config_store.read().resume_session || hibernated;
+        let resume_program = resume_program_for(&program, force_resume);
         let resume_program = program_with_session_name(&resume_program, &title);
         let resume_program = self.maybe_wrap_nix_develop(&resume_program, &worktree_path);
         let create_result = self
@@ -462,12 +484,14 @@ impl SessionManager {
             .configure_status_bar(&tmux_session_name, &status_bar)
             .await;
 
-        // Set status to Running
+        // Set status to Running and clear the hibernation marker — the pane has
+        // been recreated (resumed above when it was hibernated).
         let sid = *session_id;
         self.store
             .mutate(move |state| {
                 if let Some(session) = state.get_session_mut(&sid) {
                     session.set_status(SessionStatus::Running);
+                    session.hibernated = false;
                 }
             })
             .await?;
@@ -543,6 +567,10 @@ impl SessionManager {
             .mutate(move |state| {
                 if let Some(session) = state.get_session_mut(&sid) {
                     session.set_status(SessionStatus::Running);
+                    // The pane is live again, so clear the hibernation marker to
+                    // uphold the "live pane ⇒ not hibernated" invariant (matches
+                    // restart_session and the attach/recreate wake path).
+                    session.hibernated = false;
                 }
             })
             .await?;
@@ -608,6 +636,146 @@ impl SessionManager {
         Ok(())
     }
 
+    /// Hibernate a session: stop its tmux process to free memory while keeping
+    /// the worktree, branch, and all metadata intact. Unlike [`kill_session`]
+    /// this is a *policy* action driven by the idle-hibernation loop, so it
+    /// marks the session `hibernated` — the wake path then resumes the agent
+    /// conversation even when the global `resume_session` config is off.
+    ///
+    /// Guards against racing a concurrent manual restart or a late attach:
+    ///  - `last_active_at` is snapshotted at the top of this function; the
+    ///    re-check immediately before the destructive kill compares it via
+    ///    [`still_hibernatable`]. `restart_session` bumps `last_active_at`
+    ///    *before* its own kill (and again when it flips the session back to
+    ///    `Running`), so an in-flight or completed restart presents a changed
+    ///    stamp: "a live pane was just recreated — don't kill it";
+    ///  - a client attached just before the kill is detected via
+    ///    `is_attached_including_shell` (spanning the paired shell, and erring
+    ///    toward "attached" on any glitch);
+    ///  - as a backstop for the reverse interleaving, if the tmux session
+    ///    reappears after the kill the status update is skipped, and the final
+    ///    mutate only transitions a still-`Running` session.
+    /// Returns `true` if the session was actually hibernated, `false` if a guard
+    /// skipped it (attached, no longer a candidate, or tmux reappeared) — so the
+    /// caller can record telemetry only for real hibernations.
+    #[instrument(skip(self))]
+    pub async fn hibernate_session(&self, session_id: &SessionId) -> Result<bool> {
+        let (tmux_session_name, shell_tmux_name, last_active_at) = {
+            let state = self.store.read().await;
+            let session = state
+                .get_session(session_id)
+                .ok_or(SessionError::NotFound(*session_id))?;
+            (
+                session.tmux_session_name.clone(),
+                session.shell_tmux_session_name.clone(),
+                session.last_active_at,
+            )
+        };
+
+        // A client attached since the decision was made? Leave it running.
+        // Spans the paired shell (Ctrl-\ toggles to it) since the kill below
+        // destroys both. Conservative: a failed probe counts as attached.
+        if self
+            .is_attached_including_shell(&tmux_session_name, shell_tmux_name.as_deref())
+            .await
+        {
+            info!(
+                "Session {} attached before hibernate kill; skipping",
+                session_id
+            );
+            return Ok(false);
+        }
+
+        // Final re-check under the lock, as close to the kill as possible: a
+        // manual restart that completed in the meantime bumped last_active_at
+        // (and would have recreated a live pane), so bail rather than clobber it.
+        {
+            let state = self.store.read().await;
+            let still = state.get_session(session_id).is_some_and(|s| {
+                still_hibernatable(s.status, s.keep_alive, s.last_active_at, last_active_at)
+            });
+            if !still {
+                info!(
+                    "Session {} no longer a hibernate candidate at kill time; skipping",
+                    session_id
+                );
+                return Ok(false);
+            }
+        }
+
+        self.kill_tmux_sessions(&tmux_session_name, shell_tmux_name.as_deref())
+            .await;
+
+        // If a concurrent restart recreated the tmux session between our re-check
+        // and the kill, don't mark it Stopped — that would leave a live pane
+        // flagged hibernated.
+        if self
+            .tmux
+            .session_exists(&tmux_session_name)
+            .await
+            .unwrap_or(false)
+        {
+            warn!(
+                "Session {} tmux reappeared after hibernate kill; skipping status update",
+                session_id
+            );
+            return Ok(false);
+        }
+
+        let sid = *session_id;
+        let hibernated = self
+            .store
+            .mutate(move |state| {
+                if let Some(session) = state.get_session_mut(&sid)
+                    && session.status == SessionStatus::Running
+                {
+                    session.set_status(SessionStatus::Stopped);
+                    session.hibernated = true;
+                    true
+                } else {
+                    false
+                }
+            })
+            .await?;
+
+        if hibernated {
+            info!("Hibernated session {}", session_id);
+        }
+        Ok(hibernated)
+    }
+
+    /// Set a session's keep-alive flag (opt-out of auto-hibernation). Returns
+    /// the value that was set, or [`SessionError::NotFound`] if the session no
+    /// longer exists — so callers don't report success for a no-op (matches
+    /// [`toggle_keep_alive`](Self::toggle_keep_alive)).
+    pub async fn set_keep_alive(&self, session_id: &SessionId, keep_alive: bool) -> Result<bool> {
+        let sid = *session_id;
+        self.store
+            .mutate(move |state| {
+                state.get_session_mut(&sid).map(|session| {
+                    session.keep_alive = keep_alive;
+                    session.keep_alive
+                })
+            })
+            .await?
+            .ok_or_else(|| SessionError::NotFound(sid).into())
+    }
+
+    /// Toggle a session's keep-alive flag, returning the new value. The flip is
+    /// done inside a single mutate so concurrent toggles can't race.
+    pub async fn toggle_keep_alive(&self, session_id: &SessionId) -> Result<bool> {
+        let sid = *session_id;
+        self.store
+            .mutate(move |state| {
+                state.get_session_mut(&sid).map(|session| {
+                    session.keep_alive = !session.keep_alive;
+                    session.keep_alive
+                })
+            })
+            .await?
+            .ok_or_else(|| SessionError::NotFound(sid).into())
+    }
+
     /// Delete a session (remove from state)
     #[instrument(skip(self))]
     pub async fn delete_session(&self, session_id: &SessionId) -> Result<()> {
@@ -646,43 +814,49 @@ impl SessionManager {
     }
 }
 
-/// Insert `--permission-mode <mode>` and/or `--effort <level>` into a Claude
-/// command string. Always uses long-form flags (never short flags like `-p`)
-/// because short flags on the Claude CLI can have different meanings.
+/// Insert agent launch flags into a command string: `--permission-mode` and
+/// `--effort` for Claude only, `--model <name>` for any harness that
+/// understands it (Claude, Codex). Always uses long-form flags (never short
+/// flags like `-p`) because short flags can have different meanings across
+/// harnesses.
 ///
 /// `"default"` mode is treated as a no-op — the Claude CLI uses its own
 /// default when the flag is absent. Effort has no equivalent no-op value
 /// (its levels are `high`/`medium`/`low`), so all values are passed through.
-///
-/// No-op when the program isn't Claude.
-pub fn program_with_claude_flags(
+pub fn program_with_agent_flags(
     program: &str,
     mode: Option<&str>,
     effort: Option<&str>,
+    model: Option<&str>,
 ) -> String {
-    if !AgentKind::from_program(program).is_claude() || (mode.is_none() && effort.is_none()) {
+    let kind = AgentKind::from_program(program);
+
+    let mut flags = Vec::new();
+    if kind.is_claude() {
+        if let Some(m) = mode
+            && m != "default"
+        {
+            flags.push(format!("--permission-mode {m}"));
+        }
+        if let Some(e) = effort {
+            flags.push(format!("--effort {e}"));
+        }
+    }
+    if kind.supports_model_flag()
+        && let Some(m) = model
+    {
+        flags.push(format!("--model {m}"));
+    }
+
+    if flags.is_empty() {
         return program.to_string();
     }
 
     let mut parts = program.splitn(2, char::is_whitespace);
     let cmd = parts.next().unwrap();
-    let rest = parts.next();
-
-    let mut flags = Vec::new();
-    if let Some(m) = mode
-        && m != "default"
-    {
-        flags.push(format!("--permission-mode {m}"));
-    }
-    if let Some(e) = effort {
-        flags.push(format!("--effort {e}"));
-    }
-
-    match (flags.is_empty(), rest) {
-        (true, Some(r)) => format!("{cmd} {r}"),
-        (true, None) => cmd.to_string(),
-        (false, Some(r)) => format!("{cmd} {} {r}", flags.join(" ")),
-        (false, None) => format!("{cmd} {}", flags.join(" ")),
+    match parts.next() {
+        Some(r) => format!("{cmd} {} {r}", flags.join(" ")),
+        None => format!("{cmd} {}", flags.join(" ")),
     }
 }
 
@@ -707,16 +881,80 @@ pub(super) fn shell_escape_single_quote(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
+/// Choose the launch command when recreating a session's tmux pane: the
+/// harness's resume command when `force_resume` is set, otherwise the program
+/// launched fresh. Resume syntax is harness-specific; an unrecognised program
+/// has no resume mechanism, so it launches fresh regardless.
+///
+/// Callers combine two inputs into `force_resume`: the global `resume_session`
+/// config and the per-session `hibernated` marker (an auto-hibernated session
+/// must resume to be non-destructive, even when the global flag is off).
+pub(super) fn resume_program_for(program: &str, force_resume: bool) -> String {
+    if force_resume {
+        AgentKind::from_program(program)
+            .resume_command(program)
+            .unwrap_or_else(|| program.to_string())
+    } else {
+        program.to_string()
+    }
+}
+
+/// Whether a session is still a valid hibernate target at the pre-kill re-check.
+///
+/// `snapshot_last_active` is `last_active_at` captured at the start of
+/// [`SessionManager::hibernate_session`]. A session is still hibernatable only if it is `Running`, not
+/// keep-alive, and its `last_active_at` is unchanged — any advance means a
+/// concurrent restart/wake flipped it back to `Running` (`set_status` bumps the
+/// stamp) and recreated a live pane that must not be killed. Pure, so the
+/// clobber-guard logic is unit-tested without tmux.
+pub(super) fn still_hibernatable(
+    status: SessionStatus,
+    keep_alive: bool,
+    last_active_at: chrono::DateTime<chrono::Utc>,
+    snapshot_last_active: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    status == SessionStatus::Running && !keep_alive && last_active_at == snapshot_last_active
+}
+
 #[cfg(test)]
 mod lifecycle_tests {
     use super::*;
 
-    // --- program_with_claude_flags ---
+    // --- still_hibernatable (pre-kill clobber/attach guard) ---
+
+    #[test]
+    fn still_hibernatable_when_running_and_unchanged() {
+        let t = chrono::Utc::now();
+        assert!(still_hibernatable(SessionStatus::Running, false, t, t));
+    }
+
+    #[test]
+    fn not_hibernatable_when_last_active_advanced() {
+        // A concurrent restart/wake bumped last_active_at — its live pane must
+        // not be killed even though the status is (again) Running.
+        let snapshot = chrono::Utc::now();
+        let after_restart = snapshot + chrono::Duration::seconds(1);
+        assert!(!still_hibernatable(
+            SessionStatus::Running,
+            false,
+            after_restart,
+            snapshot
+        ));
+    }
+
+    #[test]
+    fn not_hibernatable_when_keep_alive_or_not_running() {
+        let t = chrono::Utc::now();
+        assert!(!still_hibernatable(SessionStatus::Running, true, t, t));
+        assert!(!still_hibernatable(SessionStatus::Stopped, false, t, t));
+    }
+
+    // --- program_with_agent_flags ---
 
     #[test]
     fn claude_flags_effort_only() {
         assert_eq!(
-            program_with_claude_flags("claude", None, Some("high")),
+            program_with_agent_flags("claude", None, Some("high"), None),
             "claude --effort high"
         );
     }
@@ -724,7 +962,7 @@ mod lifecycle_tests {
     #[test]
     fn claude_flags_mode_only() {
         assert_eq!(
-            program_with_claude_flags("claude", Some("auto"), None),
+            program_with_agent_flags("claude", Some("auto"), None, None),
             "claude --permission-mode auto"
         );
     }
@@ -732,7 +970,7 @@ mod lifecycle_tests {
     #[test]
     fn claude_flags_both() {
         assert_eq!(
-            program_with_claude_flags("claude", Some("plan"), Some("low")),
+            program_with_agent_flags("claude", Some("plan"), Some("low"), None),
             "claude --permission-mode plan --effort low"
         );
     }
@@ -740,7 +978,7 @@ mod lifecycle_tests {
     #[test]
     fn claude_flags_default_mode_is_noop() {
         assert_eq!(
-            program_with_claude_flags("claude", Some("default"), None),
+            program_with_agent_flags("claude", Some("default"), None, None),
             "claude"
         );
     }
@@ -748,7 +986,7 @@ mod lifecycle_tests {
     #[test]
     fn claude_flags_preserves_existing_args() {
         assert_eq!(
-            program_with_claude_flags("claude --resume", Some("auto"), Some("high")),
+            program_with_agent_flags("claude --resume", Some("auto"), Some("high"), None),
             "claude --permission-mode auto --effort high --resume"
         );
     }
@@ -756,12 +994,12 @@ mod lifecycle_tests {
     #[test]
     fn claude_flags_noop_for_non_claude() {
         assert_eq!(
-            program_with_claude_flags("bash", Some("auto"), Some("high")),
+            program_with_agent_flags("bash", Some("auto"), Some("high"), None),
             "bash"
         );
         // Codex has its own flag conventions — never inject Claude's flags.
         assert_eq!(
-            program_with_claude_flags("codex", Some("auto"), Some("high")),
+            program_with_agent_flags("codex", Some("auto"), Some("high"), None),
             "codex"
         );
     }
@@ -769,8 +1007,40 @@ mod lifecycle_tests {
     #[test]
     fn claude_flags_noop_when_no_flags() {
         assert_eq!(
-            program_with_claude_flags("claude --resume", None, None),
+            program_with_agent_flags("claude --resume", None, None, None),
             "claude --resume"
+        );
+    }
+
+    #[test]
+    fn model_flag_injected_for_claude() {
+        assert_eq!(
+            program_with_agent_flags("claude", None, None, Some("opus")),
+            "claude --model opus"
+        );
+    }
+
+    #[test]
+    fn model_flag_injected_for_codex() {
+        assert_eq!(
+            program_with_agent_flags("codex", None, None, Some("gpt-5")),
+            "codex --model gpt-5"
+        );
+    }
+
+    #[test]
+    fn model_flag_combines_with_claude_only_flags() {
+        assert_eq!(
+            program_with_agent_flags("claude", Some("plan"), Some("high"), Some("opus")),
+            "claude --permission-mode plan --effort high --model opus"
+        );
+    }
+
+    #[test]
+    fn model_flag_noop_for_unknown_program() {
+        assert_eq!(
+            program_with_agent_flags("bash", None, None, Some("opus")),
+            "bash"
         );
     }
 
@@ -807,6 +1077,28 @@ mod lifecycle_tests {
     fn session_name_escapes_single_quotes() {
         let cmd = program_with_session_name("claude", "it's a test");
         assert_eq!(cmd, "claude -n 'it'\\''s a test'");
+    }
+
+    // --- resume_program_for ---
+
+    #[test]
+    fn resume_program_for_forces_resume_per_harness() {
+        assert_eq!(resume_program_for("claude", true), "claude --resume");
+        assert_eq!(resume_program_for("codex", true), "codex resume --last");
+        // Flags on the base command survive the resume rewrite.
+        assert_eq!(resume_program_for("claude -c", true), "claude -c --resume");
+    }
+
+    #[test]
+    fn resume_program_for_unknown_harness_launches_fresh_even_when_forced() {
+        // A bare shell has no resume mechanism, so forcing resume can't change it.
+        assert_eq!(resume_program_for("bash", true), "bash");
+    }
+
+    #[test]
+    fn resume_program_for_without_force_launches_fresh() {
+        assert_eq!(resume_program_for("claude", false), "claude");
+        assert_eq!(resume_program_for("codex", false), "codex");
     }
 
     #[test]

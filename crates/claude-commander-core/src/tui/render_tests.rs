@@ -159,6 +159,8 @@ fn test_session_list_with_sessions() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    keep_alive: false,
+                    lfs_pulling: false,
                     stacked_child: false,
                 },
                 SessionListItem::Worktree {
@@ -178,6 +180,8 @@ fn test_session_list_with_sessions() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    keep_alive: false,
+                    lfs_pulling: false,
                     stacked_child: false,
                 },
                 SessionListItem::Worktree {
@@ -197,6 +201,8 @@ fn test_session_list_with_sessions() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    keep_alive: false,
+                    lfs_pulling: false,
                     stacked_child: false,
                 },
             ];
@@ -248,6 +254,8 @@ fn test_session_list_with_pr_badges() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    keep_alive: false,
+                    lfs_pulling: false,
                     stacked_child: false,
                 },
                 SessionListItem::Worktree {
@@ -267,6 +275,8 @@ fn test_session_list_with_pr_badges() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    keep_alive: false,
+                    lfs_pulling: false,
                     stacked_child: false,
                 },
             ];
@@ -318,6 +328,8 @@ fn test_session_list_mixed_programs() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    keep_alive: false,
+                    lfs_pulling: false,
                     stacked_child: false,
                 },
                 SessionListItem::Worktree {
@@ -337,6 +349,8 @@ fn test_session_list_mixed_programs() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    keep_alive: false,
+                    lfs_pulling: false,
                     stacked_child: false,
                 },
             ];
@@ -388,6 +402,8 @@ fn test_session_list_with_numbers() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    keep_alive: false,
+                    lfs_pulling: false,
                     stacked_child: false,
                 },
                 SessionListItem::Worktree {
@@ -407,6 +423,8 @@ fn test_session_list_with_numbers() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    keep_alive: false,
+                    lfs_pulling: false,
                     stacked_child: false,
                 },
                 SessionListItem::Worktree {
@@ -426,6 +444,8 @@ fn test_session_list_with_numbers() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    keep_alive: false,
+                    lfs_pulling: false,
                     stacked_child: false,
                 },
             ];
@@ -1271,6 +1291,8 @@ fn test_session_list_creating_status() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    keep_alive: false,
+                    lfs_pulling: false,
                     stacked_child: false,
                 },
                 SessionListItem::Worktree {
@@ -1290,6 +1312,8 @@ fn test_session_list_creating_status() {
                     created_at: chrono::Utc::now(),
                     agent_state: None,
                     unread: false,
+                    keep_alive: false,
+                    lfs_pulling: false,
                     stacked_child: false,
                 },
             ];

@@ -212,6 +212,16 @@ pub async fn read(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `POST /sessions/{id}/keep-alive` → toggle the hibernation-exempt flag,
+/// returning the new value.
+pub async fn keep_alive(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<bool>, ApiError> {
+    let id = parse_session_id(&id)?;
+    Ok(Json(state.service.toggle_keep_alive(&id).await?))
+}
+
 /// Body for the batch mark-unread route: the session ids to flag.
 #[derive(Debug, Deserialize)]
 pub struct UnreadBody {

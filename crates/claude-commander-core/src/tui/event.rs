@@ -192,6 +192,9 @@ pub enum StateUpdate {
         backend_id: usize,
         result: std::result::Result<(), String>,
     },
+    /// A background `git lfs pull` for a freshly-created session finished
+    /// (success or failure), so its `⇣ LFS` row marker can be cleared.
+    LfsPullFinished { session_id: SessionId },
     /// Review diff prepared off-thread: the parsed diff plus its warmed render
     /// caches (word-diff segments + syntax highlighting), ready to replace the
     /// loading spinner with the full review view. Boxed — the payload is large.
@@ -269,6 +272,8 @@ pub enum UserCommand {
     RenameSession,
     /// Restart current session (kill tmux and recreate)
     RestartSession,
+    /// Toggle keep-alive on the selected session (opt out of auto-hibernation)
+    ToggleKeepAlive,
     /// Remove an entire project
     RemoveProject,
     /// Open worktree in editor/IDE
@@ -377,6 +382,7 @@ impl UserCommand {
             | UserCommand::NewStackedSession
             | UserCommand::DeleteSession
             | UserCommand::RestartSession
+            | UserCommand::ToggleKeepAlive
             | UserCommand::NewProject
             | UserCommand::ScanDirectory
             | UserCommand::OpenReviewDiff => None,
@@ -454,6 +460,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::DeleteMergedPrSessions => Self::DeleteMergedPrSessions,
             BindableAction::RenameSession => Self::RenameSession,
             BindableAction::RestartSession => Self::RestartSession,
+            BindableAction::ToggleKeepAlive => Self::ToggleKeepAlive,
             BindableAction::RemoveProject => Self::RemoveProject,
             BindableAction::OpenInEditor => Self::OpenInEditor,
             BindableAction::OpenPullRequest => Self::OpenPullRequest,

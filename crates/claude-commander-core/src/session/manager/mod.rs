@@ -25,6 +25,7 @@ pub struct ScanResult {
 
 mod cascade;
 mod content;
+mod hibernate;
 mod lifecycle;
 mod nix;
 mod project_shell;
@@ -33,7 +34,7 @@ mod shell;
 mod worktree_sync;
 
 pub use cascade::{CascadeOutcome, PushStackOutcome};
-pub use lifecycle::program_with_claude_flags;
+pub use lifecycle::program_with_agent_flags;
 
 #[cfg(test)]
 mod tests;

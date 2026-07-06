@@ -557,6 +557,12 @@ impl CommanderBackend for RemoteBackend {
             .await
     }
 
+    async fn toggle_keep_alive(&self, id: SessionId) -> BResult<bool> {
+        self.inner
+            .post_empty_json(self.session_url(id, &["keep-alive"]))
+            .await
+    }
+
     async fn mark_unread(&self, ids: Vec<SessionId>) -> BResult<()> {
         // Batch counterpart to `mark_read`: `POST /api/sessions/unread` with
         // `{ "ids": [...] }`. Unknown ids are silently skipped server-side,
@@ -1288,6 +1294,7 @@ mod tests {
                 initial_prompt: None,
                 effort: None,
                 mode: None,
+                model: None,
                 base_branch: None,
                 section: None,
                 stack_parent: None,
@@ -1378,6 +1385,7 @@ mod tests {
                 initial_prompt: None,
                 effort: None,
                 mode: None,
+                model: None,
                 base_branch: None,
                 section: None,
                 stack_parent: None,
@@ -1463,6 +1471,7 @@ mod tests {
                 initial_prompt: None,
                 effort: None,
                 mode: None,
+                model: None,
                 base_branch: None,
                 section: None,
                 stack_parent: None,

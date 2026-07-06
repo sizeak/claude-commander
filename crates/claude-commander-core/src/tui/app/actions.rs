@@ -1007,6 +1007,7 @@ impl App {
                 initial_prompt: None,
                 effort: None,
                 mode: None,
+                model: None,
                 base_branch: Some(branch_name),
                 section: None,
                 stack_parent: None,
@@ -1341,6 +1342,37 @@ impl App {
                     session_id: sref.id,
                 },
             };
+        }
+    }
+
+    /// Toggle keep-alive on the selected session (opt out of / back into
+    /// auto-hibernation). Non-destructive, so it applies immediately and
+    /// reports via a transient status message.
+    pub(super) async fn handle_toggle_keep_alive(&mut self) {
+        let Some(session_id) = self.ui_state.selected_session_id else {
+            return;
+        };
+        match self
+            .backend_arc(session_id.backend)
+            .toggle_keep_alive(session_id.id)
+            .await
+        {
+            Ok(keep_alive) => {
+                let msg = if keep_alive {
+                    "Keep-alive on — session won't auto-hibernate"
+                } else {
+                    "Keep-alive off — idle session may auto-hibernate"
+                };
+                self.ui_state.status_message =
+                    Some((msg.to_string(), Instant::now() + Duration::from_secs(3)));
+                self.refresh_list_items().await;
+            }
+            Err(e) => {
+                self.ui_state.status_message = Some((
+                    format!("Failed to toggle keep-alive: {e}"),
+                    Instant::now() + Duration::from_secs(3),
+                ));
+            }
         }
     }
 
@@ -1765,7 +1797,8 @@ impl App {
 
     /// Handle input modal submission. `program` is the command chosen in the
     /// new-session program picker, or `None` for flows without a picker (which
-    /// then fall back to `default_program` inside the backend).
+    /// then fall back to the first configured program inside `prepare_session`,
+    /// on whichever backend owns the target project).
     pub(super) async fn handle_input_submit(
         &mut self,
         action: InputAction,
@@ -1808,6 +1841,7 @@ impl App {
                         initial_prompt: None,
                         effort: None,
                         mode: None,
+                        model: None,
                         base_branch: None,
                         section,
                         stack_parent: None,
@@ -1849,6 +1883,7 @@ impl App {
                         initial_prompt: None,
                         effort: None,
                         mode: None,
+                        model: None,
                         base_branch: None,
                         section: None,
                         stack_parent: Some(parent_session_id),

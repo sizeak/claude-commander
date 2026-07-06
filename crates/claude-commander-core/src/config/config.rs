@@ -2,7 +2,7 @@
 //!
 //! Layered configuration: defaults → config file
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crossterm::event::{KeyCode, KeyModifiers};
 use directories::ProjectDirs;
@@ -13,6 +13,7 @@ use figment::{
 use serde::{Deserialize, Serialize};
 
 use crate::config::keybindings::KeyBindings;
+use crate::config::migrations;
 use crate::config::theme::ThemeOverrides;
 use crate::error::{ConfigError, Error, Result};
 
@@ -72,14 +73,16 @@ impl std::fmt::Debug for RemoteServerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Default program to run in new sessions. Also acts as the pre-selected
-    /// entry in the new-session program picker.
-    pub default_program: String,
+    /// Legacy default program setting. Config files are migrated to put this
+    /// command first in `programs`; runtime code should use
+    /// [`Config::default_session_program`] instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_program: Option<String>,
 
     /// Selectable agent harnesses for the new-session program picker. Each entry
     /// pairs a display `label` with the `command` launched (program plus any
-    /// flags). When empty, the picker offers a single entry synthesised from
-    /// `default_program`, so existing configs keep working unchanged.
+    /// flags). The first entry is the default. When empty, the picker offers a
+    /// single `claude` entry so existing empty configs keep working unchanged.
     #[serde(default)]
     pub programs: Vec<ProgramEntry>,
 
@@ -145,6 +148,14 @@ pub struct Config {
     #[serde(alias = "pull_before_create")]
     pub fetch_before_create: bool,
 
+    /// Skip git-LFS smudging during `git worktree add` so session creation is
+    /// fast on LFS repos (the checkout leaves cheap pointer files). The real
+    /// LFS content is fetched afterwards with `git lfs pull` — asynchronously
+    /// in the TUI (with a `⇣ LFS` indicator) or synchronously on the CLI.
+    /// Default true.
+    #[serde(default = "default_true")]
+    pub skip_lfs_smudge: bool,
+
     /// Pass `--resume` to the program when restarting or recreating a session,
     /// so the agent picks up where it left off. When false, the program is
     /// started fresh.
@@ -161,6 +172,26 @@ pub struct Config {
 
     /// Interval in milliseconds for polling agent state (Working/Idle/Waiting) (0 = disabled)
     pub agent_state_poll_interval_ms: u64,
+
+    /// Enable automatic hibernation of idle sessions: a background loop stops
+    /// the tmux process (freeing ~400MB per idle `claude`) for sessions that
+    /// have been idle past `hibernate_idle_timeout_secs`, keeping the worktree
+    /// and metadata. The session transparently resumes on next attach.
+    /// Disabled by default.
+    #[serde(default)]
+    pub hibernate_enabled: bool,
+
+    /// Idle duration in seconds before an eligible session is hibernated. A
+    /// session counts as idle only while its agent is Idle (not Working or
+    /// WaitingForInput) and no tmux client is attached. Default 86400 (1 day).
+    #[serde(default = "default_hibernate_idle_timeout_secs")]
+    pub hibernate_idle_timeout_secs: u64,
+
+    /// Interval in seconds between hibernation policy checks. Default 600
+    /// (10 min). `0` disables the loop entirely (the loop is not spawned),
+    /// matching the convention used by `agent_state_poll_interval_ms`.
+    #[serde(default = "default_hibernate_check_interval_secs")]
+    pub hibernate_check_interval_secs: u64,
 
     /// When true, render PR labels as colored text on the default background
     /// (the pre-pill behavior). When false (default), PR labels render as a
@@ -240,7 +271,7 @@ pub struct Config {
     pub commander_enabled: bool,
 
     /// Program (with flags) to launch for the commander session. When unset,
-    /// falls back to `default_program`. Use this to pin a specific model,
+    /// falls back to the first configured program. Use this to pin a specific model,
     /// e.g. `claude --model opus-4-7`.
     #[serde(default)]
     pub commander_program: Option<String>,
@@ -425,7 +456,7 @@ impl Default for TelemetryConfig {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            default_program: "claude".to_string(),
+            default_program: None,
             programs: Vec::new(),
             branch_prefix: String::new(),
             max_concurrent_tmux: 16,
@@ -443,10 +474,14 @@ impl Default for Config {
             project_pull_interval_secs: 3600,
             pr_review_labels: default_pr_review_labels(),
             fetch_before_create: true,
+            skip_lfs_smudge: true,
             resume_session: true,
             nix_develop: true,
             state_sync_interval_ms: 2000,
             agent_state_poll_interval_ms: 3000,
+            hibernate_enabled: false,
+            hibernate_idle_timeout_secs: default_hibernate_idle_timeout_secs(),
+            hibernate_check_interval_secs: default_hibernate_check_interval_secs(),
             invert_pr_label_color: false,
             show_session_program: false,
             dim_unfocused_preview: true,
@@ -478,6 +513,14 @@ fn default_true() -> bool {
     true
 }
 
+fn default_hibernate_idle_timeout_secs() -> u64 {
+    86400
+}
+
+fn default_hibernate_check_interval_secs() -> u64 {
+    600
+}
+
 fn default_pr_review_labels() -> Vec<String> {
     vec![
         "dev-review-required".to_string(),
@@ -505,11 +548,23 @@ impl Config {
     pub fn load() -> Result<Self> {
         let config_path = Self::config_file_path()?;
 
-        let config: Config = Figment::new()
+        Self::load_from_path(config_path)
+    }
+
+    /// Load configuration from a specific path using the standard migration and
+    /// layered resolution pipeline.
+    pub fn load_from_path(path: impl AsRef<Path>) -> Result<Self> {
+        let config_path = path.as_ref();
+
+        let mut figment = Figment::new()
             // Start with defaults
-            .merge(Serialized::defaults(Config::default()))
-            // Layer config file if it exists
-            .merge(Toml::file(&config_path))
+            .merge(Serialized::defaults(Config::default()));
+
+        if let Some(toml) = migrations::migrate_config_file(config_path)? {
+            figment = figment.merge(Toml::string(&toml));
+        }
+
+        let config: Config = figment
             .extract()
             .map_err(|e| ConfigError::LoadFailed(e.to_string()))?;
 
@@ -622,22 +677,36 @@ impl Config {
     }
 
     /// Program (with flags) to launch for the commander session, falling back
-    /// to `default_program` when `commander_program` is unset.
+    /// to the first configured program when `commander_program` is unset.
     pub fn commander_program(&self) -> String {
         self.commander_program
             .clone()
-            .unwrap_or_else(|| self.default_program.clone())
+            .unwrap_or_else(|| self.default_session_program())
+    }
+
+    /// Command used when a session creation flow does not explicitly choose a
+    /// program. The first configured program is the source of truth; unmigrated
+    /// legacy configs fall back to `default_program`, then to built-in `claude`.
+    pub fn default_session_program(&self) -> String {
+        if let Some(entry) = self.programs.first() {
+            entry.command.clone()
+        } else if let Some(default_program) = &self.default_program {
+            default_program.clone()
+        } else {
+            "claude".to_string()
+        }
     }
 
     /// The non-empty list of harnesses offered in the new-session program
     /// picker. Returns the configured `programs` verbatim, or — when none are
-    /// configured — a single entry synthesised from `default_program` (label and
-    /// command both the program), so the picker always has at least one choice.
+    /// configured — a single built-in `claude` entry, so the picker always has
+    /// at least one choice.
     pub fn program_choices(&self) -> Vec<ProgramEntry> {
         if self.programs.is_empty() {
+            let default_program = self.default_session_program();
             vec![ProgramEntry {
-                label: self.default_program.clone(),
-                command: self.default_program.clone(),
+                label: default_program.clone(),
+                command: default_program,
             }]
         } else {
             self.programs.clone()
@@ -645,14 +714,9 @@ impl Config {
     }
 
     /// Index into [`Self::program_choices`] of the entry to pre-select in the
-    /// picker: the one whose `command` equals `default_program`, falling back to
-    /// the first entry when none match (or the synthesised single entry).
+    /// picker. The first configured program is the default.
     pub fn default_program_index(&self) -> usize {
-        let choices = self.program_choices();
-        choices
-            .iter()
-            .position(|e| e.command == self.default_program)
-            .unwrap_or(0)
+        0
     }
 
     /// Resolve the worktrees directory, nesting under repo name if configured.
@@ -910,7 +974,8 @@ has_label = ["blocked", "waiting-on-author"]
     #[test]
     fn test_default_config() {
         let config = Config::default();
-        assert_eq!(config.default_program, "claude");
+        assert_eq!(config.default_program, None);
+        assert_eq!(config.default_session_program(), "claude");
         assert_eq!(config.branch_prefix, "");
         assert_eq!(config.max_concurrent_tmux, 16);
         assert_eq!(config.capture_cache_ttl_ms, 50);
@@ -1000,8 +1065,116 @@ speed = 1.25
     fn test_config_serialization() {
         let config = Config::default();
         let toml = toml::to_string_pretty(&config).unwrap();
-        assert!(toml.contains("default_program"));
-        assert!(toml.contains("claude"));
+        assert!(!toml.contains("default_program"));
+    }
+
+    #[test]
+    fn test_load_from_path_migrates_default_program() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "default_program = \"codex\"\n").unwrap();
+
+        let config = Config::load_from_path(&path).unwrap();
+
+        assert_eq!(config.default_program, None);
+        assert_eq!(config.default_session_program(), "codex");
+        let migrated = std::fs::read_to_string(path).unwrap();
+        assert!(!migrated.contains("default_program"));
+        assert!(migrated.contains("command = \"codex\""));
+    }
+
+    #[test]
+    fn test_load_from_path_migrates_default_program_with_empty_inline_programs() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "default_program = \"codex\"\nprograms = []\n").unwrap();
+
+        let config = Config::load_from_path(&path).unwrap();
+
+        assert_eq!(config.default_session_program(), "codex");
+        let migrated = std::fs::read_to_string(path).unwrap();
+        assert!(!migrated.contains("default_program"));
+        assert!(migrated.contains("command = \"codex\""));
+    }
+
+    #[test]
+    fn test_default_session_program_falls_back_to_legacy_default_program() {
+        let config = Config {
+            default_program: Some("codex".to_string()),
+            programs: Vec::new(),
+            ..Config::default()
+        };
+
+        assert_eq!(config.default_session_program(), "codex");
+    }
+
+    #[test]
+    fn test_program_choices_synthesises_legacy_default_program_when_unmigrated() {
+        let config = Config {
+            default_program: Some("codex".to_string()),
+            programs: Vec::new(),
+            ..Config::default()
+        };
+
+        let choices = config.program_choices();
+        assert_eq!(choices.len(), 1);
+        assert_eq!(choices[0].label, "codex");
+        assert_eq!(choices[0].command, "codex");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_load_from_path_honours_legacy_default_when_migration_write_fails() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "default_program = \"codex\"\n").unwrap();
+        if std::fs::metadata(&path).unwrap().uid() == 0 {
+            return;
+        }
+
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o444);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let config = Config::load_from_path(&path).unwrap();
+
+        assert_eq!(config.default_session_program(), "codex");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_load_from_path_uses_migrated_content_when_migration_write_fails() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"default_program = "codex"
+
+[[programs]]
+label = "Claude"
+command = "claude"
+
+[[programs]]
+label = "Codex"
+command = "codex"
+"#,
+        )
+        .unwrap();
+        if std::fs::metadata(&path).unwrap().uid() == 0 {
+            return;
+        }
+
+        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o444);
+        std::fs::set_permissions(&path, permissions).unwrap();
+
+        let config = Config::load_from_path(&path).unwrap();
+
+        assert_eq!(config.default_session_program(), "codex");
     }
 
     #[test]
@@ -1115,6 +1288,7 @@ speed = 1.25
         assert_eq!(config.diff_cache_ttl_ms, 500);
         assert_eq!(config.pr_check_interval_secs, 120);
         assert!(config.fetch_before_create);
+        assert!(config.skip_lfs_smudge);
         assert!(config.resume_session);
         assert_eq!(config.state_sync_interval_ms, 2000);
         assert_eq!(config.agent_state_poll_interval_ms, 3000);
@@ -1139,6 +1313,17 @@ show_session_program = false
         )
         .unwrap();
         assert!(!cfg.show_session_program);
+    }
+
+    #[test]
+    fn test_skip_lfs_smudge_deserialise() {
+        // Missing → default true.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.skip_lfs_smudge);
+
+        // Explicit false survives round trip.
+        let cfg: Config = toml::from_str("skip_lfs_smudge = false\n").unwrap();
+        assert!(!cfg.skip_lfs_smudge);
     }
 
     #[test]
@@ -1187,19 +1372,39 @@ show_session_program = false
     }
 
     #[test]
-    fn test_commander_program_falls_back_to_default_program() {
+    fn test_hibernation_defaults() {
+        let config = Config::default();
+        assert!(!config.hibernate_enabled);
+        assert_eq!(config.hibernate_idle_timeout_secs, 86400);
+        assert_eq!(config.hibernate_check_interval_secs, 600);
+    }
+
+    #[test]
+    fn test_hibernation_fields_default_when_absent_from_toml() {
+        // A config file written before this feature omits the fields; they must
+        // fall back to the defaults rather than failing to parse.
+        let config: Config = toml::from_str("default_program = \"claude\"").unwrap();
+        assert!(!config.hibernate_enabled);
+        assert_eq!(config.hibernate_idle_timeout_secs, 86400);
+        assert_eq!(config.hibernate_check_interval_secs, 600);
+    }
+
+    #[test]
+    fn test_commander_program_falls_back_to_first_program() {
         let config = Config {
-            default_program: "claude".to_string(),
+            programs: vec![ProgramEntry {
+                label: "Codex".to_string(),
+                command: "codex".to_string(),
+            }],
             commander_program: None,
             ..Config::default()
         };
-        assert_eq!(config.commander_program(), "claude");
+        assert_eq!(config.commander_program(), "codex");
     }
 
     #[test]
     fn test_commander_program_override_wins() {
         let config = Config {
-            default_program: "claude".to_string(),
             commander_program: Some("claude --model opus-4-7".to_string()),
             ..Config::default()
         };
@@ -1207,16 +1412,12 @@ show_session_program = false
     }
 
     #[test]
-    fn test_program_choices_synthesises_from_default_when_empty() {
-        let config = Config {
-            default_program: "codex".to_string(),
-            programs: Vec::new(),
-            ..Config::default()
-        };
+    fn test_program_choices_synthesises_claude_when_empty() {
+        let config = Config::default();
         let choices = config.program_choices();
         assert_eq!(choices.len(), 1);
-        assert_eq!(choices[0].label, "codex");
-        assert_eq!(choices[0].command, "codex");
+        assert_eq!(choices[0].label, "claude");
+        assert_eq!(choices[0].command, "claude");
         // Synthesised single entry is the default selection.
         assert_eq!(config.default_program_index(), 0);
     }
@@ -1224,7 +1425,6 @@ show_session_program = false
     #[test]
     fn test_program_choices_returns_configured_list() {
         let config = Config {
-            default_program: "codex".to_string(),
             programs: vec![
                 ProgramEntry {
                     label: "Claude".to_string(),
@@ -1239,14 +1439,13 @@ show_session_program = false
         };
         let choices = config.program_choices();
         assert_eq!(choices.len(), 2);
-        // default_program points the picker at the matching entry.
-        assert_eq!(config.default_program_index(), 1);
+        assert_eq!(config.default_program_index(), 0);
+        assert_eq!(config.default_session_program(), "claude");
     }
 
     #[test]
-    fn test_default_program_index_falls_back_to_first_when_unmatched() {
+    fn test_default_program_index_is_first() {
         let config = Config {
-            default_program: "aider".to_string(),
             programs: vec![
                 ProgramEntry {
                     label: "Claude".to_string(),
@@ -1265,8 +1464,6 @@ show_session_program = false
     #[test]
     fn test_programs_deserialise_from_toml() {
         let toml = "\
-default_program = \"codex\"
-
 [[programs]]
 label = \"Claude\"
 command = \"claude\"

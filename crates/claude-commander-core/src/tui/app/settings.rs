@@ -14,11 +14,6 @@ impl App {
                 with_section_spacers(vec![
                     SettingsRow::header("Sessions & Worktrees"),
                     SettingsRow::text(
-                        "Default Program",
-                        c.default_program.clone(),
-                        "default_program",
-                    ),
-                    SettingsRow::text(
                         "Branch Prefix",
                         if c.branch_prefix.is_empty() {
                             "(none)".to_string()
@@ -46,8 +41,24 @@ impl App {
                         c.fetch_before_create,
                         "fetch_before_create",
                     ),
+                    SettingsRow::toggle("Skip LFS Smudge", c.skip_lfs_smudge, "skip_lfs_smudge"),
                     SettingsRow::toggle("Resume Session", c.resume_session, "resume_session"),
                     SettingsRow::toggle("Nix Develop", c.nix_develop, "nix_develop"),
+                    SettingsRow::toggle(
+                        "Hibernate Idle Sessions",
+                        c.hibernate_enabled,
+                        "hibernate_enabled",
+                    ),
+                    SettingsRow::text(
+                        "Hibernate Idle Timeout (s)",
+                        c.hibernate_idle_timeout_secs.to_string(),
+                        "hibernate_idle_timeout_secs",
+                    ),
+                    SettingsRow::text(
+                        "Hibernate Check Interval (s)",
+                        c.hibernate_check_interval_secs.to_string(),
+                        "hibernate_check_interval_secs",
+                    ),
                     SettingsRow::text(
                         "In Progress WIP Limit",
                         c.in_progress_limit
@@ -222,6 +233,9 @@ impl App {
             SettingsTab::Sections => {
                 vec![]
             }
+            SettingsTab::Programs => {
+                vec![]
+            }
             SettingsTab::Keybindings => {
                 // Grouped into logical sections (see `BindableAction::section`),
                 // each preceded by a non-selectable header row and a blank
@@ -375,6 +389,8 @@ impl App {
 
         if state.tab == SettingsTab::Sections {
             self.render_sections_tab(frame, body_area, footer_area, &state.sections_state);
+        } else if state.tab == SettingsTab::Programs {
+            self.render_programs_tab(frame, body_area, footer_area, &state.programs_state);
         } else {
             self.render_settings_rows(frame, body_area, footer_area, state);
         }
@@ -429,11 +445,7 @@ impl App {
         let value_width = rows_area.width.saturating_sub(label_width + 3);
 
         let visible_rows = rows_area.height as usize;
-        let scroll_offset = if state.selected_row >= visible_rows {
-            state.selected_row - visible_rows + 1
-        } else {
-            0
-        };
+        let scroll_offset = list_scroll_offset(state.selected_row, visible_rows);
 
         // Check if the OptionPicker is active and how many rows it occupies
         let picker_info: Option<(usize, &[String], usize)> =
@@ -664,6 +676,25 @@ impl App {
         );
     }
 
+    /// Draw the full-height `│` divider between the list and detail panes of a
+    /// two-pane settings tab (Sections / Programs).
+    fn render_settings_divider(&self, frame: &mut Frame, divider_area: Rect) {
+        for row in 0..divider_area.height {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "│",
+                    Style::default().fg(self.theme.border_unfocused),
+                )),
+                Rect {
+                    x: divider_area.x,
+                    y: divider_area.y + row,
+                    width: 1,
+                    height: 1,
+                },
+            );
+        }
+    }
+
     fn render_sections_tab(
         &self,
         frame: &mut Frame,
@@ -694,21 +725,7 @@ impl App {
         };
 
         // --- Divider ---
-        for row in 0..body_area.height {
-            let y = divider_area.y + row;
-            frame.render_widget(
-                Paragraph::new(Span::styled(
-                    "│",
-                    Style::default().fg(self.theme.border_unfocused),
-                )),
-                Rect {
-                    x: divider_area.x,
-                    y,
-                    width: 1,
-                    height: 1,
-                },
-            );
-        }
+        self.render_settings_divider(frame, divider_area);
 
         // --- Section list ---
         if let Some(SectionsEditing::CreatingSection { value }) = &sec.editing {
@@ -740,11 +757,7 @@ impl App {
             );
         } else {
             let visible = list_area.height as usize;
-            let scroll = if sec.selected_section >= visible {
-                sec.selected_section - visible + 1
-            } else {
-                0
-            };
+            let scroll = list_scroll_offset(sec.selected_section, visible);
             for (i, section) in sections.iter().enumerate().skip(scroll).take(visible) {
                 let y = list_area.y + (i - scroll) as u16;
                 let is_selected = i == sec.selected_section;
@@ -895,7 +908,6 @@ impl App {
     pub(super) fn apply_settings_edit(&mut self, tab: SettingsTab, field_key: &str, value: &str) {
         match tab {
             SettingsTab::General => match field_key {
-                "default_program" => self.config.default_program = value.to_string(),
                 "branch_prefix" => self.config.branch_prefix = value.to_string(),
                 "shell_program" => self.config.shell_program = value.to_string(),
                 "worktrees_dir" => {
@@ -936,6 +948,30 @@ impl App {
                         self.config.pr_check_interval_secs = v;
                     }
                 }
+                "hibernate_idle_timeout_secs" => match value.parse::<u64>() {
+                    Ok(v) if v >= 60 => {
+                        self.config.hibernate_idle_timeout_secs = v;
+                    }
+                    Ok(_) => {
+                        self.ui_state.status_message = Some((
+                            "Hibernate Idle Timeout must be at least 60 seconds".into(),
+                            std::time::Instant::now() + std::time::Duration::from_secs(4),
+                        ));
+                    }
+                    Err(_) => {}
+                },
+                "hibernate_check_interval_secs" => match value.parse::<u64>() {
+                    Ok(v) if v >= 10 => {
+                        self.config.hibernate_check_interval_secs = v;
+                    }
+                    Ok(_) => {
+                        self.ui_state.status_message = Some((
+                            "Hibernate Check Interval must be at least 10 seconds".into(),
+                            std::time::Instant::now() + std::time::Duration::from_secs(4),
+                        ));
+                    }
+                    Err(_) => {}
+                },
                 "project_pull_interval_secs" => match value.parse::<u64>() {
                     Ok(v) if v >= 60 => {
                         self.config.project_pull_interval_secs = v;
@@ -1181,6 +1217,10 @@ impl App {
                 // Sections tab handles its own persistence via save_sections_config
                 return;
             }
+            SettingsTab::Programs => {
+                // Programs tab handles its own persistence in handle_programs_key
+                return;
+            }
         }
 
         self.persist_config();
@@ -1194,7 +1234,9 @@ impl App {
         match field_key {
             "per_repo_worktree_dirs" => self.config.per_repo_worktree_dirs = value,
             "fetch_before_create" => self.config.fetch_before_create = value,
+            "skip_lfs_smudge" => self.config.skip_lfs_smudge = value,
             "resume_session" => self.config.resume_session = value,
+            "hibernate_enabled" => self.config.hibernate_enabled = value,
             "nix_develop" => self.config.nix_develop = value,
             "project_pull_enabled" => self.config.project_pull_enabled = value,
             "dim_unfocused_preview" => self.config.dim_unfocused_preview = value,
@@ -1225,6 +1267,19 @@ impl App {
         }
     }
 
+    /// Switch the settings modal to the next (`forward`) or previous tab,
+    /// rebuilding its rows and resetting the selection to the first selectable
+    /// row. The caller restores the modal afterwards.
+    fn switch_settings_tab(&self, state: &mut SettingsState, forward: bool) {
+        state.tab = if forward {
+            state.tab.next()
+        } else {
+            state.tab.prev()
+        };
+        state.rows = self.build_settings_rows(state.tab);
+        state.selected_row = first_selectable_from(&state.rows, 0);
+    }
+
     /// Handle a keypress in the settings modal.
     pub(super) async fn handle_settings_key(
         &mut self,
@@ -1235,6 +1290,11 @@ impl App {
 
         if state.tab == SettingsTab::Sections {
             self.handle_sections_key(key, state).await;
+            return;
+        }
+
+        if state.tab == SettingsTab::Programs {
+            self.handle_programs_key(key, state);
             return;
         }
 
@@ -1372,15 +1432,11 @@ impl App {
                         self.ui_state.modal = Modal::None;
                     }
                     KeyCode::Tab => {
-                        state.tab = state.tab.next();
-                        state.rows = self.build_settings_rows(state.tab);
-                        state.selected_row = first_selectable_from(&state.rows, 0);
+                        self.switch_settings_tab(&mut state, true);
                         self.ui_state.modal = Modal::Settings(state);
                     }
                     KeyCode::BackTab => {
-                        state.tab = state.tab.prev();
-                        state.rows = self.build_settings_rows(state.tab);
-                        state.selected_row = first_selectable_from(&state.rows, 0);
+                        self.switch_settings_tab(&mut state, false);
                         self.ui_state.modal = Modal::Settings(state);
                     }
                     KeyCode::Enter => {
@@ -1603,15 +1659,11 @@ impl App {
                             self.ui_state.modal = Modal::None;
                         }
                         KeyCode::Tab => {
-                            state.tab = state.tab.next();
-                            state.rows = self.build_settings_rows(state.tab);
-                            state.selected_row = first_selectable_from(&state.rows, 0);
+                            self.switch_settings_tab(&mut state, true);
                             self.ui_state.modal = Modal::Settings(state);
                         }
                         KeyCode::BackTab => {
-                            state.tab = state.tab.prev();
-                            state.rows = self.build_settings_rows(state.tab);
-                            state.selected_row = first_selectable_from(&state.rows, 0);
+                            self.switch_settings_tab(&mut state, false);
                             self.ui_state.modal = Modal::Settings(state);
                         }
                         KeyCode::Right | KeyCode::Enter => {
@@ -1710,15 +1762,11 @@ impl App {
                             self.ui_state.modal = Modal::Settings(state);
                         }
                         KeyCode::Tab => {
-                            state.tab = state.tab.next();
-                            state.rows = self.build_settings_rows(state.tab);
-                            state.selected_row = first_selectable_from(&state.rows, 0);
+                            self.switch_settings_tab(&mut state, true);
                             self.ui_state.modal = Modal::Settings(state);
                         }
                         KeyCode::BackTab => {
-                            state.tab = state.tab.prev();
-                            state.rows = self.build_settings_rows(state.tab);
-                            state.selected_row = first_selectable_from(&state.rows, 0);
+                            self.switch_settings_tab(&mut state, false);
                             self.ui_state.modal = Modal::Settings(state);
                         }
                         KeyCode::Enter => {
@@ -1753,6 +1801,546 @@ impl App {
             warn!("Failed to save sections config: {}", e);
         }
         self.reconcile_section_assignments().await;
+    }
+
+    /// Handle a keypress while the Programs tab is active.
+    fn handle_programs_key(&mut self, key: crossterm::event::KeyEvent, mut state: SettingsState) {
+        use crossterm::event::KeyCode;
+
+        let prog = &mut state.programs_state;
+
+        // --- Editing mode ---
+        if let Some(ref mut editing) = prog.editing {
+            match editing {
+                ProgramsEditing::RenamingLabel { value } => match key.code {
+                    KeyCode::Enter => {
+                        let new_label = value.value().trim().to_string();
+                        if !new_label.is_empty() && prog.selected < self.config.programs.len() {
+                            let has_dup = self
+                                .config
+                                .programs
+                                .iter()
+                                .enumerate()
+                                .any(|(i, p)| i != prog.selected && p.label == new_label);
+                            if !has_dup {
+                                self.config.programs[prog.selected].label = new_label;
+                                self.persist_config();
+                            }
+                        }
+                        prog.editing = None;
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Esc => {
+                        prog.editing = None;
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    _ => {
+                        super::edit_text_input(value, key);
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                },
+                ProgramsEditing::EditingField { value } => match key.code {
+                    KeyCode::Enter => {
+                        let val = value.value().trim().to_string();
+                        if prog.selected < self.config.programs.len() {
+                            if prog.field_selected == 0 {
+                                // Label: reject empty and duplicates.
+                                let has_dup = self
+                                    .config
+                                    .programs
+                                    .iter()
+                                    .enumerate()
+                                    .any(|(i, p)| i != prog.selected && p.label == val);
+                                if !val.is_empty() && !has_dup {
+                                    self.config.programs[prog.selected].label = val;
+                                    self.persist_config();
+                                }
+                            } else {
+                                // Command: reject empty.
+                                if !val.is_empty() {
+                                    self.config.programs[prog.selected].command = val;
+                                    self.persist_config();
+                                }
+                            }
+                        }
+                        prog.editing = None;
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Esc => {
+                        prog.editing = None;
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    _ => {
+                        super::edit_text_input(value, key);
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                },
+                ProgramsEditing::CreatingLabel { value } => match key.code {
+                    KeyCode::Enter => {
+                        let label = value.value().trim().to_string();
+                        let has_dup = self.config.programs.iter().any(|p| p.label == label);
+                        if !label.is_empty() && !has_dup {
+                            // Advance to the command step, prefilled with the label
+                            // (the common case is command == label).
+                            prog.editing = Some(ProgramsEditing::CreatingCommand {
+                                value: label.clone().into(),
+                                label,
+                            });
+                        } else {
+                            // Reject empty/duplicate labels by closing the editor,
+                            // mirroring the Sections tab's CreatingSection.
+                            prog.editing = None;
+                        }
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Esc => {
+                        prog.editing = None;
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    _ => {
+                        super::edit_text_input(value, key);
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                },
+                ProgramsEditing::CreatingCommand { label, value } => match key.code {
+                    KeyCode::Enter => {
+                        let command = value.value().trim().to_string();
+                        if !command.is_empty() {
+                            self.config.programs.push(crate::config::ProgramEntry {
+                                label: label.clone(),
+                                command,
+                            });
+                            prog.selected = self.config.programs.len() - 1;
+                            self.persist_config();
+                        }
+                        prog.editing = None;
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Esc => {
+                        prog.editing = None;
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    _ => {
+                        super::edit_text_input(value, key);
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                },
+            }
+            return;
+        }
+
+        // --- Navigation mode ---
+        let programs_len = self.config.programs.len();
+
+        match prog.focus {
+            ProgramsFocus::List => {
+                use crate::config::keybindings::BindableAction;
+
+                match self.config.keybindings.resolve(&key) {
+                    Some(BindableAction::NavigateDown) => {
+                        if programs_len > 0 {
+                            prog.selected = (prog.selected + 1) % programs_len;
+                            prog.field_selected = 0;
+                        }
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    Some(BindableAction::NavigateUp) => {
+                        if programs_len > 0 {
+                            prog.selected = if prog.selected == 0 {
+                                programs_len - 1
+                            } else {
+                                prog.selected - 1
+                            };
+                            prog.field_selected = 0;
+                        }
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    Some(BindableAction::Quit) => {
+                        self.ui_state.modal = Modal::None;
+                    }
+                    _ => match key.code {
+                        KeyCode::Esc => {
+                            self.ui_state.modal = Modal::None;
+                        }
+                        KeyCode::Tab => {
+                            self.switch_settings_tab(&mut state, true);
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        KeyCode::BackTab => {
+                            self.switch_settings_tab(&mut state, false);
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        KeyCode::Right | KeyCode::Enter => {
+                            if programs_len > 0 {
+                                prog.focus = ProgramsFocus::Fields;
+                                prog.field_selected = 0;
+                            }
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        KeyCode::Char('n') => {
+                            prog.editing = Some(ProgramsEditing::CreatingLabel {
+                                value: super::Input::default(),
+                            });
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        KeyCode::Char('r') => {
+                            if prog.selected < programs_len {
+                                let current = self.config.programs[prog.selected].label.clone();
+                                prog.editing = Some(ProgramsEditing::RenamingLabel {
+                                    value: current.into(),
+                                });
+                            }
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        KeyCode::Char('d') => {
+                            if prog.selected < programs_len {
+                                self.config.programs.remove(prog.selected);
+                                if prog.selected >= self.config.programs.len() && prog.selected > 0
+                                {
+                                    prog.selected -= 1;
+                                }
+                                self.persist_config();
+                            }
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        KeyCode::Char('J') => {
+                            if prog.selected + 1 < programs_len {
+                                self.config.programs.swap(prog.selected, prog.selected + 1);
+                                prog.selected += 1;
+                                self.persist_config();
+                            }
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        KeyCode::Char('K') => {
+                            if prog.selected > 0 && programs_len > 0 {
+                                self.config.programs.swap(prog.selected, prog.selected - 1);
+                                prog.selected -= 1;
+                                self.persist_config();
+                            }
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        _ => {
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                    },
+                }
+            }
+            ProgramsFocus::Fields => {
+                use crate::config::keybindings::BindableAction;
+
+                match self.config.keybindings.resolve(&key) {
+                    Some(BindableAction::NavigateDown | BindableAction::NavigateUp) => {
+                        // Only two fields (label / command): toggle between them.
+                        prog.field_selected = 1 - prog.field_selected;
+                        self.ui_state.modal = Modal::Settings(state);
+                    }
+                    Some(BindableAction::Quit) => {
+                        self.ui_state.modal = Modal::None;
+                    }
+                    _ => match key.code {
+                        KeyCode::Esc | KeyCode::Left => {
+                            prog.focus = ProgramsFocus::List;
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        KeyCode::Tab => {
+                            self.switch_settings_tab(&mut state, true);
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        KeyCode::BackTab => {
+                            self.switch_settings_tab(&mut state, false);
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        KeyCode::Enter => {
+                            if prog.selected < programs_len {
+                                let entry = &self.config.programs[prog.selected];
+                                let current = if prog.field_selected == 0 {
+                                    entry.label.clone()
+                                } else {
+                                    entry.command.clone()
+                                };
+                                prog.editing = Some(ProgramsEditing::EditingField {
+                                    value: current.into(),
+                                });
+                            }
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                        _ => {
+                            self.ui_state.modal = Modal::Settings(state);
+                        }
+                    },
+                }
+            }
+        }
+    }
+
+    fn render_programs_tab(
+        &self,
+        frame: &mut Frame,
+        body_area: Rect,
+        footer_area: Rect,
+        prog: &ProgramsState,
+    ) {
+        let programs = &self.config.programs;
+        let list_width = body_area.width.clamp(16, 28);
+        let divider_width = 1_u16;
+        let detail_width = body_area
+            .width
+            .saturating_sub(list_width + divider_width + 1);
+
+        let list_area = Rect {
+            width: list_width,
+            ..body_area
+        };
+        let divider_area = Rect {
+            x: body_area.x + list_width,
+            width: divider_width,
+            ..body_area
+        };
+        let detail_area = Rect {
+            x: body_area.x + list_width + divider_width + 1,
+            width: detail_width,
+            ..body_area
+        };
+
+        // --- Divider ---
+        self.render_settings_divider(frame, divider_area);
+
+        // --- Program list ---
+        if let Some(ProgramsEditing::CreatingLabel { value }) = &prog.editing {
+            let visible = list_area.height as usize;
+            let name_rows = programs.len().min(visible.saturating_sub(1));
+            for (i, entry) in programs.iter().enumerate().take(name_rows) {
+                let y = list_area.y + i as u16;
+                let style = Style::default().fg(self.theme.text_secondary);
+                let label = truncate_str(&entry.label, list_width as usize - 2);
+                frame.render_widget(
+                    Paragraph::new(Span::styled(format!("  {label}"), style)),
+                    Rect {
+                        y,
+                        height: 1,
+                        ..list_area
+                    },
+                );
+            }
+            let input_y = list_area.y + name_rows as u16;
+            let input_style = self.theme.selection().add_modifier(Modifier::UNDERLINED);
+            let display = format!("  {}", super::input_with_caret(value));
+            frame.render_widget(
+                Paragraph::new(Span::styled(display, input_style)),
+                Rect {
+                    y: input_y,
+                    height: 1,
+                    ..list_area
+                },
+            );
+        } else {
+            let visible = list_area.height as usize;
+            let scroll = list_scroll_offset(prog.selected, visible);
+            for (i, entry) in programs.iter().enumerate().skip(scroll).take(visible) {
+                let y = list_area.y + (i - scroll) as u16;
+                let is_selected = i == prog.selected;
+                let is_focused = prog.focus == ProgramsFocus::List;
+
+                let style = if is_selected && is_focused {
+                    self.theme.selection()
+                } else if is_selected {
+                    Style::default()
+                        .fg(self.theme.text_primary)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(self.theme.text_secondary)
+                };
+
+                let prefix = if is_selected { "▸ " } else { "  " };
+                let is_renaming = is_selected
+                    && matches!(prog.editing, Some(ProgramsEditing::RenamingLabel { .. }));
+                let label = if is_renaming {
+                    if let Some(ProgramsEditing::RenamingLabel { value }) = &prog.editing {
+                        format!("{prefix}{}", super::input_with_caret(value))
+                    } else {
+                        String::new()
+                    }
+                } else {
+                    // Reserve room for the ` (default)` suffix on the first entry.
+                    let suffix_len = if i == 0 { " (default)".len() } else { 0 };
+                    let avail = (list_width as usize).saturating_sub(2 + suffix_len);
+                    let l = truncate_str(&entry.label, avail);
+                    format!("{prefix}{l}")
+                };
+
+                let row_style = if is_renaming {
+                    style.add_modifier(Modifier::UNDERLINED)
+                } else {
+                    style
+                };
+
+                frame.render_widget(
+                    Paragraph::new(Span::styled(label.clone(), row_style)),
+                    Rect {
+                        y,
+                        height: 1,
+                        ..list_area
+                    },
+                );
+
+                // Dim ` (default)` suffix on the first entry (not while renaming).
+                if i == 0 && !is_renaming {
+                    let used = label.chars().count() as u16;
+                    if used < list_width {
+                        frame.render_widget(
+                            Paragraph::new(Span::styled(
+                                " (default)",
+                                Style::default().fg(self.theme.text_secondary),
+                            )),
+                            Rect {
+                                x: list_area.x + used,
+                                y,
+                                width: list_width - used,
+                                height: 1,
+                            },
+                        );
+                    }
+                }
+            }
+
+            if programs.is_empty() {
+                frame.render_widget(
+                    Paragraph::new(Span::styled(
+                        "  (none — built-in claude)",
+                        Style::default().fg(self.theme.text_secondary),
+                    )),
+                    Rect {
+                        height: 1,
+                        ..list_area
+                    },
+                );
+            }
+        }
+
+        // --- Detail pane (right side) ---
+        // While creating a new entry the detail pane previews the pending
+        // label/command; otherwise it shows the selected entry's fields.
+        let pending_command = match &prog.editing {
+            Some(ProgramsEditing::CreatingCommand { label, value }) => Some((label.clone(), value)),
+            _ => None,
+        };
+
+        let detail_rows: Vec<(&str, String)> = if let Some((label, _)) = &pending_command {
+            vec![
+                ("label", label.clone()),
+                ("command", String::new()), // rendered as caret input below
+            ]
+        } else if !programs.is_empty() && prog.selected < programs.len() {
+            let entry = &programs[prog.selected];
+            vec![
+                ("label", entry.label.clone()),
+                ("command", entry.command.clone()),
+            ]
+        } else {
+            Vec::new()
+        };
+
+        let is_fields_focused = prog.focus == ProgramsFocus::Fields;
+        for (i, (label, value)) in detail_rows.iter().enumerate() {
+            if i as u16 >= detail_area.height {
+                break;
+            }
+            let y = detail_area.y + i as u16;
+            let is_selected = is_fields_focused && i == prog.field_selected;
+
+            let style = if is_selected {
+                self.theme.selection()
+            } else {
+                Style::default()
+            };
+
+            let label_w = 10_u16.min(detail_area.width);
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    format!("{:<w$}", label, w = label_w as usize),
+                    style,
+                )),
+                Rect {
+                    x: detail_area.x,
+                    y,
+                    width: label_w,
+                    height: 1,
+                },
+            );
+
+            if detail_area.width > label_w + 1 {
+                let val_x = detail_area.x + label_w + 1;
+                let val_w = detail_area.width.saturating_sub(label_w + 1);
+
+                // Which field, if any, is currently in an inline edit.
+                let editing_this = match &prog.editing {
+                    Some(ProgramsEditing::EditingField { value: v }) if is_selected => Some(v),
+                    Some(ProgramsEditing::CreatingCommand { value: v, .. }) if i == 1 => Some(v),
+                    _ => None,
+                };
+
+                let display_val = if let Some(v) = editing_this {
+                    super::input_with_caret(v)
+                } else {
+                    value.clone()
+                };
+
+                let val_style = if editing_this.is_some() {
+                    style.add_modifier(Modifier::UNDERLINED)
+                } else if is_selected {
+                    style
+                } else {
+                    style.fg(self.theme.text_accent)
+                };
+
+                frame.render_widget(
+                    Paragraph::new(Span::styled(display_val, val_style)),
+                    Rect {
+                        x: val_x,
+                        y,
+                        width: val_w,
+                        height: 1,
+                    },
+                );
+            }
+        }
+
+        // Dim hint below the fields.
+        let hint_y = detail_area.y + detail_rows.len() as u16 + 1;
+        if hint_y < detail_area.y + detail_area.height {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "First entry is the default for new sessions.",
+                    Style::default().fg(self.theme.text_secondary),
+                )),
+                Rect {
+                    x: detail_area.x,
+                    y: hint_y,
+                    width: detail_area.width,
+                    height: 1,
+                },
+            );
+        }
+
+        // --- Footer ---
+        let footer_text = match &prog.editing {
+            Some(ProgramsEditing::RenamingLabel { .. } | ProgramsEditing::EditingField { .. }) => {
+                "Enter: save  Esc: cancel"
+            }
+            Some(ProgramsEditing::CreatingLabel { .. }) => "Enter: next (command)  Esc: cancel",
+            Some(ProgramsEditing::CreatingCommand { .. }) => "Enter: create  Esc: cancel",
+            None if prog.focus == ProgramsFocus::List => {
+                "n: new  r: rename  d: delete  J/K: reorder  →/Enter: fields  Tab: switch tab"
+            }
+            None => "Enter: edit  ←: back to list  Tab: switch tab",
+        };
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                footer_text,
+                Style::default().fg(self.theme.text_secondary),
+            )),
+            footer_area,
+        );
     }
 }
 
@@ -1993,6 +2581,16 @@ fn settings_label_width(rows: &[SettingsRow], area_width: u16) -> u16 {
     // the label below its floor (on a very narrow terminal labels truncate).
     let cap = area_width.saturating_sub(MIN_VALUE + GAP).max(MIN_LABEL);
     desired.min(cap)
+}
+
+/// Top scroll offset that keeps `selected` visible in a window `visible` rows
+/// tall: scroll only once the selection passes the bottom edge.
+fn list_scroll_offset(selected: usize, visible: usize) -> usize {
+    if selected >= visible {
+        selected - visible + 1
+    } else {
+        0
+    }
 }
 
 /// Index of the first selectable row at or after `from`, wrapping to the start
@@ -2272,10 +2870,15 @@ mod tests {
 
     #[test]
     fn settings_tab_cycle_includes_conversation() {
-        assert_eq!(SettingsTab::ALL.len(), 5);
+        assert_eq!(SettingsTab::ALL.len(), 6);
         assert!(SettingsTab::ALL.contains(&SettingsTab::Conversation));
+        assert!(SettingsTab::ALL.contains(&SettingsTab::Programs));
         assert_eq!(SettingsTab::General.next(), SettingsTab::Conversation);
         assert_eq!(SettingsTab::Conversation.prev(), SettingsTab::General);
+        // Programs sits after Sections and wraps back to General.
+        assert_eq!(SettingsTab::Sections.next(), SettingsTab::Programs);
+        assert_eq!(SettingsTab::Programs.next(), SettingsTab::General);
+        assert_eq!(SettingsTab::General.prev(), SettingsTab::Programs);
         // A full forward cycle returns to the start.
         let mut t = SettingsTab::General;
         for _ in 0..SettingsTab::ALL.len() {
@@ -2283,5 +2886,6 @@ mod tests {
         }
         assert_eq!(t, SettingsTab::General);
         assert_eq!(SettingsTab::Conversation.label(), "Conversation");
+        assert_eq!(SettingsTab::Programs.label(), "Programs");
     }
 }

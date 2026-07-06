@@ -77,7 +77,7 @@ impl ConfigSnapshot {
         Self {
             theme_preset: config.theme.preset.clone(),
             view_mode: view_mode.map(view_mode_name).map(str::to_string),
-            default_program: program_basename(&config.default_program),
+            default_program: program_basename(&config.default_session_program()),
             commander_enabled: config.commander_enabled,
             conversation_enabled: config.conversation.enabled,
             stt_enabled: config.stt.enabled,
@@ -167,7 +167,10 @@ mod tests {
     fn config_snapshot_maps_fields_and_omits_paths() {
         let mut config = Config::default();
         config.theme.preset = Some("rose-pine".into());
-        config.default_program = "/home/alice/bin/claude --model opus".into();
+        config.programs = vec![crate::config::ProgramEntry {
+            label: "Claude Opus".into(),
+            command: "/home/alice/bin/claude --model opus".into(),
+        }];
         config.commander_enabled = true;
         config.conversation.enabled = true;
         // A path that must never appear in the snapshot.

@@ -179,6 +179,12 @@ impl App {
                 // left a remote create half-landed (no reconcile, no selection).
                 self.reconcile_one_section_assignment(backend_id, session_id)
                     .await;
+                // Materialise LFS content in the background (worktree was
+                // created with smudging skipped). Inserts into lfs_pull_in_flight
+                // before the refresh below so the marker shows on first paint.
+                // Self-guards to local sessions (remote worktrees are
+                // server-side; the id won't resolve in the local view).
+                self.spawn_lfs_pull(session_id).await;
                 self.refresh_list_items().await;
                 // Select the newly created session
                 self.select_session_in_tree(session_id);
@@ -445,6 +451,12 @@ impl App {
             StateUpdate::CascadeAbandonFinished { backend_id, result } => {
                 self.handle_cascade_abandon_finished(BackendId(backend_id), result);
             }
+            StateUpdate::LfsPullFinished { session_id } => {
+                if self.ui_state.lfs_pull_in_flight.remove(&session_id) {
+                    debug!("lfs pull finished for {}", session_id);
+                    self.refresh_list_items().await;
+                }
+            }
             _ => {}
         }
     }
@@ -567,6 +579,20 @@ impl App {
                 ),
             };
             items.append(&mut backend_items);
+        }
+
+        // Mark rows whose LFS content is still being pulled in the background.
+        // Sourced from UiState (not the persisted session) so it survives the
+        // store's read-modify-write cycle untouched.
+        if !self.ui_state.lfs_pull_in_flight.is_empty() {
+            for item in &mut items {
+                if let SessionListItem::Worktree {
+                    id, lfs_pulling, ..
+                } = item
+                {
+                    *lfs_pulling = self.ui_state.lfs_pull_in_flight.contains(id);
+                }
+            }
         }
 
         let selectable: Vec<bool> = items.iter().map(|i| i.is_selectable()).collect();
@@ -797,6 +823,10 @@ fn worktree_item(
         created_at: session.created_at,
         agent_state: agent_states.get(&session.session_id).copied(),
         unread: session.unread,
+        keep_alive: session.keep_alive,
+        // Set by refresh_list_items from UiState::lfs_pull_in_flight after the
+        // items are built.
+        lfs_pulling: false,
         stacked_child,
     }
 }

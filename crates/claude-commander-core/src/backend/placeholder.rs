@@ -150,6 +150,10 @@ impl CommanderBackend for PlaceholderBackend {
         self.unavailable()
     }
 
+    async fn toggle_keep_alive(&self, _id: SessionId) -> BResult<bool> {
+        self.unavailable()
+    }
+
     async fn mark_unread(&self, _ids: Vec<SessionId>) -> BResult<()> {
         self.unavailable()
     }

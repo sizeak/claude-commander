@@ -20,7 +20,7 @@ impl SessionManager {
     pub async fn ensure_attachable(&self, session_id: &SessionId) -> Result<String> {
         info!("ensure_attachable called for session: {}", session_id);
 
-        let (tmux_name, worktree_path, title, program, status_bar) = {
+        let (tmux_name, worktree_path, title, program, hibernated, status_bar) = {
             let state = self.store.read().await;
             let session = state
                 .get_session(session_id)
@@ -41,6 +41,7 @@ impl SessionManager {
                 session.worktree_path.clone(),
                 session.title.clone(),
                 session.program.clone(),
+                session.hibernated,
                 self.status_bar_info(session, &state),
             )
         };
@@ -68,16 +69,12 @@ impl SessionManager {
         };
 
         if needs_recreate {
-            // Recreate the tmux session, resuming the prior agent session if
-            // configured so the agent picks up where it left off. Resume syntax
-            // is harness-specific; an unrecognised program launches fresh.
-            let resume_program = if self.config_store.read().resume_session {
-                crate::agent::AgentKind::from_program(&program)
-                    .resume_command(&program)
-                    .unwrap_or_else(|| program.clone())
-            } else {
-                program.clone()
-            };
+            // Recreate the tmux session, resuming the prior agent session when
+            // configured, or unconditionally when it was auto-hibernated (resume
+            // is what makes hibernation non-destructive). Resume syntax is
+            // harness-specific; an unrecognised program launches fresh.
+            let force_resume = self.config_store.read().resume_session || hibernated;
+            let resume_program = super::lifecycle::resume_program_for(&program, force_resume);
             let resume_program =
                 super::lifecycle::program_with_session_name(&resume_program, &title);
             let resume_program = self.maybe_wrap_nix_develop(&resume_program, &worktree_path);
@@ -91,12 +88,15 @@ impl SessionManager {
                 .configure_status_bar(&tmux_name, &status_bar)
                 .await;
 
+            // Mark Running and clear the hibernation marker — the pane is live
+            // and resumed, so a future wake shouldn't force resume again.
             let sid = *session_id;
             let _ = self
                 .store
                 .mutate(move |state| {
                     if let Some(session) = state.get_session_mut(&sid) {
                         session.set_status(SessionStatus::Running);
+                        session.hibernated = false;
                     }
                 })
                 .await;

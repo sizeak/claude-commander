@@ -261,6 +261,24 @@ impl TmuxExecutor {
         Ok(output.trim() == "1")
     }
 
+    /// Whether any client is currently attached to the session. Used by the
+    /// hibernation policy to avoid stopping a session the user is viewing.
+    /// `#{session_attached}` is the count of attached clients, so any non-zero
+    /// value means attached. Callers should treat an `Err` conservatively (as
+    /// attached) so a detection failure never triggers hibernation.
+    pub async fn is_session_attached(&self, session_name: &str) -> Result<bool> {
+        let output = self
+            .execute(&[
+                "display-message",
+                "-p",
+                "-t",
+                session_name,
+                "#{session_attached}",
+            ])
+            .await?;
+        Ok(parse_session_attached(&output))
+    }
+
     /// Send keys to a tmux session
     pub async fn send_keys(&self, session_name: &str, keys: &str) -> Result<()> {
         self.execute(&["send-keys", "-t", session_name, keys])
@@ -388,12 +406,20 @@ impl Default for TmuxExecutor {
 ///
 /// tmux prints `can't find session: NAME` when the target session is absent,
 /// and `no server running on PATH` when there's no server at all (so, no
-/// sessions). Anything else — `server exited unexpectedly`, `lost server`,
-/// resource errors — is a failure we must NOT mistake for absence, or the
-/// state reconciler will wrongly mark a live session as Stopped.
+/// sessions). When the server is running but has *no sessions left* (e.g. the
+/// only session was just killed), `has-session -t NAME` can't anchor the target
+/// and fails with `no current target` / `no current session` instead — which
+/// still means the named session doesn't exist. Anything else — `server exited
+/// unexpectedly`, `lost server`, resource errors — is a failure we must NOT
+/// mistake for absence, or the state reconciler will wrongly mark a live
+/// session as Stopped.
 fn stderr_means_session_absent(stderr: &str) -> bool {
     let s = stderr.to_ascii_lowercase();
-    if s.contains("can't find session") || s.contains("no server running") {
+    if s.contains("can't find session")
+        || s.contains("no server running")
+        || s.contains("no current target")
+        || s.contains("no current session")
+    {
         return true;
     }
     // No tmux server has started at all: the socket file is missing, so
@@ -404,9 +430,38 @@ fn stderr_means_session_absent(stderr: &str) -> bool {
     s.contains("error connecting to") && s.contains("no such file")
 }
 
+/// Parse tmux's `#{session_attached}` client count into "is a client attached".
+///
+/// Conservative on unexpected output: an empty or unparsable value (seen on
+/// some tmux versions / client-handoff edge states) counts as **attached**, so
+/// a glitch never lets the hibernation loop kill a session out from under a
+/// user. The `execute` error path is likewise treated as attached by callers
+/// (`unwrap_or(true)`); this keeps the Ok-but-garbage path equally safe.
+fn parse_session_attached(output: &str) -> bool {
+    output.trim().parse::<u32>().map(|n| n > 0).unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_session_attached_counts() {
+        assert!(parse_session_attached("1"));
+        assert!(parse_session_attached("2"));
+        assert!(!parse_session_attached("0"));
+        assert!(!parse_session_attached(" 0\n"));
+        assert!(parse_session_attached(" 1 "));
+    }
+
+    #[test]
+    fn parse_session_attached_unparsable_is_conservatively_attached() {
+        // Empty / non-numeric output must NOT read as unattached, or a
+        // detection glitch could hibernate a session under an attached user.
+        assert!(parse_session_attached(""));
+        assert!(parse_session_attached("   "));
+        assert!(parse_session_attached("garbage"));
+    }
 
     #[tokio::test]
     async fn test_executor_creation() {
@@ -473,6 +528,12 @@ mod tests {
         assert!(stderr_means_session_absent(
             "error connecting to /tmp/tmux-1001/default (No such file or directory)"
         ));
+        // Server up but no sessions left (the only one was just killed): tmux
+        // can't resolve the target and says "no current target" rather than
+        // "can't find session". Still means the session is absent — must read
+        // as such so `ensure_session` recreates instead of erroring.
+        assert!(stderr_means_session_absent("no current target"));
+        assert!(stderr_means_session_absent("no current session"));
         // A transient connection failure tells us nothing about existence —
         // never mistake it for absence.
         assert!(!stderr_means_session_absent(

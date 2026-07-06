@@ -1200,6 +1200,9 @@ impl App {
             UserCommand::RestartSession => {
                 self.handle_restart_session();
             }
+            UserCommand::ToggleKeepAlive => {
+                self.handle_toggle_keep_alive().await;
+            }
             UserCommand::RemoveProject => {
                 self.handle_remove_project();
             }
@@ -1297,6 +1300,7 @@ impl App {
                     editing: None,
                     rows,
                     sections_state: SectionsState::default(),
+                    programs_state: ProgramsState::default(),
                     search: None,
                 });
             }

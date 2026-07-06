@@ -65,6 +65,21 @@ pub enum Commands {
         force: bool,
     },
 
+    /// Toggle (or explicitly set) keep-alive on a session, exempting it from
+    /// automatic idle-hibernation. With no flag, toggles the current value.
+    KeepAlive {
+        /// Session name or ID prefix
+        session: String,
+
+        /// Turn keep-alive on (never auto-hibernate this session)
+        #[arg(long, conflicts_with = "off")]
+        on: bool,
+
+        /// Turn keep-alive off (allow auto-hibernation when idle)
+        #[arg(long, conflicts_with = "on")]
+        off: bool,
+    },
+
     /// Dump recent terminal output from a session
     Log {
         /// Session name or ID prefix
@@ -99,6 +114,10 @@ pub enum Commands {
         /// Claude permission mode
         #[arg(short, long)]
         mode: Option<String>,
+
+        /// Model to run the agent with (Claude or Codex)
+        #[arg(long)]
+        model: Option<String>,
 
         /// Branch to fork from (default: origin/main)
         #[arg(short = 'b', long)]
@@ -180,6 +199,7 @@ mod tests {
             "config",
             "commander",
             "listen-toggle",
+            "keep-alive",
         ] {
             assert!(
                 names.contains(&expected),

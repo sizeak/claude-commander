@@ -136,6 +136,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // data via `/workspace` + `/agent-states` polls. Handles run for the process
     // lifetime; we don't need to hold them.
     let _background = service.spawn_background_tasks(BackgroundOpts { commander_enabled });
+    // The server is a long-lived frontend, so drive the idle-hibernation loop
+    // (no-op unless hibernate_enabled and the check interval is non-zero), just
+    // as the TUI does. Without this a server-only deployment — the many-idle-
+    // sessions case hibernation targets — would never hibernate.
+    service.start_hibernation_loop();
     let state = AppState::new(service, auth).with_cors(cfg.cors_allowed_origins.clone());
     let app = build_router(state);
 
