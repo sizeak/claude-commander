@@ -15,8 +15,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use claude_commander_core::api::{
     AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
-    OperationStatus, PreviewData, PreviewTarget, ReviewSnapshot, SessionDetail, ToggleReviewed,
-    WorkspaceSnapshot,
+    OperationStatus, PreviewData, PreviewTarget, ProgramInfo, ReviewSnapshot, SessionDetail,
+    SetProgramsRequest, ToggleReviewed, WorkspaceSnapshot,
 };
 use claude_commander_core::backend::{
     AttachConnection, AttachKind, BResult, BackendCapabilities, BackendChangeFeed,
@@ -234,6 +234,13 @@ impl RemoteInner {
     /// PATCH a JSON body, discarding the (204) response.
     async fn patch_json_ok<B: Serialize>(&self, url: Url, body: &B) -> BResult<()> {
         let response = self.send(self.client.patch(url).json(body)).await?;
+        self.check(response).await?;
+        Ok(())
+    }
+
+    /// PUT a JSON body, discarding the (204) response.
+    async fn put_json_ok<B: Serialize>(&self, url: Url, body: &B) -> BResult<()> {
+        let response = self.send(self.client.put(url).json(body)).await?;
         self.check(response).await?;
         Ok(())
     }
@@ -502,6 +509,15 @@ impl CommanderBackend for RemoteBackend {
     async fn create_options(&self) -> BResult<CreateOptions> {
         self.inner
             .get_json(self.inner.endpoint(&["create-options"]))
+            .await
+    }
+
+    async fn set_programs(&self, programs: Vec<ProgramInfo>) -> BResult<()> {
+        self.inner
+            .put_json_ok(
+                self.inner.endpoint(&["config", "programs"]),
+                &SetProgramsRequest { programs },
+            )
             .await
     }
 
@@ -924,6 +940,41 @@ mod tests {
         assert_eq!(snap.projects[0].id, pid);
         assert_eq!(snap.sessions.len(), 1);
         assert_eq!(snap.sessions[0].session_id, sid);
+    }
+
+    #[tokio::test]
+    async fn set_programs_round_trips_to_server_config() {
+        use claude_commander_core::api::ProgramInfo;
+
+        let (addr, service, _d, _w) = serve_disabled().await;
+        // A fresh server has no configured programs.
+        assert!(service.read_config().programs.is_empty());
+
+        let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
+        backend
+            .set_programs(vec![
+                ProgramInfo {
+                    label: "Claude (Opus)".to_string(),
+                    command: "claude --model opus".to_string(),
+                },
+                ProgramInfo {
+                    label: "Shell".to_string(),
+                    command: "bash".to_string(),
+                },
+            ])
+            .await
+            .unwrap();
+
+        // The PUT reached the server and rewrote its config; create_options
+        // (what a client fetches to build the picker) now reflects it.
+        let opts = service.create_options();
+        assert_eq!(opts.programs.len(), 2);
+        assert_eq!(opts.programs[0].command, "claude --model opus");
+        assert_eq!(opts.default_program, "claude --model opus");
+
+        // An empty list round-trips too.
+        backend.set_programs(vec![]).await.unwrap();
+        assert!(service.read_config().programs.is_empty());
     }
 
     #[tokio::test]

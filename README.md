@@ -197,6 +197,14 @@ name → URL → token with a connection test), or edit `[[remote_servers]]` in
 the config file directly — see [Configuration](docs/configuration.md). Changes
 hot-reload; no restart needed.
 
+Each server's **program list** (the new-session picker options) lives in that
+server's own config, so a fresh server offers only the built-in `claude` until
+you configure it. Edit it without leaving the TUI: click the ⚙ on a server's
+tree header, or run **"Edit server's program list…"** from the palette, to open
+Settings → Programs targeting that server. In the Programs tab, `t` cycles which
+backend (local or a remote server) you're editing; edits are saved to the chosen
+backend as you make them.
+
 ## Documentation
 
 - **[Usage guide](docs/usage.md)** — CLI commands, the session list, PR stacks (cascade merge / push stack), and AI summaries

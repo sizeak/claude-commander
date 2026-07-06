@@ -154,6 +154,23 @@ pub enum StateUpdate {
         project_id: ProjectId,
         picker: super::app::ProgramPicker,
     },
+    /// A remote backend's program list finished loading (or failed) for the
+    /// Settings → Programs tab. Applied only if that tab is still open for the
+    /// same `backend` and `gen` (a stale response for a superseded target is
+    /// dropped). Unlike [`Self::NewSessionProgramsLoaded`], this carries the
+    /// error so the tab can surface a failed fetch (it has no local fallback).
+    ServerProgramsLoaded {
+        backend: crate::backend::BackendId,
+        generation: u64,
+        result: std::result::Result<Vec<crate::config::ProgramEntry>, String>,
+    },
+    /// A background program-list PUT to a remote server failed. Surfaced as an
+    /// in-tab error if the Programs tab is still open for that backend (the
+    /// working copy is unaffected); otherwise logged, never hijacking the UI.
+    ServerProgramsSaveFailed {
+        backend: crate::backend::BackendId,
+        message: String,
+    },
     /// Preview/diff/shell data ready from background fetch
     PreviewReady {
         /// Which session this data is for (None if project-level)
@@ -306,6 +323,10 @@ pub enum UserCommand {
     ShowHelp,
     /// Show settings modal
     ShowSettings,
+    /// Open the settings modal on the Programs tab, targeting the currently
+    /// selected backend's program list (a server header, or the selected
+    /// session/project's server). Also the action bound to the server-header cog.
+    EditServerPrograms,
     /// Quit application
     Quit,
     /// Cancel current operation
@@ -429,6 +450,7 @@ impl UserCommand {
             UserCommand::TogglePane | UserCommand::TogglePaneReverse => Some("ui.toggle_pane"),
             UserCommand::ShowHelp => Some("ui.help"),
             UserCommand::ShowSettings => Some("ui.settings"),
+            UserCommand::EditServerPrograms => Some("ui.edit_server_programs"),
             UserCommand::QuickSwitch => Some("ui.quick_switch"),
             UserCommand::MoveToSection => Some("ui.move_to_section"),
             UserCommand::ToggleSection => Some("ui.toggle_section"),
@@ -475,6 +497,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::GrowLeftPane => Self::GrowLeftPane,
             BindableAction::ShowHelp => Self::ShowHelp,
             BindableAction::ShowSettings => Self::ShowSettings,
+            BindableAction::EditServerPrograms => Self::EditServerPrograms,
             BindableAction::Quit => Self::Quit,
             BindableAction::ScrollUp => Self::ScrollUp,
             BindableAction::ScrollDown => Self::ScrollDown,

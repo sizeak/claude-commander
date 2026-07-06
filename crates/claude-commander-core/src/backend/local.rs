@@ -15,8 +15,8 @@ use uuid::Uuid;
 
 use crate::api::{
     AgentStatesSnapshot, BranchInfo, CommanderService, CreateOptions, CreateSessionOpts, DiffSide,
-    NewComment, OperationStatus, PreviewData, PreviewTarget, ReviewSnapshot, SessionDetail,
-    WorkspaceSnapshot,
+    NewComment, OperationStatus, PreviewData, PreviewTarget, ProgramInfo, ReviewSnapshot,
+    SessionDetail, WorkspaceSnapshot,
 };
 use crate::comment::ApplyOutcome;
 use crate::session::{ProjectId, ScanResult, SessionId};
@@ -240,6 +240,12 @@ impl CommanderBackend for LocalBackend {
 
     async fn create_options(&self) -> BResult<CreateOptions> {
         Ok(self.service.create_options())
+    }
+
+    async fn set_programs(&self, programs: Vec<ProgramInfo>) -> BResult<()> {
+        Ok(self
+            .service
+            .set_programs(programs.into_iter().map(Into::into).collect())?)
     }
 
     async fn pending_comment_sessions(&self) -> BResult<Vec<SessionId>> {

@@ -13,6 +13,14 @@
 //! `programs`, …); restricting to a conservative set of benign
 //! UI/timing fields keeps those off-limits even though they remain readable via
 //! `GET /config`.
+//!
+//! The one program-launch field that IS remotely writable — `programs` — has its
+//! own dedicated route, `PUT /config/programs` ([`put_programs`]), rather than
+//! being folded into the general patch. This keeps the `ConfigPatch` allow-list
+//! locked down while letting a client edit the new-session picker list. It is not
+//! a new capability: any token-bearing client can already run an arbitrary
+//! command by passing `program` to `POST /sessions`, so the picker list is a
+//! convenience, not a security boundary.
 
 use axum::{
     Json,
@@ -21,6 +29,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use claude_commander_core::Config;
+use claude_commander_core::api::SetProgramsRequest;
 use claude_commander_core::error::SessionError;
 use serde::Deserialize;
 use serde_json::json;
@@ -43,7 +52,9 @@ pub async fn read(State(state): State<AppState>) -> Json<Config> {
 /// `commander_program`, `commander_enabled`, `nix_develop`), and complex nested
 /// tables (`keybindings`, `theme`, `sections`, `conversation`, `stt`,
 /// `telemetry`) are intentionally absent, so a request can neither set nor
-/// reset them. `deny_unknown_fields` means a body that even *mentions* such a
+/// reset them *here* — `programs` is editable, but only via its own dedicated
+/// route [`put_programs`], never this general patch.
+/// `deny_unknown_fields` means a body that even *mentions* such a
 /// field is rejected (400) rather than silently dropped — a clear signal to the
 /// caller that the field is off-limits.
 #[derive(Debug, Default, Deserialize)]
@@ -152,6 +163,20 @@ pub async fn update(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// `PUT /config/programs` → replace the configured program list wholesale → 204.
+///
+/// A dedicated write route for the one program-launch field that is remotely
+/// editable (see the module doc). An empty list is accepted (the picker then
+/// falls back to a synthesized `claude` entry).
+pub async fn put_programs(
+    State(state): State<AppState>,
+    Json(req): Json<SetProgramsRequest>,
+) -> Result<StatusCode, ApiError> {
+    let programs = req.programs.into_iter().map(Into::into).collect();
+    state.service.set_programs(programs)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// `POST /config/reload` → `reload_config` → `{ "reloaded": bool }`
 /// (true when the on-disk config differed and was re-read).
 pub async fn reload(State(state): State<AppState>) -> Result<Response, ApiError> {
@@ -175,7 +200,10 @@ pub async fn health_tmux(State(state): State<AppState>) -> StatusCode {
 mod tests {
     use axum::body::Body;
     use axum::http::Request;
-    use axum::{Router, routing::get};
+    use axum::{
+        Router,
+        routing::{get, put},
+    };
     use claude_commander_core::Config;
     use tempfile::TempDir;
 
@@ -185,11 +213,20 @@ mod tests {
     fn router(state: AppState) -> Router {
         Router::new()
             .route("/config", get(super::read).patch(super::update))
+            .route("/config/programs", put(super::put_programs))
             .with_state(state)
     }
 
     async fn patch(state: AppState, body: serde_json::Value) -> axum::http::StatusCode {
         let req = Request::patch("/config")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        send(router(state), req).await.0
+    }
+
+    async fn put_programs(state: AppState, body: serde_json::Value) -> axum::http::StatusCode {
+        let req = Request::put("/config/programs")
             .header("content-type", "application/json")
             .body(Body::from(body.to_string()))
             .unwrap();
@@ -293,5 +330,74 @@ mod tests {
 
         let after = state.service.read_config();
         assert_eq!(after.ui_refresh_fps, before.ui_refresh_fps);
+    }
+
+    /// `PUT /config/programs` replaces the program list, and the change is
+    /// reflected by the new-session options.
+    #[tokio::test]
+    async fn put_programs_updates_config_and_create_options() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        // A default config has no configured programs (create_options is verbatim).
+        assert_eq!(state.service.create_options().programs.len(), 0);
+
+        let status = put_programs(
+            state.clone(),
+            serde_json::json!({
+                "programs": [
+                    { "label": "Claude (Opus)", "command": "claude --model opus" },
+                    { "label": "Shell", "command": "bash" }
+                ]
+            }),
+        )
+        .await;
+        assert_eq!(status, 204);
+
+        let opts = state.service.create_options();
+        assert_eq!(opts.programs.len(), 2);
+        assert_eq!(opts.programs[0].command, "claude --model opus");
+        assert_eq!(opts.default_program, "claude --model opus");
+    }
+
+    /// An empty program list is accepted and persists as empty (the picker then
+    /// falls back to the synthesized `claude` entry).
+    #[tokio::test]
+    async fn put_programs_accepts_empty_list() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        // Seed a non-empty list first, then clear it.
+        assert_eq!(
+            put_programs(
+                state.clone(),
+                serde_json::json!({ "programs": [{ "label": "X", "command": "x" }] }),
+            )
+            .await,
+            204
+        );
+        assert_eq!(state.service.read_config().programs.len(), 1);
+
+        let status = put_programs(state.clone(), serde_json::json!({ "programs": [] })).await;
+        assert_eq!(status, 204);
+        assert!(state.service.read_config().programs.is_empty());
+    }
+
+    /// `programs` remains off-limits on the general PATCH surface: the dedicated
+    /// PUT route is the only way to edit it, and `deny_unknown_fields` still 4xxs
+    /// a patch body that names `programs`.
+    #[tokio::test]
+    async fn patch_still_rejects_programs_field() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+
+        let status = patch(
+            state.clone(),
+            serde_json::json!({ "programs": [{ "label": "X", "command": "evil" }] }),
+        )
+        .await;
+        assert!(
+            status.is_client_error(),
+            "patching `programs` via PATCH /config must be a 4xx, got {status}"
+        );
+        assert!(state.service.read_config().programs.is_empty());
     }
 }

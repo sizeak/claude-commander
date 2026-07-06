@@ -347,6 +347,17 @@ pub struct ProgramInfo {
     pub command: String,
 }
 
+/// Body for `PUT /config/programs`: replaces the server's configured program
+/// list wholesale. A dedicated endpoint (rather than `PATCH /config`) keeps the
+/// general config-patch allow-list locked down while still letting a client edit
+/// the picker list.
+///
+/// FLUTTER: mirror this DTO.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SetProgramsRequest {
+    pub programs: Vec<ProgramInfo>,
+}
+
 /// Options for the new-session dialog: the default program, the configured
 /// program list, and the configured section names.
 ///
@@ -637,6 +648,31 @@ mod tests {
         let b: BranchInfo = serde_json::from_str(r#"{"name":"main","is_remote":false}"#).unwrap();
         assert_eq!(b.name, "main");
         assert!(!b.is_remote);
+    }
+
+    #[test]
+    fn set_programs_request_round_trip() {
+        let req = SetProgramsRequest {
+            programs: vec![
+                ProgramInfo {
+                    label: "Claude (Opus)".to_string(),
+                    command: "claude --model opus".to_string(),
+                },
+                ProgramInfo {
+                    label: "Shell".to_string(),
+                    command: "bash".to_string(),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: SetProgramsRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.programs.len(), 2);
+        assert_eq!(back.programs[0].command, "claude --model opus");
+        assert_eq!(back.programs[1].label, "Shell");
+
+        // An empty list is a valid request (clears the picker to the fallback).
+        let empty: SetProgramsRequest = serde_json::from_str(r#"{"programs":[]}"#).unwrap();
+        assert!(empty.programs.is_empty());
     }
 
     #[test]

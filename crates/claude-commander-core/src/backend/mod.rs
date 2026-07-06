@@ -42,8 +42,8 @@ use uuid::Uuid;
 
 use crate::api::{
     AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
-    OperationStatus, PreviewData, PreviewTarget, ReviewSnapshot, ServerStatus, SessionDetail,
-    WorkspaceSnapshot,
+    OperationStatus, PreviewData, PreviewTarget, ProgramInfo, ReviewSnapshot, ServerStatus,
+    SessionDetail, WorkspaceSnapshot,
 };
 use crate::comment::ApplyOutcome;
 use crate::session::{ProjectId, SessionId};
@@ -458,6 +458,11 @@ pub trait CommanderBackend: Send + Sync {
 
     /// New-session dialog options (default program, program list, sections).
     async fn create_options(&self) -> BResult<CreateOptions>;
+
+    /// Replace this backend's configured program list (the new-session picker
+    /// options). For the local backend this rewrites the local config; for a
+    /// remote backend it PUTs to the server, editing *its* config.
+    async fn set_programs(&self, programs: Vec<ProgramInfo>) -> BResult<()>;
 
     /// Session ids with at least one not-yet-applied review comment.
     async fn pending_comment_sessions(&self) -> BResult<Vec<SessionId>>;

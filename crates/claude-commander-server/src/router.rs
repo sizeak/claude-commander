@@ -5,7 +5,7 @@ use axum::{
     Router,
     http::{HeaderValue, Method, header::AUTHORIZATION},
     middleware::from_fn_with_state,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use tower_http::{
     catch_panic::CatchPanicLayer,
@@ -109,6 +109,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/projects/{id}/preview", get(projects::preview))
         // -- config + health --
         .route("/config", get(config::read).patch(config::update))
+        .route("/config/programs", put(config::put_programs))
         .route("/config/reload", post(config::reload))
         .route("/health/tmux", get(config::health_tmux))
         // Bearer auth guards the whole `/api` surface; the CORS layer sits

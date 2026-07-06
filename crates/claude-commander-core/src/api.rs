@@ -15,7 +15,7 @@ use crate::comment::{
     ApplyOutcome, Comment, CommentStatus, CommentStore, SendDecision, compose_markdown,
     decide_send, reanchor_comments,
 };
-use crate::config::{AppState, Config, ConfigStore, StateStore};
+use crate::config::{AppState, Config, ConfigStore, ProgramEntry, StateStore};
 use crate::error::{Result, SessionError};
 use crate::git::{
     FileDiff, GitBackend, PrCheckResult, compose_review_diff, compute_branch_diff,
@@ -204,6 +204,16 @@ impl CommanderService {
     /// won't re-read our own write).
     pub fn update_config(&self, config: Config) -> Result<()> {
         self.config_store.mutate(|c| *c = config)
+    }
+
+    /// Replace the configured program list (the new-session picker options) and
+    /// persist it. Exposed as its own method — and, for remotes, its own HTTP
+    /// endpoint — so the picker list can be edited without opening up the general
+    /// config-patch surface. An empty list is allowed (the picker then falls back
+    /// to a synthesized `claude` entry).
+    pub fn set_programs(&self, programs: Vec<ProgramEntry>) -> Result<()> {
+        self.telemetry.feature("programs.set");
+        self.config_store.mutate(|c| c.programs = programs)
     }
 
     /// Reload config from disk if the file changed since the last read.
@@ -1357,14 +1367,7 @@ impl CommanderService {
         let config = self.config_store.read();
         CreateOptions {
             default_program: config.default_session_program(),
-            programs: config
-                .programs
-                .iter()
-                .map(|p| ProgramInfo {
-                    label: p.label.clone(),
-                    command: p.command.clone(),
-                })
-                .collect(),
+            programs: config.programs.iter().map(ProgramInfo::from).collect(),
             sections: config.sections.iter().map(|s| s.name.clone()).collect(),
         }
     }
@@ -2230,7 +2233,7 @@ pub use claude_commander_protocol::api::{
     AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, DiffStat,
     NewComment, OperationKind, OperationOutcome, OperationStatus, PreviewData, ProgramInfo,
     ProjectInfo, PullBlockReason, PullStatus, RenameSession, ReviewSnapshot, ServerStatus,
-    SessionDetail, SessionInfo, SetSection, ToggleReviewed, WorkspaceSnapshot,
+    SessionDetail, SessionInfo, SetProgramsRequest, SetSection, ToggleReviewed, WorkspaceSnapshot,
 };
 
 /// Build a [`SessionInfo`] wire DTO from core's `WorktreeSession` domain model.
@@ -3001,6 +3004,42 @@ mod tests {
         assert_eq!(opts.programs.len(), 1);
         assert_eq!(opts.programs[0].label, "Claude (Opus)");
         assert_eq!(opts.sections, vec!["Open PRs".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn set_programs_persists_and_reflects_in_create_options() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        // Default config has no configured programs; create_options reports the raw
+        // (empty) list — the `claude` fallback lives in the picker, not here.
+        assert_eq!(svc.create_options().programs.len(), 0);
+
+        svc.set_programs(vec![
+            crate::config::ProgramEntry {
+                label: "Claude (Opus)".to_string(),
+                command: "claude --model opus".to_string(),
+            },
+            crate::config::ProgramEntry {
+                label: "Shell".to_string(),
+                command: "bash".to_string(),
+            },
+        ])
+        .unwrap();
+
+        let opts = svc.create_options();
+        assert_eq!(opts.programs.len(), 2);
+        assert_eq!(opts.programs[0].command, "claude --model opus");
+        assert_eq!(opts.programs[1].label, "Shell");
+        // First configured program is the default.
+        assert_eq!(opts.default_program, "claude --model opus");
+
+        // The change is durable: it was written to the config file on disk.
+        let toml = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(toml.contains("claude --model opus"));
+
+        // An empty list is accepted and persists as empty.
+        svc.set_programs(vec![]).unwrap();
+        assert_eq!(svc.create_options().programs.len(), 0);
     }
 
     #[tokio::test]

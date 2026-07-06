@@ -70,6 +70,7 @@ pub enum BindableAction {
     ToggleViewMode,
     AddRemoteServer,
     RemoveRemoteServer,
+    EditServerPrograms,
 }
 
 impl BindableAction {
@@ -111,6 +112,7 @@ impl BindableAction {
         // Remote Servers
         Self::AddRemoteServer,
         Self::RemoveRemoteServer,
+        Self::EditServerPrograms,
         // Sections & View
         Self::ToggleViewMode,
         Self::MoveToSection,
@@ -185,6 +187,7 @@ impl BindableAction {
             Self::MoveToSection => "move_to_section",
             Self::ToggleSection => "toggle_section",
             Self::ToggleViewMode => "toggle_view_mode",
+            Self::EditServerPrograms => "edit_server_programs",
             Self::AddRemoteServer => "add_remote_server",
             Self::RemoveRemoteServer => "remove_remote_server",
         }
@@ -238,6 +241,7 @@ impl BindableAction {
             Self::MoveToSection => "Move session to section…",
             Self::ToggleSection => "Collapse/expand section",
             Self::ToggleViewMode => "Cycle project / sections / section stacks view",
+            Self::EditServerPrograms => "Edit server's program list…",
             Self::AddRemoteServer => "Add remote server",
             Self::RemoveRemoteServer => "Remove remote server",
         }
@@ -297,6 +301,7 @@ impl BindableAction {
             Self::MoveToSection => "move",
             Self::ToggleSection => "toggle section",
             Self::ToggleViewMode => "view mode",
+            Self::EditServerPrograms => "server programs",
             Self::AddRemoteServer => "add server",
             Self::RemoveRemoteServer => "remove server",
         }
@@ -333,7 +338,9 @@ impl BindableAction {
             Self::OpenPullRequest | Self::RefreshPrStatus | Self::DeleteMergedPrSessions => {
                 "Pull Requests"
             }
-            Self::AddRemoteServer | Self::RemoveRemoteServer => "Remote Servers",
+            Self::AddRemoteServer | Self::RemoveRemoteServer | Self::EditServerPrograms => {
+                "Remote Servers"
+            }
             Self::ToggleViewMode | Self::MoveToSection | Self::ToggleSection => "Sections & View",
             Self::OpenReviewDiff
             | Self::GenerateSummary
@@ -400,6 +407,7 @@ impl FromStr for BindableAction {
             "move_to_section" => Ok(Self::MoveToSection),
             "toggle_section" => Ok(Self::ToggleSection),
             "toggle_view_mode" => Ok(Self::ToggleViewMode),
+            "edit_server_programs" => Ok(Self::EditServerPrograms),
             "add_remote_server" => Ok(Self::AddRemoteServer),
             "remove_remote_server" => Ok(Self::RemoveRemoteServer),
             _ => Err(format!("unknown action: {s}")),
@@ -1312,6 +1320,7 @@ mod tests {
         for (action, name) in [
             (BindableAction::AddRemoteServer, "add_remote_server"),
             (BindableAction::RemoveRemoteServer, "remove_remote_server"),
+            (BindableAction::EditServerPrograms, "edit_server_programs"),
         ] {
             assert!(kb.keys_for(action).is_empty());
             assert_eq!(name.parse::<BindableAction>().unwrap(), action);
