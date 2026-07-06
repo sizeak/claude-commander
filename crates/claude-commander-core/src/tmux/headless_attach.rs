@@ -54,9 +54,19 @@ impl HeadlessAttach {
         let (pty, pts) = pty_process::open()?;
         pty.resize(pty_process::Size::new(rows, cols))?;
 
-        let cmd = pty_process::Command::new("tmux")
+        let mut cmd = pty_process::Command::new("tmux")
             .args(["attach-session", "-t", session_name])
             .with_tmux_tmpdir(tmux_tmpdir);
+        // `tmux attach` refuses to start (or degrades to no IO) when the
+        // inherited TERM is missing or "dumb" — the norm for headless hosts
+        // (systemd units, CI runners). The bridge's pty does no rendering of
+        // its own — bytes stream raw to the far client, whose real terminal
+        // is what matters — so pin a capable TERM in that case. An inherited
+        // real TERM (the local TUI attach path) is left untouched so tmux
+        // emits sequences for the terminal actually displaying them.
+        if let Some(term) = fallback_term(std::env::var("TERM").ok().as_deref()) {
+            cmd = cmd.env("TERM", term);
+        }
         let child = cmd.spawn(pts)?;
 
         info!("Spawned tmux attach-session for {}", session_name);
@@ -204,5 +214,36 @@ impl Drop for ChildGuard {
         // reaped by tokio's background machinery. This is the safety net for
         // ungraceful drops — graceful paths should call `kill().await`.
         let _ = self.child.start_kill();
+    }
+}
+
+/// The TERM to force on the bridge child when the inherited one can't drive
+/// `tmux attach`: `None` leaves a genuine terminal's TERM untouched.
+fn fallback_term(current: Option<&str>) -> Option<&'static str> {
+    match current {
+        Some(t) if !t.is_empty() && t != "dumb" && t != "unknown" => None,
+        _ => Some("xterm-256color"),
+    }
+}
+
+#[cfg(test)]
+mod term_tests {
+    use super::fallback_term;
+
+    #[test]
+    fn headless_terms_get_a_capable_fallback() {
+        // Unset/dumb/unknown/empty: the states found on CI runners and
+        // systemd units, where tmux attach exits immediately without this.
+        assert_eq!(fallback_term(None), Some("xterm-256color"));
+        assert_eq!(fallback_term(Some("dumb")), Some("xterm-256color"));
+        assert_eq!(fallback_term(Some("unknown")), Some("xterm-256color"));
+        assert_eq!(fallback_term(Some("")), Some("xterm-256color"));
+    }
+
+    #[test]
+    fn real_terminals_are_left_untouched() {
+        assert_eq!(fallback_term(Some("xterm-256color")), None);
+        assert_eq!(fallback_term(Some("tmux-256color")), None);
+        assert_eq!(fallback_term(Some("screen")), None);
     }
 }

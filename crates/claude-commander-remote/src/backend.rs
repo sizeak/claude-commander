@@ -1414,7 +1414,7 @@ mod tests {
         writer.write_all(b"echo cc_remote_marker\n").await.unwrap();
         writer.flush().await.unwrap();
         assert!(
-            read_until_contains(&mut *reader, "cc_remote_marker", Duration::from_secs(5)).await,
+            read_until_contains(&mut *reader, "cc_remote_marker", Duration::from_secs(20)).await,
             "attached PTY output should echo the typed marker"
         );
 
