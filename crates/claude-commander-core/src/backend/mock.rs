@@ -16,7 +16,8 @@ use uuid::Uuid;
 
 use crate::api::{
     AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
-    OperationStatus, PreviewData, PreviewTarget, ReviewSnapshot, SessionDetail, WorkspaceSnapshot,
+    OperationStatus, PreviewData, PreviewTarget, ProgramInfo, ReviewSnapshot, SessionDetail,
+    WorkspaceSnapshot,
 };
 use crate::comment::{ApplyOutcome, Comment};
 use crate::session::{ProjectId, ScanResult, SessionId};
@@ -268,6 +269,10 @@ impl CommanderBackend for MockBackend {
     }
 
     async fn create_options(&self) -> BResult<CreateOptions> {
+        self.unimpl()
+    }
+
+    async fn set_programs(&self, _programs: Vec<ProgramInfo>) -> BResult<()> {
         self.unimpl()
     }
 

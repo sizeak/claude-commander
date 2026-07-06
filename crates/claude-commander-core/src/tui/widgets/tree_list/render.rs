@@ -279,6 +279,9 @@ impl<'a> TreeList<'a> {
                     let mut spans: Vec<Span<'static>> = vec![
                         Span::styled("● ", Style::default().fg(dot_color)),
                         Span::styled(name.clone(), name_style),
+                        // Clickable affordance: opens Settings → Programs for this
+                        // server (the whole header row is the click target).
+                        Span::styled(" ⚙", Style::default().fg(self.theme.text_secondary)),
                     ];
                     if let Some((text, color)) = note {
                         spans.push(Span::styled(

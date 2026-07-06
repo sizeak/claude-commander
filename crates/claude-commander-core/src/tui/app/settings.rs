@@ -1278,6 +1278,11 @@ impl App {
         };
         state.rows = self.build_settings_rows(state.tab);
         state.selected_row = first_selectable_from(&state.rows, 0);
+        // Landing on the Programs tab loads its target's list (local from config,
+        // a remote server asynchronously).
+        if state.tab == SettingsTab::Programs {
+            self.load_programs_target(&mut state.programs_state);
+        }
     }
 
     /// Handle a keypress in the settings modal.
@@ -1803,11 +1808,147 @@ impl App {
         self.reconcile_section_assignments().await;
     }
 
-    /// Handle a keypress while the Programs tab is active.
+    /// The backend whose programs the `EditServerPrograms` command/cog targets:
+    /// the selected server header, else the selected session/project's backend,
+    /// else local.
+    pub(super) fn selected_backend_id(&self) -> crate::backend::BackendId {
+        if let Some(idx) = self.ui_state.list_state.selected()
+            && let Some(SessionListItem::ServerHeader { backend, .. }) =
+                self.ui_state.list_items.get(idx)
+        {
+            return *backend;
+        }
+        if let Some(sref) = self.ui_state.selected_session_id {
+            return sref.backend;
+        }
+        if let Some((backend, _)) = self.ui_state.selected_project_id {
+            return backend;
+        }
+        crate::backend::LOCAL_BACKEND_ID
+    }
+
+    /// Open the settings modal on the Programs tab, targeting `target`'s program
+    /// list (loading it — synchronously for local, asynchronously for a remote).
+    pub(super) fn open_settings_on_programs(&mut self, target: crate::backend::BackendId) {
+        let rows = self.build_settings_rows(SettingsTab::Programs);
+        let selected_row = first_selectable_from(&rows, 0);
+        let mut programs_state = ProgramsState {
+            target,
+            ..ProgramsState::default()
+        };
+        self.load_programs_target(&mut programs_state);
+        self.ui_state.modal = Modal::Settings(SettingsState {
+            tab: SettingsTab::Programs,
+            selected_row,
+            editing: None,
+            rows,
+            sections_state: SectionsState::default(),
+            programs_state,
+            search: None,
+        });
+    }
+
+    /// (Re)load the program list for the Programs tab's current target. Local is
+    /// read synchronously from config; a remote server is fetched on a background
+    /// task (bumping `load_gen` so a superseded response is dropped), delivering
+    /// [`StateUpdate::ServerProgramsLoaded`].
+    fn load_programs_target(&self, prog: &mut ProgramsState) {
+        prog.editing = None;
+        prog.focus = ProgramsFocus::List;
+        prog.field_selected = 0;
+        prog.selected = 0;
+        prog.save_error = None;
+        if prog.target == crate::backend::LOCAL_BACKEND_ID {
+            prog.entries = self.config.programs.clone();
+            prog.loading = false;
+            prog.load_error = None;
+            return;
+        }
+        // Unknown/removed target: surface it rather than showing the local list
+        // (which `backend_arc` would fall back to).
+        let Some(backend) = self.backend(prog.target).map(|h| h.backend.clone()) else {
+            prog.loading = false;
+            prog.entries.clear();
+            prog.load_error = Some("server no longer configured".to_string());
+            return;
+        };
+        prog.load_gen = prog.load_gen.wrapping_add(1);
+        prog.loading = true;
+        prog.load_error = None;
+        prog.entries.clear();
+        let target = prog.target;
+        let generation = prog.load_gen;
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let result = backend
+                .create_options()
+                .await
+                .map(|opts| opts.programs.into_iter().map(Into::into).collect())
+                .map_err(|e| e.to_string());
+            let _ = tx
+                .send(crate::tui::event::AppEvent::StateUpdate(
+                    crate::tui::event::StateUpdate::ServerProgramsLoaded {
+                        backend: target,
+                        generation,
+                        result,
+                    },
+                ))
+                .await;
+        });
+    }
+
+    /// Push the working copy to the current target after a committed edit. Local
+    /// writes the config and persists (keeping `App.config` authoritative); a
+    /// remote target is queued for an ordered background PUT (see
+    /// [`ProgramCommitQueue`]). If the target backend no longer exists (its
+    /// server was removed while the tab was open), the edit is dropped with an
+    /// in-tab error rather than silently rewriting the *local* config — the
+    /// `backend_arc` fallback would otherwise route it there.
+    fn commit_programs(&mut self, prog: &mut ProgramsState) {
+        // A fresh edit supersedes any earlier save failure note.
+        prog.save_error = None;
+        if prog.target == crate::backend::LOCAL_BACKEND_ID {
+            self.config.programs = prog.entries.clone();
+            self.persist_config();
+            return;
+        }
+        let Some(backend) = self.backend(prog.target).map(|h| h.backend.clone()) else {
+            prog.load_error = Some("server no longer configured".to_string());
+            return;
+        };
+        let programs: Vec<crate::api::ProgramInfo> = prog.entries.iter().map(Into::into).collect();
+        let tx = self.event_loop.sender();
+        self.program_commit
+            .submit(prog.target, backend, tx, programs);
+    }
+
+    /// Cycle the Programs tab to the next configured backend (local → each remote
+    /// server → local) and load its program list. No-op with a single backend.
+    fn cycle_programs_target(&self, prog: &mut ProgramsState) {
+        let ids: Vec<crate::backend::BackendId> = self.backends.iter().map(|h| h.id).collect();
+        if ids.len() <= 1 {
+            return;
+        }
+        let cur = ids.iter().position(|id| *id == prog.target).unwrap_or(0);
+        prog.target = ids[(cur + 1) % ids.len()];
+        self.load_programs_target(prog);
+    }
+
+    /// Handle a keypress while the Programs tab is active. Edits mutate the
+    /// working copy (`entries`) and are committed per edit to the current target.
     fn handle_programs_key(&mut self, key: crossterm::event::KeyEvent, mut state: SettingsState) {
+        use crate::config::keybindings::BindableAction;
         use crossterm::event::KeyCode;
 
         let prog = &mut state.programs_state;
+        // Whether a committed edit needs pushing to the target at the end.
+        let mut changed = false;
+        // Whether to close the settings modal (Esc/quit) instead of keeping it.
+        let mut close = false;
+        // Deferred tab switch: `switch_settings_tab` needs `&mut state`, which
+        // can't coexist with the `prog` borrow, so record the direction and apply
+        // it after `prog` is released.
+        let mut switch_tab: Option<bool> = None;
 
         // --- Editing mode ---
         if let Some(ref mut editing) = prog.editing {
@@ -1815,70 +1956,56 @@ impl App {
                 ProgramsEditing::RenamingLabel { value } => match key.code {
                     KeyCode::Enter => {
                         let new_label = value.value().trim().to_string();
-                        if !new_label.is_empty() && prog.selected < self.config.programs.len() {
-                            let has_dup = self
-                                .config
-                                .programs
+                        if !new_label.is_empty() && prog.selected < prog.entries.len() {
+                            let has_dup = prog
+                                .entries
                                 .iter()
                                 .enumerate()
                                 .any(|(i, p)| i != prog.selected && p.label == new_label);
                             if !has_dup {
-                                self.config.programs[prog.selected].label = new_label;
-                                self.persist_config();
+                                prog.entries[prog.selected].label = new_label;
+                                changed = true;
                             }
                         }
                         prog.editing = None;
-                        self.ui_state.modal = Modal::Settings(state);
                     }
-                    KeyCode::Esc => {
-                        prog.editing = None;
-                        self.ui_state.modal = Modal::Settings(state);
-                    }
+                    KeyCode::Esc => prog.editing = None,
                     _ => {
                         super::edit_text_input(value, key);
-                        self.ui_state.modal = Modal::Settings(state);
                     }
                 },
                 ProgramsEditing::EditingField { value } => match key.code {
                     KeyCode::Enter => {
                         let val = value.value().trim().to_string();
-                        if prog.selected < self.config.programs.len() {
+                        if prog.selected < prog.entries.len() {
                             if prog.field_selected == 0 {
                                 // Label: reject empty and duplicates.
-                                let has_dup = self
-                                    .config
-                                    .programs
+                                let has_dup = prog
+                                    .entries
                                     .iter()
                                     .enumerate()
                                     .any(|(i, p)| i != prog.selected && p.label == val);
                                 if !val.is_empty() && !has_dup {
-                                    self.config.programs[prog.selected].label = val;
-                                    self.persist_config();
+                                    prog.entries[prog.selected].label = val;
+                                    changed = true;
                                 }
-                            } else {
+                            } else if !val.is_empty() {
                                 // Command: reject empty.
-                                if !val.is_empty() {
-                                    self.config.programs[prog.selected].command = val;
-                                    self.persist_config();
-                                }
+                                prog.entries[prog.selected].command = val;
+                                changed = true;
                             }
                         }
                         prog.editing = None;
-                        self.ui_state.modal = Modal::Settings(state);
                     }
-                    KeyCode::Esc => {
-                        prog.editing = None;
-                        self.ui_state.modal = Modal::Settings(state);
-                    }
+                    KeyCode::Esc => prog.editing = None,
                     _ => {
                         super::edit_text_input(value, key);
-                        self.ui_state.modal = Modal::Settings(state);
                     }
                 },
                 ProgramsEditing::CreatingLabel { value } => match key.code {
                     KeyCode::Enter => {
                         let label = value.value().trim().to_string();
-                        let has_dup = self.config.programs.iter().any(|p| p.label == label);
+                        let has_dup = prog.entries.iter().any(|p| p.label == label);
                         if !label.is_empty() && !has_dup {
                             // Advance to the command step, prefilled with the label
                             // (the common case is command == label).
@@ -1891,185 +2018,154 @@ impl App {
                             // mirroring the Sections tab's CreatingSection.
                             prog.editing = None;
                         }
-                        self.ui_state.modal = Modal::Settings(state);
                     }
-                    KeyCode::Esc => {
-                        prog.editing = None;
-                        self.ui_state.modal = Modal::Settings(state);
-                    }
+                    KeyCode::Esc => prog.editing = None,
                     _ => {
                         super::edit_text_input(value, key);
-                        self.ui_state.modal = Modal::Settings(state);
                     }
                 },
                 ProgramsEditing::CreatingCommand { label, value } => match key.code {
                     KeyCode::Enter => {
                         let command = value.value().trim().to_string();
                         if !command.is_empty() {
-                            self.config.programs.push(crate::config::ProgramEntry {
+                            prog.entries.push(crate::config::ProgramEntry {
                                 label: label.clone(),
                                 command,
                             });
-                            prog.selected = self.config.programs.len() - 1;
-                            self.persist_config();
+                            prog.selected = prog.entries.len() - 1;
+                            changed = true;
                         }
                         prog.editing = None;
-                        self.ui_state.modal = Modal::Settings(state);
                     }
-                    KeyCode::Esc => {
-                        prog.editing = None;
-                        self.ui_state.modal = Modal::Settings(state);
-                    }
+                    KeyCode::Esc => prog.editing = None,
                     _ => {
                         super::edit_text_input(value, key);
-                        self.ui_state.modal = Modal::Settings(state);
                     }
                 },
             }
+            if changed {
+                self.commit_programs(prog);
+            }
+            self.ui_state.modal = Modal::Settings(state);
             return;
         }
 
         // --- Navigation mode ---
-        let programs_len = self.config.programs.len();
+        // A remote target that is still loading (or failed to load) can be
+        // navigated/retargeted/closed, but not edited.
+        let editable = !prog.loading && prog.load_error.is_none();
+        let programs_len = prog.entries.len();
+        let resolved = self.config.keybindings.resolve(&key);
 
         match prog.focus {
-            ProgramsFocus::List => {
-                use crate::config::keybindings::BindableAction;
-
-                match self.config.keybindings.resolve(&key) {
-                    Some(BindableAction::NavigateDown) => {
+            ProgramsFocus::List => match resolved {
+                Some(BindableAction::NavigateDown) => {
+                    if programs_len > 0 {
+                        prog.selected = (prog.selected + 1) % programs_len;
+                        prog.field_selected = 0;
+                    }
+                }
+                Some(BindableAction::NavigateUp) => {
+                    if programs_len > 0 {
+                        prog.selected = if prog.selected == 0 {
+                            programs_len - 1
+                        } else {
+                            prog.selected - 1
+                        };
+                        prog.field_selected = 0;
+                    }
+                }
+                Some(BindableAction::Quit) => close = true,
+                _ => match key.code {
+                    KeyCode::Esc => close = true,
+                    KeyCode::Tab => switch_tab = Some(true),
+                    KeyCode::BackTab => switch_tab = Some(false),
+                    // `t` cycles which backend's program list is being edited.
+                    KeyCode::Char('t') => self.cycle_programs_target(prog),
+                    KeyCode::Right | KeyCode::Enter => {
                         if programs_len > 0 {
-                            prog.selected = (prog.selected + 1) % programs_len;
+                            prog.focus = ProgramsFocus::Fields;
                             prog.field_selected = 0;
                         }
-                        self.ui_state.modal = Modal::Settings(state);
                     }
-                    Some(BindableAction::NavigateUp) => {
-                        if programs_len > 0 {
-                            prog.selected = if prog.selected == 0 {
-                                programs_len - 1
-                            } else {
-                                prog.selected - 1
-                            };
-                            prog.field_selected = 0;
-                        }
-                        self.ui_state.modal = Modal::Settings(state);
+                    KeyCode::Char('n') if editable => {
+                        prog.editing = Some(ProgramsEditing::CreatingLabel {
+                            value: super::Input::default(),
+                        });
                     }
-                    Some(BindableAction::Quit) => {
-                        self.ui_state.modal = Modal::None;
-                    }
-                    _ => match key.code {
-                        KeyCode::Esc => {
-                            self.ui_state.modal = Modal::None;
-                        }
-                        KeyCode::Tab => {
-                            self.switch_settings_tab(&mut state, true);
-                            self.ui_state.modal = Modal::Settings(state);
-                        }
-                        KeyCode::BackTab => {
-                            self.switch_settings_tab(&mut state, false);
-                            self.ui_state.modal = Modal::Settings(state);
-                        }
-                        KeyCode::Right | KeyCode::Enter => {
-                            if programs_len > 0 {
-                                prog.focus = ProgramsFocus::Fields;
-                                prog.field_selected = 0;
-                            }
-                            self.ui_state.modal = Modal::Settings(state);
-                        }
-                        KeyCode::Char('n') => {
-                            prog.editing = Some(ProgramsEditing::CreatingLabel {
-                                value: super::Input::default(),
+                    KeyCode::Char('r') if editable => {
+                        if prog.selected < programs_len {
+                            let current = prog.entries[prog.selected].label.clone();
+                            prog.editing = Some(ProgramsEditing::RenamingLabel {
+                                value: current.into(),
                             });
-                            self.ui_state.modal = Modal::Settings(state);
                         }
-                        KeyCode::Char('r') => {
-                            if prog.selected < programs_len {
-                                let current = self.config.programs[prog.selected].label.clone();
-                                prog.editing = Some(ProgramsEditing::RenamingLabel {
-                                    value: current.into(),
-                                });
-                            }
-                            self.ui_state.modal = Modal::Settings(state);
-                        }
-                        KeyCode::Char('d') => {
-                            if prog.selected < programs_len {
-                                self.config.programs.remove(prog.selected);
-                                if prog.selected >= self.config.programs.len() && prog.selected > 0
-                                {
-                                    prog.selected -= 1;
-                                }
-                                self.persist_config();
-                            }
-                            self.ui_state.modal = Modal::Settings(state);
-                        }
-                        KeyCode::Char('J') => {
-                            if prog.selected + 1 < programs_len {
-                                self.config.programs.swap(prog.selected, prog.selected + 1);
-                                prog.selected += 1;
-                                self.persist_config();
-                            }
-                            self.ui_state.modal = Modal::Settings(state);
-                        }
-                        KeyCode::Char('K') => {
-                            if prog.selected > 0 && programs_len > 0 {
-                                self.config.programs.swap(prog.selected, prog.selected - 1);
+                    }
+                    KeyCode::Char('d') if editable => {
+                        if prog.selected < programs_len {
+                            prog.entries.remove(prog.selected);
+                            if prog.selected >= prog.entries.len() && prog.selected > 0 {
                                 prog.selected -= 1;
-                                self.persist_config();
                             }
-                            self.ui_state.modal = Modal::Settings(state);
+                            changed = true;
                         }
-                        _ => {
-                            self.ui_state.modal = Modal::Settings(state);
+                    }
+                    KeyCode::Char('J') if editable => {
+                        if prog.selected + 1 < programs_len {
+                            prog.entries.swap(prog.selected, prog.selected + 1);
+                            prog.selected += 1;
+                            changed = true;
                         }
-                    },
+                    }
+                    KeyCode::Char('K') if editable => {
+                        if prog.selected > 0 && programs_len > 0 {
+                            prog.entries.swap(prog.selected, prog.selected - 1);
+                            prog.selected -= 1;
+                            changed = true;
+                        }
+                    }
+                    _ => {}
+                },
+            },
+            ProgramsFocus::Fields => match resolved {
+                Some(BindableAction::NavigateDown | BindableAction::NavigateUp) => {
+                    // Only two fields (label / command): toggle between them.
+                    prog.field_selected = 1 - prog.field_selected;
                 }
-            }
-            ProgramsFocus::Fields => {
-                use crate::config::keybindings::BindableAction;
+                Some(BindableAction::Quit) => close = true,
+                _ => match key.code {
+                    KeyCode::Esc | KeyCode::Left => prog.focus = ProgramsFocus::List,
+                    KeyCode::Tab => switch_tab = Some(true),
+                    KeyCode::BackTab => switch_tab = Some(false),
+                    KeyCode::Enter if editable => {
+                        if prog.selected < programs_len {
+                            let entry = &prog.entries[prog.selected];
+                            let current = if prog.field_selected == 0 {
+                                entry.label.clone()
+                            } else {
+                                entry.command.clone()
+                            };
+                            prog.editing = Some(ProgramsEditing::EditingField {
+                                value: current.into(),
+                            });
+                        }
+                    }
+                    _ => {}
+                },
+            },
+        }
 
-                match self.config.keybindings.resolve(&key) {
-                    Some(BindableAction::NavigateDown | BindableAction::NavigateUp) => {
-                        // Only two fields (label / command): toggle between them.
-                        prog.field_selected = 1 - prog.field_selected;
-                        self.ui_state.modal = Modal::Settings(state);
-                    }
-                    Some(BindableAction::Quit) => {
-                        self.ui_state.modal = Modal::None;
-                    }
-                    _ => match key.code {
-                        KeyCode::Esc | KeyCode::Left => {
-                            prog.focus = ProgramsFocus::List;
-                            self.ui_state.modal = Modal::Settings(state);
-                        }
-                        KeyCode::Tab => {
-                            self.switch_settings_tab(&mut state, true);
-                            self.ui_state.modal = Modal::Settings(state);
-                        }
-                        KeyCode::BackTab => {
-                            self.switch_settings_tab(&mut state, false);
-                            self.ui_state.modal = Modal::Settings(state);
-                        }
-                        KeyCode::Enter => {
-                            if prog.selected < programs_len {
-                                let entry = &self.config.programs[prog.selected];
-                                let current = if prog.field_selected == 0 {
-                                    entry.label.clone()
-                                } else {
-                                    entry.command.clone()
-                                };
-                                prog.editing = Some(ProgramsEditing::EditingField {
-                                    value: current.into(),
-                                });
-                            }
-                            self.ui_state.modal = Modal::Settings(state);
-                        }
-                        _ => {
-                            self.ui_state.modal = Modal::Settings(state);
-                        }
-                    },
-                }
-            }
+        if changed {
+            self.commit_programs(prog);
+        }
+        // `prog` is released past this point, so `state` can be borrowed whole.
+        if let Some(forward) = switch_tab {
+            self.switch_settings_tab(&mut state, forward);
+        }
+        if close {
+            self.ui_state.modal = Modal::None;
+        } else {
+            self.ui_state.modal = Modal::Settings(state);
         }
     }
 
@@ -2080,7 +2176,97 @@ impl App {
         footer_area: Rect,
         prog: &ProgramsState,
     ) {
-        let programs = &self.config.programs;
+        // When more than one backend is configured, the tab edits a *chosen*
+        // backend's list — show which, and how to switch. A lone-local setup
+        // keeps the original single-pane layout with no header noise.
+        let body_area = if self.backends.len() > 1 {
+            let name = self
+                .backends
+                .iter()
+                .find(|h| h.id == prog.target)
+                .map(|h| h.backend.descriptor().name)
+                .unwrap_or_else(|| "local".to_string());
+            frame.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled("Target: ", Style::default().fg(self.theme.text_secondary)),
+                    Span::styled(
+                        name,
+                        Style::default()
+                            .fg(self.theme.text_primary)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(
+                        "  (t to switch)",
+                        Style::default().fg(self.theme.text_secondary),
+                    ),
+                ])),
+                Rect {
+                    height: 1,
+                    ..body_area
+                },
+            );
+            // Leave a blank spacer row below the header.
+            Rect {
+                y: body_area.y + 2,
+                height: body_area.height.saturating_sub(2),
+                ..body_area
+            }
+        } else {
+            body_area
+        };
+
+        // A remote target that is still loading (or failed) has no list to edit;
+        // keep a footer so `t` (switch target) / Esc remain discoverable.
+        let dead_footer = |this: &Self| {
+            let hint = if this.backends.len() > 1 {
+                "t: switch target  Tab: switch tab  Esc: close"
+            } else {
+                "Tab: switch tab  Esc: close"
+            };
+            (hint, footer_area)
+        };
+        if prog.loading {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "Loading…",
+                    Style::default().fg(self.theme.text_secondary),
+                )),
+                Rect {
+                    height: 1,
+                    ..body_area
+                },
+            );
+            let (hint, area) = dead_footer(self);
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    hint,
+                    Style::default().fg(self.theme.text_secondary),
+                )),
+                area,
+            );
+            return;
+        }
+        if let Some(err) = &prog.load_error {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    format!("Unavailable: {err}"),
+                    Style::default().fg(self.theme.modal_error),
+                ))
+                .wrap(ratatui::widgets::Wrap { trim: true }),
+                body_area,
+            );
+            let (hint, area) = dead_footer(self);
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    hint,
+                    Style::default().fg(self.theme.text_secondary),
+                )),
+                area,
+            );
+            return;
+        }
+
+        let programs = &prog.entries;
         let list_width = body_area.width.clamp(16, 28);
         let divider_width = 1_u16;
         let detail_width = body_area
@@ -2323,16 +2509,39 @@ impl App {
         }
 
         // --- Footer ---
+        // A background save failure takes over the footer as a non-blocking
+        // warning (the list stays editable).
+        if let Some(err) = &prog.save_error {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    err.clone(),
+                    Style::default().fg(self.theme.modal_error),
+                )),
+                footer_area,
+            );
+            return;
+        }
+        let switch = if self.backends.len() > 1 {
+            "  t: switch target"
+        } else {
+            ""
+        };
         let footer_text = match &prog.editing {
             Some(ProgramsEditing::RenamingLabel { .. } | ProgramsEditing::EditingField { .. }) => {
-                "Enter: save  Esc: cancel"
+                "Enter: save  Esc: cancel".to_string()
             }
-            Some(ProgramsEditing::CreatingLabel { .. }) => "Enter: next (command)  Esc: cancel",
-            Some(ProgramsEditing::CreatingCommand { .. }) => "Enter: create  Esc: cancel",
+            Some(ProgramsEditing::CreatingLabel { .. }) => {
+                "Enter: next (command)  Esc: cancel".to_string()
+            }
+            Some(ProgramsEditing::CreatingCommand { .. }) => {
+                "Enter: create  Esc: cancel".to_string()
+            }
             None if prog.focus == ProgramsFocus::List => {
-                "n: new  r: rename  d: delete  J/K: reorder  →/Enter: fields  Tab: switch tab"
+                format!(
+                    "n: new  r: rename  d: delete  J/K: reorder  →/Enter: fields{switch}  Tab: tab"
+                )
             }
-            None => "Enter: edit  ←: back to list  Tab: switch tab",
+            None => "Enter: edit  ←: back to list  Tab: switch tab".to_string(),
         };
         frame.render_widget(
             Paragraph::new(Span::styled(

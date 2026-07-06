@@ -911,6 +911,11 @@ impl App {
             "",
             width = key_col_width,
         )));
+        lines.push(Line::from(format!(
+            "  {:<width$}Click the ⚙ on a server header to edit its program list.",
+            "click ⚙",
+            width = key_col_width,
+        )));
 
         // Status indicators (not keybinding-related, stays hardcoded)
         lines.push(Line::from(""));

@@ -857,6 +857,19 @@ impl App {
             self.ui_state.last_left_click = None;
             return;
         };
+        // A click on a server header (its `⚙` affordance / anywhere on the row)
+        // opens that server's Programs settings pane. Route through the command
+        // so it selects the header first and records the UI-feature telemetry.
+        if matches!(
+            self.ui_state.list_items.get(idx),
+            Some(SessionListItem::ServerHeader { .. })
+        ) {
+            self.ui_state.last_left_click = None;
+            self.ui_state.list_state.select(Some(idx));
+            self.update_selection();
+            self.handle_command(UserCommand::EditServerPrograms).await;
+            return;
+        }
         // Skip rows that aren't selectable (e.g. Spacer).
         match self.ui_state.list_items.get(idx) {
             Some(item) if !item.is_selectable() => {
@@ -1303,6 +1316,9 @@ impl App {
                     programs_state: ProgramsState::default(),
                     search: None,
                 });
+            }
+            UserCommand::EditServerPrograms => {
+                self.open_settings_on_programs(self.selected_backend_id());
             }
             UserCommand::Quit => {
                 self.ui_state.should_quit = true;

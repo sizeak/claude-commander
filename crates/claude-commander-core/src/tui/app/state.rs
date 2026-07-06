@@ -332,6 +332,49 @@ impl App {
                     *program_picker = Some(picker);
                 }
             }
+            StateUpdate::ServerProgramsLoaded {
+                backend,
+                generation,
+                result,
+            } => {
+                // Apply only if the Settings → Programs tab is still open for the
+                // same target and this is the latest load (a superseded target's
+                // response is dropped).
+                if let Modal::Settings(settings) = &mut self.ui_state.modal
+                    && settings.tab == crate::tui::app::SettingsTab::Programs
+                    && settings.programs_state.target == backend
+                    && settings.programs_state.load_gen == generation
+                {
+                    let prog = &mut settings.programs_state;
+                    prog.loading = false;
+                    match result {
+                        Ok(entries) => {
+                            prog.entries = entries;
+                            prog.load_error = None;
+                            if prog.selected >= prog.entries.len() {
+                                prog.selected = prog.entries.len().saturating_sub(1);
+                            }
+                        }
+                        Err(message) => {
+                            prog.entries.clear();
+                            prog.selected = 0;
+                            prog.load_error = Some(message);
+                        }
+                    }
+                }
+            }
+            StateUpdate::ServerProgramsSaveFailed { backend, message } => {
+                // Show the failure in the tab if it's still open for that target;
+                // don't tear down whatever modal the user has since moved to.
+                if let Modal::Settings(settings) = &mut self.ui_state.modal
+                    && settings.tab == crate::tui::app::SettingsTab::Programs
+                    && settings.programs_state.target == backend
+                {
+                    settings.programs_state.save_error = Some(format!("save failed: {message}"));
+                } else {
+                    warn!("failed to save programs to remote backend: {message}");
+                }
+            }
             StateUpdate::Error { message } => {
                 self.ui_state.modal = Modal::Error { message };
             }

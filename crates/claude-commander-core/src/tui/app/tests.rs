@@ -1640,7 +1640,6 @@ fn keybindings_settings_state(app: &App, search: Option<&str>) -> crate::tui::ap
 
 #[test]
 fn render_keybindings_tab_draws_section_headers() {
-    use crate::tui::app::Modal;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -1694,7 +1693,6 @@ fn render_general_tab_draws_section_headers() {
 
 #[test]
 fn render_keybindings_search_box_filters_and_shows_prompt() {
-    use crate::tui::app::Modal;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -1751,19 +1749,6 @@ fn render_consumes_clear_right_pane_flag() {
 // Programs settings tab
 // ---------------------------------------------------------------------------
 
-fn programs_settings_state() -> crate::tui::app::SettingsState {
-    use crate::tui::app::{ProgramsState, SectionsState, SettingsState, SettingsTab};
-    SettingsState {
-        tab: SettingsTab::Programs,
-        selected_row: 0,
-        editing: None,
-        rows: vec![],
-        sections_state: SectionsState::default(),
-        programs_state: ProgramsState::default(),
-        search: None,
-    }
-}
-
 fn program_entry(label: &str, command: &str) -> crate::config::ProgramEntry {
     crate::config::ProgramEntry {
         label: label.to_string(),
@@ -1773,7 +1758,6 @@ fn program_entry(label: &str, command: &str) -> crate::config::ProgramEntry {
 
 /// Borrow the Programs-tab state out of the current settings modal.
 fn peek_programs(app: &App) -> &crate::tui::app::ProgramsState {
-    use crate::tui::app::Modal;
     match &app.ui_state.modal {
         Modal::Settings(s) => &s.programs_state,
         _ => panic!("expected a settings modal"),
@@ -1782,7 +1766,6 @@ fn peek_programs(app: &App) -> &crate::tui::app::ProgramsState {
 
 /// Feed one keypress into the Programs tab, keeping the modal in place.
 async fn feed_programs_key(app: &mut App, code: crossterm::event::KeyCode) {
-    use crate::tui::app::Modal;
     let state = match std::mem::replace(&mut app.ui_state.modal, Modal::None) {
         Modal::Settings(s) => s,
         other => {
@@ -1801,11 +1784,11 @@ async fn type_programs(app: &mut App, text: &str) {
 
 #[tokio::test]
 async fn programs_tab_new_creates_entry_via_two_step_prompt() {
-    use crate::tui::app::{Modal, ProgramsEditing};
+    use crate::tui::app::ProgramsEditing;
     use crossterm::event::KeyCode;
 
     let mut app = make_test_app();
-    app.ui_state.modal = Modal::Settings(programs_settings_state());
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
 
     // Step 1: `n` opens the label prompt; type a label.
     feed_programs_key(&mut app, KeyCode::Char('n')).await;
@@ -1831,11 +1814,10 @@ async fn programs_tab_new_creates_entry_via_two_step_prompt() {
 
 #[tokio::test]
 async fn programs_tab_create_esc_at_command_step_discards() {
-    use crate::tui::app::Modal;
     use crossterm::event::KeyCode;
 
     let mut app = make_test_app();
-    app.ui_state.modal = Modal::Settings(programs_settings_state());
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
 
     feed_programs_key(&mut app, KeyCode::Char('n')).await;
     type_programs(&mut app, "Codex").await;
@@ -1858,7 +1840,7 @@ async fn programs_tab_rename_rejects_duplicate_and_empty_labels() {
         program_entry("Claude", "claude"),
         program_entry("Codex", "codex"),
     ];
-    app.ui_state.modal = crate::tui::app::Modal::Settings(programs_settings_state());
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
 
     // Move to the second entry and rename it to a duplicate of the first.
     feed_programs_key(&mut app, KeyCode::Char('j')).await;
@@ -1887,7 +1869,7 @@ async fn programs_tab_fields_focus_edits_command() {
 
     let mut app = make_test_app();
     app.config.programs = vec![program_entry("Claude", "claude")];
-    app.ui_state.modal = crate::tui::app::Modal::Settings(programs_settings_state());
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
 
     // Enter the fields pane, move to the command field, edit it.
     feed_programs_key(&mut app, KeyCode::Enter).await;
@@ -1911,7 +1893,7 @@ async fn programs_tab_delete_clamps_selection_and_allows_empty() {
 
     let mut app = make_test_app();
     app.config.programs = vec![program_entry("Alpha", "a"), program_entry("Beta", "b")];
-    app.ui_state.modal = crate::tui::app::Modal::Settings(programs_settings_state());
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
 
     // Select the last entry, then delete it: selection clamps back.
     feed_programs_key(&mut app, KeyCode::Char('j')).await;
@@ -1939,7 +1921,7 @@ async fn programs_tab_reorder_changes_default() {
         program_entry("Claude", "claude"),
         program_entry("Codex", "codex"),
     ];
-    app.ui_state.modal = crate::tui::app::Modal::Settings(programs_settings_state());
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
     assert_eq!(app.config.default_session_program(), "claude");
 
     // `J` swaps the first entry down, making the second the new default.
@@ -1959,7 +1941,7 @@ async fn programs_tab_tab_key_switches_tabs() {
     use crossterm::event::KeyCode;
 
     let mut app = make_test_app();
-    app.ui_state.modal = Modal::Settings(programs_settings_state());
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
 
     // Tab advances to the wrapped-around General tab.
     feed_programs_key(&mut app, KeyCode::Tab).await;
@@ -1969,7 +1951,7 @@ async fn programs_tab_tab_key_switches_tabs() {
     }
 
     // BackTab from Programs lands on Sections.
-    app.ui_state.modal = Modal::Settings(programs_settings_state());
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
     feed_programs_key(&mut app, KeyCode::BackTab).await;
     match &app.ui_state.modal {
         Modal::Settings(s) => assert_eq!(s.tab, SettingsTab::Sections),
@@ -1979,7 +1961,6 @@ async fn programs_tab_tab_key_switches_tabs() {
 
 #[test]
 fn render_programs_tab_shows_entries_and_default_marker() {
-    use crate::tui::app::Modal;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
@@ -1988,7 +1969,7 @@ fn render_programs_tab_shows_entries_and_default_marker() {
         program_entry("Claude", "claude"),
         program_entry("Codex", "codex"),
     ];
-    app.ui_state.modal = Modal::Settings(programs_settings_state());
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
 
     let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
     terminal.draw(|f| app.render(f)).unwrap();
@@ -2023,7 +2004,6 @@ fn make_test_app_with_path() -> (App, std::path::PathBuf) {
 
 #[tokio::test]
 async fn programs_tab_reorder_persists_through_store() {
-    use crate::tui::app::Modal;
     use crossterm::event::KeyCode;
 
     let (mut app, path) = make_test_app_with_path();
@@ -2031,7 +2011,7 @@ async fn programs_tab_reorder_persists_through_store() {
         program_entry("Claude", "claude"),
         program_entry("Codex", "codex"),
     ];
-    app.ui_state.modal = Modal::Settings(programs_settings_state());
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
 
     feed_programs_key(&mut app, KeyCode::Char('J')).await;
 
@@ -2049,7 +2029,6 @@ async fn programs_tab_reorder_persists_through_store() {
 
 #[tokio::test]
 async fn programs_tab_editing_field_label_rejects_duplicate() {
-    use crate::tui::app::Modal;
     use crossterm::event::KeyCode;
 
     let mut app = make_test_app();
@@ -2057,7 +2036,7 @@ async fn programs_tab_editing_field_label_rejects_duplicate() {
         program_entry("Claude", "claude"),
         program_entry("Codex", "codex"),
     ];
-    app.ui_state.modal = Modal::Settings(programs_settings_state());
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
 
     // Focus the fields pane on the second entry and edit its label to a dup.
     feed_programs_key(&mut app, KeyCode::Char('j')).await;
@@ -2075,12 +2054,11 @@ async fn programs_tab_editing_field_label_rejects_duplicate() {
 
 #[tokio::test]
 async fn programs_tab_esc_cancels_rename_and_edit_without_change() {
-    use crate::tui::app::Modal;
     use crossterm::event::KeyCode;
 
     let mut app = make_test_app();
     app.config.programs = vec![program_entry("Claude", "claude")];
-    app.ui_state.modal = Modal::Settings(programs_settings_state());
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
 
     // Rename: type a new label then Esc — nothing changes.
     feed_programs_key(&mut app, KeyCode::Char('r')).await;
@@ -2101,12 +2079,11 @@ async fn programs_tab_esc_cancels_rename_and_edit_without_change() {
 
 #[tokio::test]
 async fn programs_tab_create_label_empty_or_duplicate_closes_editor() {
-    use crate::tui::app::Modal;
     use crossterm::event::KeyCode;
 
     let mut app = make_test_app();
     app.config.programs = vec![program_entry("Claude", "claude")];
-    app.ui_state.modal = Modal::Settings(programs_settings_state());
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
 
     // Empty label + Enter closes the editor without creating anything.
     feed_programs_key(&mut app, KeyCode::Char('n')).await;
@@ -2124,7 +2101,6 @@ async fn programs_tab_create_label_empty_or_duplicate_closes_editor() {
 
 #[tokio::test]
 async fn programs_tab_reorder_up_with_k() {
-    use crate::tui::app::Modal;
     use crossterm::event::KeyCode;
 
     let mut app = make_test_app();
@@ -2132,7 +2108,7 @@ async fn programs_tab_reorder_up_with_k() {
         program_entry("Claude", "claude"),
         program_entry("Codex", "codex"),
     ];
-    app.ui_state.modal = Modal::Settings(programs_settings_state());
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
 
     // Select the second entry, then `K` moves it up to become the default.
     feed_programs_key(&mut app, KeyCode::Char('j')).await;
@@ -2144,6 +2120,175 @@ async fn programs_tab_reorder_up_with_k() {
         0,
         "selection follows the move"
     );
+}
+
+#[tokio::test]
+async fn open_settings_on_programs_targets_local_and_loads_entries() {
+    use crate::tui::app::{Modal, SettingsTab};
+
+    let mut app = make_test_app();
+    app.config.programs = vec![program_entry("Claude", "claude")];
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
+
+    match &app.ui_state.modal {
+        Modal::Settings(s) => {
+            assert_eq!(s.tab, SettingsTab::Programs);
+            assert_eq!(s.programs_state.target, crate::backend::LOCAL_BACKEND_ID);
+            // Local target loads synchronously from config — no loading state.
+            assert!(!s.programs_state.loading);
+            assert_eq!(
+                s.programs_state.entries,
+                vec![program_entry("Claude", "claude")]
+            );
+        }
+        _ => panic!("expected a settings modal on the Programs tab"),
+    }
+}
+
+#[tokio::test]
+async fn programs_tab_blocks_editing_while_loading() {
+    use crossterm::event::KeyCode;
+
+    let mut app = make_test_app();
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
+    // Simulate an in-flight remote fetch.
+    if let crate::tui::app::Modal::Settings(s) = &mut app.ui_state.modal {
+        s.programs_state.target = crate::backend::BackendId(1);
+        s.programs_state.loading = true;
+    }
+
+    // `n` (new) must be ignored while loading — no editor opens.
+    feed_programs_key(&mut app, KeyCode::Char('n')).await;
+    assert!(peek_programs(&app).editing.is_none());
+}
+
+#[tokio::test]
+async fn server_programs_loaded_applies_for_matching_target_and_gen() {
+    use crate::tui::event::StateUpdate;
+
+    let mut app = make_test_app();
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
+    let (target, generation) = {
+        let s = match &mut app.ui_state.modal {
+            crate::tui::app::Modal::Settings(s) => s,
+            _ => unreachable!(),
+        };
+        s.programs_state.target = crate::backend::BackendId(1);
+        s.programs_state.loading = true;
+        s.programs_state.selected = 5; // will be clamped
+        (s.programs_state.target, s.programs_state.load_gen)
+    };
+
+    app.handle_state_update(StateUpdate::ServerProgramsLoaded {
+        backend: target,
+        generation,
+        result: Ok(vec![program_entry("Remote", "claude")]),
+    })
+    .await;
+
+    let prog = peek_programs(&app);
+    assert!(!prog.loading);
+    assert_eq!(prog.entries, vec![program_entry("Remote", "claude")]);
+    assert_eq!(prog.selected, 0, "selection clamped to the new list");
+    assert!(prog.load_error.is_none());
+}
+
+#[tokio::test]
+async fn server_programs_loaded_ignored_for_stale_generation() {
+    use crate::tui::event::StateUpdate;
+
+    let mut app = make_test_app();
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
+    let target = crate::backend::BackendId(1);
+    if let crate::tui::app::Modal::Settings(s) = &mut app.ui_state.modal {
+        s.programs_state.target = target;
+        s.programs_state.loading = true;
+        s.programs_state.load_gen = 7;
+    }
+
+    // A response from a superseded load (wrong generation) is dropped.
+    app.handle_state_update(StateUpdate::ServerProgramsLoaded {
+        backend: target,
+        generation: 6,
+        result: Ok(vec![program_entry("Stale", "stale")]),
+    })
+    .await;
+
+    let prog = peek_programs(&app);
+    assert!(prog.loading, "still loading; stale response ignored");
+    assert!(prog.entries.is_empty());
+}
+
+#[tokio::test]
+async fn server_programs_loaded_error_sets_load_error() {
+    use crate::tui::event::StateUpdate;
+
+    let mut app = make_test_app();
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
+    let (target, generation) = {
+        let s = match &mut app.ui_state.modal {
+            crate::tui::app::Modal::Settings(s) => s,
+            _ => unreachable!(),
+        };
+        s.programs_state.target = crate::backend::BackendId(1);
+        s.programs_state.loading = true;
+        (s.programs_state.target, s.programs_state.load_gen)
+    };
+
+    app.handle_state_update(StateUpdate::ServerProgramsLoaded {
+        backend: target,
+        generation,
+        result: Err("connection refused".to_string()),
+    })
+    .await;
+
+    let prog = peek_programs(&app);
+    assert!(!prog.loading);
+    assert_eq!(prog.load_error.as_deref(), Some("connection refused"));
+}
+
+#[tokio::test]
+async fn commit_to_missing_backend_does_not_clobber_local_config() {
+    use crossterm::event::KeyCode;
+
+    let mut app = make_test_app();
+    // Local config has its own programs, which must be left untouched.
+    app.config.programs = vec![program_entry("Local", "local-cmd")];
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
+
+    // Simulate a tab that was pointed at a remote server which has since been
+    // removed: a non-local target id with no backend, but a loaded (editable)
+    // working copy.
+    if let crate::tui::app::Modal::Settings(s) = &mut app.ui_state.modal {
+        s.programs_state.target = crate::backend::BackendId(999);
+        s.programs_state.entries = vec![program_entry("Remote", "remote-cmd")];
+        s.programs_state.loading = false;
+        s.programs_state.load_error = None;
+        s.programs_state.selected = 0;
+    }
+
+    // Deleting the entry commits to the (missing) remote target.
+    feed_programs_key(&mut app, KeyCode::Char('d')).await;
+
+    // The local config must NOT have been overwritten with the remote list
+    // (the old `backend_arc` fallback would have done exactly that).
+    assert_eq!(
+        app.config.programs,
+        vec![program_entry("Local", "local-cmd")]
+    );
+    // And the tab surfaces that the target is gone.
+    assert!(peek_programs(&app).load_error.is_some());
+}
+
+#[tokio::test]
+async fn cycle_programs_target_noop_with_single_backend() {
+    use crossterm::event::KeyCode;
+
+    let mut app = make_test_app();
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
+    // `t` cycles targets; with only the local backend it stays put.
+    feed_programs_key(&mut app, KeyCode::Char('t')).await;
+    assert_eq!(peek_programs(&app).target, crate::backend::LOCAL_BACKEND_ID);
 }
 
 #[cfg(test)]

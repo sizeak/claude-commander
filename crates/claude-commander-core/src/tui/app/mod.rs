@@ -618,15 +618,56 @@ pub enum ProgramsFocus {
     Fields,
 }
 
-/// State for the Programs tab within the settings modal
-#[derive(Debug, Clone, Default)]
+/// State for the Programs tab within the settings modal.
+///
+/// The tab edits a working copy (`entries`) rather than `config.programs`
+/// directly, because the `target` backend may be a *remote* server whose program
+/// list lives on the server, not in the local config. `entries` is the single
+/// source the editor reads and mutates; each committed edit is pushed to the
+/// `target` backend (local → local config + persist; remote → `set_programs`
+/// over the API). For a remote target the list is fetched asynchronously, so the
+/// tab shows a `loading` / `load_error` state until it arrives.
+#[derive(Debug, Clone)]
 pub struct ProgramsState {
-    /// Index into `config.programs`.
+    /// Which backend's program list is being edited (local or a remote server).
+    pub target: BackendId,
+    /// The working copy of `target`'s program list.
+    pub entries: Vec<crate::config::ProgramEntry>,
+    /// Index into `entries`.
     pub selected: usize,
     pub focus: ProgramsFocus,
     /// 0 = label, 1 = command.
     pub field_selected: usize,
     pub editing: Option<ProgramsEditing>,
+    /// A remote fetch of `entries` is in flight; editing is disabled until it
+    /// resolves.
+    pub loading: bool,
+    /// A remote fetch failed; `entries` is empty and editing is disabled.
+    pub load_error: Option<String>,
+    /// A background save (remote PUT) failed; shown as a non-blocking warning
+    /// line. `entries` is unaffected and editing stays enabled. Cleared on the
+    /// next committed edit.
+    pub save_error: Option<String>,
+    /// Bumped on each (re)load so a stale async response for a superseded target
+    /// can be discarded on arrival.
+    pub load_gen: u64,
+}
+
+impl Default for ProgramsState {
+    fn default() -> Self {
+        Self {
+            target: LOCAL_BACKEND_ID,
+            entries: Vec::new(),
+            selected: 0,
+            focus: ProgramsFocus::default(),
+            field_selected: 0,
+            editing: None,
+            loading: false,
+            load_error: None,
+            save_error: None,
+            load_gen: 0,
+        }
+    }
 }
 
 /// Editing state for the Programs tab
@@ -1321,6 +1362,62 @@ impl AppUiState {
 }
 
 /// Main TUI application
+/// Serializes program-list writes to each backend. A remote save is a full-list
+/// PUT; committing per edit means holding a reorder key fires several in quick
+/// succession, and HTTP gives no ordering guarantee — so an earlier snapshot
+/// could land after a later one and leave the server on a stale list. This runs
+/// one background task per target that applies snapshots in submission order,
+/// coalescing to the latest pending one.
+#[derive(Default)]
+pub(crate) struct ProgramCommitQueue {
+    senders: HashMap<BackendId, tokio::sync::mpsc::UnboundedSender<Vec<crate::api::ProgramInfo>>>,
+}
+
+impl ProgramCommitQueue {
+    /// Queue `programs` to be written to `backend` (id `id`). Spawns the target's
+    /// worker on first use. A failed PUT posts [`StateUpdate::ServerProgramsSaveFailed`].
+    fn submit(
+        &mut self,
+        id: BackendId,
+        backend: Arc<dyn CommanderBackend>,
+        events: tokio::sync::mpsc::Sender<AppEvent>,
+        programs: Vec<crate::api::ProgramInfo>,
+    ) {
+        let sender = self.senders.entry(id).or_insert_with(|| {
+            let (tx, mut rx) =
+                tokio::sync::mpsc::unbounded_channel::<Vec<crate::api::ProgramInfo>>();
+            tokio::spawn(async move {
+                while let Some(mut latest) = rx.recv().await {
+                    // Coalesce any snapshots already queued behind this one.
+                    while let Ok(newer) = rx.try_recv() {
+                        latest = newer;
+                    }
+                    if let Err(e) = backend.set_programs(latest).await {
+                        let _ = events
+                            .send(AppEvent::StateUpdate(
+                                crate::tui::event::StateUpdate::ServerProgramsSaveFailed {
+                                    backend: id,
+                                    message: e.to_string(),
+                                },
+                            ))
+                            .await;
+                    }
+                }
+            });
+            tx
+        });
+        // Send failure only if the worker is gone (it lives for the app's life).
+        let _ = sender.send(programs);
+    }
+
+    /// Drop the workers for backends that were removed (e.g. via config
+    /// hot-reload). Dropping the sender closes the channel, so the worker's
+    /// `rx.recv()` returns `None` and the task exits.
+    fn forget(&mut self, ids: &[BackendId]) {
+        self.senders.retain(|id, _| !ids.contains(id));
+    }
+}
+
 pub struct App {
     /// Local config cache — refreshed from config_store on tick when file changes
     config: Config,
@@ -1356,6 +1453,9 @@ pub struct App {
     /// message can't land on a freshly-added backend that happened to reuse its
     /// slot. Starts past the startup-assigned ids.
     next_remote_backend_id: usize,
+    /// Serializes program-list writes per backend so rapid edits (e.g. holding a
+    /// reorder key) can't have their PUTs arrive out of order.
+    program_commit: ProgramCommitQueue,
     /// Frontend-owned UI preferences (view mode, last selection, pane width),
     /// persisted to `tui.json` — kept out of `state.json` so backend/session
     /// data and local UI prefs never share a file. See [`crate::tui::prefs`].
@@ -1445,6 +1545,7 @@ impl App {
             backends,
             remote_factory,
             next_remote_backend_id,
+            program_commit: ProgramCommitQueue::default(),
             tui_prefs,
             ui_state: AppUiState::default(),
             event_loop: EventLoop::new(),
@@ -1523,6 +1624,9 @@ impl App {
             // Dropping the handle aborts its feed tasks (see BackendHandle::drop).
             self.backends
                 .retain(|h| h.id == LOCAL_BACKEND_ID || !removed_ids.contains(&h.id));
+            // Drop any program-commit worker for a removed backend; dropping the
+            // sender closes its channel so the worker task exits cleanly.
+            self.program_commit.forget(&removed_ids);
 
             let session_gone = self
                 .ui_state

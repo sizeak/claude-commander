@@ -28,6 +28,24 @@ pub struct ProgramEntry {
     pub command: String,
 }
 
+impl From<claude_commander_protocol::api::ProgramInfo> for ProgramEntry {
+    fn from(p: claude_commander_protocol::api::ProgramInfo) -> Self {
+        ProgramEntry {
+            label: p.label,
+            command: p.command,
+        }
+    }
+}
+
+impl From<&ProgramEntry> for claude_commander_protocol::api::ProgramInfo {
+    fn from(p: &ProgramEntry) -> Self {
+        claude_commander_protocol::api::ProgramInfo {
+            label: p.label.clone(),
+            command: p.command.clone(),
+        }
+    }
+}
+
 /// Connection details for one remote `claude-commander-server` the TUI drives
 /// alongside the local backend. Serialised as a `[[remote_servers]]` TOML table:
 ///
@@ -1459,6 +1477,19 @@ show_session_program = false
             ..Config::default()
         };
         assert_eq!(config.default_program_index(), 0);
+    }
+
+    #[test]
+    fn test_program_entry_program_info_round_trip() {
+        let entry = ProgramEntry {
+            label: "Claude (Opus)".to_string(),
+            command: "claude --model opus".to_string(),
+        };
+        let info: claude_commander_protocol::api::ProgramInfo = (&entry).into();
+        assert_eq!(info.label, "Claude (Opus)");
+        assert_eq!(info.command, "claude --model opus");
+        let back: ProgramEntry = info.into();
+        assert_eq!(back, entry);
     }
 
     #[test]
