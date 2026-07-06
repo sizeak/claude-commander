@@ -716,7 +716,7 @@ checksum = "c3e64b0cc0439b12df2fa678eae89a1c56a529fd067a9115f7827f1fffd22b32"
 
 [[package]]
 name = "claude-commander"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "clap",
  "claude-commander-core",
@@ -732,7 +732,7 @@ dependencies = [
 
 [[package]]
 name = "claude-commander-core"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
@@ -782,7 +782,7 @@ dependencies = [
 
 [[package]]
 name = "claude-commander-protocol"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "chrono",
  "serde",
@@ -792,7 +792,7 @@ dependencies = [
 
 [[package]]
 name = "claude-commander-remote"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "async-trait",
  "claude-commander-core",
@@ -813,7 +813,7 @@ dependencies = [
 
 [[package]]
 name = "claude-commander-server"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "axum",
  "axum-server",
@@ -840,7 +840,7 @@ dependencies = [
 
 [[package]]
 name = "claude-commander-test-support"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "axum",
  "claude-commander-core",
