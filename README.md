@@ -128,6 +128,8 @@ When automatic project-branch pulling is enabled (see `project_pull_enabled` in 
 
 All keybindings below are defaults and can be customised via the `[keybindings]` config table (see [Configuration](docs/configuration.md)).
 
+The status bar surfaces the most useful actions for the focused pane as clickable buttons, with the hotkey letter bracketed (`[n]ew session`, `[d]elete`); the review view's footer works the same way. Clicking a button fires the same action as its key, so the hotkeys below can also be discovered and triggered with the mouse.
+
 | Key | Action |
 |-----|--------|
 | `j/k` or `↑/↓` or `Ctrl-n/p` | Navigate session list |
@@ -178,6 +180,22 @@ When attached to a session (via `Enter` or `claude-commander attach`):
 | `Alt-r` | Switch to this session's review diff (and `Alt-r` in the diff switches back) — Claude sessions only. Uses `Alt-r` rather than `Ctrl-r` so the shell's `Ctrl-r` reverse-history-search is never shadowed |
 | `Ctrl-Space` | Open the in-session switcher popup to jump to another claude-commander session without detaching |
 | `Ctrl-.` | Open the session worktree in your editor (requires a terminal that emits CSI-u or xterm modifyOtherKeys sequences for Ctrl-.) |
+
+### Remote Servers
+
+The TUI can manage sessions on other machines running `claude-commander-server`.
+Each configured server appears as its own node in the session tree, with that
+server's projects and sessions underneath — create, delete, restart, review
+diffs, and attach to remote terminals exactly as you would locally (attach
+streams over WebSocket). Live agent-state dots and PR chips come from the
+server's own background refresh, and an unreachable server degrades to a
+greyed node with the error shown, retrying in the background without ever
+blocking local work.
+
+Add or remove servers from the command palette (**"Add remote server"** walks
+name → URL → token with a connection test), or edit `[[remote_servers]]` in
+the config file directly — see [Configuration](docs/configuration.md). Changes
+hot-reload; no restart needed.
 
 ## Documentation
 

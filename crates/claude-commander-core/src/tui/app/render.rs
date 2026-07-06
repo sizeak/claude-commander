@@ -1,0 +1,614 @@
+//! Rendering: main layout, session list, preview/info/shell panes, status bar.
+
+use super::*;
+use crate::tui::hotkey::ActionButton;
+
+/// Build the footer commander chip label, or `None` when the commander is not
+/// running (the chip is hidden then). When running, the label is `● Commander`,
+/// refined with the live agent state (`· working` / `· waiting` / `· idle`) once
+/// the background poll reports it. `Unknown`/unpolled states show the bare chip.
+pub(super) fn commander_chip_label(
+    running: bool,
+    agent_state: Option<AgentState>,
+) -> Option<String> {
+    if !running {
+        return None;
+    }
+    let suffix = match agent_state {
+        Some(AgentState::Working) => " \u{00b7} working",
+        Some(AgentState::WaitingForInput) => " \u{00b7} waiting",
+        Some(AgentState::Idle) => " \u{00b7} idle",
+        Some(AgentState::Unknown) | None => "",
+    };
+    Some(format!("\u{25cf} Commander{suffix}"))
+}
+
+impl App {
+    /// Return the border type based on config: rounded or plain (square).
+    pub(super) fn border_type(&self) -> BorderType {
+        if self.config.rounded_borders {
+            BorderType::Rounded
+        } else {
+            BorderType::Plain
+        }
+    }
+
+    /// Render the UI
+    pub(super) fn render(&mut self, frame: &mut Frame) {
+        let size = frame.area();
+        self.ui_state.terminal_size = size;
+
+        // Force a full repaint on view switch to clear stale styled cells.
+        // This is done with the `Clear` widget (a pure in-memory cell reset)
+        // rather than `Terminal::clear()`, which since ratatui 0.30 reads the
+        // cursor position from stdin — a blocking read that races our
+        // background input reader and times out (RenderError), killing the
+        // event loop. See `event_loop.rs`.
+        if std::mem::take(&mut self.ui_state.clear_right_pane) {
+            frame.render_widget(Clear, size);
+        }
+
+        // The review-diff view is a full-screen takeover: it owns the whole
+        // frame (including the bottom row, where it draws its own status bar)
+        // rather than overlaying the normal UI, so there's only one status bar.
+        if matches!(self.ui_state.modal, Modal::ReviewDiff(_)) {
+            self.ui_state.review_body_rect = Some(super::review::review_body_inner_rect(size));
+            self.ui_state.review_file_list_rect =
+                Some(super::review::review_file_list_inner_rect(size));
+            let review_buttons = if let Modal::ReviewDiff(state) = &self.ui_state.modal {
+                self.render_review_modal(frame, size, state)
+            } else {
+                Vec::new()
+            };
+            self.ui_state.review_buttons = review_buttons;
+            return;
+        }
+
+        // The conversation overlay is also a full-screen takeover.
+        if let Modal::Conversation { input, scroll } = &self.ui_state.modal {
+            self.render_conversation_modal(frame, size, input, *scroll);
+            return;
+        }
+
+        // Content area with margin on top, left, right, and space for status bar at bottom
+        let content_area = Rect {
+            x: size.x + 1,
+            y: size.y + 1,
+            width: size.width.saturating_sub(2),
+            height: size.height.saturating_sub(3), // 1 top margin + 1 bottom margin + 1 status bar
+        };
+
+        // Main layout: session list on left, right pane fills rest
+        let main_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(self.ui_state.left_pane_pct),
+                Constraint::Percentage(100 - self.ui_state.left_pane_pct),
+            ])
+            .split(content_area);
+
+        // Render session list
+        self.render_session_list(frame, main_chunks[0]);
+
+        // Render either preview, diff, or shell based on current view
+        // Defensive: if a project is selected and view is Preview, render Shell instead
+        let view = if self.is_project_selected()
+            && self.ui_state.right_pane_view == RightPaneView::Preview
+        {
+            RightPaneView::Shell
+        } else {
+            self.ui_state.right_pane_view
+        };
+        match view {
+            RightPaneView::Preview => self.render_preview(frame, main_chunks[1]),
+            RightPaneView::Info => self.render_info(frame, main_chunks[1]),
+            RightPaneView::Shell => self.render_shell(frame, main_chunks[1]),
+        }
+
+        // Render modal if open
+        self.render_modal(frame, content_area);
+
+        // Render status bar at the very bottom of the screen. It returns the
+        // clickable action-button regions it drew, recorded for hit-testing.
+        self.ui_state.action_buttons = self.render_status_bar(frame, size);
+    }
+
+    /// Render the session list
+    pub(super) fn render_session_list(&mut self, frame: &mut Frame, area: Rect) {
+        // Split into a 1-line heading bar and the list below
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(0)])
+            .split(area);
+
+        // Full-width heading bar with dark grey background. The label reflects
+        // the active view so the user can see at a glance which mode is on.
+        let heading_style = self.theme.status_bar();
+        let heading = Paragraph::new(Line::styled(
+            self.ui_state.view_mode.heading_label(),
+            heading_style,
+        ))
+        .style(heading_style);
+        frame.render_widget(heading, chunks[0]);
+
+        let blocked: std::collections::HashMap<ProjectId, &str> = self
+            .ui_state
+            .project_pull_blocked
+            .iter()
+            .map(|(id, r)| (*id, r.as_str()))
+            .collect();
+
+        let tree_list = TreeList::new(&self.ui_state.list_items, &self.theme)
+            .tick(self.ui_state.tick_count)
+            .highlight_style(self.theme.selection().add_modifier(Modifier::BOLD))
+            .review_labels(&self.config.pr_review_labels)
+            .invert_pr_label_color(self.config.invert_pr_label_color)
+            .show_session_program(self.config.show_session_program)
+            .pull_blocked_projects(blocked)
+            .comment_sessions(self.ui_state.sessions_with_comments.clone());
+
+        frame.render_stateful_widget(
+            tree_list,
+            chunks[1],
+            &mut self.ui_state.list_state.list_state,
+        );
+    }
+
+    /// Build a styled tab title line for the pane header.
+    ///
+    /// `tabs` is the list of tab labels, `active` is the index of the currently
+    /// selected tab. The active tab is rendered bold in the accent color; inactive
+    /// tabs use the secondary text color. Tabs are separated by ` · `.
+    pub(super) fn build_pane_tabs(&self, tabs: &[&str], active: usize) -> Line<'static> {
+        let active_style = Style::default()
+            .fg(self.theme.text_accent)
+            .add_modifier(Modifier::BOLD);
+        let inactive_style = Style::default().fg(self.theme.text_secondary);
+        let sep_style = Style::default().fg(self.theme.text_secondary);
+
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        spans.push(Span::raw(" "));
+        for (i, tab) in tabs.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(" · ", sep_style));
+            }
+            let style = if i == active {
+                active_style
+            } else {
+                inactive_style
+            };
+            spans.push(Span::styled(tab.to_string(), style));
+        }
+        spans.push(Span::raw(" "));
+        Line::from(spans)
+    }
+
+    /// Build a standard right-pane block with tabs, border styling, and focus state.
+    fn pane_block(&self, tabs: &[&str], active_tab: usize) -> Block<'static> {
+        let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
+        let title = self.build_pane_tabs(tabs, active_tab);
+        Block::default()
+            .title(title)
+            .borders(Borders::ALL)
+            .border_type(self.border_type())
+            .border_style(if is_focused {
+                self.theme.border_focused()
+            } else {
+                self.theme.border_unfocused()
+            })
+    }
+
+    /// Return `Some(opacity)` when the right pane is unfocused and dim is enabled,
+    /// `None` otherwise. Used by preview and shell panes.
+    fn pane_dim_opacity(&self) -> Option<f32> {
+        let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
+        if !is_focused && self.config.dim_unfocused_preview {
+            Some(self.config.dim_unfocused_opacity)
+        } else {
+            None
+        }
+    }
+
+    /// Render the preview pane
+    pub(super) fn render_preview(&mut self, frame: &mut Frame, area: Rect) {
+        let dim_opacity = self.pane_dim_opacity();
+        let block = self.pane_block(&["Preview", "Info", "Shell"], 0);
+
+        // Update preview state with visible area
+        let inner_height = area.height.saturating_sub(2);
+        self.ui_state
+            .preview_state
+            .set_content(&self.ui_state.preview_content, inner_height);
+
+        let preview = Preview::new(&self.ui_state.preview_content)
+            .block(block)
+            .scroll(self.ui_state.preview_state.scroll_offset)
+            .dim_opacity(dim_opacity);
+
+        frame.render_widget(preview, area);
+    }
+
+    /// Render the info pane (session metadata, PR details, AI summary)
+    pub(super) fn render_info(&mut self, frame: &mut Frame, area: Rect) {
+        let on_project = self.is_project_selected();
+
+        // Compute display string for the generate-summary hotkey (None = AI disabled)
+        let summary_key_hint = if self.config.ai_summary_enabled {
+            self.config
+                .keybindings
+                .keys_for(BindableAction::GenerateSummary)
+                .first()
+                .map(|k| k.to_string())
+        } else {
+            None
+        };
+
+        let block = if on_project {
+            self.pane_block(&["Shell", "Info"], 1)
+        } else {
+            self.pane_block(&["Preview", "Info", "Shell"], 1)
+        };
+
+        // Build the info content based on current selection
+        let content = if let Some(session_id) = self.ui_state.selected_session_id.map(|r| r.id) {
+            // Find the session data from list_items (includes all needed fields)
+            let session_data = self.ui_state.list_items.iter().find_map(|item| {
+                if let SessionListItem::Worktree {
+                    id,
+                    title,
+                    branch,
+                    status,
+                    program,
+                    pr_number,
+                    pr_url,
+                    pr_merged,
+                    worktree_path,
+                    created_at,
+                    ..
+                } = item
+                {
+                    if *id == session_id {
+                        Some((
+                            title.clone(),
+                            branch.clone(),
+                            *status,
+                            program.clone(),
+                            *pr_number,
+                            pr_url.clone(),
+                            *pr_merged,
+                            worktree_path.display().to_string(),
+                            created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
+                        ))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            });
+
+            if let Some((
+                title,
+                branch,
+                status,
+                program,
+                pr_number,
+                pr_url,
+                pr_merged,
+                worktree_path,
+                created_at,
+            )) = session_data
+            {
+                let enriched_pr = self
+                    .ui_state
+                    .enriched_pr
+                    .as_ref()
+                    .and_then(|(sid, pr)| if *sid == session_id { Some(pr) } else { None });
+
+                let ai_summary = if self.config.ai_summary_enabled {
+                    self.ui_state.ai_summaries.get(&session_id)
+                } else {
+                    None
+                };
+
+                InfoContent::Session(InfoSessionData {
+                    title,
+                    branch,
+                    created_at,
+                    status,
+                    program,
+                    worktree_path,
+                    diff_info: &self.ui_state.diff_info,
+                    pr_number,
+                    pr_url,
+                    pr_merged,
+                    enriched_pr,
+                    ai_summary,
+                    summary_key_hint,
+                    stack_chain: &self.ui_state.stack_chain,
+                })
+            } else {
+                InfoContent::Empty
+            }
+        } else if let Some((_backend, project_id)) = self.ui_state.selected_project_id {
+            let project_data = self.ui_state.list_items.iter().find_map(|item| {
+                if let SessionListItem::Project {
+                    id,
+                    name,
+                    repo_path,
+                    main_branch,
+                    ..
+                } = item
+                {
+                    if *id == project_id {
+                        Some((
+                            name.clone(),
+                            repo_path.display().to_string(),
+                            main_branch.clone(),
+                        ))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            });
+
+            if let Some((name, repo_path, main_branch)) = project_data {
+                let pull_blocked = self
+                    .ui_state
+                    .project_pull_blocked
+                    .get(&project_id)
+                    .map(|r| r.as_str().to_string());
+                InfoContent::Project(InfoProjectData {
+                    name,
+                    repo_path,
+                    main_branch,
+                    pull_blocked,
+                })
+            } else {
+                InfoContent::Empty
+            }
+        } else {
+            InfoContent::Empty
+        };
+
+        // Build lines once, use for both scroll metrics and rendering
+        let info_view = InfoView::new(content, &self.theme);
+        let lines = info_view.build_lines();
+        let inner_height = area.height.saturating_sub(2);
+        self.ui_state
+            .info_state
+            .set_metrics(lines.len(), inner_height);
+
+        let info_view = info_view
+            .with_prebuilt_lines(lines)
+            .block(block)
+            .scroll(self.ui_state.info_state.scroll_offset);
+
+        frame.render_widget(info_view, area);
+    }
+
+    /// Render the shell pane
+    pub(super) fn render_shell(&mut self, frame: &mut Frame, area: Rect) {
+        let dim_opacity = self.pane_dim_opacity();
+
+        let block = if self.is_project_selected() {
+            self.pane_block(&["Shell", "Info"], 0)
+        } else {
+            self.pane_block(&["Preview", "Info", "Shell"], 2)
+        };
+
+        let inner_height = area.height.saturating_sub(2);
+        self.ui_state
+            .shell_state
+            .set_content(&self.ui_state.shell_content, inner_height);
+
+        let preview = Preview::new(&self.ui_state.shell_content)
+            .block(block)
+            .scroll(self.ui_state.shell_state.scroll_offset)
+            .dim_opacity(dim_opacity);
+
+        frame.render_widget(preview, area);
+    }
+
+    /// Render status bar. Returns the clickable action-button regions drawn in
+    /// the middle zone (empty when a toast / restart message occupies the bar).
+    pub(super) fn render_status_bar(&self, frame: &mut Frame, area: Rect) -> Vec<ActionButton> {
+        if area.height < 2 {
+            return Vec::new();
+        }
+
+        let status_area = Rect {
+            x: area.x,
+            y: area.bottom().saturating_sub(1),
+            width: area.width,
+            height: 1,
+        };
+
+        let base_style = self.theme.status_bar();
+        let accent = base_style.fg(self.theme.text_accent);
+        let sep = Span::styled(" \u{2502} ", base_style);
+
+        // Fill the entire status bar background
+        let bg_line = Line::from(vec![Span::styled(
+            " ".repeat(status_area.width as usize),
+            base_style,
+        )]);
+        frame.render_widget(Paragraph::new(bg_line), status_area);
+
+        let toast = if let Some((ref msg, expires)) = self.ui_state.status_message {
+            if Instant::now() < expires {
+                Some(msg.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let restart_needed = self.service.restart_required();
+
+        let session_count = self
+            .ui_state
+            .list_items
+            .iter()
+            .filter(|i| i.is_worktree())
+            .count();
+
+        let sessions_span = Span::styled(
+            format!(" Sessions: {session_count}"),
+            base_style.add_modifier(Modifier::BOLD),
+        );
+
+        let help_hint = Span::styled("? help ", base_style);
+
+        // A toast or restart notice claims the bar; otherwise it hosts the
+        // context-aware action buttons.
+        let show_buttons = toast.is_none() && !restart_needed;
+
+        // Build the left status zone: session count, then any transient message.
+        let mut left_spans = vec![sessions_span];
+        if let Some(msg) = toast {
+            left_spans.push(sep.clone());
+            left_spans.push(Span::styled(msg, base_style));
+            if restart_needed {
+                left_spans.push(sep.clone());
+                left_spans.push(Span::styled("Restart to apply config changes", base_style));
+            }
+        } else if restart_needed {
+            left_spans.push(sep.clone());
+            left_spans.push(Span::styled("Restart to apply config changes", base_style));
+        }
+
+        // The commander chip reflects live system state, so it shows in every
+        // branch (toast / restart / default) — spliced right after the session
+        // count. The label folds in the live agent state; absence of the chip
+        // means the commander isn't running.
+        let commander_agent_state = self
+            .ui_state
+            .agent_states
+            .get(&crate::commander::commander_sentinel_id())
+            .copied();
+        if let Some(label) =
+            commander_chip_label(self.ui_state.commander_running, commander_agent_state)
+        {
+            left_spans.splice(
+                1..1,
+                [
+                    Span::styled(" \u{2502} ", base_style),
+                    Span::styled(label, base_style.fg(self.theme.status_running)),
+                ],
+            );
+        }
+
+        // A trailing separator visually detaches the buttons from the status.
+        if show_buttons {
+            left_spans.push(sep);
+        }
+
+        let left_line = Line::from(left_spans);
+        let left_width = left_line.width() as u16;
+
+        // Split the status area into left status | middle buttons | help hint.
+        let help_width = 8u16; // "? help " + padding
+        let chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Length(left_width),
+                Constraint::Fill(1),
+                Constraint::Length(help_width),
+            ])
+            .split(status_area);
+
+        frame.render_widget(Paragraph::new(left_line).style(base_style), chunks[0]);
+
+        let buttons = if show_buttons {
+            let actions = self.status_bar_actions();
+            self.render_action_bar(frame, &actions, chunks[1], base_style, accent)
+        } else {
+            Vec::new()
+        };
+
+        let right_line = Line::from(vec![help_hint]).alignment(Alignment::Right);
+        frame.render_widget(Paragraph::new(right_line).style(base_style), chunks[2]);
+
+        buttons
+    }
+
+    /// The ordered, context-aware set of actions surfaced as buttons in the
+    /// status bar, filtered to those currently invokable. Buttons swap with the
+    /// focused pane so they sit near the UI they act on.
+    fn status_bar_actions(&self) -> Vec<BindableAction> {
+        use BindableAction::*;
+        let actions: &[BindableAction] = match self.ui_state.focused_pane {
+            FocusedPane::SessionList => &[
+                NewSession,
+                NewStackedSession,
+                DeleteSession,
+                OpenReviewDiff,
+                OpenInEditor,
+                NewProject,
+            ],
+            FocusedPane::RightPane => &[TogglePane, ShrinkLeftPane, GrowLeftPane, GenerateSummary],
+        };
+        actions
+            .iter()
+            .copied()
+            // GenerateSummary is also config-gated (AI summaries can be off);
+            // `is_command_available` already covers the Info-pane requirement.
+            .filter(|&a| a != GenerateSummary || self.config.ai_summary_enabled)
+            .filter(|&a| self.ui_state.is_command_available(a))
+            .collect()
+    }
+
+    /// Render a horizontal row of bracketed, clickable action buttons into
+    /// `area` (a 1-row rect), separated by `" │ "`. Returns each button's
+    /// rect + action for hit-testing. A button that would overflow `area` is
+    /// dropped whole (never half-clipped), along with all lower-priority
+    /// buttons after it.
+    pub(super) fn render_action_bar(
+        &self,
+        frame: &mut Frame,
+        actions: &[BindableAction],
+        area: Rect,
+        base: Style,
+        accent: Style,
+    ) -> Vec<ActionButton> {
+        const SEP: &str = " \u{2502} ";
+        const SEP_WIDTH: u16 = 3; // " │ "
+
+        // Segment + style each label once, then let `layout_buttons` decide
+        // which fit. Kept buttons are always a prefix, so the rendered spans
+        // (built from the same prefix) stay in sync with the recorded rects.
+        let rendered: Vec<(BindableAction, Vec<Span<'static>>)> = actions
+            .iter()
+            .map(|&action| {
+                let seg = crate::tui::hotkey::segment_label(
+                    action.button_label(),
+                    &self.config.keybindings,
+                    action,
+                );
+                (action, crate::tui::hotkey::hotkey_spans(&seg, base, accent))
+            })
+            .collect();
+
+        let widths: Vec<(BindableAction, u16)> = rendered
+            .iter()
+            .map(|(action, spans)| (*action, spans.iter().map(|s| s.width() as u16).sum()))
+            .collect();
+
+        let buttons = crate::tui::hotkey::layout_buttons(&widths, area, SEP_WIDTH);
+
+        let mut spans: Vec<Span> = Vec::new();
+        for (i, (_, btn_spans)) in rendered.iter().take(buttons.len()).enumerate() {
+            if i != 0 {
+                spans.push(Span::styled(SEP, base));
+            }
+            spans.extend(btn_spans.iter().cloned());
+        }
+
+        frame.render_widget(Paragraph::new(Line::from(spans)).style(base), area);
+        buttons
+    }
+}

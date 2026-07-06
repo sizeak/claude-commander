@@ -10,8 +10,44 @@ Configuration file location depends on your platform:
 - **Linux**: `~/.config/claude-commander/config.toml`
 
 ```toml
-# Default program to run in new sessions
-default_program = "claude"
+# Selectable agent harnesses for the New Session dialog's program picker. Each
+# entry pairs a display `label` with the `command` launched (program plus any
+# flags); the command's first token determines the harness, so Claude Code
+# (`claude`) and OpenAI Codex (`codex`) are both recognised and get the right
+# launch, resume, and working/waiting detection. The first entry is the default
+# for new sessions. When `programs` is omitted, the picker offers a single
+# built-in `claude` entry.
+#
+# Legacy configs using `default_program = "..."` are migrated automatically:
+# the legacy command is moved or inserted as the first `[[programs]]` entry and
+# `default_program` is removed from the file.
+#
+# In the New Session dialog, press Tab (or Shift+Tab to go back) to cycle focus
+# between the name field, the project picker, and the program picker, then ↑/↓
+# to choose. The project picker defaults to the currently-selected project and
+# can be typed into to filter the list — so the usual "type a name, hit Enter"
+# flow is unchanged.
+#
+# Program entries can be managed in-app from Settings ▸ Programs (settings
+# modal, `,` key) — add (`n`), rename (`r`), edit the label/command fields, and
+# remove (`d`) entries, or reorder them with `J`/`K`. Reordering changes the
+# default, since the first entry is the default for new sessions.
+#
+# [[programs]]
+# label = "Claude"
+# command = "claude"
+#
+# [[programs]]
+# label = "Claude (Opus, plan mode)"
+# command = "claude --model opus --permission-mode plan"
+#
+# [[programs]]
+# label = "Codex"
+# command = "codex"
+#
+# [[programs]]
+# label = "Codex (full auto)"
+# command = "codex --full-auto"
 
 # Branch name prefix for new sessions (empty = no prefix)
 branch_prefix = ""
@@ -19,9 +55,33 @@ branch_prefix = ""
 # Fetch latest changes from origin before creating a new session
 fetch_before_create = true
 
+# Skip git-LFS smudging during `git worktree add` so session creation is fast on
+# LFS repos (the checkout leaves cheap pointer files). The real LFS content is
+# fetched afterwards with `git lfs pull` — asynchronously in the TUI (with a
+# `⇣ LFS` indicator on the session row) or synchronously on the CLI. While the
+# background pull runs, the agent briefly sees pointer files rather than real
+# content. Set to false to smudge during checkout as before.
+skip_lfs_smudge = true
+
 # Pass `--resume` when restarting/recreating a session so the agent picks up
 # where it left off. Set to false to start the program fresh each time.
 resume_session = true
+
+# Automatically hibernate idle sessions to free memory (see "Idle-session
+# hibernation" below). A background loop stops the tmux process of sessions
+# that have sat idle-and-unattended past the timeout, keeping the worktree and
+# metadata; the session transparently resumes on next attach. Disabled by
+# default. Enabling (and the check interval) is restart-required; the idle
+# timeout is read live.
+# hibernate_enabled = false
+# Idle duration (seconds) before an eligible session is hibernated. Default
+# 86400 (1 day). The in-app settings editor enforces a minimum of 60;
+# hand-edited values here are used as-is.
+# hibernate_idle_timeout_secs = 86400
+# Interval (seconds) between hibernation policy checks. Default 600 (10 min).
+# The in-app settings editor enforces a minimum of 10; hand-edited values here
+# are used as-is, and 0 disables the loop entirely.
+# hibernate_check_interval_secs = 600
 
 # Launch sessions inside `nix develop` when the project has a `flake.nix` at
 # its root and `nix` is on PATH, so the agent and shell get the project's dev
@@ -43,6 +103,12 @@ ui_refresh_fps = 30
 
 # Custom worktrees directory (default: platform-specific, see Data Storage below)
 # worktrees_dir = "/path/to/worktrees"
+
+# Isolate every tmux command onto a throwaway socket dir (default: unset).
+# For hermetic tests and the e2e harness ONLY — leave unset for normal use.
+# When set, tmux commands run with TMUX_TMPDIR=<dir> and $TMUX/$TMUX_PANE
+# stripped, so they hit a per-run tmux server instead of your real one.
+# tmux_tmpdir = "/path/to/throwaway/tmux"
 
 # Organize worktrees into per-repository subdirectories (default: false)
 # per_repo_worktree_dirs = true
@@ -106,8 +172,8 @@ dim_unfocused_opacity = 0.4
 
 # Show the running program as a "(program)" suffix on session rows. Only
 # renders when sessions use more than one distinct program, so it's a no-op
-# for a single-program setup. Set to false to always hide it.
-# show_session_program = true
+# for a single-program setup. Disabled by default; set to true to show it.
+# show_session_program = false
 
 # Debounce delay in ms when typing multi-digit session numbers
 # session_number_debounce_ms = 250
@@ -130,7 +196,8 @@ state_sync_interval_ms = 2000
 # the footer chip both key off the value read at launch). While running, a
 # `● Commander` chip in the footer status bar shows its live state.
 # commander_enabled = false
-# Program (with flags) for the commander; defaults to `default_program`.
+# Program (with flags) for the commander; defaults to the first `[[programs]]`
+# entry.
 # commander_program = "claude --model opus-4-7"
 # Working directory for the commander; defaults to <data dir>/commander.
 # commander_dir = "/path/to/commander"
@@ -173,7 +240,72 @@ state_sync_interval_ms = 2000
 # navigate_last = ["End"]
 # quit = ["q", "Ctrl-c"]
 # toggle_pane = ["Tab"]
+# toggle_keep_alive = ["K"]                # palette-only by default; bind a key here
+
+# Remote claude-commander servers. Each entry adds a server node to the
+# session tree with that server's projects and sessions under it (full
+# create/delete/review/attach parity over HTTP + WebSocket). Manage these
+# from the palette ("Add remote server" / "Remove remote server", which
+# includes a connection test) or by hand here — the file is hot-reloaded.
+# These are a list-of-tables, so unlike the scalar options above they are
+# NOT editable from the in-app settings modal; use the palette commands.
+# The name "local" is reserved for the built-in local machine.
+# [[remote_servers]]
+# name = "buildbox"              # unique display name (the tree header)
+# url = "http://buildbox:7878"   # base URL of claude-commander-server
+# token = "..."                  # bearer token; omit only for servers
+#                                # started with --allow-no-auth (loopback)
 ```
+
+A remote server's `token` is **operator-equivalent**: anyone holding it can create
+sessions (which run arbitrary programs on that machine) and address projects by
+server-side path. Treat it like an SSH key — don't commit it, don't share it, and
+scope it to people you'd give a shell. On disk this file is protected only by its
+`0600` permissions, so keep those intact.
+
+Don't add a remote server that shares this machine's `state.json` (for example a
+loopback `http://localhost:7878` server backed by the same data directory as your
+local instance). Its sessions are already shown under the local machine, so they
+would appear twice — once under the local root and once under the server header —
+and rows under the server header could be misrouted to the local backend. A
+loopback server is fine only when it runs against a **separate** data directory.
+claude-commander logs a warning when a configured server's URL is a loopback
+address as a reminder.
+
+## Idle-session hibernation
+
+Each live session holds a `claude` process open in tmux (~400MB RAM) whether or
+not you're using it. With many sessions open, idle ones waste memory. When
+`hibernate_enabled = true`, a background loop stops the tmux process of any
+session that has been idle past `hibernate_idle_timeout_secs`, **keeping its
+worktree, branch, and metadata** — only the process is stopped. The session
+shows as `Stopped` and transparently resumes (with `--resume`, so the
+conversation is preserved) the next time you attach.
+
+A session counts as **idle** only when all of these hold:
+
+- its agent is `Idle` — a `Working`, `WaitingForInput` (pending approval), or
+  momentarily undetectable session is never hibernated;
+- no tmux client is attached to it, and it wasn't attached within the last
+  check interval or 30 seconds, whichever is longer (so recent attaches are
+  protected slightly longer when the check interval is set below 30s);
+- `keep_alive` is off for that session.
+
+**Waking is automatic**: attaching (`Enter`) recreates the tmux session and
+resumes the agent, even if `resume_session = false` globally — hibernation
+always resumes, since that's what makes it non-destructive.
+
+**Keeping a session alive**: run the **Toggle keep-alive** action from the
+command palette on a session (or `claude-commander keep-alive <session>
+[--on|--off]`) to exempt it from hibernation — useful for a long-running build,
+a watched log, or anything you want to keep warm. A kept-alive session shows an
+anchor (`⚓`) marker in the session list. The action has no default hotkey; bind
+one via `toggle_keep_alive` under `[keybindings]` (e.g. `toggle_keep_alive =
+["K"]`) if you want a shortcut. The flag persists across restarts.
+
+Enabling hibernation and changing `hibernate_check_interval_secs` are
+restart-required (the loop is spawned once at launch); `hibernate_idle_timeout_secs`
+is read live.
 
 ## Conversation mode (TTS)
 
@@ -215,9 +347,12 @@ volume = 1.0                             # 0.0–2.0
 | `prose_only` (default) | Strip code blocks and markdown; speak the natural-language prose |
 | `verbatim` | Speak the text unchanged |
 
-> **Build note:** in-process playback uses `rodio`, which links **ALSA** on Linux. Building from
-> source needs the ALSA development headers (`libasound2-dev` on Debian/Ubuntu, `alsa-lib` on
-> Arch). The Nix dev shell provides them automatically.
+> **Build note:** in-process playback (`rodio`) and microphone capture (`cpal`) link **ALSA** on
+> Linux. They're gated behind the `audio` cargo feature, which is **on by default** — so building
+> the TUI (`claude-commander`) from source needs the ALSA development headers (`libasound2-dev` on
+> Debian/Ubuntu, `alsa-lib` on Arch); the default Nix dev shell provides them automatically. The
+> headless server and the Flutter client build with `audio` off (`default-features = false`) and
+> never link ALSA — remote clients do capture/playback on-device instead.
 
 ## Voice input (STT)
 

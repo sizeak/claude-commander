@@ -1,0 +1,1091 @@
+//! Event handling for the TUI
+//!
+//! Provides an async event stream that combines:
+//! - Terminal input events (keyboard, mouse)
+//! - Application state updates
+//! - Render ticks
+
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+use crate::config::keybindings::{BindableAction, KeyBindings};
+use crate::git::{DiffInfo, EnrichedPrInfo};
+use crate::session::{ProjectId, SessionId};
+
+use crossterm::event::{
+    Event as CrosstermEvent, EventStream, KeyCode, KeyEvent, KeyEventKind, KeyModifiers,
+};
+use futures::{FutureExt, StreamExt};
+use tokio::sync::mpsc;
+use tracing::debug;
+
+/// Application events
+#[derive(Debug, Clone)]
+pub enum AppEvent {
+    /// Terminal input event
+    Input(InputEvent),
+    /// State update from background task
+    StateUpdate(StateUpdate),
+    /// Render tick
+    Tick,
+    /// Request to quit the application
+    Quit,
+}
+
+/// Input events from the terminal
+#[derive(Debug, Clone)]
+pub enum InputEvent {
+    /// Key press
+    Key(KeyEvent),
+    /// Mouse event (if enabled)
+    Mouse(crossterm::event::MouseEvent),
+    /// Terminal resize
+    Resize(u16, u16),
+    /// Bracketed paste
+    Paste(String),
+}
+
+/// State updates from background tasks
+#[derive(Debug, Clone)]
+pub enum StateUpdate {
+    /// Session content updated
+    ContentUpdated {
+        session_id: SessionId,
+        content_hash: u64,
+    },
+    /// Session status changed
+    StatusChanged { session_id: SessionId },
+    /// Diff updated
+    DiffUpdated { session_id: SessionId },
+    /// Project added
+    ProjectAdded { project_id: ProjectId },
+    /// Session added
+    SessionAdded { session_id: SessionId },
+    /// Session removed
+    SessionRemoved { session_id: SessionId },
+    /// Error occurred
+    Error { message: String },
+    /// Session creation completed successfully
+    SessionCreated {
+        session_id: SessionId,
+        /// Backend the session was created on, so the handler refreshes the
+        /// right view (and section-reconciles the right backend) before it
+        /// tries to select the new row. Indexes the `Vec<BackendHandle>`.
+        backend_id: usize,
+    },
+    /// Session creation failed. The backend removes its own half-created
+    /// (`Creating`) session on failure, so this carries only the message.
+    SessionCreateFailed { message: String },
+    /// Result of the add-remote-server connection probe. `Ok(tmux_ok)` means
+    /// the server answered a workspace-snapshot request (reachable + auth
+    /// accepted); the flag carries its tmux health for the success toast.
+    RemoteServerProbed {
+        /// Matches `App::probe_nonce` at spawn time; a stale probe (the user
+        /// dismissed the flow and possibly opened some other Loading modal)
+        /// is dropped instead of writing config.
+        nonce: u64,
+        server: crate::config::RemoteServerConfig,
+        result: Result<bool, String>,
+    },
+    /// Enriched PR info ready from background fetch
+    EnrichedPrReady {
+        session_id: SessionId,
+        info: Option<EnrichedPrInfo>,
+    },
+    /// AI-generated branch summary ready
+    AiSummaryReady {
+        session_id: SessionId,
+        result: Result<String, String>,
+        /// Hash of the diff that was summarized (for cache keying)
+        diff_hash: u64,
+    },
+    /// A backend's change-feed fired: a fresh workspace snapshot (and agent
+    /// states) fetched off the render path, to fold into that backend's cached
+    /// [`BackendView`](crate::backend::BackendView). `backend_id` indexes the
+    /// TUI's `Vec<BackendHandle>`.
+    BackendChanged {
+        backend_id: usize,
+        snapshot: Box<crate::api::WorkspaceSnapshot>,
+        states: Box<crate::api::AgentStatesSnapshot>,
+    },
+    /// A backend's connection health changed (a remote server's poller moved
+    /// between Connecting/Connected/Degraded). Folded into that backend's
+    /// [`BackendView::connection`](crate::backend::BackendView) so its server
+    /// header re-renders live. `backend_id` indexes the `Vec<BackendHandle>`.
+    BackendConnection {
+        backend_id: usize,
+        state: crate::backend::ConnectionState,
+    },
+    /// The Checkout modal's initial (no-fetch) branch listing finished on a
+    /// background task — populate the modal's list without clearing `fetching`,
+    /// since the fetch-refresh is still running and will clear it. Spawned so a
+    /// slow remote listing never blocks the event loop before the modal opens.
+    CheckoutBranchesLoaded {
+        project_id: ProjectId,
+        branches: Vec<(String, bool)>,
+    },
+    /// Background `git fetch origin` kicked off by the Checkout modal
+    /// has finished — the modal should refresh its branch list if still open.
+    CheckoutFetchComplete {
+        project_id: ProjectId,
+        /// Fresh branch list produced after the fetch completed.
+        branches: Vec<(String, bool)>,
+    },
+    /// A background session restart finished. `Ok` toasts success; `Err` carries
+    /// a transport/backend error string. `backend_id` indexes the backend the
+    /// restart ran on, so the post-op refresh hits the right view.
+    RestartFinished {
+        backend_id: usize,
+        result: std::result::Result<(), String>,
+    },
+    /// A background per-session mutation (rename, section move) applied — refresh
+    /// the owning backend's view + tree and keep the session selected. Spawned so
+    /// a slow remote mutation never blocks the event loop.
+    SessionMutationApplied {
+        backend_id: usize,
+        session_id: SessionId,
+    },
+    /// A newly-opened New Session modal's program picker finished loading from a
+    /// remote backend's `create_options` on a background task — patch the picker
+    /// in place if that modal is still open for the same project. Spawned so a
+    /// slow remote never blocks the event loop before the modal appears.
+    NewSessionProgramsLoaded {
+        project_id: ProjectId,
+        picker: super::app::ProgramPicker,
+    },
+    /// Preview/diff/shell data ready from background fetch
+    PreviewReady {
+        /// Which session this data is for (None if project-level)
+        session_id: Option<SessionId>,
+        /// Which project this data is for
+        project_id: Option<ProjectId>,
+        /// Preview pane content (tmux capture)
+        preview_content: String,
+        /// Diff information
+        diff_info: Arc<DiffInfo>,
+        /// Shell pane content
+        shell_content: String,
+    },
+    /// Cascade-merge background task finished (completed, paused on conflict,
+    /// or errored). The TUI refreshes and shows a toast from the recorded
+    /// [`OperationStatus`](crate::api::OperationStatus). `Err` carries a
+    /// transport/backend error string (the operation never recorded).
+    CascadeFinished {
+        /// Backend the cascade ran on, so the post-op refresh hits the right view.
+        backend_id: usize,
+        result: std::result::Result<crate::api::OperationStatus, String>,
+    },
+    /// Push-stack background task finished. `Ok` carries the recorded
+    /// [`OperationStatus`](crate::api::OperationStatus) (its `detail` summarises
+    /// how many branches pushed); `Err` carries a transport/backend error.
+    PushStackFinished {
+        /// Backend the push ran on, so the post-op refresh hits the right view.
+        backend_id: usize,
+        result: std::result::Result<crate::api::OperationStatus, String>,
+    },
+    /// `Cascade abandon` background task finished — the paused cascade was
+    /// cleared (or the clear failed). Spawned so a slow/remote backend never
+    /// blocks the event loop; the TUI refreshes and toasts on arrival.
+    CascadeAbandonFinished {
+        /// Backend whose paused cascade was abandoned.
+        backend_id: usize,
+        result: std::result::Result<(), String>,
+    },
+    /// A background `git lfs pull` for a freshly-created session finished
+    /// (success or failure), so its `⇣ LFS` row marker can be cleared.
+    LfsPullFinished { session_id: SessionId },
+    /// Review diff prepared off-thread: the parsed diff plus its warmed render
+    /// caches (word-diff segments + syntax highlighting), ready to replace the
+    /// loading spinner with the full review view. Boxed — the payload is large.
+    ReviewPrepared {
+        prepared: Box<super::app::ReviewPrepared>,
+    },
+    /// The open-review fetch (now spawned off the event loop) finished without a
+    /// viewable diff: `None` means the session has no changes (a status toast),
+    /// `Some(err)` means the fetch failed (an error modal). Distinct from
+    /// [`ReviewPrepared`](Self::ReviewPrepared), which carries a ready view.
+    ReviewOpenFailed { error: Option<String> },
+    /// A binary review image finished loading off-thread: decoded bytes for one
+    /// side of one file, ready to build a render protocol from (on the main
+    /// thread, which owns the `Picker`). `Arc` keeps the enum cheap to clone.
+    ReviewImageLoaded {
+        /// The review generation this fetch was spawned under. A late arrival
+        /// whose generation no longer matches the open review is dropped.
+        generation: u64,
+        path: String,
+        side: crate::api::DiffSide,
+        image: std::result::Result<Arc<image::DynamicImage>, String>,
+    },
+    /// An open review view's diff was re-composed in the background (agent went
+    /// idle, or a manual refresh). `refreshed` carries the fresh, warmed payload
+    /// to fold into the view in place; `None` means the working tree was
+    /// unchanged. `manual` distinguishes a user-pressed refresh (which reports
+    /// an outcome) from the automatic idle-triggered one (silent). Boxed — the
+    /// payload is large.
+    ReviewRefreshed {
+        refreshed: Option<Box<super::app::ReviewPrepared>>,
+        manual: bool,
+    },
+}
+
+/// User commands triggered by input
+#[derive(Debug, Clone)]
+pub enum UserCommand {
+    /// Navigate up in the list
+    NavigateUp,
+    /// Navigate down in the list
+    NavigateDown,
+    /// Jump to the next project/section header in the list
+    NextGroup,
+    /// Jump to the previous project/section header in the list
+    PreviousGroup,
+    /// Jump to the first item in the list
+    NavigateFirst,
+    /// Jump to the last item in the list
+    NavigateLast,
+    /// Select/attach to current item
+    Select,
+    /// Open shell in worktree
+    SelectShell,
+    /// Create new session
+    NewSession,
+    /// Create a new session stacked on the selected session's branch
+    NewStackedSession,
+    /// Cascade-merge main through the selected session's stack
+    CascadeMergeMain,
+    /// Resume a cascade-merge that paused on conflicts
+    CascadeResume,
+    /// Abandon a paused cascade-merge without continuing
+    CascadeAbandon,
+    /// Push every branch in the selected session's stack to the remote
+    PushStack,
+    /// Create new project
+    NewProject,
+    /// Checkout an existing branch into a new worktree session
+    CheckoutBranch,
+    /// Delete/kill current session
+    DeleteSession,
+    /// Delete every session whose PR has merged on GitHub (palette-only)
+    DeleteMergedPrSessions,
+    /// Rename the currently selected session (UI title only)
+    RenameSession,
+    /// Restart current session (kill tmux and recreate)
+    RestartSession,
+    /// Toggle keep-alive on the selected session (opt out of auto-hibernation)
+    ToggleKeepAlive,
+    /// Remove an entire project
+    RemoveProject,
+    /// Open worktree in editor/IDE
+    OpenInEditor,
+    /// Open the selected session's PR URL in a web browser
+    OpenPullRequest,
+    /// Force an immediate PR-status re-check for all sessions (palette-only)
+    RefreshPrStatus,
+    /// Add a remote server: chained name/URL/token inputs + connection test (palette-only)
+    AddRemoteServer,
+    /// Remove a configured remote server via a picker (palette-only)
+    RemoveRemoteServer,
+    /// Open (creating if needed) the persistent commander session
+    OpenCommander,
+    /// Open/close the full-screen conversation overlay (TTS conversation mode)
+    ToggleConversationOverlay,
+    /// Toggle voice input: start/stop recording the mic for transcription (STT)
+    ToggleVoiceInput,
+    /// Open the full-screen review-diff-and-comment view for the session
+    OpenReviewDiff,
+    /// Toggle between preview/diff panes
+    TogglePane,
+    /// Toggle between preview/diff panes (reverse)
+    TogglePaneReverse,
+    /// Shrink left pane (move divider left)
+    ShrinkLeftPane,
+    /// Grow left pane (move divider right)
+    GrowLeftPane,
+    /// Show help
+    ShowHelp,
+    /// Show settings modal
+    ShowSettings,
+    /// Quit application
+    Quit,
+    /// Cancel current operation
+    Cancel,
+    /// Confirm current operation
+    Confirm,
+    /// Text input
+    TextInput(char),
+    /// Backspace in text input
+    Backspace,
+    /// Scroll preview up
+    ScrollUp,
+    /// Scroll preview down
+    ScrollDown,
+    /// Page up in preview
+    PageUp,
+    /// Page down in preview
+    PageDown,
+    /// Open quick-switch session search modal
+    QuickSwitch,
+    /// Generate AI summary for the current session (Info pane only)
+    GenerateSummary,
+    /// Scan a directory for git repos and add them as projects
+    ScanDirectory,
+    /// Open the "Move to section" modal for the selected session.
+    MoveToSection,
+    /// Collapse or expand the section containing the selected item.
+    ToggleSection,
+    /// Toggle between project-grouped and section-grouped list views.
+    ToggleViewMode,
+}
+
+impl UserCommand {
+    /// Convert a key event to a user command using the given keybinding table.
+    ///
+    /// Configurable actions are resolved via `bindings`. Structural keys
+    /// (Esc/Cancel, Backspace, text input) are handled as hardcoded fallbacks
+    /// since they are not user-rebindable.
+    pub fn from_key(key: KeyEvent, bindings: &KeyBindings) -> Option<Self> {
+        // Only process key press events; ignore release/repeat from terminals
+        // that support the kitty keyboard protocol
+        if key.kind != KeyEventKind::Press {
+            return None;
+        }
+
+        // Try the configurable bindings first
+        if let Some(action) = bindings.resolve(&key) {
+            return Some(action.into());
+        }
+
+        // Structural keys (not rebindable)
+        match (key.code, key.modifiers) {
+            (KeyCode::Esc, KeyModifiers::NONE) => Some(UserCommand::Cancel),
+            (KeyCode::Backspace, KeyModifiers::NONE) => Some(UserCommand::Backspace),
+            (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                Some(UserCommand::TextInput(c))
+            }
+            _ => None,
+        }
+    }
+
+    /// The telemetry feature name to record when this command is dispatched, or
+    /// `None` to record nothing.
+    ///
+    /// `None` is returned for two cases: (1) high-frequency navigation/scroll and
+    /// modal-mechanics commands, which would be noise; and (2) commands whose
+    /// effect runs through an already-instrumented [`CommanderService`] method
+    /// (e.g. `NewSession` → `session.create`), so we don't double-count. Only
+    /// UI-level features that don't otherwise reach the service are named here.
+    pub fn telemetry_feature(&self) -> Option<&'static str> {
+        match self {
+            // -- Recorded at the service layer; skip here to avoid double count.
+            UserCommand::NewSession
+            | UserCommand::NewStackedSession
+            | UserCommand::DeleteSession
+            | UserCommand::RestartSession
+            | UserCommand::ToggleKeepAlive
+            | UserCommand::NewProject
+            | UserCommand::ScanDirectory
+            | UserCommand::OpenReviewDiff => None,
+
+            // -- Navigation / scroll / modal mechanics: pure noise.
+            UserCommand::NavigateUp
+            | UserCommand::NavigateDown
+            | UserCommand::NextGroup
+            | UserCommand::PreviousGroup
+            | UserCommand::NavigateFirst
+            | UserCommand::NavigateLast
+            | UserCommand::ScrollUp
+            | UserCommand::ScrollDown
+            | UserCommand::PageUp
+            | UserCommand::PageDown
+            | UserCommand::ShrinkLeftPane
+            | UserCommand::GrowLeftPane
+            | UserCommand::Confirm
+            | UserCommand::Cancel
+            | UserCommand::Backspace
+            | UserCommand::TextInput(_)
+            | UserCommand::Quit => None,
+
+            // -- UI-level features worth tracking.
+            UserCommand::Select => Some("session.attach"),
+            UserCommand::SelectShell => Some("session.open_shell"),
+            UserCommand::RenameSession => Some("session.rename"),
+            UserCommand::CheckoutBranch => Some("session.checkout_branch"),
+            UserCommand::DeleteMergedPrSessions => Some("session.delete_merged_prs"),
+            UserCommand::RemoveProject => Some("project.remove"),
+            UserCommand::CascadeMergeMain => Some("cascade.merge_main"),
+            UserCommand::CascadeResume => Some("cascade.resume"),
+            UserCommand::CascadeAbandon => Some("cascade.abandon"),
+            UserCommand::PushStack => Some("stack.push"),
+            UserCommand::OpenInEditor => Some("editor.open"),
+            UserCommand::OpenPullRequest => Some("pr.open"),
+            UserCommand::RefreshPrStatus => Some("pr.refresh_status"),
+            UserCommand::AddRemoteServer => Some("server.add_remote"),
+            UserCommand::RemoveRemoteServer => Some("server.remove_remote"),
+            UserCommand::OpenCommander => Some("commander.open"),
+            UserCommand::ToggleConversationOverlay => Some("conversation.toggle"),
+            UserCommand::ToggleVoiceInput => Some("stt.toggle_voice"),
+            UserCommand::GenerateSummary => Some("ai_summary.generate"),
+            UserCommand::TogglePane | UserCommand::TogglePaneReverse => Some("ui.toggle_pane"),
+            UserCommand::ShowHelp => Some("ui.help"),
+            UserCommand::ShowSettings => Some("ui.settings"),
+            UserCommand::QuickSwitch => Some("ui.quick_switch"),
+            UserCommand::MoveToSection => Some("ui.move_to_section"),
+            UserCommand::ToggleSection => Some("ui.toggle_section"),
+            UserCommand::ToggleViewMode => Some("ui.toggle_view_mode"),
+        }
+    }
+}
+
+impl From<BindableAction> for UserCommand {
+    fn from(action: BindableAction) -> Self {
+        match action {
+            BindableAction::NavigateUp => Self::NavigateUp,
+            BindableAction::NavigateDown => Self::NavigateDown,
+            BindableAction::NextGroup => Self::NextGroup,
+            BindableAction::PreviousGroup => Self::PreviousGroup,
+            BindableAction::NavigateFirst => Self::NavigateFirst,
+            BindableAction::NavigateLast => Self::NavigateLast,
+            BindableAction::Select => Self::Select,
+            BindableAction::SelectShell => Self::SelectShell,
+            BindableAction::NewSession => Self::NewSession,
+            BindableAction::NewStackedSession => Self::NewStackedSession,
+            BindableAction::CascadeMergeMain => Self::CascadeMergeMain,
+            BindableAction::CascadeResume => Self::CascadeResume,
+            BindableAction::CascadeAbandon => Self::CascadeAbandon,
+            BindableAction::PushStack => Self::PushStack,
+            BindableAction::NewProject => Self::NewProject,
+            BindableAction::CheckoutBranch => Self::CheckoutBranch,
+            BindableAction::DeleteSession => Self::DeleteSession,
+            BindableAction::DeleteMergedPrSessions => Self::DeleteMergedPrSessions,
+            BindableAction::RenameSession => Self::RenameSession,
+            BindableAction::RestartSession => Self::RestartSession,
+            BindableAction::ToggleKeepAlive => Self::ToggleKeepAlive,
+            BindableAction::RemoveProject => Self::RemoveProject,
+            BindableAction::OpenInEditor => Self::OpenInEditor,
+            BindableAction::OpenPullRequest => Self::OpenPullRequest,
+            BindableAction::RefreshPrStatus => Self::RefreshPrStatus,
+            BindableAction::OpenCommander => Self::OpenCommander,
+            BindableAction::ToggleConversationOverlay => Self::ToggleConversationOverlay,
+            BindableAction::ToggleVoiceInput => Self::ToggleVoiceInput,
+            BindableAction::OpenReviewDiff => Self::OpenReviewDiff,
+            BindableAction::TogglePane => Self::TogglePane,
+            BindableAction::TogglePaneReverse => Self::TogglePaneReverse,
+            BindableAction::ShrinkLeftPane => Self::ShrinkLeftPane,
+            BindableAction::GrowLeftPane => Self::GrowLeftPane,
+            BindableAction::ShowHelp => Self::ShowHelp,
+            BindableAction::ShowSettings => Self::ShowSettings,
+            BindableAction::Quit => Self::Quit,
+            BindableAction::ScrollUp => Self::ScrollUp,
+            BindableAction::ScrollDown => Self::ScrollDown,
+            BindableAction::PageUp => Self::PageUp,
+            BindableAction::PageDown => Self::PageDown,
+            BindableAction::GenerateSummary => Self::GenerateSummary,
+            BindableAction::ScanDirectory => Self::ScanDirectory,
+            BindableAction::MoveToSection => Self::MoveToSection,
+            BindableAction::ToggleSection => Self::ToggleSection,
+            BindableAction::ToggleViewMode => Self::ToggleViewMode,
+            BindableAction::AddRemoteServer => Self::AddRemoteServer,
+            BindableAction::RemoveRemoteServer => Self::RemoveRemoteServer,
+        }
+    }
+}
+
+/// Event loop handle
+pub struct EventLoop {
+    /// Sender for events
+    tx: mpsc::Sender<AppEvent>,
+    /// Receiver for events
+    rx: mpsc::Receiver<AppEvent>,
+    /// Generation counter for input reader (used to stop old readers)
+    input_generation: Arc<AtomicU64>,
+    /// Current tick rate
+    tick_rate: Option<Duration>,
+}
+
+impl EventLoop {
+    /// Create a new event loop
+    pub fn new() -> Self {
+        let (tx, rx) = mpsc::channel(256);
+        Self {
+            tx,
+            rx,
+            input_generation: Arc::new(AtomicU64::new(0)),
+            tick_rate: None,
+        }
+    }
+
+    /// Get a sender for posting events
+    pub fn sender(&self) -> mpsc::Sender<AppEvent> {
+        self.tx.clone()
+    }
+
+    /// Start the event loop
+    ///
+    /// This spawns background tasks for:
+    /// - Terminal input
+    /// - Render ticks
+    pub fn start(&mut self, tick_rate: Duration) {
+        self.tick_rate = Some(tick_rate);
+        self.start_input_reader();
+
+        // Render tick task
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(tick_rate);
+
+            loop {
+                interval.tick().await;
+                if tx.send(AppEvent::Tick).await.is_err() {
+                    break;
+                }
+            }
+        });
+    }
+
+    /// Start the input reader task
+    fn start_input_reader(&self) {
+        let tx = self.tx.clone();
+        let generation = self.input_generation.load(Ordering::SeqCst);
+        let generation_ref = self.input_generation.clone();
+
+        tokio::spawn(async move {
+            let mut reader = EventStream::new();
+
+            loop {
+                // Check if we should stop (generation changed = stop signal)
+                if generation_ref.load(Ordering::SeqCst) != generation {
+                    debug!("Input reader stopping (generation changed)");
+                    break;
+                }
+
+                // Use short timeout to check generation frequently
+                let event =
+                    tokio::time::timeout(Duration::from_millis(50), reader.next().fuse()).await;
+
+                match event {
+                    Ok(Some(Ok(event))) => {
+                        // Re-check generation before sending (might have changed during read)
+                        if generation_ref.load(Ordering::SeqCst) != generation {
+                            debug!("Input reader stopping (generation changed during read)");
+                            break;
+                        }
+
+                        let app_event = match event {
+                            CrosstermEvent::Key(key) => AppEvent::Input(InputEvent::Key(key)),
+                            CrosstermEvent::Mouse(mouse) => {
+                                AppEvent::Input(InputEvent::Mouse(mouse))
+                            }
+                            CrosstermEvent::Resize(w, h) => {
+                                AppEvent::Input(InputEvent::Resize(w, h))
+                            }
+                            CrosstermEvent::Paste(text) => AppEvent::Input(InputEvent::Paste(text)),
+                            _ => continue,
+                        };
+
+                        if tx.send(app_event).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(Some(Err(e))) => {
+                        debug!("Error reading terminal event: {}", e);
+                        continue;
+                    }
+                    Ok(None) => break,
+                    Err(_) => continue, // Timeout, loop back to check generation
+                }
+            }
+            debug!("Input reader task exited");
+        });
+    }
+
+    /// Stop the input reader before tmux attach
+    ///
+    /// Increments generation to signal current reader to stop, then waits briefly
+    /// for it to actually stop so it won't compete for stdin during attach.
+    pub fn stop_input(&mut self) {
+        self.input_generation.fetch_add(1, Ordering::SeqCst);
+        debug!("Input reader stop signaled");
+    }
+
+    /// Restart the input reader after returning from tmux attach
+    pub fn restart_input(&mut self) {
+        // Drain any stale events from the channel
+        while self.rx.try_recv().is_ok() {}
+
+        // Start a fresh input reader (generation was already incremented by stop_input)
+        self.start_input_reader();
+        debug!("Input reader restarted");
+    }
+
+    /// Receive the next event
+    pub async fn next(&mut self) -> Option<AppEvent> {
+        self.rx.recv().await
+    }
+
+    /// Try to receive an event without blocking
+    pub fn try_next(&mut self) -> Option<AppEvent> {
+        self.rx.try_recv().ok()
+    }
+
+    /// Post a state update
+    pub async fn post_update(&self, update: StateUpdate) {
+        let _ = self.tx.send(AppEvent::StateUpdate(update)).await;
+    }
+}
+
+impl Default for EventLoop {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn kb() -> KeyBindings {
+        KeyBindings::default()
+    }
+
+    #[test]
+    fn telemetry_feature_skips_noise_and_service_instrumented_commands() {
+        // Navigation/scroll/mechanics record nothing.
+        for cmd in [
+            UserCommand::NavigateUp,
+            UserCommand::NavigateDown,
+            UserCommand::ScrollUp,
+            UserCommand::PageDown,
+            UserCommand::Confirm,
+            UserCommand::Cancel,
+            UserCommand::Backspace,
+            UserCommand::TextInput('x'),
+            UserCommand::Quit,
+        ] {
+            assert_eq!(cmd.telemetry_feature(), None, "{cmd:?} should be silent");
+        }
+
+        // Commands recorded by the service layer must not double-count here.
+        for cmd in [
+            UserCommand::NewSession,
+            UserCommand::DeleteSession,
+            UserCommand::RestartSession,
+            UserCommand::NewProject,
+            UserCommand::OpenReviewDiff,
+        ] {
+            assert_eq!(
+                cmd.telemetry_feature(),
+                None,
+                "{cmd:?} is service-instrumented; TUI must stay silent"
+            );
+        }
+
+        // UI-level features are named.
+        assert_eq!(
+            UserCommand::OpenCommander.telemetry_feature(),
+            Some("commander.open")
+        );
+        assert_eq!(
+            UserCommand::ToggleViewMode.telemetry_feature(),
+            Some("ui.toggle_view_mode")
+        );
+        assert_eq!(
+            UserCommand::TogglePaneReverse.telemetry_feature(),
+            Some("ui.toggle_pane")
+        );
+    }
+
+    #[test]
+    fn test_key_to_command() {
+        let b = kb();
+
+        // Navigation
+        let key = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::NavigateDown)
+        ));
+
+        let key = KeyEvent::new(KeyCode::Char('k'), KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::NavigateUp)
+        ));
+
+        // Quit
+        let key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::Quit)
+        ));
+
+        // Text input — 'a' is not bound to any action, so falls through to TextInput
+        let key = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::TextInput('a'))
+        ));
+    }
+
+    #[test]
+    fn test_pane_resize_keys() {
+        let b = kb();
+
+        let key = KeyEvent::new(KeyCode::Char('<'), KeyModifiers::SHIFT);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::ShrinkLeftPane)
+        ));
+
+        let key = KeyEvent::new(KeyCode::Char('>'), KeyModifiers::SHIFT);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::GrowLeftPane)
+        ));
+
+        // Some terminals report without SHIFT
+        let key = KeyEvent::new(KeyCode::Char('<'), KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::ShrinkLeftPane)
+        ));
+
+        let key = KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::GrowLeftPane)
+        ));
+    }
+
+    #[test]
+    fn test_ctrl_c_quits() {
+        let b = kb();
+        let key = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::Quit)
+        ));
+    }
+
+    #[test]
+    fn test_ctrl_p_navigates_up() {
+        let b = kb();
+        let key = KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::NavigateUp)
+        ));
+    }
+
+    #[test]
+    fn test_ctrl_n_navigates_down() {
+        let b = kb();
+        let key = KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::NavigateDown)
+        ));
+    }
+
+    #[test]
+    fn test_arrow_keys() {
+        let b = kb();
+
+        let up = KeyEvent::new(KeyCode::Up, KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(up, &b),
+            Some(UserCommand::NavigateUp)
+        ));
+
+        let down = KeyEvent::new(KeyCode::Down, KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(down, &b),
+            Some(UserCommand::NavigateDown)
+        ));
+    }
+
+    #[test]
+    fn test_enter_selects() {
+        let b = kb();
+        let key = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::Select)
+        ));
+    }
+
+    #[test]
+    fn test_tab_toggles_pane() {
+        let b = kb();
+
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(tab, &b),
+            Some(UserCommand::TogglePane)
+        ));
+
+        let backtab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert!(matches!(
+            UserCommand::from_key(backtab, &b),
+            Some(UserCommand::TogglePaneReverse)
+        ));
+    }
+
+    #[test]
+    fn test_session_management_keys() {
+        let b = kb();
+        let cases: Vec<(KeyCode, KeyModifiers, UserCommand)> = vec![
+            (
+                KeyCode::Char('s'),
+                KeyModifiers::NONE,
+                UserCommand::SelectShell,
+            ),
+            (
+                KeyCode::Char('n'),
+                KeyModifiers::NONE,
+                UserCommand::NewSession,
+            ),
+            (
+                KeyCode::Char('N'),
+                KeyModifiers::SHIFT,
+                UserCommand::NewProject,
+            ),
+            (
+                KeyCode::Char('d'),
+                KeyModifiers::NONE,
+                UserCommand::DeleteSession,
+            ),
+            (
+                KeyCode::Char('R'),
+                KeyModifiers::SHIFT,
+                UserCommand::RestartSession,
+            ),
+            (
+                KeyCode::Char('D'),
+                KeyModifiers::SHIFT,
+                UserCommand::RemoveProject,
+            ),
+            (
+                KeyCode::Char('.'),
+                KeyModifiers::NONE,
+                UserCommand::OpenInEditor,
+            ),
+            (
+                KeyCode::Char('.'),
+                KeyModifiers::CONTROL,
+                UserCommand::OpenInEditor,
+            ),
+            (
+                KeyCode::Char('o'),
+                KeyModifiers::NONE,
+                UserCommand::OpenPullRequest,
+            ),
+            (
+                KeyCode::Char('r'),
+                KeyModifiers::NONE,
+                UserCommand::OpenReviewDiff,
+            ),
+            (
+                KeyCode::Char('r'),
+                KeyModifiers::ALT,
+                UserCommand::OpenReviewDiff,
+            ),
+            (
+                KeyCode::Char('S'),
+                KeyModifiers::SHIFT,
+                UserCommand::ScanDirectory,
+            ),
+        ];
+
+        for (code, modifiers, expected) in cases {
+            let key = KeyEvent::new(code, modifiers);
+            let result = UserCommand::from_key(key, &b);
+            assert!(
+                result.is_some(),
+                "Expected Some for {:?}+{:?}",
+                code,
+                modifiers
+            );
+            assert_eq!(
+                std::mem::discriminant(&result.unwrap()),
+                std::mem::discriminant(&expected),
+                "Mismatch for {:?}+{:?}",
+                code,
+                modifiers
+            );
+        }
+    }
+
+    #[test]
+    fn test_scan_directory_key() {
+        let b = kb();
+        let key = KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::ScanDirectory)
+        ));
+    }
+
+    #[test]
+    fn test_scroll_keys() {
+        let b = kb();
+
+        let ctrl_u = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            UserCommand::from_key(ctrl_u, &b),
+            Some(UserCommand::PageUp)
+        ));
+
+        let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        assert!(matches!(
+            UserCommand::from_key(ctrl_d, &b),
+            Some(UserCommand::PageDown)
+        ));
+
+        let pgup = KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(pgup, &b),
+            Some(UserCommand::PageUp)
+        ));
+
+        let pgdown = KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(pgdown, &b),
+            Some(UserCommand::PageDown)
+        ));
+    }
+
+    #[test]
+    fn test_help_key() {
+        let b = kb();
+
+        let q_none = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(q_none, &b),
+            Some(UserCommand::ShowHelp)
+        ));
+
+        let q_shift = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::SHIFT);
+        assert!(matches!(
+            UserCommand::from_key(q_shift, &b),
+            Some(UserCommand::ShowHelp)
+        ));
+    }
+
+    #[test]
+    fn test_escape_cancels() {
+        let b = kb();
+        let key = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::Cancel)
+        ));
+    }
+
+    #[test]
+    fn test_backspace_key() {
+        let b = kb();
+        let key = KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::Backspace)
+        ));
+    }
+
+    #[test]
+    fn test_key_release_ignored() {
+        use crossterm::event::{KeyEventKind, KeyEventState};
+        let b = kb();
+        let key = KeyEvent {
+            code: KeyCode::Char('j'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Release,
+            state: KeyEventState::empty(),
+        };
+        assert!(UserCommand::from_key(key, &b).is_none());
+    }
+
+    #[test]
+    fn test_key_repeat_ignored() {
+        use crossterm::event::{KeyEventKind, KeyEventState};
+        let b = kb();
+        let key = KeyEvent {
+            code: KeyCode::Char('j'),
+            modifiers: KeyModifiers::NONE,
+            kind: KeyEventKind::Repeat,
+            state: KeyEventState::empty(),
+        };
+        assert!(UserCommand::from_key(key, &b).is_none());
+    }
+
+    #[test]
+    fn test_refresh_pr_status_maps_from_palette_action() {
+        // Palette-only command: reachable only via the BindableAction → UserCommand
+        // conversion the palette uses, never from a key (it has no binding).
+        assert!(matches!(
+            UserCommand::from(BindableAction::RefreshPrStatus),
+            UserCommand::RefreshPrStatus
+        ));
+    }
+
+    #[test]
+    fn test_remote_server_actions_map_from_palette_and_record_telemetry() {
+        // Palette-only commands: reachable via the BindableAction conversion,
+        // and both record a feature at the handle_command chokepoint.
+        assert!(matches!(
+            UserCommand::from(BindableAction::AddRemoteServer),
+            UserCommand::AddRemoteServer
+        ));
+        assert!(matches!(
+            UserCommand::from(BindableAction::RemoveRemoteServer),
+            UserCommand::RemoveRemoteServer
+        ));
+        assert_eq!(
+            UserCommand::AddRemoteServer.telemetry_feature(),
+            Some("server.add_remote")
+        );
+        assert_eq!(
+            UserCommand::RemoveRemoteServer.telemetry_feature(),
+            Some("server.remove_remote")
+        );
+    }
+
+    #[test]
+    fn test_toggle_view_mode_bound_to_v() {
+        let b = kb();
+        let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::ToggleViewMode)
+        ));
+    }
+
+    #[test]
+    fn test_toggle_section_not_bound_by_default() {
+        let b = kb();
+        // z is unbound by default, falls through to TextInput
+        let key = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::TextInput('z'))
+        ));
+    }
+
+    #[test]
+    fn test_unknown_key_returns_none() {
+        let b = kb();
+        let key = KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE);
+        assert!(UserCommand::from_key(key, &b).is_none());
+    }
+
+    #[test]
+    fn test_text_input_uppercase() {
+        let b = kb();
+        // 'A' with SHIFT is not bound to any action, falls through to TextInput
+        let key = KeyEvent::new(KeyCode::Char('A'), KeyModifiers::SHIFT);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::TextInput('A'))
+        ));
+    }
+}

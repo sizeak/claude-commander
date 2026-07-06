@@ -3,6 +3,26 @@
 # The GitHub release itself, the Homebrew tap bump, and the AUR publish are
 # handled by .github/workflows/publish-tap.yml and publish-aur.yml, which fire
 # on tag push.
+#
+# This is now a virtual workspace. The version is hoisted to
+# [workspace.package] and inherited by every member via
+# `version.workspace = true`, so all crates move together. `shared-version`
+# keeps every member's version identical; `consolidate-commits` (default true)
+# produces ONE release commit for the whole workspace.
+#
+# Single-tag requirement: `tag-name` below has no `{{crate_name}}-` prefix, so
+# all members resolve to the same `v{{version}}` tag. To guarantee that tag is
+# created exactly once (rather than one create attempt per releasable member),
+# the two non-representative members must opt out of the release flow with
+# `release = false` in their `[package.metadata.release]`, leaving the
+# `claude-commander` bin crate as the sole representative that drives the
+# commit/tag/replacements. claude-commander-server already carries
+# `publish = false` (never pushed to crates.io); the core lib likewise.
+# See the Stage D1 report — those `release = false` flags are a Cargo.toml
+# change outside this file's ownership and must be added there.
+
+# Keep every member's version identical and consolidate into one commit.
+shared-version = true
 
 sign-commit = true
 sign-tag    = true
@@ -12,15 +32,25 @@ tag-name                   = "v{{version}}"
 tag-message                = "{{tag_name}}"
 pre-release-commit-message = "Bump version to {{version}}"
 
-# claude-commander isn't published on crates.io.
+# Nothing in this workspace is published on crates.io (the binaries ship via
+# the GitHub release / Homebrew / AUR). This also covers the server crate.
 publish = false
 
 # Only cut releases from main.
 allow-branch = ["main"]
 
-# Keep the AUR PKGBUILD's pkgver in sync with Cargo.toml at release-commit
-# time. The sha256sums field is rewritten by .github/workflows/publish-aur.yml
-# once the GitHub release tarball exists.
+# Keep the AUR PKGBUILD's pkgver in sync with the workspace version at
+# release-commit time. The sha256sums field is rewritten by
+# .github/workflows/publish-aur.yml once the GitHub release tarball exists.
+#
+# Once `release = false` gates the release to the single representative crate
+# (see above), this replacement runs once. Even if it ran per-member it is
+# idempotent: `^pkgver=.*$` matches the already-rewritten line and replaces it
+# with the identical `pkgver={{version}}`, so `exactly = 1` is satisfied on
+# every pass and the regex always matches the single (root/workspace) version.
+# NOTE: cargo-release resolves these file paths relative to the *representative
+# crate's* manifest directory (crates/claude-commander/), not the workspace
+# root. The PKGBUILD lives at the workspace root, so we hop up two levels.
 pre-release-replacements = [
-  { file = "packaging/aur/PKGBUILD", search = "^pkgver=.*$", replace = "pkgver={{version}}", exactly = 1 },
+  { file = "../../packaging/aur/PKGBUILD", search = "^pkgver=.*$", replace = "pkgver={{version}}", exactly = 1 },
 ]
