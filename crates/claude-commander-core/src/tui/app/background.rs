@@ -237,7 +237,7 @@ impl App {
             .sessions
             .iter()
             .find(|s| s.session_id == session_id)
-            .map(|s| s.worktree_path.clone());
+            .map(|s| std::path::PathBuf::from(&s.worktree_path));
         let Some(worktree_path) = worktree_path else {
             self.ui_state.lfs_pull_in_flight.remove(&session_id);
             return;

@@ -1345,7 +1345,6 @@ mod session_info_stack_node_tests {
     use super::*;
     use chrono::{Duration as ChronoDuration, Utc};
     use claude_commander_protocol::api::SessionInfo;
-    use std::path::PathBuf;
 
     /// Minimal `SessionInfo` with a fixed project, so only the stack-relevant
     /// fields (branch / pr_base_branch / stack_parent / created_at) vary.
@@ -1377,7 +1376,7 @@ mod session_info_stack_node_tests {
             entered_section_at: None,
             last_attached_at: None,
             keep_alive: false,
-            worktree_path: PathBuf::new(),
+            worktree_path: String::new(),
             tmux_session_name: String::new(),
         }
     }

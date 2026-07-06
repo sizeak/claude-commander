@@ -819,7 +819,7 @@ fn worktree_item(
         pr_state: Some(session.pr_state),
         pr_draft: session.pr_draft,
         pr_labels: session.pr_labels.clone(),
-        worktree_path: session.worktree_path.clone(),
+        worktree_path: std::path::PathBuf::from(&session.worktree_path),
         created_at: session.created_at,
         agent_state: agent_states.get(&session.session_id).copied(),
         unread: session.unread,

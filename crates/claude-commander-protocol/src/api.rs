@@ -80,7 +80,9 @@ pub struct SessionInfo {
     pub keep_alive: bool,
     /// Absolute path to the session's git worktree.
     #[serde(default)]
-    pub worktree_path: PathBuf,
+    /// Server-side worktree path, as a display string. A `String` (not
+    /// `PathBuf`) so frb mirrors can transfer it; serde wire form is identical.
+    pub worktree_path: String,
     /// tmux session name backing this session.
     #[serde(default)]
     pub tmux_session_name: String,
@@ -491,7 +493,7 @@ mod tests {
         assert!(info.section_override.is_none());
         assert!(info.entered_section_at.is_none());
         assert!(info.last_attached_at.is_none());
-        assert_eq!(info.worktree_path, PathBuf::new());
+        assert_eq!(info.worktree_path, String::new());
         assert_eq!(info.tmux_session_name, "");
     }
 

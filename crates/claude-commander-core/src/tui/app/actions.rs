@@ -263,7 +263,7 @@ impl App {
             .sessions
             .iter()
             .find(|s| s.tmux_session_name == lookup_name)
-            .map(|s| s.worktree_path.clone());
+            .map(|s| std::path::PathBuf::from(&s.worktree_path));
 
         let Some(path) = path else {
             warn!(
@@ -313,7 +313,8 @@ impl App {
         let (backend, path) = if let Some(sref) = self.ui_state.selected_session_id {
             (
                 sref.backend,
-                self.session(sref).map(|s| s.worktree_path.clone()),
+                self.session(sref)
+                    .map(|s| std::path::PathBuf::from(&s.worktree_path)),
             )
         } else if let Some((backend, project_id)) = self.ui_state.selected_project_id {
             (

@@ -2263,7 +2263,7 @@ fn session_info_from_session(session: &WorktreeSession, project_name: &str) -> S
         entered_section_at: Some(session.entered_section_at),
         last_attached_at: session.last_attached_at,
         keep_alive: session.keep_alive,
-        worktree_path: session.worktree_path.clone(),
+        worktree_path: session.worktree_path.to_string_lossy().into_owned(),
         tmux_session_name: session.tmux_session_name.clone(),
     }
 }

@@ -93,6 +93,17 @@ class SessionInfo {
   final ReviewDecision? reviewDecision;
   final List<String> prReviewers;
   final DateTime createdAt;
+  final bool unread;
+  final SessionId? stackParentSessionId;
+  final String? prBaseBranch;
+  final bool prMerged;
+  final String? currentSection;
+  final String? sectionOverride;
+  final DateTime? enteredSectionAt;
+  final DateTime? lastAttachedAt;
+  final String worktreePath;
+  final String tmuxSessionName;
+  final bool keepAlive;
 
   const SessionInfo({
     required this.id,
@@ -111,6 +122,17 @@ class SessionInfo {
     this.reviewDecision,
     required this.prReviewers,
     required this.createdAt,
+    required this.unread,
+    this.stackParentSessionId,
+    this.prBaseBranch,
+    required this.prMerged,
+    this.currentSection,
+    this.sectionOverride,
+    this.enteredSectionAt,
+    this.lastAttachedAt,
+    required this.worktreePath,
+    required this.tmuxSessionName,
+    required this.keepAlive,
   });
 
   @override
@@ -130,7 +152,18 @@ class SessionInfo {
       prLabels.hashCode ^
       reviewDecision.hashCode ^
       prReviewers.hashCode ^
-      createdAt.hashCode;
+      createdAt.hashCode ^
+      unread.hashCode ^
+      stackParentSessionId.hashCode ^
+      prBaseBranch.hashCode ^
+      prMerged.hashCode ^
+      currentSection.hashCode ^
+      sectionOverride.hashCode ^
+      enteredSectionAt.hashCode ^
+      lastAttachedAt.hashCode ^
+      worktreePath.hashCode ^
+      tmuxSessionName.hashCode ^
+      keepAlive.hashCode;
 
   @override
   bool operator ==(Object other) =>
@@ -152,7 +185,18 @@ class SessionInfo {
           prLabels == other.prLabels &&
           reviewDecision == other.reviewDecision &&
           prReviewers == other.prReviewers &&
-          createdAt == other.createdAt;
+          createdAt == other.createdAt &&
+          unread == other.unread &&
+          stackParentSessionId == other.stackParentSessionId &&
+          prBaseBranch == other.prBaseBranch &&
+          prMerged == other.prMerged &&
+          currentSection == other.currentSection &&
+          sectionOverride == other.sectionOverride &&
+          enteredSectionAt == other.enteredSectionAt &&
+          lastAttachedAt == other.lastAttachedAt &&
+          worktreePath == other.worktreePath &&
+          tmuxSessionName == other.tmuxSessionName &&
+          keepAlive == other.keepAlive;
 }
 
 enum SessionStatus {

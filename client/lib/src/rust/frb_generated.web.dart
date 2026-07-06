@@ -54,6 +54,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool dco_decode_bool(dynamic raw);
 
   @protected
+  DateTime dco_decode_box_autoadd_Chrono_Utc(dynamic raw);
+
+  @protected
   ReviewDecision dco_decode_box_autoadd_review_decision(dynamic raw);
 
   @protected
@@ -61,6 +64,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SessionDetail dco_decode_box_autoadd_session_detail(dynamic raw);
+
+  @protected
+  SessionId dco_decode_box_autoadd_session_id(dynamic raw);
 
   @protected
   int dco_decode_box_autoadd_u_32(dynamic raw);
@@ -102,6 +108,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String? dco_decode_opt_String(dynamic raw);
 
   @protected
+  DateTime? dco_decode_opt_box_autoadd_Chrono_Utc(dynamic raw);
+
+  @protected
   ReviewDecision? dco_decode_opt_box_autoadd_review_decision(dynamic raw);
 
   @protected
@@ -111,6 +120,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SessionDetail? dco_decode_opt_box_autoadd_session_detail(dynamic raw);
+
+  @protected
+  SessionId? dco_decode_opt_box_autoadd_session_id(dynamic raw);
 
   @protected
   int? dco_decode_opt_box_autoadd_u_32(dynamic raw);
@@ -208,6 +220,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
+  DateTime sse_decode_box_autoadd_Chrono_Utc(SseDeserializer deserializer);
+
+  @protected
   ReviewDecision sse_decode_box_autoadd_review_decision(
     SseDeserializer deserializer,
   );
@@ -221,6 +236,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   SessionDetail sse_decode_box_autoadd_session_detail(
     SseDeserializer deserializer,
   );
+
+  @protected
+  SessionId sse_decode_box_autoadd_session_id(SseDeserializer deserializer);
 
   @protected
   int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
@@ -268,6 +286,9 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   String? sse_decode_opt_String(SseDeserializer deserializer);
 
   @protected
+  DateTime? sse_decode_opt_box_autoadd_Chrono_Utc(SseDeserializer deserializer);
+
+  @protected
   ReviewDecision? sse_decode_opt_box_autoadd_review_decision(
     SseDeserializer deserializer,
   );
@@ -279,6 +300,11 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
 
   @protected
   SessionDetail? sse_decode_opt_box_autoadd_session_detail(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  SessionId? sse_decode_opt_box_autoadd_session_id(
     SseDeserializer deserializer,
   );
 
@@ -393,6 +419,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
+  void sse_encode_box_autoadd_Chrono_Utc(
+    DateTime self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_box_autoadd_review_decision(
     ReviewDecision self,
     SseSerializer serializer,
@@ -407,6 +439,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_box_autoadd_session_detail(
     SessionDetail self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_session_id(
+    SessionId self,
     SseSerializer serializer,
   );
 
@@ -468,6 +506,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_opt_String(String? self, SseSerializer serializer);
 
   @protected
+  void sse_encode_opt_box_autoadd_Chrono_Utc(
+    DateTime? self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_opt_box_autoadd_review_decision(
     ReviewDecision? self,
     SseSerializer serializer,
@@ -482,6 +526,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_session_detail(
     SessionDetail? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_session_id(
+    SessionId? self,
     SseSerializer serializer,
   );
 

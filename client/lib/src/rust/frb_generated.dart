@@ -1153,6 +1153,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  DateTime dco_decode_box_autoadd_Chrono_Utc(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_Chrono_Utc(raw);
+  }
+
+  @protected
   ReviewDecision dco_decode_box_autoadd_review_decision(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_review_decision(raw);
@@ -1168,6 +1174,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   SessionDetail dco_decode_box_autoadd_session_detail(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_session_detail(raw);
+  }
+
+  @protected
+  SessionId dco_decode_box_autoadd_session_id(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_session_id(raw);
   }
 
   @protected
@@ -1262,6 +1274,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  DateTime? dco_decode_opt_box_autoadd_Chrono_Utc(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_Chrono_Utc(raw);
+  }
+
+  @protected
   ReviewDecision? dco_decode_opt_box_autoadd_review_decision(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_review_decision(raw);
@@ -1279,6 +1297,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   SessionDetail? dco_decode_opt_box_autoadd_session_detail(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_session_detail(raw);
+  }
+
+  @protected
+  SessionId? dco_decode_opt_box_autoadd_session_id(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_session_id(raw);
   }
 
   @protected
@@ -1423,8 +1447,8 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   SessionInfo dco_decode_session_info(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 16)
-      throw Exception('unexpected arr length: expect 16 but see ${arr.length}');
+    if (arr.length != 27)
+      throw Exception('unexpected arr length: expect 27 but see ${arr.length}');
     return SessionInfo(
       id: dco_decode_String(arr[0]),
       sessionId: dco_decode_session_id(arr[1]),
@@ -1442,6 +1466,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       reviewDecision: dco_decode_opt_box_autoadd_review_decision(arr[13]),
       prReviewers: dco_decode_list_String(arr[14]),
       createdAt: dco_decode_Chrono_Utc(arr[15]),
+      unread: dco_decode_bool(arr[16]),
+      stackParentSessionId: dco_decode_opt_box_autoadd_session_id(arr[17]),
+      prBaseBranch: dco_decode_opt_String(arr[18]),
+      prMerged: dco_decode_bool(arr[19]),
+      currentSection: dco_decode_opt_String(arr[20]),
+      sectionOverride: dco_decode_opt_String(arr[21]),
+      enteredSectionAt: dco_decode_opt_box_autoadd_Chrono_Utc(arr[22]),
+      lastAttachedAt: dco_decode_opt_box_autoadd_Chrono_Utc(arr[23]),
+      worktreePath: dco_decode_String(arr[24]),
+      tmuxSessionName: dco_decode_String(arr[25]),
+      keepAlive: dco_decode_bool(arr[26]),
     );
   }
 
@@ -1566,6 +1601,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  DateTime sse_decode_box_autoadd_Chrono_Utc(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_Chrono_Utc(deserializer));
+  }
+
+  @protected
   ReviewDecision sse_decode_box_autoadd_review_decision(
     SseDeserializer deserializer,
   ) {
@@ -1587,6 +1628,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     return (sse_decode_session_detail(deserializer));
+  }
+
+  @protected
+  SessionId sse_decode_box_autoadd_session_id(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_session_id(deserializer));
   }
 
   @protected
@@ -1736,6 +1783,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  DateTime? sse_decode_opt_box_autoadd_Chrono_Utc(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_Chrono_Utc(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
   ReviewDecision? sse_decode_opt_box_autoadd_review_decision(
     SseDeserializer deserializer,
   ) {
@@ -1769,6 +1829,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_session_detail(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  SessionId? sse_decode_opt_box_autoadd_session_id(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_session_id(deserializer));
     } else {
       return null;
     }
@@ -1959,6 +2032,23 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     );
     var var_prReviewers = sse_decode_list_String(deserializer);
     var var_createdAt = sse_decode_Chrono_Utc(deserializer);
+    var var_unread = sse_decode_bool(deserializer);
+    var var_stackParentSessionId = sse_decode_opt_box_autoadd_session_id(
+      deserializer,
+    );
+    var var_prBaseBranch = sse_decode_opt_String(deserializer);
+    var var_prMerged = sse_decode_bool(deserializer);
+    var var_currentSection = sse_decode_opt_String(deserializer);
+    var var_sectionOverride = sse_decode_opt_String(deserializer);
+    var var_enteredSectionAt = sse_decode_opt_box_autoadd_Chrono_Utc(
+      deserializer,
+    );
+    var var_lastAttachedAt = sse_decode_opt_box_autoadd_Chrono_Utc(
+      deserializer,
+    );
+    var var_worktreePath = sse_decode_String(deserializer);
+    var var_tmuxSessionName = sse_decode_String(deserializer);
+    var var_keepAlive = sse_decode_bool(deserializer);
     return SessionInfo(
       id: var_id,
       sessionId: var_sessionId,
@@ -1976,6 +2066,17 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       reviewDecision: var_reviewDecision,
       prReviewers: var_prReviewers,
       createdAt: var_createdAt,
+      unread: var_unread,
+      stackParentSessionId: var_stackParentSessionId,
+      prBaseBranch: var_prBaseBranch,
+      prMerged: var_prMerged,
+      currentSection: var_currentSection,
+      sectionOverride: var_sectionOverride,
+      enteredSectionAt: var_enteredSectionAt,
+      lastAttachedAt: var_lastAttachedAt,
+      worktreePath: var_worktreePath,
+      tmuxSessionName: var_tmuxSessionName,
+      keepAlive: var_keepAlive,
     );
   }
 
@@ -2105,6 +2206,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_Chrono_Utc(
+    DateTime self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_Chrono_Utc(self, serializer);
+  }
+
+  @protected
   void sse_encode_box_autoadd_review_decision(
     ReviewDecision self,
     SseSerializer serializer,
@@ -2129,6 +2239,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_session_detail(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_session_id(
+    SessionId self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_session_id(self, serializer);
   }
 
   @protected
@@ -2265,6 +2384,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_opt_box_autoadd_Chrono_Utc(
+    DateTime? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_Chrono_Utc(self, serializer);
+    }
+  }
+
+  @protected
   void sse_encode_opt_box_autoadd_review_decision(
     ReviewDecision? self,
     SseSerializer serializer,
@@ -2300,6 +2432,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_session_detail(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_session_id(
+    SessionId? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_session_id(self, serializer);
     }
   }
 
@@ -2460,6 +2605,20 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_opt_box_autoadd_review_decision(self.reviewDecision, serializer);
     sse_encode_list_String(self.prReviewers, serializer);
     sse_encode_Chrono_Utc(self.createdAt, serializer);
+    sse_encode_bool(self.unread, serializer);
+    sse_encode_opt_box_autoadd_session_id(
+      self.stackParentSessionId,
+      serializer,
+    );
+    sse_encode_opt_String(self.prBaseBranch, serializer);
+    sse_encode_bool(self.prMerged, serializer);
+    sse_encode_opt_String(self.currentSection, serializer);
+    sse_encode_opt_String(self.sectionOverride, serializer);
+    sse_encode_opt_box_autoadd_Chrono_Utc(self.enteredSectionAt, serializer);
+    sse_encode_opt_box_autoadd_Chrono_Utc(self.lastAttachedAt, serializer);
+    sse_encode_String(self.worktreePath, serializer);
+    sse_encode_String(self.tmuxSessionName, serializer);
+    sse_encode_bool(self.keepAlive, serializer);
   }
 
   @protected

@@ -1498,12 +1498,15 @@ mod tests {
             .expect("shell session should resolve/create");
         assert!(shell_name.ends_with("-sh"), "got {shell_name}");
 
-        // Detach and confirm the shell session survives.
+        // Detach (streams still held, like the interactive loop does) and
+        // confirm the shell session survives. Dropping the streams BEFORE the
+        // detach raced the pump's stream-EOF teardown against any in-flight
+        // server frame and could observe SessionEnded on slow runners.
+        terminator.detach().await;
+        assert_eq!(terminator.wait().await, AttachEnd::Detached);
         drop(reader);
         drop(writer);
         drop(resizer);
-        terminator.detach().await;
-        assert_eq!(terminator.wait().await, AttachEnd::Detached);
 
         let tmux = TmuxExecutor::new().with_tmux_tmpdir(service.read_config().tmux_tmpdir);
         let mut exists = false;

@@ -39,6 +39,17 @@ SessionInfo sessionInfo({
     reviewDecision: null,
     prReviewers: const [],
     createdAt: DateTime.utc(2026, 1, 1),
+    unread: false,
+    stackParentSessionId: null,
+    prBaseBranch: null,
+    prMerged: false,
+    currentSection: null,
+    sectionOverride: null,
+    enteredSectionAt: null,
+    lastAttachedAt: null,
+    worktreePath: '/tmp/test-worktree',
+    tmuxSessionName: 'cc-test',
+    keepAlive: false,
   );
 }
 
