@@ -578,6 +578,12 @@ pub enum SessionListItem {
         backend: crate::backend::BackendId,
         name: String,
         connection: crate::backend::ConnectionState,
+        /// Set when this backend's server build is older than the client (see
+        /// [`server_version_mismatch`](crate::backend::server_version_mismatch)).
+        /// Rendered as a non-blocking `⚠` annotation; independent of
+        /// `connection` so a mismatched-but-healthy server still shows its
+        /// subtree.
+        version_warning: Option<crate::backend::VersionMismatch>,
     },
     /// A section header (used only when config.sections is non-empty).
     SectionHeader {

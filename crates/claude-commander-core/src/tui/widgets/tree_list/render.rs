@@ -247,7 +247,10 @@ impl<'a> TreeList<'a> {
                     ListItem::new(line)
                 }
                 SessionListItem::ServerHeader {
-                    name, connection, ..
+                    name,
+                    connection,
+                    version_warning,
+                    ..
                 } => {
                     use crate::backend::ConnectionState;
                     // A filled dot coloured by health, the server name, and a
@@ -283,6 +286,15 @@ impl<'a> TreeList<'a> {
                         // server (the whole header row is the click target).
                         Span::styled(" ⚙", Style::default().fg(self.theme.text_secondary)),
                     ];
+                    // A version-mismatch warning is independent of connection
+                    // health: shown right after the name so a healthy-but-older
+                    // server reads as active-with-a-caveat, not inert.
+                    if let Some(w) = version_warning {
+                        spans.push(Span::styled(
+                            format!(" ⚠ v{} (client v{})", w.server, w.client),
+                            Style::default().fg(self.theme.modal_warning),
+                        ));
+                    }
                     if let Some((text, color)) = note {
                         spans.push(Span::styled(
                             format!(" ({text})"),

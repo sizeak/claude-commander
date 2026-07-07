@@ -1118,6 +1118,11 @@ pub struct AppUiState {
     pub diff_info: Arc<DiffInfo>,
     /// Status message (with expiry time)
     pub status_message: Option<(String, Instant)>,
+    /// Backend ids (raw) that have already shown their one-time version-mismatch
+    /// toast this session, so a stale server warns once rather than on every
+    /// snapshot fold. Ids are monotonic, so a re-added server gets a fresh id
+    /// and re-toasts.
+    pub version_warned: HashSet<usize>,
     /// Should quit
     pub should_quit: bool,
     /// Last known terminal size (updated each render frame)
@@ -1240,6 +1245,7 @@ impl Default for AppUiState {
             preview_content: String::new(),
             diff_info: Arc::new(DiffInfo::empty()),
             status_message: None, // (message, expiry)
+            version_warned: HashSet::new(),
             review_body_rect: None,
             review_file_list_rect: None,
             modal_list_rect: None,
