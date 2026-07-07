@@ -1581,3 +1581,140 @@ async fn test_fresh_restart_clears_hibernation_marker() {
     drop(state_temp_dir);
     drop(worktrees_dir);
 }
+
+/// End-to-end paste-image: create a real (bash) session, call
+/// `CommanderService::paste_image`, and confirm (a) the bytes are written to a
+/// temp file and (b) the file path is typed into the pane. Exercises the full
+/// wiring the server route depends on: validate → store → `send-keys -l`.
+#[tokio::test]
+async fn test_paste_image_writes_file_and_injects_path() {
+    use claude_commander_core::api::CommanderService;
+    use claude_commander_core::telemetry::FrontendInfo;
+
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    // A valid 1×1 PNG.
+    const TINY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let state_temp_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+    // Redirect paste-image writes (and the store's prune) into a TempDir instead
+    // of the real /tmp/paste-images, per the repo's test-isolation rule.
+    let paste_dir = TempDir::new().unwrap();
+    let mut config = Config {
+        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        paste_images_dir: Some(paste_dir.path().to_path_buf()),
+        ..Config::default()
+    };
+    // Never post telemetry from the test suite.
+    config.telemetry.enabled = false;
+
+    // A manager (for setup) and a service (under test) share the same
+    // config/state stores, so the service resolves the session the manager
+    // creates and both drive the same isolated tmux server.
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
+    let store = create_isolated_store(&state_temp_dir);
+    let manager = SessionManager::new(config_store.clone(), store.clone(), "");
+    let service = CommanderService::new(
+        config_store,
+        store.clone(),
+        FrontendInfo::new("integration-test", "0.0.0"),
+    );
+
+    let project_id = manager.add_project(repo_path).await.unwrap();
+    let prepared = manager
+        .prepare_session(
+            &project_id,
+            "paste-image-test".to_string(),
+            Some("bash".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+    let session_id = manager
+        .finalize_session(&prepared, None, None)
+        .await
+        .unwrap();
+    let id_str = session_id.to_string();
+
+    // Paste the image.
+    let path = service
+        .paste_image(&id_str, TINY_PNG)
+        .await
+        .expect("paste_image should succeed for a live session");
+
+    // (a) The file was written with the exact bytes, under the configured
+    // paste-images base (a TempDir here; the OS temp dir in production).
+    assert!(path.exists(), "written image path should exist: {path:?}");
+    assert_eq!(std::fs::read(&path).unwrap(), TINY_PNG);
+    assert!(path.starts_with(paste_dir.path().join("paste-images")));
+
+    // (b) The path was typed into the pane (send-keys -l). Retry a few times to
+    // absorb the tiny delay between finalize and the pane accepting input. Strip
+    // whitespace from the capture first: an ~80-char path soft-wraps in an 80-col
+    // pane, so the filename could otherwise be split across physical lines.
+    let filename = path.file_name().unwrap().to_string_lossy().to_string();
+    let mut found = false;
+    for _ in 0..20 {
+        if let Ok(Some(pane)) = service.get_pane_content(&id_str, Some(200)).await {
+            let squashed: String = pane.chars().filter(|c| !c.is_whitespace()).collect();
+            if squashed.contains(&filename) {
+                found = true;
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        found,
+        "pasted image path ({filename}) should appear in the pane input"
+    );
+
+    // No Enter was sent: the path must sit unexecuted on the prompt. Had Enter
+    // been sent, bash would try to run the (non-executable) PNG at that absolute
+    // path and print `bash: <path>: <error>`. Check specifically for OUR path
+    // followed by an exec error — a bare "command not found" would also match
+    // unrelated bash startup noise, so we match on the path. Squash whitespace
+    // from BOTH the capture and the marker (an ~85-char `<path>: <error>` line
+    // soft-wraps in an 80-col pane; without this the check is vacuous).
+    let pane = service
+        .get_pane_content(&id_str, Some(200))
+        .await
+        .unwrap()
+        .unwrap_or_default();
+    let squashed_pane: String = pane.chars().filter(|c| !c.is_whitespace()).collect();
+    let path_str = path.display().to_string();
+    for err in [
+        "Permission denied",
+        "cannot execute",
+        "No such file or directory",
+    ] {
+        let marker: String = format!("{path_str}: {err}")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(
+            !squashed_pane.contains(&marker),
+            "path should sit unexecuted on the prompt (no Enter), but pane shows {marker:?}:\n{pane}"
+        );
+    }
+
+    // Best-effort cleanup of the temp file this test wrote.
+    let _ = std::fs::remove_file(&path);
+
+    // Cleanup
+    let _ = manager.kill_session(&session_id, true).await;
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
+    drop(worktrees_dir);
+}

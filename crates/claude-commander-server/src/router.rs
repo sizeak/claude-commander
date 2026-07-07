@@ -3,6 +3,7 @@
 
 use axum::{
     Router,
+    extract::DefaultBodyLimit,
     http::{HeaderValue, Method, header::AUTHORIZATION},
     middleware::from_fn_with_state,
     routing::{delete, get, post, put},
@@ -14,7 +15,9 @@ use tower_http::{
 use tracing::warn;
 
 use crate::auth::require_bearer;
-use crate::handlers::{blobs, cascade, config, health, projects, review, sessions, workspace};
+use crate::handlers::{
+    blobs, cascade, config, health, paste, projects, review, sessions, workspace,
+};
 use crate::state::AppState;
 use crate::ws;
 
@@ -100,6 +103,16 @@ pub fn build_router(state: AppState) -> Router {
         )
         // -- blobs --
         .route("/sessions/{id}/blob", get(blobs::fetch))
+        // -- pasted-image upload (raw image body) --
+        // The route carries its own body-size limit sized to the paste-image cap
+        // (the global axum default is 2 MiB, too small for a screenshot); the
+        // service re-checks the length as defence in depth.
+        .route(
+            "/sessions/{id}/paste-image",
+            post(paste::paste_image).route_layer(DefaultBodyLimit::max(
+                claude_commander_core::paste_image::MAX_IMAGE_BYTES,
+            )),
+        )
         // -- projects --
         .route("/projects", get(projects::list).post(projects::add))
         .route("/projects/scan", post(projects::scan))

@@ -94,7 +94,7 @@ async-trait = "0.1"
 pty-process = { version = "0.5", features = ["async"] }
 
 # Unix system calls (safe wrappers)
-nix = { version = "0.29", features = ["term", "poll", "fs"] }
+nix = { version = "0.29", features = ["term", "poll", "fs", "user"] }
 
 # Throbber/spinner widget
 throbber-widgets-tui = "0.11"
@@ -130,14 +130,21 @@ rodio = { version = "0.19", default-features = false, features = [
 ], optional = true }
 cpal = { version = "0.15", optional = true }
 hound = { version = "3.5", optional = true }
+# Local OS-clipboard access, gated behind the `clipboard` feature. arboard links
+# X11/Wayland (xcb) on Linux, so — like `audio` — only the desktop TUI needs it;
+# the server, remote backend, test-support and client cdylib take core with
+# `default-features = false` to drop it.
+arboard = { version = "3.4", optional = true }
 
 [features]
 # On by default so `cargo build`, the TUI binary, and `cargo test` all get voice
-# device I/O. Downstream crates that never touch a mic/speaker (the server,
-# test-support, the client cdylib) depend on core with `default-features = false`
-# to drop the ALSA-linked rodio/cpal/hound entirely.
-default = ["audio"]
+# device I/O and local clipboard access. Downstream crates that never touch a
+# mic/speaker or clipboard (the server, test-support, the client cdylib) depend
+# on core with `default-features = false` to drop the ALSA-linked
+# rodio/cpal/hound and the X11/Wayland-linked arboard entirely.
+default = ["audio", "clipboard"]
 audio = ["dep:rodio", "dep:cpal", "dep:hound"]
+clipboard = ["dep:arboard"]
 
 [dev-dependencies]
 # Property-based testing
@@ -150,3 +157,5 @@ tempfile = "3.10"
 pretty_assertions = "1.4"
 # Snapshot testing
 insta = "1.41"
+# Set file mtimes deterministically (paste-image prune test)
+filetime = "0.2"

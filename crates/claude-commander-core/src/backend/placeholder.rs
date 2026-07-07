@@ -76,6 +76,7 @@ impl CommanderBackend for PlaceholderBackend {
             switcher_popup: false,
             commander_session: false,
             shell_toggle: false,
+            client_side_image_paste: false,
         }
     }
 

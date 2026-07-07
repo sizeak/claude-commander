@@ -78,7 +78,8 @@ impl ApiError {
 
             // Bad client input → 400.
             CoreError::Session(SessionError::InvalidName { .. })
-            | CoreError::Session(SessionError::InvalidProgram(_)) => StatusCode::BAD_REQUEST,
+            | CoreError::Session(SessionError::InvalidProgram(_))
+            | CoreError::Session(SessionError::InvalidImage(_)) => StatusCode::BAD_REQUEST,
 
             // tmux missing entirely → 503 (the backing service is unavailable).
             CoreError::Tmux(TmuxError::NotInstalled)

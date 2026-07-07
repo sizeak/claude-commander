@@ -231,6 +231,21 @@ impl RemoteInner {
         Ok(())
     }
 
+    /// POST a raw byte body with an explicit `Content-Type`, discarding the
+    /// response. Used to upload a pasted image (PNG bytes) to the server.
+    async fn post_bytes_ok(&self, url: Url, bytes: Vec<u8>, content_type: &str) -> BResult<()> {
+        let response = self
+            .send(
+                self.client
+                    .post(url)
+                    .header(reqwest::header::CONTENT_TYPE, content_type)
+                    .body(bytes),
+            )
+            .await?;
+        self.check(response).await?;
+        Ok(())
+    }
+
     /// PATCH a JSON body, discarding the (204) response.
     async fn patch_json_ok<B: Serialize>(&self, url: Url, body: &B) -> BResult<()> {
         let response = self.send(self.client.patch(url).json(body)).await?;
@@ -421,6 +436,10 @@ impl CommanderBackend for RemoteBackend {
             switcher_popup: false,
             commander_session: false,
             shell_toggle: false,
+            // The agent runs on the server host: the operator's clipboard image
+            // can't be read there, so the client captures it locally and uploads
+            // via `paste_image`.
+            client_side_image_paste: true,
         }
     }
 
@@ -546,6 +565,12 @@ impl CommanderBackend for RemoteBackend {
     async fn restart_session(&self, id: SessionId) -> BResult<()> {
         self.inner
             .post_empty_ok(self.session_url(id, &["restart"]))
+            .await
+    }
+
+    async fn paste_image(&self, id: SessionId, png: Vec<u8>) -> BResult<()> {
+        self.inner
+            .post_bytes_ok(self.session_url(id, &["paste-image"]), png, "image/png")
             .await
     }
 
@@ -906,6 +931,9 @@ mod tests {
             assert!(!caps.switcher_popup);
             assert!(!caps.commander_session);
             assert!(!caps.shell_toggle);
+            // Image paste is the exception: a remote agent can't read the
+            // operator's clipboard, so the client must capture + upload it.
+            assert!(caps.client_side_image_paste);
             let d = backend.descriptor();
             assert_eq!(d.name, "test-remote");
             assert_eq!(d.kind, BackendKind::Remote);
@@ -1129,6 +1157,46 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, BackendError::NotFound), "got {err:?}");
+    }
+
+    /// A valid PNG for an unknown session round-trips over HTTP to the
+    /// `paste-image` route (proving the byte body + `image/png` content-type +
+    /// URL all reach the server and pass image validation) and comes back as a
+    /// `NotFound` because the session doesn't exist. A junk body would instead
+    /// fail validation with `InvalidRequest`, so this also confirms the bytes
+    /// arrive intact.
+    #[tokio::test]
+    async fn paste_image_valid_png_unknown_session_is_not_found() {
+        const TINY_PNG: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        let (addr, _service, _d, _w) = serve_disabled().await;
+        let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
+        let err = backend
+            .paste_image(SessionId::new(), TINY_PNG.to_vec())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BackendError::NotFound), "got {err:?}");
+    }
+
+    /// A junk (non-image) body is rejected by server-side validation as a 400,
+    /// which maps to `InvalidRequest` — independent of session existence.
+    #[tokio::test]
+    async fn paste_image_non_image_is_invalid_request() {
+        let (addr, _service, _d, _w) = serve_disabled().await;
+        let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
+        let err = backend
+            .paste_image(SessionId::new(), b"not an image".to_vec())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, BackendError::InvalidRequest(_)),
+            "got {err:?}"
+        );
     }
 
     #[tokio::test]

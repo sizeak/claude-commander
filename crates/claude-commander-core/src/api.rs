@@ -413,6 +413,63 @@ impl CommanderService {
         Ok(Some(tmux_name))
     }
 
+    /// Store a pasted image for a remote session and inject its file path into
+    /// the session's Claude pane.
+    ///
+    /// The desktop TUI captures the *local* clipboard image on Ctrl+V during a
+    /// remote attach and uploads the bytes here (via the server's
+    /// `POST /api/sessions/{id}/paste-image` route). We validate + write them to
+    /// a pruned temp file under the OS temp dir, then `send-keys -l` the absolute
+    /// path into the agent pane so the Claude CLI — which accepts a plain-text
+    /// image path in the prompt — picks it up. No Enter is sent: the user adds
+    /// prompt text and submits. Returns the written path.
+    ///
+    /// Errors: [`SessionError::InvalidImage`] (bad/oversized content → 400),
+    /// [`SessionError::TmuxSessionNotFound`] (no such session → 404).
+    pub async fn paste_image(&self, query: &str, bytes: &[u8]) -> Result<PathBuf> {
+        // Validate the bytes up front so junk/oversized input is a clean 400
+        // regardless of whether the session exists (and before any disk write).
+        crate::paste_image::validate(bytes)?;
+
+        let tmux_name = self
+            .resolve_tmux_session(query)
+            .await?
+            .ok_or_else(|| SessionError::TmuxSessionNotFound(query.to_string()))?;
+
+        // Store under the OS temp dir, not the data dir: the temp dir is
+        // space-free on every platform (macOS's data dir under `~/Library/
+        // Application Support/…` contains spaces, which the CLI would mis-parse
+        // in an unquoted injected path), and it's the same location
+        // `write_apply_brief` uses for comment-apply briefs — proven readable by
+        // the agent without a permission prompt. Tests override the base via
+        // `paste_images_dir` to keep writes (and the store's prune) off the real
+        // `/tmp`, per the repo's test-isolation rule.
+        let base = self
+            .read_config()
+            .paste_images_dir
+            .unwrap_or_else(std::env::temp_dir);
+        let store = crate::paste_image::PasteImageStore::new(&base);
+        let path = store.store(bytes)?;
+
+        // Inject the path with `send-keys -l` (no Enter). Unlike automated
+        // comment-apply, this is user-initiated (the operator pressed Ctrl+V) and
+        // user-visible (they're attached and watching the pane), so it is *not*
+        // gated on agent state via `decide_send`: if the agent happens to be at a
+        // prompt, the user sees the path land and can correct it. The composed
+        // text wraps the path in spaces and escapes any interior space; the path
+        // is server-generated (UUID name, space-free temp dir) so it carries no
+        // client-controlled content.
+        let injected = crate::paste_image::compose_injection(&path);
+        self.manager
+            .tmux
+            .send_keys_literal(&tmux_name, &injected)
+            .await?;
+
+        self.telemetry.feature("paste_image");
+        debug!("pasted image for session {} -> {}", query, path.display());
+        Ok(path)
+    }
+
     pub async fn check_tmux(&self) -> Result<()> {
         self.manager.check_tmux().await
     }
