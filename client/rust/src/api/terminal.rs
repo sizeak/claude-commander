@@ -227,7 +227,9 @@ async fn attach_inner(
 
     // Handshake: auth, then attach.
     write
-        .send(Message::Text(ClientControl::Auth { token }.to_text()?))
+        .send(Message::Text(
+            ClientControl::Auth { token }.to_text()?.into(),
+        ))
         .await
         .context("failed to send auth frame")?;
     write
@@ -236,7 +238,8 @@ async fn attach_inner(
                 session_id,
                 kind: AttachKind::Agent,
             }
-            .to_text()?,
+            .to_text()?
+            .into(),
         ))
         .await
         .context("failed to send attach frame")?;
@@ -279,17 +282,19 @@ async fn attach_inner(
                 let Some(out) = outbound else { break }; // all senders dropped
                 match out {
                     Outbound::Input(bytes) => {
-                        write.send(Message::Binary(bytes)).await.context("failed to send input")?;
+                        write.send(Message::Binary(bytes.into())).await.context("failed to send input")?;
                     }
                     Outbound::Resize { cols, rows } => {
                         write
-                            .send(Message::Text(ClientControl::Resize { cols, rows }.to_text()?))
+                            .send(Message::Text(
+                                ClientControl::Resize { cols, rows }.to_text()?.into(),
+                            ))
                             .await
                             .context("failed to send resize")?;
                     }
                     Outbound::Detach => {
                         let _ = write
-                            .send(Message::Text(ClientControl::Detach.to_text()?))
+                            .send(Message::Text(ClientControl::Detach.to_text()?.into()))
                             .await;
                         break;
                     }

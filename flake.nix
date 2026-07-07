@@ -51,14 +51,41 @@
           nativeBuildInputs = with pkgs; [
             pkg-config
             makeWrapper
+          ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+            # cpal's `pipewire` backend builds pipewire-sys/libspa-sys, whose
+            # build scripts run bindgen; bindgenHook supplies LIBCLANG_PATH.
+            pkgs.rustPlatform.bindgenHook
           ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isDarwin [
             pkgs.apple-sdk_15
           ];
 
-          # rodio (conversation-mode audio) links ALSA via cpal on Linux.
+          # cpal (conversation-mode audio) links both libpipewire (its default
+          # host) and ALSA (its runtime fallback) on Linux.
           buildInputs = pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
             pkgs.alsa-lib
+            pkgs.pipewire
           ];
+
+          # cpal's `pipewire` backend pulls libspa-sys/pipewire-sys. Their bindgen
+          # step calls `clang_macro_fallback` to evaluate cast macros like
+          # `SPA_ID_INVALID` ((uint32_t)0xffffffff); that probe writes a precompiled
+          # header into the crate's OWN source dir. Crane vendors deps read-only in
+          # the Nix store, so the write fails and bindgen *silently drops* the macro
+          # → libspa fails to compile with "cannot find value `SPA_ID_INVALID`".
+          # (`nix develop`/plain cargo use a writable registry, so they're immune —
+          # only the sealed `nix build` hits this.) `configureCargoVendoredDepsHook`
+          # points cargo at the read-only `$cargoVendorDir` during preConfigure; here
+          # in preBuild (which runs after it) we copy the vendored sources somewhere
+          # writable and repoint cargo's source replacement at the copy.
+          preBuild = pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux ''
+            if [ -n "''${cargoVendorDir:-}" ] && [ -n "''${CARGO_HOME:-}" ] && [ -f "$CARGO_HOME/config.toml" ]; then
+              writableVendor="$TMPDIR/cc-writable-cargo-vendor"
+              rm -rf "$writableVendor"
+              cp -rL --no-preserve=mode "$cargoVendorDir" "$writableVendor"
+              chmod -R u+w "$writableVendor"
+              sed -i "s|$cargoVendorDir|$writableVendor|g" "$CARGO_HOME/config.toml"
+            fi
+          '';
         };
 
         # Build only dependencies (cached separately for incremental rebuilds)
@@ -208,7 +235,13 @@
             git
             pkg-config
           ] ++ pkgs.lib.optionals pkgs.stdenv.hostPlatform.isLinux [
+            # Audio backends for the `audio` feature: ALSA + libpipewire. The
+            # bindgenHook supplies LIBCLANG_PATH + BINDGEN_EXTRA_CLANG_ARGS for
+            # the pipewire-sys/libspa-sys bindgen build (matches the package
+            # build's nativeBuildInputs so dev shell and `nix build` agree).
             alsa-lib
+            pipewire
+            rustPlatform.bindgenHook
           ];
         };
 

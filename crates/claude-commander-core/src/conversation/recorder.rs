@@ -76,6 +76,15 @@ impl Recorder {
     }
 }
 
+/// Human-readable name of a cpal device, or `None` if it can't be queried.
+/// cpal 0.18 exposes this via `Device::description().name()` (the old `name()`
+/// accessor was removed). Under the PipeWire host this is a friendly label
+/// (e.g. "Built-in Audio Analog Stereo") rather than a raw ALSA alias.
+#[cfg(feature = "audio")]
+fn device_display_name(device: &cpal::Device) -> Option<String> {
+    device.description().ok().map(|d| d.name().to_string())
+}
+
 /// Given the names of the available input devices and an optionally-requested
 /// device name, decide which name to open. Returns `None` — meaning "use the
 /// system default input device" — when nothing was requested, or when the
@@ -92,76 +101,16 @@ fn resolve_input_device_name(available: &[String], requested: Option<&str>) -> O
 /// Empty when the `audio` feature is off, or on an enumeration error. This
 /// synchronously queries the audio host, so it's called only on demand (when
 /// the user opens the microphone picker), not on a hot path.
-///
-/// On Unix the query is wrapped in [`with_stderr_silenced`]: cpal's ALSA backend
-/// prints chatty `snd_*` diagnostics straight to fd 2, which would otherwise
-/// scribble over the raw-mode TUI when the picker is opened.
 #[cfg(feature = "audio")]
 pub fn input_device_names() -> Vec<String> {
-    let enumerate = || {
-        let host = cpal::default_host();
-        match host.input_devices() {
-            Ok(devices) => devices.filter_map(|d| d.name().ok()).collect(),
-            Err(e) => {
-                warn!("failed to enumerate input devices: {e}");
-                Vec::new()
-            }
-        }
-    };
-    #[cfg(unix)]
-    {
-        with_stderr_silenced(enumerate)
-    }
-    #[cfg(not(unix))]
-    {
-        enumerate()
-    }
-}
-
-/// Run `f` with the process's stderr (fd 2) temporarily redirected to
-/// `/dev/null`, restoring it afterwards. Used to swallow cpal/ALSA's unsolicited
-/// `snd_*` error prints during device enumeration so they don't corrupt the
-/// raw-mode terminal. Best-effort: if any of the `dup`/`open` calls fail we run
-/// `f` with stderr untouched. The redirect is process-wide for its (brief)
-/// duration, so a concurrent write from another thread could be dropped — an
-/// acceptable trade for a one-shot, user-initiated call. The restore runs from a
-/// `Drop` guard, so a panic in `f` can't strand fd 2 pointed at `/dev/null`.
-#[cfg(all(feature = "audio", unix))]
-fn with_stderr_silenced<T>(f: impl FnOnce() -> T) -> T {
-    const STDERR_FD: libc::c_int = 2;
-
-    /// Restores the saved stderr and closes the backup fd when dropped.
-    struct Restore(libc::c_int);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            // SAFETY: `self.0` is a live fd we dup'd; restore fd 2 then close it.
-            unsafe {
-                libc::dup2(self.0, STDERR_FD);
-                libc::close(self.0);
-            }
+    let host = cpal::default_host();
+    match host.input_devices() {
+        Ok(devices) => devices.filter_map(|d| device_display_name(&d)).collect(),
+        Err(e) => {
+            warn!("failed to enumerate input devices: {e}");
+            Vec::new()
         }
     }
-
-    // SAFETY: dup the current stderr and point fd 2 at /dev/null. If either step
-    // fails we run `f` with stderr untouched. The `Restore` guard undoes the
-    // redirect on scope exit (including unwind).
-    let _guard = unsafe {
-        let saved = libc::dup(STDERR_FD);
-        if saved < 0 {
-            None
-        } else {
-            let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY);
-            if devnull < 0 {
-                libc::close(saved);
-                None
-            } else {
-                libc::dup2(devnull, STDERR_FD);
-                libc::close(devnull);
-                Some(Restore(saved))
-            }
-        }
-    };
-    f()
 }
 
 /// Placeholder used when the `audio` feature is off. The `tui` settings module
@@ -187,7 +136,7 @@ fn recorder_thread(
         .input_devices()
         .map(|it| it.collect())
         .unwrap_or_default();
-    let names: Vec<String> = devices.iter().filter_map(|d| d.name().ok()).collect();
+    let names: Vec<String> = devices.iter().filter_map(device_display_name).collect();
     let chosen = resolve_input_device_name(&names, input_device.as_deref());
     if input_device.is_some() && chosen.is_none() {
         warn!("STT: requested microphone not found, using default input device");
@@ -195,7 +144,7 @@ fn recorder_thread(
     let device = match &chosen {
         Some(name) => devices
             .into_iter()
-            .find(|d| d.name().ok().as_deref() == Some(name.as_str()))
+            .find(|d| device_display_name(d).as_deref() == Some(name.as_str()))
             .or_else(|| host.default_input_device()),
         None => host.default_input_device(),
     };
@@ -212,7 +161,7 @@ fn recorder_thread(
     };
     let _ = ready.send(Ok(()));
 
-    let sample_rate = supported.sample_rate().0;
+    let sample_rate = supported.sample_rate();
     let channels = supported.channels();
     let sample_format = supported.sample_format();
     let config: cpal::StreamConfig = supported.into();
@@ -275,14 +224,14 @@ fn build_typed<T>(
     config: &cpal::StreamConfig,
     channels: u16,
     buffer: Arc<Mutex<Vec<f32>>>,
-) -> Result<cpal::Stream, cpal::BuildStreamError>
+) -> Result<cpal::Stream, cpal::Error>
 where
     T: SizedSample,
     f32: FromSample<T>,
 {
     let ch = channels.max(1) as usize;
     device.build_input_stream(
-        config,
+        *config,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
             let mut buf = buffer.lock().unwrap();
             for frame in data.chunks(ch) {

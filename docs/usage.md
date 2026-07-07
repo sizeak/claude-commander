@@ -110,6 +110,24 @@ detaching to the session list. `Alt-r` is used rather than `Ctrl-r` so a
 shell's `Ctrl-r` reverse-history-search is never shadowed; the toggle is wired
 up for Claude sessions only.
 
+### Pasting images into a remote session
+
+Claude Code accepts a pasted image on `Ctrl-V` by reading the clipboard of the
+machine it runs on. For a **local** session that's your machine, so it just
+works and claude-commander forwards `Ctrl-V` untouched. For a session running on
+a **remote** `claude-commander-server`, the agent is on the server and can't see
+your clipboard — so while attached to a remote session, claude-commander
+intercepts `Ctrl-V`, reads the image from *your local* clipboard, uploads it to
+the server, saves it to a short-lived temp file there, and types that file's
+path into the Claude prompt (the same plain-text path form Claude accepts). Add
+your prompt text and submit as usual. If the clipboard holds no image (or the
+build was compiled without the `clipboard` feature), `Ctrl-V` is forwarded
+unchanged. Uploads are validated as real images and capped at 10 MiB; the server
+prunes the temp files automatically. (A few terminals bind `Ctrl-V` to their own
+paste and never deliver it to the app — and under an enhanced keyboard protocol
+`Ctrl-V` may arrive as an escape sequence rather than the usual control byte; in
+both cases it is forwarded rather than intercepted, matching local behaviour.)
+
 The diff is rendered in a `lumen`/`hunk`-style colour scheme: dark green/red
 line fills, a brighter highlight on the changed span within a line, and (on
 true-color terminals) syntax highlighting of the code. It degrades to

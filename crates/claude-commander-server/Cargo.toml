@@ -35,9 +35,9 @@ futures = "0.3"
 # Web framework
 axum = { version = "0.8", features = ["ws", "macros"] }
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace", "cors", "catch-panic"] }
+tower-http = { version = "0.7", features = ["trace", "cors", "catch-panic"] }
 # Optional TLS termination (behind the `tls` feature, off by default).
-axum-server = { version = "0.7", features = ["tls-rustls"], optional = true }
+axum-server = { version = "0.8", features = ["tls-rustls"], optional = true }
 
 # Configuration (layered: defaults -> [server] table -> CLI flags)
 figment = { version = "0.10", features = ["toml", "env"] }
@@ -47,7 +47,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 
 # Random bearer-token generation (auto-generated token on first run)
-uuid = { version = "1.0", features = ["v4"] }
+uuid = { version = "1.23", features = ["v4"] }
 
 # Error handling
 thiserror = { workspace = true }
@@ -57,7 +57,7 @@ tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # CLI (derive macros)
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.6", features = ["derive"] }
 
 [features]
 default = []
@@ -68,9 +68,9 @@ tls = ["dep:axum-server"]
 # dev-dependency cycle (test-support depends on this crate); Cargo allows it
 # because it only closes through this crate's test targets, not its library.
 claude-commander-test-support = { path = "../claude-commander-test-support" }
-tempfile = "3.10"
+tempfile = "3.27"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 # Real HTTP + WebSocket clients for the tmux-gated integration tests.
-reqwest = { version = "0.12", default-features = false, features = ["json"] }
-tokio-tungstenite = "0.24"
+reqwest = { version = "0.13", default-features = false, features = ["json"] }
+tokio-tungstenite = "0.29"

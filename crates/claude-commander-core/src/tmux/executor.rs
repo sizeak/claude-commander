@@ -286,6 +286,17 @@ impl TmuxExecutor {
         Ok(())
     }
 
+    /// Send `text` to a session's pane as **literal** input (`send-keys -l`), so
+    /// no character is interpreted as a tmux key name — the text lands in the
+    /// pane's input verbatim. `--` guards against any leading `-` in `text`
+    /// being parsed as an option. Used to inject a pasted-image file path into
+    /// the Claude prompt; deliberately sends no Enter.
+    pub async fn send_keys_literal(&self, session_name: &str, text: &str) -> Result<()> {
+        self.execute(&["send-keys", "-t", session_name, "-l", "--", text])
+            .await?;
+        Ok(())
+    }
+
     /// Configure the status bar for a CC tmux session.
     ///
     /// Shows branch name, optional PR badge, and key hints. Style is set by

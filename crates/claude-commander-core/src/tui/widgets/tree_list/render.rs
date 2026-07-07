@@ -300,8 +300,10 @@ impl<'a> TreeList<'a> {
                     let twistie = if *collapsed { "▸ " } else { "▾ " };
                     let (count_text, count_color) = match max_sessions {
                         Some(limit) => {
-                            let over = *count >= *limit as usize;
-                            let color = if over {
+                            let limit_usize = *limit as usize;
+                            let color = if *count > limit_usize {
+                                self.theme.modal_error
+                            } else if *count == limit_usize {
                                 self.theme.modal_warning
                             } else {
                                 self.theme.text_secondary

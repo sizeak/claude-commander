@@ -110,6 +110,11 @@ ui_refresh_fps = 30
 # stripped, so they hit a per-run tmux server instead of your real one.
 # tmux_tmpdir = "/path/to/throwaway/tmux"
 
+# Base directory for pasted-image temp files, remote image paste (default: the
+# OS temp dir). For hermetic tests ONLY — leave unset for normal use; when set,
+# image writes and their pruning go here instead of the OS temp dir.
+# paste_images_dir = "/path/to/throwaway/paste-images"
+
 # Organize worktrees into per-repository subdirectories (default: false)
 # per_repo_worktree_dirs = true
 
@@ -348,12 +353,15 @@ volume = 1.0                             # 0.0–2.0
 | `prose_only` (default) | Strip code blocks and markdown; speak the natural-language prose |
 | `verbatim` | Speak the text unchanged |
 
-> **Build note:** in-process playback (`rodio`) and microphone capture (`cpal`) link **ALSA** on
-> Linux. They're gated behind the `audio` cargo feature, which is **on by default** — so building
-> the TUI (`claude-commander`) from source needs the ALSA development headers (`libasound2-dev` on
-> Debian/Ubuntu, `alsa-lib` on Arch); the default Nix dev shell provides them automatically. The
-> headless server and the Flutter client build with `audio` off (`default-features = false`) and
-> never link ALSA — remote clients do capture/playback on-device instead.
+> **Build note:** in-process playback (`rodio`) and microphone capture (`cpal`) use **PipeWire** as
+> the default audio host on Linux (falling back to **ALSA** at runtime if PipeWire isn't running),
+> so both backends are linked. They're gated behind the `audio` cargo feature, which is **on by
+> default** — so building the TUI (`claude-commander`) from source needs the PipeWire and ALSA
+> development libraries plus **clang/libclang** (cpal's PipeWire backend runs `bindgen`):
+> `libpipewire-0.3-dev libasound2-dev libclang-dev` on Debian/Ubuntu, `pipewire alsa-lib clang` on
+> Arch. The default Nix dev shell provides them automatically. The headless server and the Flutter
+> client build with `audio` off (`default-features = false`) and never link either backend — remote
+> clients do capture/playback on-device instead.
 
 ## Voice input (STT)
 
@@ -366,7 +374,7 @@ is open or not**, mirroring spoken replies.
 
 `stt.enabled` is a separate switch from `conversation.enabled` and is **off by default**. Voice
 input feeds the conversation session, so it's only useful alongside conversation mode. Microphone
-capture uses `cpal` (also ALSA on Linux — see the build note above). If no microphone is available
+capture uses `cpal` (PipeWire/ALSA on Linux — see the build note above). If no microphone is available
 or the STT server is unreachable, voice input degrades gracefully (a status message) and never
 blocks the UI.
 
@@ -521,7 +529,7 @@ All fields are optional; a section matches when **every declared field** matches
 | `has_label` | string (literal) or array (any-of) | |
 | `review_decision` | `"approved"` \| `"changes_requested"` \| `"review_required"` — scalar or array (any-of) | Mirrors GitHub's `reviewDecision` field |
 | `has_reviewer` | `true` / `false`, a specific login, or an array of logins (any-of) | `true` excludes Copilot via case-insensitive `"copilot"` substring match; specific/array forms match literally |
-| `max_sessions` | positive integer | Advisory WIP limit. Section header shows `count/limit` and highlights when at or over the limit. Never blocks creation. |
+| `max_sessions` | positive integer | Advisory WIP limit. Section header shows `count/limit`, warning-coloured at the limit and error-coloured over it. Never blocks creation. |
 
 ### Process order and forward-only
 
@@ -537,7 +545,7 @@ In the section-grouped views, a session created with `n` lands in the section th
 
 ### WIP limits
 
-Set `max_sessions = N` on any section to flag it when it accumulates too much work. The header renders `count/N` and switches to the warning colour once `count >= N`. The catch-all "In Progress" section uses the top-level `in_progress_limit` instead:
+Set `max_sessions = N` on any section to flag it when it accumulates too much work. The header renders `count/N`, switching to the warning colour when `count == N` and to the error colour when `count > N`. The catch-all "In Progress" section uses the top-level `in_progress_limit` instead:
 
 ```toml
 in_progress_limit = 3

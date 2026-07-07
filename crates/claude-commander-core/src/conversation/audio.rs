@@ -1,6 +1,6 @@
 //! In-process audio playback via `rodio`, on a dedicated thread.
 //!
-//! rodio's `OutputStream` (a cpal stream) is `!Send`, so it can't live inside
+//! rodio's `MixerDeviceSink` (a cpal stream) is `!Send`, so it can't live inside
 //! the async watcher task. Instead the stream + sink live on their own thread
 //! and we drive them with commands over a channel. The [`Player`] handle is
 //! `Send` (it only holds a channel sender), so the worker can hold it across
@@ -16,7 +16,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
 use std::time::{Duration, Instant};
 
 #[cfg(feature = "audio")]
-use rodio::{OutputStream, Sink};
+use rodio::{DeviceSinkBuilder, Player as RodioPlayer};
 #[cfg(feature = "audio")]
 use tracing::{debug, warn};
 
@@ -94,27 +94,19 @@ fn audio_thread(
             let _ = tx.send(edge);
         }
     };
-    let stream = match OutputStream::try_default() {
-        Ok((stream, handle)) => {
-            // Keep `stream` alive for the thread's lifetime; build the first sink.
-            match Sink::try_new(&handle) {
-                Ok(sink) => {
-                    sink.set_volume(volume);
-                    let _ = ready.send(Ok(()));
-                    (stream, handle, sink)
-                }
-                Err(e) => {
-                    let _ = ready.send(Err(e.to_string()));
-                    return;
-                }
-            }
-        }
+    // Keep `device_sink` (which owns the cpal stream) alive for the thread's
+    // lifetime; `Player`s attach to its mixer. Building a `Player` is infallible
+    // in rodio 0.22, so only opening the device can fail here.
+    let device_sink = match DeviceSinkBuilder::open_default_sink() {
+        Ok(device_sink) => device_sink,
         Err(e) => {
             let _ = ready.send(Err(e.to_string()));
             return;
         }
     };
-    let (_stream, handle, mut sink) = stream;
+    let mut sink = RodioPlayer::connect_new(device_sink.mixer());
+    sink.set_volume(volume);
+    let _ = ready.send(Ok(()));
 
     // Stage 3b timing: track each contiguous playback span. `playing_since` is
     // set when audio starts coming out of an idle sink and cleared (with a trace)
@@ -143,18 +135,14 @@ fn audio_thread(
                     Err(e) => warn!("TTS audio decode failed: {e}"),
                 },
                 Command::Stop => {
-                    // A stopped Sink can't accept new sources, so replace it.
+                    // A stopped Player can't accept new sources, so replace it
+                    // with a fresh one attached to the same device mixer.
                     sink.stop();
                     if playing_since.take().is_some() {
                         emit(PlaybackEdge::Stopped);
                     }
-                    match Sink::try_new(&handle) {
-                        Ok(fresh) => {
-                            fresh.set_volume(volume);
-                            sink = fresh;
-                        }
-                        Err(e) => warn!("TTS audio sink reset failed: {e}"),
-                    }
+                    sink = RodioPlayer::connect_new(device_sink.mixer());
+                    sink.set_volume(volume);
                 }
             }
         }
