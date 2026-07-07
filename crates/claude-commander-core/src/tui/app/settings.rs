@@ -1408,10 +1408,16 @@ impl App {
                             chosen
                         };
                         state.editing = None;
+                        let prev_input_device = self.config.stt.input_device.clone();
                         self.apply_settings_edit(state.tab, &field_key, &val);
-                        // Selecting a microphone rebuilds the running listener so
-                        // the new device is used on the next recording, live.
-                        if field_key == "stt_input_device" {
+                        // Selecting a *different* microphone rebuilds the running
+                        // listener so the new device is used on the next recording,
+                        // live. Skip the respawn when the id is unchanged (e.g.
+                        // re-picking the current device) to avoid a needless
+                        // teardown / re-open of the same device.
+                        if field_key == "stt_input_device"
+                            && self.config.stt.input_device != prev_input_device
+                        {
                             self.respawn_listener();
                         }
                         state.rows = self.build_settings_rows(state.tab);

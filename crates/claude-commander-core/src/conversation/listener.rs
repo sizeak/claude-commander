@@ -61,7 +61,11 @@ impl ListenerHandle {
         *self.0.lock().unwrap() = Some(tx);
     }
 
-    /// Whether a listener is currently installed.
+    /// Whether a listener sender is currently installed. Note this means
+    /// "a listener has been spawned", not "the microphone opened successfully":
+    /// the sender is installed synchronously while the device opens in the
+    /// background, so on a device-open failure this stays `true` but the sender
+    /// is inert (sends are dropped).
     pub fn is_present(&self) -> bool {
         self.0.lock().unwrap().is_some()
     }
@@ -132,7 +136,7 @@ pub fn spawn_listener(
         let recorder = match Recorder::new(wav_tx, cfg.input_device.clone()).await {
             Ok(r) => r,
             Err(e) => {
-                warn!("STT unavailable: {e}");
+                warn!(target: "conversation", "STT unavailable: {e}");
                 return;
             }
         };

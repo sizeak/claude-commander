@@ -514,9 +514,9 @@ impl App {
     /// listener returns its sender immediately and opens the mic device inside
     /// its own task, so this never blocks the UI. Installing the new sender drops
     /// the previous one (if any), ending the old listener and releasing its
-    /// device at once; the new device then opens asynchronously, and any commands
-    /// sent in that brief gap queue on the channel and run once it's ready.
-    /// Assumes the media gate is set up.
+    /// device as that task unwinds; the new device opens asynchronously (the two
+    /// can briefly overlap), and any commands sent before it's ready queue on the
+    /// channel and run once it is. Assumes the media gate is set up.
     fn build_and_store_listener(&mut self) {
         let gate = self.conversation.gate.clone();
         let speaker = self.conversation.speaker.clone();
