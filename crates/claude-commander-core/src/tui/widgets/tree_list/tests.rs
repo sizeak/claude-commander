@@ -87,6 +87,63 @@ fn make_worktree_with_program(title: &str, program: &str) -> SessionListItem {
 }
 
 #[test]
+fn server_header_renders_version_mismatch_annotation() {
+    use crate::backend::{BackendId, ConnectionState, VersionMismatch};
+
+    let base = SessionListItem::ServerHeader {
+        backend: BackendId(1),
+        name: "buildbox".to_string(),
+        connection: ConnectionState::Connected,
+        version_warning: None,
+    };
+    // No warning → just the name, no ⚠.
+    let plain = render_tree(std::slice::from_ref(&base), 60, 2).join("\n");
+    assert!(plain.contains("buildbox"), "{plain}");
+    assert!(!plain.contains('⚠'), "unexpected warning glyph:\n{plain}");
+
+    // With a mismatch → the ⚠ annotation with both full versions.
+    let warned = SessionListItem::ServerHeader {
+        backend: BackendId(1),
+        name: "buildbox".to_string(),
+        connection: ConnectionState::Connected,
+        version_warning: Some(VersionMismatch {
+            server: "0.24.0".to_string(),
+            client: "0.25.0".to_string(),
+        }),
+    };
+    let out = render_tree(&[warned], 60, 2).join("\n");
+    assert!(
+        out.contains("⚠ v0.24.0 (client v0.25.0)"),
+        "expected version-mismatch annotation:\n{out}"
+    );
+}
+
+#[test]
+fn server_header_shows_annotation_alongside_degraded_reason() {
+    use crate::backend::{BackendId, ConnectionState, VersionMismatch};
+
+    // A stale server can also be Degraded: both the ⚠ annotation and the
+    // degraded reason must show (the annotation is independent of connection).
+    let item = SessionListItem::ServerHeader {
+        backend: BackendId(1),
+        name: "buildbox".to_string(),
+        connection: ConnectionState::Degraded {
+            reason: "offline".to_string(),
+        },
+        version_warning: Some(VersionMismatch {
+            server: "0.24.0".to_string(),
+            client: "0.25.0".to_string(),
+        }),
+    };
+    let out = render_tree(&[item], 70, 2).join("\n");
+    assert!(
+        out.contains("⚠ v0.24.0 (client v0.25.0)"),
+        "annotation missing:\n{out}"
+    );
+    assert!(out.contains("(offline)"), "degraded reason missing:\n{out}");
+}
+
+#[test]
 fn worktree_shows_keep_alive_marker() {
     let mut wt = make_worktree("Feature");
     let items_off = vec![make_project("proj", 1), make_worktree("Feature")];

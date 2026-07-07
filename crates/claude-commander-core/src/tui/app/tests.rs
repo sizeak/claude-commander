@@ -3160,6 +3160,193 @@ async fn multi_backend_tree_emits_server_headers_in_config_order_local_first() {
     );
 }
 
+/// The `version_warning` on the buildbox server header, or `None` if there's no
+/// such header.
+fn buildbox_version_warning(app: &App) -> Option<crate::backend::VersionMismatch> {
+    app.ui_state.list_items.iter().find_map(|i| match i {
+        SessionListItem::ServerHeader {
+            name,
+            version_warning,
+            ..
+        } if name == "buildbox" => version_warning.clone(),
+        _ => None,
+    })
+}
+
+fn agent_states_box() -> Box<crate::api::AgentStatesSnapshot> {
+    Box::new(crate::api::AgentStatesSnapshot {
+        states: Default::default(),
+        commander_running: false,
+    })
+}
+
+#[tokio::test]
+async fn older_server_snapshot_annotates_header_but_placeholder_does_not() {
+    // A remote whose server build is behind this client (major.minor) flags a
+    // warning on its header. Before its first real snapshot lands the header
+    // carries the connecting placeholder (== client version), so no false alarm.
+    let mut old_snap = empty_snapshot();
+    old_snap.server.version = "0.1.0".to_string(); // certainly behind the client
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", old_snap.clone())]);
+    app.bootstrap_backend_views().await;
+    app.refresh_list_items().await;
+    assert_eq!(
+        buildbox_version_warning(&app),
+        None,
+        "the connecting placeholder reports the client version, so no warning yet"
+    );
+
+    // Land the older snapshot (first real snapshot arrives via BackendChanged).
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: BackendId(1).0,
+        snapshot: Box::new(old_snap),
+        states: agent_states_box(),
+    })
+    .await;
+    assert_eq!(
+        buildbox_version_warning(&app),
+        Some(crate::backend::VersionMismatch {
+            server: "0.1.0".to_string(),
+            client: crate::VERSION.to_string(),
+        }),
+        "an older remote server must carry a version warning on its header"
+    );
+}
+
+#[tokio::test]
+async fn stale_server_toast_fires_once_and_never_for_local() {
+    let mut old_snap = empty_snapshot();
+    old_snap.server.version = "0.1.0".to_string();
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", old_snap.clone())]);
+    app.bootstrap_backend_views().await;
+
+    // First fold of the older snapshot: the one-time toast fires.
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: BackendId(1).0,
+        snapshot: Box::new(old_snap.clone()),
+        states: agent_states_box(),
+    })
+    .await;
+    let toast = app.ui_state.status_message.as_ref().map(|(m, _)| m.clone());
+    assert!(
+        toast
+            .as_deref()
+            .is_some_and(|m| m.contains("older than this client")),
+        "first fold of a stale server must toast, got {toast:?}"
+    );
+    assert!(app.ui_state.version_warned.contains(&BackendId(1).0));
+
+    // A second fold must NOT re-fire the toast.
+    app.ui_state.status_message = None;
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: BackendId(1).0,
+        snapshot: Box::new(old_snap),
+        states: agent_states_box(),
+    })
+    .await;
+    assert_eq!(
+        app.ui_state.status_message, None,
+        "a subsequent fold of the same stale server must not re-toast"
+    );
+
+    // The local backend reports the client's own version, so it never toasts.
+    assert!(
+        !app.ui_state.version_warned.contains(&BackendId(0).0),
+        "the local backend must never flag a version mismatch"
+    );
+}
+
+#[tokio::test]
+async fn version_toast_does_not_clobber_a_live_status_message() {
+    let mut old_snap = empty_snapshot();
+    old_snap.server.version = "0.1.0".to_string();
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", old_snap.clone())]);
+    app.bootstrap_backend_views().await;
+
+    // A live message (e.g. "Created session …") occupies the single slot.
+    app.ui_state.status_message = Some((
+        "busy".to_string(),
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+    ));
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: BackendId(1).0,
+        snapshot: Box::new(old_snap),
+        states: agent_states_box(),
+    })
+    .await;
+    assert_eq!(
+        app.ui_state
+            .status_message
+            .as_ref()
+            .map(|(m, _)| m.as_str()),
+        Some("busy"),
+        "the version toast must not overwrite a live message"
+    );
+    assert!(
+        !app.ui_state.version_warned.contains(&BackendId(1).0),
+        "a deferred toast must not mark the server warned, so it can retry"
+    );
+
+    // Once the slot frees, the next refresh delivers the deferred toast.
+    app.ui_state.status_message = None;
+    app.refresh_list_items().await;
+    assert!(
+        app.ui_state
+            .status_message
+            .as_ref()
+            .is_some_and(|(m, _)| m.contains("older than this client")),
+        "the deferred toast must fire once the slot is free"
+    );
+    assert!(app.ui_state.version_warned.contains(&BackendId(1).0));
+}
+
+#[tokio::test]
+async fn two_stale_servers_each_get_their_own_toast() {
+    let mut old_snap = empty_snapshot();
+    old_snap.server.version = "0.1.0".to_string();
+    let mut app = build_app_with_mock_remotes(vec![
+        ("buildbox", old_snap.clone()),
+        ("ci", old_snap.clone()),
+    ]);
+    app.bootstrap_backend_views().await;
+
+    // Fold buildbox (id 1): its toast fires; ci is still on its placeholder.
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: BackendId(1).0,
+        snapshot: Box::new(old_snap.clone()),
+        states: agent_states_box(),
+    })
+    .await;
+    assert!(
+        app.ui_state
+            .status_message
+            .as_ref()
+            .is_some_and(|(m, _)| m.contains("buildbox")),
+        "first stale server toasts, got {:?}",
+        app.ui_state.status_message
+    );
+    assert!(app.ui_state.version_warned.contains(&BackendId(1).0));
+    assert!(!app.ui_state.version_warned.contains(&BackendId(2).0));
+
+    // Free the slot, then fold ci (id 2): it gets its own toast.
+    app.ui_state.status_message = None;
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: BackendId(2).0,
+        snapshot: Box::new(old_snap),
+        states: agent_states_box(),
+    })
+    .await;
+    assert!(
+        app.ui_state
+            .status_message
+            .as_ref()
+            .is_some_and(|(m, _)| m.contains("ci")),
+        "second stale server toasts too, got {:?}",
+        app.ui_state.status_message
+    );
+    assert!(app.ui_state.version_warned.contains(&BackendId(2).0));
+}
+
 #[tokio::test]
 async fn multi_backend_list_keys_are_unique() {
     let (remote_snap, _sid, _pid) = snapshot_with_one_session();

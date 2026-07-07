@@ -551,14 +551,42 @@ impl App {
         // the tree renders exactly as a single-machine setup always has.
         let single_backend = self.backends.len() == 1;
         let mut items: Vec<SessionListItem> = Vec::new();
+        // A stale-server warning to surface once (deferred until after the loop
+        // so `ui_state` isn't mutated while `self.backends` is borrowed). This
+        // seam covers every snapshot-fold path by construction, since they all
+        // re-run `refresh_list_items`.
+        let mut pending_version_toast: Option<(usize, String, crate::backend::VersionMismatch)> =
+            None;
         for handle in &self.backends {
             let snapshot = &handle.view.snapshot;
             let agent_states = &handle.view.agent_states.states;
             if !single_backend {
+                let name = handle.backend.descriptor().name;
+                // Compare this backend's reported server build against the
+                // client's. Only remote backends can skew: the local backend is
+                // in-process, and `crate::VERSION` (the core crate's version) is
+                // both what it reports and what we compare against, so they
+                // always match. A backend still showing its connecting
+                // placeholder also reports `crate::VERSION`, so it never warns.
+                let version_warning = if handle.id == crate::backend::LOCAL_BACKEND_ID {
+                    None
+                } else {
+                    crate::backend::server_version_mismatch(
+                        &snapshot.server.version,
+                        crate::VERSION,
+                    )
+                };
+                if let Some(mismatch) = &version_warning
+                    && pending_version_toast.is_none()
+                    && !self.ui_state.version_warned.contains(&handle.id.0)
+                {
+                    pending_version_toast = Some((handle.id.0, name.clone(), mismatch.clone()));
+                }
                 items.push(SessionListItem::ServerHeader {
                     backend: handle.id,
-                    name: handle.backend.descriptor().name,
+                    name,
                     connection: handle.view.connection.clone(),
+                    version_warning,
                 });
             }
             let mut backend_items = match self.ui_state.view_mode {
@@ -579,6 +607,30 @@ impl App {
                 ),
             };
             items.append(&mut backend_items);
+        }
+
+        // Fire the one-time stale-server toast now the `self.backends` borrow is
+        // released, but only into a free slot: don't clobber a live message
+        // (e.g. "Created session …", set just before this refresh). We mark the
+        // server warned only when the toast is actually shown, so a deferred one
+        // retries on a later refresh rather than being silently consumed. The
+        // persistent header annotation carries the warning regardless.
+        if let Some((id, name, mismatch)) = pending_version_toast {
+            let slot_free = self
+                .ui_state
+                .status_message
+                .as_ref()
+                .is_none_or(|(_, expiry)| Instant::now() >= *expiry);
+            if slot_free {
+                self.ui_state.version_warned.insert(id);
+                self.ui_state.status_message = Some((
+                    format!(
+                        "{name} is on v{} — older than this client (v{}); some features may not work",
+                        mismatch.server, mismatch.client
+                    ),
+                    Instant::now() + Duration::from_secs(6),
+                ));
+            }
         }
 
         // Mark rows whose LFS content is still being pulled in the background.
