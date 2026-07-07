@@ -328,3 +328,57 @@ fn test_generate_branch_name_slash_in_prefix() {
 
     assert_eq!(manager.generate_branch_name("Foo"), "user/cc/foo");
 }
+
+#[tokio::test]
+async fn delete_session_mutates_state_once_removal_first() {
+    // Regression: delete must remove the session from state *before* the slow
+    // tmux/worktree teardown, so the tree row disappears immediately rather than
+    // lingering until `git worktree remove` finishes. Observable via the store
+    // generation counter: the fix mutates state exactly once (the removal),
+    // whereas the old kill-first path mutated twice (a `Stopped` transition
+    // inside `kill_session`, then the removal).
+    let mut config = Config::default();
+    config.telemetry.enabled = false;
+    // Isolate tmux onto a throwaway socket dir so the teardown never touches the
+    // developer's real tmux server (see the test-isolation rules in CLAUDE.md).
+    let tmux_tmpdir = TempDir::new().unwrap();
+    config.tmux_tmpdir = Some(tmux_tmpdir.path().to_path_buf());
+    let (_cdir, config_store) = test_config_store(config);
+    let (_dir, store) = test_store();
+    let manager = SessionManager::new(config_store, store.clone(), "");
+
+    // Seed a project + session with bogus repo/worktree paths so worktree
+    // removal is a no-op (`GitBackend::open` fails on a non-repo path).
+    let project = Project::new(
+        "repo",
+        std::path::PathBuf::from("/nonexistent/repo"),
+        "main",
+    );
+    let pid = project.id;
+    let session = WorktreeSession::new(
+        pid,
+        "task",
+        "task",
+        std::path::PathBuf::from("/nonexistent/wt"),
+        "claude",
+    );
+    let sid = session.id;
+    store
+        .mutate(move |state| {
+            state.add_project(project);
+            state.add_session(session);
+        })
+        .await
+        .unwrap();
+
+    let gen_before = *store.subscribe().borrow();
+    manager.delete_session(&sid).await.unwrap();
+    let gen_after = *store.subscribe().borrow();
+
+    assert_eq!(
+        gen_after - gen_before,
+        1,
+        "delete must mutate state once (removal), not transition through Stopped first"
+    );
+    assert!(store.read().await.get_session(&sid).is_none());
+}
