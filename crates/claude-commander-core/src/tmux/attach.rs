@@ -308,6 +308,19 @@ pub struct AttachOutcome {
 /// sequences for `Ctrl-<non-letter>` bindings. Bindings that cannot be detected
 /// in raw stdin (e.g. a bare letter) should simply be omitted.
 ///
+/// Hook the attach loop calls with the switcher's picked tmux session name
+/// before running `tmux switch-client`: revives the session when its tmux
+/// session is missing or its pane died, returning the (primary) name to
+/// switch to. Supplied by frontends that own a `CommanderService` (see
+/// `CommanderService::switcher_revive_hook`) so the revive runs in the
+/// process that owns the state store; the attach loop itself stays
+/// transport-agnostic and holds no service handle.
+pub type SwitcherRevive = Arc<
+    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// When `intercept_ctrl_z` is true, Ctrl+Z (`0x1A`) bytes are stripped from
 /// stdin before reaching the pane. Use this for Claude sessions where SIGTSTP
 /// would freeze the pane with no shell to recover from. Leave it false for
@@ -332,6 +345,11 @@ pub struct AttachConfig {
     /// runs against the operator's local tmux, so for a remote session it may
     /// simply target a name that isn't there. `None` disables both.
     pub session_name: Option<String>,
+    /// Revives the switcher's pick before `tmux switch-client` when its tmux
+    /// session died (e.g. after a reboot) — the same revive-on-attach the
+    /// tree view gets. `None` switches to the raw name, which fails for a
+    /// dead session.
+    pub switcher_revive: Option<SwitcherRevive>,
     /// Sink for clipboard-image paste, set only for a **remote** attach (the
     /// backend's `client_side_image_paste` capability). When `Some`, Ctrl+V is
     /// intercepted: the operator's local clipboard image is captured, encoded,
@@ -355,6 +373,7 @@ pub async fn attach_to_session(
     voice_listener: Option<mpsc::UnboundedSender<crate::conversation::ListenerCommand>>,
     recording: Arc<AtomicBool>,
     intercept_ctrl_z: bool,
+    switcher_revive: Option<SwitcherRevive>,
 ) -> Result<AttachOutcome> {
     let (cols, rows) = terminal::size().unwrap_or((80, 24));
     // Local TUI/CLI attach talks to the user's own tmux server, so no socket-dir
@@ -369,6 +388,7 @@ pub async fn attach_to_session(
         intercept_ctrl_z,
         switcher_enabled: true,
         session_name: Some(session_name.to_string()),
+        switcher_revive,
         // The CLI/local attach runs the agent on this machine, so it reads the
         // local clipboard itself — no client-side capture.
         image_paste: None,
@@ -567,6 +587,7 @@ async fn run_async_loop(
     let recording_flag = cfg.recording.clone();
     let intercept_ctrl_z = cfg.intercept_ctrl_z;
     let switcher_enabled = cfg.switcher_enabled;
+    let switcher_revive = cfg.switcher_revive.clone();
     let image_paste = cfg.image_paste.clone();
 
     // Channel for shutdown signal
@@ -669,8 +690,9 @@ async fn run_async_loop(
                                 debug!("Ctrl+Space detected, spawning switcher popup");
                                 let popup_open = popup_open.clone();
                                 let current_session = current_session.clone();
+                                let revive = switcher_revive.clone();
                                 tokio::spawn(async move {
-                                    run_switcher_popup(current_session, popup_open).await;
+                                    run_switcher_popup(current_session, popup_open, revive).await;
                                 });
                             }
                             if filtered.is_empty() {
@@ -800,23 +822,55 @@ fn shell_quote(s: &str) -> String {
 }
 
 /// Run the in-session switcher: spawn a `tmux display-popup` showing
-/// the picker subcommand, then on a non-empty result `tmux
-/// switch-client` to the chosen session and record it in
-/// `current_session`. Always clears `popup_open` before returning.
-async fn run_switcher_popup(current_session: Arc<Mutex<String>>, popup_open: Arc<AtomicBool>) {
+/// the picker subcommand, then on a non-empty result revive the chosen
+/// session if its tmux session died, `tmux switch-client` to it, and
+/// record it in `current_session`. Always clears `popup_open` before
+/// returning.
+async fn run_switcher_popup(
+    current_session: Arc<Mutex<String>>,
+    popup_open: Arc<AtomicBool>,
+    revive: Option<SwitcherRevive>,
+) {
     let current_name = current_session.lock().await.clone();
     let new_session = run_switcher_popup_inner(&current_name).await;
     if let Some(name) = new_session {
         info!("Switcher picked session: {}", name);
+        // Revive the pick before switching — its tmux session may have died
+        // (e.g. after a reboot), and `switch-client` can't create sessions.
+        // On a revive error fall back to the raw name: the pick may exist in
+        // tmux without being in commander state.
+        let target = match &revive {
+            Some(revive) => match revive(name.clone()).await {
+                Ok(target) => target,
+                Err(e) => {
+                    warn!("Failed to revive picked session {}: {}", name, e);
+                    name
+                }
+            },
+            None => name,
+        };
         let switch_status = tokio::process::Command::new("tmux")
-            .args(["switch-client", "-t", &name])
+            .args(["switch-client", "-t", &target])
             .status()
             .await;
         match switch_status {
             Ok(s) if s.success() => {
-                *current_session.lock().await = name;
+                *current_session.lock().await = target;
             }
-            Ok(s) => warn!("tmux switch-client exited with {:?}", s.code()),
+            Ok(s) => {
+                warn!("tmux switch-client exited with {:?}", s.code());
+                // Surface the failure in the pane the user is still on;
+                // without this a dead pick looks like the popup did nothing.
+                let _ = tokio::process::Command::new("tmux")
+                    .args([
+                        "display-message",
+                        "-t",
+                        &current_name,
+                        &format!("Could not switch to session {target}"),
+                    ])
+                    .status()
+                    .await;
+            }
             Err(e) => warn!("Failed to spawn tmux switch-client: {}", e),
         }
     }

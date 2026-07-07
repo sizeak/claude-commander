@@ -129,7 +129,11 @@ fn raise_fd_limit() {
 fn raise_fd_limit() {}
 
 /// Execute async PTY-based attach to a tmux session
-async fn execute_attach(session_name: &str, editor_triggers: Vec<Vec<u8>>) {
+async fn execute_attach(
+    session_name: &str,
+    editor_triggers: Vec<Vec<u8>>,
+    switcher_revive: Option<claude_commander_core::tmux::SwitcherRevive>,
+) {
     // CLI `attach` resolves a Claude session by title/ID, never a shell. The
     // review toggle has no standalone UI here, so it's disabled (empty triggers).
     // Voice input needs the TUI's conversation runtime, so it's disabled here too.
@@ -141,6 +145,7 @@ async fn execute_attach(session_name: &str, editor_triggers: Vec<Vec<u8>>) {
         None,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         true,
+        switcher_revive,
     )
     .await
     {
@@ -456,7 +461,15 @@ async fn main() -> Result<()> {
             match claude_commander_core::cli::find_session(&app_state, &session) {
                 Some(s) => {
                     let triggers = claude_commander_core::editor_trigger_bytes(&config.keybindings);
-                    execute_attach(&s.tmux_session_name, triggers).await;
+                    let tmux_name = s.tmux_session_name.clone();
+                    // Give the Ctrl+Space switcher revive-on-switch; a service
+                    // construction failure just degrades to switching without
+                    // reviving, as before.
+                    let revive =
+                        claude_commander_core::api::CommanderService::for_cli(config, frontend())
+                            .ok()
+                            .map(|svc| svc.switcher_revive_hook());
+                    execute_attach(&tmux_name, triggers, revive).await;
                 }
                 None => {
                     eprintln!("Session not found: {}", session);
@@ -477,7 +490,14 @@ async fn main() -> Result<()> {
             match claude_commander_core::commander::ensure_session(&config, &tmux, &cmd).await {
                 Ok(name) => {
                     let triggers = claude_commander_core::editor_trigger_bytes(&config.keybindings);
-                    execute_attach(&name, triggers).await;
+                    // Best-effort revive hook for the Ctrl+Space switcher: the
+                    // commander must stay usable even when state.json is
+                    // unreadable, so a `for_cli` failure means no hook.
+                    let revive =
+                        claude_commander_core::api::CommanderService::for_cli(config, frontend())
+                            .ok()
+                            .map(|svc| svc.switcher_revive_hook());
+                    execute_attach(&name, triggers, revive).await;
                 }
                 Err(
                     e @ claude_commander_core::Error::Session(

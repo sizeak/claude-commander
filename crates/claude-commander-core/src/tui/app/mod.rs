@@ -2357,6 +2357,15 @@ impl App {
                                 intercept_ctrl_z,
                                 switcher_enabled,
                                 session_name: name.clone(),
+                                // Revive a switcher pick whose tmux session
+                                // died (e.g. after a reboot) the way the
+                                // tree-view attach does. The switcher only
+                                // lists local sessions, so the local service
+                                // owns the revive regardless of which backend
+                                // the currently-attached session is on.
+                                switcher_revive: self
+                                    .local_backend()
+                                    .map(|b| b.service().switcher_revive_hook()),
                                 image_paste,
                             };
 
