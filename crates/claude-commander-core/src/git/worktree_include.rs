@@ -65,7 +65,14 @@ pub(super) async fn copy_worktree_includes(repo_path: &Path, worktree_path: &Pat
     // to descend into every standard-ignored directory testing each file —
     // multiple seconds on a large monorepo.
     let mut search = gix::ignore::Search::default();
-    search.add_patterns_buffer(&include_bytes, include_file.clone(), None);
+    // gix-ignore 0.21 added a `parse` arg controlling precious-pattern handling;
+    // the default matches prior behaviour (no `$`-prefixed precious patterns).
+    search.add_patterns_buffer(
+        &include_bytes,
+        include_file.clone(),
+        None,
+        Default::default(),
+    );
 
     // Preserve trailing-slash dir markers from git's output: gitignore
     // semantics for `dir/` patterns are dir-only, so the matcher needs

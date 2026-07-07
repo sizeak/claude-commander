@@ -92,7 +92,7 @@ fn recorder_thread(
     };
     let _ = ready.send(Ok(()));
 
-    let sample_rate = supported.sample_rate().0;
+    let sample_rate = supported.sample_rate();
     let channels = supported.channels();
     let sample_format = supported.sample_format();
     let config: cpal::StreamConfig = supported.into();
@@ -155,14 +155,14 @@ fn build_typed<T>(
     config: &cpal::StreamConfig,
     channels: u16,
     buffer: Arc<Mutex<Vec<f32>>>,
-) -> Result<cpal::Stream, cpal::BuildStreamError>
+) -> Result<cpal::Stream, cpal::Error>
 where
     T: SizedSample,
     f32: FromSample<T>,
 {
     let ch = channels.max(1) as usize;
     device.build_input_stream(
-        config,
+        *config,
         move |data: &[T], _: &cpal::InputCallbackInfo| {
             let mut buf = buffer.lock().unwrap();
             for frame in data.chunks(ch) {

@@ -254,7 +254,7 @@ async fn send_control(write: &mut SplitSink<WsStream, Message>, msg: ClientContr
         .to_text()
         .map_err(|_| BackendError::Protocol("could not encode control frame".to_string()))?;
     write
-        .send(Message::Text(text))
+        .send(Message::Text(text.into()))
         .await
         .map_err(|_| BackendError::Unavailable {
             reason: "connection to server lost during handshake".to_string(),
@@ -379,7 +379,7 @@ async fn run_pump(
                 Ok(0) => break (AttachEnd::Detached, true),
                 Ok(n) => {
                     if ws_write
-                        .send(Message::Binary(in_buf[..n].to_vec()))
+                        .send(Message::Binary(in_buf[..n].to_vec().into()))
                         .await
                         .is_err()
                     {
@@ -394,7 +394,7 @@ async fn run_pump(
                 Some(WsControl::Resize { cols, rows }) => {
                     if let Ok(text) = (ClientControl::Resize { cols, rows }).to_text() {
                         // A failed resize is non-fatal; keep pumping.
-                        let _ = ws_write.send(Message::Text(text)).await;
+                        let _ = ws_write.send(Message::Text(text.into())).await;
                     }
                 }
                 Some(WsControl::Detach) => break (AttachEnd::Detached, true),
@@ -408,7 +408,7 @@ async fn run_pump(
     // Teardown. On a client-initiated end, tell the server to detach (kill the
     // attach child, leave the session running) before closing.
     if we_detached && let Ok(text) = ClientControl::Detach.to_text() {
-        let _ = ws_write.send(Message::Text(text)).await;
+        let _ = ws_write.send(Message::Text(text.into())).await;
     }
     let _ = ws_write.close().await;
     let _ = end_tx.send(Some(end));
@@ -514,7 +514,8 @@ mod tests {
                 ServerControl::Ready {
                     session: "cc-test".to_string(),
                 }
-                .to_text(),
+                .to_text()
+                .into(),
             ))
             .await
             .unwrap();
