@@ -1,6 +1,8 @@
 use super::*;
 use crate::git::PrState;
 use crate::session::{ProjectId, SessionId};
+use ratatui::buffer::Buffer;
+use ratatui::style::Color;
 use ratatui::{Terminal, backend::TestBackend, widgets::ListState};
 use std::path::PathBuf;
 
@@ -59,6 +61,23 @@ fn render_tree_with<F>(
 where
     F: for<'a> FnOnce(TreeList<'a>) -> TreeList<'a>,
 {
+    let buf = draw_tree_buffer(items, width, height, configure);
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| buf[(x, y)].symbol().to_string())
+                .collect::<String>()
+        })
+        .collect()
+}
+
+/// Shared draw step for the rendering helpers below: builds a `TestBackend`
+/// of the requested size, renders the (optionally configured) `TreeList`, and
+/// returns the resulting buffer for the caller to extract symbols or styles.
+fn draw_tree_buffer<F>(items: &[SessionListItem], width: u16, height: u16, configure: F) -> Buffer
+where
+    F: for<'a> FnOnce(TreeList<'a>) -> TreeList<'a>,
+{
     let theme = Theme::basic();
     let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
@@ -68,14 +87,7 @@ where
             frame.render_stateful_widget(tree, frame.area(), &mut ListState::default());
         })
         .unwrap();
-    let buf = terminal.backend().buffer();
-    (0..height)
-        .map(|y| {
-            (0..width)
-                .map(|x| buf[(x, y)].symbol().to_string())
-                .collect::<String>()
-        })
-        .collect()
+    terminal.backend().buffer().clone()
 }
 
 fn make_worktree_with_program(title: &str, program: &str) -> SessionListItem {
@@ -967,6 +979,16 @@ fn make_section_header(name: &str, count: usize, collapsed: bool) -> SessionList
     }
 }
 
+/// Section header with a WIP limit set. Used by the tests that exercise the
+/// `(count/limit)` suffix rendering (text + colour ramp).
+fn make_section_header_with_limit(count: usize, limit: u32) -> SessionListItem {
+    let mut h = make_section_header("Review", count, false);
+    if let SessionListItem::SectionHeader { max_sessions, .. } = &mut h {
+        *max_sessions = Some(limit);
+    }
+    h
+}
+
 #[test]
 fn test_section_header_expanded_shows_down_twistie() {
     let items = vec![
@@ -1016,13 +1038,7 @@ fn test_section_header_shows_count() {
 
 #[test]
 fn test_section_header_shows_count_over_limit_when_max_sessions_set() {
-    let item = SessionListItem::SectionHeader {
-        name: "Review".to_string(),
-        count: 3,
-        collapsed: false,
-        max_sessions: Some(2),
-    };
-    let lines = render_tree(&[item], 60, 2);
+    let lines = render_tree(&[make_section_header_with_limit(3, 2)], 60, 2);
     assert!(
         lines[0].contains("(3/2)"),
         "Expected count/limit display when over limit: {:?}",
@@ -1032,18 +1048,44 @@ fn test_section_header_shows_count_over_limit_when_max_sessions_set() {
 
 #[test]
 fn test_section_header_shows_count_under_limit_when_max_sessions_set() {
-    let item = SessionListItem::SectionHeader {
-        name: "Review".to_string(),
-        count: 1,
-        collapsed: false,
-        max_sessions: Some(5),
-    };
-    let lines = render_tree(&[item], 60, 2);
+    let lines = render_tree(&[make_section_header_with_limit(1, 5)], 60, 2);
     assert!(
         lines[0].contains("(1/5)"),
         "Expected count/limit display when under limit: {:?}",
         lines[0]
     );
+}
+
+/// Assert that the `(count/limit)` suffix rendered on the section header uses
+/// `expected` as its foreground colour. Uses `find_text_in_row` (the same
+/// needle-scanner production code uses) so it can't mis-anchor on a stray `(`
+/// in the section name.
+fn assert_count_suffix_colour(count: usize, limit: u32, expected: Color) {
+    let buf = draw_tree_buffer(
+        &[make_section_header_with_limit(count, limit)],
+        60,
+        2,
+        |t| t,
+    );
+    let needle = format!("({count}/{limit})");
+    let x = super::render::find_text_in_row(&buf, 0, 0, 60, &needle)
+        .unwrap_or_else(|| panic!("count suffix {needle:?} not found in rendered row"));
+    assert_eq!(buf[(x, 0)].style().fg, Some(expected));
+}
+
+#[test]
+fn section_header_under_limit_uses_secondary_colour() {
+    assert_count_suffix_colour(1, 5, Theme::basic().text_secondary);
+}
+
+#[test]
+fn section_header_at_limit_uses_warning_colour() {
+    assert_count_suffix_colour(2, 2, Theme::basic().modal_warning);
+}
+
+#[test]
+fn section_header_over_limit_uses_error_colour() {
+    assert_count_suffix_colour(3, 2, Theme::basic().modal_error);
 }
 
 #[test]

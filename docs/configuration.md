@@ -512,7 +512,7 @@ All fields are optional; a section matches when **every declared field** matches
 | `has_label` | string (literal) or array (any-of) | |
 | `review_decision` | `"approved"` \| `"changes_requested"` \| `"review_required"` — scalar or array (any-of) | Mirrors GitHub's `reviewDecision` field |
 | `has_reviewer` | `true` / `false`, a specific login, or an array of logins (any-of) | `true` excludes Copilot via case-insensitive `"copilot"` substring match; specific/array forms match literally |
-| `max_sessions` | positive integer | Advisory WIP limit. Section header shows `count/limit` and highlights when at or over the limit. Never blocks creation. |
+| `max_sessions` | positive integer | Advisory WIP limit. Section header shows `count/limit`, warning-coloured at the limit and error-coloured over it. Never blocks creation. |
 
 ### Process order and forward-only
 
@@ -528,7 +528,7 @@ In the section-grouped views, a session created with `n` lands in the section th
 
 ### WIP limits
 
-Set `max_sessions = N` on any section to flag it when it accumulates too much work. The header renders `count/N` and switches to the warning colour once `count >= N`. The catch-all "In Progress" section uses the top-level `in_progress_limit` instead:
+Set `max_sessions = N` on any section to flag it when it accumulates too much work. The header renders `count/N`, switching to the warning colour when `count == N` and to the error colour when `count > N`. The catch-all "In Progress" section uses the top-level `in_progress_limit` instead:
 
 ```toml
 in_progress_limit = 3
