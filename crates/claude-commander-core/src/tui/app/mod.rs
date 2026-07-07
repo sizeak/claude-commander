@@ -832,9 +832,14 @@ pub enum SettingsEditing {
         action_name: String,
         keys: Vec<String>,
     },
-    /// Picking from a list of options (used for theme presets)
+    /// Picking from a list of options (used for theme presets). `options` holds
+    /// the display labels. `values`, when `Some`, holds the string committed on
+    /// selection (parallel to `options`) so the picker can show a friendly label
+    /// while storing a different value (e.g. a microphone's stable device id);
+    /// when `None`, the label itself is committed.
     OptionPicker {
         options: Vec<String>,
+        values: Option<Vec<String>>,
         selected: usize,
     },
 }

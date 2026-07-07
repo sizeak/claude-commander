@@ -454,7 +454,10 @@ impl App {
 
         // Check if the OptionPicker is active and how many rows it occupies
         let picker_info: Option<(usize, &[String], usize)> =
-            if let Some(SettingsEditing::OptionPicker { options, selected }) = &state.editing {
+            if let Some(SettingsEditing::OptionPicker {
+                options, selected, ..
+            }) = &state.editing
+            {
                 // screen_row is the row index (within visible area) where the picker starts
                 let screen_row = state.selected_row.saturating_sub(scroll_offset);
                 Some((screen_row, options.as_slice(), *selected))
@@ -572,8 +575,11 @@ impl App {
                     SettingsRowKind::Text(text) if is_selected => {
                         if let Some(SettingsEditing::TextInput { value }) = &state.editing {
                             super::input_with_caret(value)
-                        } else if let Some(SettingsEditing::OptionPicker { options, selected }) =
-                            &state.editing
+                        } else if let Some(SettingsEditing::OptionPicker {
+                            options,
+                            selected,
+                            ..
+                        }) = &state.editing
                         {
                             // Show the currently highlighted option on the selected row
                             format!("▸ {}", options[*selected])
@@ -1372,9 +1378,18 @@ impl App {
                         }
                     }
                 }
-                SettingsEditing::OptionPicker { options, selected } => match key.code {
+                SettingsEditing::OptionPicker {
+                    options,
+                    values,
+                    selected,
+                } => match key.code {
                     KeyCode::Enter => {
-                        let chosen = options[*selected].clone();
+                        // Commit the parallel `value` when present (e.g. a mic's
+                        // stable id), else the visible label.
+                        let chosen = values
+                            .as_ref()
+                            .map(|v| v[*selected].clone())
+                            .unwrap_or_else(|| options[*selected].clone());
                         let field_key = state.rows[state.selected_row].field_key.clone();
                         // Treat "(auto)" as empty string for apply_settings_edit
                         let val = if chosen == "(auto)" {
@@ -1474,8 +1489,11 @@ impl App {
                                 let current_value = state.rows[state.selected_row].text_value();
                                 let selected =
                                     options.iter().position(|o| o == current_value).unwrap_or(0);
-                                state.editing =
-                                    Some(SettingsEditing::OptionPicker { options, selected });
+                                state.editing = Some(SettingsEditing::OptionPicker {
+                                    options,
+                                    values: None,
+                                    selected,
+                                });
                             } else if field_key == "conversation_speak_scope" {
                                 // Inline option picker for the speak-scope enum.
                                 use crate::conversation::SpeakScope;
@@ -1486,26 +1504,40 @@ impl App {
                                 let current_value = state.rows[state.selected_row].text_value();
                                 let selected =
                                     options.iter().position(|o| o == current_value).unwrap_or(0);
-                                state.editing =
-                                    Some(SettingsEditing::OptionPicker { options, selected });
+                                state.editing = Some(SettingsEditing::OptionPicker {
+                                    options,
+                                    values: None,
+                                    selected,
+                                });
                             } else if field_key == "stt_input_device" {
-                                // Inline option picker listing the available input
-                                // devices (queried on demand), with "(default)"
-                                // first for the system default.
+                                // Inline option picker for the microphone: shows a
+                                // friendly label per device but commits the stable
+                                // device id (`values`), with "(default)" first for
+                                // the system default. Devices are queried on demand.
+                                let devices = crate::conversation::recorder::input_devices();
                                 let mut options = vec!["(default)".to_string()];
-                                options.extend(crate::conversation::recorder::input_device_names());
+                                let mut values = vec!["(default)".to_string()];
+                                for d in devices {
+                                    options.push(d.label);
+                                    values.push(d.id);
+                                }
+                                // `current_value` is the stored device id. Keep a
+                                // configured-but-unplugged device selectable so
+                                // opening the picker doesn't silently reset it.
                                 let current_value = state.rows[state.selected_row].text_value();
-                                // Keep a configured-but-unplugged device selectable
-                                // so opening the picker doesn't silently reset it.
                                 if current_value != "(default)"
-                                    && !options.iter().any(|o| o == current_value)
+                                    && !values.iter().any(|v| v == current_value)
                                 {
-                                    options.push(current_value.to_string());
+                                    options.push(format!("{current_value} (not connected)"));
+                                    values.push(current_value.to_string());
                                 }
                                 let selected =
-                                    options.iter().position(|o| o == current_value).unwrap_or(0);
-                                state.editing =
-                                    Some(SettingsEditing::OptionPicker { options, selected });
+                                    values.iter().position(|v| v == current_value).unwrap_or(0);
+                                state.editing = Some(SettingsEditing::OptionPicker {
+                                    options,
+                                    values: Some(values),
+                                    selected,
+                                });
                             } else {
                                 let current_value = state.rows[state.selected_row].text_value();
                                 let initial =

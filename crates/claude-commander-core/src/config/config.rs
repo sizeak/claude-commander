@@ -429,8 +429,11 @@ pub struct SttConfig {
     /// On by default.
     pub pause_media: bool,
 
-    /// Microphone (input device) name to capture from. `None` uses the system
-    /// default input device. Names are OS-provided (from `cpal`); if the named
+    /// Microphone to capture from, as cpal's stable device id (the PipeWire
+    /// `node.name`, e.g. `alsa_input.pci-0000_c1_00.6.analog-stereo`). `None`
+    /// uses the system default input device. Set it via the picker in
+    /// Settings ▸ Conversation rather than by hand. Ids — not friendly names —
+    /// are stored because a mic and its speaker's loopback share a name; if the
     /// device is absent at record time, capture falls back to the default (with
     /// a warning) rather than failing.
     pub input_device: Option<String>,
