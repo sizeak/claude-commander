@@ -228,6 +228,7 @@ state_sync_interval_ms = 2000
 # language = "en"                          # ISO-639-1 hint; omit to auto-detect
 # prompt = "..."                           # optional decoding prompt (domain vocab / spelling)
 # api_key = "..."                          # sent as a Bearer header; omit for local servers
+# input_device = "..."                     # microphone to capture from; omit for the system default
 # pause_media = true                       # pause other players while recording, resume after the
 #                                          # reply (best-effort via playerctl/osascript; on by default)
 
@@ -377,8 +378,16 @@ model = "Systran/faster-whisper-base"    # transcription model name
 language = "en"                          # ISO-639-1 hint; omit to auto-detect
 # prompt = "Vitest, Kotlin, ..."         # optional decoding prompt (domain vocab / spelling hints)
 # api_key = "..."                        # sent as a Bearer header; omit for local servers
+# input_device = "USB Microphone"        # microphone to capture from; omit for the system default
 pause_media = true                       # pause other players while recording, resume after the reply
 ```
+
+`input_device` picks which microphone to capture from — omit it (or leave it as
+**(default)** in Settings ▸ Conversation) to use the system default. Device names are
+OS-provided and can change across reboots, driver updates, or hot-plug; if the configured
+device isn't present when recording starts, capture falls back to the default (with a warning)
+rather than failing. Selecting a microphone in the settings modal takes effect on the **next
+recording, live** — no restart needed — whenever voice input is already running.
 
 While you're recording (and until the assistant has finished its spoken reply), `pause_media`
 pauses any other media players so they don't talk over the conversation, then resumes whatever was

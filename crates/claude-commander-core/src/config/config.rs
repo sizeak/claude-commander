@@ -420,6 +420,12 @@ pub struct SttConfig {
     /// (Linux) / `osascript` (macOS); a silent no-op when neither is available.
     /// On by default.
     pub pause_media: bool,
+
+    /// Microphone (input device) name to capture from. `None` uses the system
+    /// default input device. Names are OS-provided (from `cpal`); if the named
+    /// device is absent at record time, capture falls back to the default (with
+    /// a warning) rather than failing.
+    pub input_device: Option<String>,
 }
 
 impl Default for SttConfig {
@@ -435,6 +441,7 @@ impl Default for SttConfig {
             prompt: None,
             api_key: None,
             pause_media: true,
+            input_device: None,
         }
     }
 }
@@ -1029,6 +1036,7 @@ has_label = ["blocked", "waiting-on-author"]
         assert_eq!(c.language, None);
         assert_eq!(c.prompt, None);
         assert_eq!(c.api_key, None);
+        assert_eq!(c.input_device, None);
     }
 
     #[test]
@@ -1046,12 +1054,14 @@ enabled = true
 base_url = "http://192.168.1.10:8080/v1"
 model = "large-v3-turbo"
 language = "en"
+input_device = "USB Mic"
 "#;
         let config: Config = toml::from_str(toml_src).expect("toml parse");
         assert!(config.stt.enabled);
         assert_eq!(config.stt.base_url, "http://192.168.1.10:8080/v1");
         assert_eq!(config.stt.model, "large-v3-turbo");
         assert_eq!(config.stt.language.as_deref(), Some("en"));
+        assert_eq!(config.stt.input_device.as_deref(), Some("USB Mic"));
         // Unspecified fields keep their defaults.
         assert_eq!(config.stt.prompt, None);
     }

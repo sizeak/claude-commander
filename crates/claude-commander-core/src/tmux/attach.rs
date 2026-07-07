@@ -162,7 +162,7 @@ pub struct AttachConfig {
     pub editor_triggers: Vec<Vec<u8>>,
     pub review_triggers: Vec<Vec<u8>>,
     pub voice_triggers: Vec<Vec<u8>>,
-    pub voice_listener: Option<mpsc::UnboundedSender<crate::conversation::ListenerCommand>>,
+    pub voice_listener: Option<crate::conversation::ListenerHandle>,
     pub recording: Arc<AtomicBool>,
     pub intercept_ctrl_z: bool,
     /// Whether the in-session Ctrl+Space switcher popup is available. It's a
@@ -191,7 +191,7 @@ pub async fn attach_to_session(
     editor_triggers: Vec<Vec<u8>>,
     review_triggers: Vec<Vec<u8>>,
     voice_triggers: Vec<Vec<u8>>,
-    voice_listener: Option<mpsc::UnboundedSender<crate::conversation::ListenerCommand>>,
+    voice_listener: Option<crate::conversation::ListenerHandle>,
     recording: Arc<AtomicBool>,
     intercept_ctrl_z: bool,
 ) -> Result<AttachOutcome> {

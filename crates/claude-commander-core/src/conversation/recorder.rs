@@ -46,13 +46,17 @@ pub struct Recorder {
 impl Recorder {
     /// Start the recorder thread. Returns an error synchronously if no input
     /// device is available. Finished recordings are delivered as WAV bytes on
-    /// `wav_tx`.
-    pub fn new(wav_tx: UnboundedSender<Vec<u8>>) -> Result<Self, TtsError> {
+    /// `wav_tx`. `input_device` names the microphone to capture from; `None`
+    /// (or a name that isn't present) falls back to the system default.
+    pub fn new(
+        wav_tx: UnboundedSender<Vec<u8>>,
+        input_device: Option<String>,
+    ) -> Result<Self, TtsError> {
         let (tx, rx) = channel::<Command>();
         let (ready_tx, ready_rx) = channel::<Result<(), String>>();
         std::thread::Builder::new()
             .name("cc-stt-audio".into())
-            .spawn(move || recorder_thread(rx, wav_tx, ready_tx))
+            .spawn(move || recorder_thread(rx, wav_tx, ready_tx, input_device))
             .map_err(|e| TtsError::Audio(e.to_string()))?;
         match ready_rx.recv() {
             Ok(Ok(())) => Ok(Self { tx }),
@@ -72,14 +76,130 @@ impl Recorder {
     }
 }
 
+/// Given the names of the available input devices and an optionally-requested
+/// device name, decide which name to open. Returns `None` — meaning "use the
+/// system default input device" — when nothing was requested, or when the
+/// requested device is no longer present (graceful fallback rather than error).
+#[cfg(feature = "audio")]
+fn resolve_input_device_name(available: &[String], requested: Option<&str>) -> Option<String> {
+    match requested {
+        Some(name) if available.iter().any(|a| a == name) => Some(name.to_string()),
+        _ => None,
+    }
+}
+
+/// Names of the available input (capture) devices, for the settings picker.
+/// Empty when the `audio` feature is off, or on an enumeration error. This
+/// synchronously queries the audio host, so it's called only on demand (when
+/// the user opens the microphone picker), not on a hot path.
+///
+/// On Unix the query is wrapped in [`with_stderr_silenced`]: cpal's ALSA backend
+/// prints chatty `snd_*` diagnostics straight to fd 2, which would otherwise
+/// scribble over the raw-mode TUI when the picker is opened.
+#[cfg(feature = "audio")]
+pub fn input_device_names() -> Vec<String> {
+    let enumerate = || {
+        let host = cpal::default_host();
+        match host.input_devices() {
+            Ok(devices) => devices.filter_map(|d| d.name().ok()).collect(),
+            Err(e) => {
+                warn!("failed to enumerate input devices: {e}");
+                Vec::new()
+            }
+        }
+    };
+    #[cfg(unix)]
+    {
+        with_stderr_silenced(enumerate)
+    }
+    #[cfg(not(unix))]
+    {
+        enumerate()
+    }
+}
+
+/// Run `f` with the process's stderr (fd 2) temporarily redirected to
+/// `/dev/null`, restoring it afterwards. Used to swallow cpal/ALSA's unsolicited
+/// `snd_*` error prints during device enumeration so they don't corrupt the
+/// raw-mode terminal. Best-effort: if any of the `dup`/`open` calls fail we run
+/// `f` with stderr untouched. The redirect is process-wide for its (brief)
+/// duration, so a concurrent write from another thread could be dropped — an
+/// acceptable trade for a one-shot, user-initiated call. The restore runs from a
+/// `Drop` guard, so a panic in `f` can't strand fd 2 pointed at `/dev/null`.
+#[cfg(all(feature = "audio", unix))]
+fn with_stderr_silenced<T>(f: impl FnOnce() -> T) -> T {
+    const STDERR_FD: libc::c_int = 2;
+
+    /// Restores the saved stderr and closes the backup fd when dropped.
+    struct Restore(libc::c_int);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            // SAFETY: `self.0` is a live fd we dup'd; restore fd 2 then close it.
+            unsafe {
+                libc::dup2(self.0, STDERR_FD);
+                libc::close(self.0);
+            }
+        }
+    }
+
+    // SAFETY: dup the current stderr and point fd 2 at /dev/null. If either step
+    // fails we run `f` with stderr untouched. The `Restore` guard undoes the
+    // redirect on scope exit (including unwind).
+    let _guard = unsafe {
+        let saved = libc::dup(STDERR_FD);
+        if saved < 0 {
+            None
+        } else {
+            let devnull = libc::open(c"/dev/null".as_ptr(), libc::O_WRONLY);
+            if devnull < 0 {
+                libc::close(saved);
+                None
+            } else {
+                libc::dup2(devnull, STDERR_FD);
+                libc::close(devnull);
+                Some(Restore(saved))
+            }
+        }
+    };
+    f()
+}
+
+/// Placeholder used when the `audio` feature is off. The `tui` settings module
+/// is compiled in every build (server, client cdylib) and calls this, so it
+/// must exist even where cpal isn't linked; there are simply no devices.
+#[cfg(not(feature = "audio"))]
+pub fn input_device_names() -> Vec<String> {
+    Vec::new()
+}
+
 #[cfg(feature = "audio")]
 fn recorder_thread(
     rx: Receiver<Command>,
     wav_tx: UnboundedSender<Vec<u8>>,
     ready: Sender<Result<(), String>>,
+    input_device: Option<String>,
 ) {
     let host = cpal::default_host();
-    let Some(device) = host.default_input_device() else {
+    // Enumerate once: derive the name list from the same devices we search, so a
+    // device whose `name()` errors is simply never matched (no index skew), and
+    // we don't probe the (slow) audio host twice.
+    let devices: Vec<cpal::Device> = host
+        .input_devices()
+        .map(|it| it.collect())
+        .unwrap_or_default();
+    let names: Vec<String> = devices.iter().filter_map(|d| d.name().ok()).collect();
+    let chosen = resolve_input_device_name(&names, input_device.as_deref());
+    if input_device.is_some() && chosen.is_none() {
+        warn!("STT: requested microphone not found, using default input device");
+    }
+    let device = match &chosen {
+        Some(name) => devices
+            .into_iter()
+            .find(|d| d.name().ok().as_deref() == Some(name.as_str()))
+            .or_else(|| host.default_input_device()),
+        None => host.default_input_device(),
+    };
+    let Some(device) = device else {
         let _ = ready.send(Err("no input audio device available".into()));
         return;
     };
@@ -205,7 +325,10 @@ pub struct Recorder;
 
 #[cfg(not(feature = "audio"))]
 impl Recorder {
-    pub fn new(_wav_tx: UnboundedSender<Vec<u8>>) -> Result<Self, TtsError> {
+    pub fn new(
+        _wav_tx: UnboundedSender<Vec<u8>>,
+        _input_device: Option<String>,
+    ) -> Result<Self, TtsError> {
         Err(TtsError::Audio("audio support not compiled in".into()))
     }
 
@@ -246,5 +369,21 @@ mod tests {
         let bytes = encode_wav(&[], 16_000).expect("encode empty");
         let reader = hound::WavReader::new(Cursor::new(bytes)).expect("read");
         assert_eq!(reader.len(), 0);
+    }
+
+    #[test]
+    fn resolve_input_device_name_cases() {
+        let available = vec!["Built-in".to_string(), "USB Mic".to_string()];
+        // Requested device present → selected verbatim.
+        assert_eq!(
+            resolve_input_device_name(&available, Some("USB Mic")),
+            Some("USB Mic".to_string())
+        );
+        // Requested device absent → None (fall back to system default).
+        assert_eq!(resolve_input_device_name(&available, Some("Gone")), None);
+        // Nothing requested → None (system default).
+        assert_eq!(resolve_input_device_name(&available, None), None);
+        // Empty device list with a request → None.
+        assert_eq!(resolve_input_device_name(&[], Some("USB Mic")), None);
     }
 }

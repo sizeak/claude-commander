@@ -8,6 +8,7 @@
 //! to the conversation session.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use tokio::sync::mpsc;
@@ -39,6 +40,51 @@ pub enum ListenAction {
     Stop,
 }
 
+/// A respawn-stable handle to the current voice listener's command channel.
+///
+/// The listener's [`Recorder`] binds its microphone once at spawn time, so
+/// changing the selected mic means tearing the listener down and building a
+/// fresh one. Every voice trigger (the Alt-V key path, the in-attach byte
+/// interceptor, and the Unix-socket toggle) reaches the listener *through* this
+/// handle rather than holding a raw `Sender` clone, so a [`replace`] swaps the
+/// device under all of them at once. Dropping the previous `Sender` (there is
+/// only ever the one, held here) ends the old listener task — which in turn ends
+/// its recorder thread, releasing the old device.
+///
+/// [`replace`]: ListenerHandle::replace
+#[derive(Clone, Default)]
+pub struct ListenerHandle(Arc<Mutex<Option<mpsc::UnboundedSender<ListenerCommand>>>>);
+
+impl ListenerHandle {
+    /// Install (or swap in) the current listener's command sender, dropping any
+    /// previous one.
+    pub fn replace(&self, tx: mpsc::UnboundedSender<ListenerCommand>) {
+        *self.0.lock().unwrap() = Some(tx);
+    }
+
+    /// Drop the current sender (e.g. when the listener could not be rebuilt).
+    pub fn clear(&self) {
+        *self.0.lock().unwrap() = None;
+    }
+
+    /// Whether a listener is currently installed.
+    pub fn is_present(&self) -> bool {
+        self.0.lock().unwrap().is_some()
+    }
+
+    /// Send a command to the current listener. Returns `false` if none is
+    /// installed or the listener task has gone away.
+    pub fn send(&self, cmd: ListenerCommand) -> bool {
+        matches!(&*self.0.lock().unwrap(), Some(tx) if tx.send(cmd).is_ok())
+    }
+}
+
+impl From<mpsc::UnboundedSender<ListenerCommand>> for ListenerHandle {
+    fn from(tx: mpsc::UnboundedSender<ListenerCommand>) -> Self {
+        Self(Arc::new(Mutex::new(Some(tx))))
+    }
+}
+
 /// Apply a [`ListenAction`] against the shared recording flag and listener.
 ///
 /// This is the single shared entry point for *every* voice trigger — the in-app
@@ -48,7 +94,7 @@ pub enum ListenAction {
 /// [`ListenerCommand`] only when the state actually changes (so a redundant
 /// `Start`/`Stop` doesn't restart capture or transcribe silence).
 pub fn apply_listen_action(
-    listener: &mpsc::UnboundedSender<ListenerCommand>,
+    listener: &ListenerHandle,
     recording: &AtomicBool,
     action: ListenAction,
 ) -> bool {
@@ -82,7 +128,7 @@ pub fn spawn_listener(
     speaker: SpeakerHandle,
 ) -> Result<mpsc::UnboundedSender<ListenerCommand>, TtsError> {
     let (wav_tx, mut wav_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let recorder = Recorder::new(wav_tx)?;
+    let recorder = Recorder::new(wav_tx, cfg.input_device.clone())?;
     let client = SttClient::new(&cfg);
     let (tx, mut rx) = mpsc::unbounded_channel::<ListenerCommand>();
 
@@ -171,10 +217,15 @@ mod tests {
     #[test]
     fn toggle_alternates_start_and_stop() {
         let (tx, mut rx) = mpsc::unbounded_channel();
+        let handle = ListenerHandle::from(tx);
         let recording = AtomicBool::new(false);
 
         // First toggle starts recording.
-        assert!(apply_listen_action(&tx, &recording, ListenAction::Toggle));
+        assert!(apply_listen_action(
+            &handle,
+            &recording,
+            ListenAction::Toggle
+        ));
         assert!(recording.load(Ordering::Acquire));
         assert!(matches!(
             drain(&mut rx).as_slice(),
@@ -182,7 +233,11 @@ mod tests {
         ));
 
         // Second toggle stops it.
-        assert!(!apply_listen_action(&tx, &recording, ListenAction::Toggle));
+        assert!(!apply_listen_action(
+            &handle,
+            &recording,
+            ListenAction::Toggle
+        ));
         assert!(!recording.load(Ordering::Acquire));
         assert!(matches!(drain(&mut rx).as_slice(), [ListenerCommand::Stop]));
     }
@@ -190,23 +245,67 @@ mod tests {
     #[test]
     fn explicit_start_stop_are_idempotent() {
         let (tx, mut rx) = mpsc::unbounded_channel();
+        let handle = ListenerHandle::from(tx);
         let recording = AtomicBool::new(false);
 
         // Start from idle records and sends Start.
-        assert!(apply_listen_action(&tx, &recording, ListenAction::Start));
+        assert!(apply_listen_action(
+            &handle,
+            &recording,
+            ListenAction::Start
+        ));
         assert!(matches!(
             drain(&mut rx).as_slice(),
             [ListenerCommand::Start]
         ));
 
         // A second Start is a no-op — no command, no restart.
-        assert!(apply_listen_action(&tx, &recording, ListenAction::Start));
+        assert!(apply_listen_action(
+            &handle,
+            &recording,
+            ListenAction::Start
+        ));
         assert!(drain(&mut rx).is_empty());
 
         // Stop sends Stop; a second Stop is a no-op.
-        assert!(!apply_listen_action(&tx, &recording, ListenAction::Stop));
+        assert!(!apply_listen_action(
+            &handle,
+            &recording,
+            ListenAction::Stop
+        ));
         assert!(matches!(drain(&mut rx).as_slice(), [ListenerCommand::Stop]));
-        assert!(!apply_listen_action(&tx, &recording, ListenAction::Stop));
+        assert!(!apply_listen_action(
+            &handle,
+            &recording,
+            ListenAction::Stop
+        ));
         assert!(drain(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn replace_swaps_the_delivered_to_sender() {
+        // The core respawn guarantee: after `replace`, triggers routed through
+        // the (cloned) handle reach the *new* listener, not the old one — this
+        // is what lets a mic change take effect live under the IPC/attach
+        // clones that still hold their original handle clone.
+        let (tx1, mut rx1) = mpsc::unbounded_channel();
+        let handle = ListenerHandle::from(tx1);
+        let shared = handle.clone(); // as the IPC/attach tasks would hold it
+        let recording = AtomicBool::new(false);
+
+        let (tx2, mut rx2) = mpsc::unbounded_channel();
+        handle.replace(tx2);
+
+        // A trigger via the pre-existing clone now lands on the new receiver.
+        assert!(apply_listen_action(
+            &shared,
+            &recording,
+            ListenAction::Start
+        ));
+        assert!(drain(&mut rx1).is_empty());
+        assert!(matches!(
+            drain(&mut rx2).as_slice(),
+            [ListenerCommand::Start]
+        ));
     }
 }

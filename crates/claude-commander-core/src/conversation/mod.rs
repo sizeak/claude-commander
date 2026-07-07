@@ -44,7 +44,9 @@ pub mod stt;
 pub mod tts;
 
 pub use extract::{SpeakScope, split_sentences, spoken_text};
-pub use listener::{ListenAction, ListenerCommand, apply_listen_action, spawn_listener};
+pub use listener::{
+    ListenAction, ListenerCommand, ListenerHandle, apply_listen_action, spawn_listener,
+};
 pub use media::{MediaSignal, signal as media_signal, spawn_media_gate};
 pub use session::{ConversationEvent, ConversationSession, parse_event, user_message_line};
 pub use speaker::{

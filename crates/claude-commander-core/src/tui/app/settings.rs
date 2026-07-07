@@ -223,6 +223,11 @@ impl App {
                         s.prompt.clone().unwrap_or_else(|| "(none)".into()),
                         "stt_prompt",
                     ),
+                    SettingsRow::text(
+                        "STT Microphone",
+                        s.input_device.clone().unwrap_or_else(|| "(default)".into()),
+                        "stt_input_device",
+                    ),
                     SettingsRow::toggle(
                         "Pause Media While Recording",
                         s.pause_media,
@@ -1092,6 +1097,15 @@ impl App {
                         Some(value.to_string())
                     };
                 }
+                "stt_input_device" => {
+                    let v = value.trim();
+                    self.config.stt.input_device =
+                        if v.is_empty() || v == "(default)" || v == "(auto)" {
+                            None
+                        } else {
+                            Some(v.to_string())
+                        };
+                }
                 _ => {}
             },
             SettingsTab::Theme => {
@@ -1370,6 +1384,11 @@ impl App {
                         };
                         state.editing = None;
                         self.apply_settings_edit(state.tab, &field_key, &val);
+                        // Selecting a microphone rebuilds the running listener so
+                        // the new device is used on the next recording, live.
+                        if field_key == "stt_input_device" {
+                            self.respawn_listener();
+                        }
                         state.rows = self.build_settings_rows(state.tab);
                         self.ui_state.modal = Modal::Settings(state);
                     }
@@ -1465,6 +1484,24 @@ impl App {
                                     .map(|s| s.label().to_string())
                                     .collect();
                                 let current_value = state.rows[state.selected_row].text_value();
+                                let selected =
+                                    options.iter().position(|o| o == current_value).unwrap_or(0);
+                                state.editing =
+                                    Some(SettingsEditing::OptionPicker { options, selected });
+                            } else if field_key == "stt_input_device" {
+                                // Inline option picker listing the available input
+                                // devices (queried on demand), with "(default)"
+                                // first for the system default.
+                                let mut options = vec!["(default)".to_string()];
+                                options.extend(crate::conversation::recorder::input_device_names());
+                                let current_value = state.rows[state.selected_row].text_value();
+                                // Keep a configured-but-unplugged device selectable
+                                // so opening the picker doesn't silently reset it.
+                                if current_value != "(default)"
+                                    && !options.iter().any(|o| o == current_value)
+                                {
+                                    options.push(current_value.to_string());
+                                }
                                 let selected =
                                     options.iter().position(|o| o == current_value).unwrap_or(0);
                                 state.editing =

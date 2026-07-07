@@ -130,6 +130,11 @@ rodio = { version = "0.19", default-features = false, features = [
 ], optional = true }
 cpal = { version = "0.15", optional = true }
 hound = { version = "3.5", optional = true }
+# Used only to briefly redirect fd 2 to /dev/null while enumerating input
+# devices, so ALSA's chatty `snd_*` error prints don't corrupt the raw-mode TUI
+# (see `recorder::input_device_names`). Only used behind `cfg(unix)`; part of the
+# `audio` feature.
+libc = { version = "0.2", optional = true }
 
 [features]
 # On by default so `cargo build`, the TUI binary, and `cargo test` all get voice
@@ -137,7 +142,7 @@ hound = { version = "3.5", optional = true }
 # test-support, the client cdylib) depend on core with `default-features = false`
 # to drop the ALSA-linked rodio/cpal/hound entirely.
 default = ["audio"]
-audio = ["dep:rodio", "dep:cpal", "dep:hound"]
+audio = ["dep:rodio", "dep:cpal", "dep:hound", "dep:libc"]
 
 [dev-dependencies]
 # Property-based testing

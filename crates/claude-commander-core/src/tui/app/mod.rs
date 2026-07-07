@@ -2295,7 +2295,7 @@ impl App {
                                         crate::config::keybindings::voice_trigger_bytes(
                                             &self.config.keybindings,
                                         ),
-                                        self.conversation.listener.clone(),
+                                        Some(self.conversation.listener.clone()),
                                     )
                                 } else {
                                     (Vec::new(), None)
