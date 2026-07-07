@@ -1783,28 +1783,50 @@ async fn type_programs(app: &mut App, text: &str) {
 }
 
 #[tokio::test]
-async fn programs_tab_new_creates_entry_via_two_step_prompt() {
+async fn programs_tab_new_adds_entry_immediately_and_edits_in_place() {
     use crate::tui::app::ProgramsEditing;
     use crossterm::event::KeyCode;
 
     let mut app = make_test_app();
     app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
 
-    // Step 1: `n` opens the label prompt; type a label.
+    // `n` adds a real, visible entry straight away (the bug fix) with a unique
+    // default label + runnable command, committed to the target immediately, and
+    // starts editing its label.
     feed_programs_key(&mut app, KeyCode::Char('n')).await;
+    assert_eq!(
+        peek_programs(&app).entries,
+        vec![program_entry("New program", "claude")],
+        "new entry appears in the working copy immediately"
+    );
+    assert_eq!(
+        app.config.programs,
+        vec![program_entry("New program", "claude")],
+        "and is committed to the local config"
+    );
+    assert_eq!(peek_programs(&app).selected, 0);
+    assert!(matches!(
+        peek_programs(&app).editing,
+        Some(ProgramsEditing::CreatingLabel { .. })
+    ));
+
+    // Type a label; Enter applies it to the live entry and advances to the
+    // command step, seeded from the (new) label.
     type_programs(&mut app, "Codex").await;
     feed_programs_key(&mut app, KeyCode::Enter).await;
-
-    // Step 2: the command input is prefilled with the label.
+    assert_eq!(
+        peek_programs(&app).entries[0].label,
+        "Codex",
+        "label applied to the live entry"
+    );
     match &peek_programs(&app).editing {
-        Some(ProgramsEditing::CreatingCommand { label, value }) => {
-            assert_eq!(label, "Codex");
-            assert_eq!(value.value(), "Codex", "command prefilled with label");
+        Some(ProgramsEditing::CreatingCommand { value }) => {
+            assert_eq!(value.value(), "Codex", "command seeded from the label");
         }
         other => panic!("expected CreatingCommand, got {other:?}"),
     }
 
-    // Enter creates the entry (using the prefilled command) and persists it.
+    // Enter finishes editing, using the seeded command.
     feed_programs_key(&mut app, KeyCode::Enter).await;
     assert_eq!(app.config.programs, vec![program_entry("Codex", "Codex")]);
     let prog = peek_programs(&app);
@@ -1813,21 +1835,29 @@ async fn programs_tab_new_creates_entry_via_two_step_prompt() {
 }
 
 #[tokio::test]
-async fn programs_tab_create_esc_at_command_step_discards() {
+async fn programs_tab_create_esc_keeps_the_added_entry() {
     use crossterm::event::KeyCode;
 
     let mut app = make_test_app();
     app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
 
+    // Back out at the label step: the entry stays with its default label/command
+    // and must be deleted explicitly (the requested behaviour).
+    feed_programs_key(&mut app, KeyCode::Char('n')).await;
+    feed_programs_key(&mut app, KeyCode::Esc).await;
+    assert_eq!(
+        app.config.programs,
+        vec![program_entry("New program", "claude")]
+    );
+    assert!(peek_programs(&app).editing.is_none());
+
+    // Back out at the command step: still kept (label applied, command default).
     feed_programs_key(&mut app, KeyCode::Char('n')).await;
     type_programs(&mut app, "Codex").await;
     feed_programs_key(&mut app, KeyCode::Enter).await; // advance to command step
-    feed_programs_key(&mut app, KeyCode::Esc).await; // cancel
-
-    assert!(
-        app.config.programs.is_empty(),
-        "nothing half-formed persisted"
-    );
+    feed_programs_key(&mut app, KeyCode::Esc).await; // back out
+    assert_eq!(app.config.programs.len(), 2);
+    assert_eq!(app.config.programs[1], program_entry("Codex", "claude"));
     assert!(peek_programs(&app).editing.is_none());
 }
 
@@ -1981,6 +2011,38 @@ fn render_programs_tab_shows_entries_and_default_marker() {
     assert!(text.contains("n: new"), "missing list footer hint");
 }
 
+#[tokio::test]
+async fn render_programs_tab_shows_new_entry_while_naming_it() {
+    use crossterm::event::KeyCode;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    app.config.programs = vec![program_entry("Claude", "claude")];
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
+
+    // `n` adds the entry; while it is being named it must still render alongside
+    // the existing entries (the bug: it used to be invisible until saved).
+    feed_programs_key(&mut app, KeyCode::Char('n')).await;
+    type_programs(&mut app, "Cod").await;
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    let text = buffer_text(&terminal);
+    assert!(
+        text.contains("Claude"),
+        "existing entry still shown while naming"
+    );
+    assert!(
+        text.contains("Cod"),
+        "the new entry's live label input is shown in the list"
+    );
+    assert!(
+        text.contains("next (command)"),
+        "footer reflects the label-naming step"
+    );
+}
+
 /// Like `make_test_app`, but returns the on-disk config path so tests can read
 /// the persisted config back and pin that a mutation actually wrote through the
 /// store (not merely the in-memory `app.config`).
@@ -2024,6 +2086,23 @@ async fn programs_tab_reorder_persists_through_store() {
             program_entry("Codex", "codex"),
             program_entry("Claude", "claude"),
         ]
+    );
+}
+
+#[tokio::test]
+async fn programs_tab_new_entry_persists_through_store() {
+    use crossterm::event::KeyCode;
+
+    let (mut app, path) = make_test_app_with_path();
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
+
+    // `n` must write the freshly-added entry through the store immediately, so a
+    // user who backs out (never reaching the final Enter) still finds it saved.
+    feed_programs_key(&mut app, KeyCode::Char('n')).await;
+    let persisted = Config::load_from_path(&path).unwrap();
+    assert_eq!(
+        persisted.programs,
+        vec![program_entry("New program", "claude")]
     );
 }
 
@@ -2078,25 +2157,41 @@ async fn programs_tab_esc_cancels_rename_and_edit_without_change() {
 }
 
 #[tokio::test]
-async fn programs_tab_create_label_empty_or_duplicate_closes_editor() {
+async fn programs_tab_create_label_empty_or_duplicate_keeps_default() {
+    use crate::tui::app::ProgramsEditing;
     use crossterm::event::KeyCode;
 
     let mut app = make_test_app();
     app.config.programs = vec![program_entry("Claude", "claude")];
     app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
 
-    // Empty label + Enter closes the editor without creating anything.
+    // Empty label at the create step keeps the auto-generated default and
+    // advances to the command step (the entry was already added on `n`).
     feed_programs_key(&mut app, KeyCode::Char('n')).await;
     feed_programs_key(&mut app, KeyCode::Enter).await;
-    assert!(peek_programs(&app).editing.is_none(), "empty closes editor");
-    assert_eq!(app.config.programs.len(), 1);
+    assert_eq!(app.config.programs.len(), 2);
+    assert_eq!(app.config.programs[1].label, "New program");
+    assert!(matches!(
+        peek_programs(&app).editing,
+        Some(ProgramsEditing::CreatingCommand { .. })
+    ));
+    feed_programs_key(&mut app, KeyCode::Enter).await; // finish
 
-    // Duplicate label + Enter also closes the editor without creating.
+    // A duplicate label is rejected, so the entry keeps its unique default.
     feed_programs_key(&mut app, KeyCode::Char('n')).await;
-    type_programs(&mut app, "Claude").await;
+    let default_label = peek_programs(&app).entries[2].label.clone();
+    assert_ne!(default_label, "New program", "second default is distinct");
+    type_programs(&mut app, "Claude").await; // duplicate of the first entry
     feed_programs_key(&mut app, KeyCode::Enter).await;
-    assert!(peek_programs(&app).editing.is_none(), "dup closes editor");
-    assert_eq!(app.config.programs.len(), 1);
+    assert_eq!(app.config.programs.len(), 3);
+    assert_eq!(
+        app.config.programs[2].label, default_label,
+        "duplicate rejected; default kept"
+    );
+    assert!(matches!(
+        peek_programs(&app).editing,
+        Some(ProgramsEditing::CreatingCommand { .. })
+    ));
 }
 
 #[tokio::test]

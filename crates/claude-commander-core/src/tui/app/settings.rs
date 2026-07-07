@@ -2004,39 +2004,45 @@ impl App {
                 },
                 ProgramsEditing::CreatingLabel { value } => match key.code {
                     KeyCode::Enter => {
-                        let label = value.value().trim().to_string();
-                        let has_dup = prog.entries.iter().any(|p| p.label == label);
-                        if !label.is_empty() && !has_dup {
-                            // Advance to the command step, prefilled with the label
+                        // The entry already exists (added on `n`); apply the typed
+                        // label to it, keeping the auto-generated default when the
+                        // input is empty or clashes with another entry.
+                        if prog.selected < prog.entries.len() {
+                            let label = value.value().trim().to_string();
+                            let has_dup = prog
+                                .entries
+                                .iter()
+                                .enumerate()
+                                .any(|(i, p)| i != prog.selected && p.label == label);
+                            if !label.is_empty() && !has_dup {
+                                prog.entries[prog.selected].label = label;
+                                changed = true;
+                            }
+                            // Advance to the command step, seeded from the label
                             // (the common case is command == label).
-                            prog.editing = Some(ProgramsEditing::CreatingCommand {
-                                value: label.clone().into(),
-                                label,
-                            });
+                            let seed = prog.entries[prog.selected].label.clone();
+                            prog.editing =
+                                Some(ProgramsEditing::CreatingCommand { value: seed.into() });
                         } else {
-                            // Reject empty/duplicate labels by closing the editor,
-                            // mirroring the Sections tab's CreatingSection.
                             prog.editing = None;
                         }
                     }
+                    // Backing out keeps the added entry (delete with `d`).
                     KeyCode::Esc => prog.editing = None,
                     _ => {
                         super::edit_text_input(value, key);
                     }
                 },
-                ProgramsEditing::CreatingCommand { label, value } => match key.code {
+                ProgramsEditing::CreatingCommand { value } => match key.code {
                     KeyCode::Enter => {
                         let command = value.value().trim().to_string();
-                        if !command.is_empty() {
-                            prog.entries.push(crate::config::ProgramEntry {
-                                label: label.clone(),
-                                command,
-                            });
-                            prog.selected = prog.entries.len() - 1;
+                        if !command.is_empty() && prog.selected < prog.entries.len() {
+                            prog.entries[prog.selected].command = command;
                             changed = true;
                         }
                         prog.editing = None;
                     }
+                    // Backing out keeps the added entry (delete with `d`).
                     KeyCode::Esc => prog.editing = None,
                     _ => {
                         super::edit_text_input(value, key);
@@ -2089,6 +2095,17 @@ impl App {
                         }
                     }
                     KeyCode::Char('n') if editable => {
+                        // Add the entry immediately so it shows in the list while
+                        // being named; backing out leaves it in place (delete with
+                        // `d`). Defaults are a unique label and a runnable `claude`
+                        // command, both editable in the guided label → command
+                        // steps that follow. `changed` commits it to the target.
+                        prog.entries.push(crate::config::ProgramEntry {
+                            label: unique_program_label(&prog.entries),
+                            command: "claude".to_string(),
+                        });
+                        prog.selected = prog.entries.len() - 1;
+                        changed = true;
                         prog.editing = Some(ProgramsEditing::CreatingLabel {
                             value: super::Input::default(),
                         });
@@ -2292,34 +2309,10 @@ impl App {
         self.render_settings_divider(frame, divider_area);
 
         // --- Program list ---
-        if let Some(ProgramsEditing::CreatingLabel { value }) = &prog.editing {
-            let visible = list_area.height as usize;
-            let name_rows = programs.len().min(visible.saturating_sub(1));
-            for (i, entry) in programs.iter().enumerate().take(name_rows) {
-                let y = list_area.y + i as u16;
-                let style = Style::default().fg(self.theme.text_secondary);
-                let label = truncate_str(&entry.label, list_width as usize - 2);
-                frame.render_widget(
-                    Paragraph::new(Span::styled(format!("  {label}"), style)),
-                    Rect {
-                        y,
-                        height: 1,
-                        ..list_area
-                    },
-                );
-            }
-            let input_y = list_area.y + name_rows as u16;
-            let input_style = self.theme.selection().add_modifier(Modifier::UNDERLINED);
-            let display = format!("  {}", super::input_with_caret(value));
-            frame.render_widget(
-                Paragraph::new(Span::styled(display, input_style)),
-                Rect {
-                    y: input_y,
-                    height: 1,
-                    ..list_area
-                },
-            );
-        } else {
+        // Both list-focus label editors — renaming an existing entry (`r`) and
+        // naming a just-added one (`n` → CreatingLabel) — render the selected row
+        // as a live caret input over the (already-present) entry.
+        {
             let visible = list_area.height as usize;
             let scroll = list_scroll_offset(prog.selected, visible);
             for (i, entry) in programs.iter().enumerate().skip(scroll).take(visible) {
@@ -2339,9 +2332,19 @@ impl App {
 
                 let prefix = if is_selected { "▸ " } else { "  " };
                 let is_renaming = is_selected
-                    && matches!(prog.editing, Some(ProgramsEditing::RenamingLabel { .. }));
+                    && matches!(
+                        prog.editing,
+                        Some(
+                            ProgramsEditing::RenamingLabel { .. }
+                                | ProgramsEditing::CreatingLabel { .. }
+                        )
+                    );
                 let label = if is_renaming {
-                    if let Some(ProgramsEditing::RenamingLabel { value }) = &prog.editing {
+                    if let Some(
+                        ProgramsEditing::RenamingLabel { value }
+                        | ProgramsEditing::CreatingLabel { value },
+                    ) = &prog.editing
+                    {
                         format!("{prefix}{}", super::input_with_caret(value))
                     } else {
                         String::new()
@@ -2404,27 +2407,19 @@ impl App {
         }
 
         // --- Detail pane (right side) ---
-        // While creating a new entry the detail pane previews the pending
-        // label/command; otherwise it shows the selected entry's fields.
-        let pending_command = match &prog.editing {
-            Some(ProgramsEditing::CreatingCommand { label, value }) => Some((label.clone(), value)),
-            _ => None,
-        };
-
-        let detail_rows: Vec<(&str, String)> = if let Some((label, _)) = &pending_command {
-            vec![
-                ("label", label.clone()),
-                ("command", String::new()), // rendered as caret input below
-            ]
-        } else if !programs.is_empty() && prog.selected < programs.len() {
-            let entry = &programs[prog.selected];
-            vec![
-                ("label", entry.label.clone()),
-                ("command", entry.command.clone()),
-            ]
-        } else {
-            Vec::new()
-        };
+        // The selected entry is always a real list element (creation adds it up
+        // front), so the detail pane just reflects it; the command field renders
+        // as a caret input while it is being edited (see `editing_this` below).
+        let detail_rows: Vec<(&str, String)> =
+            if !programs.is_empty() && prog.selected < programs.len() {
+                let entry = &programs[prog.selected];
+                vec![
+                    ("label", entry.label.clone()),
+                    ("command", entry.command.clone()),
+                ]
+            } else {
+                Vec::new()
+            };
 
         let is_fields_focused = prog.focus == ProgramsFocus::Fields;
         for (i, (label, value)) in detail_rows.iter().enumerate() {
@@ -2461,7 +2456,7 @@ impl App {
                 // Which field, if any, is currently in an inline edit.
                 let editing_this = match &prog.editing {
                     Some(ProgramsEditing::EditingField { value: v }) if is_selected => Some(v),
-                    Some(ProgramsEditing::CreatingCommand { value: v, .. }) if i == 1 => Some(v),
+                    Some(ProgramsEditing::CreatingCommand { value: v }) if i == 1 => Some(v),
                     _ => None,
                 };
 
@@ -2531,10 +2526,10 @@ impl App {
                 "Enter: save  Esc: cancel".to_string()
             }
             Some(ProgramsEditing::CreatingLabel { .. }) => {
-                "Enter: next (command)  Esc: cancel".to_string()
+                "Enter: next (command)  Esc: keep (delete with d)".to_string()
             }
             Some(ProgramsEditing::CreatingCommand { .. }) => {
-                "Enter: create  Esc: cancel".to_string()
+                "Enter: save  Esc: keep (delete with d)".to_string()
             }
             None if prog.focus == ProgramsFocus::List => {
                 format!(
@@ -2551,6 +2546,22 @@ impl App {
             footer_area,
         );
     }
+}
+
+/// A placeholder label for a freshly-added program that does not clash with any
+/// existing entry (`"New program"`, then `"New program 2"`, …). New entries are
+/// added to the working copy up front, so they need a unique default before the
+/// user renames them.
+fn unique_program_label(programs: &[crate::config::ProgramEntry]) -> String {
+    const BASE: &str = "New program";
+    let taken = |label: &str| programs.iter().any(|p| p.label == label);
+    if !taken(BASE) {
+        return BASE.to_string();
+    }
+    (2..)
+        .map(|n| format!("{BASE} {n}"))
+        .find(|candidate| !taken(candidate))
+        .expect("an unused label exists in an unbounded sequence")
 }
 
 /// Build displayable rows for a section's predicates.
@@ -3075,6 +3086,33 @@ mod tests {
         let s = spacer_positions[0];
         assert!(matches!(rows[s + 1].kind, SettingsRowKind::Header));
         assert_eq!(rows[s + 1].label, "Sessions");
+    }
+
+    #[test]
+    fn unique_program_label_avoids_clashes() {
+        use crate::config::ProgramEntry;
+        let entry = |label: &str| ProgramEntry {
+            label: label.to_string(),
+            command: "claude".to_string(),
+        };
+
+        // Empty list → the base label.
+        assert_eq!(unique_program_label(&[]), "New program");
+
+        // Base taken → first numbered suffix.
+        assert_eq!(
+            unique_program_label(&[entry("New program")]),
+            "New program 2"
+        );
+
+        // Base + first suffix taken → skips to the next free number.
+        assert_eq!(
+            unique_program_label(&[entry("New program"), entry("New program 2")]),
+            "New program 3"
+        );
+
+        // Unrelated labels don't affect the base.
+        assert_eq!(unique_program_label(&[entry("Claude")]), "New program");
     }
 
     #[test]
