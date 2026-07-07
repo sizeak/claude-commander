@@ -20,6 +20,6 @@ claude-commander-core = { path = "../claude-commander-core", default-features = 
 claude-commander-server = { path = "../claude-commander-server" }
 
 tokio = { workspace = true }
-tempfile = "3.10"
+tempfile = "3.27"
 # `spawn_server` calls `axum::serve`; keep the same major as the server crate.
 axum = { version = "0.8", features = ["ws", "macros"] }

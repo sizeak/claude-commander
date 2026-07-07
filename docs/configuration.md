@@ -352,12 +352,15 @@ volume = 1.0                             # 0.0–2.0
 | `prose_only` (default) | Strip code blocks and markdown; speak the natural-language prose |
 | `verbatim` | Speak the text unchanged |
 
-> **Build note:** in-process playback (`rodio`) and microphone capture (`cpal`) link **ALSA** on
-> Linux. They're gated behind the `audio` cargo feature, which is **on by default** — so building
-> the TUI (`claude-commander`) from source needs the ALSA development headers (`libasound2-dev` on
-> Debian/Ubuntu, `alsa-lib` on Arch); the default Nix dev shell provides them automatically. The
-> headless server and the Flutter client build with `audio` off (`default-features = false`) and
-> never link ALSA — remote clients do capture/playback on-device instead.
+> **Build note:** in-process playback (`rodio`) and microphone capture (`cpal`) use **PipeWire** as
+> the default audio host on Linux (falling back to **ALSA** at runtime if PipeWire isn't running),
+> so both backends are linked. They're gated behind the `audio` cargo feature, which is **on by
+> default** — so building the TUI (`claude-commander`) from source needs the PipeWire and ALSA
+> development libraries plus **clang/libclang** (cpal's PipeWire backend runs `bindgen`):
+> `libpipewire-0.3-dev libasound2-dev libclang-dev` on Debian/Ubuntu, `pipewire alsa-lib clang` on
+> Arch. The default Nix dev shell provides them automatically. The headless server and the Flutter
+> client build with `audio` off (`default-features = false`) and never link either backend — remote
+> clients do capture/playback on-device instead.
 
 ## Voice input (STT)
 
@@ -370,7 +373,7 @@ is open or not**, mirroring spoken replies.
 
 `stt.enabled` is a separate switch from `conversation.enabled` and is **off by default**. Voice
 input feeds the conversation session, so it's only useful alongside conversation mode. Microphone
-capture uses `cpal` (also ALSA on Linux — see the build note above). If no microphone is available
+capture uses `cpal` (PipeWire/ALSA on Linux — see the build note above). If no microphone is available
 or the STT server is unreachable, voice input degrades gracefully (a status message) and never
 blocks the UI.
 

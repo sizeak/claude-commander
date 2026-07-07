@@ -24,14 +24,14 @@ claude-commander-remote = { path = "../claude-commander-remote" }
 tokio = { workspace = true }
 
 # CLI (derive macros - idiomatic Rust)
-clap = { version = "4.5", features = ["derive"] }
+clap = { version = "4.6", features = ["derive"] }
 
 # Serialization (JSON + TOML output for the CLI subcommands)
 serde_json = { workspace = true }
-toml = "0.8"
+toml = "1.1"
 
 # Unix system calls — raise the file-descriptor rlimit at startup
-nix = { version = "0.29", features = ["resource"] }
+nix = { version = "0.31", features = ["resource"] }
 
 # Error handling
 color-eyre = "0.6"

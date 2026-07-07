@@ -178,17 +178,19 @@ async fn ws_attach_streams_and_detach_keeps_session_alive() {
     // -- handshake: auth (token is ignored under AuthConfig::Disabled, but the
     //    handler still expects an auth frame first), attach, resize --
     ws.send(Message::Text(
-        r#"{"type":"auth","token":"unused"}"#.to_string(),
+        r#"{"type":"auth","token":"unused"}"#.to_string().into(),
     ))
     .await
     .unwrap();
     ws.send(Message::Text(
-        serde_json::json!({"type":"attach","session_id": session_id.to_string()}).to_string(),
+        serde_json::json!({"type":"attach","session_id": session_id.to_string()})
+            .to_string()
+            .into(),
     ))
     .await
     .unwrap();
     ws.send(Message::Text(
-        r#"{"type":"resize","cols":100,"rows":30}"#.to_string(),
+        r#"{"type":"resize","cols":100,"rows":30}"#.to_string().into(),
     ))
     .await
     .unwrap();
@@ -205,7 +207,7 @@ async fn ws_attach_streams_and_detach_keeps_session_alive() {
 
     // -- type a keystroke (BINARY frame) and assert PTY output arrives as
     //    BINARY frames. A bare newline makes bash echo a prompt line. --
-    ws.send(Message::Binary(b"echo cc_ws_marker\n".to_vec()))
+    ws.send(Message::Binary(b"echo cc_ws_marker\n".to_vec().into()))
         .await
         .unwrap();
 
@@ -216,7 +218,7 @@ async fn ws_attach_streams_and_detach_keeps_session_alive() {
     );
 
     // -- detach: should leave the tmux session running --
-    ws.send(Message::Text(r#"{"type":"detach"}"#.to_string()))
+    ws.send(Message::Text(r#"{"type":"detach"}"#.to_string().into()))
         .await
         .unwrap();
     // Drain until the socket closes so the server completes its teardown
@@ -305,12 +307,14 @@ async fn ws_agent_attach_revives_dead_tmux_session() {
     let url = format!("ws://{addr}/ws/attach");
     let (mut ws, _resp) = tokio_tungstenite::connect_async(&url).await.unwrap();
     ws.send(Message::Text(
-        r#"{"type":"auth","token":"unused"}"#.to_string(),
+        r#"{"type":"auth","token":"unused"}"#.to_string().into(),
     ))
     .await
     .unwrap();
     ws.send(Message::Text(
-        serde_json::json!({"type":"attach","session_id": session_id.to_string()}).to_string(),
+        serde_json::json!({"type":"attach","session_id": session_id.to_string()})
+            .to_string()
+            .into(),
     ))
     .await
     .unwrap();
@@ -338,7 +342,7 @@ async fn ws_agent_attach_revives_dead_tmux_session() {
         "agent attach must recreate the dead tmux session {tmux_name}"
     );
 
-    ws.send(Message::Text(r#"{"type":"detach"}"#.to_string()))
+    ws.send(Message::Text(r#"{"type":"detach"}"#.to_string().into()))
         .await
         .unwrap();
     drain_until_close(&mut ws, Duration::from_secs(5)).await;
@@ -399,12 +403,14 @@ async fn ws_attach_stamps_last_attached_at() {
     let url = format!("ws://{addr}/ws/attach");
     let (mut ws, _resp) = tokio_tungstenite::connect_async(&url).await.unwrap();
     ws.send(Message::Text(
-        r#"{"type":"auth","token":"unused"}"#.to_string(),
+        r#"{"type":"auth","token":"unused"}"#.to_string().into(),
     ))
     .await
     .unwrap();
     ws.send(Message::Text(
-        serde_json::json!({"type":"attach","session_id": session_id.to_string()}).to_string(),
+        serde_json::json!({"type":"attach","session_id": session_id.to_string()})
+            .to_string()
+            .into(),
     ))
     .await
     .unwrap();
@@ -428,7 +434,7 @@ async fn ws_attach_stamps_last_attached_at() {
         "a WS attach must stamp last_attached_at (MRU parity with LocalBackend)"
     );
 
-    ws.send(Message::Text(r#"{"type":"detach"}"#.to_string()))
+    ws.send(Message::Text(r#"{"type":"detach"}"#.to_string().into()))
         .await
         .unwrap();
     drain_until_close(&mut ws, Duration::from_secs(5)).await;

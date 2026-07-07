@@ -117,28 +117,29 @@ fn inline_programs_array_to_array_of_tables(value: Option<&Value>) -> Option<Arr
     Some(programs)
 }
 
-fn program_positions(programs: &ArrayOfTables) -> Vec<usize> {
-    let mut positions: Vec<usize> = programs.iter().filter_map(Table::position).collect();
+fn program_positions(programs: &ArrayOfTables) -> Vec<isize> {
+    let mut positions: Vec<isize> = programs.iter().filter_map(Table::position).collect();
     positions.sort_unstable();
     positions
 }
 
-fn set_programs(doc: &mut DocumentMut, reordered: Vec<Table>, positions: Vec<usize>) {
+fn set_programs(doc: &mut DocumentMut, reordered: Vec<Table>, positions: Vec<isize>) {
     let positions = reassigned_positions(&positions, reordered.len());
     let mut programs = ArrayOfTables::new();
     for (index, mut program) in reordered.into_iter().enumerate() {
         if let Some(position) = positions.get(index) {
-            program.set_position(*position);
+            program.set_position(Some(*position));
         }
         programs.push(program);
     }
     doc["programs"] = Item::ArrayOfTables(programs);
 }
 
-fn reassigned_positions(existing: &[usize], len: usize) -> Vec<usize> {
+fn reassigned_positions(existing: &[isize], len: usize) -> Vec<isize> {
+    let len = len as isize;
     match existing {
         [] => (0..len).collect(),
-        positions if positions.len() == len => positions.to_vec(),
+        positions if positions.len() as isize == len => positions.to_vec(),
         positions => (positions[0]..positions[0] + len).collect(),
     }
 }
