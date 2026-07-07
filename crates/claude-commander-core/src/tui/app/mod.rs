@@ -832,16 +832,33 @@ pub enum SettingsEditing {
         action_name: String,
         keys: Vec<String>,
     },
-    /// Picking from a list of options (used for theme presets). `options` holds
-    /// the display labels. `values`, when `Some`, holds the string committed on
-    /// selection (parallel to `options`) so the picker can show a friendly label
-    /// while storing a different value (e.g. a microphone's stable device id);
-    /// when `None`, the label itself is committed.
+    /// Picking from a list of options (theme presets, speak scope, microphone).
     OptionPicker {
-        options: Vec<String>,
-        values: Option<Vec<String>>,
+        options: Vec<PickerOption>,
         selected: usize,
     },
+}
+
+/// One entry in an [`SettingsEditing::OptionPicker`]: the `label` shown in the
+/// dropdown and the `value` committed to config when it's chosen. They differ
+/// only when the display text isn't the stored value — e.g. a microphone's
+/// friendly name (label) versus its stable device id (value). For simple enum
+/// pickers use [`PickerOption::plain`], where the two are the same.
+#[derive(Debug, Clone)]
+pub struct PickerOption {
+    pub label: String,
+    pub value: String,
+}
+
+impl PickerOption {
+    /// A picker entry whose committed value is the same as its display label.
+    pub fn plain(text: impl Into<String>) -> Self {
+        let text = text.into();
+        Self {
+            label: text.clone(),
+            value: text,
+        }
+    }
 }
 
 /// Which field of the New Session input modal currently has focus. Tab cycles
@@ -1501,6 +1518,11 @@ pub struct App {
     /// Conversation mode runtime (headless streaming `claude` session + TTS).
     /// Lives here, not in the overlay modal, so it keeps running while closed.
     conversation: conversation::ConversationRuntime,
+    /// Cached list of input (capture) devices for the STT Microphone setting,
+    /// refreshed when the settings modal / mic picker opens. Lets the settings
+    /// row map the persisted device id to its friendly label without enumerating
+    /// the audio host on the render path (which `build_settings_rows` sits on).
+    stt_input_devices: Vec<crate::conversation::recorder::InputDevice>,
     /// Terminal graphics capability for the review image view, probed ONCE
     /// before the input reader starts (see `run`); `None` until then. Kept on
     /// `App` rather than in `DiffReviewState` because the protocol cache below
@@ -1580,6 +1602,7 @@ impl App {
             suppress_keys_until: Instant::now(),
             digit_accumulator: super::digit_accumulator::DigitAccumulator::new(debounce),
             conversation: conversation::ConversationRuntime::default(),
+            stt_input_devices: Vec::new(),
             picker: None,
             review_images: RefCell::new(HashMap::new()),
             review_image_gen: Cell::new(0),
