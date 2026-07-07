@@ -33,6 +33,8 @@ use std::io::Cursor;
 use std::sync::mpsc::{Receiver, Sender, channel};
 #[cfg(feature = "audio")]
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "audio")]
+use tokio::sync::oneshot;
 
 #[cfg(feature = "audio")]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -56,21 +58,23 @@ pub struct Recorder {
 
 #[cfg(feature = "audio")]
 impl Recorder {
-    /// Start the recorder thread. Returns an error synchronously if no input
-    /// device is available. Finished recordings are delivered as WAV bytes on
+    /// Start the recorder thread. Returns an error if no input device is
+    /// available. Awaits the thread's one-shot readiness signal rather than
+    /// blocking, so opening a slow device (e.g. Bluetooth) doesn't stall the
+    /// caller's task. Finished recordings are delivered as WAV bytes on
     /// `wav_tx`. `input_device` is the cpal device id to capture from; `None`
     /// (or an id that isn't present) falls back to the system default.
-    pub fn new(
+    pub async fn new(
         wav_tx: UnboundedSender<Vec<u8>>,
         input_device: Option<String>,
     ) -> Result<Self, TtsError> {
         let (tx, rx) = channel::<Command>();
-        let (ready_tx, ready_rx) = channel::<Result<(), String>>();
+        let (ready_tx, ready_rx) = oneshot::channel::<Result<(), String>>();
         std::thread::Builder::new()
             .name("cc-stt-audio".into())
             .spawn(move || recorder_thread(rx, wav_tx, ready_tx, input_device))
             .map_err(|e| TtsError::Audio(e.to_string()))?;
-        match ready_rx.recv() {
+        match ready_rx.await {
             Ok(Ok(())) => Ok(Self { tx }),
             Ok(Err(e)) => Err(TtsError::Audio(e)),
             Err(e) => Err(TtsError::Audio(e.to_string())),
@@ -173,7 +177,7 @@ pub fn input_devices() -> Vec<InputDevice> {
 fn recorder_thread(
     rx: Receiver<Command>,
     wav_tx: UnboundedSender<Vec<u8>>,
-    ready: Sender<Result<(), String>>,
+    ready: oneshot::Sender<Result<(), String>>,
     input_device: Option<String>,
 ) {
     let host = cpal::default_host();
@@ -322,7 +326,7 @@ pub struct Recorder;
 
 #[cfg(not(feature = "audio"))]
 impl Recorder {
-    pub fn new(
+    pub async fn new(
         _wav_tx: UnboundedSender<Vec<u8>>,
         _input_device: Option<String>,
     ) -> Result<Self, TtsError> {

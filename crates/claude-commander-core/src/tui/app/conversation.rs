@@ -510,45 +510,43 @@ impl App {
     }
 
     /// Build a listener from the current STT config and its off-loop transcript
-    /// submit task, installing the command sender in the shared handle. On
-    /// success the previous sender (if any) is dropped, tearing down the old
-    /// listener; on failure the existing listener is left untouched (a bad
-    /// config never kills working capture). Assumes the media gate is set up.
+    /// submit task, installing the command sender in the shared handle. The
+    /// listener returns its sender immediately and opens the mic device inside
+    /// its own task, so this never blocks the UI. Installing the new sender drops
+    /// the previous one (if any), ending the old listener and releasing its
+    /// device at once; the new device then opens asynchronously, and any commands
+    /// sent in that brief gap queue on the channel and run once it's ready.
+    /// Assumes the media gate is set up.
     fn build_and_store_listener(&mut self) {
         let gate = self.conversation.gate.clone();
         let speaker = self.conversation.speaker.clone();
         let (tx_text, mut rx_text) = tokio::sync::mpsc::unbounded_channel::<String>();
-        match spawn_listener(
+        let tx = spawn_listener(
             self.config.stt.clone(),
             tx_text,
             gate.clone(),
             speaker.clone(),
-        ) {
-            Ok(tx) => {
-                self.conversation.listener.replace(tx);
-                let session = self.conversation.session.clone();
-                let view = self.conversation.view.clone();
-                let conv = self.config.conversation.clone();
-                tokio::spawn(async move {
-                    while let Some(text) = rx_text.recv().await {
-                        let text = text.trim().to_string();
-                        if text.is_empty() {
-                            continue;
-                        }
-                        // Submit directly (off the UI loop) so voice input works
-                        // even while the main loop is parked in a tmux attach. If
-                        // no session is up yet (transcript arrived before the
-                        // overlay was opened), spawn one and retry once.
-                        if !submit_to_session(&session, &view, &speaker, text.clone()).await {
-                            spawn_session_runtime(&conv, gate.clone(), &session, &view, &speaker)
-                                .await;
-                            submit_to_session(&session, &view, &speaker, text).await;
-                        }
-                    }
-                });
+        );
+        self.conversation.listener.replace(tx);
+        let session = self.conversation.session.clone();
+        let view = self.conversation.view.clone();
+        let conv = self.config.conversation.clone();
+        tokio::spawn(async move {
+            while let Some(text) = rx_text.recv().await {
+                let text = text.trim().to_string();
+                if text.is_empty() {
+                    continue;
+                }
+                // Submit directly (off the UI loop) so voice input works even
+                // while the main loop is parked in a tmux attach. If no session
+                // is up yet (transcript arrived before the overlay was opened),
+                // spawn one and retry once.
+                if !submit_to_session(&session, &view, &speaker, text.clone()).await {
+                    spawn_session_runtime(&conv, gate.clone(), &session, &view, &speaker).await;
+                    submit_to_session(&session, &view, &speaker, text).await;
+                }
             }
-            Err(e) => warn!(target: "conversation", "STT unavailable: {e}"),
-        }
+        });
     }
 
     /// Start the external voice-toggle trigger so the hotkey works from anywhere

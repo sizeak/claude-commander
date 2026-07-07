@@ -19,7 +19,6 @@ use crate::conversation::media::{MediaSignal, signal as media_signal};
 use crate::conversation::recorder::Recorder;
 use crate::conversation::speaker::{SpeakerCommand, SpeakerHandle};
 use crate::conversation::stt::SttClient;
-use crate::error::TtsError;
 
 /// Commands to the listener task.
 #[derive(Debug, Clone)]
@@ -112,22 +111,32 @@ pub fn apply_listen_action(
     now
 }
 
-/// Start the listener task. Returns a sender for [`ListenerCommand`]s, or an
-/// error if no input device is available. Recognized transcripts are sent on
-/// `transcript_tx`. Dropping the command sender ends the task and releases the
-/// microphone.
+/// Start the listener task and return its [`ListenerCommand`] sender
+/// *immediately* — the microphone device is opened inside the task (awaiting the
+/// recorder's readiness), so a slow device never blocks the caller. Commands
+/// sent before the device finishes opening queue on the channel and run once it
+/// is ready. If no input device is available the task logs and exits, leaving
+/// the returned sender inert. Recognized transcripts are sent on
+/// `transcript_tx`; dropping the sender ends the task and releases the mic.
 pub fn spawn_listener(
     cfg: SttConfig,
     transcript_tx: mpsc::UnboundedSender<String>,
     gate: Option<mpsc::UnboundedSender<MediaSignal>>,
     speaker: SpeakerHandle,
-) -> Result<mpsc::UnboundedSender<ListenerCommand>, TtsError> {
-    let (wav_tx, mut wav_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-    let recorder = Recorder::new(wav_tx, cfg.input_device.clone())?;
-    let client = SttClient::new(&cfg);
+) -> mpsc::UnboundedSender<ListenerCommand> {
     let (tx, mut rx) = mpsc::unbounded_channel::<ListenerCommand>();
 
     tokio::spawn(async move {
+        let (wav_tx, mut wav_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        // Open the mic off the caller's task; on failure the sender goes inert.
+        let recorder = match Recorder::new(wav_tx, cfg.input_device.clone()).await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("STT unavailable: {e}");
+                return;
+            }
+        };
+        let client = SttClient::new(&cfg);
         loop {
             tokio::select! {
                 // A finished recording arrived from the recorder thread.
@@ -193,7 +202,7 @@ pub fn spawn_listener(
         }
     });
 
-    Ok(tx)
+    tx
 }
 
 #[cfg(test)]
