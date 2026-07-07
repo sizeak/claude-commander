@@ -1498,6 +1498,100 @@ async fn test_hibernate_session_keeps_worktree_and_wakes_with_resume() {
     drop(worktrees_dir);
 }
 
+/// The in-session Ctrl+Space switcher resolves its pick by tmux session name.
+/// Reviving through that path must behave exactly like the tree-view attach:
+/// a session whose tmux session died behind commander's back (e.g. after a
+/// reboot) is recreated and marked Running, and the switch stamps MRU
+/// ordering for the picker's Alt+Tab sort.
+#[tokio::test]
+async fn test_ensure_attachable_by_tmux_name_revives_dead_session() {
+    use claude_commander_core::api::CommanderService;
+    use claude_commander_core::telemetry::FrontendInfo;
+
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let state_temp_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+    let mut config = Config {
+        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        ..Config::default()
+    };
+    // Never post telemetry from the test suite.
+    config.telemetry.enabled = false;
+
+    // A manager (for setup) and a service (under test) share the same
+    // config/state stores, so the service resolves the session the manager
+    // creates and both drive the same isolated tmux server.
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
+    let store = create_isolated_store(&state_temp_dir);
+    let manager = SessionManager::new(config_store.clone(), store.clone(), "");
+    let service = CommanderService::new(
+        config_store,
+        store.clone(),
+        FrontendInfo::new("integration-test", "0.0.0"),
+    );
+
+    let project_id = manager.add_project(repo_path).await.unwrap();
+    let prepared = manager
+        .prepare_session(
+            &project_id,
+            "switcher-revive-test".to_string(),
+            Some("bash".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+    manager
+        .finalize_session(&prepared, None, None)
+        .await
+        .unwrap();
+
+    let tmux_name = {
+        let state = store.read().await;
+        let s = state.get_session(&prepared).unwrap();
+        assert!(s.last_attached_at.is_none(), "no attach recorded yet");
+        s.tmux_session_name.clone()
+    };
+
+    // Kill the tmux session behind commander's back — the post-reboot shape:
+    // state says Running, tmux has nothing.
+    manager.tmux.kill_session(&tmux_name).await.unwrap();
+    assert!(!manager.tmux.session_exists(&tmux_name).await.unwrap());
+
+    // Revive by tmux name, as the switcher does with the picker's choice.
+    let target = service
+        .ensure_attachable_by_tmux_name(&tmux_name)
+        .await
+        .expect("revive by tmux name should succeed");
+    assert_eq!(
+        target, tmux_name,
+        "switch target should be the session's primary tmux name"
+    );
+    assert!(
+        manager.tmux.session_exists(&tmux_name).await.unwrap(),
+        "tmux session should be recreated by the by-name revive"
+    );
+    {
+        let state = store.read().await;
+        let s = state.get_session(&prepared).unwrap();
+        assert_eq!(s.status, SessionStatus::Running, "should be Running again");
+        assert!(
+            s.last_attached_at.is_some(),
+            "switching via the picker must stamp MRU ordering"
+        );
+    }
+
+    // Cleanup
+    let _ = manager.kill_session(&prepared, true).await;
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
+    drop(worktrees_dir);
+}
+
 #[tokio::test]
 async fn test_fresh_restart_clears_hibernation_marker() {
     if !tmux_available().await {

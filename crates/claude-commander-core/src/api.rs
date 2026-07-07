@@ -413,6 +413,41 @@ impl CommanderService {
         Ok(Some(tmux_name))
     }
 
+    /// Resolve a session by **tmux session name** (primary or shell pair) and
+    /// prepare its agent pane for attach, exactly as
+    /// [`Self::resolve_attach_session`] does for a title/id query: a dead tmux
+    /// session is revived (agent resumed, status bar reconfigured) and
+    /// `last_attached_at` is stamped for MRU ordering. Returns the primary
+    /// tmux name to attach or switch to. Used by the in-session Ctrl+Space
+    /// switcher, whose picker knows sessions only by tmux name.
+    pub async fn ensure_attachable_by_tmux_name(&self, tmux_name: &str) -> Result<String> {
+        let session_id = {
+            let state = self.store.read().await;
+            state
+                .sessions
+                .values()
+                .find(|s| s.matches_tmux_name(tmux_name))
+                .map(|s| s.id)
+        };
+        let id =
+            session_id.ok_or_else(|| SessionError::TmuxSessionNotFound(tmux_name.to_string()))?;
+        let name = self.manager.ensure_attachable(&id).await?;
+        self.mark_attached(&id).await?;
+        Ok(name)
+    }
+
+    /// Wrap this service as the [`crate::tmux::SwitcherRevive`] hook the
+    /// attach loop invokes before `tmux switch-client`, so the in-session
+    /// switcher revives a dead pick the same way the tree-view attach path
+    /// does (via [`Self::ensure_attachable_by_tmux_name`]).
+    pub fn switcher_revive_hook(&self) -> crate::tmux::SwitcherRevive {
+        let service = self.clone();
+        Arc::new(move |name: String| {
+            let service = service.clone();
+            Box::pin(async move { service.ensure_attachable_by_tmux_name(&name).await })
+        })
+    }
+
     /// Store a pasted image for a remote session and inject its file path into
     /// the session's Claude pane.
     ///
@@ -3438,6 +3473,61 @@ mod tests {
             Some(&PullStatus::Blocked {
                 reason: PullBlockReason::Dirty
             })
+        );
+    }
+
+    // -- In-session switcher revive (ensure_attachable_by_tmux_name) --
+
+    #[tokio::test]
+    async fn ensure_attachable_by_tmux_name_unknown_name_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let err = svc
+            .ensure_attachable_by_tmux_name("cc-deadbeef")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::Error::Session(SessionError::TmuxSessionNotFound(ref n))
+                    if n == "cc-deadbeef"
+            ),
+            "unknown tmux name should be a TmuxSessionNotFound error, got: {err}"
+        );
+    }
+
+    /// Resolution must accept either of a session's tmux names (primary or
+    /// shell pair) and reach the id-based attach validation: a `Creating`
+    /// session can't attach, so `InvalidState` for the right id proves the
+    /// shell-pair name resolved to the session before any tmux command ran.
+    #[tokio::test]
+    async fn ensure_attachable_by_tmux_name_resolves_shell_pair_name() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+
+        let project = Project::new("repo", PathBuf::from("/tmp/repo"), "main");
+        let mut session =
+            WorktreeSession::new_creating(project.id, "task", "branch-task", "claude");
+        session.shell_tmux_session_name = Some("cc-task-sh".to_string());
+        let sid = session.id;
+        svc.store()
+            .mutate(move |state| {
+                state.add_project(project);
+                state.add_session(session);
+            })
+            .await
+            .unwrap();
+
+        let err = svc
+            .ensure_attachable_by_tmux_name("cc-task-sh")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::Error::Session(SessionError::InvalidState(id)) if id == sid
+            ),
+            "shell-pair name should resolve to the session and hit its attach guard, got: {err}"
         );
     }
 }
