@@ -502,6 +502,9 @@ impl App {
         }
         // A device swap cancels any in-flight capture (the old recorder thread
         // dies with its buffer); reset the flag so state stays consistent.
+        // (Narrow race: an external socket toggle firing during the rebuild
+        // below could set the flag and Start the *old*, about-to-be-dropped
+        // recorder. It self-heals on the next toggle, so we don't lock here.)
         self.conversation.recording.store(false, Ordering::Release);
         self.build_and_store_listener();
     }

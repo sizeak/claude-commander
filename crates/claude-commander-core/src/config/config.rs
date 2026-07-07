@@ -1066,14 +1066,17 @@ enabled = true
 base_url = "http://192.168.1.10:8080/v1"
 model = "large-v3-turbo"
 language = "en"
-input_device = "USB Mic"
+input_device = "alsa_input.pci-0000_c1_00.6.analog-stereo"
 "#;
         let config: Config = toml::from_str(toml_src).expect("toml parse");
         assert!(config.stt.enabled);
         assert_eq!(config.stt.base_url, "http://192.168.1.10:8080/v1");
         assert_eq!(config.stt.model, "large-v3-turbo");
         assert_eq!(config.stt.language.as_deref(), Some("en"));
-        assert_eq!(config.stt.input_device.as_deref(), Some("USB Mic"));
+        assert_eq!(
+            config.stt.input_device.as_deref(),
+            Some("alsa_input.pci-0000_c1_00.6.analog-stereo")
+        );
         // Unspecified fields keep their defaults.
         assert_eq!(config.stt.prompt, None);
     }

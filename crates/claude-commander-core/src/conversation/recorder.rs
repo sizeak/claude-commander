@@ -58,8 +58,8 @@ pub struct Recorder {
 impl Recorder {
     /// Start the recorder thread. Returns an error synchronously if no input
     /// device is available. Finished recordings are delivered as WAV bytes on
-    /// `wav_tx`. `input_device` names the microphone to capture from; `None`
-    /// (or a name that isn't present) falls back to the system default.
+    /// `wav_tx`. `input_device` is the cpal device id to capture from; `None`
+    /// (or an id that isn't present) falls back to the system default.
     pub fn new(
         wav_tx: UnboundedSender<Vec<u8>>,
         input_device: Option<String>,
@@ -149,11 +149,13 @@ pub fn input_devices() -> Vec<InputDevice> {
             })
         })
         .collect();
-    // Guarantee visually-distinct labels: append the id to any that repeat.
-    for i in 0..out.len() {
-        let dup = out.iter().filter(|d| d.label == out[i].label).count() > 1;
-        if dup {
-            out[i].label = format!("{} [{}]", out[i].label, out[i].id);
+    // Guarantee visually-distinct labels: append the id to every entry whose
+    // label repeats. Count against a snapshot so tagging one doesn't change the
+    // counts seen for the rest (n is tiny, so the O(n²) scan is fine).
+    let labels: Vec<String> = out.iter().map(|d| d.label.clone()).collect();
+    for d in &mut out {
+        if labels.iter().filter(|l| **l == d.label).count() > 1 {
+            d.label = format!("{} [{}]", d.label, d.id);
         }
     }
     out

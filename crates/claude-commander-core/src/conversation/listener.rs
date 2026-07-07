@@ -62,11 +62,6 @@ impl ListenerHandle {
         *self.0.lock().unwrap() = Some(tx);
     }
 
-    /// Drop the current sender (e.g. when the listener could not be rebuilt).
-    pub fn clear(&self) {
-        *self.0.lock().unwrap() = None;
-    }
-
     /// Whether a listener is currently installed.
     pub fn is_present(&self) -> bool {
         self.0.lock().unwrap().is_some()
