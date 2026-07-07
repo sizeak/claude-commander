@@ -696,10 +696,13 @@ pub enum ProgramsEditing {
     RenamingLabel { value: Input },
     /// Editing the selected field (label or command) in Fields focus.
     EditingField { value: Input },
-    /// Step 1 of `n`: entering the new entry's label.
+    /// Step 1 of `n`: naming the just-added entry. The entry already exists in
+    /// `entries` (so it shows in the list immediately); this only edits its
+    /// label. An empty/duplicate label keeps the auto-generated default.
     CreatingLabel { value: Input },
-    /// Step 2 of `n`: entering the new entry's command (prefilled from label).
-    CreatingCommand { label: String, value: Input },
+    /// Step 2 of `n`: setting the just-added entry's command (seeded from its
+    /// label). The entry is already in `entries`; this only edits its command.
+    CreatingCommand { value: Input },
 }
 
 /// State for the settings modal
