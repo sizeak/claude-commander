@@ -180,6 +180,7 @@ When attached to a session (via `Enter` or `claude-commander attach`):
 | `Alt-r` | Switch to this session's review diff (and `Alt-r` in the diff switches back) — Claude sessions only. Uses `Alt-r` rather than `Ctrl-r` so the shell's `Ctrl-r` reverse-history-search is never shadowed |
 | `Ctrl-Space` | Open the in-session switcher popup to jump to another claude-commander session without detaching |
 | `Ctrl-.` | Open the session worktree in your editor (requires a terminal that emits CSI-u or xterm modifyOtherKeys sequences for Ctrl-.) |
+| `Ctrl-v` | **Remote sessions only:** paste an image from your local clipboard into the Claude prompt. The image is uploaded to the server, saved to a temp file, and its path is typed into the prompt. On a local session `Ctrl-v` is forwarded to Claude, which reads your clipboard directly. If the clipboard holds no image, `Ctrl-v` is forwarded unchanged |
 
 ### Remote Servers
 

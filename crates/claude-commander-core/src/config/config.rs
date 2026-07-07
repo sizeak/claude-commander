@@ -132,6 +132,14 @@ pub struct Config {
     /// `TMUX_TMPDIR`). `None` touches the environment not at all.
     pub tmux_tmpdir: Option<PathBuf>,
 
+    /// Base directory for pasted-image temp files (remote image paste). `None`
+    /// (normal use) means the OS temp dir, which is space-free on every platform
+    /// and readable by the agent. Set only by hermetic tests to redirect writes
+    /// (and the store's prune) into a `TempDir` instead of the real `/tmp`, per
+    /// the repo's test-isolation rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paste_images_dir: Option<PathBuf>,
+
     /// Organize worktrees into per-repository subdirectories
     pub per_repo_worktree_dirs: bool,
 
@@ -483,6 +491,7 @@ impl Default for Config {
             ui_refresh_fps: 30,
             worktrees_dir: None,
             tmux_tmpdir: None,
+            paste_images_dir: None,
             per_repo_worktree_dirs: false,
             editor: None,
             editor_gui: None,

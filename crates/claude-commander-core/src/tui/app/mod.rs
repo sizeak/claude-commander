@@ -235,6 +235,25 @@ pub enum AttachTarget {
     LocalName(String),
 }
 
+/// Adapts a backend + session id to the attach loop's
+/// [`ImagePasteSink`](crate::tmux::ImagePasteSink): a remote attach captures the
+/// operator's local clipboard image and uploads it through the owning backend's
+/// `paste_image` route, which writes it server-side and injects the path.
+struct BackendImagePaste {
+    backend: Arc<dyn CommanderBackend>,
+    id: SessionId,
+}
+
+#[async_trait::async_trait]
+impl crate::tmux::ImagePasteSink for BackendImagePaste {
+    async fn upload(&self, png: Vec<u8>) -> std::result::Result<(), String> {
+        self.backend
+            .paste_image(self.id, png)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
 /// Minimum left pane width as a percentage of the content area
 const MIN_LEFT_PANE_PCT: u16 = 15;
 /// Maximum left pane width as a percentage of the content area
@@ -2252,6 +2271,31 @@ impl App {
                                 .map(|h| h.backend.capabilities().switcher_popup)
                                 .unwrap_or(false);
 
+                            // For a remote agent pane, hand the attach loop a sink
+                            // that uploads a captured clipboard image via the
+                            // owning backend (the remote agent can't read the
+                            // operator's clipboard on Ctrl+V). Only the agent pane
+                            // (where Claude runs) and only backends that advertise
+                            // `client_side_image_paste` (i.e. remote) get one.
+                            let image_paste: Option<Arc<dyn crate::tmux::ImagePasteSink>> =
+                                match &current {
+                                    AttachTarget::Session {
+                                        session,
+                                        kind: AttachKind::Agent,
+                                    } => self.backend(session.backend).and_then(|h| {
+                                        h.backend.capabilities().client_side_image_paste.then(
+                                            || {
+                                                Arc::new(BackendImagePaste {
+                                                    backend: h.backend.clone(),
+                                                    id: session.id,
+                                                })
+                                                    as Arc<dyn crate::tmux::ImagePasteSink>
+                                            },
+                                        )
+                                    }),
+                                    _ => None,
+                                };
+
                             // Open the connection first (the backend revives a
                             // dead tmux session and stamps last-attached); a
                             // failure surfaces as an error modal.
@@ -2310,6 +2354,7 @@ impl App {
                                 intercept_ctrl_z,
                                 switcher_enabled,
                                 session_name: name.clone(),
+                                image_paste,
                             };
 
                             let outcome = match crate::tmux::run_attach(streams, cfg).await {

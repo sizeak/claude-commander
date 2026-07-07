@@ -112,6 +112,12 @@ pub struct BackendCapabilities {
     pub commander_session: bool,
     /// Ctrl+\ agent↔shell pane toggle.
     pub shell_toggle: bool,
+    /// The agent runs on a remote host, so image paste must be captured from the
+    /// *client's* local clipboard and uploaded (the remote agent can't read the
+    /// operator's clipboard on Ctrl+V). False for a local backend, where the
+    /// co-located agent reads the local clipboard itself. Gates the attach
+    /// loop's Ctrl+V interception + [`CommanderBackend::paste_image`] upload.
+    pub client_side_image_paste: bool,
 }
 
 impl BackendCapabilities {
@@ -122,6 +128,9 @@ impl BackendCapabilities {
         switcher_popup: true,
         commander_session: true,
         shell_toggle: true,
+        // The local agent reads the operator's clipboard directly on Ctrl+V, so
+        // no client-side capture/upload is needed.
+        client_side_image_paste: false,
     };
 }
 
@@ -491,6 +500,18 @@ pub trait CommanderBackend: Send + Sync {
     async fn toggle_keep_alive(&self, id: SessionId) -> BResult<bool>;
     /// Mark a batch of sessions unread (paired with [`Self::mark_read`]).
     async fn mark_unread(&self, ids: Vec<SessionId>) -> BResult<()>;
+
+    /// Upload a pasted image (PNG bytes) for a session and inject its file path
+    /// into the agent pane. Only meaningful for backends whose
+    /// [`Self::capabilities`] set `client_side_image_paste` (i.e. remote): the
+    /// TUI captures the operator's local clipboard image and hands the bytes
+    /// here. The default rejects the call — a local backend never needs it (the
+    /// co-located agent reads the clipboard itself).
+    async fn paste_image(&self, _id: SessionId, _png: Vec<u8>) -> BResult<()> {
+        Err(BackendError::InvalidRequest(
+            "image paste is not supported by this backend".into(),
+        ))
+    }
 
     /// Persist a batch of PR-check results and refresh status bars. Takes the
     /// core `PrCheckResult` because PR polling is a *local* capability (the
