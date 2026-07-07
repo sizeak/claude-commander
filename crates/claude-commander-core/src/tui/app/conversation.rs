@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use super::*;
 use crate::conversation::{
-    ConversationEvent, ConversationSession, ListenAction, ListenerCommand, MediaSignal,
+    ConversationEvent, ConversationSession, ListenAction, ListenerHandle, MediaSignal,
     SpeakerCommand, SpeakerHandle, apply_listen_action, media_signal, spawn_listener,
     spawn_media_gate, spawn_speaker,
 };
@@ -249,8 +249,11 @@ pub struct ConversationRuntime {
     pub session: Arc<tokio::sync::Mutex<Option<ConversationSession>>>,
     /// Shared display model — updated off-loop, read by the renderer.
     pub view: Arc<Mutex<ConversationView>>,
-    /// Voice-input listener command channel; `None` if STT is off/unavailable.
-    pub listener: Option<tokio::sync::mpsc::UnboundedSender<ListenerCommand>>,
+    /// Respawn-stable handle to the voice-input listener's command channel.
+    /// Empty until the listener comes up (STT off / no mic keeps it empty).
+    /// Shared with the IPC task and the in-attach interceptor so swapping the
+    /// listener (e.g. on a microphone change) is visible to all of them at once.
+    pub listener: ListenerHandle,
     /// Whether the microphone is currently capturing. Shared (`Arc`) so every
     /// trigger — the Alt-V key path, the in-attach byte interceptor, and the
     /// external Unix-socket toggle — observes and flips the one flag without
@@ -270,8 +273,10 @@ impl ConversationRuntime {
     /// Apply a voice [`ListenAction`] if a listener is up. Returns the new
     /// recording state, or `None` when there's no listener (STT off / no mic).
     pub fn apply_listen(&self, action: ListenAction) -> Option<bool> {
-        let listener = self.listener.as_ref()?;
-        Some(apply_listen_action(listener, &self.recording, action))
+        if !self.listener.is_present() {
+            return None;
+        }
+        Some(apply_listen_action(&self.listener, &self.recording, action))
     }
 
     /// Whether the microphone is currently capturing.
@@ -472,7 +477,7 @@ impl App {
     /// conversation overlay is ever opened. The submit task spawns the session
     /// lazily on the first transcript, so the mic costs nothing until used.
     pub(super) async fn ensure_listener_started(&mut self) {
-        if !self.config.stt.enabled || self.conversation.listener.is_some() {
+        if !self.config.stt.enabled || self.conversation.listener.is_present() {
             return;
         }
 
@@ -482,41 +487,66 @@ impl App {
         if self.conversation.gate.is_none() && self.config.stt.pause_media {
             self.conversation.gate = spawn_media_gate(true);
         }
-        let gate = self.conversation.gate.clone();
+        self.build_and_store_listener();
+    }
 
+    /// Rebuild the voice listener with the current STT config after the selected
+    /// microphone changes, so the new device takes effect on the next recording
+    /// without an app restart. A no-op when STT is off or no listener is running
+    /// (enabling STT still comes up at boot). Replacing the sender in the shared
+    /// [`ListenerHandle`] drops the old one, which ends the old listener task —
+    /// and with it the old recorder thread, releasing the previous device.
+    pub(super) fn respawn_listener(&mut self) {
+        if !self.config.stt.enabled || !self.conversation.listener.is_present() {
+            return;
+        }
+        // A device swap cancels any in-flight capture (the old recorder thread
+        // dies with its buffer); reset the flag so state stays consistent.
+        // (Narrow race: an external socket toggle firing during the rebuild
+        // below could set the flag and Start the *old*, about-to-be-dropped
+        // recorder. It self-heals on the next toggle, so we don't lock here.)
+        self.conversation.recording.store(false, Ordering::Release);
+        self.build_and_store_listener();
+    }
+
+    /// Build a listener from the current STT config and its off-loop transcript
+    /// submit task, installing the command sender in the shared handle. The
+    /// listener returns its sender immediately and opens the mic device inside
+    /// its own task, so this never blocks the UI. Installing the new sender drops
+    /// the previous one (if any), ending the old listener and releasing its
+    /// device as that task unwinds; the new device opens asynchronously (the two
+    /// can briefly overlap), and any commands sent before it's ready queue on the
+    /// channel and run once it is. Assumes the media gate is set up.
+    fn build_and_store_listener(&mut self) {
+        let gate = self.conversation.gate.clone();
         let speaker = self.conversation.speaker.clone();
         let (tx_text, mut rx_text) = tokio::sync::mpsc::unbounded_channel::<String>();
-        match spawn_listener(
+        let tx = spawn_listener(
             self.config.stt.clone(),
             tx_text,
             gate.clone(),
             speaker.clone(),
-        ) {
-            Ok(tx) => {
-                self.conversation.listener = Some(tx);
-                let session = self.conversation.session.clone();
-                let view = self.conversation.view.clone();
-                let conv = self.config.conversation.clone();
-                tokio::spawn(async move {
-                    while let Some(text) = rx_text.recv().await {
-                        let text = text.trim().to_string();
-                        if text.is_empty() {
-                            continue;
-                        }
-                        // Submit directly (off the UI loop) so voice input works
-                        // even while the main loop is parked in a tmux attach. If
-                        // no session is up yet (transcript arrived before the
-                        // overlay was opened), spawn one and retry once.
-                        if !submit_to_session(&session, &view, &speaker, text.clone()).await {
-                            spawn_session_runtime(&conv, gate.clone(), &session, &view, &speaker)
-                                .await;
-                            submit_to_session(&session, &view, &speaker, text).await;
-                        }
-                    }
-                });
+        );
+        self.conversation.listener.replace(tx);
+        let session = self.conversation.session.clone();
+        let view = self.conversation.view.clone();
+        let conv = self.config.conversation.clone();
+        tokio::spawn(async move {
+            while let Some(text) = rx_text.recv().await {
+                let text = text.trim().to_string();
+                if text.is_empty() {
+                    continue;
+                }
+                // Submit directly (off the UI loop) so voice input works even
+                // while the main loop is parked in a tmux attach. If no session
+                // is up yet (transcript arrived before the overlay was opened),
+                // spawn one and retry once.
+                if !submit_to_session(&session, &view, &speaker, text.clone()).await {
+                    spawn_session_runtime(&conv, gate.clone(), &session, &view, &speaker).await;
+                    submit_to_session(&session, &view, &speaker, text).await;
+                }
             }
-            Err(e) => warn!(target: "conversation", "STT unavailable: {e}"),
-        }
+        });
     }
 
     /// Start the external voice-toggle trigger so the hotkey works from anywhere
@@ -526,10 +556,14 @@ impl App {
     /// recording flag as in-app Alt-V. No-op when the mic listener didn't come up
     /// (STT off / no microphone).
     pub(super) fn spawn_listen_ipc(&self) {
-        let Some(listener) = self.conversation.listener.clone() else {
+        if !self.conversation.listener.is_present() {
             debug!(target: "conversation", "voice IPC not started: no mic listener");
             return;
-        };
+        }
+        // The IPC task holds a clone of the respawn-stable handle, so a later
+        // microphone change (which swaps the sender inside the handle) keeps the
+        // desktop hotkey driving the *current* listener.
+        let listener = self.conversation.listener.clone();
         let recording = self.conversation.recording.clone();
         let path = crate::conversation::ipc::default_socket_path();
         if let Err(e) = crate::conversation::ipc::serve(path, listener, recording) {

@@ -24,10 +24,9 @@ use std::sync::atomic::AtomicBool;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
 
-use crate::conversation::{ListenAction, ListenerCommand, apply_listen_action};
+use crate::conversation::{ListenAction, ListenerHandle, apply_listen_action};
 
 /// Default per-user socket path. Prefers `$XDG_RUNTIME_DIR` (per-user on Linux),
 /// falling back to the OS temp dir (`$TMPDIR`, per-user on macOS). Both the TUI
@@ -65,7 +64,7 @@ fn action_word(action: ListenAction) -> &'static str {
 /// caller can log and skip rather than stealing it.
 pub fn serve(
     path: PathBuf,
-    listener: UnboundedSender<ListenerCommand>,
+    listener: ListenerHandle,
     recording: Arc<AtomicBool>,
 ) -> std::io::Result<PathBuf> {
     let l = bind_with_cleanup(&path)?;
@@ -101,11 +100,7 @@ fn bind_with_cleanup(path: &Path) -> std::io::Result<UnixListener> {
     }
 }
 
-async fn run_accept_loop(
-    l: UnixListener,
-    listener: UnboundedSender<ListenerCommand>,
-    recording: Arc<AtomicBool>,
-) {
+async fn run_accept_loop(l: UnixListener, listener: ListenerHandle, recording: Arc<AtomicBool>) {
     loop {
         match l.accept().await {
             Ok((stream, _addr)) => {
@@ -122,11 +117,7 @@ async fn run_accept_loop(
 }
 
 /// Read one command line, apply it, and write back the resulting state.
-async fn handle_conn(
-    stream: UnixStream,
-    listener: UnboundedSender<ListenerCommand>,
-    recording: Arc<AtomicBool>,
-) {
+async fn handle_conn(stream: UnixStream, listener: ListenerHandle, recording: Arc<AtomicBool>) {
     let (read_half, mut write_half) = stream.into_split();
     let mut line = String::new();
     if BufReader::new(read_half)
@@ -168,6 +159,7 @@ pub async fn send_command(path: &Path, action: ListenAction) -> std::io::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::conversation::ListenerCommand;
     use std::sync::atomic::Ordering;
     use tokio::sync::mpsc::unbounded_channel;
 
@@ -188,7 +180,7 @@ mod tests {
         let recording = Arc::new(AtomicBool::new(false));
 
         // Bind happens synchronously inside serve(), so there's no accept race.
-        serve(path.clone(), tx, recording.clone()).expect("bind");
+        serve(path.clone(), ListenerHandle::from(tx), recording.clone()).expect("bind");
 
         let reply = send_command(&path, ListenAction::Toggle)
             .await
@@ -215,7 +207,7 @@ mod tests {
         let (tx, _rx) = unbounded_channel();
         let recording = Arc::new(AtomicBool::new(false));
         // Should remove the stale file and bind successfully.
-        serve(path.clone(), tx, recording).expect("reclaim stale socket");
+        serve(path.clone(), ListenerHandle::from(tx), recording).expect("reclaim stale socket");
 
         let reply = send_command(&path, ListenAction::Start)
             .await

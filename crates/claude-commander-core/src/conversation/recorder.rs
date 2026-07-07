@@ -15,12 +15,26 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::error::TtsError;
 
+/// One selectable capture device for the settings picker. `id` is cpal's stable,
+/// unique device id (the PipeWire `node.name`, e.g. `alsa_input.pci-…`), which is
+/// what we persist and match against — device *names* are neither unique (a mic
+/// and its speaker's loopback share one) nor ordered mic-first, so matching by
+/// name can pick the wrong node. `label` is the human-readable text shown in the
+/// picker (friendly name, tagged `(loopback)` for monitor sources).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputDevice {
+    pub id: String,
+    pub label: String,
+}
+
 #[cfg(feature = "audio")]
 use std::io::Cursor;
 #[cfg(feature = "audio")]
 use std::sync::mpsc::{Receiver, Sender, channel};
 #[cfg(feature = "audio")]
 use std::sync::{Arc, Mutex};
+#[cfg(feature = "audio")]
+use tokio::sync::oneshot;
 
 #[cfg(feature = "audio")]
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -44,17 +58,23 @@ pub struct Recorder {
 
 #[cfg(feature = "audio")]
 impl Recorder {
-    /// Start the recorder thread. Returns an error synchronously if no input
-    /// device is available. Finished recordings are delivered as WAV bytes on
-    /// `wav_tx`.
-    pub fn new(wav_tx: UnboundedSender<Vec<u8>>) -> Result<Self, TtsError> {
+    /// Start the recorder thread. Returns an error if no input device is
+    /// available. Awaits the thread's one-shot readiness signal rather than
+    /// blocking, so opening a slow device (e.g. Bluetooth) doesn't stall the
+    /// caller's task. Finished recordings are delivered as WAV bytes on
+    /// `wav_tx`. `input_device` is the cpal device id to capture from; `None`
+    /// (or an id that isn't present) falls back to the system default.
+    pub async fn new(
+        wav_tx: UnboundedSender<Vec<u8>>,
+        input_device: Option<String>,
+    ) -> Result<Self, TtsError> {
         let (tx, rx) = channel::<Command>();
-        let (ready_tx, ready_rx) = channel::<Result<(), String>>();
+        let (ready_tx, ready_rx) = oneshot::channel::<Result<(), String>>();
         std::thread::Builder::new()
             .name("cc-stt-audio".into())
-            .spawn(move || recorder_thread(rx, wav_tx, ready_tx))
+            .spawn(move || recorder_thread(rx, wav_tx, ready_tx, input_device))
             .map_err(|e| TtsError::Audio(e.to_string()))?;
-        match ready_rx.recv() {
+        match ready_rx.await {
             Ok(Ok(())) => Ok(Self { tx }),
             Ok(Err(e)) => Err(TtsError::Audio(e)),
             Err(e) => Err(TtsError::Audio(e.to_string())),
@@ -72,14 +92,115 @@ impl Recorder {
     }
 }
 
+/// cpal's stable, unique id for a device (the PipeWire `node.name`), or `None`
+/// if it can't be queried. This is what we persist and match on.
+#[cfg(feature = "audio")]
+fn device_id(device: &cpal::Device) -> Option<String> {
+    device.id().ok().map(|id| id.id().to_string())
+}
+
+/// Human-readable picker label for a device: its friendly description name, with
+/// a `(loopback)` tag when it's a monitor/output source rather than a real input
+/// (cpal reports those as non-`Input` direction). `None` if it has no
+/// description. cpal 0.18 exposes the name via `Device::description().name()`
+/// (the old `name()` accessor was removed); under PipeWire it's a friendly label
+/// (e.g. "ALC295 Analog") rather than a raw ALSA alias.
+#[cfg(feature = "audio")]
+fn device_label(device: &cpal::Device) -> Option<String> {
+    let desc = device.description().ok()?;
+    let name = desc.name();
+    if desc.direction() == cpal::DeviceDirection::Input {
+        Some(name.to_string())
+    } else {
+        // A capturable output/duplex node is the sink's monitor — loopback.
+        Some(format!("{name} (loopback)"))
+    }
+}
+
+/// Given the ids of the available input devices and an optionally-requested id,
+/// decide which id to open. Returns `None` — meaning "use the system default
+/// input device" — when nothing was requested, or when the requested device is
+/// no longer present (graceful fallback rather than error).
+#[cfg(feature = "audio")]
+fn resolve_input_device_id(available: &[String], requested: Option<&str>) -> Option<String> {
+    match requested {
+        Some(id) if available.iter().any(|a| a == id) => Some(id.to_string()),
+        _ => None,
+    }
+}
+
+/// The available input (capture) devices, for the settings picker — each with a
+/// stable `id` (persisted/matched) and a human-readable `label` (displayed).
+/// Empty when the `audio` feature is off, or on an enumeration error. This
+/// synchronously queries the audio host, so it's called only on demand (when the
+/// user opens the microphone picker), not on a hot path. Labels that would
+/// otherwise collide get their id appended so every entry is distinguishable.
+#[cfg(feature = "audio")]
+pub fn input_devices() -> Vec<InputDevice> {
+    let host = cpal::default_host();
+    let devices = match host.input_devices() {
+        Ok(d) => d,
+        Err(e) => {
+            warn!("failed to enumerate input devices: {e}");
+            return Vec::new();
+        }
+    };
+    let mut out: Vec<InputDevice> = devices
+        .filter_map(|d| {
+            Some(InputDevice {
+                id: device_id(&d)?,
+                label: device_label(&d)?,
+            })
+        })
+        .collect();
+    // Guarantee visually-distinct labels: append the id to every entry whose
+    // label repeats. Count against a snapshot so tagging one doesn't change the
+    // counts seen for the rest (n is tiny, so the O(n²) scan is fine).
+    let labels: Vec<String> = out.iter().map(|d| d.label.clone()).collect();
+    for d in &mut out {
+        if labels.iter().filter(|l| **l == d.label).count() > 1 {
+            d.label = format!("{} [{}]", d.label, d.id);
+        }
+    }
+    out
+}
+
+/// Placeholder used when the `audio` feature is off. The `tui` settings module
+/// is compiled in every build (server, client cdylib) and calls this, so it
+/// must exist even where cpal isn't linked; there are simply no devices.
+#[cfg(not(feature = "audio"))]
+pub fn input_devices() -> Vec<InputDevice> {
+    Vec::new()
+}
+
 #[cfg(feature = "audio")]
 fn recorder_thread(
     rx: Receiver<Command>,
     wav_tx: UnboundedSender<Vec<u8>>,
-    ready: Sender<Result<(), String>>,
+    ready: oneshot::Sender<Result<(), String>>,
+    input_device: Option<String>,
 ) {
     let host = cpal::default_host();
-    let Some(device) = host.default_input_device() else {
+    // Enumerate once: derive the name list from the same devices we search, so a
+    // device whose `name()` errors is simply never matched (no index skew), and
+    // we don't probe the (slow) audio host twice.
+    let devices: Vec<cpal::Device> = host
+        .input_devices()
+        .map(|it| it.collect())
+        .unwrap_or_default();
+    let ids: Vec<String> = devices.iter().filter_map(device_id).collect();
+    let chosen = resolve_input_device_id(&ids, input_device.as_deref());
+    if input_device.is_some() && chosen.is_none() {
+        warn!("STT: requested microphone not found, using default input device");
+    }
+    let device = match &chosen {
+        Some(id) => devices
+            .into_iter()
+            .find(|d| device_id(d).as_deref() == Some(id.as_str()))
+            .or_else(|| host.default_input_device()),
+        None => host.default_input_device(),
+    };
+    let Some(device) = device else {
         let _ = ready.send(Err("no input audio device available".into()));
         return;
     };
@@ -205,7 +326,10 @@ pub struct Recorder;
 
 #[cfg(not(feature = "audio"))]
 impl Recorder {
-    pub fn new(_wav_tx: UnboundedSender<Vec<u8>>) -> Result<Self, TtsError> {
+    pub async fn new(
+        _wav_tx: UnboundedSender<Vec<u8>>,
+        _input_device: Option<String>,
+    ) -> Result<Self, TtsError> {
         Err(TtsError::Audio("audio support not compiled in".into()))
     }
 
@@ -246,5 +370,24 @@ mod tests {
         let bytes = encode_wav(&[], 16_000).expect("encode empty");
         let reader = hound::WavReader::new(Cursor::new(bytes)).expect("read");
         assert_eq!(reader.len(), 0);
+    }
+
+    #[test]
+    fn resolve_input_device_id_cases() {
+        let available = vec![
+            "alsa_input.pci-0000_c1_00.6.analog-stereo".to_string(),
+            "bluez_input.38:18:4C:19:E1:C2".to_string(),
+        ];
+        // Requested device present → selected verbatim.
+        assert_eq!(
+            resolve_input_device_id(&available, Some("bluez_input.38:18:4C:19:E1:C2")),
+            Some("bluez_input.38:18:4C:19:E1:C2".to_string())
+        );
+        // Requested device absent → None (fall back to system default).
+        assert_eq!(resolve_input_device_id(&available, Some("gone")), None);
+        // Nothing requested → None (system default).
+        assert_eq!(resolve_input_device_id(&available, None), None);
+        // Empty device list with a request → None.
+        assert_eq!(resolve_input_device_id(&[], Some("anything")), None);
     }
 }
