@@ -28,6 +28,11 @@ pub struct Cli {
     pub command: Option<Commands>,
 }
 
+// A clap subcommand enum is parsed once at startup and never stored in bulk, so
+// the size gap between the arg-heavy `New` variant and the unit variants is
+// immaterial — boxing a variant would only fight clap's derive for no runtime
+// benefit.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum Commands {
     /// Start the interactive TUI (default)

@@ -442,10 +442,8 @@ pub async fn attach_backend_session(
     let conn = backend.attach(id, cols, rows, AttachKind::Agent).await?;
     let streams = conn.split();
 
-    let image_paste: Option<Arc<dyn ImagePasteSink>> = backend
-        .capabilities()
-        .client_side_image_paste
-        .then(|| {
+    let image_paste: Option<Arc<dyn ImagePasteSink>> =
+        backend.capabilities().client_side_image_paste.then(|| {
             Arc::new(BackendImagePaste {
                 backend: backend.clone(),
                 id,

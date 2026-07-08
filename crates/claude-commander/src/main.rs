@@ -50,7 +50,9 @@ fn build_remote_backend(
     };
     let backend = RemoteBackend::new(spec)?;
     Ok(std::sync::Arc::new(backend)
-        as std::sync::Arc<dyn claude_commander_core::backend::CommanderBackend>)
+        as std::sync::Arc<
+            dyn claude_commander_core::backend::CommanderBackend,
+        >)
 }
 
 /// Resolve a `CommanderBackend` for a one-shot CLI command. `remote` is the
@@ -534,9 +536,9 @@ async fn main() -> Result<()> {
             println!("Session created: {}", session_id);
             println!();
             match &remote {
-                Some(server) => println!(
-                    "Attach with: claude-commander attach --remote {server} {session_id}"
-                ),
+                Some(server) => {
+                    println!("Attach with: claude-commander attach --remote {server} {session_id}")
+                }
                 None => println!("Attach with: claude-commander attach {}", session_id),
             }
         }

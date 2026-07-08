@@ -698,9 +698,7 @@ impl Config {
                 };
                 ConfigError::InvalidValue {
                     key: "remote".to_string(),
-                    reason: format!(
-                        "no remote server named '{name}' (available: {available})"
-                    ),
+                    reason: format!("no remote server named '{name}' (available: {available})"),
                 }
                 .into()
             })
