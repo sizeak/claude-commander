@@ -969,6 +969,26 @@ fn test_toggle_commander_enabled_via_bool_path() {
 }
 
 #[test]
+fn test_hide_empty_sections_toggle_and_apply() {
+    let mut app = make_test_app();
+    // Default is on.
+    assert!(app.config.hide_empty_sections);
+    // Row is present with correct default value.
+    let rows = app.build_settings_rows(SettingsTab::General);
+    let row = rows
+        .iter()
+        .find(|r| r.field_key == "hide_empty_sections")
+        .unwrap_or_else(|| panic!("missing hide_empty_sections row"));
+    assert_eq!(row.kind, SettingsRowKind::Toggle(true));
+    // Apply false via bool path (what the toggle uses).
+    app.apply_bool_setting("hide_empty_sections", false);
+    assert!(!app.config.hide_empty_sections);
+    // Flip back.
+    app.apply_bool_setting("hide_empty_sections", true);
+    assert!(app.config.hide_empty_sections);
+}
+
+#[test]
 fn test_stt_rows_present_with_defaults() {
     let app = make_test_app();
     let rows = app.build_settings_rows(SettingsTab::Conversation);
