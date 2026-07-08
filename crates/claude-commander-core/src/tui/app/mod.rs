@@ -235,25 +235,6 @@ pub enum AttachTarget {
     LocalName(String),
 }
 
-/// Adapts a backend + session id to the attach loop's
-/// [`ImagePasteSink`](crate::tmux::ImagePasteSink): a remote attach captures the
-/// operator's local clipboard image and uploads it through the owning backend's
-/// `paste_image` route, which writes it server-side and injects the path.
-struct BackendImagePaste {
-    backend: Arc<dyn CommanderBackend>,
-    id: SessionId,
-}
-
-#[async_trait::async_trait]
-impl crate::tmux::ImagePasteSink for BackendImagePaste {
-    async fn upload(&self, png: Vec<u8>) -> std::result::Result<(), String> {
-        self.backend
-            .paste_image(self.id, png)
-            .await
-            .map_err(|e| e.to_string())
-    }
-}
-
 /// Minimum left pane width as a percentage of the content area
 const MIN_LEFT_PANE_PCT: u16 = 15;
 /// Maximum left pane width as a percentage of the content area
@@ -2322,11 +2303,10 @@ impl App {
                                     } => self.backend(session.backend).and_then(|h| {
                                         h.backend.capabilities().client_side_image_paste.then(
                                             || {
-                                                Arc::new(BackendImagePaste {
-                                                    backend: h.backend.clone(),
-                                                    id: session.id,
-                                                })
-                                                    as Arc<dyn crate::tmux::ImagePasteSink>
+                                                crate::tmux::BackendImagePaste::sink(
+                                                    h.backend.clone(),
+                                                    session.id,
+                                                )
                                             },
                                         )
                                     }),
