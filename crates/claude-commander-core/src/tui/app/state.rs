@@ -640,6 +640,7 @@ impl App {
                     self.config.in_progress_limit,
                     agent_states,
                     &self.ui_state.collapsed_sections,
+                    self.config.hide_empty_sections,
                 ),
                 ViewMode::SectionStacks => build_stacked_section_items(
                     snapshot,
@@ -647,6 +648,7 @@ impl App {
                     self.config.in_progress_limit,
                     agent_states,
                     &self.ui_state.collapsed_sections,
+                    self.config.hide_empty_sections,
                 ),
             };
             items.append(&mut backend_items);
@@ -994,6 +996,7 @@ pub(super) fn build_section_grouped_items(
     in_progress_limit: Option<u32>,
     agent_states: &BTreeMap<SessionId, AgentState>,
     collapsed_sections: &std::collections::HashSet<String>,
+    hide_empty_sections: bool,
 ) -> Vec<SessionListItem> {
     let by_id = session_index(snapshot);
     let groups = crate::session::build_sections(&snapshot.sessions, sections);
@@ -1002,10 +1005,15 @@ pub(super) fn build_section_grouped_items(
     projects.sort_by(|a, b| a.name.cmp(&b.name));
 
     let mut items = Vec::new();
-    for (group_idx, group) in groups.iter().enumerate() {
-        if group_idx > 0 {
+    let mut first_section = true;
+    for group in groups.iter() {
+        if hide_empty_sections && group.sessions.is_empty() {
+            continue;
+        }
+        if !first_section {
             items.push(SessionListItem::Spacer);
         }
+        first_section = false;
         let collapsed = collapsed_sections.contains(&group.name);
         items.push(SessionListItem::SectionHeader {
             name: group.name.clone(),
@@ -1070,6 +1078,7 @@ pub(super) fn build_stacked_section_items(
     in_progress_limit: Option<u32>,
     agent_states: &BTreeMap<SessionId, AgentState>,
     collapsed_sections: &std::collections::HashSet<String>,
+    hide_empty_sections: bool,
 ) -> Vec<SessionListItem> {
     use chrono::{DateTime, Utc};
 
@@ -1201,11 +1210,8 @@ pub(super) fn build_stacked_section_items(
         .collect();
 
     let mut items = Vec::new();
-    for (idx, section_name) in section_order.iter().enumerate() {
-        if idx > 0 {
-            items.push(SessionListItem::Spacer);
-        }
-
+    let mut first_section = true;
+    for section_name in section_order.iter() {
         let project_groups = by_section.get(section_name);
         let total_count: usize = project_groups
             .map(|m| {
@@ -1215,6 +1221,14 @@ pub(super) fn build_stacked_section_items(
                     .sum()
             })
             .unwrap_or(0);
+
+        if hide_empty_sections && total_count == 0 {
+            continue;
+        }
+        if !first_section {
+            items.push(SessionListItem::Spacer);
+        }
+        first_section = false;
 
         let collapsed = collapsed_sections.contains(section_name);
         items.push(SessionListItem::SectionHeader {
@@ -1581,7 +1595,8 @@ mod stack_order_tests {
         let agent_states = BTreeMap::new();
         let collapsed = std::collections::HashSet::new();
 
-        let items = build_stacked_section_items(&state, &sections, None, &agent_states, &collapsed);
+        let items =
+            build_stacked_section_items(&state, &sections, None, &agent_states, &collapsed, false);
 
         // Walk items: find the "Open" header, then base+child should follow.
         let found_open = items.iter().any(
@@ -1661,6 +1676,7 @@ mod stack_order_tests {
             None,
             &BTreeMap::new(),
             &std::collections::HashSet::new(),
+            false,
         );
 
         let pinned_rows: Vec<_> = items
@@ -1707,6 +1723,7 @@ mod stack_order_tests {
             None,
             &BTreeMap::new(),
             &std::collections::HashSet::new(),
+            false,
         );
 
         // Walk items tracking the enclosing section header, then read off
@@ -1754,6 +1771,7 @@ mod stack_order_tests {
             None,
             &BTreeMap::new(),
             &std::collections::HashSet::new(),
+            false,
         );
 
         let open_session_ids: Vec<_> = items
@@ -1828,6 +1846,7 @@ mod stack_order_tests {
             None,
             &BTreeMap::new(),
             &std::collections::HashSet::new(),
+            false,
         );
 
         let pinned_count = items
@@ -1903,14 +1922,26 @@ mod stack_order_tests {
         let sections = vec![section_named("Open")];
         let collapsed = std::collections::HashSet::new();
 
-        let first =
-            build_stacked_section_items(&state, &sections, None, &BTreeMap::new(), &collapsed);
+        let first = build_stacked_section_items(
+            &state,
+            &sections,
+            None,
+            &BTreeMap::new(),
+            &collapsed,
+            false,
+        );
         // Call many times — every iteration constructs fresh internal
         // HashMaps with a new RandomState, so any non-determinism shows up
         // here. 32 calls is well past the birthday-paradox threshold.
         for _ in 0..32 {
-            let again =
-                build_stacked_section_items(&state, &sections, None, &BTreeMap::new(), &collapsed);
+            let again = build_stacked_section_items(
+                &state,
+                &sections,
+                None,
+                &BTreeMap::new(),
+                &collapsed,
+                false,
+            );
             assert_eq!(
                 again, first,
                 "build_stacked_section_items must produce identical output on every call"
@@ -1938,6 +1969,7 @@ mod stack_order_tests {
             None,
             &BTreeMap::new(),
             &std::collections::HashSet::new(),
+            false,
         );
 
         let open_session_order: Vec<_> = items
@@ -2018,6 +2050,7 @@ mod stack_order_tests {
             None,
             &BTreeMap::new(),
             &std::collections::HashSet::new(),
+            false,
         );
 
         let review_header = items.iter().find_map(|i| match i {
@@ -2047,6 +2080,7 @@ mod stack_order_tests {
             Some(2),
             &BTreeMap::new(),
             &std::collections::HashSet::new(),
+            false,
         );
 
         let ip_header = items.iter().find_map(|i| match i {
@@ -2077,6 +2111,7 @@ mod stack_order_tests {
             Some(1),
             &BTreeMap::new(),
             &std::collections::HashSet::new(),
+            false,
         );
 
         let review_limit = items.iter().find_map(|i| match i {
@@ -2093,6 +2128,109 @@ mod stack_order_tests {
         });
         assert_eq!(review_limit, Some(Some(4)));
         assert_eq!(ip_limit, Some(Some(1)));
+    }
+
+    #[test]
+    fn hide_empty_sections_grouped_omits_empty_sections() {
+        let project_id = ProjectId::new();
+        let mut s = make_session_in_section("s", "s", 0, "Review");
+        s.project_id = project_id;
+
+        let state = appstate_from(vec![s]);
+        let sections = vec![section_named("Open"), section_named("Review")];
+
+        // With hide_empty_sections=false, all sections appear.
+        let items = super::build_section_grouped_items(
+            &state,
+            &sections,
+            None,
+            &BTreeMap::new(),
+            &std::collections::HashSet::new(),
+            false,
+        );
+        let headers: Vec<_> = items
+            .iter()
+            .filter_map(|i| match i {
+                SessionListItem::SectionHeader { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            headers.contains(&crate::session::IN_PROGRESS),
+            "In Progress should appear when hide_empty_sections is false",
+        );
+        assert!(
+            headers.contains(&"Open"),
+            "Open should appear when hide_empty_sections is false"
+        );
+        assert!(headers.contains(&"Review"), "Review should appear");
+
+        // With hide_empty_sections=true, empty sections are omitted.
+        let items = super::build_section_grouped_items(
+            &state,
+            &sections,
+            None,
+            &BTreeMap::new(),
+            &std::collections::HashSet::new(),
+            true,
+        );
+        let headers: Vec<_> = items
+            .iter()
+            .filter_map(|i| match i {
+                SessionListItem::SectionHeader { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headers, vec!["Review"]);
+    }
+
+    #[test]
+    fn hide_empty_sections_stacked_omits_empty_sections() {
+        let project_id = ProjectId::new();
+        let mut s = make_session_in_section("s", "s", 0, "Review");
+        s.project_id = project_id;
+
+        let state = appstate_from(vec![s]);
+        let sections = vec![section_named("Open"), section_named("Review")];
+
+        // With hide_empty_sections=true, empty sections are omitted.
+        let items = build_stacked_section_items(
+            &state,
+            &sections,
+            None,
+            &BTreeMap::new(),
+            &std::collections::HashSet::new(),
+            true,
+        );
+        let headers: Vec<_> = items
+            .iter()
+            .filter_map(|i| match i {
+                SessionListItem::SectionHeader { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headers, vec!["Review"]);
+    }
+
+    #[test]
+    fn hide_empty_sections_no_spacers_when_all_hidden() {
+        // When all sections are empty and hide_empty_sections is true,
+        // the result should be empty (no spacers or headers).
+        let state = appstate_from(Vec::<WorktreeSession>::new());
+        let sections = vec![section_named("Open"), section_named("Review")];
+
+        let items = super::build_section_grouped_items(
+            &state,
+            &sections,
+            None,
+            &BTreeMap::new(),
+            &std::collections::HashSet::new(),
+            true,
+        );
+        assert!(
+            items.is_empty(),
+            "empty state with hide_empty_sections should yield no items"
+        );
     }
 
     #[test]
@@ -2265,6 +2403,7 @@ mod stack_order_tests {
                 Some(5),
                 &agent_states,
                 &collapsed,
+                false,
             ));
         });
         time("section_stacks", &mut || {
@@ -2274,6 +2413,7 @@ mod stack_order_tests {
                 Some(5),
                 &agent_states,
                 &collapsed,
+                false,
             ));
         });
     }

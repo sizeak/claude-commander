@@ -232,6 +232,14 @@ pub struct Config {
     /// so an omitted field resolves to `Config::default()`'s `false`.)
     pub show_session_program: bool,
 
+    /// Whether to hide empty section headers in the session list.
+    ///
+    /// Enabled by default. When true, sections with no sessions (including
+    /// "In Progress") are not rendered. This is a UI-only change; backend
+    /// section assignment is unaffected.
+    #[serde(default = "default_true")]
+    pub hide_empty_sections: bool,
+
     /// Dim the right pane (preview/diff/shell) when the session list is focused
     pub dim_unfocused_preview: bool,
 
@@ -521,6 +529,7 @@ impl Default for Config {
             hibernate_check_interval_secs: default_hibernate_check_interval_secs(),
             invert_pr_label_color: false,
             show_session_program: false,
+            hide_empty_sections: true,
             dim_unfocused_preview: true,
             dim_unfocused_opacity: 0.4,
             leader_key: " ".to_string(),
@@ -1369,6 +1378,8 @@ command = "codex"
         assert!(config.ai_summary_enabled);
         assert_eq!(config.ai_summary_model, "claude-haiku-4-5-20251001");
         assert!(!config.show_session_program);
+        // Hide empty sections is on by default.
+        assert!(config.hide_empty_sections);
         // Review cache precompute is on by default.
         assert!(config.precompute_review_caches);
     }
@@ -1398,6 +1409,17 @@ show_session_program = false
         // Explicit false survives round trip.
         let cfg: Config = toml::from_str("skip_lfs_smudge = false\n").unwrap();
         assert!(!cfg.skip_lfs_smudge);
+    }
+
+    #[test]
+    fn test_hide_empty_sections_deserialise() {
+        // Missing → default true.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.hide_empty_sections);
+
+        // Explicit false survives round trip.
+        let cfg: Config = toml::from_str("hide_empty_sections = false\n").unwrap();
+        assert!(!cfg.hide_empty_sections);
     }
 
     #[test]

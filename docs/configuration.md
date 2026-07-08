@@ -180,6 +180,12 @@ dim_unfocused_opacity = 0.4
 # for a single-program setup. Disabled by default; set to true to show it.
 # show_session_program = false
 
+# Hide empty section headers in the session list. When enabled, sections with
+# zero sessions (including "In Progress") are omitted along with their spacers,
+# reducing visual clutter. Enabled by default; set to false to always show all
+# section headers.
+# hide_empty_sections = true
+
 # Debounce delay in ms when typing multi-digit session numbers
 # session_number_debounce_ms = 250
 

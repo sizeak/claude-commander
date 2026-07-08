@@ -141,6 +141,11 @@ impl App {
                         c.show_session_program,
                         "show_session_program",
                     ),
+                    SettingsRow::toggle(
+                        "Hide Empty Sections",
+                        c.hide_empty_sections,
+                        "hide_empty_sections",
+                    ),
                     SettingsRow::toggle("Rounded Borders", c.rounded_borders, "rounded_borders"),
                     SettingsRow::header("Performance"),
                     SettingsRow::text(
@@ -1279,6 +1284,7 @@ impl App {
             "dim_unfocused_preview" => self.config.dim_unfocused_preview = value,
             "invert_pr_label_color" => self.config.invert_pr_label_color = value,
             "show_session_program" => self.config.show_session_program = value,
+            "hide_empty_sections" => self.config.hide_empty_sections = value,
             "rounded_borders" => self.config.rounded_borders = value,
             "precompute_review_caches" => self.config.precompute_review_caches = value,
             "ai_summary_enabled" => self.config.ai_summary_enabled = value,
