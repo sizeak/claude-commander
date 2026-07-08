@@ -398,11 +398,23 @@ pub async fn attach_to_session(
 
 /// Clipboard-image sink that forwards a captured PNG through a
 /// [`CommanderBackend`](crate::backend::CommanderBackend)'s `paste_image` route.
-/// Shared by any frontend attaching to a *remote* session (the TUI has its own
-/// copy inline; the CLI's remote attach uses this one).
-struct BackendImagePaste {
+/// The canonical [`ImagePasteSink`] used by every frontend attaching to a
+/// *remote* session (the TUI and the CLI both construct it via [`Self::new`]).
+pub struct BackendImagePaste {
     backend: Arc<dyn crate::backend::CommanderBackend>,
     id: crate::session::SessionId,
+}
+
+impl BackendImagePaste {
+    /// Build a sink that uploads captured clipboard images to `backend` for the
+    /// session `id`, boxed as the trait object the attach loop's `image_paste`
+    /// slot expects.
+    pub fn new(
+        backend: Arc<dyn crate::backend::CommanderBackend>,
+        id: crate::session::SessionId,
+    ) -> Arc<dyn ImagePasteSink> {
+        Arc::new(Self { backend, id })
+    }
 }
 
 #[async_trait::async_trait]
@@ -442,13 +454,10 @@ pub async fn attach_backend_session(
     let conn = backend.attach(id, cols, rows, AttachKind::Agent).await?;
     let streams = conn.split();
 
-    let image_paste: Option<Arc<dyn ImagePasteSink>> =
-        backend.capabilities().client_side_image_paste.then(|| {
-            Arc::new(BackendImagePaste {
-                backend: backend.clone(),
-                id,
-            }) as Arc<dyn ImagePasteSink>
-        });
+    let image_paste: Option<Arc<dyn ImagePasteSink>> = backend
+        .capabilities()
+        .client_side_image_paste
+        .then(|| BackendImagePaste::new(backend.clone(), id));
 
     let cfg = AttachConfig {
         editor_triggers,
