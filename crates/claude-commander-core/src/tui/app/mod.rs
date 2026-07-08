@@ -2303,7 +2303,7 @@ impl App {
                                     } => self.backend(session.backend).and_then(|h| {
                                         h.backend.capabilities().client_side_image_paste.then(
                                             || {
-                                                crate::tmux::BackendImagePaste::new(
+                                                crate::tmux::BackendImagePaste::sink(
                                                     h.backend.clone(),
                                                     session.id,
                                                 )
