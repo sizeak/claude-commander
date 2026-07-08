@@ -108,10 +108,11 @@ pub enum Commands {
         #[arg(short = 'd', long)]
         path: Option<std::path::PathBuf>,
 
-        /// Existing project to create the session in, by name. Resolves to the
-        /// project's repo path via the backend, so a remote project needs no
-        /// `--path`. Mutually exclusive with `--path` (which seeds a new
-        /// project).
+        /// Existing project to create the session in, by name (case-insensitive).
+        /// Resolves to the project's repo path via the backend, so a remote
+        /// project needs no `--path`. If the name matches more than one project
+        /// (names aren't unique), use `--path` to disambiguate. Mutually
+        /// exclusive with `--path` (which seeds a new project).
         #[arg(long, conflicts_with = "path")]
         project: Option<String>,
 

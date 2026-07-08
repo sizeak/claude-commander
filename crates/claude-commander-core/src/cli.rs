@@ -87,35 +87,50 @@ pub fn find_session_exact<'a>(
 /// the session's worktree will fork from. For a remote backend this is the
 /// server-side path, so the caller never has to know it.
 ///
-/// Returns a [`ConfigError::InvalidValue`](crate::error::ConfigError) listing
-/// the available project names when no project matches, so a `--project` typo is
-/// as actionable as an unknown `--remote` server. An empty project list reports
-/// "none found" (e.g. a fresh remote with no sessions yet — seed one with
-/// `--path`).
+/// Both failures return a [`ConfigError::InvalidValue`](crate::error::ConfigError):
+/// - **No match**: lists the available project names (an empty list reports
+///   "none found" — e.g. a fresh remote with no sessions yet; seed one with
+///   `--path`), so a typo is as actionable as an unknown `--remote` server.
+/// - **Ambiguous match**: project names are derived from repo directory names
+///   and are *not* unique, so two projects can share one. Rather than silently
+///   pick the first, report the collision and direct the caller to `--path`
+///   (which names an exact directory).
 pub fn resolve_project_path(
     projects: &[crate::api::ProjectInfo],
     name: &str,
 ) -> crate::Result<std::path::PathBuf> {
-    projects
+    let mut matches = projects
         .iter()
-        .find(|p| p.name.eq_ignore_ascii_case(name))
-        .map(|p| p.repo_path.clone())
-        .ok_or_else(|| {
-            let available = if projects.is_empty() {
-                "none found".to_string()
-            } else {
-                projects
-                    .iter()
-                    .map(|p| p.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            };
-            crate::error::ConfigError::InvalidValue {
-                key: "project".to_string(),
-                reason: format!("no project named '{name}' (available: {available})"),
-            }
-            .into()
-        })
+        .filter(|p| p.name.eq_ignore_ascii_case(name));
+
+    let Some(first) = matches.next() else {
+        let available = if projects.is_empty() {
+            "none found".to_string()
+        } else {
+            projects
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        return Err(crate::error::ConfigError::InvalidValue {
+            key: "project".to_string(),
+            reason: format!("no project named '{name}' (available: {available})"),
+        }
+        .into());
+    };
+
+    if matches.next().is_some() {
+        return Err(crate::error::ConfigError::InvalidValue {
+            key: "project".to_string(),
+            reason: format!(
+                "'{name}' matches more than one project — disambiguate with --path <repo path>"
+            ),
+        }
+        .into());
+    }
+
+    Ok(first.repo_path.clone())
 }
 
 /// Maximum lines allowed for the `log` command's `--lines` flag.
@@ -824,6 +839,22 @@ mod tests {
         assert!(
             err.to_string().contains("none found"),
             "with no projects the error must say none were found: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_project_path_ambiguous_errors_with_path_hint() {
+        // Project names aren't unique (they come from repo dir names), so two
+        // projects named "app" at different paths must not silently pick one.
+        let projects = vec![
+            make_project_info("app", "/home/mark/one/app"),
+            make_project_info("App", "/home/mark/two/app"),
+        ];
+        let err = resolve_project_path(&projects, "app").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("more than one project") && msg.contains("--path"),
+            "ambiguous project must error and point at --path: {err}"
         );
     }
 }

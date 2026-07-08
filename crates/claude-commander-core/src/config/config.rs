@@ -617,7 +617,7 @@ impl Config {
     /// rejected at load with a clear message rather than surfacing later as a
     /// silently-degraded backend.
     pub fn validate_remote_servers(&self) -> Result<()> {
-        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for server in &self.remote_servers {
             let name = server.name.trim();
             if name.is_empty() {
@@ -637,10 +637,14 @@ impl Config {
                 }
                 .into());
             }
-            if !seen.insert(name) {
+            // Dedup case-insensitively: lookups (`find_remote_server`, the TUI's
+            // name-keyed selection) match names with `eq_ignore_ascii_case`, so
+            // `Box` and `box` would resolve ambiguously to whichever comes first.
+            // Reject the collision at load rather than silently pick one.
+            if !seen.insert(name.to_ascii_lowercase()) {
                 return Err(ConfigError::InvalidValue {
                     key: "remote_servers.name".to_string(),
-                    reason: format!("duplicate server name '{name}'"),
+                    reason: format!("duplicate server name '{name}' (names are case-insensitive)"),
                 }
                 .into());
             }
@@ -1686,6 +1690,32 @@ url = "http://127.0.0.1:7878"
         };
         let err = cfg.validate_remote_servers().unwrap_err();
         assert!(err.to_string().contains("duplicate"), "{err}");
+    }
+
+    #[test]
+    fn test_validate_remote_servers_rejects_case_insensitive_duplicate_names() {
+        // `find_remote_server` matches case-insensitively, so `Box` and `box`
+        // would resolve ambiguously — validation must reject the pair at load.
+        let cfg = Config {
+            remote_servers: vec![
+                RemoteServerConfig {
+                    name: "Box".to_string(),
+                    url: "http://a:7878".to_string(),
+                    token: None,
+                },
+                RemoteServerConfig {
+                    name: "box".to_string(),
+                    url: "http://b:7878".to_string(),
+                    token: None,
+                },
+            ],
+            ..Config::default()
+        };
+        let err = cfg.validate_remote_servers().unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate"),
+            "case-only-differing names must be rejected: {err}"
+        );
     }
 
     #[test]
