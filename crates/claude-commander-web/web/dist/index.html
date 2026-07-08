@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Claude Commander</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #0d1117;
+        color: #c9d1d9;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      }
+      .card {
+        text-align: center;
+        padding: 32px 40px;
+        border: 1px solid #30363d;
+        border-radius: 12px;
+        background: #161b22;
+      }
+      code {
+        color: #d97757;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Claude Commander — Web UI</h1>
+      <p>Phase 1 scaffold. Auth mode: <code id="mode">…</code></p>
+      <p id="api">Checking upstream…</p>
+    </div>
+    <script>
+      // Prove the /webui/config hint and the /api reverse proxy are wired.
+      fetch("/webui/config")
+        .then((r) => r.json())
+        .then((c) => {
+          document.getElementById("mode").textContent = c.mode;
+        })
+        .catch(() => {
+          document.getElementById("mode").textContent = "unknown";
+        });
+      fetch("/api/config")
+        .then((r) => {
+          document.getElementById("api").textContent =
+            "Upstream /api reachable (HTTP " + r.status + ")";
+        })
+        .catch((e) => {
+          document.getElementById("api").textContent = "Upstream /api error: " + e;
+        });
+    </script>
+  </body>
+</html>
