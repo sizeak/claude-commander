@@ -677,6 +677,35 @@ impl Config {
         Ok(())
     }
 
+    /// Look up a configured remote server by name (case-insensitive, matching
+    /// the uniqueness rule in [`validate_remote_servers`](Self::validate_remote_servers)).
+    /// Returns a [`ConfigError::InvalidValue`] listing the available server
+    /// names when no entry matches, so a CLI `--remote <name>` typo produces an
+    /// actionable message rather than a silent local fallback.
+    pub fn find_remote_server(&self, name: &str) -> Result<&RemoteServerConfig> {
+        self.remote_servers
+            .iter()
+            .find(|s| s.name.eq_ignore_ascii_case(name))
+            .ok_or_else(|| {
+                let available = if self.remote_servers.is_empty() {
+                    "none configured".to_string()
+                } else {
+                    self.remote_servers
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                ConfigError::InvalidValue {
+                    key: "remote".to_string(),
+                    reason: format!(
+                        "no remote server named '{name}' (available: {available})"
+                    ),
+                }
+                .into()
+            })
+    }
+
     /// Get the configuration file path
     pub fn config_file_path() -> Result<PathBuf> {
         let dirs = Self::project_dirs()?;
@@ -1696,6 +1725,48 @@ url = "http://127.0.0.1:7878"
         assert!(
             err.to_string().contains("invalid url"),
             "an unparseable url must be rejected with a parse-failure reason: {err}"
+        );
+    }
+
+    #[test]
+    fn test_find_remote_server_matches_case_insensitively() {
+        let cfg = Config {
+            remote_servers: vec![RemoteServerConfig {
+                name: "Box".to_string(),
+                url: "http://box:7878".to_string(),
+                token: None,
+            }],
+            ..Config::default()
+        };
+        let found = cfg.find_remote_server("box").unwrap();
+        assert_eq!(found.url, "http://box:7878");
+    }
+
+    #[test]
+    fn test_find_remote_server_unknown_lists_available() {
+        let cfg = Config {
+            remote_servers: vec![RemoteServerConfig {
+                name: "box".to_string(),
+                url: "http://box:7878".to_string(),
+                token: None,
+            }],
+            ..Config::default()
+        };
+        let err = cfg.find_remote_server("nope").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no remote server named 'nope'") && msg.contains("box"),
+            "unknown remote must name the miss and list configured servers: {err}"
+        );
+    }
+
+    #[test]
+    fn test_find_remote_server_none_configured() {
+        let cfg = Config::default();
+        let err = cfg.find_remote_server("box").unwrap_err();
+        assert!(
+            err.to_string().contains("none configured"),
+            "with no servers the error must say none are configured: {err}"
         );
     }
 

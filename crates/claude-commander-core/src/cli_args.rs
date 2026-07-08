@@ -103,6 +103,13 @@ pub enum Commands {
         #[arg(short = 'd', long)]
         path: Option<std::path::PathBuf>,
 
+        /// Existing project to create the session in, by name. Resolves to the
+        /// project's repo path via the backend, so a remote project needs no
+        /// `--path`. Mutually exclusive with `--path` (which seeds a new
+        /// project).
+        #[arg(long, conflicts_with = "path")]
+        project: Option<String>,
+
         /// Initial prompt to send to the Claude agent
         #[arg(short = 'i', long)]
         initial_prompt: Option<String>,
@@ -126,12 +133,24 @@ pub enum Commands {
         /// Place session in a specific section
         #[arg(short = 's', long)]
         section: Option<String>,
+
+        /// Create the session on a configured remote server (by name from
+        /// `[[remote_servers]]`) instead of locally. Pair with `--project` to
+        /// pick an existing server-side project by name, or `--path` to seed a
+        /// new one (the path is resolved on the server, not this machine).
+        #[arg(long)]
+        remote: Option<String>,
     },
 
     /// Attach to an existing session
     Attach {
         /// Session name or ID
         session: String,
+
+        /// Attach to a session on a configured remote server (by name from
+        /// `[[remote_servers]]`) instead of a local one.
+        #[arg(long)]
+        remote: Option<String>,
     },
 
     /// Open the persistent commander session — a project-less Claude session
