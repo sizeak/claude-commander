@@ -2246,11 +2246,11 @@ pub fn validate_program_flags(opts: &CreateSessionOpts, resolved_program: &str) 
         ))
         .into());
     }
-    // `--model` is understood by both Claude and Codex.
+    // `--model` is understood by Claude, Codex, and OpenCode.
     if opts.model.is_some() && !kind.supports_model_flag() {
         return Err(SessionError::InvalidProgram(format!(
             "--model is only supported for programs that accept it, e.g. \
-             claude or codex (got {:?})",
+             claude, codex, or opencode (got {:?})",
             resolved_program
         ))
         .into());
@@ -2728,6 +2728,23 @@ mod tests {
             stack_parent: None,
         };
         validate_program_flags(&opts, "codex").unwrap();
+    }
+
+    #[test]
+    fn validate_allows_opencode_with_model() {
+        let opts = CreateSessionOpts {
+            project_path: PathBuf::from("/tmp/repo"),
+            title: "test".to_string(),
+            program: Some("opencode".to_string()),
+            initial_prompt: None,
+            effort: None,
+            mode: None,
+            model: Some("anthropic/claude-sonnet-4-5".to_string()),
+            base_branch: None,
+            section: None,
+            stack_parent: None,
+        };
+        validate_program_flags(&opts, "opencode").unwrap();
     }
 
     #[test]
