@@ -1,9 +1,9 @@
 //! Agent harness abstraction.
 //!
-//! Claude Commander launches different agent CLIs (Claude Code, OpenAI Codex)
-//! inside tmux sessions. Each harness differs in how it is resumed, whether it
-//! accepts a positional prompt, and what it renders in the tmux pane while
-//! working or waiting for the user.
+//! Claude Commander launches different agent CLIs (Claude Code, OpenAI Codex,
+//! OpenCode) inside tmux sessions. Each harness differs in how it is resumed,
+//! whether it accepts a positional prompt, and what it renders in the tmux pane
+//! while working or waiting for the user.
 //!
 //! [`AgentKind`] is *derived* from the persisted `program` command string (never
 //! stored separately) and owns this per-harness behaviour, so the divergences
@@ -21,6 +21,17 @@ use crate::session::AgentState;
 static ANSI_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\x1B\[[0-9;]*[a-zA-Z]|\x1B\][^\x07]*\x07|\x1B\][^\x1B]*\x1B\\")
         .expect("valid regex")
+});
+
+/// OpenCode renders completed assistant turns as an agent/model/duration line,
+/// e.g. `▣ Build · GPT-5.5 · 8.5s`. Active turns have the same agent/model
+/// prefix but no duration; the active signal is the separate `esc interrupt`
+/// footer below.
+static OPENCODE_COMPLETED_TURN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?m)^\s*▣\s+.+\s·\s+\d+(?:\.\d+)?(?:ms|s|m|h)(?:\s+\d+(?:\.\d+)?(?:ms|s|m|h))*\s*$",
+    )
+    .expect("valid regex")
 });
 
 /// Strip ANSI escape sequences from a string.
@@ -55,6 +66,15 @@ const CODEX_APPROVAL_MARKERS: [&str; 5] = [
 /// the approval footer, which reads "esc to cancel".
 const CODEX_WORKING_MARKER: &str = "esc to interrupt";
 
+/// Pane-content substring OpenCode renders in both full and mini TUI footers
+/// while a task is actively running. Completed turns keep the prompt footer but
+/// drop this interrupt hint, so it is a durable active-task signal.
+const OPENCODE_WORKING_MARKER: &str = "esc interrupt";
+
+/// Pane-content substring OpenCode renders in its permission prompt overlay
+/// when the agent is blocked on a user approval decision.
+const OPENCODE_PERMISSION_MARKER: &str = "Permission required";
+
 /// The agent CLI harness backing a session, derived from its `program` command.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentKind {
@@ -62,6 +82,8 @@ pub enum AgentKind {
     Claude,
     /// OpenAI Codex CLI (`codex`).
     Codex,
+    /// OpenCode TUI (`opencode`).
+    OpenCode,
     /// Any other program (a bare shell, an unrecognised agent, …). We launch it
     /// but make no assumptions about its flags or TUI output.
     Unknown,
@@ -81,6 +103,8 @@ impl AgentKind {
             Self::Claude
         } else if name.eq_ignore_ascii_case("codex") {
             Self::Codex
+        } else if name.eq_ignore_ascii_case("opencode") {
+            Self::OpenCode
         } else {
             Self::Unknown
         }
@@ -100,10 +124,11 @@ impl AgentKind {
         matches!(self, Self::Claude | Self::Codex)
     }
 
-    /// Whether this harness accepts a `--model <name>` launch flag. Both
-    /// Claude and Codex do; an unknown program's flags are unconstrained.
+    /// Whether this harness accepts a `--model <name>` launch flag. Claude,
+    /// Codex, and OpenCode support it; an unknown program's flags are
+    /// unconstrained.
     pub fn supports_model_flag(self) -> bool {
-        matches!(self, Self::Claude | Self::Codex)
+        matches!(self, Self::Claude | Self::Codex | Self::OpenCode)
     }
 
     /// Build the command that resumes this harness's previous session,
@@ -111,7 +136,8 @@ impl AgentKind {
     /// has no resume mechanism we can drive (so the caller launches fresh).
     ///
     /// Claude appends a `--resume` flag; Codex uses a `resume --last` subcommand
-    /// that must follow the binary, before its other flags.
+    /// that must follow the binary, before its other flags; OpenCode appends
+    /// `--continue`.
     pub fn resume_command(self, program: &str) -> Option<String> {
         let mut parts = program.splitn(2, char::is_whitespace);
         let binary = parts.next().unwrap_or("");
@@ -124,6 +150,10 @@ impl AgentKind {
             Self::Codex => Some(match rest {
                 Some(r) => format!("{binary} resume --last {r}"),
                 None => format!("{binary} resume --last"),
+            }),
+            Self::OpenCode => Some(match rest {
+                Some(r) => format!("{binary} {r} --continue"),
+                None => format!("{binary} --continue"),
             }),
             Self::Unknown => None,
         }
@@ -139,18 +169,21 @@ impl AgentKind {
             // two are mutually exclusive in Codex's title.
             Self::Codex if title.contains("Action Required") => Some(AgentState::WaitingForInput),
             Self::Claude | Self::Codex if has_braille_spinner(title) => Some(AgentState::Working),
+            // OpenCode's title is always "OpenCode" regardless of state, so
+            // title alone is not conclusive — fall through to content.
             _ => None,
         }
     }
 
     /// Detect agent state from the visible pane *content* (the fallback when the
-    /// title is inconclusive). Defaults to `Idle` — the benign resting state —
-    /// rather than guessing.
+    /// title is inconclusive). Harnesses with a durable idle prompt can return
+    /// `Idle`; otherwise they should return `Unknown` rather than guessing.
     pub fn content_state(self, content: &str) -> AgentState {
         let content = strip_ansi(content);
         match self {
             Self::Claude => claude_content_state(&content),
             Self::Codex => codex_content_state(&content),
+            Self::OpenCode => opencode_content_state(&content),
             Self::Unknown => AgentState::Idle,
         }
     }
@@ -205,6 +238,23 @@ fn codex_content_state(content: &str) -> AgentState {
     AgentState::Idle
 }
 
+/// OpenCode content patterns. The interrupt hint is rendered while a task runs.
+/// Completed turns render an agent/model/duration line, which is the durable idle
+/// signal. Brand-new sessions still return `Unknown`: "Ask anything" only
+/// appears before the first turn and is not a general idle marker.
+fn opencode_content_state(content: &str) -> AgentState {
+    if content.contains(OPENCODE_PERMISSION_MARKER) {
+        return AgentState::WaitingForInput;
+    }
+    if content.contains(OPENCODE_WORKING_MARKER) {
+        return AgentState::Working;
+    }
+    if OPENCODE_COMPLETED_TURN_RE.is_match(content) {
+        return AgentState::Idle;
+    }
+    AgentState::Unknown
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,12 +288,27 @@ mod tests {
     }
 
     #[test]
+    fn from_program_detects_opencode() {
+        assert_eq!(AgentKind::from_program("opencode"), AgentKind::OpenCode);
+        assert_eq!(
+            AgentKind::from_program("opencode --auto"),
+            AgentKind::OpenCode
+        );
+        assert_eq!(AgentKind::from_program("OpenCode"), AgentKind::OpenCode);
+        assert_eq!(
+            AgentKind::from_program("/usr/local/bin/opencode"),
+            AgentKind::OpenCode
+        );
+    }
+
+    #[test]
     fn from_program_unknown_for_others() {
         assert_eq!(AgentKind::from_program("bash"), AgentKind::Unknown);
         assert_eq!(AgentKind::from_program(""), AgentKind::Unknown);
         // Different binary names that merely contain the substring must not match.
         assert_eq!(AgentKind::from_program("claude-code"), AgentKind::Unknown);
         assert_eq!(AgentKind::from_program("codex-cli"), AgentKind::Unknown);
+        assert_eq!(AgentKind::from_program("opencode-ai"), AgentKind::Unknown);
     }
 
     // --- capability flags ---
@@ -252,6 +317,9 @@ mod tests {
     fn accepts_positional_prompt_for_agents_only() {
         assert!(AgentKind::Claude.accepts_positional_prompt());
         assert!(AgentKind::Codex.accepts_positional_prompt());
+        // OpenCode's plain `opencode` does not accept a positional prompt;
+        // prompts are passed via `opencode run [message..]` instead.
+        assert!(!AgentKind::OpenCode.accepts_positional_prompt());
         assert!(!AgentKind::Unknown.accepts_positional_prompt());
     }
 
@@ -259,6 +327,7 @@ mod tests {
     fn is_claude_only_for_claude() {
         assert!(AgentKind::Claude.is_claude());
         assert!(!AgentKind::Codex.is_claude());
+        assert!(!AgentKind::OpenCode.is_claude());
         assert!(!AgentKind::Unknown.is_claude());
     }
 
@@ -266,6 +335,7 @@ mod tests {
     fn supports_model_flag_for_agents_only() {
         assert!(AgentKind::Claude.supports_model_flag());
         assert!(AgentKind::Codex.supports_model_flag());
+        assert!(AgentKind::OpenCode.supports_model_flag());
         assert!(!AgentKind::Unknown.supports_model_flag());
     }
 
@@ -300,6 +370,18 @@ mod tests {
     #[test]
     fn resume_command_none_for_unknown() {
         assert_eq!(AgentKind::Unknown.resume_command("bash"), None);
+    }
+
+    #[test]
+    fn resume_command_opencode_appends_continue() {
+        assert_eq!(
+            AgentKind::OpenCode.resume_command("opencode"),
+            Some("opencode --continue".to_string())
+        );
+        assert_eq!(
+            AgentKind::OpenCode.resume_command("opencode --auto"),
+            Some("opencode --auto --continue".to_string())
+        );
     }
 
     // --- title_state ---
@@ -339,6 +421,9 @@ mod tests {
         // trip its detector via the title path.
         assert_eq!(AgentKind::Claude.title_state("Action Required"), None);
         assert_eq!(AgentKind::Unknown.title_state("⠋ working"), None);
+        // OpenCode's title is always "OpenCode" regardless of state, so title
+        // alone is not conclusive.
+        assert_eq!(AgentKind::OpenCode.title_state("OpenCode"), None);
     }
 
     // --- content_state: Claude ---
@@ -443,6 +528,104 @@ mod tests {
         assert_eq!(
             AgentKind::Unknown.content_state("Esc to cancel"),
             AgentState::Idle
+        );
+    }
+
+    // --- content_state: OpenCode ---
+
+    #[test]
+    fn opencode_content_new_session_prompt_is_unknown() {
+        // The brand-new-session prompt is not a general idle marker: after a
+        // completed turn OpenCode leaves a blank prompt instead. Avoid using it
+        // as an idle signal for hibernation.
+        let content = "Ask anything... \"Fix broken tests\"\n  Build · GPT-5.5\n";
+        assert_eq!(
+            AgentKind::OpenCode.content_state(content),
+            AgentState::Unknown
+        );
+    }
+
+    #[test]
+    fn opencode_content_working_from_interrupt_hint() {
+        // Real active-task footer captured from OpenCode full and mini TUIs.
+        let full = "⬝⬝⬝⬝⬝⬝⬝⬝  esc interrupt                         tab agents  ctrl+p commands\n";
+        let mini =
+            "BUILD  ⬝■■■■■■⬝ esc interrupt                                       ctrl+p cmd\n";
+        assert_eq!(AgentKind::OpenCode.content_state(full), AgentState::Working);
+        assert_eq!(AgentKind::OpenCode.content_state(mini), AgentState::Working);
+    }
+
+    #[test]
+    fn opencode_content_permission_prompt_is_waiting() {
+        // Real approval overlay captured from OpenCode when accessing `~/` from
+        // a session sandboxed in another directory.
+        let content = "⚠ Permission required\n← Access external directory ~\n\nPatterns\n\n- /home/si/*\n\nAllow once   Allow always   Reject\n";
+        assert_eq!(
+            AgentKind::OpenCode.content_state(content),
+            AgentState::WaitingForInput
+        );
+    }
+
+    #[test]
+    fn opencode_content_permission_takes_precedence() {
+        let content = "Permission required\nesc interrupt\n▣ Build · GPT-5.5 · 2.7s\n";
+        assert_eq!(
+            AgentKind::OpenCode.content_state(content),
+            AgentState::WaitingForInput
+        );
+    }
+
+    #[test]
+    fn opencode_content_completed_turn_is_idle() {
+        let content = "▣  Build · GPT-5.5 · 2.7s\n7.6K (1%) · $0.04  ctrl+p commands\n";
+        assert_eq!(AgentKind::OpenCode.content_state(content), AgentState::Idle);
+    }
+
+    #[test]
+    fn opencode_content_completed_turn_accepts_longer_duration() {
+        let content = "▣  Build · GPT-5.5 · 1m 8.5s\n";
+        assert_eq!(AgentKind::OpenCode.content_state(content), AgentState::Idle);
+    }
+
+    #[test]
+    fn opencode_content_active_agent_line_without_duration_is_unknown() {
+        // Active turns show the agent/model line before the footer appears, but
+        // no duration. Do not call it idle unless the completed-turn duration is
+        // present.
+        let content = "▣  Build · GPT-5.5\n";
+        assert_eq!(
+            AgentKind::OpenCode.content_state(content),
+            AgentState::Unknown
+        );
+    }
+
+    #[test]
+    fn opencode_content_unknown_when_ambiguous() {
+        // No working or idle marker visible — return Unknown, not Idle, to
+        // avoid false auto-hibernation.
+        assert_eq!(
+            AgentKind::OpenCode.content_state("Some intermediate TUI state\n"),
+            AgentState::Unknown
+        );
+        assert_eq!(AgentKind::OpenCode.content_state(""), AgentState::Unknown);
+    }
+
+    #[test]
+    fn opencode_content_tip_is_not_working() {
+        // This text appears as a rotating idle tip, not as the active-task
+        // footer's "esc interrupt" status signal.
+        let content = "● Tip Press escape to stop the AI mid-response\n";
+        assert_eq!(
+            AgentKind::OpenCode.content_state(content),
+            AgentState::Unknown
+        );
+    }
+
+    #[test]
+    fn opencode_content_strips_ansi_before_matching() {
+        assert_eq!(
+            AgentKind::OpenCode.content_state("\x1B[1mesc interrupt\x1B[0m  ctrl+p commands\n"),
+            AgentState::Working
         );
     }
 

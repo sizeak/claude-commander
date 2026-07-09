@@ -1091,6 +1091,24 @@ mod lifecycle_tests {
         );
     }
 
+    #[test]
+    fn model_flag_injected_for_opencode() {
+        assert_eq!(
+            program_with_agent_flags("opencode", None, None, Some("anthropic/claude-sonnet-4-5")),
+            "opencode --model anthropic/claude-sonnet-4-5"
+        );
+        // Claude-only flags are ignored for OpenCode.
+        assert_eq!(
+            program_with_agent_flags(
+                "opencode",
+                Some("auto"),
+                Some("high"),
+                Some("anthropic/claude-sonnet-4-5")
+            ),
+            "opencode --model anthropic/claude-sonnet-4-5"
+        );
+    }
+
     // --- program_with_session_name ---
 
     #[test]
@@ -1112,6 +1130,9 @@ mod lifecycle_tests {
         // Codex has no `-n` session-name flag — leave its command untouched.
         let codex = program_with_session_name("codex", "my session");
         assert_eq!(codex, "codex");
+        // OpenCode has no `-n` session-name flag either.
+        let opencode = program_with_session_name("opencode", "my session");
+        assert_eq!(opencode, "opencode");
     }
 
     #[test]
@@ -1132,7 +1153,12 @@ mod lifecycle_tests {
     fn resume_program_for_forces_resume_per_harness() {
         assert_eq!(resume_program_for("claude", true), "claude --resume");
         assert_eq!(resume_program_for("codex", true), "codex resume --last");
-        // Flags on the base command survive the resume rewrite.
+        assert_eq!(resume_program_for("opencode", true), "opencode --continue");
+        assert_eq!(
+            resume_program_for("opencode --auto", true),
+            "opencode --auto --continue"
+        );
+
         assert_eq!(resume_program_for("claude -c", true), "claude -c --resume");
     }
 
