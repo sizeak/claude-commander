@@ -36,6 +36,14 @@ claude-commander new "feature-ui" --section "Needs Review"
 # Attach to a session
 claude-commander attach feature-auth
 
+# Create and attach to a session on a configured remote server (by name from
+# [[remote_servers]]). Use --project to pick an existing server-side project by
+# name (no need to know its path); use --path to seed a brand-new project (the
+# path is resolved on the server, not this machine).
+claude-commander new "feature-remote" --remote workstation --project genio
+claude-commander new "new-repo" --remote workstation --path /repos/app
+claude-commander attach feature-remote --remote workstation
+
 # Dump recent terminal output from a session (default 100 lines, max 10000)
 claude-commander log feature-auth --lines 200
 

@@ -81,6 +81,58 @@ pub fn find_session_exact<'a>(
     }
 }
 
+/// Resolve a `--project <name>` flag to the project's on-disk repo path using a
+/// backend's [`WorkspaceSnapshot`](crate::api::WorkspaceSnapshot). Matches a
+/// project by name (case-insensitive) and returns its `repo_path` — the path
+/// the session's worktree will fork from. For a remote backend this is the
+/// server-side path, so the caller never has to know it.
+///
+/// Both failures return a [`ConfigError::InvalidValue`](crate::error::ConfigError):
+/// - **No match**: lists the available project names (an empty list reports
+///   "none found" — e.g. a fresh remote with no sessions yet; seed one with
+///   `--path`), so a typo is as actionable as an unknown `--remote` server.
+/// - **Ambiguous match**: project names are derived from repo directory names
+///   and are *not* unique, so two projects can share one. Rather than silently
+///   pick the first, report the collision and direct the caller to `--path`
+///   (which names an exact directory).
+pub fn resolve_project_path(
+    projects: &[crate::api::ProjectInfo],
+    name: &str,
+) -> crate::Result<std::path::PathBuf> {
+    let mut matches = projects
+        .iter()
+        .filter(|p| p.name.eq_ignore_ascii_case(name));
+
+    let Some(first) = matches.next() else {
+        let available = if projects.is_empty() {
+            "none found".to_string()
+        } else {
+            projects
+                .iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        return Err(crate::error::ConfigError::InvalidValue {
+            key: "project".to_string(),
+            reason: format!("no project named '{name}' (available: {available})"),
+        }
+        .into());
+    };
+
+    if matches.next().is_some() {
+        return Err(crate::error::ConfigError::InvalidValue {
+            key: "project".to_string(),
+            reason: format!(
+                "'{name}' matches more than one project — disambiguate with --path <repo path>"
+            ),
+        }
+        .into());
+    }
+
+    Ok(first.repo_path.clone())
+}
+
 /// Maximum lines allowed for the `log` command's `--lines` flag.
 pub const LOG_MAX_LINES: usize = 10_000;
 
@@ -748,5 +800,61 @@ mod tests {
         for input in ["", "n", "no", "x", "yep", "\n"] {
             assert!(!parse_yes_no(input), "expected {input:?} to be no");
         }
+    }
+
+    fn make_project_info(name: &str, repo_path: &str) -> crate::api::ProjectInfo {
+        crate::api::ProjectInfo {
+            id: ProjectId::new(),
+            name: name.to_string(),
+            repo_path: PathBuf::from(repo_path),
+            main_branch: "main".to_string(),
+            session_ids: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn resolve_project_path_matches_case_insensitively() {
+        let projects = vec![
+            make_project_info("Genio", "/home/mark/genio"),
+            make_project_info("other", "/home/mark/other"),
+        ];
+        let path = resolve_project_path(&projects, "genio").unwrap();
+        assert_eq!(path, PathBuf::from("/home/mark/genio"));
+    }
+
+    #[test]
+    fn resolve_project_path_unknown_lists_available() {
+        let projects = vec![make_project_info("genio", "/home/mark/genio")];
+        let err = resolve_project_path(&projects, "nope").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no project named 'nope'") && msg.contains("genio"),
+            "unknown project must name the miss and list projects: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_project_path_empty_reports_none_found() {
+        let err = resolve_project_path(&[], "genio").unwrap_err();
+        assert!(
+            err.to_string().contains("none found"),
+            "with no projects the error must say none were found: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_project_path_ambiguous_errors_with_path_hint() {
+        // Project names aren't unique (they come from repo dir names), so two
+        // projects named "app" at different paths must not silently pick one.
+        let projects = vec![
+            make_project_info("app", "/home/mark/one/app"),
+            make_project_info("App", "/home/mark/two/app"),
+        ];
+        let err = resolve_project_path(&projects, "app").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("more than one project") && msg.contains("--path"),
+            "ambiguous project must error and point at --path: {err}"
+        );
     }
 }
