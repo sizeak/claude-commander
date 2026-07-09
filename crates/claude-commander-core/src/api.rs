@@ -2237,13 +2237,11 @@ pub fn validate_program_flags(opts: &CreateSessionOpts, resolved_program: &str) 
         .into());
     }
     // An initial prompt is passed as a positional argument, which only
-    // harnesses that accept one (claude, codex) understand. OpenCode prompts go
-    // through `opencode run`, not the interactive `opencode` TUI command.
+    // harnesses that accept one (claude, codex) understand.
     if opts.initial_prompt.is_some() && !kind.accepts_positional_prompt() {
         return Err(SessionError::InvalidProgram(format!(
             "--initial-prompt is only supported for programs that accept a \
-             positional prompt, e.g. claude or codex; plain opencode does not \
-             (got {:?})",
+             positional prompt, e.g. claude or codex (got {:?})",
             resolved_program
         ))
         .into());

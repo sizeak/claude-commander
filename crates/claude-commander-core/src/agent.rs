@@ -176,8 +176,10 @@ impl AgentKind {
     }
 
     /// Detect agent state from the visible pane *content* (the fallback when the
-    /// title is inconclusive). Harnesses with a durable idle prompt can return
-    /// `Idle`; otherwise they should return `Unknown` rather than guessing.
+    /// title is inconclusive). Recognised harnesses with no durable idle signal
+    /// should return `Unknown` rather than guessing. The `Unknown` harness arm is
+    /// retained as a benign fallback for direct unit tests; `AgentStateDetector`
+    /// short-circuits unknown programs before pane inspection.
     pub fn content_state(self, content: &str) -> AgentState {
         let content = strip_ansi(content);
         match self {
