@@ -2731,6 +2731,23 @@ mod tests {
     }
 
     #[test]
+    fn validate_allows_opencode_with_model() {
+        let opts = CreateSessionOpts {
+            project_path: PathBuf::from("/tmp/repo"),
+            title: "test".to_string(),
+            program: Some("opencode".to_string()),
+            initial_prompt: None,
+            effort: None,
+            mode: None,
+            model: Some("anthropic/claude-sonnet-4-5".to_string()),
+            base_branch: None,
+            section: None,
+            stack_parent: None,
+        };
+        validate_program_flags(&opts, "opencode").unwrap();
+    }
+
+    #[test]
     fn review_base_prefers_live_branch_then_falls_back_to_commit_then_head() {
         let mut s = make_session_for_project("t", ProjectId::new());
         // Nothing recorded yet → HEAD.
