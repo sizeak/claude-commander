@@ -28,6 +28,7 @@ const els = {
   title: document.getElementById("session-title"),
   micBtn: document.getElementById("mic-btn"),
   kbdBtn: document.getElementById("kbd-btn"),
+  reviewBtn: document.getElementById("review-btn"),
   infoBtn: document.getElementById("info-btn"),
   restart: document.getElementById("restart-btn"),
   kill: document.getElementById("kill-btn"),
@@ -384,6 +385,7 @@ function renderTree() {
   els.kill.disabled = !active;
   els.delete.disabled = !sel;
   els.infoBtn.disabled = !sel;
+  els.reviewBtn.disabled = !sel;
   els.micBtn.disabled = !sel;
   els.kbdBtn.disabled = !sel;
   els.title.textContent = sel ? sel.title : "Select a session";
@@ -458,7 +460,8 @@ function ensureTerm() {
   requestAnimationFrame(() => fitNow());
 
   // Keystrokes → raw PTY bytes (binary frame). A sticky Ctrl (from the key bar)
-  // rewrites the next char to its control code.
+  // rewrites the next char to its control code. Paste arrives here too (multi-
+  // char, so the sticky-Ctrl transform is skipped) and is forwarded verbatim.
   state.term.onData((data) => {
     let out = data;
     if (state.ctrlPending && data.length === 1) {
@@ -466,6 +469,22 @@ function ensureTerm() {
       armCtrl(false);
     }
     sendData(out);
+  });
+
+  // Ctrl/Cmd+C copies the selection to the clipboard instead of sending SIGINT —
+  // but only when there IS a selection, so a bare ^C still reaches the program.
+  // (Paste is handled natively by xterm's paste event → onData above.)
+  state.term.attachCustomKeyEventHandler((e) => {
+    if (e.type !== "keydown") return true;
+    const mod = e.ctrlKey || e.metaKey;
+    if (mod && (e.key === "c" || e.key === "C") && state.term.hasSelection()) {
+      const sel = state.term.getSelection();
+      if (sel && navigator.clipboard) {
+        navigator.clipboard.writeText(sel).catch(() => {});
+        return false;
+      }
+    }
+    return true;
   });
 }
 
@@ -980,6 +999,258 @@ els.settingsForm.addEventListener("submit", async (e) => {
     project_pull_enabled: document.getElementById("set-project-pull-enabled").checked,
   };
   if (await action("PATCH", "/api/config", patch)) closeModal(els.settingsModal);
+});
+
+// ---- Review (diff + comments) ----
+
+const rv = {
+  sessionId: null,
+  snapshot: null,
+  view: document.getElementById("review-view"),
+  body: document.getElementById("review-body"),
+  title: document.getElementById("review-title"),
+  status: document.getElementById("review-status"),
+};
+
+function reviewDisplayPath(f) {
+  return f.status === "deleted" ? f.old_path : f.new_path;
+}
+
+async function openReview() {
+  const s = currentSession();
+  if (!s) return;
+  rv.sessionId = s.id;
+  rv.title.textContent = `Review — ${s.title}`;
+  rv.status.textContent = "loading…";
+  rv.body.innerHTML = "";
+  rv.view.classList.remove("hidden");
+  try {
+    rv.snapshot = await apiGet(`/api/sessions/${s.id}/review`);
+    renderReview();
+  } catch (e) {
+    if (e.message !== "unauthorized") {
+      rv.body.innerHTML = `<div class="rv-empty">Failed to load review: ${e.message}</div>`;
+      rv.status.textContent = "";
+    }
+  }
+}
+
+function closeReview() {
+  rv.view.classList.add("hidden");
+  rv.sessionId = null;
+  rv.snapshot = null;
+  rv.body.innerHTML = "";
+}
+
+async function reloadReview() {
+  if (!rv.sessionId) return;
+  try {
+    rv.snapshot = await apiGet(`/api/sessions/${rv.sessionId}/review`);
+    renderReview();
+  } catch (_) {}
+}
+
+function commentsFor(file, side, lineno) {
+  return (rv.snapshot.comments || []).filter(
+    (c) => c.file === file && c.side === side && c.line_range[0] === lineno
+  );
+}
+
+function renderReview() {
+  const snap = rv.snapshot;
+  rv.body.innerHTML = "";
+  const files = (snap.diff && snap.diff.files) || [];
+  rv.status.textContent = `${files.length} file(s) · ${snap.comments.length} comment(s)`;
+  if (files.length === 0) {
+    rv.body.innerHTML = `<div class="rv-empty">No changes against ${snap.base}.</div>`;
+    return;
+  }
+  const reviewed = new Set(snap.reviewed || []);
+  for (const f of files) rv.body.appendChild(renderReviewFile(f, reviewed));
+}
+
+function renderReviewFile(f, reviewed) {
+  const dp = reviewDisplayPath(f);
+  const wrap = document.createElement("div");
+  wrap.className = "rv-file";
+
+  const header = document.createElement("div");
+  header.className = "rv-file-header";
+  const path = document.createElement("span");
+  path.className = "rv-file-path";
+  path.textContent = f.status === "renamed" ? `${f.old_path} → ${f.new_path}` : dp;
+  header.appendChild(path);
+  const st = document.createElement("span");
+  st.className = "rv-file-status";
+  st.textContent = f.status;
+  header.appendChild(st);
+  const stat = document.createElement("span");
+  stat.innerHTML = `<span class="rv-stat-add">+${f.added}</span> <span class="rv-stat-del">-${f.removed}</span>`;
+  header.appendChild(stat);
+  const rev = document.createElement("label");
+  rev.className = "rv-reviewed";
+  const cb = document.createElement("input");
+  cb.type = "checkbox";
+  cb.checked = reviewed.has(dp);
+  cb.addEventListener("change", () => toggleReviewed(dp, cb));
+  rev.appendChild(cb);
+  rev.appendChild(document.createTextNode("reviewed"));
+  header.appendChild(rev);
+  wrap.appendChild(header);
+
+  if (f.binary) {
+    const b = document.createElement("div");
+    b.className = "rv-binary";
+    b.textContent = "Binary file not shown.";
+    wrap.appendChild(b);
+    return wrap;
+  }
+
+  for (const h of f.hunks || []) {
+    const hh = document.createElement("div");
+    hh.className = "rv-hunk-header";
+    hh.textContent = `@@ -${h.old_start},${h.old_lines} +${h.new_start},${h.new_lines} @@${h.header ? " " + h.header : ""}`;
+    wrap.appendChild(hh);
+    for (const line of h.lines) {
+      wrap.appendChild(renderReviewLine(dp, line));
+      const side = line.origin === "deletion" ? "old" : "new";
+      const lineno = side === "old" ? line.old_lineno : line.new_lineno;
+      if (lineno != null) {
+        for (const c of commentsFor(dp, side, lineno)) wrap.appendChild(renderComment(c));
+      }
+    }
+  }
+  return wrap;
+}
+
+function renderReviewLine(file, line) {
+  const row = document.createElement("div");
+  row.className = "rv-line " + line.origin;
+  const gutter = document.createElement("span");
+  gutter.className = "rv-gutter";
+  const o = line.old_lineno != null ? line.old_lineno : "";
+  const n = line.new_lineno != null ? line.new_lineno : "";
+  gutter.textContent = `${String(o).padStart(4)} ${String(n).padStart(4)}`;
+  row.appendChild(gutter);
+  const content = document.createElement("span");
+  content.className = "rv-content";
+  content.textContent = line.content;
+  row.appendChild(content);
+  row.addEventListener("click", () => openComposer(row, file, line));
+  return row;
+}
+
+function renderComment(c) {
+  const el = document.createElement("div");
+  el.className = "rv-comment " + c.status;
+  const meta = document.createElement("div");
+  meta.className = "rv-comment-meta";
+  const who = document.createElement("span");
+  const range =
+    c.line_range[1] !== c.line_range[0]
+      ? `${c.line_range[0]}-${c.line_range[1]}`
+      : `${c.line_range[0]}`;
+  who.textContent = `${c.side}:${range} · ${c.status}`;
+  meta.appendChild(who);
+  const del = document.createElement("button");
+  del.className = "rv-comment-del";
+  del.textContent = "✕";
+  del.title = "Delete comment";
+  del.addEventListener("click", () => deleteComment(c.id));
+  meta.appendChild(del);
+  el.appendChild(meta);
+  const body = document.createElement("div");
+  body.textContent = c.comment;
+  el.appendChild(body);
+  return el;
+}
+
+let composerEl = null;
+function openComposer(afterRow, file, line) {
+  if (composerEl) composerEl.remove();
+  const side = line.origin === "deletion" ? "old" : "new";
+  const lineno = side === "old" ? line.old_lineno : line.new_lineno;
+  if (lineno == null) return;
+
+  const box = document.createElement("div");
+  box.className = "rv-composer";
+  const ta = document.createElement("textarea");
+  ta.rows = 2;
+  ta.placeholder = `Comment on ${side} line ${lineno}…`;
+  box.appendChild(ta);
+  const actions = document.createElement("div");
+  actions.className = "rv-composer-actions";
+  const cancel = document.createElement("button");
+  cancel.className = "ghost";
+  cancel.textContent = "Cancel";
+  cancel.addEventListener("click", () => {
+    box.remove();
+    composerEl = null;
+  });
+  const save = document.createElement("button");
+  save.className = "primary";
+  save.textContent = "Comment";
+  save.addEventListener("click", async () => {
+    const text = ta.value.trim();
+    if (!text) return;
+    const ok = await action("POST", `/api/sessions/${rv.sessionId}/comments`, {
+      file,
+      side,
+      line_range: [lineno, lineno],
+      snippet: line.content,
+      comment: text,
+    });
+    if (ok) {
+      box.remove();
+      composerEl = null;
+      reloadReview();
+    }
+  });
+  actions.appendChild(cancel);
+  actions.appendChild(save);
+  box.appendChild(actions);
+  afterRow.insertAdjacentElement("afterend", box);
+  composerEl = box;
+  ta.focus();
+}
+
+async function deleteComment(cid) {
+  if (await action("DELETE", `/api/sessions/${rv.sessionId}/comments/${cid}`)) reloadReview();
+}
+
+async function toggleReviewed(dp, cb) {
+  const res = await action("POST", `/api/sessions/${rv.sessionId}/files/reviewed`, {
+    display_path: dp,
+  });
+  if (res && typeof res.reviewed === "boolean") cb.checked = res.reviewed;
+  else cb.checked = !cb.checked; // revert on failure
+}
+
+async function applyComments() {
+  const res = await action("POST", `/api/sessions/${rv.sessionId}/comments/apply`);
+  if (!res) return;
+  switch (res.outcome) {
+    case "applied":
+      alert(`Applied ${res.count} comment(s) — brief sent to the agent.`);
+      break;
+    case "deferred":
+      alert(`Wrote ${res.count} comment(s), but the agent wasn't ready — re-apply when it's at a prompt.`);
+      break;
+    case "blocked":
+      alert(`Blocked: ${(res.drifted || []).length} comment(s) drifted. Refresh and re-anchor.`);
+      break;
+    default:
+      alert("No staged comments to apply.");
+  }
+  reloadReview();
+}
+
+els.reviewBtn.addEventListener("click", openReview);
+document.getElementById("review-close").addEventListener("click", closeReview);
+document.getElementById("review-refresh").addEventListener("click", reloadReview);
+document.getElementById("review-apply").addEventListener("click", applyComments);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !rv.view.classList.contains("hidden")) closeReview();
 });
 
 // ---- Boot ----

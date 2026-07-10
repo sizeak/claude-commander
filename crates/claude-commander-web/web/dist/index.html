@@ -43,6 +43,7 @@
           <div id="toolbar-actions">
             <button id="mic-btn" disabled title="Dictate (microphone)" aria-label="Dictate">🎤</button>
             <button id="kbd-btn" disabled title="Show keyboard" aria-label="Show keyboard">⌨</button>
+            <button id="review-btn" disabled title="Review diff & comments">Review</button>
             <button id="info-btn" disabled title="Toggle info panel">Info</button>
             <button id="restart-btn" disabled title="Restart session">Restart</button>
             <button id="kill-btn" disabled title="Kill session">Kill</button>
@@ -180,6 +181,20 @@
           </div>
         </form>
       </div>
+    </div>
+
+    <!-- Full-screen review: diff + comments -->
+    <div id="review-view" class="hidden">
+      <header id="review-header">
+        <div id="review-title">Review</div>
+        <div class="review-actions">
+          <span id="review-status"></span>
+          <button id="review-refresh" title="Refresh diff">⟳</button>
+          <button id="review-apply" class="primary">Apply comments</button>
+          <button id="review-close" title="Close review">✕ Close</button>
+        </div>
+      </header>
+      <div id="review-body"></div>
     </div>
 
     <script src="/vendor/xterm.js"></script>
