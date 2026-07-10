@@ -786,6 +786,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unknown_session_change_program_is_not_found() {
+        let (addr, _service, _d, _w) = serve_disabled().await;
+        let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
+        let err = backend
+            .change_program(SessionId::new(), "codex".to_string())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BackendError::NotFound), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn paste_image_valid_png_unknown_session_is_not_found() {
+        const TINY_PNG: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0x00, 0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+            0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        let (addr, _service, _d, _w) = serve_disabled().await;
+        let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
+        let err = backend
+            .paste_image(SessionId::new(), TINY_PNG.to_vec())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BackendError::NotFound), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn paste_image_non_image_is_invalid_request() {
+        let (addr, _service, _d, _w) = serve_disabled().await;
+        let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
+        let err = backend
+            .paste_image(SessionId::new(), b"not an image".to_vec())
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, BackendError::InvalidRequest(_)),
+            "got {err:?}"
+        );
+    }
+
+    #[tokio::test]
     async fn poller_bumps_change_feed_on_state_change() {
         let (addr, service, _d, _w) = serve_disabled().await;
         let backend = RemoteBackend::with_config(spec(addr, None), fast_config()).unwrap();
