@@ -585,6 +585,13 @@ impl CommanderBackend for RemoteBackend {
             .await
     }
 
+    async fn change_program(&self, id: SessionId, program: String) -> BResult<()> {
+        let body = serde_json::json!({ "op": "change_program", "program": program });
+        self.inner
+            .patch_json_ok(self.session_url(id, &[]), &body)
+            .await
+    }
+
     async fn set_section(&self, id: SessionId, section: Option<String>) -> BResult<()> {
         let body = serde_json::json!({ "op": "set_section", "section": section });
         self.inner
@@ -1154,6 +1161,22 @@ mod tests {
         let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
         let err = backend
             .rename_session(SessionId::new(), "x".to_string())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BackendError::NotFound), "got {err:?}");
+    }
+
+    /// A `change_program` for an unknown session round-trips over HTTP to the
+    /// PATCH route and comes back `NotFound` (the service's existence check fires
+    /// before the relaunch, so no tmux is touched). This proves the client's
+    /// `op` tag matches the server's serde discriminant end-to-end: a mismatch
+    /// would fail deserialization as a 400 → `InvalidRequest`, not `NotFound`.
+    #[tokio::test]
+    async fn unknown_session_change_program_is_not_found() {
+        let (addr, _service, _d, _w) = serve_disabled().await;
+        let backend = RemoteBackend::with_config(spec(addr, None), idle_config()).unwrap();
+        let err = backend
+            .change_program(SessionId::new(), "codex".to_string())
             .await
             .unwrap_err();
         assert!(matches!(err, BackendError::NotFound), "got {err:?}");

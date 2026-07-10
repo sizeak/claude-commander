@@ -154,6 +154,14 @@ pub enum StateUpdate {
         project_id: ProjectId,
         picker: super::app::ProgramPicker,
     },
+    /// The owning backend's program list finished loading for the open
+    /// change-program palette. Replaces the palette's fallback choices (seeded
+    /// from local config) if it's still open for the same session. Spawned so a
+    /// slow remote never blocks the event loop before the palette appears.
+    ProgramChoicesLoaded {
+        session_id: SessionId,
+        choices: Vec<crate::config::ProgramEntry>,
+    },
     /// A remote backend's program list finished loading (or failed) for the
     /// Settings → Programs tab. Applied only if that tab is still open for the
     /// same `backend` and `gen` (a stale response for a superseded target is
@@ -289,6 +297,8 @@ pub enum UserCommand {
     RenameSession,
     /// Restart current session (kill tmux and recreate)
     RestartSession,
+    /// Change the program (agent) of the selected session and relaunch it
+    ChangeProgram,
     /// Toggle keep-alive on the selected session (opt out of auto-hibernation)
     ToggleKeepAlive,
     /// Remove an entire project
@@ -403,6 +413,7 @@ impl UserCommand {
             | UserCommand::NewStackedSession
             | UserCommand::DeleteSession
             | UserCommand::RestartSession
+            | UserCommand::ChangeProgram
             | UserCommand::ToggleKeepAlive
             | UserCommand::NewProject
             | UserCommand::ScanDirectory
@@ -482,6 +493,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::DeleteMergedPrSessions => Self::DeleteMergedPrSessions,
             BindableAction::RenameSession => Self::RenameSession,
             BindableAction::RestartSession => Self::RestartSession,
+            BindableAction::ChangeProgram => Self::ChangeProgram,
             BindableAction::ToggleKeepAlive => Self::ToggleKeepAlive,
             BindableAction::RemoveProject => Self::RemoveProject,
             BindableAction::OpenInEditor => Self::OpenInEditor,

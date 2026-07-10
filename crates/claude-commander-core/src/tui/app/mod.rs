@@ -464,6 +464,12 @@ pub enum PaletteMode {
     /// Remote-server picker for the remove-server flow: one entry per
     /// configured `[[remote_servers]]`; selecting one opens a confirm modal.
     RemoteServerPicker,
+    /// Program (agent) picker for a specific session. The palette lists the
+    /// owning backend's configured programs; selecting one opens a confirm modal
+    /// that changes the session's program and relaunches it.
+    ProgramPicker {
+        session_id: SessionId,
+    },
 }
 
 /// A row in the quick-switch palette — either an open session, a
@@ -485,6 +491,15 @@ pub enum QuickSwitchItem {
     RemoteServerRemove {
         name: String,
         /// Pre-formatted display label (`name (url)`).
+        label: String,
+    },
+    /// Selecting this row opens a confirm modal to change `session_id`'s program
+    /// to `program` and relaunch it (program-picker palette mode).
+    ProgramChange {
+        session_id: SessionId,
+        /// The launch command to switch to.
+        program: String,
+        /// Pre-formatted display label.
         label: String,
     },
 }
@@ -1078,6 +1093,11 @@ pub enum ConfirmAction {
     RestartSession {
         session_id: SessionId,
     },
+    /// Change a session's program (agent) to `program` and relaunch it fresh.
+    ChangeProgram {
+        session_id: SessionId,
+        program: String,
+    },
     RemoveProject {
         project_id: ProjectId,
     },
@@ -1229,6 +1249,17 @@ pub struct AppUiState {
     /// (The project-pull scheduler state that used to sit alongside this
     /// moved into `CommanderService`'s background tasks.)
     pub lfs_pull_in_flight: std::collections::HashSet<SessionId>,
+    /// Program choices for the change-program palette (`ProgramPicker` mode).
+    /// Re-seeded from local config each time the palette opens and replaced by
+    /// the owning backend's list once `ProgramChoicesLoaded` arrives for a remote
+    /// session. The refilter rebuilds the palette rows from this. Only read while
+    /// the `ProgramPicker` palette is open, so a stale value between opens is
+    /// inert (not cleared on close).
+    pub program_picker_choices: Vec<crate::config::ProgramEntry>,
+    /// The current program of the session the change-program palette targets, so
+    /// its row can be flagged. Re-set each time the palette opens; like
+    /// `program_picker_choices`, only read while that palette is open.
+    pub program_picker_current: String,
 }
 
 impl Default for AppUiState {
@@ -1283,6 +1314,8 @@ impl Default for AppUiState {
             stack_chain: Vec::new(),
             project_pull_blocked: HashMap::new(),
             lfs_pull_in_flight: std::collections::HashSet::new(),
+            program_picker_choices: Vec::new(),
+            program_picker_current: String::new(),
         }
     }
 }
@@ -1310,6 +1343,7 @@ impl AppUiState {
             | BindableAction::DeleteSession
             | BindableAction::RenameSession
             | BindableAction::RestartSession
+            | BindableAction::ChangeProgram
             | BindableAction::ToggleKeepAlive
             | BindableAction::OpenPullRequest
             | BindableAction::OpenReviewDiff

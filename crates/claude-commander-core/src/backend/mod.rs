@@ -545,6 +545,11 @@ pub trait CommanderBackend: Send + Sync {
     }
     async fn delete_session(&self, id: SessionId) -> BResult<()>;
     async fn rename_session(&self, id: SessionId, title: String) -> BResult<()>;
+    /// Change a session's launch program (the agent harness that runs) and
+    /// relaunch its pane fresh so the new program takes effect. Runs on the
+    /// session's owning host — the local backend delegates to the service; a
+    /// remote backend PATCHes the server, which relaunches server-side.
+    async fn change_program(&self, id: SessionId, program: String) -> BResult<()>;
     /// Move a session to `section`, or clear its manual override (`None`).
     async fn set_section(&self, id: SessionId, section: Option<String>) -> BResult<()>;
     /// Clear a session's unread flag.

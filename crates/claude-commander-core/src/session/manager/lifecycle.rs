@@ -538,6 +538,23 @@ impl SessionManager {
             )
         };
 
+        // Bump last_active_at *before* the destructive kill, mirroring
+        // [`Self::restart_session`]. A hibernation pass that snapshotted this
+        // session earlier compares the stamp at its pre-kill recheck
+        // ([`still_hibernatable`]); bumping it now means an in-flight
+        // fresh-restart — pane killed, not yet recreated — presents a changed
+        // stamp, so the racing hibernate bails instead of killing the pane we
+        // are about to rebuild. Matters for user-initiated relaunches of
+        // long-idle sessions (e.g. `change_program`), not just the attach-loop
+        // caller whose session was active moments ago.
+        self.store
+            .mutate(move |state| {
+                if let Some(session) = state.get_session_mut(&session_id) {
+                    session.touch();
+                }
+            })
+            .await?;
+
         let _ = self.tmux.kill_session(tmux_name).await;
 
         let launch_cmd = program_with_session_name(&program, &title);

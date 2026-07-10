@@ -332,6 +332,22 @@ impl App {
                     *program_picker = Some(picker);
                 }
             }
+            StateUpdate::ProgramChoicesLoaded {
+                session_id,
+                choices,
+            } => {
+                // Apply only if the change-program palette is still open for the
+                // same session; the user may have dismissed it or moved on.
+                if let Modal::QuickSwitch {
+                    mode: PaletteMode::ProgramPicker { session_id: sid },
+                    ..
+                } = &self.ui_state.modal
+                    && *sid == session_id
+                {
+                    self.ui_state.program_picker_choices = choices;
+                    self.refilter_quick_switch();
+                }
+            }
             StateUpdate::ServerProgramsLoaded {
                 backend,
                 generation,

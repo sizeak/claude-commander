@@ -393,6 +393,14 @@ pub struct SetSection {
     pub section: Option<String>,
 }
 
+/// Request body for changing a session's launch program (`PATCH /sessions/{id}`).
+/// The new program is the command that will be relaunched in the pane; the
+/// owning host relaunches the agent fresh so it takes effect.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChangeProgram {
+    pub program: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
