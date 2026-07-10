@@ -673,7 +673,10 @@ mod tests {
     #[test]
     fn frontend_identifies_binary_package() {
         let frontend = frontend();
-        assert_eq!(frontend.name, env!("CARGO_PKG_NAME"));
+        // Pin the actual telemetry identity, not just "matches the macro" —
+        // this is the string dashboards key on, and it must not silently
+        // drift back to the core crate's name (claude-commander-core).
+        assert_eq!(frontend.name, "claude-commander");
         assert_eq!(frontend.version, env!("CARGO_PKG_VERSION"));
     }
 }
