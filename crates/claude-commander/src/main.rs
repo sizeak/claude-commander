@@ -20,7 +20,10 @@ use claude_commander_core::{
 /// Identify this binary to the telemetry layer. Required by
 /// `CommanderService`/`App` — they panic if a frontend isn't supplied.
 fn frontend() -> claude_commander_core::telemetry::FrontendInfo {
-    claude_commander_core::telemetry::FrontendInfo::new(claude_commander_core::APP_NAME, VERSION)
+    claude_commander_core::telemetry::FrontendInfo::new(
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION"),
+    )
 }
 
 /// The remote-backend factory injected into the TUI. Keeps core free of a
@@ -29,19 +32,55 @@ fn frontend() -> claude_commander_core::telemetry::FrontendInfo {
 /// builds a `RemoteBackend`. A construction failure (malformed URL, etc.) is
 /// surfaced as a `BackendError` that the TUI renders as a degraded server.
 fn remote_backend_factory() -> claude_commander_core::backend::RemoteBackendFactory {
+    std::sync::Arc::new(build_remote_backend)
+}
+
+/// Build a `RemoteBackend` for one `[[remote_servers]]` config entry, boxed as
+/// the object-safe `CommanderBackend`. Shared by the TUI's backend factory and
+/// the CLI's `--remote` path so both map a config entry to a client the same
+/// way. A construction failure (malformed URL, etc.) surfaces as a
+/// `BackendError`.
+fn build_remote_backend(
+    cfg: &claude_commander_core::config::RemoteServerConfig,
+) -> claude_commander_core::backend::BResult<
+    std::sync::Arc<dyn claude_commander_core::backend::CommanderBackend>,
+> {
     use claude_commander_remote::{RemoteBackend, RemoteServerSpec, SecretString};
-    std::sync::Arc::new(|cfg: &claude_commander_core::config::RemoteServerConfig| {
-        let spec = RemoteServerSpec {
-            name: cfg.name.clone(),
-            base_url: cfg.url.clone(),
-            token: cfg.token.clone().map(SecretString::new),
-        };
-        let backend = RemoteBackend::new(spec)?;
-        Ok(std::sync::Arc::new(backend)
-            as std::sync::Arc<
-                dyn claude_commander_core::backend::CommanderBackend,
-            >)
-    })
+    let spec = RemoteServerSpec {
+        name: cfg.name.clone(),
+        base_url: cfg.url.clone(),
+        token: cfg.token.clone().map(SecretString::new),
+    };
+    let backend = RemoteBackend::new(spec)?;
+    Ok(std::sync::Arc::new(backend)
+        as std::sync::Arc<
+            dyn claude_commander_core::backend::CommanderBackend,
+        >)
+}
+
+/// Resolve a `CommanderBackend` for a one-shot CLI command. `remote` is the
+/// value of a `--remote <name>` flag: `None` builds the in-process
+/// [`LocalBackend`] (the historical CLI behaviour), `Some(name)` looks the name
+/// up in `[[remote_servers]]` and connects to that server. An unknown name is a
+/// hard error listing the configured servers (see
+/// `Config::find_remote_server`).
+fn resolve_cli_backend(
+    config: Config,
+    remote: Option<&str>,
+) -> Result<std::sync::Arc<dyn claude_commander_core::backend::CommanderBackend>> {
+    match remote {
+        None => {
+            let service =
+                claude_commander_core::api::CommanderService::for_cli(config, frontend())?;
+            Ok(std::sync::Arc::new(
+                claude_commander_core::backend::LocalBackend::new(service),
+            ))
+        }
+        Some(name) => {
+            let server = config.find_remote_server(name)?.clone();
+            Ok(build_remote_backend(&server)?)
+        }
+    }
 }
 
 fn setup_logging(debug: bool, to_file: bool) -> Result<()> {
@@ -129,7 +168,11 @@ fn raise_fd_limit() {
 fn raise_fd_limit() {}
 
 /// Execute async PTY-based attach to a tmux session
-async fn execute_attach(session_name: &str, editor_triggers: Vec<Vec<u8>>) {
+async fn execute_attach(
+    session_name: &str,
+    editor_triggers: Vec<Vec<u8>>,
+    switcher_revive: Option<claude_commander_core::tmux::SwitcherRevive>,
+) {
     // CLI `attach` resolves a Claude session by title/ID, never a shell. The
     // review toggle has no standalone UI here, so it's disabled (empty triggers).
     // Voice input needs the TUI's conversation runtime, so it's disabled here too.
@@ -141,6 +184,7 @@ async fn execute_attach(session_name: &str, editor_triggers: Vec<Vec<u8>>) {
         None,
         std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         true,
+        switcher_revive,
     )
     .await
     {
@@ -161,6 +205,29 @@ async fn execute_attach(session_name: &str, editor_triggers: Vec<Vec<u8>>) {
         Err(e) => {
             eprintln!("Failed to attach: {}", e);
         }
+    }
+}
+
+/// Attach to a session on a remote server over the backend's WebSocket
+/// transport, driving the same interactive loop the local PTY path uses. The
+/// driver itself lives in core (`attach_backend_session`); this only maps the
+/// outcome to CLI logging.
+async fn execute_remote_attach(
+    backend: std::sync::Arc<dyn claude_commander_core::backend::CommanderBackend>,
+    query: &str,
+    editor_triggers: Vec<Vec<u8>>,
+) {
+    match claude_commander_core::tmux::attach_backend_session(backend, query, editor_triggers).await
+    {
+        Ok(outcome) => match outcome.result {
+            AttachResult::Detached
+            | AttachResult::SwitchToShell
+            | AttachResult::SwitchToReview
+            | AttachResult::OpenEditor => info!("Detached from remote session"),
+            AttachResult::SessionEnded => info!("Remote session ended"),
+            AttachResult::Error(e) => eprintln!("Attach error: {e}"),
+        },
+        Err(e) => eprintln!("Failed to attach: {e}"),
     }
 }
 
@@ -404,23 +471,48 @@ async fn main() -> Result<()> {
             name,
             program,
             path,
+            project,
             initial_prompt,
             effort,
             mode,
             model,
             base_branch,
             section,
+            remote,
         }) => {
             setup_logging(cli.debug, false)?;
 
-            let service =
-                claude_commander_core::api::CommanderService::for_cli(config, frontend())?;
+            let backend = resolve_cli_backend(config, remote.as_deref())?;
 
-            println!("Creating session '{}'...", name);
-            let session_id = match service
+            // Path resolution precedence:
+            //   --project → look the name up in the backend's projects (works
+            //               for a remote without knowing its server-side path),
+            //   --path    → use it verbatim (also seeds a brand-new project),
+            //   neither   → the cwd locally; an error for a remote (the cwd
+            //               names nothing on the server).
+            // `--project` and `--path` are mutually exclusive (clap-enforced).
+            let project_path = match (project, path, remote.as_deref()) {
+                (Some(name), _, _) => {
+                    let snapshot = backend.workspace_snapshot().await?;
+                    claude_commander_core::cli::resolve_project_path(&snapshot.projects, &name)?
+                }
+                (None, Some(p), _) => p,
+                (None, None, None) => std::env::current_dir().unwrap_or_default(),
+                (None, None, Some(server)) => {
+                    eprintln!(
+                        "--path or --project is required with --remote {server} (the project path is resolved on the server, not this machine)."
+                    );
+                    std::process::exit(2);
+                }
+            };
+
+            match &remote {
+                Some(server) => println!("Creating session '{name}' on remote '{server}'..."),
+                None => println!("Creating session '{name}'..."),
+            }
+            let session_id = match backend
                 .create_session(claude_commander_core::api::CreateSessionOpts {
-                    project_path: path
-                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default()),
+                    project_path,
                     title: name,
                     program,
                     initial_prompt,
@@ -434,9 +526,10 @@ async fn main() -> Result<()> {
                 .await
             {
                 Ok(id) => id,
-                Err(claude_commander_core::Error::Session(
-                    claude_commander_core::error::SessionError::InvalidProgram(msg),
-                )) => {
+                // Bad input (invalid program flags/name) is a usage error, not a
+                // transport failure — surface it the way clap would, whether it
+                // came from the local backend or a remote server's 400.
+                Err(claude_commander_core::backend::BackendError::InvalidRequest(msg)) => {
                     clap::Error::raw(clap::error::ErrorKind::ArgumentConflict, format!("{msg}\n"))
                         .exit();
                 }
@@ -445,22 +538,47 @@ async fn main() -> Result<()> {
 
             println!("Session created: {}", session_id);
             println!();
-            println!("Attach with: claude-commander attach {}", session_id);
+            match &remote {
+                Some(server) => {
+                    println!("Attach with: claude-commander attach --remote {server} {session_id}")
+                }
+                None => println!("Attach with: claude-commander attach {}", session_id),
+            }
         }
 
-        Some(Commands::Attach { session }) => {
+        Some(Commands::Attach { session, remote }) => {
             setup_logging(cli.debug, false)?;
 
-            let app_state = AppState::load_or_exit();
+            let triggers = claude_commander_core::editor_trigger_bytes(&config.keybindings);
 
-            match claude_commander_core::cli::find_session(&app_state, &session) {
-                Some(s) => {
-                    let triggers = claude_commander_core::editor_trigger_bytes(&config.keybindings);
-                    execute_attach(&s.tmux_session_name, triggers).await;
+            match remote {
+                Some(name) => {
+                    let server = config.find_remote_server(&name)?.clone();
+                    let backend = build_remote_backend(&server)?;
+                    execute_remote_attach(backend, &session, triggers).await;
                 }
                 None => {
-                    eprintln!("Session not found: {}", session);
-                    eprintln!("Use 'claude-commander list' to see available sessions.");
+                    let app_state = AppState::load_or_exit();
+
+                    match claude_commander_core::cli::find_session(&app_state, &session) {
+                        Some(s) => {
+                            let tmux_name = s.tmux_session_name.clone();
+                            // Give the Ctrl+Space switcher revive-on-switch; a service
+                            // construction failure just degrades to switching without
+                            // reviving, as before.
+                            let revive = claude_commander_core::api::CommanderService::for_cli(
+                                config,
+                                frontend(),
+                            )
+                            .ok()
+                            .map(|svc| svc.switcher_revive_hook());
+                            execute_attach(&tmux_name, triggers, revive).await;
+                        }
+                        None => {
+                            eprintln!("Session not found: {}", session);
+                            eprintln!("Use 'claude-commander list' to see available sessions.");
+                        }
+                    }
                 }
             }
         }
@@ -477,7 +595,14 @@ async fn main() -> Result<()> {
             match claude_commander_core::commander::ensure_session(&config, &tmux, &cmd).await {
                 Ok(name) => {
                     let triggers = claude_commander_core::editor_trigger_bytes(&config.keybindings);
-                    execute_attach(&name, triggers).await;
+                    // Best-effort revive hook for the Ctrl+Space switcher: the
+                    // commander must stay usable even when state.json is
+                    // unreadable, so a `for_cli` failure means no hook.
+                    let revive =
+                        claude_commander_core::api::CommanderService::for_cli(config, frontend())
+                            .ok()
+                            .map(|svc| svc.switcher_revive_hook());
+                    execute_attach(&name, triggers, revive).await;
                 }
                 Err(
                     e @ claude_commander_core::Error::Session(
@@ -539,4 +664,19 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frontend_identifies_binary_package() {
+        let frontend = frontend();
+        // Pin the actual telemetry identity, not just "matches the macro" —
+        // this is the string dashboards key on, and it must not silently
+        // drift back to the core crate's name (claude-commander-core).
+        assert_eq!(frontend.name, "claude-commander");
+        assert_eq!(frontend.version, env!("CARGO_PKG_VERSION"));
+    }
 }

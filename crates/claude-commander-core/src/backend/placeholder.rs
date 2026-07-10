@@ -76,6 +76,7 @@ impl CommanderBackend for PlaceholderBackend {
             switcher_popup: false,
             commander_session: false,
             shell_toggle: false,
+            client_side_image_paste: false,
         }
     }
 
@@ -144,6 +145,10 @@ impl CommanderBackend for PlaceholderBackend {
     }
 
     async fn rename_session(&self, _id: SessionId, _title: String) -> BResult<()> {
+        self.unavailable()
+    }
+
+    async fn change_program(&self, _id: SessionId, _program: String) -> BResult<()> {
         self.unavailable()
     }
 

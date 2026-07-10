@@ -102,6 +102,10 @@ impl CommanderBackend for RemoteBackend {
             switcher_popup: false,
             commander_session: false,
             shell_toggle: false,
+            // The agent runs on the server host: the operator's clipboard image
+            // can't be read there, so the client captures it locally and uploads
+            // via `paste_image`.
+            client_side_image_paste: true,
         }
     }
 
@@ -242,6 +246,18 @@ impl CommanderBackend for RemoteBackend {
     async fn set_section(&self, id: SessionId, section: Option<String>) -> BResult<()> {
         self.client
             .set_section(id, section)
+            .await
+            .map_err(into_backend_error)
+    }
+    async fn change_program(&self, id: SessionId, program: String) -> BResult<()> {
+        self.client
+            .change_program(id, program)
+            .await
+            .map_err(into_backend_error)
+    }
+    async fn paste_image(&self, id: SessionId, png: Vec<u8>) -> BResult<()> {
+        self.client
+            .paste_image(id, png)
             .await
             .map_err(into_backend_error)
     }
@@ -541,6 +557,9 @@ mod tests {
             assert!(!caps.switcher_popup);
             assert!(!caps.commander_session);
             assert!(!caps.shell_toggle);
+            // Image paste is the exception: a remote agent can't read the
+            // operator's clipboard, so the client must capture + upload it.
+            assert!(caps.client_side_image_paste);
             let d = backend.descriptor();
             assert_eq!(d.name, "test-remote");
             assert_eq!(d.kind, BackendKind::Remote);

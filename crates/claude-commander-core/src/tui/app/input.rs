@@ -977,7 +977,7 @@ impl App {
 
     /// Activate the highlighted quick-switch row: jump to the session, run
     /// the command, or apply the section move.
-    async fn activate_quick_switch_selection(&mut self) {
+    pub(super) async fn activate_quick_switch_selection(&mut self) {
         // Clone the selected item so the borrow on `matches` is released
         // before we mutate `modal` and dispatch.
         let selected = match &self.ui_state.modal {
@@ -1021,6 +1021,22 @@ impl App {
                         "Remove remote server \"{name}\"?\n\nSessions keep running on the server; this only removes it from this TUI's config."
                     ),
                     on_confirm: ConfirmAction::RemoveRemoteServer { name },
+                };
+            }
+            Some(QuickSwitchItem::ProgramChange {
+                session_id,
+                program,
+                ..
+            }) => {
+                self.ui_state.modal = Modal::Confirm {
+                    title: "Change Program".to_string(),
+                    message: format!(
+                        "Change program to `{program}` and restart this session?\n\nThe current agent conversation will be terminated."
+                    ),
+                    on_confirm: ConfirmAction::ChangeProgram {
+                        session_id,
+                        program,
+                    },
                 };
             }
             None => {}
@@ -1213,6 +1229,9 @@ impl App {
             UserCommand::RestartSession => {
                 self.handle_restart_session();
             }
+            UserCommand::ChangeProgram => {
+                self.handle_change_program();
+            }
             UserCommand::ToggleKeepAlive => {
                 self.handle_toggle_keep_alive().await;
             }
@@ -1305,6 +1324,10 @@ impl App {
                 self.ui_state.modal = Modal::Help { scroll: 0 };
             }
             UserCommand::ShowSettings => {
+                // Populate the mic-device cache so the STT Microphone row shows a
+                // friendly label (not the raw id) as soon as the Conversation tab
+                // is opened, without enumerating on the render path.
+                self.refresh_input_devices();
                 let rows = self.build_settings_rows(SettingsTab::General);
                 let selected_row = super::settings::first_selectable_from(&rows, 0);
                 self.ui_state.modal = Modal::Settings(SettingsState {

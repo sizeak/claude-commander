@@ -1118,6 +1118,9 @@ impl App {
         if let PaletteMode::SectionPicker { session_id } = eff_mode {
             return self.gather_section_picker_items(session_id, eff_query);
         }
+        if let PaletteMode::ProgramPicker { session_id } = eff_mode {
+            return self.gather_program_picker_items(session_id, eff_query);
+        }
         if eff_mode == PaletteMode::RemoteServerPicker {
             return self.gather_remote_server_picker_items(eff_query);
         }
@@ -1196,6 +1199,26 @@ impl App {
             } = &mut self.ui_state.modal
             {
                 *matches = section_items;
+                if *selected_idx >= matches.len() {
+                    *selected_idx = matches.len().saturating_sub(1);
+                }
+                *scroll = 0;
+                *scroll = adjust_list_scroll(*selected_idx, *scroll, LIST_MAX_VISIBLE);
+            }
+            return;
+        }
+
+        // Program picker: same shape — re-filter the program rows and stop.
+        if let PaletteMode::ProgramPicker { session_id } = eff_mode {
+            let program_items = self.gather_program_picker_items(session_id, eff_query);
+            if let Modal::QuickSwitch {
+                matches,
+                selected_idx,
+                scroll,
+                ..
+            } = &mut self.ui_state.modal
+            {
+                *matches = program_items;
                 if *selected_idx >= matches.len() {
                     *selected_idx = matches.len().saturating_sub(1);
                 }
@@ -1590,6 +1613,106 @@ impl App {
             selected_idx: 0,
             scroll: 0,
         };
+    }
+
+    /// Open the "Change program" palette for the selected session. The palette
+    /// lists the owning backend's configured programs; selecting one confirms,
+    /// then changes the session's program and relaunches it fresh.
+    ///
+    /// The picker is seeded from local config immediately (correct and final for
+    /// a local session); for a remote-backed session a background task swaps in
+    /// the server's supported programs when its `create_options` returns, so the
+    /// palette never waits on that request.
+    pub(super) fn handle_change_program(&mut self) {
+        let Some(sref) = self.ui_state.selected_session_id else {
+            return;
+        };
+        let session_id = sref.id;
+        let current = self
+            .session(sref)
+            .map(|s| s.program.clone())
+            .unwrap_or_default();
+        self.ui_state.program_picker_choices = self.config.program_choices();
+        self.ui_state.program_picker_current = current;
+        let matches = self.gather_program_picker_items(session_id, "");
+        self.ui_state.modal = Modal::QuickSwitch {
+            mode: PaletteMode::ProgramPicker { session_id },
+            query: super::Input::default(),
+            matches,
+            selected_idx: 0,
+            scroll: 0,
+        };
+        self.spawn_remote_program_choices(sref.backend, session_id);
+    }
+
+    /// For a remote `backend`, spawn a background task that loads its supported
+    /// programs and posts [`StateUpdate::ProgramChoicesLoaded`] to replace the
+    /// change-program palette's local-config fallback. No-op for the local
+    /// backend (its choices come from local config and are already final).
+    fn spawn_remote_program_choices(&self, backend: BackendId, session_id: SessionId) {
+        if backend == LOCAL_BACKEND_ID {
+            return;
+        }
+        let backend = self.backend_arc(backend);
+        let tx = self.event_loop.sender();
+        tokio::spawn(async move {
+            let Ok(opts) = backend.create_options().await else {
+                // Query failed — leave the local fallback the palette already shows.
+                return;
+            };
+            if opts.programs.is_empty() {
+                return;
+            }
+            let choices = opts
+                .programs
+                .into_iter()
+                .map(crate::config::ProgramEntry::from)
+                .collect();
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::ProgramChoicesLoaded {
+                    session_id,
+                    choices,
+                }))
+                .await;
+        });
+    }
+
+    /// Build the program-picker rows for the change-program palette mode from
+    /// `program_picker_choices`, filtered by a label/command substring. The row
+    /// matching the session's current program is flagged.
+    pub(super) fn gather_program_picker_items(
+        &self,
+        session_id: SessionId,
+        filter_query: &str,
+    ) -> Vec<QuickSwitchItem> {
+        let q = filter_query.to_lowercase();
+        let current = &self.ui_state.program_picker_current;
+        self.ui_state
+            .program_picker_choices
+            .iter()
+            .filter(|e| {
+                q.is_empty()
+                    || e.label.to_lowercase().contains(&q)
+                    || e.command.to_lowercase().contains(&q)
+            })
+            .map(|e| {
+                let base = if e.label == e.command {
+                    e.command.clone()
+                } else {
+                    format!("{} ({})", e.label, e.command)
+                };
+                let label = if e.command == *current {
+                    format!("{base}  — current")
+                } else {
+                    base
+                };
+                QuickSwitchItem::ProgramChange {
+                    session_id,
+                    program: e.command.clone(),
+                    label,
+                }
+            })
+            .collect()
     }
 
     /// Handle "add remote server" — step 1 of the chained flow: prompt for a
@@ -2168,6 +2291,32 @@ impl App {
                 tokio::spawn(async move {
                     let result = backend
                         .restart_session(session_id)
+                        .await
+                        .map_err(|e| e.to_string());
+                    let _ = tx
+                        .send(AppEvent::StateUpdate(StateUpdate::RestartFinished {
+                            backend_id: backend_id.0,
+                            result,
+                        }))
+                        .await;
+                });
+            }
+            ConfirmAction::ChangeProgram {
+                session_id,
+                program,
+            } => {
+                // Spawn the change+relaunch so a slow/degraded remote never blocks
+                // the event loop; `RestartFinished` refreshes the view and toasts.
+                let backend_id = self.backend_of_session(session_id);
+                self.ui_state.status_message = Some((
+                    format!("Changing program to {program}…"),
+                    Instant::now() + Duration::from_secs(30),
+                ));
+                let backend = self.backend_arc(backend_id);
+                let tx = self.event_loop.sender();
+                tokio::spawn(async move {
+                    let result = backend
+                        .change_program(session_id, program)
                         .await
                         .map_err(|e| e.to_string());
                     let _ = tx

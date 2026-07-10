@@ -464,6 +464,12 @@ pub enum PaletteMode {
     /// Remote-server picker for the remove-server flow: one entry per
     /// configured `[[remote_servers]]`; selecting one opens a confirm modal.
     RemoteServerPicker,
+    /// Program (agent) picker for a specific session. The palette lists the
+    /// owning backend's configured programs; selecting one opens a confirm modal
+    /// that changes the session's program and relaunches it.
+    ProgramPicker {
+        session_id: SessionId,
+    },
 }
 
 /// A row in the quick-switch palette — either an open session, a
@@ -485,6 +491,15 @@ pub enum QuickSwitchItem {
     RemoteServerRemove {
         name: String,
         /// Pre-formatted display label (`name (url)`).
+        label: String,
+    },
+    /// Selecting this row opens a confirm modal to change `session_id`'s program
+    /// to `program` and relaunch it (program-picker palette mode).
+    ProgramChange {
+        session_id: SessionId,
+        /// The launch command to switch to.
+        program: String,
+        /// Pre-formatted display label.
         label: String,
     },
 }
@@ -677,10 +692,13 @@ pub enum ProgramsEditing {
     RenamingLabel { value: Input },
     /// Editing the selected field (label or command) in Fields focus.
     EditingField { value: Input },
-    /// Step 1 of `n`: entering the new entry's label.
+    /// Step 1 of `n`: naming the just-added entry. The entry already exists in
+    /// `entries` (so it shows in the list immediately); this only edits its
+    /// label. An empty/duplicate label keeps the auto-generated default.
     CreatingLabel { value: Input },
-    /// Step 2 of `n`: entering the new entry's command (prefilled from label).
-    CreatingCommand { label: String, value: Input },
+    /// Step 2 of `n`: setting the just-added entry's command (seeded from its
+    /// label). The entry is already in `entries`; this only edits its command.
+    CreatingCommand { value: Input },
 }
 
 /// State for the settings modal
@@ -810,11 +828,33 @@ pub enum SettingsEditing {
         action_name: String,
         keys: Vec<String>,
     },
-    /// Picking from a list of options (used for theme presets)
+    /// Picking from a list of options (theme presets, speak scope, microphone).
     OptionPicker {
-        options: Vec<String>,
+        options: Vec<PickerOption>,
         selected: usize,
     },
+}
+
+/// One entry in an [`SettingsEditing::OptionPicker`]: the `label` shown in the
+/// dropdown and the `value` committed to config when it's chosen. They differ
+/// only when the display text isn't the stored value — e.g. a microphone's
+/// friendly name (label) versus its stable device id (value). For simple enum
+/// pickers use [`PickerOption::plain`], where the two are the same.
+#[derive(Debug, Clone)]
+pub struct PickerOption {
+    pub label: String,
+    pub value: String,
+}
+
+impl PickerOption {
+    /// A picker entry whose committed value is the same as its display label.
+    pub fn plain(text: impl Into<String>) -> Self {
+        let text = text.into();
+        Self {
+            label: text.clone(),
+            value: text,
+        }
+    }
 }
 
 /// Which field of the New Session input modal currently has focus. Tab cycles
@@ -1053,6 +1093,11 @@ pub enum ConfirmAction {
     RestartSession {
         session_id: SessionId,
     },
+    /// Change a session's program (agent) to `program` and relaunch it fresh.
+    ChangeProgram {
+        session_id: SessionId,
+        program: String,
+    },
     RemoveProject {
         project_id: ProjectId,
     },
@@ -1096,6 +1141,11 @@ pub struct AppUiState {
     pub diff_info: Arc<DiffInfo>,
     /// Status message (with expiry time)
     pub status_message: Option<(String, Instant)>,
+    /// Backend ids (raw) that have already shown their one-time version-mismatch
+    /// toast this session, so a stale server warns once rather than on every
+    /// snapshot fold. Ids are monotonic, so a re-added server gets a fresh id
+    /// and re-toasts.
+    pub version_warned: HashSet<usize>,
     /// Should quit
     pub should_quit: bool,
     /// Last known terminal size (updated each render frame)
@@ -1199,6 +1249,17 @@ pub struct AppUiState {
     /// (The project-pull scheduler state that used to sit alongside this
     /// moved into `CommanderService`'s background tasks.)
     pub lfs_pull_in_flight: std::collections::HashSet<SessionId>,
+    /// Program choices for the change-program palette (`ProgramPicker` mode).
+    /// Re-seeded from local config each time the palette opens and replaced by
+    /// the owning backend's list once `ProgramChoicesLoaded` arrives for a remote
+    /// session. The refilter rebuilds the palette rows from this. Only read while
+    /// the `ProgramPicker` palette is open, so a stale value between opens is
+    /// inert (not cleared on close).
+    pub program_picker_choices: Vec<crate::config::ProgramEntry>,
+    /// The current program of the session the change-program palette targets, so
+    /// its row can be flagged. Re-set each time the palette opens; like
+    /// `program_picker_choices`, only read while that palette is open.
+    pub program_picker_current: String,
 }
 
 impl Default for AppUiState {
@@ -1218,6 +1279,7 @@ impl Default for AppUiState {
             preview_content: String::new(),
             diff_info: Arc::new(DiffInfo::empty()),
             status_message: None, // (message, expiry)
+            version_warned: HashSet::new(),
             review_body_rect: None,
             review_file_list_rect: None,
             modal_list_rect: None,
@@ -1252,6 +1314,8 @@ impl Default for AppUiState {
             stack_chain: Vec::new(),
             project_pull_blocked: HashMap::new(),
             lfs_pull_in_flight: std::collections::HashSet::new(),
+            program_picker_choices: Vec::new(),
+            program_picker_current: String::new(),
         }
     }
 }
@@ -1279,6 +1343,7 @@ impl AppUiState {
             | BindableAction::DeleteSession
             | BindableAction::RenameSession
             | BindableAction::RestartSession
+            | BindableAction::ChangeProgram
             | BindableAction::ToggleKeepAlive
             | BindableAction::OpenPullRequest
             | BindableAction::OpenReviewDiff
@@ -1474,6 +1539,11 @@ pub struct App {
     /// Conversation mode runtime (headless streaming `claude` session + TTS).
     /// Lives here, not in the overlay modal, so it keeps running while closed.
     conversation: conversation::ConversationRuntime,
+    /// Cached list of input (capture) devices for the STT Microphone setting,
+    /// refreshed when the settings modal / mic picker opens. Lets the settings
+    /// row map the persisted device id to its friendly label without enumerating
+    /// the audio host on the render path (which `build_settings_rows` sits on).
+    stt_input_devices: Vec<crate::conversation::recorder::InputDevice>,
     /// Terminal graphics capability for the review image view, probed ONCE
     /// before the input reader starts (see `run`); `None` until then. Kept on
     /// `App` rather than in `DiffReviewState` because the protocol cache below
@@ -1553,6 +1623,7 @@ impl App {
             suppress_keys_until: Instant::now(),
             digit_accumulator: super::digit_accumulator::DigitAccumulator::new(debounce),
             conversation: conversation::ConversationRuntime::default(),
+            stt_input_devices: Vec::new(),
             picker: None,
             review_images: RefCell::new(HashMap::new()),
             review_image_gen: Cell::new(0),
@@ -2252,6 +2323,30 @@ impl App {
                                 .map(|h| h.backend.capabilities().switcher_popup)
                                 .unwrap_or(false);
 
+                            // For a remote agent pane, hand the attach loop a sink
+                            // that uploads a captured clipboard image via the
+                            // owning backend (the remote agent can't read the
+                            // operator's clipboard on Ctrl+V). Only the agent pane
+                            // (where Claude runs) and only backends that advertise
+                            // `client_side_image_paste` (i.e. remote) get one.
+                            let image_paste: Option<Arc<dyn crate::tmux::ImagePasteSink>> =
+                                match &current {
+                                    AttachTarget::Session {
+                                        session,
+                                        kind: AttachKind::Agent,
+                                    } => self.backend(session.backend).and_then(|h| {
+                                        h.backend.capabilities().client_side_image_paste.then(
+                                            || {
+                                                crate::tmux::BackendImagePaste::sink(
+                                                    h.backend.clone(),
+                                                    session.id,
+                                                )
+                                            },
+                                        )
+                                    }),
+                                    _ => None,
+                                };
+
                             // Open the connection first (the backend revives a
                             // dead tmux session and stamps last-attached); a
                             // failure surfaces as an error modal.
@@ -2295,7 +2390,7 @@ impl App {
                                         crate::config::keybindings::voice_trigger_bytes(
                                             &self.config.keybindings,
                                         ),
-                                        self.conversation.listener.clone(),
+                                        Some(self.conversation.listener.clone()),
                                     )
                                 } else {
                                     (Vec::new(), None)
@@ -2310,6 +2405,16 @@ impl App {
                                 intercept_ctrl_z,
                                 switcher_enabled,
                                 session_name: name.clone(),
+                                // Revive a switcher pick whose tmux session
+                                // died (e.g. after a reboot) the way the
+                                // tree-view attach does. The switcher only
+                                // lists local sessions, so the local service
+                                // owns the revive regardless of which backend
+                                // the currently-attached session is on.
+                                switcher_revive: self
+                                    .local_backend()
+                                    .map(|b| b.service().switcher_revive_hook()),
+                                image_paste,
                             };
 
                             let outcome = match crate::tmux::run_attach(streams, cfg).await {

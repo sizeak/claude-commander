@@ -538,6 +538,23 @@ impl SessionManager {
             )
         };
 
+        // Bump last_active_at *before* the destructive kill, mirroring
+        // [`Self::restart_session`]. A hibernation pass that snapshotted this
+        // session earlier compares the stamp at its pre-kill recheck
+        // ([`still_hibernatable`]); bumping it now means an in-flight
+        // fresh-restart — pane killed, not yet recreated — presents a changed
+        // stamp, so the racing hibernate bails instead of killing the pane we
+        // are about to rebuild. Matters for user-initiated relaunches of
+        // long-idle sessions (e.g. `change_program`), not just the attach-loop
+        // caller whose session was active moments ago.
+        self.store
+            .mutate(move |state| {
+                if let Some(session) = state.get_session_mut(&session_id) {
+                    session.touch();
+                }
+            })
+            .await?;
+
         let _ = self.tmux.kill_session(tmux_name).await;
 
         let launch_cmd = program_with_session_name(&program, &title);
@@ -607,19 +624,8 @@ impl SessionManager {
                     .get_project(&session.project_id)
                     .map(|p| p.repo_path.clone())
             };
-
-            if let Some(repo_path) = repo_path
-                && let Ok(backend) = GitBackend::open(&repo_path)
-            {
-                let worktree_manager =
-                    WorktreeManager::new(backend, self.config_store.read().worktrees_dir()?);
-                if let Err(e) = worktree_manager
-                    .remove_worktree(&session.worktree_path, true)
-                    .await
-                {
-                    warn!("Failed to remove worktree: {}", e);
-                }
-            }
+            self.remove_session_worktree(repo_path.as_deref(), &session.worktree_path)
+                .await?;
         }
 
         // Update state
@@ -776,25 +782,83 @@ impl SessionManager {
             .ok_or_else(|| SessionError::NotFound(sid).into())
     }
 
+    /// Remove a session's git worktree, best-effort. `repo_path` is the owning
+    /// project's repository path (where the worktree list lives); `None` — or a
+    /// path that isn't a git repo — skips removal. A removal failure is logged
+    /// and swallowed: the caller has already dropped (or is about to drop) the
+    /// session, and an orphaned worktree is reconciled at next startup. Returns
+    /// `Err` only if the configured worktrees dir can't be resolved.
+    pub(super) async fn remove_session_worktree(
+        &self,
+        repo_path: Option<&Path>,
+        worktree_path: &Path,
+    ) -> Result<()> {
+        if let Some(repo_path) = repo_path
+            && let Ok(backend) = GitBackend::open(repo_path)
+        {
+            let worktree_manager =
+                WorktreeManager::new(backend, self.config_store.read().worktrees_dir()?);
+            if let Err(e) = worktree_manager.remove_worktree(worktree_path, true).await {
+                warn!("Failed to remove worktree: {}", e);
+            }
+        }
+        Ok(())
+    }
+
     /// Delete a session (remove from state)
     #[instrument(skip(self))]
     pub async fn delete_session(&self, session_id: &SessionId) -> Result<()> {
-        // Kill the tmux session (a no-op if it isn't running) AND remove the
-        // git worktree. Unconditional: a Stopped session no longer has a live
-        // tmux session but its worktree is still on disk and must be cleaned up
-        // — gating this on `status.is_active()` leaked stopped sessions'
-        // worktrees.
-        self.kill_session(session_id, true).await?;
+        // Resolve the owning project's repo path up front (needed to open the
+        // git backend for worktree removal) — a cheap store read while the
+        // session still exists.
+        let repo_path = {
+            let state = self.store.read().await;
+            let session = state
+                .get_session(session_id)
+                .ok_or(SessionError::NotFound(*session_id))?;
+            state
+                .get_project(&session.project_id)
+                .map(|p| p.repo_path.clone())
+        };
 
-        // Remove from state, re-pointing stacked children onto the parent and
-        // returning the durable PR-base edits — planned atomically with the
-        // removal inside the same mutate, so no concurrent task can invalidate
-        // the plan between read and remove.
+        // Remove from state FIRST so the tree updates immediately: this single
+        // mutate bumps the change feed, and the row disappears without waiting on
+        // the slow tmux-kill + `git worktree remove` below (which the kill-first
+        // ordering used to block the row's removal on). Stacked children are
+        // re-pointed onto the parent and the durable PR-base edits are planned
+        // atomically inside the same mutate — so no concurrent task can
+        // invalidate the plan between read and remove — and it hands back the
+        // removed session so the teardown still has its tmux names and worktree
+        // path.
         let sid = *session_id;
-        let pr_retargets = self
+        let (removed, pr_retargets) = self
             .store
-            .mutate(move |state| state.remove_session_retargeting_children(&sid).1)
+            .mutate(move |state| state.remove_session_retargeting_children(&sid))
             .await?;
+        let Some(session) = removed else {
+            // A concurrent delete won the race and already removed it.
+            return Err(SessionError::NotFound(*session_id).into());
+        };
+
+        // Tear down the (already-removed) session's resources. Unconditional: a
+        // Stopped session has no live tmux session but its worktree is still on
+        // disk and must be cleaned up. A failure here can't restore the row and
+        // only orphans a resource that startup reconciliation cleans up, so it's
+        // logged rather than propagated.
+        self.kill_tmux_sessions(
+            &session.tmux_session_name,
+            session.shell_tmux_session_name.as_deref(),
+        )
+        .await;
+        // Swallow (don't `?`) any teardown error: the session is already gone, so
+        // propagating would report a failed delete and skip the child-PR retarget
+        // below, leaving children retargeted locally but not on GitHub.
+        if let Err(e) = self
+            .remove_session_worktree(repo_path.as_deref(), &session.worktree_path)
+            .await
+        {
+            warn!("Failed to remove worktree while deleting session: {}", e);
+        }
 
         // Durably retarget child PRs on GitHub (best-effort, non-fatal).
         Self::retarget_child_prs(pr_retargets).await;
@@ -1044,6 +1108,24 @@ mod lifecycle_tests {
         );
     }
 
+    #[test]
+    fn model_flag_injected_for_opencode() {
+        assert_eq!(
+            program_with_agent_flags("opencode", None, None, Some("anthropic/claude-sonnet-4-5")),
+            "opencode --model anthropic/claude-sonnet-4-5"
+        );
+        // Claude-only flags are ignored for OpenCode.
+        assert_eq!(
+            program_with_agent_flags(
+                "opencode",
+                Some("auto"),
+                Some("high"),
+                Some("anthropic/claude-sonnet-4-5")
+            ),
+            "opencode --model anthropic/claude-sonnet-4-5"
+        );
+    }
+
     // --- program_with_session_name ---
 
     #[test]
@@ -1065,6 +1147,9 @@ mod lifecycle_tests {
         // Codex has no `-n` session-name flag — leave its command untouched.
         let codex = program_with_session_name("codex", "my session");
         assert_eq!(codex, "codex");
+        // OpenCode has no `-n` session-name flag either.
+        let opencode = program_with_session_name("opencode", "my session");
+        assert_eq!(opencode, "opencode");
     }
 
     #[test]
@@ -1085,7 +1170,12 @@ mod lifecycle_tests {
     fn resume_program_for_forces_resume_per_harness() {
         assert_eq!(resume_program_for("claude", true), "claude --resume");
         assert_eq!(resume_program_for("codex", true), "codex resume --last");
-        // Flags on the base command survive the resume rewrite.
+        assert_eq!(resume_program_for("opencode", true), "opencode --continue");
+        assert_eq!(
+            resume_program_for("opencode --auto", true),
+            "opencode --auto --continue"
+        );
+
         assert_eq!(resume_program_for("claude -c", true), "claude -c --resume");
     }
 

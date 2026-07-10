@@ -90,6 +90,9 @@ pub enum SessionError {
 
     #[error("File not in the current review diff: {0}")]
     FileNotInDiff(String),
+
+    #[error("Invalid pasted image: {0}")]
+    InvalidImage(String),
 }
 
 /// Tmux integration errors

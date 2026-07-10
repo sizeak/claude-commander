@@ -112,6 +112,12 @@ pub struct BackendCapabilities {
     pub commander_session: bool,
     /// Ctrl+\ agent↔shell pane toggle.
     pub shell_toggle: bool,
+    /// The agent runs on a remote host, so image paste must be captured from the
+    /// *client's* local clipboard and uploaded (the remote agent can't read the
+    /// operator's clipboard on Ctrl+V). False for a local backend, where the
+    /// co-located agent reads the local clipboard itself. Gates the attach
+    /// loop's Ctrl+V interception + [`CommanderBackend::paste_image`] upload.
+    pub client_side_image_paste: bool,
 }
 
 impl BackendCapabilities {
@@ -122,6 +128,9 @@ impl BackendCapabilities {
         switcher_popup: true,
         commander_session: true,
         shell_toggle: true,
+        // The local agent reads the operator's clipboard directly on Ctrl+V, so
+        // no client-side capture/upload is needed.
+        client_side_image_paste: false,
     };
 }
 
@@ -233,9 +242,64 @@ pub(crate) fn empty_snapshot() -> WorkspaceSnapshot {
         server: ServerStatus {
             gh_available: false,
             tmux_ok: false,
+            // The client's own version. The version-mismatch warning
+            // (`server_version_mismatch`) depends on this: seeding the
+            // placeholder with the client version means `server == client`
+            // before the first real snapshot lands, so a connecting backend
+            // never flags a false mismatch. A `"0.0.0"` seed would wrongly warn
+            // during "connecting…".
             version: env!("CARGO_PKG_VERSION").to_string(),
         },
     }
+}
+
+/// A detected skew where a backend's server build is behind the client build.
+/// Rendered as a non-blocking annotation on the server header; carries both
+/// full version strings verbatim for display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VersionMismatch {
+    pub server: String,
+    pub client: String,
+}
+
+/// The leading ASCII-digit run of `s` as a `u64`, or `None` if it doesn't start
+/// with a digit (so a component like `"0-rc"` yields `0` and `"v0"` yields
+/// `None`). Overflowing values also yield `None` (via `parse`). Allocation-free:
+/// this runs per backend on every `refresh_list_items`.
+fn leading_number(s: &str) -> Option<u64> {
+    let end = s.bytes().take_while(u8::is_ascii_digit).count();
+    // `end` is a valid boundary (ASCII digits are single-byte); an empty prefix
+    // parses to `Err` → `None`.
+    s.get(..end)?.parse().ok()
+}
+
+/// Parse `(major, minor)` from a version string, ignoring patch and any
+/// pre-release/build suffix. Splits on `.`, takes the first two components, and
+/// reads the leading digit run of each. `None` if there are fewer than two
+/// components or either leading-digit run is empty.
+fn major_minor(version: &str) -> Option<(u64, u64)> {
+    let mut parts = version.split('.');
+    let major = leading_number(parts.next()?)?;
+    let minor = leading_number(parts.next()?)?;
+    Some((major, minor))
+}
+
+/// `Some(VersionMismatch)` when the server's major.minor is strictly behind the
+/// client's — the direction where the client may call endpoints the older
+/// server lacks. `None` when equal, newer, or unparseable (conservative: no
+/// false alarms).
+///
+/// Deliberately one-directional: a client *older* than its server is not warned.
+/// That skew tends to surface as deserialization errors driving the remote
+/// [`Degraded`](ConnectionState::Degraded) anyway, and warning both ways would
+/// nag every user who hasn't upgraded to a server's latest point release.
+pub fn server_version_mismatch(server: &str, client: &str) -> Option<VersionMismatch> {
+    let server_mm = major_minor(server)?;
+    let client_mm = major_minor(client)?;
+    (server_mm < client_mm).then(|| VersionMismatch {
+        server: server.to_string(),
+        client: client.to_string(),
+    })
 }
 
 /// One backend the TUI drives: its id, the trait object (cloneable across
@@ -478,6 +542,11 @@ pub trait CommanderBackend: Send + Sync {
     }
     async fn delete_session(&self, id: SessionId) -> BResult<()>;
     async fn rename_session(&self, id: SessionId, title: String) -> BResult<()>;
+    /// Change a session's launch program (the agent harness that runs) and
+    /// relaunch its pane fresh so the new program takes effect. Runs on the
+    /// session's owning host — the local backend delegates to the service; a
+    /// remote backend PATCHes the server, which relaunches server-side.
+    async fn change_program(&self, id: SessionId, program: String) -> BResult<()>;
     /// Move a session to `section`, or clear its manual override (`None`).
     async fn set_section(&self, id: SessionId, section: Option<String>) -> BResult<()>;
     /// Clear a session's unread flag.
@@ -488,6 +557,18 @@ pub trait CommanderBackend: Send + Sync {
     async fn toggle_keep_alive(&self, id: SessionId) -> BResult<bool>;
     /// Mark a batch of sessions unread (paired with [`Self::mark_read`]).
     async fn mark_unread(&self, ids: Vec<SessionId>) -> BResult<()>;
+
+    /// Upload a pasted image (PNG bytes) for a session and inject its file path
+    /// into the agent pane. Only meaningful for backends whose
+    /// [`Self::capabilities`] set `client_side_image_paste` (i.e. remote): the
+    /// TUI captures the operator's local clipboard image and hands the bytes
+    /// here. The default rejects the call — a local backend never needs it (the
+    /// co-located agent reads the clipboard itself).
+    async fn paste_image(&self, _id: SessionId, _png: Vec<u8>) -> BResult<()> {
+        Err(BackendError::InvalidRequest(
+            "image paste is not supported by this backend".into(),
+        ))
+    }
 
     /// Persist a batch of PR-check results and refresh status bars. Takes the
     /// core `PrCheckResult` because PR polling is a *local* capability (the
@@ -592,6 +673,56 @@ mod tests {
         assert!(v.snapshot.sessions.is_empty());
         assert!(v.agent_states.states.is_empty());
         assert_eq!(v.connection, ConnectionState::Connecting);
+    }
+
+    #[test]
+    fn version_mismatch_flags_older_server() {
+        // Server behind at the minor level, or the major level, warns.
+        assert_eq!(
+            server_version_mismatch("0.24.3", "0.25.0"),
+            Some(VersionMismatch {
+                server: "0.24.3".to_string(),
+                client: "0.25.0".to_string(),
+            })
+        );
+        assert!(server_version_mismatch("0.9.0", "1.0.0").is_some());
+    }
+
+    #[test]
+    fn version_mismatch_silent_when_not_older() {
+        // Equal, newer, and patch-only-older all stay quiet.
+        assert_eq!(server_version_mismatch("0.25.0", "0.25.0"), None);
+        assert_eq!(server_version_mismatch("0.26.0", "0.25.0"), None);
+        // Patch-only difference: major.minor are equal, so no warning.
+        assert_eq!(server_version_mismatch("0.25.0", "0.25.1"), None);
+    }
+
+    #[test]
+    fn version_mismatch_ignores_prerelease_and_build_suffixes() {
+        // Suffix on the patch component doesn't affect major.minor.
+        assert!(server_version_mismatch("0.24.0-rc.1", "0.25.0").is_some());
+        assert_eq!(server_version_mismatch("0.25.0-rc.1", "0.25.0"), None);
+        assert_eq!(server_version_mismatch("0.25.0+abc123", "0.25.0"), None);
+    }
+
+    #[test]
+    fn version_mismatch_none_on_unparseable() {
+        // A malformed server version (or client) never warns.
+        for bad in ["", "abc", "1", "v0.25.0"] {
+            assert_eq!(server_version_mismatch(bad, "0.25.0"), None, "server={bad}");
+            assert_eq!(server_version_mismatch("0.24.0", bad), None, "client={bad}");
+        }
+    }
+
+    #[test]
+    fn version_mismatch_absent_for_connecting_placeholder() {
+        // The placeholder seeds the client's own version, so a backend that has
+        // not yet received a real snapshot must not flag a mismatch.
+        let v = BackendView::connecting();
+        assert_eq!(
+            server_version_mismatch(&v.snapshot.server.version, crate::VERSION),
+            None
+        );
     }
 
     #[test]

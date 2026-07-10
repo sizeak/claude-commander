@@ -413,6 +413,98 @@ impl CommanderService {
         Ok(Some(tmux_name))
     }
 
+    /// Resolve a session by **tmux session name** (primary or shell pair) and
+    /// prepare its agent pane for attach, exactly as
+    /// [`Self::resolve_attach_session`] does for a title/id query: a dead tmux
+    /// session is revived (agent resumed, status bar reconfigured) and
+    /// `last_attached_at` is stamped for MRU ordering. Returns the primary
+    /// tmux name to attach or switch to. Used by the in-session Ctrl+Space
+    /// switcher, whose picker knows sessions only by tmux name.
+    pub async fn ensure_attachable_by_tmux_name(&self, tmux_name: &str) -> Result<String> {
+        let session_id = {
+            let state = self.store.read().await;
+            state
+                .sessions
+                .values()
+                .find(|s| s.matches_tmux_name(tmux_name))
+                .map(|s| s.id)
+        };
+        let id =
+            session_id.ok_or_else(|| SessionError::TmuxSessionNotFound(tmux_name.to_string()))?;
+        let name = self.manager.ensure_attachable(&id).await?;
+        self.mark_attached(&id).await?;
+        Ok(name)
+    }
+
+    /// Wrap this service as the [`crate::tmux::SwitcherRevive`] hook the
+    /// attach loop invokes before `tmux switch-client`, so the in-session
+    /// switcher revives a dead pick the same way the tree-view attach path
+    /// does (via [`Self::ensure_attachable_by_tmux_name`]).
+    pub fn switcher_revive_hook(&self) -> crate::tmux::SwitcherRevive {
+        let service = self.clone();
+        Arc::new(move |name: String| {
+            let service = service.clone();
+            Box::pin(async move { service.ensure_attachable_by_tmux_name(&name).await })
+        })
+    }
+
+    /// Store a pasted image for a remote session and inject its file path into
+    /// the session's Claude pane.
+    ///
+    /// The desktop TUI captures the *local* clipboard image on Ctrl+V during a
+    /// remote attach and uploads the bytes here (via the server's
+    /// `POST /api/sessions/{id}/paste-image` route). We validate + write them to
+    /// a pruned temp file under the OS temp dir, then `send-keys -l` the absolute
+    /// path into the agent pane so the Claude CLI — which accepts a plain-text
+    /// image path in the prompt — picks it up. No Enter is sent: the user adds
+    /// prompt text and submits. Returns the written path.
+    ///
+    /// Errors: [`SessionError::InvalidImage`] (bad/oversized content → 400),
+    /// [`SessionError::TmuxSessionNotFound`] (no such session → 404).
+    pub async fn paste_image(&self, query: &str, bytes: &[u8]) -> Result<PathBuf> {
+        // Validate the bytes up front so junk/oversized input is a clean 400
+        // regardless of whether the session exists (and before any disk write).
+        crate::paste_image::validate(bytes)?;
+
+        let tmux_name = self
+            .resolve_tmux_session(query)
+            .await?
+            .ok_or_else(|| SessionError::TmuxSessionNotFound(query.to_string()))?;
+
+        // Store under the OS temp dir, not the data dir: the temp dir is
+        // space-free on every platform (macOS's data dir under `~/Library/
+        // Application Support/…` contains spaces, which the CLI would mis-parse
+        // in an unquoted injected path), and it's the same location
+        // `write_apply_brief` uses for comment-apply briefs — proven readable by
+        // the agent without a permission prompt. Tests override the base via
+        // `paste_images_dir` to keep writes (and the store's prune) off the real
+        // `/tmp`, per the repo's test-isolation rule.
+        let base = self
+            .read_config()
+            .paste_images_dir
+            .unwrap_or_else(std::env::temp_dir);
+        let store = crate::paste_image::PasteImageStore::new(&base);
+        let path = store.store(bytes)?;
+
+        // Inject the path with `send-keys -l` (no Enter). Unlike automated
+        // comment-apply, this is user-initiated (the operator pressed Ctrl+V) and
+        // user-visible (they're attached and watching the pane), so it is *not*
+        // gated on agent state via `decide_send`: if the agent happens to be at a
+        // prompt, the user sees the path land and can correct it. The composed
+        // text wraps the path in spaces and escapes any interior space; the path
+        // is server-generated (UUID name, space-free temp dir) so it carries no
+        // client-controlled content.
+        let injected = crate::paste_image::compose_injection(&path);
+        self.manager
+            .tmux
+            .send_keys_literal(&tmux_name, &injected)
+            .await?;
+
+        self.telemetry.feature("paste_image");
+        debug!("pasted image for session {} -> {}", query, path.display());
+        Ok(path)
+    }
+
     pub async fn check_tmux(&self) -> Result<()> {
         self.manager.check_tmux().await
     }
@@ -1306,6 +1398,35 @@ impl CommanderService {
             .await
     }
 
+    /// Change a session's launch program (which agent harness runs) and relaunch
+    /// its pane so the new program takes effect. The stored `program` is the
+    /// single source of truth for the harness ([`AgentKind`] is derived from it)
+    /// and only applies at launch, so the pane is restarted *fresh* — a different
+    /// harness cannot resume the previous one's conversation. Runs on the
+    /// session's owning host (called directly by the local backend and by the
+    /// server's PATCH handler for remote sessions).
+    pub async fn change_program(&self, id: &SessionId, program: impl Into<String>) -> Result<()> {
+        let program = program.into().trim().to_string();
+        if program.is_empty() {
+            return Err(SessionError::InvalidProgram("program cannot be empty".to_string()).into());
+        }
+        self.ensure_session_exists(id).await?;
+        self.telemetry.feature("session.change_program");
+        let sid = *id;
+        let prog = program.clone();
+        self.store
+            .mutate(move |state| {
+                if let Some(s) = state.get_session_mut(&sid) {
+                    s.program = prog;
+                }
+            })
+            .await?;
+        // Relaunch so the newly-chosen agent actually runs. Fresh (no `--resume`):
+        // the previous harness's conversation belongs to a different CLI and
+        // can't be resumed by the new one.
+        self.manager.restart_session_fresh(id).await
+    }
+
     /// Move a session to a section (`Some(name)`) or clear its manual override
     /// and re-run predicate assignment (`None`). Mirrors the TUI's
     /// `apply_section_move`.
@@ -2154,11 +2275,11 @@ pub fn validate_program_flags(opts: &CreateSessionOpts, resolved_program: &str) 
         ))
         .into());
     }
-    // `--model` is understood by both Claude and Codex.
+    // `--model` is understood by Claude, Codex, and OpenCode.
     if opts.model.is_some() && !kind.supports_model_flag() {
         return Err(SessionError::InvalidProgram(format!(
             "--model is only supported for programs that accept it, e.g. \
-             claude or codex (got {:?})",
+             claude, codex, or opencode (got {:?})",
             resolved_program
         ))
         .into());
@@ -2230,10 +2351,11 @@ fn ensure_install_id(store: &Arc<StateStore>) -> String {
 // Construction that needs core's domain model is done by
 // `session_info_from_session` below.
 pub use claude_commander_protocol::api::{
-    AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, DiffStat,
-    NewComment, OperationKind, OperationOutcome, OperationStatus, PreviewData, ProgramInfo,
-    ProjectInfo, PullBlockReason, PullStatus, RenameSession, ReviewSnapshot, ServerStatus,
-    SessionDetail, SessionInfo, SetProgramsRequest, SetSection, ToggleReviewed, WorkspaceSnapshot,
+    AgentStatesSnapshot, BranchInfo, ChangeProgram, CreateOptions, CreateSessionOpts, DiffSide,
+    DiffStat, NewComment, OperationKind, OperationOutcome, OperationStatus, PreviewData,
+    ProgramInfo, ProjectInfo, PullBlockReason, PullStatus, RenameSession, ReviewSnapshot,
+    ServerStatus, SessionDetail, SessionInfo, SetProgramsRequest, SetSection, ToggleReviewed,
+    WorkspaceSnapshot,
 };
 
 /// Build a [`SessionInfo`] wire DTO from core's `WorktreeSession` domain model.
@@ -2636,6 +2758,23 @@ mod tests {
             stack_parent: None,
         };
         validate_program_flags(&opts, "codex").unwrap();
+    }
+
+    #[test]
+    fn validate_allows_opencode_with_model() {
+        let opts = CreateSessionOpts {
+            project_path: PathBuf::from("/tmp/repo"),
+            title: "test".to_string(),
+            program: Some("opencode".to_string()),
+            initial_prompt: None,
+            effort: None,
+            mode: None,
+            model: Some("anthropic/claude-sonnet-4-5".to_string()),
+            base_branch: None,
+            section: None,
+            stack_parent: None,
+        };
+        validate_program_flags(&opts, "opencode").unwrap();
     }
 
     #[test]
@@ -3381,6 +3520,61 @@ mod tests {
             Some(&PullStatus::Blocked {
                 reason: PullBlockReason::Dirty
             })
+        );
+    }
+
+    // -- In-session switcher revive (ensure_attachable_by_tmux_name) --
+
+    #[tokio::test]
+    async fn ensure_attachable_by_tmux_name_unknown_name_errors() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let err = svc
+            .ensure_attachable_by_tmux_name("cc-deadbeef")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::Error::Session(SessionError::TmuxSessionNotFound(ref n))
+                    if n == "cc-deadbeef"
+            ),
+            "unknown tmux name should be a TmuxSessionNotFound error, got: {err}"
+        );
+    }
+
+    /// Resolution must accept either of a session's tmux names (primary or
+    /// shell pair) and reach the id-based attach validation: a `Creating`
+    /// session can't attach, so `InvalidState` for the right id proves the
+    /// shell-pair name resolved to the session before any tmux command ran.
+    #[tokio::test]
+    async fn ensure_attachable_by_tmux_name_resolves_shell_pair_name() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+
+        let project = Project::new("repo", PathBuf::from("/tmp/repo"), "main");
+        let mut session =
+            WorktreeSession::new_creating(project.id, "task", "branch-task", "claude");
+        session.shell_tmux_session_name = Some("cc-task-sh".to_string());
+        let sid = session.id;
+        svc.store()
+            .mutate(move |state| {
+                state.add_project(project);
+                state.add_session(session);
+            })
+            .await
+            .unwrap();
+
+        let err = svc
+            .ensure_attachable_by_tmux_name("cc-task-sh")
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::Error::Session(SessionError::InvalidState(id)) if id == sid
+            ),
+            "shell-pair name should resolve to the session and hit its attach guard, got: {err}"
         );
     }
 }

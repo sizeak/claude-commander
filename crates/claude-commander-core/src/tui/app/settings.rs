@@ -3,6 +3,29 @@
 use super::*;
 
 impl App {
+    /// Refresh the cached input-device list (id + friendly label) backing the
+    /// STT Microphone setting. Called when the settings modal or the mic picker
+    /// opens, so the row and picker show current devices without enumerating the
+    /// audio host on the render path.
+    pub(super) fn refresh_input_devices(&mut self) {
+        self.stt_input_devices = crate::conversation::recorder::input_devices();
+    }
+
+    /// Friendly display label for the currently-selected STT microphone: the
+    /// cached device's label, `(default)` when unset, or the raw id tagged
+    /// `(not connected)` when the configured device isn't currently present.
+    fn input_device_label(&self) -> String {
+        match self.config.stt.input_device.as_deref() {
+            None => "(default)".to_string(),
+            Some(id) => self
+                .stt_input_devices
+                .iter()
+                .find(|d| d.id == id)
+                .map(|d| d.label.clone())
+                .unwrap_or_else(|| format!("{id} (not connected)")),
+        }
+    }
+
     pub(super) fn build_settings_rows(&self, tab: SettingsTab) -> Vec<SettingsRow> {
         match tab {
             SettingsTab::General => {
@@ -118,6 +141,11 @@ impl App {
                         c.show_session_program,
                         "show_session_program",
                     ),
+                    SettingsRow::toggle(
+                        "Hide Empty Sections",
+                        c.hide_empty_sections,
+                        "hide_empty_sections",
+                    ),
                     SettingsRow::toggle("Rounded Borders", c.rounded_borders, "rounded_borders"),
                     SettingsRow::header("Performance"),
                     SettingsRow::text(
@@ -222,6 +250,11 @@ impl App {
                         "STT Prompt",
                         s.prompt.clone().unwrap_or_else(|| "(none)".into()),
                         "stt_prompt",
+                    ),
+                    SettingsRow::text(
+                        "STT Microphone",
+                        self.input_device_label(),
+                        "stt_input_device",
                     ),
                     SettingsRow::toggle(
                         "Pause Media While Recording",
@@ -448,7 +481,7 @@ impl App {
         let scroll_offset = list_scroll_offset(state.selected_row, visible_rows);
 
         // Check if the OptionPicker is active and how many rows it occupies
-        let picker_info: Option<(usize, &[String], usize)> =
+        let picker_info: Option<(usize, &[PickerOption], usize)> =
             if let Some(SettingsEditing::OptionPicker { options, selected }) = &state.editing {
                 // screen_row is the row index (within visible area) where the picker starts
                 let screen_row = state.selected_row.saturating_sub(scroll_offset);
@@ -571,7 +604,7 @@ impl App {
                             &state.editing
                         {
                             // Show the currently highlighted option on the selected row
-                            format!("▸ {}", options[*selected])
+                            format!("▸ {}", options[*selected].label)
                         } else {
                             text.clone()
                         }
@@ -636,7 +669,7 @@ impl App {
                 };
 
                 frame.render_widget(
-                    Paragraph::new(Span::styled(format!("{prefix}{option}"), opt_style)),
+                    Paragraph::new(Span::styled(format!("{prefix}{}", option.label), opt_style)),
                     opt_area,
                 );
             }
@@ -1092,6 +1125,15 @@ impl App {
                         Some(value.to_string())
                     };
                 }
+                "stt_input_device" => {
+                    let v = value.trim();
+                    self.config.stt.input_device =
+                        if v.is_empty() || v == "(default)" || v == "(auto)" {
+                            None
+                        } else {
+                            Some(v.to_string())
+                        };
+                }
                 _ => {}
             },
             SettingsTab::Theme => {
@@ -1242,6 +1284,7 @@ impl App {
             "dim_unfocused_preview" => self.config.dim_unfocused_preview = value,
             "invert_pr_label_color" => self.config.invert_pr_label_color = value,
             "show_session_program" => self.config.show_session_program = value,
+            "hide_empty_sections" => self.config.hide_empty_sections = value,
             "rounded_borders" => self.config.rounded_borders = value,
             "precompute_review_caches" => self.config.precompute_review_caches = value,
             "ai_summary_enabled" => self.config.ai_summary_enabled = value,
@@ -1360,7 +1403,9 @@ impl App {
                 }
                 SettingsEditing::OptionPicker { options, selected } => match key.code {
                     KeyCode::Enter => {
-                        let chosen = options[*selected].clone();
+                        // Commit the entry's value (the display label and stored
+                        // value differ only for the mic picker's device ids).
+                        let chosen = options[*selected].value.clone();
                         let field_key = state.rows[state.selected_row].field_key.clone();
                         // Treat "(auto)" as empty string for apply_settings_edit
                         let val = if chosen == "(auto)" {
@@ -1369,7 +1414,18 @@ impl App {
                             chosen
                         };
                         state.editing = None;
+                        let prev_input_device = self.config.stt.input_device.clone();
                         self.apply_settings_edit(state.tab, &field_key, &val);
+                        // Selecting a *different* microphone rebuilds the running
+                        // listener so the new device is used on the next recording,
+                        // live. Skip the respawn when the id is unchanged (e.g.
+                        // re-picking the current device) to avoid a needless
+                        // teardown / re-open of the same device.
+                        if field_key == "stt_input_device"
+                            && self.config.stt.input_device != prev_input_device
+                        {
+                            self.respawn_listener();
+                        }
                         state.rows = self.build_settings_rows(state.tab);
                         self.ui_state.modal = Modal::Settings(state);
                     }
@@ -1450,23 +1506,66 @@ impl App {
                             if state.tab == SettingsTab::Theme && field_key == "preset" {
                                 // Open an inline option picker for theme presets
                                 use crate::tui::theme::PRESET_NAMES;
-                                let options: Vec<String> =
-                                    PRESET_NAMES.iter().map(|s| (*s).to_string()).collect();
+                                let options: Vec<PickerOption> = PRESET_NAMES
+                                    .iter()
+                                    .map(|s| PickerOption::plain(*s))
+                                    .collect();
                                 let current_value = state.rows[state.selected_row].text_value();
-                                let selected =
-                                    options.iter().position(|o| o == current_value).unwrap_or(0);
+                                let selected = options
+                                    .iter()
+                                    .position(|o| o.value == current_value)
+                                    .unwrap_or(0);
                                 state.editing =
                                     Some(SettingsEditing::OptionPicker { options, selected });
                             } else if field_key == "conversation_speak_scope" {
                                 // Inline option picker for the speak-scope enum.
                                 use crate::conversation::SpeakScope;
-                                let options: Vec<String> = SpeakScope::ALL
+                                let options: Vec<PickerOption> = SpeakScope::ALL
                                     .iter()
-                                    .map(|s| s.label().to_string())
+                                    .map(|s| PickerOption::plain(s.label()))
                                     .collect();
                                 let current_value = state.rows[state.selected_row].text_value();
-                                let selected =
-                                    options.iter().position(|o| o == current_value).unwrap_or(0);
+                                let selected = options
+                                    .iter()
+                                    .position(|o| o.value == current_value)
+                                    .unwrap_or(0);
+                                state.editing =
+                                    Some(SettingsEditing::OptionPicker { options, selected });
+                            } else if field_key == "stt_input_device" {
+                                // Inline option picker for the microphone: each entry
+                                // shows a friendly label but commits the stable device
+                                // id. "(default)" comes first for the system default.
+                                // Refresh the device cache so the list is current.
+                                self.refresh_input_devices();
+                                let mut options = vec![PickerOption::plain("(default)")];
+                                options.extend(self.stt_input_devices.iter().map(|d| {
+                                    PickerOption {
+                                        label: d.label.clone(),
+                                        value: d.id.clone(),
+                                    }
+                                }));
+                                // Preselect by the stored device id (the row shows
+                                // the friendly label, so read config directly).
+                                let current_id = self
+                                    .config
+                                    .stt
+                                    .input_device
+                                    .clone()
+                                    .unwrap_or_else(|| "(default)".into());
+                                // Keep a configured-but-unplugged device selectable so
+                                // opening the picker doesn't silently reset it.
+                                if current_id != "(default)"
+                                    && !options.iter().any(|o| o.value == current_id)
+                                {
+                                    options.push(PickerOption {
+                                        label: format!("{current_id} (not connected)"),
+                                        value: current_id.clone(),
+                                    });
+                                }
+                                let selected = options
+                                    .iter()
+                                    .position(|o| o.value == current_id)
+                                    .unwrap_or(0);
                                 state.editing =
                                     Some(SettingsEditing::OptionPicker { options, selected });
                             } else {
@@ -1830,6 +1929,9 @@ impl App {
     /// Open the settings modal on the Programs tab, targeting `target`'s program
     /// list (loading it — synchronously for local, asynchronously for a remote).
     pub(super) fn open_settings_on_programs(&mut self, target: crate::backend::BackendId) {
+        // Cache mic devices so the STT Microphone row shows a friendly label if
+        // the user tabs over to the Conversation tab.
+        self.refresh_input_devices();
         let rows = self.build_settings_rows(SettingsTab::Programs);
         let selected_row = first_selectable_from(&rows, 0);
         let mut programs_state = ProgramsState {
@@ -2004,39 +2106,45 @@ impl App {
                 },
                 ProgramsEditing::CreatingLabel { value } => match key.code {
                     KeyCode::Enter => {
-                        let label = value.value().trim().to_string();
-                        let has_dup = prog.entries.iter().any(|p| p.label == label);
-                        if !label.is_empty() && !has_dup {
-                            // Advance to the command step, prefilled with the label
+                        // The entry already exists (added on `n`); apply the typed
+                        // label to it, keeping the auto-generated default when the
+                        // input is empty or clashes with another entry.
+                        if prog.selected < prog.entries.len() {
+                            let label = value.value().trim().to_string();
+                            let has_dup = prog
+                                .entries
+                                .iter()
+                                .enumerate()
+                                .any(|(i, p)| i != prog.selected && p.label == label);
+                            if !label.is_empty() && !has_dup {
+                                prog.entries[prog.selected].label = label;
+                                changed = true;
+                            }
+                            // Advance to the command step, seeded from the label
                             // (the common case is command == label).
-                            prog.editing = Some(ProgramsEditing::CreatingCommand {
-                                value: label.clone().into(),
-                                label,
-                            });
+                            let seed = prog.entries[prog.selected].label.clone();
+                            prog.editing =
+                                Some(ProgramsEditing::CreatingCommand { value: seed.into() });
                         } else {
-                            // Reject empty/duplicate labels by closing the editor,
-                            // mirroring the Sections tab's CreatingSection.
                             prog.editing = None;
                         }
                     }
+                    // Backing out keeps the added entry (delete with `d`).
                     KeyCode::Esc => prog.editing = None,
                     _ => {
                         super::edit_text_input(value, key);
                     }
                 },
-                ProgramsEditing::CreatingCommand { label, value } => match key.code {
+                ProgramsEditing::CreatingCommand { value } => match key.code {
                     KeyCode::Enter => {
                         let command = value.value().trim().to_string();
-                        if !command.is_empty() {
-                            prog.entries.push(crate::config::ProgramEntry {
-                                label: label.clone(),
-                                command,
-                            });
-                            prog.selected = prog.entries.len() - 1;
+                        if !command.is_empty() && prog.selected < prog.entries.len() {
+                            prog.entries[prog.selected].command = command;
                             changed = true;
                         }
                         prog.editing = None;
                     }
+                    // Backing out keeps the added entry (delete with `d`).
                     KeyCode::Esc => prog.editing = None,
                     _ => {
                         super::edit_text_input(value, key);
@@ -2089,6 +2197,17 @@ impl App {
                         }
                     }
                     KeyCode::Char('n') if editable => {
+                        // Add the entry immediately so it shows in the list while
+                        // being named; backing out leaves it in place (delete with
+                        // `d`). Defaults are a unique label and a runnable `claude`
+                        // command, both editable in the guided label → command
+                        // steps that follow. `changed` commits it to the target.
+                        prog.entries.push(crate::config::ProgramEntry {
+                            label: unique_program_label(&prog.entries),
+                            command: "claude".to_string(),
+                        });
+                        prog.selected = prog.entries.len() - 1;
+                        changed = true;
                         prog.editing = Some(ProgramsEditing::CreatingLabel {
                             value: super::Input::default(),
                         });
@@ -2292,34 +2411,10 @@ impl App {
         self.render_settings_divider(frame, divider_area);
 
         // --- Program list ---
-        if let Some(ProgramsEditing::CreatingLabel { value }) = &prog.editing {
-            let visible = list_area.height as usize;
-            let name_rows = programs.len().min(visible.saturating_sub(1));
-            for (i, entry) in programs.iter().enumerate().take(name_rows) {
-                let y = list_area.y + i as u16;
-                let style = Style::default().fg(self.theme.text_secondary);
-                let label = truncate_str(&entry.label, list_width as usize - 2);
-                frame.render_widget(
-                    Paragraph::new(Span::styled(format!("  {label}"), style)),
-                    Rect {
-                        y,
-                        height: 1,
-                        ..list_area
-                    },
-                );
-            }
-            let input_y = list_area.y + name_rows as u16;
-            let input_style = self.theme.selection().add_modifier(Modifier::UNDERLINED);
-            let display = format!("  {}", super::input_with_caret(value));
-            frame.render_widget(
-                Paragraph::new(Span::styled(display, input_style)),
-                Rect {
-                    y: input_y,
-                    height: 1,
-                    ..list_area
-                },
-            );
-        } else {
+        // Both list-focus label editors — renaming an existing entry (`r`) and
+        // naming a just-added one (`n` → CreatingLabel) — render the selected row
+        // as a live caret input over the (already-present) entry.
+        {
             let visible = list_area.height as usize;
             let scroll = list_scroll_offset(prog.selected, visible);
             for (i, entry) in programs.iter().enumerate().skip(scroll).take(visible) {
@@ -2339,9 +2434,19 @@ impl App {
 
                 let prefix = if is_selected { "▸ " } else { "  " };
                 let is_renaming = is_selected
-                    && matches!(prog.editing, Some(ProgramsEditing::RenamingLabel { .. }));
+                    && matches!(
+                        prog.editing,
+                        Some(
+                            ProgramsEditing::RenamingLabel { .. }
+                                | ProgramsEditing::CreatingLabel { .. }
+                        )
+                    );
                 let label = if is_renaming {
-                    if let Some(ProgramsEditing::RenamingLabel { value }) = &prog.editing {
+                    if let Some(
+                        ProgramsEditing::RenamingLabel { value }
+                        | ProgramsEditing::CreatingLabel { value },
+                    ) = &prog.editing
+                    {
                         format!("{prefix}{}", super::input_with_caret(value))
                     } else {
                         String::new()
@@ -2404,27 +2509,19 @@ impl App {
         }
 
         // --- Detail pane (right side) ---
-        // While creating a new entry the detail pane previews the pending
-        // label/command; otherwise it shows the selected entry's fields.
-        let pending_command = match &prog.editing {
-            Some(ProgramsEditing::CreatingCommand { label, value }) => Some((label.clone(), value)),
-            _ => None,
-        };
-
-        let detail_rows: Vec<(&str, String)> = if let Some((label, _)) = &pending_command {
-            vec![
-                ("label", label.clone()),
-                ("command", String::new()), // rendered as caret input below
-            ]
-        } else if !programs.is_empty() && prog.selected < programs.len() {
-            let entry = &programs[prog.selected];
-            vec![
-                ("label", entry.label.clone()),
-                ("command", entry.command.clone()),
-            ]
-        } else {
-            Vec::new()
-        };
+        // The selected entry is always a real list element (creation adds it up
+        // front), so the detail pane just reflects it; the command field renders
+        // as a caret input while it is being edited (see `editing_this` below).
+        let detail_rows: Vec<(&str, String)> =
+            if !programs.is_empty() && prog.selected < programs.len() {
+                let entry = &programs[prog.selected];
+                vec![
+                    ("label", entry.label.clone()),
+                    ("command", entry.command.clone()),
+                ]
+            } else {
+                Vec::new()
+            };
 
         let is_fields_focused = prog.focus == ProgramsFocus::Fields;
         for (i, (label, value)) in detail_rows.iter().enumerate() {
@@ -2461,7 +2558,7 @@ impl App {
                 // Which field, if any, is currently in an inline edit.
                 let editing_this = match &prog.editing {
                     Some(ProgramsEditing::EditingField { value: v }) if is_selected => Some(v),
-                    Some(ProgramsEditing::CreatingCommand { value: v, .. }) if i == 1 => Some(v),
+                    Some(ProgramsEditing::CreatingCommand { value: v }) if i == 1 => Some(v),
                     _ => None,
                 };
 
@@ -2531,10 +2628,10 @@ impl App {
                 "Enter: save  Esc: cancel".to_string()
             }
             Some(ProgramsEditing::CreatingLabel { .. }) => {
-                "Enter: next (command)  Esc: cancel".to_string()
+                "Enter: next (command)  Esc: keep (delete with d)".to_string()
             }
             Some(ProgramsEditing::CreatingCommand { .. }) => {
-                "Enter: create  Esc: cancel".to_string()
+                "Enter: save  Esc: keep (delete with d)".to_string()
             }
             None if prog.focus == ProgramsFocus::List => {
                 format!(
@@ -2551,6 +2648,22 @@ impl App {
             footer_area,
         );
     }
+}
+
+/// A placeholder label for a freshly-added program that does not clash with any
+/// existing entry (`"New program"`, then `"New program 2"`, …). New entries are
+/// added to the working copy up front, so they need a unique default before the
+/// user renames them.
+fn unique_program_label(programs: &[crate::config::ProgramEntry]) -> String {
+    const BASE: &str = "New program";
+    let taken = |label: &str| programs.iter().any(|p| p.label == label);
+    if !taken(BASE) {
+        return BASE.to_string();
+    }
+    (2..)
+        .map(|n| format!("{BASE} {n}"))
+        .find(|candidate| !taken(candidate))
+        .expect("an unused label exists in an unbounded sequence")
 }
 
 /// Build displayable rows for a section's predicates.
@@ -3075,6 +3188,33 @@ mod tests {
         let s = spacer_positions[0];
         assert!(matches!(rows[s + 1].kind, SettingsRowKind::Header));
         assert_eq!(rows[s + 1].label, "Sessions");
+    }
+
+    #[test]
+    fn unique_program_label_avoids_clashes() {
+        use crate::config::ProgramEntry;
+        let entry = |label: &str| ProgramEntry {
+            label: label.to_string(),
+            command: "claude".to_string(),
+        };
+
+        // Empty list → the base label.
+        assert_eq!(unique_program_label(&[]), "New program");
+
+        // Base taken → first numbered suffix.
+        assert_eq!(
+            unique_program_label(&[entry("New program")]),
+            "New program 2"
+        );
+
+        // Base + first suffix taken → skips to the next free number.
+        assert_eq!(
+            unique_program_label(&[entry("New program"), entry("New program 2")]),
+            "New program 3"
+        );
+
+        // Unrelated labels don't affect the base.
+        assert_eq!(unique_program_label(&[entry("Claude")]), "New program");
     }
 
     #[test]

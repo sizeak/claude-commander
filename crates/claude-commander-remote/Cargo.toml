@@ -33,12 +33,13 @@ claude-commander-protocol = { path = "../claude-commander-protocol" }
 tokio = { workspace = true }
 async-trait = "0.1"
 
-# Ids returned by the create-comment endpoint / used in trait signatures.
-uuid = { version = "1.0", features = ["v4", "serde"] }
+# Ids returned by the create-comment endpoint / used in trait signatures. The
+# reqwest/tungstenite/xxhash/serde transport deps moved to claude-commander-client.
+uuid = { version = "1.23", features = ["v4", "serde"] }
 
 [dev-dependencies]
 # Spin the REAL server router in-process for the round-trip tests.
 claude-commander-server = { path = "../claude-commander-server" }
 # Shared hermetic-server harness (telemetry off, tmux isolated, loopback bind).
 claude-commander-test-support = { path = "../claude-commander-test-support" }
-tempfile = "3.10"
+tempfile = "3.27"

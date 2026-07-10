@@ -17,14 +17,14 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.25.0"
+version = "0.26.0"
 edition = "2024"
 authors = ["Claude Commander Contributors"]
 license = "MIT"
 repository = "https://github.com/claude-commander/claude-commander"
 
 [workspace.dependencies]
-tokio = { version = "1.40", features = ["full"] }
+tokio = { version = "1.52", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "2.0"

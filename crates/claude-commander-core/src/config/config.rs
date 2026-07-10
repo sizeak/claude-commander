@@ -132,6 +132,14 @@ pub struct Config {
     /// `TMUX_TMPDIR`). `None` touches the environment not at all.
     pub tmux_tmpdir: Option<PathBuf>,
 
+    /// Base directory for pasted-image temp files (remote image paste). `None`
+    /// (normal use) means the OS temp dir, which is space-free on every platform
+    /// and readable by the agent. Set only by hermetic tests to redirect writes
+    /// (and the store's prune) into a `TempDir` instead of the real `/tmp`, per
+    /// the repo's test-isolation rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paste_images_dir: Option<PathBuf>,
+
     /// Organize worktrees into per-repository subdirectories
     pub per_repo_worktree_dirs: bool,
 
@@ -224,6 +232,14 @@ pub struct Config {
     /// so an omitted field resolves to `Config::default()`'s `false`.)
     pub show_session_program: bool,
 
+    /// Whether to hide empty section headers in the session list.
+    ///
+    /// Enabled by default. When true, sections with no sessions (including
+    /// "In Progress") are not rendered. This is a UI-only change; backend
+    /// section assignment is unaffected.
+    #[serde(default = "default_true")]
+    pub hide_empty_sections: bool,
+
     /// Dim the right pane (preview/diff/shell) when the session list is focused
     pub dim_unfocused_preview: bool,
 
@@ -276,9 +292,9 @@ pub struct Config {
     pub sections: Vec<crate::session::SectionConfig>,
 
     /// Advisory WIP limit for the implicit "In Progress" catch-all section.
-    /// When set, the section header shows `count/n` and renders in a warning
-    /// colour once `count >= n`. Purely informational — never blocks session
-    /// creation.
+    /// When set, the section header shows `count/n`, rendering in the warning
+    /// colour when `count == n` and the error colour when `count > n`. Purely
+    /// informational — never blocks session creation.
     #[serde(default)]
     pub in_progress_limit: Option<u32>,
 
@@ -420,6 +436,15 @@ pub struct SttConfig {
     /// (Linux) / `osascript` (macOS); a silent no-op when neither is available.
     /// On by default.
     pub pause_media: bool,
+
+    /// Microphone to capture from, as cpal's stable device id (the PipeWire
+    /// `node.name`, e.g. `alsa_input.pci-0000_c1_00.6.analog-stereo`). `None`
+    /// uses the system default input device. Set it via the picker in
+    /// Settings ▸ Conversation rather than by hand. Ids — not friendly names —
+    /// are stored because a mic and its speaker's loopback share a name; if the
+    /// device is absent at record time, capture falls back to the default (with
+    /// a warning) rather than failing.
+    pub input_device: Option<String>,
 }
 
 impl Default for SttConfig {
@@ -435,6 +460,7 @@ impl Default for SttConfig {
             prompt: None,
             api_key: None,
             pause_media: true,
+            input_device: None,
         }
     }
 }
@@ -483,6 +509,7 @@ impl Default for Config {
             ui_refresh_fps: 30,
             worktrees_dir: None,
             tmux_tmpdir: None,
+            paste_images_dir: None,
             per_repo_worktree_dirs: false,
             editor: None,
             editor_gui: None,
@@ -502,6 +529,7 @@ impl Default for Config {
             hibernate_check_interval_secs: default_hibernate_check_interval_secs(),
             invert_pr_label_color: false,
             show_session_program: false,
+            hide_empty_sections: true,
             dim_unfocused_preview: true,
             dim_unfocused_opacity: 0.4,
             leader_key: " ".to_string(),
@@ -598,7 +626,7 @@ impl Config {
     /// rejected at load with a clear message rather than surfacing later as a
     /// silently-degraded backend.
     pub fn validate_remote_servers(&self) -> Result<()> {
-        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for server in &self.remote_servers {
             let name = server.name.trim();
             if name.is_empty() {
@@ -618,10 +646,14 @@ impl Config {
                 }
                 .into());
             }
-            if !seen.insert(name) {
+            // Dedup case-insensitively: lookups (`find_remote_server`, the TUI's
+            // name-keyed selection) match names with `eq_ignore_ascii_case`, so
+            // `Box` and `box` would resolve ambiguously to whichever comes first.
+            // Reject the collision at load rather than silently pick one.
+            if !seen.insert(name.to_ascii_lowercase()) {
                 return Err(ConfigError::InvalidValue {
                     key: "remote_servers.name".to_string(),
-                    reason: format!("duplicate server name '{name}'"),
+                    reason: format!("duplicate server name '{name}' (names are case-insensitive)"),
                 }
                 .into());
             }
@@ -656,6 +688,33 @@ impl Config {
             }
         }
         Ok(())
+    }
+
+    /// Look up a configured remote server by name (case-insensitive, matching
+    /// the uniqueness rule in [`validate_remote_servers`](Self::validate_remote_servers)).
+    /// Returns a [`ConfigError::InvalidValue`] listing the available server
+    /// names when no entry matches, so a CLI `--remote <name>` typo produces an
+    /// actionable message rather than a silent local fallback.
+    pub fn find_remote_server(&self, name: &str) -> Result<&RemoteServerConfig> {
+        self.remote_servers
+            .iter()
+            .find(|s| s.name.eq_ignore_ascii_case(name))
+            .ok_or_else(|| {
+                let available = if self.remote_servers.is_empty() {
+                    "none configured".to_string()
+                } else {
+                    self.remote_servers
+                        .iter()
+                        .map(|s| s.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
+                ConfigError::InvalidValue {
+                    key: "remote".to_string(),
+                    reason: format!("no remote server named '{name}' (available: {available})"),
+                }
+                .into()
+            })
     }
 
     /// Get the configuration file path
@@ -1029,6 +1088,7 @@ has_label = ["blocked", "waiting-on-author"]
         assert_eq!(c.language, None);
         assert_eq!(c.prompt, None);
         assert_eq!(c.api_key, None);
+        assert_eq!(c.input_device, None);
     }
 
     #[test]
@@ -1046,12 +1106,17 @@ enabled = true
 base_url = "http://192.168.1.10:8080/v1"
 model = "large-v3-turbo"
 language = "en"
+input_device = "alsa_input.pci-0000_c1_00.6.analog-stereo"
 "#;
         let config: Config = toml::from_str(toml_src).expect("toml parse");
         assert!(config.stt.enabled);
         assert_eq!(config.stt.base_url, "http://192.168.1.10:8080/v1");
         assert_eq!(config.stt.model, "large-v3-turbo");
         assert_eq!(config.stt.language.as_deref(), Some("en"));
+        assert_eq!(
+            config.stt.input_device.as_deref(),
+            Some("alsa_input.pci-0000_c1_00.6.analog-stereo")
+        );
         // Unspecified fields keep their defaults.
         assert_eq!(config.stt.prompt, None);
     }
@@ -1313,6 +1378,8 @@ command = "codex"
         assert!(config.ai_summary_enabled);
         assert_eq!(config.ai_summary_model, "claude-haiku-4-5-20251001");
         assert!(!config.show_session_program);
+        // Hide empty sections is on by default.
+        assert!(config.hide_empty_sections);
         // Review cache precompute is on by default.
         assert!(config.precompute_review_caches);
     }
@@ -1342,6 +1409,17 @@ show_session_program = false
         // Explicit false survives round trip.
         let cfg: Config = toml::from_str("skip_lfs_smudge = false\n").unwrap();
         assert!(!cfg.skip_lfs_smudge);
+    }
+
+    #[test]
+    fn test_hide_empty_sections_deserialise() {
+        // Missing → default true.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.hide_empty_sections);
+
+        // Explicit false survives round trip.
+        let cfg: Config = toml::from_str("hide_empty_sections = false\n").unwrap();
+        assert!(!cfg.hide_empty_sections);
     }
 
     #[test]
@@ -1637,6 +1715,32 @@ url = "http://127.0.0.1:7878"
     }
 
     #[test]
+    fn test_validate_remote_servers_rejects_case_insensitive_duplicate_names() {
+        // `find_remote_server` matches case-insensitively, so `Box` and `box`
+        // would resolve ambiguously — validation must reject the pair at load.
+        let cfg = Config {
+            remote_servers: vec![
+                RemoteServerConfig {
+                    name: "Box".to_string(),
+                    url: "http://a:7878".to_string(),
+                    token: None,
+                },
+                RemoteServerConfig {
+                    name: "box".to_string(),
+                    url: "http://b:7878".to_string(),
+                    token: None,
+                },
+            ],
+            ..Config::default()
+        };
+        let err = cfg.validate_remote_servers().unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate"),
+            "case-only-differing names must be rejected: {err}"
+        );
+    }
+
+    #[test]
     fn test_validate_remote_servers_rejects_reserved_local_name() {
         // "local" is the local backend's own descriptor name; a remote server
         // sharing it would collide with the name-keyed selection lookups.
@@ -1671,6 +1775,48 @@ url = "http://127.0.0.1:7878"
         assert!(
             err.to_string().contains("invalid url"),
             "an unparseable url must be rejected with a parse-failure reason: {err}"
+        );
+    }
+
+    #[test]
+    fn test_find_remote_server_matches_case_insensitively() {
+        let cfg = Config {
+            remote_servers: vec![RemoteServerConfig {
+                name: "Box".to_string(),
+                url: "http://box:7878".to_string(),
+                token: None,
+            }],
+            ..Config::default()
+        };
+        let found = cfg.find_remote_server("box").unwrap();
+        assert_eq!(found.url, "http://box:7878");
+    }
+
+    #[test]
+    fn test_find_remote_server_unknown_lists_available() {
+        let cfg = Config {
+            remote_servers: vec![RemoteServerConfig {
+                name: "box".to_string(),
+                url: "http://box:7878".to_string(),
+                token: None,
+            }],
+            ..Config::default()
+        };
+        let err = cfg.find_remote_server("nope").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("no remote server named 'nope'") && msg.contains("box"),
+            "unknown remote must name the miss and list configured servers: {err}"
+        );
+    }
+
+    #[test]
+    fn test_find_remote_server_none_configured() {
+        let cfg = Config::default();
+        let err = cfg.find_remote_server("box").unwrap_err();
+        assert!(
+            err.to_string().contains("none configured"),
+            "with no servers the error must say none are configured: {err}"
         );
     }
 

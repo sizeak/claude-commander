@@ -26,14 +26,14 @@ claude-commander-protocol = { path = "../claude-commander-protocol" }
 tokio = { workspace = true }
 
 # HTTP client. rustls (not OpenSSL) to keep it pure-Rust and mobile-friendly.
-reqwest = { version = "0.12", default-features = false, features = [
+reqwest = { version = "0.13", default-features = false, features = [
     "json",
-    "rustls-tls",
+    "rustls",
 ] }
 
 # WebSocket client for the interactive attach transport. Same pin/features as the
 # Flutter client's cdylib so both speak the wire protocol over one locked version.
-tokio-tungstenite = { version = "0.24", default-features = false, features = [
+tokio-tungstenite = { version = "0.29", default-features = false, features = [
     "connect",
     "rustls-tls-webpki-roots",
 ] }
@@ -53,4 +53,4 @@ tracing = { workspace = true }
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 
 # Ids returned by the create endpoints.
-uuid = { version = "1.0", features = ["v4", "serde"] }
+uuid = { version = "1.23", features = ["v4", "serde"] }

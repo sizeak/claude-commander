@@ -432,6 +432,95 @@ async fn test_session_manager_restart() {
     drop(worktrees_dir);
 }
 
+/// `CommanderService::change_program` must persist the new program on the
+/// session and relaunch its pane so the new agent actually runs. Regression:
+/// the stored `program` is the single source of truth for the harness, and it
+/// only takes effect at launch — changing it without relaunching would leave
+/// the old agent running.
+#[tokio::test]
+async fn test_change_program_updates_field_and_relaunches() {
+    use claude_commander_core::api::CommanderService;
+    use claude_commander_core::telemetry::FrontendInfo;
+
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let state_temp_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+    let mut config = Config {
+        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        ..Config::default()
+    };
+    config.telemetry.enabled = false;
+
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
+    let store = create_isolated_store(&state_temp_dir);
+    let manager = SessionManager::new(config_store.clone(), store.clone(), "");
+    let service = CommanderService::new(
+        config_store,
+        store.clone(),
+        FrontendInfo::new("integration-test", "0.0.0"),
+    );
+
+    let project_id = manager.add_project(repo_path).await.unwrap();
+    let session_id = manager
+        .prepare_session(
+            &project_id,
+            "change-program-test".to_string(),
+            Some("sleep 60".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+    manager
+        .finalize_session(&session_id, None, None)
+        .await
+        .unwrap();
+
+    let tmux_name = {
+        let state = store.read().await;
+        let s = state.get_session(&session_id).unwrap();
+        assert_eq!(s.program, "sleep 60");
+        s.tmux_session_name.clone()
+    };
+
+    // Empty program is rejected before touching the pane.
+    assert!(
+        service.change_program(&session_id, "  ").await.is_err(),
+        "an empty program must be rejected"
+    );
+
+    // Change to a different program; the pane is relaunched.
+    service
+        .change_program(&session_id, "cat")
+        .await
+        .expect("change_program should succeed");
+
+    {
+        let state = store.read().await;
+        let s = state.get_session(&session_id).unwrap();
+        assert_eq!(s.program, "cat", "the new program must be persisted");
+        assert_eq!(
+            s.status,
+            SessionStatus::Running,
+            "the session must be Running after the relaunch"
+        );
+    }
+    assert!(
+        manager.tmux.session_exists(&tmux_name).await.unwrap(),
+        "the tmux pane must be live after the program change"
+    );
+
+    // Cleanup
+    let _ = manager.kill_session(&session_id, true).await;
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
+    drop(worktrees_dir);
+}
+
 /// Regression: deleting a *Stopped* session must still remove its git
 /// worktree. `delete_session` used to only run worktree cleanup when the
 /// session was active, so a stopped session's worktree leaked on disk.
@@ -1498,6 +1587,100 @@ async fn test_hibernate_session_keeps_worktree_and_wakes_with_resume() {
     drop(worktrees_dir);
 }
 
+/// The in-session Ctrl+Space switcher resolves its pick by tmux session name.
+/// Reviving through that path must behave exactly like the tree-view attach:
+/// a session whose tmux session died behind commander's back (e.g. after a
+/// reboot) is recreated and marked Running, and the switch stamps MRU
+/// ordering for the picker's Alt+Tab sort.
+#[tokio::test]
+async fn test_ensure_attachable_by_tmux_name_revives_dead_session() {
+    use claude_commander_core::api::CommanderService;
+    use claude_commander_core::telemetry::FrontendInfo;
+
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let state_temp_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+    let mut config = Config {
+        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        ..Config::default()
+    };
+    // Never post telemetry from the test suite.
+    config.telemetry.enabled = false;
+
+    // A manager (for setup) and a service (under test) share the same
+    // config/state stores, so the service resolves the session the manager
+    // creates and both drive the same isolated tmux server.
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
+    let store = create_isolated_store(&state_temp_dir);
+    let manager = SessionManager::new(config_store.clone(), store.clone(), "");
+    let service = CommanderService::new(
+        config_store,
+        store.clone(),
+        FrontendInfo::new("integration-test", "0.0.0"),
+    );
+
+    let project_id = manager.add_project(repo_path).await.unwrap();
+    let prepared = manager
+        .prepare_session(
+            &project_id,
+            "switcher-revive-test".to_string(),
+            Some("bash".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+    manager
+        .finalize_session(&prepared, None, None)
+        .await
+        .unwrap();
+
+    let tmux_name = {
+        let state = store.read().await;
+        let s = state.get_session(&prepared).unwrap();
+        assert!(s.last_attached_at.is_none(), "no attach recorded yet");
+        s.tmux_session_name.clone()
+    };
+
+    // Kill the tmux session behind commander's back — the post-reboot shape:
+    // state says Running, tmux has nothing.
+    manager.tmux.kill_session(&tmux_name).await.unwrap();
+    assert!(!manager.tmux.session_exists(&tmux_name).await.unwrap());
+
+    // Revive by tmux name, as the switcher does with the picker's choice.
+    let target = service
+        .ensure_attachable_by_tmux_name(&tmux_name)
+        .await
+        .expect("revive by tmux name should succeed");
+    assert_eq!(
+        target, tmux_name,
+        "switch target should be the session's primary tmux name"
+    );
+    assert!(
+        manager.tmux.session_exists(&tmux_name).await.unwrap(),
+        "tmux session should be recreated by the by-name revive"
+    );
+    {
+        let state = store.read().await;
+        let s = state.get_session(&prepared).unwrap();
+        assert_eq!(s.status, SessionStatus::Running, "should be Running again");
+        assert!(
+            s.last_attached_at.is_some(),
+            "switching via the picker must stamp MRU ordering"
+        );
+    }
+
+    // Cleanup
+    let _ = manager.kill_session(&prepared, true).await;
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
+    drop(worktrees_dir);
+}
+
 #[tokio::test]
 async fn test_fresh_restart_clears_hibernation_marker() {
     if !tmux_available().await {
@@ -1574,6 +1757,143 @@ async fn test_fresh_restart_clears_hibernation_marker() {
         manager.tmux.session_exists(&tmux_name).await.unwrap(),
         "tmux session should be recreated by fresh restart"
     );
+
+    // Cleanup
+    let _ = manager.kill_session(&session_id, true).await;
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
+    drop(worktrees_dir);
+}
+
+/// End-to-end paste-image: create a real (bash) session, call
+/// `CommanderService::paste_image`, and confirm (a) the bytes are written to a
+/// temp file and (b) the file path is typed into the pane. Exercises the full
+/// wiring the server route depends on: validate → store → `send-keys -l`.
+#[tokio::test]
+async fn test_paste_image_writes_file_and_injects_path() {
+    use claude_commander_core::api::CommanderService;
+    use claude_commander_core::telemetry::FrontendInfo;
+
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    // A valid 1×1 PNG.
+    const TINY_PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let state_temp_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+    // Redirect paste-image writes (and the store's prune) into a TempDir instead
+    // of the real /tmp/paste-images, per the repo's test-isolation rule.
+    let paste_dir = TempDir::new().unwrap();
+    let mut config = Config {
+        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        paste_images_dir: Some(paste_dir.path().to_path_buf()),
+        ..Config::default()
+    };
+    // Never post telemetry from the test suite.
+    config.telemetry.enabled = false;
+
+    // A manager (for setup) and a service (under test) share the same
+    // config/state stores, so the service resolves the session the manager
+    // creates and both drive the same isolated tmux server.
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
+    let store = create_isolated_store(&state_temp_dir);
+    let manager = SessionManager::new(config_store.clone(), store.clone(), "");
+    let service = CommanderService::new(
+        config_store,
+        store.clone(),
+        FrontendInfo::new("integration-test", "0.0.0"),
+    );
+
+    let project_id = manager.add_project(repo_path).await.unwrap();
+    let prepared = manager
+        .prepare_session(
+            &project_id,
+            "paste-image-test".to_string(),
+            Some("bash".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+    let session_id = manager
+        .finalize_session(&prepared, None, None)
+        .await
+        .unwrap();
+    let id_str = session_id.to_string();
+
+    // Paste the image.
+    let path = service
+        .paste_image(&id_str, TINY_PNG)
+        .await
+        .expect("paste_image should succeed for a live session");
+
+    // (a) The file was written with the exact bytes, under the configured
+    // paste-images base (a TempDir here; the OS temp dir in production).
+    assert!(path.exists(), "written image path should exist: {path:?}");
+    assert_eq!(std::fs::read(&path).unwrap(), TINY_PNG);
+    assert!(path.starts_with(paste_dir.path().join("paste-images")));
+
+    // (b) The path was typed into the pane (send-keys -l). Retry a few times to
+    // absorb the tiny delay between finalize and the pane accepting input. Strip
+    // whitespace from the capture first: an ~80-char path soft-wraps in an 80-col
+    // pane, so the filename could otherwise be split across physical lines.
+    let filename = path.file_name().unwrap().to_string_lossy().to_string();
+    let mut found = false;
+    for _ in 0..20 {
+        if let Ok(Some(pane)) = service.get_pane_content(&id_str, Some(200)).await {
+            let squashed: String = pane.chars().filter(|c| !c.is_whitespace()).collect();
+            if squashed.contains(&filename) {
+                found = true;
+                break;
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(
+        found,
+        "pasted image path ({filename}) should appear in the pane input"
+    );
+
+    // No Enter was sent: the path must sit unexecuted on the prompt. Had Enter
+    // been sent, bash would try to run the (non-executable) PNG at that absolute
+    // path and print `bash: <path>: <error>`. Check specifically for OUR path
+    // followed by an exec error — a bare "command not found" would also match
+    // unrelated bash startup noise, so we match on the path. Squash whitespace
+    // from BOTH the capture and the marker (an ~85-char `<path>: <error>` line
+    // soft-wraps in an 80-col pane; without this the check is vacuous).
+    let pane = service
+        .get_pane_content(&id_str, Some(200))
+        .await
+        .unwrap()
+        .unwrap_or_default();
+    let squashed_pane: String = pane.chars().filter(|c| !c.is_whitespace()).collect();
+    let path_str = path.display().to_string();
+    for err in [
+        "Permission denied",
+        "cannot execute",
+        "No such file or directory",
+    ] {
+        let marker: String = format!("{path_str}: {err}")
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect();
+        assert!(
+            !squashed_pane.contains(&marker),
+            "path should sit unexecuted on the prompt (no Enter), but pane shows {marker:?}:\n{pane}"
+        );
+    }
+
+    // Best-effort cleanup of the temp file this test wrote.
+    let _ = std::fs::remove_file(&path);
 
     // Cleanup
     let _ = manager.kill_session(&session_id, true).await;

@@ -969,6 +969,26 @@ fn test_toggle_commander_enabled_via_bool_path() {
 }
 
 #[test]
+fn test_hide_empty_sections_toggle_and_apply() {
+    let mut app = make_test_app();
+    // Default is on.
+    assert!(app.config.hide_empty_sections);
+    // Row is present with correct default value.
+    let rows = app.build_settings_rows(SettingsTab::General);
+    let row = rows
+        .iter()
+        .find(|r| r.field_key == "hide_empty_sections")
+        .unwrap_or_else(|| panic!("missing hide_empty_sections row"));
+    assert_eq!(row.kind, SettingsRowKind::Toggle(true));
+    // Apply false via bool path (what the toggle uses).
+    app.apply_bool_setting("hide_empty_sections", false);
+    assert!(!app.config.hide_empty_sections);
+    // Flip back.
+    app.apply_bool_setting("hide_empty_sections", true);
+    assert!(app.config.hide_empty_sections);
+}
+
+#[test]
 fn test_stt_rows_present_with_defaults() {
     let app = make_test_app();
     let rows = app.build_settings_rows(SettingsTab::Conversation);
@@ -1783,28 +1803,50 @@ async fn type_programs(app: &mut App, text: &str) {
 }
 
 #[tokio::test]
-async fn programs_tab_new_creates_entry_via_two_step_prompt() {
+async fn programs_tab_new_adds_entry_immediately_and_edits_in_place() {
     use crate::tui::app::ProgramsEditing;
     use crossterm::event::KeyCode;
 
     let mut app = make_test_app();
     app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
 
-    // Step 1: `n` opens the label prompt; type a label.
+    // `n` adds a real, visible entry straight away (the bug fix) with a unique
+    // default label + runnable command, committed to the target immediately, and
+    // starts editing its label.
     feed_programs_key(&mut app, KeyCode::Char('n')).await;
+    assert_eq!(
+        peek_programs(&app).entries,
+        vec![program_entry("New program", "claude")],
+        "new entry appears in the working copy immediately"
+    );
+    assert_eq!(
+        app.config.programs,
+        vec![program_entry("New program", "claude")],
+        "and is committed to the local config"
+    );
+    assert_eq!(peek_programs(&app).selected, 0);
+    assert!(matches!(
+        peek_programs(&app).editing,
+        Some(ProgramsEditing::CreatingLabel { .. })
+    ));
+
+    // Type a label; Enter applies it to the live entry and advances to the
+    // command step, seeded from the (new) label.
     type_programs(&mut app, "Codex").await;
     feed_programs_key(&mut app, KeyCode::Enter).await;
-
-    // Step 2: the command input is prefilled with the label.
+    assert_eq!(
+        peek_programs(&app).entries[0].label,
+        "Codex",
+        "label applied to the live entry"
+    );
     match &peek_programs(&app).editing {
-        Some(ProgramsEditing::CreatingCommand { label, value }) => {
-            assert_eq!(label, "Codex");
-            assert_eq!(value.value(), "Codex", "command prefilled with label");
+        Some(ProgramsEditing::CreatingCommand { value }) => {
+            assert_eq!(value.value(), "Codex", "command seeded from the label");
         }
         other => panic!("expected CreatingCommand, got {other:?}"),
     }
 
-    // Enter creates the entry (using the prefilled command) and persists it.
+    // Enter finishes editing, using the seeded command.
     feed_programs_key(&mut app, KeyCode::Enter).await;
     assert_eq!(app.config.programs, vec![program_entry("Codex", "Codex")]);
     let prog = peek_programs(&app);
@@ -1813,21 +1855,29 @@ async fn programs_tab_new_creates_entry_via_two_step_prompt() {
 }
 
 #[tokio::test]
-async fn programs_tab_create_esc_at_command_step_discards() {
+async fn programs_tab_create_esc_keeps_the_added_entry() {
     use crossterm::event::KeyCode;
 
     let mut app = make_test_app();
     app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
 
+    // Back out at the label step: the entry stays with its default label/command
+    // and must be deleted explicitly (the requested behaviour).
+    feed_programs_key(&mut app, KeyCode::Char('n')).await;
+    feed_programs_key(&mut app, KeyCode::Esc).await;
+    assert_eq!(
+        app.config.programs,
+        vec![program_entry("New program", "claude")]
+    );
+    assert!(peek_programs(&app).editing.is_none());
+
+    // Back out at the command step: still kept (label applied, command default).
     feed_programs_key(&mut app, KeyCode::Char('n')).await;
     type_programs(&mut app, "Codex").await;
     feed_programs_key(&mut app, KeyCode::Enter).await; // advance to command step
-    feed_programs_key(&mut app, KeyCode::Esc).await; // cancel
-
-    assert!(
-        app.config.programs.is_empty(),
-        "nothing half-formed persisted"
-    );
+    feed_programs_key(&mut app, KeyCode::Esc).await; // back out
+    assert_eq!(app.config.programs.len(), 2);
+    assert_eq!(app.config.programs[1], program_entry("Codex", "claude"));
     assert!(peek_programs(&app).editing.is_none());
 }
 
@@ -1981,6 +2031,38 @@ fn render_programs_tab_shows_entries_and_default_marker() {
     assert!(text.contains("n: new"), "missing list footer hint");
 }
 
+#[tokio::test]
+async fn render_programs_tab_shows_new_entry_while_naming_it() {
+    use crossterm::event::KeyCode;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    app.config.programs = vec![program_entry("Claude", "claude")];
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
+
+    // `n` adds the entry; while it is being named it must still render alongside
+    // the existing entries (the bug: it used to be invisible until saved).
+    feed_programs_key(&mut app, KeyCode::Char('n')).await;
+    type_programs(&mut app, "Cod").await;
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    let text = buffer_text(&terminal);
+    assert!(
+        text.contains("Claude"),
+        "existing entry still shown while naming"
+    );
+    assert!(
+        text.contains("Cod"),
+        "the new entry's live label input is shown in the list"
+    );
+    assert!(
+        text.contains("next (command)"),
+        "footer reflects the label-naming step"
+    );
+}
+
 /// Like `make_test_app`, but returns the on-disk config path so tests can read
 /// the persisted config back and pin that a mutation actually wrote through the
 /// store (not merely the in-memory `app.config`).
@@ -2024,6 +2106,23 @@ async fn programs_tab_reorder_persists_through_store() {
             program_entry("Codex", "codex"),
             program_entry("Claude", "claude"),
         ]
+    );
+}
+
+#[tokio::test]
+async fn programs_tab_new_entry_persists_through_store() {
+    use crossterm::event::KeyCode;
+
+    let (mut app, path) = make_test_app_with_path();
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
+
+    // `n` must write the freshly-added entry through the store immediately, so a
+    // user who backs out (never reaching the final Enter) still finds it saved.
+    feed_programs_key(&mut app, KeyCode::Char('n')).await;
+    let persisted = Config::load_from_path(&path).unwrap();
+    assert_eq!(
+        persisted.programs,
+        vec![program_entry("New program", "claude")]
     );
 }
 
@@ -2078,25 +2177,41 @@ async fn programs_tab_esc_cancels_rename_and_edit_without_change() {
 }
 
 #[tokio::test]
-async fn programs_tab_create_label_empty_or_duplicate_closes_editor() {
+async fn programs_tab_create_label_empty_or_duplicate_keeps_default() {
+    use crate::tui::app::ProgramsEditing;
     use crossterm::event::KeyCode;
 
     let mut app = make_test_app();
     app.config.programs = vec![program_entry("Claude", "claude")];
     app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
 
-    // Empty label + Enter closes the editor without creating anything.
+    // Empty label at the create step keeps the auto-generated default and
+    // advances to the command step (the entry was already added on `n`).
     feed_programs_key(&mut app, KeyCode::Char('n')).await;
     feed_programs_key(&mut app, KeyCode::Enter).await;
-    assert!(peek_programs(&app).editing.is_none(), "empty closes editor");
-    assert_eq!(app.config.programs.len(), 1);
+    assert_eq!(app.config.programs.len(), 2);
+    assert_eq!(app.config.programs[1].label, "New program");
+    assert!(matches!(
+        peek_programs(&app).editing,
+        Some(ProgramsEditing::CreatingCommand { .. })
+    ));
+    feed_programs_key(&mut app, KeyCode::Enter).await; // finish
 
-    // Duplicate label + Enter also closes the editor without creating.
+    // A duplicate label is rejected, so the entry keeps its unique default.
     feed_programs_key(&mut app, KeyCode::Char('n')).await;
-    type_programs(&mut app, "Claude").await;
+    let default_label = peek_programs(&app).entries[2].label.clone();
+    assert_ne!(default_label, "New program", "second default is distinct");
+    type_programs(&mut app, "Claude").await; // duplicate of the first entry
     feed_programs_key(&mut app, KeyCode::Enter).await;
-    assert!(peek_programs(&app).editing.is_none(), "dup closes editor");
-    assert_eq!(app.config.programs.len(), 1);
+    assert_eq!(app.config.programs.len(), 3);
+    assert_eq!(
+        app.config.programs[2].label, default_label,
+        "duplicate rejected; default kept"
+    );
+    assert!(matches!(
+        peek_programs(&app).editing,
+        Some(ProgramsEditing::CreatingCommand { .. })
+    ));
 }
 
 #[tokio::test]
@@ -3303,6 +3418,193 @@ async fn multi_backend_tree_emits_server_headers_in_config_order_local_first() {
         ],
         "server headers should be local-first, then config order"
     );
+}
+
+/// The `version_warning` on the buildbox server header, or `None` if there's no
+/// such header.
+fn buildbox_version_warning(app: &App) -> Option<crate::backend::VersionMismatch> {
+    app.ui_state.list_items.iter().find_map(|i| match i {
+        SessionListItem::ServerHeader {
+            name,
+            version_warning,
+            ..
+        } if name == "buildbox" => version_warning.clone(),
+        _ => None,
+    })
+}
+
+fn agent_states_box() -> Box<crate::api::AgentStatesSnapshot> {
+    Box::new(crate::api::AgentStatesSnapshot {
+        states: Default::default(),
+        commander_running: false,
+    })
+}
+
+#[tokio::test]
+async fn older_server_snapshot_annotates_header_but_placeholder_does_not() {
+    // A remote whose server build is behind this client (major.minor) flags a
+    // warning on its header. Before its first real snapshot lands the header
+    // carries the connecting placeholder (== client version), so no false alarm.
+    let mut old_snap = empty_snapshot();
+    old_snap.server.version = "0.1.0".to_string(); // certainly behind the client
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", old_snap.clone())]);
+    app.bootstrap_backend_views().await;
+    app.refresh_list_items().await;
+    assert_eq!(
+        buildbox_version_warning(&app),
+        None,
+        "the connecting placeholder reports the client version, so no warning yet"
+    );
+
+    // Land the older snapshot (first real snapshot arrives via BackendChanged).
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: BackendId(1).0,
+        snapshot: Box::new(old_snap),
+        states: agent_states_box(),
+    })
+    .await;
+    assert_eq!(
+        buildbox_version_warning(&app),
+        Some(crate::backend::VersionMismatch {
+            server: "0.1.0".to_string(),
+            client: crate::VERSION.to_string(),
+        }),
+        "an older remote server must carry a version warning on its header"
+    );
+}
+
+#[tokio::test]
+async fn stale_server_toast_fires_once_and_never_for_local() {
+    let mut old_snap = empty_snapshot();
+    old_snap.server.version = "0.1.0".to_string();
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", old_snap.clone())]);
+    app.bootstrap_backend_views().await;
+
+    // First fold of the older snapshot: the one-time toast fires.
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: BackendId(1).0,
+        snapshot: Box::new(old_snap.clone()),
+        states: agent_states_box(),
+    })
+    .await;
+    let toast = app.ui_state.status_message.as_ref().map(|(m, _)| m.clone());
+    assert!(
+        toast
+            .as_deref()
+            .is_some_and(|m| m.contains("older than this client")),
+        "first fold of a stale server must toast, got {toast:?}"
+    );
+    assert!(app.ui_state.version_warned.contains(&BackendId(1).0));
+
+    // A second fold must NOT re-fire the toast.
+    app.ui_state.status_message = None;
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: BackendId(1).0,
+        snapshot: Box::new(old_snap),
+        states: agent_states_box(),
+    })
+    .await;
+    assert_eq!(
+        app.ui_state.status_message, None,
+        "a subsequent fold of the same stale server must not re-toast"
+    );
+
+    // The local backend reports the client's own version, so it never toasts.
+    assert!(
+        !app.ui_state.version_warned.contains(&BackendId(0).0),
+        "the local backend must never flag a version mismatch"
+    );
+}
+
+#[tokio::test]
+async fn version_toast_does_not_clobber_a_live_status_message() {
+    let mut old_snap = empty_snapshot();
+    old_snap.server.version = "0.1.0".to_string();
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", old_snap.clone())]);
+    app.bootstrap_backend_views().await;
+
+    // A live message (e.g. "Created session …") occupies the single slot.
+    app.ui_state.status_message = Some((
+        "busy".to_string(),
+        std::time::Instant::now() + std::time::Duration::from_secs(30),
+    ));
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: BackendId(1).0,
+        snapshot: Box::new(old_snap),
+        states: agent_states_box(),
+    })
+    .await;
+    assert_eq!(
+        app.ui_state
+            .status_message
+            .as_ref()
+            .map(|(m, _)| m.as_str()),
+        Some("busy"),
+        "the version toast must not overwrite a live message"
+    );
+    assert!(
+        !app.ui_state.version_warned.contains(&BackendId(1).0),
+        "a deferred toast must not mark the server warned, so it can retry"
+    );
+
+    // Once the slot frees, the next refresh delivers the deferred toast.
+    app.ui_state.status_message = None;
+    app.refresh_list_items().await;
+    assert!(
+        app.ui_state
+            .status_message
+            .as_ref()
+            .is_some_and(|(m, _)| m.contains("older than this client")),
+        "the deferred toast must fire once the slot is free"
+    );
+    assert!(app.ui_state.version_warned.contains(&BackendId(1).0));
+}
+
+#[tokio::test]
+async fn two_stale_servers_each_get_their_own_toast() {
+    let mut old_snap = empty_snapshot();
+    old_snap.server.version = "0.1.0".to_string();
+    let mut app = build_app_with_mock_remotes(vec![
+        ("buildbox", old_snap.clone()),
+        ("ci", old_snap.clone()),
+    ]);
+    app.bootstrap_backend_views().await;
+
+    // Fold buildbox (id 1): its toast fires; ci is still on its placeholder.
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: BackendId(1).0,
+        snapshot: Box::new(old_snap.clone()),
+        states: agent_states_box(),
+    })
+    .await;
+    assert!(
+        app.ui_state
+            .status_message
+            .as_ref()
+            .is_some_and(|(m, _)| m.contains("buildbox")),
+        "first stale server toasts, got {:?}",
+        app.ui_state.status_message
+    );
+    assert!(app.ui_state.version_warned.contains(&BackendId(1).0));
+    assert!(!app.ui_state.version_warned.contains(&BackendId(2).0));
+
+    // Free the slot, then fold ci (id 2): it gets its own toast.
+    app.ui_state.status_message = None;
+    app.handle_state_update(StateUpdate::BackendChanged {
+        backend_id: BackendId(2).0,
+        snapshot: Box::new(old_snap),
+        states: agent_states_box(),
+    })
+    .await;
+    assert!(
+        app.ui_state
+            .status_message
+            .as_ref()
+            .is_some_and(|(m, _)| m.contains("ci")),
+        "second stale server toasts too, got {:?}",
+        app.ui_state.status_message
+    );
+    assert!(app.ui_state.version_warned.contains(&BackendId(2).0));
 }
 
 #[tokio::test]
@@ -4744,6 +5046,179 @@ async fn restart_confirm_spawns_against_owning_backend_and_toasts() {
         .clone()
         .expect("a status toast after restart");
     assert!(msg.contains("restarted"), "toast: {msg}");
+}
+
+#[tokio::test]
+async fn change_program_confirm_spawns_against_owning_backend_and_routes_program() {
+    // Confirming a program change must spawn `change_program` on the OWNING
+    // backend (not the local one) with the chosen command, off the event loop.
+    let (app, remote_sid) = app_with_remote_session().await;
+    let mut app = app;
+
+    app.handle_confirm(super::ConfirmAction::ChangeProgram {
+        session_id: remote_sid,
+        program: "codex".to_string(),
+    })
+    .await;
+
+    // Drive the completion event the spawned change posts (reuses RestartFinished).
+    loop {
+        match app.event_loop.next().await.expect("a change-program event") {
+            AppEvent::StateUpdate(su @ StateUpdate::RestartFinished { .. }) => {
+                app.handle_state_update(su).await;
+                break;
+            }
+            _ => continue,
+        }
+    }
+
+    assert_eq!(
+        remote_mock(&app, BackendId(1)).program_changes(),
+        vec![(remote_sid, "codex".to_string())],
+        "change_program must route to the owning backend with the chosen program"
+    );
+}
+
+#[tokio::test]
+async fn program_picker_items_flag_current_and_filter() {
+    // `gather_program_picker_items` flags the row matching the session's current
+    // program and filters rows by a label/command substring.
+    let (app, sid) = app_with_remote_session().await;
+    let mut app = app;
+    app.ui_state.program_picker_current = "codex".to_string();
+    app.ui_state.program_picker_choices = vec![
+        crate::config::ProgramEntry {
+            label: "Claude".to_string(),
+            command: "claude".to_string(),
+        },
+        crate::config::ProgramEntry {
+            label: "Codex".to_string(),
+            command: "codex".to_string(),
+        },
+        crate::config::ProgramEntry {
+            label: "OpenCode".to_string(),
+            command: "opencode".to_string(),
+        },
+    ];
+
+    let all = app.gather_program_picker_items(sid, "");
+    assert_eq!(all.len(), 3, "no filter lists every choice");
+    let codex = all
+        .iter()
+        .find_map(|i| match i {
+            QuickSwitchItem::ProgramChange { program, label, .. } if program == "codex" => {
+                Some(label.clone())
+            }
+            _ => None,
+        })
+        .expect("a codex row");
+    assert!(
+        codex.contains("current"),
+        "current program is flagged: {codex}"
+    );
+
+    let filtered = app.gather_program_picker_items(sid, "open");
+    assert_eq!(filtered.len(), 1, "substring filter narrows the list");
+    match &filtered[0] {
+        QuickSwitchItem::ProgramChange { program, .. } => assert_eq!(program, "opencode"),
+        other => panic!("expected a ProgramChange row, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn program_choices_loaded_replaces_only_for_matching_open_palette() {
+    // The remote program-list load must replace the palette's fallback choices
+    // only when the change-program palette is still open for the SAME session.
+    let (app, sid) = app_with_remote_session().await;
+    let mut app = app;
+    app.ui_state.program_picker_choices = vec![crate::config::ProgramEntry {
+        label: "Claude".to_string(),
+        command: "claude".to_string(),
+    }];
+    app.ui_state.modal = Modal::QuickSwitch {
+        mode: super::PaletteMode::ProgramPicker { session_id: sid },
+        query: super::Input::default(),
+        matches: Vec::new(),
+        selected_idx: 0,
+        scroll: 0,
+    };
+
+    // A load for a DIFFERENT session is dropped.
+    app.handle_state_update(StateUpdate::ProgramChoicesLoaded {
+        session_id: SessionId::new(),
+        choices: vec![crate::config::ProgramEntry {
+            label: "Codex".to_string(),
+            command: "codex".to_string(),
+        }],
+    })
+    .await;
+    assert_eq!(
+        app.ui_state.program_picker_choices.len(),
+        1,
+        "a load for another session must not touch these choices"
+    );
+
+    // A load for the open palette's session replaces the choices and rebuilds rows.
+    app.handle_state_update(StateUpdate::ProgramChoicesLoaded {
+        session_id: sid,
+        choices: vec![
+            crate::config::ProgramEntry {
+                label: "Codex".to_string(),
+                command: "codex".to_string(),
+            },
+            crate::config::ProgramEntry {
+                label: "OpenCode".to_string(),
+                command: "opencode".to_string(),
+            },
+        ],
+    })
+    .await;
+    assert_eq!(app.ui_state.program_picker_choices.len(), 2);
+    match &app.ui_state.modal {
+        Modal::QuickSwitch { matches, .. } => {
+            assert_eq!(matches.len(), 2, "rows rebuilt from the loaded choices")
+        }
+        other => panic!("expected the palette to stay open, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn selecting_program_row_opens_change_program_confirm() {
+    // Selecting a program row in the change-program palette must open a confirm
+    // modal carrying the target session and chosen program (not apply directly).
+    let (app, remote_sid) = app_with_remote_session().await;
+    let mut app = app;
+
+    app.ui_state.modal = Modal::QuickSwitch {
+        mode: super::PaletteMode::ProgramPicker {
+            session_id: remote_sid,
+        },
+        query: super::Input::default(),
+        matches: vec![QuickSwitchItem::ProgramChange {
+            session_id: remote_sid,
+            program: "opencode".to_string(),
+            label: "opencode".to_string(),
+        }],
+        selected_idx: 0,
+        scroll: 0,
+    };
+
+    app.activate_quick_switch_selection().await;
+
+    match &app.ui_state.modal {
+        Modal::Confirm {
+            on_confirm:
+                super::ConfirmAction::ChangeProgram {
+                    session_id,
+                    program,
+                },
+            ..
+        } => {
+            assert_eq!(*session_id, remote_sid);
+            assert_eq!(program, "opencode");
+        }
+        other => panic!("expected ChangeProgram confirm modal, got {other:?}"),
+    }
 }
 
 #[tokio::test]

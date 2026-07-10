@@ -36,8 +36,24 @@ enum InputAction {
     /// A voice trigger fired: toggle the mic, then forward the remaining bytes
     /// (trigger bytes stripped out; may be empty).
     ToggleVoice(Vec<u8>),
+    /// Ctrl+V during a remote attach: capture the local clipboard image and
+    /// upload it. Carries the original burst verbatim (the `0x16` is *not*
+    /// stripped here) so the effectful handler can forward it as a fallback when
+    /// the clipboard holds no image or the upload fails.
+    PasteImage(Vec<u8>),
     /// Exit the attach loop with this result (Ctrl+Q, Ctrl+\, review, editor).
     Break(AttachResult),
+}
+
+/// Sink for a clipboard image captured during a remote attach. The attach loop
+/// reads the operator's *local* clipboard (the remote agent can't) and hands the
+/// encoded PNG bytes here; the implementation ships them to wherever the agent
+/// can read them (the server) and returns once the image's path has been
+/// injected into the pane. Kept transport-agnostic (a `String` error) so the
+/// attach loop doesn't depend on the backend error type.
+#[async_trait::async_trait]
+pub trait ImagePasteSink: Send + Sync {
+    async fn upload(&self, png: Vec<u8>) -> std::result::Result<(), String>;
 }
 
 /// Classify a raw stdin burst. See [`InputAction`] for the contract; this is the
@@ -50,6 +66,7 @@ fn classify_input(
     review_triggers: &[Vec<u8>],
     editor_triggers: &[Vec<u8>],
     intercept_ctrl_z: bool,
+    image_paste_enabled: bool,
 ) -> InputAction {
     // While the in-session switcher popup is open, forward every byte to tmux
     // verbatim. tmux routes keystrokes to the popup (which has its own PTY), and
@@ -106,6 +123,23 @@ fn classify_input(
         return InputAction::Break(AttachResult::OpenEditor);
     }
 
+    // Ctrl+V (0x16) during a REMOTE attach: capture the operator's local
+    // clipboard image and upload it, because the remote agent reads the *server's*
+    // clipboard (empty) on paste. Only when enabled — a local attach leaves this
+    // false so Ctrl+V is forwarded and the co-located agent reads the clipboard
+    // itself. The original burst rides along so the effectful handler can forward
+    // it verbatim when there's no clipboard image (fallback to normal Ctrl+V).
+    //
+    // This matches the standard control-byte encoding. Under an enhanced keyboard
+    // protocol (kitty/CSI-u or xterm modifyOtherKeys) the remote agent may have
+    // enabled, Ctrl+V can instead arrive as an escape sequence (e.g. `\x1b[118;5u`)
+    // and won't match here — paste then falls through to plain forwarding, same as
+    // a local attach. Placed after the configurable editor/voice/review triggers
+    // so an explicit user binding on 0x16 still wins.
+    if image_paste_enabled && data.contains(&0x16) {
+        return InputAction::PasteImage(data.to_vec());
+    }
+
     // Plain forwarding, with optional Ctrl+Z stripping for Claude sessions.
     let stripped = if intercept_ctrl_z {
         strip_ctrl_z(data)
@@ -113,6 +147,126 @@ fn classify_input(
         None
     };
     InputAction::Forward(stripped.unwrap_or_else(|| data.to_vec()))
+}
+
+/// What to do with a Ctrl+V paste burst, given the clipboard capture result.
+/// Pure so the four outcomes are unit-testable without a real clipboard/network;
+/// the effectful [`handle_image_paste`] maps it to spawn-upload + forward.
+#[derive(Debug, PartialEq, Eq)]
+enum PasteDecision {
+    /// Forward these bytes to the pane verbatim; do not upload. Covers no
+    /// clipboard image, a capture error, and an over-limit image — in every case
+    /// Ctrl+V behaves as it would on a local attach.
+    Forward(Vec<u8>),
+    /// Upload this PNG (fire-and-forget) and forward these bytes — the original
+    /// burst with `0x16` stripped (the Ctrl+V is swallowed; the server injects
+    /// the path, which appears in the pane via the output stream).
+    Upload { png: Vec<u8>, forward: Vec<u8> },
+}
+
+/// Pure paste decision from a clipboard-capture result. An image within the size
+/// cap → upload + strip `0x16`; no image, a capture error, or an over-limit
+/// image → forward the burst verbatim.
+fn paste_decision(
+    capture: std::result::Result<Option<Vec<u8>>, String>,
+    orig: &[u8],
+) -> PasteDecision {
+    match capture {
+        Ok(Some(png)) if png.len() <= crate::paste_image::MAX_IMAGE_BYTES => {
+            PasteDecision::Upload {
+                png,
+                forward: orig.iter().copied().filter(|b| *b != 0x16).collect(),
+            }
+        }
+        _ => PasteDecision::Forward(orig.to_vec()),
+    }
+}
+
+/// Handle a Ctrl+V image-paste burst during a remote attach: read the local
+/// clipboard image and, if present and within the size cap, upload it via
+/// `sink`. Returns the bytes the stdin loop should forward to the pane (see
+/// [`PasteDecision`]).
+///
+/// The clipboard read runs on a blocking thread and is awaited (a fast local
+/// round-trip), keeping the no-image fallback in-order. The **upload** is
+/// spawned fire-and-forget: a large image over a slow link must never freeze
+/// keystroke forwarding — this is the only stdin path. An upload failure is
+/// therefore surfaced only as a `warn!` log (there is no reliable on-screen
+/// channel: the remote pane's tmux is not the operator's local tmux, so a
+/// `display-message` would target a name that isn't here). Success needs no
+/// notification — the injected path appears in the prompt.
+///
+/// Accepted trade-off: because the upload is spawned, keystrokes typed
+/// immediately after Ctrl+V travel the WS while the path injection races over
+/// HTTP, so very fast typing within the round-trip can land before the path
+/// (splitting a word around it — the surrounding spaces keep them from merging,
+/// and the user is watching). This is the deliberate price of not blocking
+/// stdin during the upload; do not "fix" it by awaiting the upload inline.
+async fn handle_image_paste(orig: &[u8], sink: Option<&Arc<dyn ImagePasteSink>>) -> Vec<u8> {
+    // `handle_image_paste` is only reached when `classify_input` returned
+    // `PasteImage`, which requires `image_paste_enabled == sink.is_some()`; so
+    // `sink` is `Some` here. Defensive fallback keeps the contract explicit.
+    let Some(sink) = sink else {
+        return orig.to_vec();
+    };
+    let capture = capture_clipboard_png().await;
+    match &capture {
+        Err(e) => warn!("clipboard image read failed: {e}"),
+        Ok(None) => debug!("Ctrl+V with no clipboard image; forwarding verbatim"),
+        Ok(Some(png)) if png.len() > crate::paste_image::MAX_IMAGE_BYTES => warn!(
+            "clipboard image {} bytes exceeds {} limit; not uploading",
+            png.len(),
+            crate::paste_image::MAX_IMAGE_BYTES
+        ),
+        Ok(Some(_)) => {}
+    }
+    match paste_decision(capture, orig) {
+        PasteDecision::Forward(bytes) => bytes,
+        PasteDecision::Upload { png, forward } => {
+            let sink = sink.clone();
+            tokio::spawn(async move {
+                match sink.upload(png).await {
+                    Ok(()) => debug!("pasted clipboard image to remote session"),
+                    Err(e) => warn!("image paste upload failed: {e}"),
+                }
+            });
+            forward
+        }
+    }
+}
+
+/// Read an image from the operator's local OS clipboard and encode it as PNG.
+/// `Ok(None)` means the clipboard holds no image (so the caller forwards Ctrl+V
+/// verbatim). The blocking `arboard` read runs on a blocking thread so it never
+/// stalls the async stdin loop.
+#[cfg(feature = "clipboard")]
+async fn capture_clipboard_png() -> std::result::Result<Option<Vec<u8>>, String> {
+    tokio::task::spawn_blocking(|| {
+        let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+        match clipboard.get_image() {
+            Ok(img) => {
+                let png = crate::paste_image::encode_rgba_png(
+                    img.width as u32,
+                    img.height as u32,
+                    img.bytes.into_owned(),
+                )
+                .map_err(|e| e.to_string())?;
+                Ok(Some(png))
+            }
+            // No image on the clipboard (text, or empty) — not an error.
+            Err(arboard::Error::ContentNotAvailable) => Ok(None),
+            Err(e) => Err(e.to_string()),
+        }
+    })
+    .await
+    .map_err(|e| format!("clipboard task panicked: {e}"))?
+}
+
+/// Clipboard support compiled out (`--no-default-features`): there is no local
+/// clipboard to read, so paste always falls back to forwarding Ctrl+V.
+#[cfg(not(feature = "clipboard"))]
+async fn capture_clipboard_png() -> std::result::Result<Option<Vec<u8>>, String> {
+    Ok(None)
 }
 
 /// Result of a session attachment attempt
@@ -154,6 +308,19 @@ pub struct AttachOutcome {
 /// sequences for `Ctrl-<non-letter>` bindings. Bindings that cannot be detected
 /// in raw stdin (e.g. a bare letter) should simply be omitted.
 ///
+/// Hook the attach loop calls with the switcher's picked tmux session name
+/// before running `tmux switch-client`: revives the session when its tmux
+/// session is missing or its pane died, returning the (primary) name to
+/// switch to. Supplied by frontends that own a `CommanderService` (see
+/// `CommanderService::switcher_revive_hook`) so the revive runs in the
+/// process that owns the state store; the attach loop itself stays
+/// transport-agnostic and holds no service handle.
+pub type SwitcherRevive = Arc<
+    dyn Fn(String) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<String>> + Send>>
+        + Send
+        + Sync,
+>;
+
 /// When `intercept_ctrl_z` is true, Ctrl+Z (`0x1A`) bytes are stripped from
 /// stdin before reaching the pane. Use this for Claude sessions where SIGTSTP
 /// would freeze the pane with no shell to recover from. Leave it false for
@@ -162,7 +329,7 @@ pub struct AttachConfig {
     pub editor_triggers: Vec<Vec<u8>>,
     pub review_triggers: Vec<Vec<u8>>,
     pub voice_triggers: Vec<Vec<u8>>,
-    pub voice_listener: Option<mpsc::UnboundedSender<crate::conversation::ListenerCommand>>,
+    pub voice_listener: Option<crate::conversation::ListenerHandle>,
     pub recording: Arc<AtomicBool>,
     pub intercept_ctrl_z: bool,
     /// Whether the in-session Ctrl+Space switcher popup is available. It's a
@@ -178,6 +345,18 @@ pub struct AttachConfig {
     /// runs against the operator's local tmux, so for a remote session it may
     /// simply target a name that isn't there. `None` disables both.
     pub session_name: Option<String>,
+    /// Revives the switcher's pick before `tmux switch-client` when its tmux
+    /// session died (e.g. after a reboot) — the same revive-on-attach the
+    /// tree view gets. `None` switches to the raw name, which fails for a
+    /// dead session.
+    pub switcher_revive: Option<SwitcherRevive>,
+    /// Sink for clipboard-image paste, set only for a **remote** attach (the
+    /// backend's `client_side_image_paste` capability). When `Some`, Ctrl+V is
+    /// intercepted: the operator's local clipboard image is captured, encoded,
+    /// and uploaded via this sink instead of being forwarded to the remote pane.
+    /// `None` (local attach) forwards Ctrl+V so the co-located agent reads the
+    /// clipboard directly, exactly as before.
+    pub image_paste: Option<Arc<dyn ImagePasteSink>>,
 }
 
 /// Async PTY attachment by tmux session name — the CLI/local entry point.
@@ -191,9 +370,10 @@ pub async fn attach_to_session(
     editor_triggers: Vec<Vec<u8>>,
     review_triggers: Vec<Vec<u8>>,
     voice_triggers: Vec<Vec<u8>>,
-    voice_listener: Option<mpsc::UnboundedSender<crate::conversation::ListenerCommand>>,
+    voice_listener: Option<crate::conversation::ListenerHandle>,
     recording: Arc<AtomicBool>,
     intercept_ctrl_z: bool,
+    switcher_revive: Option<SwitcherRevive>,
 ) -> Result<AttachOutcome> {
     let (cols, rows) = terminal::size().unwrap_or((80, 24));
     // Local TUI/CLI attach talks to the user's own tmux server, so no socket-dir
@@ -208,8 +388,94 @@ pub async fn attach_to_session(
         intercept_ctrl_z,
         switcher_enabled: true,
         session_name: Some(session_name.to_string()),
+        switcher_revive,
+        // The CLI/local attach runs the agent on this machine, so it reads the
+        // local clipboard itself — no client-side capture.
+        image_paste: None,
     };
     run_attach(streams, cfg).await
+}
+
+/// Clipboard-image sink that forwards a captured PNG through a
+/// [`CommanderBackend`](crate::backend::CommanderBackend)'s `paste_image` route.
+/// The canonical [`ImagePasteSink`] used by every frontend attaching to a
+/// *remote* session (the TUI and the CLI both construct it via [`Self::sink`]).
+pub struct BackendImagePaste {
+    backend: Arc<dyn crate::backend::CommanderBackend>,
+    id: crate::session::SessionId,
+}
+
+impl BackendImagePaste {
+    /// Build a sink that uploads captured clipboard images to `backend` for the
+    /// session `id`, boxed as the [`ImagePasteSink`] trait object the attach
+    /// loop's `image_paste` slot expects. Named `sink` rather than `new` because
+    /// it returns the trait object, not `Self`.
+    pub fn sink(
+        backend: Arc<dyn crate::backend::CommanderBackend>,
+        id: crate::session::SessionId,
+    ) -> Arc<dyn ImagePasteSink> {
+        Arc::new(Self { backend, id })
+    }
+}
+
+#[async_trait::async_trait]
+impl ImagePasteSink for BackendImagePaste {
+    async fn upload(&self, png: Vec<u8>) -> std::result::Result<(), String> {
+        self.backend
+            .paste_image(self.id, png)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Attach to a session on a `backend` — the remote entry point mirroring
+/// [`attach_to_session`]'s local PTY path. Resolves `query` to a session via the
+/// backend, opens an attach connection (a WebSocket for a remote backend), and
+/// drives it through [`run_attach`] with the CLI-appropriate policy: the
+/// in-session switcher and voice input are TUI-only affordances so they stay
+/// off, while clipboard-image paste is enabled when the backend advertises
+/// `client_side_image_paste`.
+///
+/// Lives in core (not `main.rs`) so the config assembly is unit-testable and the
+/// CLI stays thin.
+pub async fn attach_backend_session(
+    backend: Arc<dyn crate::backend::CommanderBackend>,
+    query: &str,
+    editor_triggers: Vec<Vec<u8>>,
+) -> crate::backend::BResult<AttachOutcome> {
+    use crate::backend::{AttachKind, BackendError};
+
+    let detail = backend
+        .session_detail(query, None)
+        .await?
+        .ok_or(BackendError::NotFound)?;
+    let id = detail.info.session_id;
+
+    let (cols, rows) = terminal::size().unwrap_or((80, 24));
+    let conn = backend.attach(id, cols, rows, AttachKind::Agent).await?;
+    let streams = conn.split();
+
+    let image_paste: Option<Arc<dyn ImagePasteSink>> = backend
+        .capabilities()
+        .client_side_image_paste
+        .then(|| BackendImagePaste::sink(backend.clone(), id));
+
+    let cfg = AttachConfig {
+        editor_triggers,
+        review_triggers: Vec::new(),
+        voice_triggers: Vec::new(),
+        voice_listener: None,
+        recording: Arc::new(AtomicBool::new(false)),
+        intercept_ctrl_z: true,
+        // Local-only affordance: the switcher popup runs `tmux display-popup`
+        // against the operator's own server, where the remote session isn't.
+        switcher_enabled: false,
+        session_name: None,
+        switcher_revive: None,
+        image_paste,
+    };
+
+    Ok(run_attach(streams, cfg).await?)
 }
 
 /// Drive one interactive attach over transport-agnostic [`AttachStreams`]
@@ -403,6 +669,8 @@ async fn run_async_loop(
     let recording_flag = cfg.recording.clone();
     let intercept_ctrl_z = cfg.intercept_ctrl_z;
     let switcher_enabled = cfg.switcher_enabled;
+    let switcher_revive = cfg.switcher_revive.clone();
+    let image_paste = cfg.image_paste.clone();
 
     // Channel for shutdown signal
     let (shutdown_tx, mut shutdown_rx) = mpsc::channel::<AttachResult>(1);
@@ -462,6 +730,7 @@ async fn run_async_loop(
                         &review_triggers,
                         &editor_triggers,
                         intercept_ctrl_z,
+                        image_paste.is_some(),
                     ) {
                         InputAction::Break(result) => {
                             match &result {
@@ -503,8 +772,9 @@ async fn run_async_loop(
                                 debug!("Ctrl+Space detected, spawning switcher popup");
                                 let popup_open = popup_open.clone();
                                 let current_session = current_session.clone();
+                                let revive = switcher_revive.clone();
                                 tokio::spawn(async move {
-                                    run_switcher_popup(current_session, popup_open).await;
+                                    run_switcher_popup(current_session, popup_open, revive).await;
                                 });
                             }
                             if filtered.is_empty() {
@@ -542,6 +812,20 @@ async fn run_async_loop(
                                 continue;
                             }
                             if writer.write_all(&filtered).await.is_err() {
+                                break;
+                            }
+                            let _ = writer.flush().await;
+                        }
+                        InputAction::PasteImage(orig) => {
+                            // Capture the local clipboard image and upload it.
+                            // Returns the bytes to forward: empty/rest on success
+                            // (Ctrl+V swallowed), or the original burst as a
+                            // fallback when there's no image or the upload fails.
+                            let to_forward = handle_image_paste(&orig, image_paste.as_ref()).await;
+                            if to_forward.is_empty() {
+                                continue;
+                            }
+                            if writer.write_all(&to_forward).await.is_err() {
                                 break;
                             }
                             let _ = writer.flush().await;
@@ -620,23 +904,55 @@ fn shell_quote(s: &str) -> String {
 }
 
 /// Run the in-session switcher: spawn a `tmux display-popup` showing
-/// the picker subcommand, then on a non-empty result `tmux
-/// switch-client` to the chosen session and record it in
-/// `current_session`. Always clears `popup_open` before returning.
-async fn run_switcher_popup(current_session: Arc<Mutex<String>>, popup_open: Arc<AtomicBool>) {
+/// the picker subcommand, then on a non-empty result revive the chosen
+/// session if its tmux session died, `tmux switch-client` to it, and
+/// record it in `current_session`. Always clears `popup_open` before
+/// returning.
+async fn run_switcher_popup(
+    current_session: Arc<Mutex<String>>,
+    popup_open: Arc<AtomicBool>,
+    revive: Option<SwitcherRevive>,
+) {
     let current_name = current_session.lock().await.clone();
     let new_session = run_switcher_popup_inner(&current_name).await;
     if let Some(name) = new_session {
         info!("Switcher picked session: {}", name);
+        // Revive the pick before switching — its tmux session may have died
+        // (e.g. after a reboot), and `switch-client` can't create sessions.
+        // On a revive error fall back to the raw name: the pick may exist in
+        // tmux without being in commander state.
+        let target = match &revive {
+            Some(revive) => match revive(name.clone()).await {
+                Ok(target) => target,
+                Err(e) => {
+                    warn!("Failed to revive picked session {}: {}", name, e);
+                    name
+                }
+            },
+            None => name,
+        };
         let switch_status = tokio::process::Command::new("tmux")
-            .args(["switch-client", "-t", &name])
+            .args(["switch-client", "-t", &target])
             .status()
             .await;
         match switch_status {
             Ok(s) if s.success() => {
-                *current_session.lock().await = name;
+                *current_session.lock().await = target;
             }
-            Ok(s) => warn!("tmux switch-client exited with {:?}", s.code()),
+            Ok(s) => {
+                warn!("tmux switch-client exited with {:?}", s.code());
+                // Surface the failure in the pane the user is still on;
+                // without this a dead pick looks like the popup did nothing.
+                let _ = tokio::process::Command::new("tmux")
+                    .args([
+                        "display-message",
+                        "-t",
+                        &current_name,
+                        &format!("Could not switch to session {target}"),
+                    ])
+                    .status()
+                    .await;
+            }
             Err(e) => warn!("Failed to spawn tmux switch-client: {}", e),
         }
     }
@@ -685,6 +1001,25 @@ async fn run_switcher_popup_inner(current_session: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn attach_backend_session_unknown_query_is_not_found() {
+        // A query that resolves to no session must fail with NotFound *before*
+        // the loop touches the terminal — the mock's `session_detail` returns
+        // `None`, so the early return fires and raw mode is never entered.
+        use crate::backend::mock::MockBackend;
+        use crate::backend::{BackendError, empty_snapshot};
+
+        let backend: Arc<dyn crate::backend::CommanderBackend> =
+            Arc::new(MockBackend::new("test", empty_snapshot()));
+        let err = attach_backend_session(backend, "does-not-exist", Vec::new())
+            .await
+            .expect_err("unknown session query must not attach");
+        assert!(
+            matches!(err, BackendError::NotFound),
+            "expected NotFound, got {err:?}"
+        );
+    }
 
     #[test]
     fn test_contains_subsequence_finds_needle() {
@@ -753,9 +1088,18 @@ mod tests {
         vec![vec![0x05]]
     }
 
-    /// Classify with the standard trigger set and Ctrl+Z interception on.
+    /// Classify with the standard trigger set and Ctrl+Z interception on. Image
+    /// paste is off (the local-attach default), matching the historical calls.
     fn classify(data: &[u8], popup_open: bool) -> InputAction {
-        classify_input(data, popup_open, &voice(), &review(), &editor(), true)
+        classify_input(
+            data,
+            popup_open,
+            &voice(),
+            &review(),
+            &editor(),
+            true,
+            false,
+        )
     }
 
     #[test]
@@ -855,7 +1199,15 @@ mod tests {
 
     #[test]
     fn classify_keeps_ctrl_z_when_interception_disabled() {
-        let action = classify_input(b"a\x1ab", false, &voice(), &review(), &editor(), false);
+        let action = classify_input(
+            b"a\x1ab",
+            false,
+            &voice(),
+            &review(),
+            &editor(),
+            false,
+            false,
+        );
         assert_eq!(action, InputAction::Forward(b"a\x1ab".to_vec()));
     }
 
@@ -863,9 +1215,9 @@ mod tests {
     fn classify_empty_triggers_disable_review_and_editor() {
         // With no review/editor triggers configured, those bytes are forwarded
         // as ordinary input rather than intercepted.
-        let action = classify_input(b"\x1br", false, &voice(), &[], &[], true);
+        let action = classify_input(b"\x1br", false, &voice(), &[], &[], true, false);
         assert_eq!(action, InputAction::Forward(b"\x1br".to_vec()));
-        let action = classify_input(b"\x05", false, &voice(), &[], &[], true);
+        let action = classify_input(b"\x05", false, &voice(), &[], &[], true, false);
         assert_eq!(action, InputAction::Forward(b"\x05".to_vec()));
     }
 
@@ -873,7 +1225,112 @@ mod tests {
     fn classify_voice_precedes_review_when_both_match() {
         // Ordering: voice is checked before review. A burst containing both
         // triggers toggles voice (and strips it) rather than breaking to review.
-        let action = classify_input(b"\x1bv\x1br", false, &voice(), &review(), &editor(), true);
+        let action = classify_input(
+            b"\x1bv\x1br",
+            false,
+            &voice(),
+            &review(),
+            &editor(),
+            true,
+            false,
+        );
         assert_eq!(action, InputAction::ToggleVoice(b"\x1br".to_vec()));
+    }
+
+    #[test]
+    fn classify_ctrl_v_pastes_image_when_enabled() {
+        // With image paste enabled (remote attach), Ctrl+V (0x16) is intercepted
+        // and the original burst carried through for the effectful handler.
+        let action = classify_input(b"\x16", false, &voice(), &review(), &editor(), true, true);
+        assert_eq!(action, InputAction::PasteImage(b"\x16".to_vec()));
+        // Mixed with other bytes, the whole burst rides along (0x16 not stripped
+        // here — the handler decides).
+        let action = classify_input(b"a\x16b", false, &voice(), &review(), &editor(), true, true);
+        assert_eq!(action, InputAction::PasteImage(b"a\x16b".to_vec()));
+    }
+
+    #[test]
+    fn classify_ctrl_v_forwards_when_disabled() {
+        // Local attach (image paste off): Ctrl+V is forwarded verbatim so the
+        // co-located agent reads the clipboard itself — unchanged behaviour.
+        let action = classify_input(b"\x16", false, &voice(), &review(), &editor(), true, false);
+        assert_eq!(action, InputAction::Forward(b"\x16".to_vec()));
+    }
+
+    #[test]
+    fn classify_ctrl_v_does_not_shadow_detach() {
+        // Ctrl+Q still detaches even in a burst that also contains Ctrl+V, since
+        // the detach check precedes the paste check.
+        let action = classify_input(
+            b"\x16\x11",
+            false,
+            &voice(),
+            &review(),
+            &editor(),
+            true,
+            true,
+        );
+        assert_eq!(action, InputAction::Break(AttachResult::Detached));
+    }
+
+    #[test]
+    fn classify_ctrl_v_forwarded_verbatim_when_popup_open() {
+        // With the switcher popup open, every byte (including 0x16) is forwarded
+        // untouched — image paste must not fire while the picker owns input.
+        let action = classify_input(b"\x16", true, &voice(), &review(), &editor(), true, true);
+        assert_eq!(action, InputAction::Forward(b"\x16".to_vec()));
+    }
+
+    // -- paste_decision: the strip/forward contract for a Ctrl+V burst --
+
+    #[test]
+    fn paste_decision_uploads_and_strips_on_capture() {
+        // An image within the cap → upload it and forward the burst with 0x16
+        // removed (order otherwise preserved).
+        let png = vec![0u8; 16];
+        assert_eq!(
+            paste_decision(Ok(Some(png.clone())), b"a\x16b"),
+            PasteDecision::Upload {
+                png: png.clone(),
+                forward: b"ab".to_vec(),
+            }
+        );
+        // A lone Ctrl+V uploads and forwards nothing.
+        assert_eq!(
+            paste_decision(Ok(Some(png.clone())), b"\x16"),
+            PasteDecision::Upload {
+                png,
+                forward: vec![],
+            }
+        );
+    }
+
+    #[test]
+    fn paste_decision_forwards_verbatim_when_no_image() {
+        // Empty clipboard → forward Ctrl+V unchanged (local-attach behaviour).
+        assert_eq!(
+            paste_decision(Ok(None), b"\x16"),
+            PasteDecision::Forward(b"\x16".to_vec())
+        );
+    }
+
+    #[test]
+    fn paste_decision_forwards_verbatim_on_capture_error() {
+        // Clipboard read failed → forward Ctrl+V unchanged, never swallow it.
+        assert_eq!(
+            paste_decision(Err("x11 unavailable".into()), b"x\x16y"),
+            PasteDecision::Forward(b"x\x16y".to_vec())
+        );
+    }
+
+    #[test]
+    fn paste_decision_forwards_verbatim_when_over_size_cap() {
+        // An over-limit image is not uploaded (the doomed transfer is skipped);
+        // Ctrl+V is forwarded verbatim.
+        let too_big = vec![0u8; crate::paste_image::MAX_IMAGE_BYTES + 1];
+        assert_eq!(
+            paste_decision(Ok(Some(too_big)), b"\x16"),
+            PasteDecision::Forward(b"\x16".to_vec())
+        );
     }
 }

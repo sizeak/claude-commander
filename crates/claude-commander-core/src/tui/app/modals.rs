@@ -562,6 +562,7 @@ impl App {
                     PaletteMode::CommandOnly => " Commands ",
                     PaletteMode::SectionPicker { .. } => " Move to Section ",
                     PaletteMode::RemoteServerPicker => " Remove Remote Server ",
+                    PaletteMode::ProgramPicker { .. } => " Change Program ",
                 };
                 let block = Block::default()
                     .title(title)
@@ -700,7 +701,8 @@ impl App {
                             frame.render_widget(Paragraph::new(line).style(row_style), line_area);
                         }
                         QuickSwitchItem::SectionMove { label, .. }
-                        | QuickSwitchItem::RemoteServerRemove { label, .. } => {
+                        | QuickSwitchItem::RemoteServerRemove { label, .. }
+                        | QuickSwitchItem::ProgramChange { label, .. } => {
                             let style = if is_selected {
                                 self.theme.selection()
                             } else {
@@ -876,6 +878,26 @@ impl App {
         lines.push(Line::from(format!(
             "  {:<width$}Filter palette to commands only",
             ">",
+            width = key_col_width,
+        )));
+
+        // Remote image paste (an intercepted key in the attach loop, not a
+        // bindable action — only active when attached to a remote session).
+        lines.push(Line::from(""));
+        lines.push(Line::from("Remote Image Paste:"));
+        lines.push(Line::from(format!(
+            "  {:<width$}Attached to a REMOTE session: paste a clipboard image —",
+            "Ctrl+V",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}uploaded to the server and its path typed into the prompt.",
+            "",
+            width = key_col_width,
+        )));
+        lines.push(Line::from(format!(
+            "  {:<width$}Local sessions forward Ctrl+V to Claude unchanged.",
+            "",
             width = key_col_width,
         )));
 

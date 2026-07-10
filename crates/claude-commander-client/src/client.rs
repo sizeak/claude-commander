@@ -295,6 +295,26 @@ impl RemoteClient {
         Ok(())
     }
 
+    /// POST a raw byte body with an explicit `Content-Type`, discarding the
+    /// response. Used to upload a pasted image (PNG bytes) to the server.
+    async fn post_bytes_ok(
+        &self,
+        url: Url,
+        bytes: Vec<u8>,
+        content_type: &str,
+    ) -> ClientResult<()> {
+        let response = self
+            .send(
+                self.client
+                    .post(url)
+                    .header(reqwest::header::CONTENT_TYPE, content_type)
+                    .body(bytes),
+            )
+            .await?;
+        self.check(response).await?;
+        Ok(())
+    }
+
     /// PUT a JSON body, discarding the (204) response.
     async fn put_json_ok<B: Serialize>(&self, url: Url, body: &B) -> ClientResult<()> {
         let response = self.send(self.client.put(url).json(body)).await?;
@@ -470,6 +490,18 @@ impl RemoteClient {
     pub async fn set_section(&self, id: SessionId, section: Option<String>) -> ClientResult<()> {
         let body = serde_json::json!({ "op": "set_section", "section": section });
         self.patch_json_ok(self.session_url(id, &[]), &body).await
+    }
+
+    /// Change a session's launch program (PATCH `change_program` op).
+    pub async fn change_program(&self, id: SessionId, program: String) -> ClientResult<()> {
+        let body = serde_json::json!({ "op": "change_program", "program": program });
+        self.patch_json_ok(self.session_url(id, &[]), &body).await
+    }
+
+    /// Upload a pasted image (PNG bytes) to a session (`POST /paste-image`).
+    pub async fn paste_image(&self, id: SessionId, png: Vec<u8>) -> ClientResult<()> {
+        self.post_bytes_ok(self.session_url(id, &["paste-image"]), png, "image/png")
+            .await
     }
 
     pub async fn mark_read(&self, id: SessionId) -> ClientResult<()> {

@@ -12,7 +12,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use claude_commander_core::api::{
-    CreateSessionOpts, PreviewData, PreviewTarget, RenameSession, SessionInfo, SetSection,
+    ChangeProgram, CreateSessionOpts, PreviewData, PreviewTarget, RenameSession, SessionInfo,
+    SetSection,
 };
 use claude_commander_core::cli::SessionLookup;
 use serde::Deserialize;
@@ -186,9 +187,10 @@ pub async fn branch_diff(
 pub enum PatchSession {
     Rename(RenameSession),
     SetSection(SetSection),
+    ChangeProgram(ChangeProgram),
 }
 
-/// `PATCH /sessions/{id}` → `rename_session` / `set_section` → 204.
+/// `PATCH /sessions/{id}` → `rename_session` / `set_section` / `change_program` → 204.
 pub async fn patch(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -198,6 +200,11 @@ pub async fn patch(
     match body {
         PatchSession::Rename(r) => state.service.rename_session(&id, r.title).await?,
         PatchSession::SetSection(s) => state.service.set_section(&id, s.section).await?,
+        // Relaunches the pane (tmux) → not `Send`; run on the local pool.
+        PatchSession::ChangeProgram(c) => {
+            run_local(move || async move { state.service.change_program(&id, c.program).await })
+                .await?;
+        }
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -457,6 +464,21 @@ mod tests {
         let req = Request::patch(format!("/sessions/{}", uuid::Uuid::new_v4()))
             .header("content-type", "application/json")
             .body(Body::from(r#"{"op":"rename","title":"  "}"#))
+            .unwrap();
+        let (status, _) = crate::handlers::test_support::send(router(test_state(&dir)), req).await;
+        assert_eq!(status, 400);
+    }
+
+    /// A `change_program` PATCH with an empty program is a 400 (service guard,
+    /// which fires before the relaunch so no tmux is touched).
+    #[tokio::test]
+    async fn patch_change_program_empty_is_400() {
+        use axum::body::Body;
+        use axum::http::Request;
+        let dir = TempDir::new().unwrap();
+        let req = Request::patch(format!("/sessions/{}", uuid::Uuid::new_v4()))
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"op":"change_program","program":"  "}"#))
             .unwrap();
         let (status, _) = crate::handlers::test_support::send(router(test_state(&dir)), req).await;
         assert_eq!(status, 400);
