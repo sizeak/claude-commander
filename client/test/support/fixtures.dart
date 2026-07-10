@@ -11,6 +11,9 @@ const testConfig = ServerConfig(
   token: 'test-token',
 );
 
+/// A stand-in server handle for pages under test — the fake ignores its value.
+const testHandle = 'test-handle';
+
 SessionInfo sessionInfo({
   String id = '11111111-2222-3333-4444-555555555555',
   String title = 'Test session',
@@ -20,6 +23,8 @@ SessionInfo sessionInfo({
   String projectName = 'my-repo',
   int? prNumber,
   PrState prState = PrState.open,
+  bool unread = false,
+  SessionId? stackParentSessionId,
 }) {
   final uuid = UuidValue.fromString(id);
   return SessionInfo(
@@ -39,8 +44,8 @@ SessionInfo sessionInfo({
     reviewDecision: null,
     prReviewers: const [],
     createdAt: DateTime.utc(2026, 1, 1),
-    unread: false,
-    stackParentSessionId: null,
+    unread: unread,
+    stackParentSessionId: stackParentSessionId,
     prBaseBranch: null,
     prMerged: false,
     currentSection: null,
@@ -52,6 +57,19 @@ SessionInfo sessionInfo({
     keepAlive: false,
   );
 }
+
+ProjectInfoDto projectInfo({
+  String id = 'aaaaaaaa-2222-3333-4444-555555555555',
+  String name = 'my-repo',
+  String repoPath = '/srv/repos/my-repo',
+  String mainBranch = 'main',
+}) => ProjectInfoDto(
+  id: ProjectId(field0: UuidValue.fromString(id)),
+  name: name,
+  repoPath: repoPath,
+  mainBranch: mainBranch,
+  sessionIds: const [],
+);
 
 SessionDetail sessionDetail({
   SessionInfo? info,

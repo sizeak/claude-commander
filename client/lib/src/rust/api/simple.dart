@@ -8,71 +8,115 @@ import 'mirrors.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:uuid/uuid.dart';
 
-// These functions are ignored because they are not marked as `pub`: `base`, `client`, `ok_or_status`, `parse_created_id`, `session_url`
+// These functions are ignored because they are not marked as `pub`: `probe_client`
 
 /// Liveness probe: `GET {base_url}/health` (no auth). Returns true on a 2xx.
+/// Called by the connect screen before any server handle exists.
 Future<bool> health({required String baseUrl}) =>
     RustLib.instance.api.crateApiSimpleHealth(baseUrl: baseUrl);
 
-/// Authenticated tmux probe: `GET {base_url}/api/health/tmux`. 200 → true,
-/// 503 → false. Doubles as an auth check — a 401 surfaces as an error to Dart.
+/// Authenticated tmux probe: `GET {base_url}/api/health/tmux`. 200 → true, 503 →
+/// false; a 401/403 surfaces as an auth error. Doubles as an auth check for the
+/// connect screen.
 Future<bool> healthTmux({required String baseUrl, required String token}) =>
     RustLib.instance.api.crateApiSimpleHealthTmux(
       baseUrl: baseUrl,
       token: token,
     );
 
-/// `GET {base_url}/api/sessions?include_stopped=` → the session list, decoded
-/// into the shared `SessionInfo` wire type (frb mirrors it to a Dart class).
+/// The whole workspace snapshot (projects, sessions, cascade/pending/pull state,
+/// operations ledger, server health) in one shot.
+Future<WorkspaceSnapshotDto> workspaceSnapshot({required String handle}) =>
+    RustLib.instance.api.crateApiSimpleWorkspaceSnapshot(handle: handle);
+
+/// Bulk agent-state snapshot (the commander sentinel entry is stripped by the
+/// DTO). `fresh` forces a re-detection rather than a cached read.
+Future<AgentStatesSnapshotDto> agentStates({
+  required String handle,
+  required bool fresh,
+}) => RustLib.instance.api.crateApiSimpleAgentStates(
+  handle: handle,
+  fresh: fresh,
+);
+
+/// Compatibility shim for the current session-list page: the sessions from the
+/// workspace snapshot, optionally filtering out stopped ones client-side. The
+/// app moves to snapshot-driven state in Phase 3; until then this keeps the list
+/// page + its tests unchanged.
 Future<List<SessionInfo>> listSessions({
-  required String baseUrl,
-  required String token,
+  required String handle,
   required bool includeStopped,
 }) => RustLib.instance.api.crateApiSimpleListSessions(
-  baseUrl: baseUrl,
-  token: token,
+  handle: handle,
   includeStopped: includeStopped,
 );
 
-/// `GET {base_url}/api/sessions/{query}/detail?lines=` → a session's live
-/// detail (agent state, diff summary, pane snapshot). `query` is matched
-/// loosely server-side (a full id, branch, or title prefix). A 404 (no match)
-/// returns `None` rather than an error, so a deleted session reads as "gone".
+/// A session's live detail (agent state, diff summary, pane snapshot). `query`
+/// is matched loosely server-side (full id, branch, or title prefix); a 404
+/// returns `None` so a deleted session reads as "gone".
 Future<SessionDetail?> getSessionDetail({
-  required String baseUrl,
-  required String token,
+  required String handle,
   required String query,
   int? lines,
 }) => RustLib.instance.api.crateApiSimpleGetSessionDetail(
-  baseUrl: baseUrl,
-  token: token,
+  handle: handle,
   query: query,
   lines: lines,
 );
 
-/// `GET {base_url}/api/sessions/{query}/pane?lines=` → the raw captured pane
-/// text. Lighter than `get_session_detail` for polling a preview. `None` on a
-/// 404.
-Future<String?> getPane({
-  required String baseUrl,
-  required String token,
-  required String query,
+/// Preview payload for a session (agent pane + diff text/stat + shell pane).
+Future<PreviewDataDto> sessionPreview({
+  required String handle,
+  required String id,
   int? lines,
-}) => RustLib.instance.api.crateApiSimpleGetPane(
-  baseUrl: baseUrl,
-  token: token,
-  query: query,
+}) => RustLib.instance.api.crateApiSimpleSessionPreview(
+  handle: handle,
+  id: id,
   lines: lines,
 );
 
-/// `POST {base_url}/api/sessions` → create a session, returning the new id.
-///
-/// `project_path` is a path on the *server's* filesystem (the repo to branch
-/// from). The optional fields map straight onto [`CreateSessionOpts`]; absent
-/// ones let the server apply its defaults.
+/// Preview payload for a project (diff text/stat; no agent pane).
+Future<PreviewDataDto> projectPreview({
+  required String handle,
+  required String id,
+}) => RustLib.instance.api.crateApiSimpleProjectPreview(handle: handle, id: id);
+
+/// The raw unified diff (base → working tree) for a session's branch.
+Future<String> branchDiff({required String handle, required String id}) =>
+    RustLib.instance.api.crateApiSimpleBranchDiff(handle: handle, id: id);
+
+/// Branches for a project's base-branch picker. `fetch` runs a `git fetch` first.
+Future<List<BranchInfo>> listBranches({
+  required String handle,
+  required String projectId,
+  required bool fetch,
+}) => RustLib.instance.api.crateApiSimpleListBranches(
+  handle: handle,
+  projectId: projectId,
+  fetch: fetch,
+);
+
+/// Options for the new-session dialog (default program, program list, sections).
+Future<CreateOptions> createOptions({required String handle}) =>
+    RustLib.instance.api.crateApiSimpleCreateOptions(handle: handle);
+
+/// Replace the server's configured program list wholesale.
+Future<void> setPrograms({
+  required String handle,
+  required List<ProgramInfo> programs,
+}) => RustLib.instance.api.crateApiSimpleSetPrograms(
+  handle: handle,
+  programs: programs,
+);
+
+/// Sessions with at least one not-yet-applied review comment.
+Future<List<SessionId>> pendingCommentSessions({required String handle}) =>
+    RustLib.instance.api.crateApiSimplePendingCommentSessions(handle: handle);
+
+/// Create a session; returns the new session's full-id string. `project_path` is
+/// a path on the *server's* filesystem.
 Future<String> createSession({
-  required String baseUrl,
-  required String token,
+  required String handle,
   required String projectPath,
   required String title,
   String? program,
@@ -81,8 +125,7 @@ Future<String> createSession({
   String? mode,
   String? baseBranch,
 }) => RustLib.instance.api.crateApiSimpleCreateSession(
-  baseUrl: baseUrl,
-  token: token,
+  handle: handle,
   projectPath: projectPath,
   title: title,
   program: program,
@@ -92,36 +135,110 @@ Future<String> createSession({
   baseBranch: baseBranch,
 );
 
-/// `POST {base_url}/api/sessions/{id}/kill` — stop a running session (204).
-Future<void> killSession({
-  required String baseUrl,
-  required String token,
+/// Stop a running session (its worktree is kept).
+Future<void> killSession({required String handle, required String id}) =>
+    RustLib.instance.api.crateApiSimpleKillSession(handle: handle, id: id);
+
+/// Restart a session's program.
+Future<void> restartSession({required String handle, required String id}) =>
+    RustLib.instance.api.crateApiSimpleRestartSession(handle: handle, id: id);
+
+/// Delete a session, its branch, and its worktree.
+Future<void> deleteSession({required String handle, required String id}) =>
+    RustLib.instance.api.crateApiSimpleDeleteSession(handle: handle, id: id);
+
+/// Rename a session's title.
+Future<void> renameSession({
+  required String handle,
   required String id,
-}) => RustLib.instance.api.crateApiSimpleKillSession(
-  baseUrl: baseUrl,
-  token: token,
+  required String title,
+}) => RustLib.instance.api.crateApiSimpleRenameSession(
+  handle: handle,
   id: id,
+  title: title,
 );
 
-/// `POST {base_url}/api/sessions/{id}/restart` — restart a session (204).
-Future<void> restartSession({
-  required String baseUrl,
-  required String token,
+/// Move a session to a section; `section: None` clears the manual override.
+Future<void> setSection({
+  required String handle,
   required String id,
-}) => RustLib.instance.api.crateApiSimpleRestartSession(
-  baseUrl: baseUrl,
-  token: token,
+  String? section,
+}) => RustLib.instance.api.crateApiSimpleSetSection(
+  handle: handle,
   id: id,
+  section: section,
 );
 
-/// `DELETE {base_url}/api/sessions/{id}` — delete a session and its worktree
-/// (204).
-Future<void> deleteSession({
-  required String baseUrl,
-  required String token,
-  required String id,
-}) => RustLib.instance.api.crateApiSimpleDeleteSession(
-  baseUrl: baseUrl,
-  token: token,
-  id: id,
+/// Mark a session read (clears its unread indicator).
+Future<void> markRead({required String handle, required String id}) =>
+    RustLib.instance.api.crateApiSimpleMarkRead(handle: handle, id: id);
+
+/// Mark a batch of sessions unread (unknown ids are skipped server-side).
+Future<void> markUnread({required String handle, required List<String> ids}) =>
+    RustLib.instance.api.crateApiSimpleMarkUnread(handle: handle, ids: ids);
+
+/// Toggle a session's keep-alive (idle-hibernation exemption); returns the new
+/// state.
+Future<bool> toggleKeepAlive({required String handle, required String id}) =>
+    RustLib.instance.api.crateApiSimpleToggleKeepAlive(handle: handle, id: id);
+
+/// Register a project (git repo) by server-side path; returns the new project's
+/// full-id string.
+Future<String> addProject({required String handle, required String path}) =>
+    RustLib.instance.api.crateApiSimpleAddProject(handle: handle, path: path);
+
+/// Remove a project (its sessions must already be gone).
+Future<void> removeProject({required String handle, required String id}) =>
+    RustLib.instance.api.crateApiSimpleRemoveProject(handle: handle, id: id);
+
+/// Scan a server-side directory for git repos, registering any new ones.
+Future<ScanResultDto> scanDirectory({
+  required String handle,
+  required String path,
+}) => RustLib.instance.api.crateApiSimpleScanDirectory(
+  handle: handle,
+  path: path,
 );
+
+/// Cascade-merge a session down its stack; returns the recorded operation.
+Future<OperationStatusDto> cascadeMerge({
+  required String handle,
+  required String id,
+}) => RustLib.instance.api.crateApiSimpleCascadeMerge(handle: handle, id: id);
+
+/// Push a session's whole stack; returns the recorded operation.
+Future<OperationStatusDto> pushStack({
+  required String handle,
+  required String id,
+}) => RustLib.instance.api.crateApiSimplePushStack(handle: handle, id: id);
+
+/// Resume a paused cascade (after the conflict was resolved); returns the op.
+Future<OperationStatusDto> cascadeResume({required String handle}) =>
+    RustLib.instance.api.crateApiSimpleCascadeResume(handle: handle);
+
+/// Abandon a paused cascade.
+Future<void> cascadeAbandon({required String handle}) =>
+    RustLib.instance.api.crateApiSimpleCascadeAbandon(handle: handle);
+
+/// Ask the server to re-check PR metadata (runs its PR-status loop).
+Future<void> requestPrRefresh({required String handle}) =>
+    RustLib.instance.api.crateApiSimpleRequestPrRefresh(handle: handle);
+
+/// Result of scanning a directory for git repos to register.
+class ScanResultDto {
+  final int added;
+  final int skipped;
+
+  const ScanResultDto({required this.added, required this.skipped});
+
+  @override
+  int get hashCode => added.hashCode ^ skipped.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ScanResultDto &&
+          runtimeType == other.runtimeType &&
+          added == other.added &&
+          skipped == other.skipped;
+}

@@ -1,12 +1,18 @@
-//! HTTP client backend for `claude-commander-server`.
+//! Adapter exposing `claude-commander-client`'s transport as a core backend.
 //!
 //! [`RemoteBackend`] implements core's
 //! [`CommanderBackend`](claude_commander_core::backend::CommanderBackend) trait
-//! over HTTP, so the same TUI that drives an in-process `LocalBackend` can drive
-//! a machine across the network. It speaks the shared wire DTOs from
-//! `claude-commander-protocol` (re-exported through `claude_commander_core::api`)
-//! and classifies every failure into the transport-neutral
-//! [`BackendError`](claude_commander_core::backend::BackendError) categories.
+//! over the pure HTTP/WebSocket [`RemoteClient`](claude_commander_client::RemoteClient),
+//! so the same TUI that drives an in-process `LocalBackend` can drive a machine
+//! across the network. The transport itself — the wire DTOs, per-route calls,
+//! change-feed poller, connection state machine, and attach pump — lives in
+//! `claude-commander-client` (which depends only on `claude-commander-protocol`,
+//! not on core, so it also backs the mobile cdylib). This crate is a thin
+//! shim: it delegates each trait method to the matching client method, maps the
+//! client's `ClientError` onto core's
+//! [`BackendError`](claude_commander_core::backend::BackendError) 1:1 (see
+//! [`error`]), and rebuilds the few core-only return types (`ScanResult`) that
+//! have no wire DTO. The attach seam is bridged in [`attach`].
 //!
 //! # Trait method → route
 //!
@@ -41,24 +47,25 @@
 //!
 //! # Change-feed + connection health
 //!
-//! A background [`poller`] polls the workspace + agent-state snapshots on a
-//! fixed cadence, content-hashes them, and bumps a generation counter (exposed
-//! via [`CommanderBackend::change_feed`](claude_commander_core::backend::CommanderBackend::change_feed))
+//! The client crate's background poller polls the workspace + agent-state
+//! snapshots on a fixed cadence, content-hashes them, and bumps a generation
+//! counter (exposed via
+//! [`CommanderBackend::change_feed`](claude_commander_core::backend::CommanderBackend::change_feed))
 //! when they move. It also drives a
 //! [`ConnectionState`](claude_commander_core::backend::ConnectionState) watch
 //! (`Connecting` → `Connected` → `Degraded { reason }` with exponential
-//! [`backoff`]), read by the TUI via [`RemoteBackend::connection_state`] /
+//! backoff), read by the TUI via [`RemoteBackend::connection_state`] /
 //! [`RemoteBackend::connection_feed`] after an
 //! [`as_any`](claude_commander_core::backend::CommanderBackend::as_any) downcast.
 
 mod attach;
 mod backend;
-mod backoff;
 mod error;
-mod poller;
-mod spec;
 
 pub use backend::RemoteBackend;
-pub use backoff::{BackoffConfig, backoff_delay};
-pub use poller::{ConnectionFeed, PollConfig};
-pub use spec::{RemoteServerSpec, SecretString};
+
+// Re-export the client crate's public knobs so this crate's downstream API
+// (the TUI and `claude-commander` bin) is unchanged by the transport extraction.
+pub use claude_commander_client::{
+    BackoffConfig, ConnectionFeed, PollConfig, RemoteServerSpec, SecretString, backoff_delay,
+};

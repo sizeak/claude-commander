@@ -4,64 +4,79 @@
 // ignore_for_file: invalid_use_of_internal_member, unused_import, unnecessary_import
 
 import '../frb_generated.dart';
+import 'mirrors.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `attach_inner`, `detached`, `error`, `lock_registry`, `output`, `ready`, `registry`, `remove_if_current`, `run_attach`, `runtime`, `ws_url`
-// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `Outbound`
+// These functions are ignored because they are not marked as `pub`: `detach_all_for_handle`, `detached`, `error`, `lock_registry`, `output`, `pump`, `ready`, `registry`, `remove_if_current`
+// These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `AttachEntry`, `Outbound`
 
-/// Open a live terminal attach. `handle` is a caller-chosen id used to route
-/// later `terminal_send_input`/`terminal_resize`/`terminal_detach` calls back to
-/// this socket. Events stream over `sink` until the attach ends.
+/// Open a live terminal attach against the server behind `handle`. `attach_id` is
+/// a caller-supplied, per-attach id (a fresh UUID) that keys this attach's
+/// control channel; `session_id` is a full-id string; `kind` picks the agent or
+/// shell pane. Later `terminal_send_input`/`terminal_resize`/`terminal_detach`
+/// calls with the same `attach_id` route here. Events stream over `sink` until it
+/// ends.
 Stream<TerminalEvent> attachTerminal({
   required String handle,
-  required String baseUrl,
-  required String token,
+  required String attachId,
   required String sessionId,
+  required AttachKind kind,
 }) => RustLib.instance.api.crateApiTerminalAttachTerminal(
   handle: handle,
-  baseUrl: baseUrl,
-  token: token,
+  attachId: attachId,
   sessionId: sessionId,
+  kind: kind,
 );
 
-/// Send keystrokes / raw input bytes to an attached terminal. No-op if the
-/// handle isn't attached (e.g. already detached).
+/// Send keystrokes / raw input bytes to the attach with `attach_id`. No-op if the
+/// id isn't attached (e.g. already detached).
 Future<void> terminalSendInput({
-  required String handle,
+  required String attachId,
   required List<int> bytes,
 }) => RustLib.instance.api.crateApiTerminalTerminalSendInput(
-  handle: handle,
+  attachId: attachId,
   bytes: bytes,
 );
 
 /// Tell the remote PTY the viewport changed.
 Future<void> terminalResize({
-  required String handle,
+  required String attachId,
   required int cols,
   required int rows,
 }) => RustLib.instance.api.crateApiTerminalTerminalResize(
-  handle: handle,
+  attachId: attachId,
   cols: cols,
   rows: rows,
 );
 
 /// Detach (leaves the tmux session running server-side).
-Future<void> terminalDetach({required String handle}) =>
-    RustLib.instance.api.crateApiTerminalTerminalDetach(handle: handle);
+Future<void> terminalDetach({required String attachId}) =>
+    RustLib.instance.api.crateApiTerminalTerminalDetach(attachId: attachId);
+
+/// Stream the server's change-feed generation counter: the poller bumps it
+/// whenever observable state moves (or on reconnect), and Dart re-fetches the
+/// workspace snapshot on each new value. The stream ends when the server is
+/// disconnected (the poller's watch closes).
+Stream<BigInt> changeFeed({required String handle}) =>
+    RustLib.instance.api.crateApiTerminalChangeFeed(handle: handle);
+
+/// Stream the server's [`ConnectionState`](claude_commander_protocol::connection::ConnectionState)
+/// as a [`ConnectionStateDto`] for the health header. Ends when the server is
+/// disconnected.
+Stream<ConnectionStateDto> connectionFeed({required String handle}) =>
+    RustLib.instance.api.crateApiTerminalConnectionFeed(handle: handle);
 
 /// An event streamed from an attached terminal to Dart.
 ///
 /// Modelled as a tagged struct (not a data-carrying enum) so frb generates a
-/// plain Dart class — keeping the spike free of the freezed/build_runner
-/// codegen step. If the project later adopts freezed, this can become a proper
-/// sealed class.
+/// plain Dart class — keeping the bridge free of the freezed/build_runner step.
 class TerminalEvent {
   final TerminalEventKind kind;
 
   /// Populated only for [`TerminalEventKind::Output`]; empty otherwise.
   final Uint8List bytes;
 
-  /// Session name (`Ready`), detach reason (`Detached`), or error message
+  /// Session label (`Ready`), detach reason (`Detached`), or error message
   /// (`Error`); empty for `Output`.
   final String text;
 
@@ -87,7 +102,7 @@ class TerminalEvent {
 /// Which kind of [`TerminalEvent`] this is. A unit-only enum so frb renders a
 /// plain Dart enum (no freezed).
 enum TerminalEventKind {
-  /// Handshake done; the server echoed the resolved tmux session name (`text`).
+  /// Handshake done; `text` is a session label (may be empty).
   ready,
 
   /// Raw PTY output bytes in `bytes` — feed straight to the terminal emulator,
@@ -95,7 +110,7 @@ enum TerminalEventKind {
   output,
 
   /// The attach ended cleanly; `text` is the reason (client detach, session
-  /// ended, transport).
+  /// ended).
   detached,
 
   /// A handshake or steady-state error; `text` is safe to show the user.

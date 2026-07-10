@@ -2,33 +2,37 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
-import '../server_config.dart';
 import '../services/commander_api.dart';
 import '../src/rust/api/mirrors.dart';
 import '../src/rust/api/review.dart' as rust;
 
-/// Review/diff + comments view for a session. Fetches the review snapshot
-/// (parsed unified diff, comments, reviewed marks), lets the user browse files
-/// and hunks, select a line range and attach a comment, then apply the staged
-/// comments back to the agent. Mirrors the TUI review view, scoped to a first
-/// cut: binary files render as a placeholder, reviewed marks are read-only.
-class ReviewPage extends StatefulWidget {
+/// Review/diff + comments view for a session, layout-agnostic (no Scaffold, no
+/// route). Fetches the review snapshot (parsed unified diff, comments, reviewed
+/// marks), lets the user browse files and hunks, select a line range and attach a
+/// comment, then apply the staged comments back to the agent. Mirrors the TUI
+/// review view, scoped to a first cut: binary files render as a placeholder,
+/// reviewed marks are read-only.
+///
+/// Its own top action bar carries refresh + apply (rather than a Scaffold app bar
+/// / FAB) so it drops cleanly into either the narrow [ReviewPage] route or the
+/// wide shell's detail pane.
+class ReviewBody extends StatefulWidget {
   final CommanderApi api;
-  final ServerConfig config;
+  final String handle;
   final SessionInfo session;
 
-  const ReviewPage({
+  const ReviewBody({
     super.key,
     required this.api,
-    required this.config,
+    required this.handle,
     required this.session,
   });
 
   @override
-  State<ReviewPage> createState() => _ReviewPageState();
+  State<ReviewBody> createState() => _ReviewBodyState();
 }
 
-class _ReviewPageState extends State<ReviewPage> {
+class _ReviewBodyState extends State<ReviewBody> {
   rust.ReviewSnapshotDto? _snapshot;
   String? _error;
   bool _loading = true;
@@ -54,8 +58,7 @@ class _ReviewPageState extends State<ReviewPage> {
     setState(() => _loading = true);
     try {
       final snap = await widget.api.openReview(
-        baseUrl: widget.config.baseUrl,
-        token: widget.config.token,
+        handle: widget.handle,
         sessionId: _id,
       );
       if (!mounted) return;
@@ -88,8 +91,7 @@ class _ReviewPageState extends State<ReviewPage> {
     setState(() => _busy = true);
     try {
       final snap = await widget.api.refreshReview(
-        baseUrl: widget.config.baseUrl,
-        token: widget.config.token,
+        handle: widget.handle,
         sessionId: _id,
         prevHash: prev.contentHash,
       );
@@ -117,8 +119,7 @@ class _ReviewPageState extends State<ReviewPage> {
     setState(() => _busy = true);
     try {
       await widget.api.deleteComment(
-        baseUrl: widget.config.baseUrl,
-        token: widget.config.token,
+        handle: widget.handle,
         sessionId: _id,
         commentId: commentId,
       );
@@ -134,8 +135,7 @@ class _ReviewPageState extends State<ReviewPage> {
     setState(() => _busy = true);
     try {
       final result = await widget.api.applyComments(
-        baseUrl: widget.config.baseUrl,
-        token: widget.config.token,
+        handle: widget.handle,
         sessionId: _id,
       );
       if (!mounted) return;
@@ -154,8 +154,7 @@ class _ReviewPageState extends State<ReviewPage> {
     setState(() => _toggling.add(displayPath));
     try {
       final nowReviewed = await widget.api.toggleFileReviewed(
-        baseUrl: widget.config.baseUrl,
-        token: widget.config.token,
+        handle: widget.handle,
         sessionId: _id,
         displayPath: displayPath,
       );
@@ -175,8 +174,7 @@ class _ReviewPageState extends State<ReviewPage> {
   }
 
   Future<Uint8List> _loadBlob(String side, String path) => widget.api.fetchBlob(
-    baseUrl: widget.config.baseUrl,
-    token: widget.config.token,
+    handle: widget.handle,
     sessionId: _id,
     side: side,
     path: path,
@@ -213,8 +211,7 @@ class _ReviewPageState extends State<ReviewPage> {
     setState(() => _busy = true);
     try {
       await widget.api.createComment(
-        baseUrl: widget.config.baseUrl,
-        token: widget.config.token,
+        handle: widget.handle,
         sessionId: _id,
         file: file,
         side: side,
@@ -239,28 +236,51 @@ class _ReviewPageState extends State<ReviewPage> {
             .where((c) => c.status == rust.ReviewCommentStatus.staged)
             .length ??
         0;
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(
-          'Review · ${widget.session.title}',
-          overflow: TextOverflow.ellipsis,
+    return Column(
+      children: [
+        _actionBar(context, snap, stagedCount),
+        Expanded(child: _body(context, snap)),
+      ],
+    );
+  }
+
+  /// Top action bar carrying refresh + apply (in place of a Scaffold app bar /
+  /// FAB), so the body composes into either layout.
+  Widget _actionBar(
+    BuildContext context,
+    rust.ReviewSnapshotDto? snap,
+    int stagedCount,
+  ) {
+    return Material(
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      child: Padding(
+        padding: const EdgeInsets.only(left: 12, right: 4, top: 2, bottom: 2),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                'Review',
+                style: Theme.of(context).textTheme.labelLarge,
+              ),
+            ),
+            if (snap != null && stagedCount > 0)
+              Padding(
+                padding: const EdgeInsets.only(right: 4),
+                child: FilledButton.icon(
+                  onPressed: _busy ? null : _apply,
+                  icon: const Icon(Icons.send, size: 16),
+                  label: Text('Apply ($stagedCount)'),
+                ),
+              ),
+            IconButton(
+              visualDensity: VisualDensity.compact,
+              onPressed: (_busy || _loading) ? null : _refresh,
+              icon: const Icon(Icons.refresh),
+              tooltip: 'Refresh diff',
+            ),
+          ],
         ),
-        actions: [
-          IconButton(
-            onPressed: _busy ? null : _refresh,
-            icon: const Icon(Icons.refresh),
-            tooltip: 'Refresh diff',
-          ),
-        ],
       ),
-      floatingActionButton: (snap != null && stagedCount > 0)
-          ? FloatingActionButton.extended(
-              onPressed: _busy ? null : _apply,
-              icon: const Icon(Icons.send),
-              label: Text('Apply ($stagedCount)'),
-            )
-          : null,
-      body: _body(context, snap),
     );
   }
 
@@ -374,6 +394,34 @@ class _ReviewPageState extends State<ReviewPage> {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// The phone (stacked-navigation) review screen: a Scaffold titled by the
+/// session, wrapping a [ReviewBody] whose own action bar carries refresh + apply.
+class ReviewPage extends StatelessWidget {
+  final CommanderApi api;
+  final String handle;
+  final SessionInfo session;
+
+  const ReviewPage({
+    super.key,
+    required this.api,
+    required this.handle,
+    required this.session,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(
+          'Review · ${session.title}',
+          overflow: TextOverflow.ellipsis,
+        ),
+      ),
+      body: ReviewBody(api: api, handle: handle, session: session),
     );
   }
 }

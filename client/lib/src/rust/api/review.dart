@@ -6,54 +6,44 @@
 import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 
-// These functions are ignored because they are not marked as `pub`: `base`, `client`, `ok_or_status`
+// These functions are ignored because they are not marked as `pub`: `parse_diff_side`, `parse_side`
 // These types are ignored because they are neither used by any `pub` functions nor (for structs and enums) marked `#[frb(unignore)]`: `ReviewDiffDto`
 // These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
 
-/// `GET {base_url}/api/sessions/{session_id}/review` → the review snapshot
-/// (parsed diff + re-anchored comments + reviewed marks), converted to DTOs.
+/// Open the review snapshot (parsed diff + re-anchored comments + reviewed
+/// marks) for a session, converted to DTOs.
 Future<ReviewSnapshotDto> openReview({
-  required String baseUrl,
-  required String token,
+  required String handle,
   required String sessionId,
 }) => RustLib.instance.api.crateApiReviewOpenReview(
-  baseUrl: baseUrl,
-  token: token,
+  handle: handle,
   sessionId: sessionId,
 );
 
-/// `GET {base_url}/api/sessions/{session_id}/review/refresh?prev_hash=` → a
-/// fresh snapshot, or `None` (204) when the diff is unchanged. `prev_hash` is
-/// the `content_hash` string from a prior snapshot, parsed back to a `u64`.
+/// A fresh snapshot, or `None` when the diff is unchanged. `prev_hash` is the
+/// `content_hash` string from a prior snapshot, parsed back to a `u64`.
 Future<ReviewSnapshotDto?> refreshReview({
-  required String baseUrl,
-  required String token,
+  required String handle,
   required String sessionId,
   required String prevHash,
 }) => RustLib.instance.api.crateApiReviewRefreshReview(
-  baseUrl: baseUrl,
-  token: token,
+  handle: handle,
   sessionId: sessionId,
   prevHash: prevHash,
 );
 
-/// `GET {base_url}/api/sessions/{session_id}/comments` → the session's comments.
+/// The session's comments (re-anchored), as DTOs.
 Future<List<CommentDto>> listComments({
-  required String baseUrl,
-  required String token,
+  required String handle,
   required String sessionId,
 }) => RustLib.instance.api.crateApiReviewListComments(
-  baseUrl: baseUrl,
-  token: token,
+  handle: handle,
   sessionId: sessionId,
 );
 
-/// `POST {base_url}/api/sessions/{session_id}/comments` (body = `NewComment`)
-/// → 201 `{ "id": ... }`, returning the new comment id. `side` is `"old"` or
-/// `"new"`.
+/// Stage a new comment, returning its id. `side` is `"old"` or `"new"`.
 Future<String> createComment({
-  required String baseUrl,
-  required String token,
+  required String handle,
   required String sessionId,
   required String file,
   required String side,
@@ -62,8 +52,7 @@ Future<String> createComment({
   required String snippet,
   required String comment,
 }) => RustLib.instance.api.crateApiReviewCreateComment(
-  baseUrl: baseUrl,
-  token: token,
+  handle: handle,
   sessionId: sessionId,
   file: file,
   side: side,
@@ -73,61 +62,48 @@ Future<String> createComment({
   comment: comment,
 );
 
-/// `DELETE {base_url}/api/sessions/{session_id}/comments/{comment_id}` (204).
+/// Delete a staged comment by id.
 Future<void> deleteComment({
-  required String baseUrl,
-  required String token,
+  required String handle,
   required String sessionId,
   required String commentId,
 }) => RustLib.instance.api.crateApiReviewDeleteComment(
-  baseUrl: baseUrl,
-  token: token,
+  handle: handle,
   sessionId: sessionId,
   commentId: commentId,
 );
 
-/// `POST {base_url}/api/sessions/{session_id}/comments/apply` → `ApplyOutcome`,
-/// converted to the flattened [`ApplyResult`] DTO.
+/// Apply a session's staged comments, returning the flattened [`ApplyResult`].
 Future<ApplyResult> applyComments({
-  required String baseUrl,
-  required String token,
+  required String handle,
   required String sessionId,
 }) => RustLib.instance.api.crateApiReviewApplyComments(
-  baseUrl: baseUrl,
-  token: token,
+  handle: handle,
   sessionId: sessionId,
 );
 
-/// `GET {base_url}/api/sessions/{session_id}/blob?side=&path=` → the raw file
-/// bytes for one side of a (binary) diff. `side` is `"old"` or `"new"`; `path`
-/// is the file's display path. Used to render binary images in the review view.
+/// Raw file bytes for one side of a (binary) diff. `side` is `"old"`/`"new"`;
+/// `path` is the file's display path. Used to render binary images.
 Future<Uint8List> fetchBlob({
-  required String baseUrl,
-  required String token,
+  required String handle,
   required String sessionId,
   required String side,
   required String path,
 }) => RustLib.instance.api.crateApiReviewFetchBlob(
-  baseUrl: baseUrl,
-  token: token,
+  handle: handle,
   sessionId: sessionId,
   side: side,
   path: path,
 );
 
-/// `POST {base_url}/api/sessions/{session_id}/files/reviewed` (body =
-/// [`ToggleReviewed`]) → toggle a file's reviewed mark, returning the new
-/// state. Only the display path crosses the wire — the server resolves the
-/// file in the *current* review diff itself, so no client-side `FileDiff`
-/// caching is needed and a mark can't be recorded against a stale copy.
+/// Toggle a file's reviewed mark, returning the new state. Only the display path
+/// crosses the wire — the server resolves the file in the *current* review diff.
 Future<bool> toggleFileReviewed({
-  required String baseUrl,
-  required String token,
+  required String handle,
   required String sessionId,
   required String displayPath,
 }) => RustLib.instance.api.crateApiReviewToggleFileReviewed(
-  baseUrl: baseUrl,
-  token: token,
+  handle: handle,
   sessionId: sessionId,
   displayPath: displayPath,
 );

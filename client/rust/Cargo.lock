@@ -647,8 +647,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "claude-commander-client"
+version = "0.25.0"
+dependencies = [
+ "claude-commander-protocol",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "tracing",
+ "uuid",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "claude-commander-core"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
@@ -690,7 +707,7 @@ dependencies = [
 
 [[package]]
 name = "claude-commander-protocol"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "chrono",
  "serde",
@@ -700,7 +717,7 @@ dependencies = [
 
 [[package]]
 name = "claude-commander-server"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "axum",
  "clap",
@@ -721,7 +738,7 @@ dependencies = [
 
 [[package]]
 name = "claude-commander-test-support"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "axum",
  "claude-commander-core",
@@ -4032,7 +4049,6 @@ checksum = "566cafdd92868e0939d3fb961bd0dc25fcfaaed179291093b3d43e6b3150ea10"
 dependencies = [
  "base64",
  "bytes",
- "futures-channel",
  "futures-core",
  "futures-util",
  "http",
@@ -4093,16 +4109,14 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "claude-commander-client",
  "claude-commander-core",
  "claude-commander-protocol",
  "claude-commander-test-support",
  "flutter_rust_bridge",
- "futures-util",
- "reqwest",
  "serde_json",
  "tempfile",
  "tokio",
- "tokio-tungstenite 0.24.0",
  "uuid",
 ]
 

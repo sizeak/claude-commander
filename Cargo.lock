@@ -731,6 +731,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "claude-commander-client"
+version = "0.25.0"
+dependencies = [
+ "claude-commander-protocol",
+ "futures-util",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-tungstenite 0.24.0",
+ "tracing",
+ "uuid",
+ "xxhash-rust",
+]
+
+[[package]]
 name = "claude-commander-core"
 version = "0.25.0"
 dependencies = [
@@ -795,20 +812,14 @@ name = "claude-commander-remote"
 version = "0.25.0"
 dependencies = [
  "async-trait",
+ "claude-commander-client",
  "claude-commander-core",
  "claude-commander-protocol",
  "claude-commander-server",
  "claude-commander-test-support",
- "futures-util",
- "reqwest",
- "serde",
- "serde_json",
  "tempfile",
  "tokio",
- "tokio-tungstenite 0.24.0",
- "tracing",
  "uuid",
- "xxhash-rust",
 ]
 
 [[package]]

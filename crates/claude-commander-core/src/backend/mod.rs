@@ -187,15 +187,12 @@ impl SessionRef {
 
 /// A backend's connection health, rendered in its server header. The local
 /// backend is always [`Connected`](ConnectionState::Connected).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ConnectionState {
-    /// The initial handshake / first snapshot hasn't landed yet.
-    Connecting,
-    /// Healthy: snapshots are current.
-    Connected,
-    /// Reachable but stale or erroring; `reason` is a short user-facing note.
-    Degraded { reason: String },
-}
+///
+/// The definition lives in `claude-commander-protocol` (a plain data enum shared
+/// with the transport client, which drives it from its poll loop); it is
+/// re-exported here so every existing `backend::ConnectionState` call site is
+/// unchanged.
+pub use claude_commander_protocol::connection::ConnectionState;
 
 /// The TUI's cached view of one backend: the latest snapshots plus connection
 /// health. A per-backend change-feed task refreshes it; the render path reads it
