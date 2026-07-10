@@ -20,7 +20,10 @@ use claude_commander_core::{
 /// Identify this binary to the telemetry layer. Required by
 /// `CommanderService`/`App` — they panic if a frontend isn't supplied.
 fn frontend() -> claude_commander_core::telemetry::FrontendInfo {
-    claude_commander_core::telemetry::FrontendInfo::new(claude_commander_core::APP_NAME, VERSION)
+    claude_commander_core::telemetry::FrontendInfo::new(
+        env!("CARGO_PKG_NAME"),
+        env!("CARGO_PKG_VERSION"),
+    )
 }
 
 /// The remote-backend factory injected into the TUI. Keeps core free of a
@@ -661,4 +664,19 @@ async fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frontend_identifies_binary_package() {
+        let frontend = frontend();
+        // Pin the actual telemetry identity, not just "matches the macro" —
+        // this is the string dashboards key on, and it must not silently
+        // drift back to the core crate's name (claude-commander-core).
+        assert_eq!(frontend.name, "claude-commander");
+        assert_eq!(frontend.version, env!("CARGO_PKG_VERSION"));
+    }
 }
