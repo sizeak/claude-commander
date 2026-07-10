@@ -148,6 +148,10 @@ impl CommanderBackend for PlaceholderBackend {
         self.unavailable()
     }
 
+    async fn change_program(&self, _id: SessionId, _program: String) -> BResult<()> {
+        self.unavailable()
+    }
+
     async fn set_section(&self, _id: SessionId, _section: Option<String>) -> BResult<()> {
         self.unavailable()
     }

@@ -160,6 +160,7 @@ The status bar surfaces the most useful actions for the focused pane as clickabl
 | `m` | Move session to section (manual override; see [Session List Sections](docs/configuration.md#session-list-sections)) |
 | `r` or `Alt-r` | Review & comment on a session's diff — see [Usage](docs/usage.md#reviewing--commenting-on-changes) |
 | palette only | Rename session (UI title only; underlying worktree, branch, and tmux session are unchanged) |
+| palette only | Change program (agent) — pick a different program (e.g. `claude`, `codex`, `opencode`) for the selected session and relaunch it with a fresh conversation |
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
 | `<` / `>` | Shrink / grow left pane |
 | `Ctrl-u/d` or `PageUp/Down` | Page up/down in preview |

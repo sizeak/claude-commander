@@ -43,6 +43,7 @@ pub enum BindableAction {
     DeleteMergedPrSessions,
     RenameSession,
     RestartSession,
+    ChangeProgram,
     ToggleKeepAlive,
     RemoveProject,
     OpenInEditor,
@@ -91,6 +92,7 @@ impl BindableAction {
         Self::NewSession,
         Self::RenameSession,
         Self::RestartSession,
+        Self::ChangeProgram,
         Self::ToggleKeepAlive,
         Self::DeleteSession,
         Self::OpenInEditor,
@@ -162,6 +164,7 @@ impl BindableAction {
             Self::DeleteMergedPrSessions => "delete_merged_pr_sessions",
             Self::RenameSession => "rename_session",
             Self::RestartSession => "restart_session",
+            Self::ChangeProgram => "change_program",
             Self::ToggleKeepAlive => "toggle_keep_alive",
             Self::RemoveProject => "remove_project",
             Self::OpenInEditor => "open_in_editor",
@@ -216,6 +219,7 @@ impl BindableAction {
             Self::DeleteMergedPrSessions => "Delete sessions with merged PRs",
             Self::RenameSession => "Rename session",
             Self::RestartSession => "Restart session",
+            Self::ChangeProgram => "Change program (agent)…",
             Self::ToggleKeepAlive => "Toggle keep-alive (never auto-hibernate)",
             Self::RemoveProject => "Remove project",
             Self::OpenInEditor => "Open in editor/IDE",
@@ -276,6 +280,7 @@ impl BindableAction {
             Self::DeleteMergedPrSessions => "delete merged",
             Self::RenameSession => "rename",
             Self::RestartSession => "restart",
+            Self::ChangeProgram => "program",
             Self::ToggleKeepAlive => "keep alive",
             Self::RemoveProject => "remove project",
             Self::OpenInEditor => "edit",
@@ -324,6 +329,7 @@ impl BindableAction {
             | Self::NewSession
             | Self::RenameSession
             | Self::RestartSession
+            | Self::ChangeProgram
             | Self::ToggleKeepAlive
             | Self::DeleteSession
             | Self::OpenInEditor => "Sessions",
@@ -382,6 +388,7 @@ impl FromStr for BindableAction {
             "delete_merged_pr_sessions" => Ok(Self::DeleteMergedPrSessions),
             "rename_session" => Ok(Self::RenameSession),
             "restart_session" => Ok(Self::RestartSession),
+            "change_program" => Ok(Self::ChangeProgram),
             "toggle_keep_alive" => Ok(Self::ToggleKeepAlive),
             "remove_project" => Ok(Self::RemoveProject),
             "open_in_editor" => Ok(Self::OpenInEditor),
