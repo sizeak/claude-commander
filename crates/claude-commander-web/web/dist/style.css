@@ -1005,3 +1005,10 @@ button.ghost {
     margin-left: 54px;
   }
 }
+
+/* Toolbar Shell toggle: highlighted while attached to the shell pane. */
+#shell-btn.sticky-active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #04121f;
+}

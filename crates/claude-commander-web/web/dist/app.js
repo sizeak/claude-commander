@@ -28,6 +28,7 @@ const els = {
   title: document.getElementById("session-title"),
   micBtn: document.getElementById("mic-btn"),
   kbdBtn: document.getElementById("kbd-btn"),
+  shellBtn: document.getElementById("shell-btn"),
   reviewBtn: document.getElementById("review-btn"),
   infoBtn: document.getElementById("info-btn"),
   restart: document.getElementById("restart-btn"),
@@ -79,6 +80,7 @@ const state = {
   term: null,
   fit: null,
   ctrlPending: false,
+  attachKind: "agent", // "agent" | "shell" — which pane of the session to attach
 };
 
 // Effort levels / permission modes aren't enumerated by the server's
@@ -386,6 +388,7 @@ function renderTree() {
   els.delete.disabled = !sel;
   els.infoBtn.disabled = !sel;
   els.reviewBtn.disabled = !sel;
+  els.shellBtn.disabled = !sel;
   els.micBtn.disabled = !sel;
   els.kbdBtn.disabled = !sel;
   els.title.textContent = sel ? sel.title : "Select a session";
@@ -477,6 +480,13 @@ function ensureTerm() {
   state.term.attachCustomKeyEventHandler((e) => {
     if (e.type !== "keydown") return true;
     const mod = e.ctrlKey || e.metaKey;
+    // Ctrl+\ toggles between the agent pane and the paired shell, matching the
+    // native client (that combo can't just be sent down the PTY — the toggle is
+    // a client-side re-attach).
+    if (e.ctrlKey && (e.key === "\\" || e.code === "Backslash")) {
+      toggleShell();
+      return false;
+    }
     if (mod && (e.key === "c" || e.key === "C") && state.term.hasSelection()) {
       const sel = state.term.getSelection();
       if (sel && navigator.clipboard) {
@@ -525,6 +535,8 @@ function sendResizeNow() {
 function selectSession(id) {
   if (state.selectedId === id) return;
   state.selectedId = id;
+  state.attachKind = "agent"; // new session → start on the agent pane
+  updateShellButton();
   renderTree();
   ensureTerm();
   els.placeholder.style.display = "none";
@@ -569,7 +581,9 @@ function openSocket(id) {
     if (state.mode === "direct" && state.token) {
       ws.send(JSON.stringify({ type: "auth", token: state.token }));
     }
-    ws.send(JSON.stringify({ type: "attach", session_id: id }));
+    const attach = { type: "attach", session_id: id };
+    if (state.attachKind === "shell") attach.kind = "shell";
+    ws.send(JSON.stringify(attach));
     fitNow();
     sendResizeNow();
   };
@@ -617,6 +631,29 @@ function scheduleReconnect(id) {
     }
   }, 1500);
 }
+
+// Toggle between the agent pane and the paired shell by re-attaching with the
+// other `kind`. The shell pane is created on demand server-side; tmux replays it
+// on attach, so switching is just a fresh attach.
+function toggleShell() {
+  if (!state.selectedId) return;
+  state.attachKind = state.attachKind === "shell" ? "agent" : "shell";
+  updateShellButton();
+  if (state.term) state.term.reset();
+  closeSocket();
+  openSocket(state.selectedId);
+}
+
+function updateShellButton() {
+  const inShell = state.attachKind === "shell";
+  els.shellBtn.textContent = inShell ? "Agent" : "Shell";
+  els.shellBtn.title = inShell
+    ? "Back to the agent pane (Ctrl+\\)"
+    : "Toggle shell pane (Ctrl+\\)";
+  els.shellBtn.classList.toggle("sticky-active", inShell);
+}
+
+els.shellBtn.addEventListener("click", toggleShell);
 
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState !== "visible" || !state.selectedId) return;
