@@ -6,6 +6,17 @@ on:
   pull_request:
     types: [opened, synchronize, reopened]
 
+# Environment-level backstop against usage telemetry leaking to the live
+# OpenObserve endpoint from CI. The baked ingest credential is compiled into
+# every build, and `cfg!(test)` only suppresses the *core* crate's own unit
+# tests — downstream crates' `cargo test`/`cargo run` link core as a normal
+# dependency and would otherwise report. `DO_NOT_TRACK` (honoured by
+# `telemetry::would_be_enabled`) neutralises every job regardless of per-fixture
+# config, and is inherited into each `nix develop -c` step. (`nix build` runs in
+# a network-less sandbox, so it needs no backstop.)
+env:
+  DO_NOT_TRACK: "1"
+
 jobs:
   fmt:
     name: Format

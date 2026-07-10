@@ -37,6 +37,12 @@ done
 TMP="$(mktemp -d)"
 export XDG_CONFIG_HOME="$TMP/cfg"
 export XDG_DATA_HOME="$TMP/data"
+# Disable usage telemetry. The server is opt-out-by-default with a baked ingest
+# credential, so without this a *local* e2e run would POST a session_start to the
+# production OpenObserve endpoint (frontend "claude-commander-server"). CI is
+# already covered by the workflow-level DO_NOT_TRACK, but a developer running
+# this script directly is not — so set it here too.
+export DO_NOT_TRACK=1
 # Isolate tmux too: the server spawns tmux inheriting this env, and tmux puts its
 # socket under $TMUX_TMPDIR. Pointing it at the temp tree means every session the
 # server creates lives in a throwaway tmux server we can kill wholesale — nothing
