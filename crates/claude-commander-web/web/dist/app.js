@@ -493,12 +493,12 @@ function ensureTerm() {
     return true;
   });
 
-  // Copy-on-select: copy the moment a selection is finished (mouse or touch).
-  // Done inside the gesture (mouseup/touchend) so Chrome permits the clipboard
-  // write; a bare selection-change callback fires outside a user gesture and
-  // gets blocked.
-  els.terminal.addEventListener("mouseup", copySelection);
-  els.terminal.addEventListener("touchend", copySelection);
+  // Copy-on-select: xterm fires onSelectionChange synchronously while it handles
+  // the drag, so the clipboard write runs inside that user gesture (Chrome
+  // permits it) and sees the finalised selection — unlike a DOM mouseup on the
+  // terminal div, which misses drags that release outside it and can run before
+  // xterm updates the selection.
+  state.term.onSelectionChange(() => copySelection());
 }
 
 // Copy the terminal's current selection to the clipboard, with a brief "copied"
