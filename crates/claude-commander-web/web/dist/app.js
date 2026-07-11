@@ -493,28 +493,63 @@ function ensureTerm() {
     return true;
   });
 
-  // Copy-on-select: xterm fires onSelectionChange synchronously while it handles
-  // the drag, so the clipboard write runs inside that user gesture (Chrome
-  // permits it) and sees the finalised selection — unlike a DOM mouseup on the
-  // terminal div, which misses drags that release outside it and can run before
-  // xterm updates the selection.
-  state.term.onSelectionChange(() => copySelection());
+  // Copy-on-select. onSelectionChange can fire from a requestAnimationFrame
+  // (outside a user gesture, so a clipboard write there is blocked), so it only
+  // *arms* a pending copy; the write happens on the next mouseup/touchend, which
+  // is a real gesture. Listen on document so a drag that releases outside the
+  // terminal is still caught.
+  state.term.onSelectionChange(() => {
+    pendingCopy = state.term.hasSelection();
+  });
+  document.addEventListener("mouseup", flushCopyOnSelect);
+  document.addEventListener("touchend", flushCopyOnSelect);
 }
 
-// Copy the terminal's current selection to the clipboard, with a brief "copied"
-// confirmation. Returns true if there was a selection to copy.
+let pendingCopy = false;
+function flushCopyOnSelect() {
+  if (!pendingCopy) return;
+  pendingCopy = false;
+  copySelection();
+}
+
+// Copy the terminal's current selection, with a "copied" flash. Prefers the
+// async Clipboard API (secure contexts: HTTPS or localhost) and falls back to
+// execCommand for plain-HTTP pages where navigator.clipboard is undefined.
 function copySelection() {
   if (!state.term || !state.term.hasSelection()) return false;
   const sel = state.term.getSelection();
-  if (!sel || !navigator.clipboard) return false;
-  navigator.clipboard
-    .writeText(sel)
-    .then(() => {
-      setConn("ok", "copied");
-      setTimeout(() => setConn("ok", "connected"), 1000);
-    })
-    .catch(() => {});
+  if (!sel) return false;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(sel).then(flashCopied).catch(() => execCopy(sel));
+  } else {
+    execCopy(sel);
+  }
   return true;
+}
+
+// Legacy clipboard write via a throwaway textarea — works without a secure
+// context. Must run inside a user gesture. Restores terminal focus after.
+function execCopy(text) {
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.top = "-1000px";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    if (ok) flashCopied();
+  } catch (_) {}
+  if (state.term) state.term.focus();
+}
+
+function flashCopied() {
+  setConn("ok", "copied");
+  setTimeout(() => setConn("ok", "connected"), 1000);
 }
 
 // Send raw bytes to the PTY as a binary frame.
