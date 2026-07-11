@@ -488,14 +488,33 @@ function ensureTerm() {
       return false;
     }
     if (mod && (e.key === "c" || e.key === "C") && state.term.hasSelection()) {
-      const sel = state.term.getSelection();
-      if (sel && navigator.clipboard) {
-        navigator.clipboard.writeText(sel).catch(() => {});
-        return false;
-      }
+      if (copySelection()) return false;
     }
     return true;
   });
+
+  // Copy-on-select: copy the moment a selection is finished (mouse or touch).
+  // Done inside the gesture (mouseup/touchend) so Chrome permits the clipboard
+  // write; a bare selection-change callback fires outside a user gesture and
+  // gets blocked.
+  els.terminal.addEventListener("mouseup", copySelection);
+  els.terminal.addEventListener("touchend", copySelection);
+}
+
+// Copy the terminal's current selection to the clipboard, with a brief "copied"
+// confirmation. Returns true if there was a selection to copy.
+function copySelection() {
+  if (!state.term || !state.term.hasSelection()) return false;
+  const sel = state.term.getSelection();
+  if (!sel || !navigator.clipboard) return false;
+  navigator.clipboard
+    .writeText(sel)
+    .then(() => {
+      setConn("ok", "copied");
+      setTimeout(() => setConn("ok", "connected"), 1000);
+    })
+    .catch(() => {});
+  return true;
 }
 
 // Send raw bytes to the PTY as a binary frame.
