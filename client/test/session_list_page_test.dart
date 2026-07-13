@@ -177,4 +177,37 @@ void main() {
 
     expect(find.textContaining('Cascade paused'), findsNothing);
   });
+
+  testWidgets('a long program name does not overflow a narrow tile', (
+    tester,
+  ) async {
+    api.listSessionsResponse = [
+      sessionInfo(
+        title: 'Alpha',
+        program:
+            'claude --dangerously-skip-permissions --resume --model opus-4-8',
+      ),
+    ];
+    unawaited(store.connect());
+    // Mimic the desktop master column's ~340px width — where an unconstrained
+    // trailing Text used to throw "Trailing widget consumes the entire tile
+    // width" for a long program string.
+    await tester.pumpWidget(
+      CommanderStoreScope(
+        store: store,
+        child: MaterialApp(
+          home: Scaffold(
+            body: SizedBox(
+              width: 340,
+              child: SessionListBody(onSelect: (_) {}),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('Alpha'), findsOneWidget);
+  });
 }

@@ -776,7 +776,7 @@ dependencies = [
 
 [[package]]
 name = "claude-commander-client"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "claude-commander-protocol",
  "futures-util",

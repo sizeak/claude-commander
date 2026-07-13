@@ -450,6 +450,16 @@ class _SessionTile extends StatelessWidget {
               overflow: TextOverflow.ellipsis,
               style: Theme.of(context).textTheme.bodySmall,
             ),
+            // Program lives in the subtitle (a Column that ellipsizes) rather
+            // than ListTile.trailing: a long program string in a narrow tile
+            // (the 340px desktop master column) made an unconstrained trailing
+            // widget throw "Trailing widget consumes the entire tile width".
+            Text(
+              session.program,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.labelSmall,
+            ),
             const SizedBox(height: 6),
             Wrap(
               spacing: 6,
@@ -461,10 +471,6 @@ class _SessionTile extends StatelessWidget {
               ],
             ),
           ],
-        ),
-        trailing: Text(
-          session.program,
-          style: Theme.of(context).textTheme.labelSmall,
         ),
       ),
     );
