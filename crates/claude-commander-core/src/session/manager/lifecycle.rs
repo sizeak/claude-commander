@@ -139,6 +139,13 @@ impl SessionManager {
         );
         let finalize_start = std::time::Instant::now();
 
+        // Kick off a background `nix develop` pre-warm for the project's dev
+        // shell now, so it overlaps the slow steps below (git fetch + worktree
+        // add). The new worktree checks out the same commit, so by the time its
+        // pane runs `nix develop` the shared store is warm and the pane reuses
+        // it instead of building from cold. No-op for non-flake projects.
+        self.prewarm_nix_shell(&repo_path);
+
         // Fetch latest changes from origin
         if self.config_store.read().fetch_before_create {
             info!(
