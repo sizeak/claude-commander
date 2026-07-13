@@ -34,7 +34,12 @@ pub async fn serve_asset(uri: Uri) -> Response {
 
     let mime = mime_guess::from_path(served_path).first_or_octet_stream();
     (
-        [(header::CONTENT_TYPE, mime.as_ref())],
+        [
+            (header::CONTENT_TYPE, mime.as_ref()),
+            // The SPA changes frequently and carries no content hashing, so never
+            // let the browser serve a stale bundle (a plain reload would).
+            (header::CACHE_CONTROL, "no-store"),
+        ],
         Body::from(asset.data.into_owned()),
     )
         .into_response()

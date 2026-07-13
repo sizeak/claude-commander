@@ -506,6 +506,13 @@ function ensureTerm() {
   // terminal is still caught.
   state.term.onSelectionChange(() => {
     pendingCopy = state.term.hasSelection();
+    // TEMP diagnostic — shows whether xterm registers a selection at all.
+    console.log(
+      "[cc] selectionchange hasSelection=",
+      pendingCopy,
+      "text=",
+      JSON.stringify(state.term.getSelection())
+    );
   });
   document.addEventListener("mouseup", flushCopyOnSelect);
   document.addEventListener("touchend", flushCopyOnSelect);
@@ -1372,5 +1379,17 @@ async function boot() {
   if (isMobile() && !state.selectedId) openDrawer();
   setInterval(refreshAll, POLL_MS);
 }
+
+// TEMP diagnostic — run `ccCopyDebug()` in the console (ideally right after an
+// Option+drag while a selection is visible).
+window.ccCopyDebug = () => ({
+  mode: state.mode,
+  secureContext: window.isSecureContext,
+  url: location.href,
+  hasClipboard: !!(navigator.clipboard && navigator.clipboard.writeText),
+  hasTerm: !!state.term,
+  hasSelection: state.term ? state.term.hasSelection() : null,
+  selectionText: state.term ? state.term.getSelection() : null,
+});
 
 boot();
