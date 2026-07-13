@@ -14,7 +14,7 @@ void main() {
   setUp(() => api = FakeCommanderApi());
 
   Widget wrap() => MaterialApp(
-    home: ReviewPage(api: api, config: testConfig, session: sessionInfo()),
+    home: ReviewPage(api: api, handle: testHandle, session: sessionInfo()),
   );
 
   testWidgets('a snapshot renders file cards and diff rows', (tester) async {
@@ -180,7 +180,7 @@ void main() {
     await tester.pumpWidget(wrap());
     await tester.pumpAndSettle();
 
-    await tester.tap(find.widgetWithText(FloatingActionButton, 'Apply (1)'));
+    await tester.tap(find.widgetWithText(FilledButton, 'Apply (1)'));
     await tester.pumpAndSettle();
 
     // Blocked → the drift count is surfaced, not an "Applied N" message.
@@ -202,7 +202,7 @@ void main() {
     await tester.pumpWidget(wrap());
     await tester.pumpAndSettle();
 
-    await tester.tap(find.widgetWithText(FloatingActionButton, 'Apply (1)'));
+    await tester.tap(find.widgetWithText(FilledButton, 'Apply (1)'));
     await tester.pumpAndSettle();
 
     expect(find.textContaining('Applied 3 comment'), findsOneWidget);
@@ -218,7 +218,7 @@ void main() {
     );
     await tester.pumpWidget(
       MaterialApp(
-        home: ReviewPage(api: gate, config: testConfig, session: sessionInfo()),
+        home: ReviewPage(api: gate, handle: testHandle, session: sessionInfo()),
       ),
     );
     await tester.pumpAndSettle();
@@ -259,7 +259,7 @@ void main() {
     );
     await tester.pumpWidget(
       MaterialApp(
-        home: ReviewPage(api: gate, config: testConfig, session: sessionInfo()),
+        home: ReviewPage(api: gate, handle: testHandle, session: sessionInfo()),
       ),
     );
     await tester.pumpAndSettle(); // first openReview resolves normally
@@ -368,8 +368,7 @@ class GatedCommentApi extends FakeCommanderApi {
 
   @override
   Future<ReviewSnapshotDto> openReview({
-    required String baseUrl,
-    required String token,
+    required String handle,
     required String sessionId,
   }) async {
     calls.add(RecordedCall('openReview', {'sessionId': sessionId}));
@@ -384,8 +383,7 @@ class GatedCommentApi extends FakeCommanderApi {
 
   @override
   Future<String> createComment({
-    required String baseUrl,
-    required String token,
+    required String handle,
     required String sessionId,
     required String file,
     required String side,
@@ -418,8 +416,7 @@ class GatedReviewApi extends FakeCommanderApi {
 
   @override
   Future<bool> toggleFileReviewed({
-    required String baseUrl,
-    required String token,
+    required String handle,
     required String sessionId,
     required String displayPath,
   }) {

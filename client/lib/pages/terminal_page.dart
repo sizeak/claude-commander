@@ -5,34 +5,60 @@ import 'package:flutter/material.dart';
 import 'package:uuid/uuid.dart';
 import 'package:xterm/xterm.dart';
 
-import '../server_config.dart';
 import '../services/commander_api.dart';
 import '../src/rust/api/mirrors.dart';
+import '../state/commander_store.dart';
+import '../state/commander_store_scope.dart';
 
-/// Live attached terminal (Phase 3 spike). Streams raw PTY bytes from the
-/// cdylib WS bridge into an `xterm.dart` [Terminal], forwards keystrokes/resize
-/// back, offers an on-screen modifier bar for touch, and shows a live byte
-/// throughput meter so we can judge whether Flutter + xterm.dart keep up.
-class TerminalPage extends StatefulWidget {
+/// Live attached terminal, layout-agnostic (no Scaffold, no route). Streams raw
+/// PTY bytes from the cdylib WS bridge into an `xterm.dart` [Terminal], forwards
+/// keystrokes/resize back, shows a compact status/throughput bar with a reconnect
+/// action, and — only when [showModifierBar] is set (touch/narrow) — an on-screen
+/// modifier bar.
+///
+/// Each attach uses a fresh per-attach id (a UUID) that keys its control channel
+/// in the cdylib, so several attaches can be live against one server. The id is
+/// registered with the [CommanderStore] (when one is in scope) so a
+/// reconnect/dispose of the store tears the attach down before releasing the
+/// handle. Resize is driven by `xterm`'s [Terminal.onResize], which fires from
+/// the widget's actual laid-out size — so the pane's real cols/rows reach the
+/// server, not a fixed 80x24.
+class TerminalBody extends StatefulWidget {
   final CommanderApi api;
-  final ServerConfig config;
+
+  /// The live server handle, used to resolve the transport client for the attach.
+  final String handle;
   final SessionInfo session;
-  const TerminalPage({
+
+  /// Which pane to attach to: the agent pane (default) or the paired shell.
+  final AttachKind kind;
+
+  /// Show the on-screen modifier/arrow bar (mobile/touch only). Desktop relies
+  /// on the physical keyboard, so this is false there.
+  final bool showModifierBar;
+
+  const TerminalBody({
     super.key,
     required this.api,
-    required this.config,
+    required this.handle,
     required this.session,
+    this.kind = AttachKind.agent,
+    this.showModifierBar = true,
   });
 
   @override
-  State<TerminalPage> createState() => _TerminalPageState();
+  State<TerminalBody> createState() => _TerminalBodyState();
 }
 
-class _TerminalPageState extends State<TerminalPage> {
-  // A unique id ties this attach's control calls back to its socket in Rust.
-  final String _handle = const Uuid().v4();
+class _TerminalBodyState extends State<TerminalBody> {
   late final Terminal _terminal;
   StreamSubscription<TerminalEvent>? _sub;
+  CommanderStore? _store;
+
+  /// A fresh id per attach: keys this attach's control channel in the cdylib.
+  /// Regenerated on every (re)connect so a reconnect never collides with the
+  /// entry a just-ended attach is still tearing down.
+  String _attachId = const Uuid().v4();
 
   // Stateful UTF-8 decoder: PTY chunks can split a multibyte codepoint across
   // WS frames, so a chunked decoder buffers the partial tail until it completes.
@@ -65,12 +91,19 @@ class _TerminalPageState extends State<TerminalPage> {
 
     _terminal.onOutput = (data) {
       unawaited(
-        widget.api.terminalSendInput(handle: _handle, bytes: utf8.encode(data)),
+        widget.api.terminalSendInput(
+          attachId: _attachId,
+          bytes: utf8.encode(data),
+        ),
       );
     };
     _terminal.onResize = (cols, rows, pixelWidth, pixelHeight) {
       unawaited(
-        widget.api.terminalResize(handle: _handle, cols: cols, rows: rows),
+        widget.api.terminalResize(
+          attachId: _attachId,
+          cols: cols,
+          rows: rows,
+        ),
       );
     };
 
@@ -85,21 +118,31 @@ class _TerminalPageState extends State<TerminalPage> {
     });
   }
 
-  /// Open (or re-open) the WS attach. The same handle is reused — the cdylib
-  /// registry entry is dropped when an attach ends, so re-attaching re-inserts
-  /// it. A re-attach replays tmux's pane, so output simply continues appending.
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // Register the current attach with the store (if one is in scope) so its
+    // reconnect/dispose tears the attach down before releasing the handle.
+    _store = CommanderStoreScope.of(context);
+    _store?.setActiveTerminalAttach(_attachId);
+  }
+
+  /// Open (or re-open) the WS attach with a fresh attach id. A re-attach replays
+  /// tmux's pane, so output simply continues appending.
   void _connect() {
     _sub?.cancel();
+    _attachId = const Uuid().v4();
+    _store?.setActiveTerminalAttach(_attachId);
     setState(() {
       _status = 'connecting…';
       _ended = false;
     });
     _sub = widget.api
         .attachTerminal(
-          handle: _handle,
-          baseUrl: widget.config.baseUrl,
-          token: widget.config.token,
+          handle: widget.handle,
+          attachId: _attachId,
           sessionId: widget.session.id,
+          kind: widget.kind,
         )
         .listen(
           _onEvent,
@@ -126,7 +169,7 @@ class _TerminalPageState extends State<TerminalPage> {
         // re-announce our current size on every ready.
         unawaited(
           widget.api.terminalResize(
-            handle: _handle,
+            attachId: _attachId,
             cols: _terminal.viewWidth,
             rows: _terminal.viewHeight,
           ),
@@ -144,13 +187,18 @@ class _TerminalPageState extends State<TerminalPage> {
     }
   }
 
-  void _send(List<int> bytes) =>
-      unawaited(widget.api.terminalSendInput(handle: _handle, bytes: bytes));
+  void _send(List<int> bytes) => unawaited(
+    widget.api.terminalSendInput(attachId: _attachId, bytes: bytes),
+  );
 
   @override
   void dispose() {
     _meter?.cancel();
-    unawaited(widget.api.terminalDetach(handle: _handle));
+    unawaited(widget.api.terminalDetach(attachId: _attachId));
+    // Guarded clear: if the wide pane already swapped in another attach (agent↔
+    // shell), its initState registered the new id before this dispose runs, so
+    // only clear when we're still the registered attach.
+    _store?.clearActiveTerminalAttach(_attachId);
     _sub?.cancel();
     _decoder.close();
     super.dispose();
@@ -168,50 +216,86 @@ class _TerminalPageState extends State<TerminalPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(widget.session.title, overflow: TextOverflow.ellipsis),
-        actions: [
+    return Column(
+      children: [
+        _statusBar(context),
+        Expanded(
+          child: TerminalView(
+            _terminal,
+            autofocus: true,
+            backgroundOpacity: 1,
+          ),
+        ),
+        if (widget.showModifierBar) _ModifierBar(onSend: _send),
+      ],
+    );
+  }
+
+  Widget _statusBar(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.only(left: 12, right: 4, top: 2, bottom: 2),
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              _status,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.labelSmall,
+            ),
+          ),
+          Text(
+            '${_fmtRate(_bytesPerSec)} · ${_totalBytes ~/ 1024} KB',
+            style: Theme.of(context).textTheme.labelSmall,
+          ),
           IconButton(
+            visualDensity: VisualDensity.compact,
             onPressed: _ended ? _reconnect : null,
-            icon: const Icon(Icons.refresh),
+            icon: const Icon(Icons.refresh, size: 18),
             tooltip: 'Reconnect',
           ),
         ],
-        bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(20),
-          child: Padding(
-            padding: const EdgeInsets.only(left: 16, right: 16, bottom: 4),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    _status,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.labelSmall,
-                  ),
-                ),
-                Text(
-                  '${_fmtRate(_bytesPerSec)} · ${_totalBytes ~/ 1024} KB',
-                  style: Theme.of(context).textTheme.labelSmall,
-                ),
-              ],
-            ),
-          ),
+      ),
+    );
+  }
+}
+
+/// The phone (stacked-navigation) terminal screen: a Scaffold titled by the
+/// session, wrapping a [TerminalBody] with the on-screen modifier bar enabled.
+class TerminalPage extends StatelessWidget {
+  final CommanderApi api;
+  final String handle;
+  final SessionInfo session;
+
+  /// Which pane to attach to: the agent pane (default) or the paired shell.
+  final AttachKind kind;
+
+  const TerminalPage({
+    super.key,
+    required this.api,
+    required this.handle,
+    required this.session,
+    this.kind = AttachKind.agent,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final isShell = kind == AttachKind.shell;
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(
+          isShell ? '${session.title} · shell' : session.title,
+          overflow: TextOverflow.ellipsis,
         ),
       ),
-      body: Column(
-        children: [
-          Expanded(
-            child: TerminalView(
-              _terminal,
-              autofocus: true,
-              backgroundOpacity: 1,
-            ),
-          ),
-          _ModifierBar(onSend: _send),
-        ],
+      body: SafeArea(
+        child: TerminalBody(
+          api: api,
+          handle: handle,
+          session: session,
+          kind: kind,
+        ),
       ),
     );
   }

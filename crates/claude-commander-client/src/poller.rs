@@ -1,35 +1,33 @@
-//! Background poller: the [`RemoteBackend`](crate::RemoteBackend)'s change-feed
-//! and connection state machine.
+//! Background poller: a [`RemoteClient`]'s change-feed and connection state
+//! machine.
 //!
-//! A remote server has no push channel for state changes (that would be a second
-//! WebSocket; Phase F is busy enough with attach), so the client polls. Every
-//! [`interval`](PollConfig::interval) the poller fetches the workspace snapshot
-//! and the agent-state snapshot, content-hashes both, and — when the hash moved
-//! (or the connection just recovered) — bumps a [`watch`] generation counter.
-//! The TUI's per-backend change-feed task waits on that counter and re-fetches,
-//! exactly as it does for the local backend's store generation.
+//! A remote server has no push channel for state changes, so the client polls.
+//! Every [`interval`](PollConfig::interval) the poller fetches the workspace
+//! snapshot and the agent-state snapshot, content-hashes both, and — when the
+//! hash moved (or the connection just recovered) — bumps a [`watch`] generation
+//! counter. The consumer (the remote adapter's change-feed task) waits on that
+//! counter and re-fetches.
 //!
-//! Alongside the generation counter the poller drives a
-//! [`ConnectionState`](claude_commander_core::backend::ConnectionState) watch:
-//! `Connecting` until the first successful poll, `Connected` while polls
+//! Alongside the generation counter the poller drives a [`ConnectionState`]
+//! watch: `Connecting` until the first successful poll, `Connected` while polls
 //! succeed, and `Degraded { reason }` on failure, with exponential backoff
 //! ([`backoff_delay`]) between retries so a downed server isn't hammered.
 //!
-//! The poll task holds no strong reference back to the `RemoteBackend`, so it
+//! The poll task holds no strong reference back to the adapter backend, so it
 //! forms no cycle; [`Poller`]'s `Drop` aborts it when the backend goes away.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use claude_commander_core::backend::ConnectionState;
+use claude_commander_protocol::connection::ConnectionState;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use crate::backend::RemoteInner;
 use crate::backoff::{BackoffConfig, backoff_delay};
+use crate::client::RemoteClient;
 
-/// Cadence + backoff for the background poller. Fields are public so Phase G can
-/// wire them from config; the defaults match the local backend's agent-state
+/// Cadence + backoff for the background poller. Fields are public so a frontend
+/// can wire them from config; the defaults match the local backend's agent-state
 /// poll cadence.
 #[derive(Clone, Copy, Debug)]
 pub struct PollConfig {
@@ -49,8 +47,7 @@ impl Default for PollConfig {
     }
 }
 
-/// A watch on a backend's [`ConnectionState`], mirroring the shape of core's
-/// `BackendChangeFeed` so the later TUI wiring can render health reactively.
+/// A watch on a backend's [`ConnectionState`], for rendering health reactively.
 #[derive(Clone)]
 pub struct ConnectionFeed {
     rx: watch::Receiver<ConnectionState>,
@@ -75,17 +72,40 @@ impl ConnectionFeed {
 
 /// Owns the spawned poll task and the receiver ends of its two watches. Aborting
 /// the task on `Drop` prevents an orphaned poll loop from outliving the backend.
-pub(crate) struct Poller {
-    // Receiver-version subtlety: `change_feed()` clones this receiver, and a
-    // cloned `watch::Receiver` inherits the source's last-seen version. This
-    // stored receiver is therefore never consumed (`borrow_and_update`) — it
-    // stays pinned at the initial generation (0) so a clone's first
-    // `changed().await` still fires on the poll loop's first bump. Consuming it
-    // here would mark that bump as already-seen and reintroduce a startup race
-    // where the initial remote snapshot is never fetched.
-    pub(crate) generation: watch::Receiver<u64>,
-    pub(crate) connection: watch::Receiver<ConnectionState>,
+pub struct Poller {
+    // Receiver-version subtlety: a change-feed clones this receiver, and a cloned
+    // `watch::Receiver` inherits the source's last-seen version. This stored
+    // receiver is therefore never consumed (`borrow_and_update`) — it stays
+    // pinned at the initial generation (0) so a clone's first `changed().await`
+    // still fires on the poll loop's first bump. Consuming it here would mark
+    // that bump as already-seen and reintroduce a startup race where the initial
+    // remote snapshot is never fetched.
+    generation: watch::Receiver<u64>,
+    connection: watch::Receiver<ConnectionState>,
     handle: JoinHandle<()>,
+}
+
+impl Poller {
+    /// A fresh clone of the change-feed generation watch (pinned at the initial
+    /// version, so a first `changed().await` fires on the poll loop's first bump).
+    pub fn generation_watch(&self) -> watch::Receiver<u64> {
+        self.generation.clone()
+    }
+
+    /// A fresh clone of the connection-health watch.
+    pub fn connection_watch(&self) -> watch::Receiver<ConnectionState> {
+        self.connection.clone()
+    }
+
+    /// The current connection health (cheap; no `.await`).
+    pub fn connection_state(&self) -> ConnectionState {
+        self.connection.borrow().clone()
+    }
+
+    /// A reactive [`ConnectionFeed`] on the connection health.
+    pub fn connection_feed(&self) -> ConnectionFeed {
+        ConnectionFeed::new(self.connection.clone())
+    }
 }
 
 impl Drop for Poller {
@@ -94,11 +114,13 @@ impl Drop for Poller {
     }
 }
 
-/// Spawn the poll loop for `inner` and return the handle owning it.
-pub(crate) fn spawn(inner: Arc<RemoteInner>, config: PollConfig) -> Poller {
+/// Spawn the poll loop for `client` and return the [`Poller`] owning it. The
+/// task holds `client` (an `Arc`) rather than the adapter backend, so it forms
+/// no cycle; dropping the returned `Poller` aborts it.
+pub fn spawn_poller(client: Arc<RemoteClient>, config: PollConfig) -> Poller {
     let (gen_tx, gen_rx) = watch::channel(0u64);
     let (conn_tx, conn_rx) = watch::channel(ConnectionState::Connecting);
-    let handle = tokio::spawn(run(inner, config, gen_tx, conn_tx));
+    let handle = tokio::spawn(run(client, config, gen_tx, conn_tx));
     Poller {
         generation: gen_rx,
         connection: conn_rx,
@@ -110,7 +132,7 @@ pub(crate) fn spawn(inner: Arc<RemoteInner>, config: PollConfig) -> Poller {
 /// or a recovery, and moves `conn_tx` through the connection state machine with
 /// exponential backoff on failure.
 async fn run(
-    inner: Arc<RemoteInner>,
+    client: Arc<RemoteClient>,
     config: PollConfig,
     gen_tx: watch::Sender<u64>,
     conn_tx: watch::Sender<ConnectionState>,
@@ -119,7 +141,7 @@ async fn run(
     let mut consecutive_failures: u32 = 0;
 
     loop {
-        match inner.poll_hashes().await {
+        match client.poll_hashes().await {
             Ok(hash) => {
                 let content_changed = last_hash != Some(hash);
                 let recovered = !matches!(&*conn_tx.borrow(), ConnectionState::Connected);
@@ -133,7 +155,7 @@ async fn run(
                 }
                 // Bump the change feed on the first successful poll (recovered
                 // from `Connecting`), on any later recovery, or whenever the
-                // observable state actually moved — so the TUI re-fetches.
+                // observable state actually moved — so the consumer re-fetches.
                 if content_changed || recovered {
                     gen_tx.send_modify(|g| *g = g.wrapping_add(1));
                 }
@@ -143,7 +165,7 @@ async fn run(
             Err(err) => {
                 consecutive_failures += 1;
                 let reason = err.to_string();
-                tracing::debug!(server = %inner.name(), %reason, "remote poll failed");
+                tracing::debug!(server = %client.name(), %reason, "remote poll failed");
                 mark_degraded(&conn_tx, reason);
                 tokio::time::sleep(backoff_delay(&config.backoff, consecutive_failures)).await;
             }

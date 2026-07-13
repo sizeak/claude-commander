@@ -1,337 +1,49 @@
-//! [`RemoteBackend`]: a [`CommanderBackend`] implemented over HTTP against a
-//! `claude-commander-server`.
+//! [`RemoteBackend`]: a [`CommanderBackend`] implemented as a thin adapter over
+//! `claude-commander-client`'s transport.
 //!
-//! Each trait method maps to one route on the server's `/api` surface (see the
-//! table in the crate docs). Requests carry the bearer token (when configured)
-//! and their failures classify into the shared [`BackendError`] categories via
-//! [`crate::error`]. A background [`Poller`] drives the change-feed and the
-//! connection state machine; see [`crate::poller`].
+//! All the HTTP/WebSocket machinery — per-route calls, the change-feed poller,
+//! the connection state machine, the attach pump — lives in the client crate,
+//! which knows nothing of core. This adapter's job is purely to satisfy core's
+//! [`CommanderBackend`] trait: each method delegates to the matching
+//! [`RemoteClient`] method, maps the client's [`ClientError`](claude_commander_client::ClientError)
+//! onto a [`BackendError`] via [`into_backend_error`], and rebuilds the handful
+//! of core-only return types (`ScanResult`) that have no wire DTO. The attach
+//! seam is bridged in [`crate::attach`].
 
 use std::any::Any;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
+use claude_commander_client::{
+    ConnectionFeed, PollConfig, Poller, RemoteClient, RemoteServerSpec, spawn_poller,
+};
 use claude_commander_core::api::{
     AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
     OperationStatus, PreviewData, PreviewTarget, ProgramInfo, ReviewSnapshot, SessionDetail,
-    SetProgramsRequest, ToggleReviewed, WorkspaceSnapshot,
+    WorkspaceSnapshot,
 };
 use claude_commander_core::backend::{
     AttachConnection, AttachKind, BResult, BackendCapabilities, BackendChangeFeed,
-    BackendDescriptor, BackendError, BackendKind, CommanderBackend, ConnectionState,
+    BackendDescriptor, BackendKind, CommanderBackend, ConnectionState,
 };
 use claude_commander_core::comment::{ApplyOutcome, Comment};
 use claude_commander_core::session::{ProjectId, ScanResult, SessionId};
 use claude_commander_protocol::ws::AttachKind as WsAttachKind;
-use reqwest::{Client, RequestBuilder, Response, StatusCode, Url};
-use serde::Serialize;
-use serde::de::DeserializeOwned;
 use uuid::Uuid;
-use xxhash_rust::xxh3::Xxh3;
 
-use crate::poller::{self, ConnectionFeed, PollConfig, Poller};
-use crate::spec::{RemoteServerSpec, SecretString};
-
-/// How long to wait for a TCP connection before treating the server as
-/// unreachable. Kept short so the poller's backoff engages promptly.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// Overall per-request ceiling (a slow branch-diff still fits comfortably).
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-/// Tighter per-request bound for interactive review reads/writes (list/create/
-/// delete comment, toggle-reviewed): these are quick store/file operations, so
-/// a user who fires one and waits shouldn't sit through the 30s
-/// [`REQUEST_TIMEOUT`] when a server has wedged — a few seconds surfaces the
-/// failure while still tolerating a slow link.
-const REVIEW_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
-/// Per-request bound for `apply_comments`. Longer than [`REVIEW_WRITE_TIMEOUT`]
-/// because the server does more work here — it recomposes a fresh review diff,
-/// re-anchors every comment, then detects the agent's state and sends keys into
-/// tmux — but still well under [`REQUEST_TIMEOUT`].
-const APPLY_COMMENTS_TIMEOUT: Duration = Duration::from_secs(15);
-
-/// The shared, cloneable core of a [`RemoteBackend`]: the HTTP client, the
-/// resolved base URL, and the (redacted) bearer token. The poll task holds an
-/// `Arc` of this — never of the `RemoteBackend` itself — so there's no cycle.
-pub(crate) struct RemoteInner {
-    name: String,
-    client: Client,
-    base: Url,
-    token: Option<SecretString>,
-}
-
-impl RemoteInner {
-    pub(crate) fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// The `/ws/attach` WebSocket URL for this server (scheme mapped, path
-    /// prefix preserved). Used by [`CommanderBackend::attach`].
-    fn ws_attach_url(&self) -> String {
-        crate::attach::ws_attach_url(self.base.as_str())
-    }
-
-    /// The raw bearer token, if configured. Crate-internal and only handed to
-    /// the attach handshake's `auth` frame — never logged.
-    fn token(&self) -> Option<&str> {
-        self.token.as_ref().map(|t| t.expose())
-    }
-
-    /// Build a `/api/<segments…>` URL against the base. `path_segments_mut`
-    /// percent-encodes each segment, so a free-form session query or a diff path
-    /// is escaped safely.
-    fn endpoint(&self, segments: &[&str]) -> Url {
-        let mut url = self.base.clone();
-        {
-            let mut path = url
-                .path_segments_mut()
-                .expect("a validated http(s) base URL is always a base");
-            // Drop the trailing empty segment of a bare `http://host/` so we
-            // don't produce `//api`, then append the API prefix + segments.
-            path.pop_if_empty();
-            path.push("api");
-            path.extend(segments);
-        }
-        url
-    }
-
-    /// Attach the bearer header (when set) and send, mapping a transport failure
-    /// (no response) to [`BackendError::Unavailable`]/`Protocol`.
-    async fn send(&self, request: RequestBuilder) -> BResult<Response> {
-        let request = match &self.token {
-            Some(token) => request.bearer_auth(token.expose()),
-            None => request,
-        };
-        request.send().await.map_err(|err| {
-            tracing::debug!(server = %self.name, error = %err, "remote request failed in transport");
-            crate::error::transport_error(err)
-        })
-    }
-
-    /// Turn a non-success status into the matching [`BackendError`], reading the
-    /// server's error body for the reason; pass a success response through.
-    async fn check(&self, response: Response) -> BResult<Response> {
-        let status = response.status();
-        if status.is_success() {
-            Ok(response)
-        } else {
-            Err(crate::error::status_error(
-                status,
-                crate::error::error_message(response).await,
-            ))
-        }
-    }
-
-    async fn get_json<T: DeserializeOwned>(&self, url: Url) -> BResult<T> {
-        self.get_json_within(url, REQUEST_TIMEOUT).await
-    }
-
-    /// [`Self::get_json`] with a per-request `timeout` overriding the client-wide
-    /// [`REQUEST_TIMEOUT`] (used by interactive review reads — see
-    /// [`REVIEW_WRITE_TIMEOUT`]).
-    async fn get_json_within<T: DeserializeOwned>(
-        &self,
-        url: Url,
-        timeout: Duration,
-    ) -> BResult<T> {
-        let response = self.send(self.client.get(url).timeout(timeout)).await?;
-        let response = self.check(response).await?;
-        decode_json(response).await
-    }
-
-    /// GET where a `404` means "no such thing" rather than an error (the detail
-    /// route resolves a free-form query and 404s when nothing matches).
-    async fn get_json_opt<T: DeserializeOwned>(&self, url: Url) -> BResult<Option<T>> {
-        let response = self.send(self.client.get(url)).await?;
-        if response.status() == StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-        let response = self.check(response).await?;
-        Ok(Some(decode_json(response).await?))
-    }
-
-    /// GET where a `204 No Content` means "unchanged" (the review-refresh route).
-    async fn get_json_if_present<T: DeserializeOwned>(&self, url: Url) -> BResult<Option<T>> {
-        let response = self.send(self.client.get(url)).await?;
-        if response.status() == StatusCode::NO_CONTENT {
-            return Ok(None);
-        }
-        let response = self.check(response).await?;
-        Ok(Some(decode_json(response).await?))
-    }
-
-    async fn get_text(&self, url: Url) -> BResult<String> {
-        let response = self.send(self.client.get(url)).await?;
-        let response = self.check(response).await?;
-        response.text().await.map_err(crate::error::body_error)
-    }
-
-    async fn get_bytes(&self, url: Url) -> BResult<Vec<u8>> {
-        let response = self.send(self.client.get(url)).await?;
-        let response = self.check(response).await?;
-        response
-            .bytes()
-            .await
-            .map(|b| b.to_vec())
-            .map_err(crate::error::body_error)
-    }
-
-    /// POST with no body, decoding the JSON response (cascade routes → 202 +
-    /// `OperationStatus`).
-    async fn post_empty_json<T: DeserializeOwned>(&self, url: Url) -> BResult<T> {
-        self.post_empty_json_within(url, REQUEST_TIMEOUT).await
-    }
-
-    /// [`Self::post_empty_json`] with a per-request `timeout` overriding the
-    /// client-wide [`REQUEST_TIMEOUT`] (used by `apply_comments` — see
-    /// [`APPLY_COMMENTS_TIMEOUT`]).
-    async fn post_empty_json_within<T: DeserializeOwned>(
-        &self,
-        url: Url,
-        timeout: Duration,
-    ) -> BResult<T> {
-        let response = self.send(self.client.post(url).timeout(timeout)).await?;
-        let response = self.check(response).await?;
-        decode_json(response).await
-    }
-
-    /// POST a JSON body, decoding the JSON response (create routes → 201 + id).
-    async fn post_json<T: DeserializeOwned, B: Serialize>(&self, url: Url, body: &B) -> BResult<T> {
-        self.post_json_within(url, body, REQUEST_TIMEOUT).await
-    }
-
-    /// [`Self::post_json`] with a per-request `timeout` overriding the
-    /// client-wide [`REQUEST_TIMEOUT`] (used by interactive review writes — see
-    /// [`REVIEW_WRITE_TIMEOUT`]).
-    async fn post_json_within<T: DeserializeOwned, B: Serialize>(
-        &self,
-        url: Url,
-        body: &B,
-        timeout: Duration,
-    ) -> BResult<T> {
-        let response = self
-            .send(self.client.post(url).json(body).timeout(timeout))
-            .await?;
-        let response = self.check(response).await?;
-        decode_json(response).await
-    }
-
-    /// POST with no body, discarding the (204/empty) response.
-    async fn post_empty_ok(&self, url: Url) -> BResult<()> {
-        let response = self.send(self.client.post(url)).await?;
-        self.check(response).await?;
-        Ok(())
-    }
-
-    /// POST a JSON body, discarding the (204) response.
-    async fn post_json_ok<B: Serialize>(&self, url: Url, body: &B) -> BResult<()> {
-        let response = self.send(self.client.post(url).json(body)).await?;
-        self.check(response).await?;
-        Ok(())
-    }
-
-    /// POST a raw byte body with an explicit `Content-Type`, discarding the
-    /// response. Used to upload a pasted image (PNG bytes) to the server.
-    async fn post_bytes_ok(&self, url: Url, bytes: Vec<u8>, content_type: &str) -> BResult<()> {
-        let response = self
-            .send(
-                self.client
-                    .post(url)
-                    .header(reqwest::header::CONTENT_TYPE, content_type)
-                    .body(bytes),
-            )
-            .await?;
-        self.check(response).await?;
-        Ok(())
-    }
-
-    /// PATCH a JSON body, discarding the (204) response.
-    async fn patch_json_ok<B: Serialize>(&self, url: Url, body: &B) -> BResult<()> {
-        let response = self.send(self.client.patch(url).json(body)).await?;
-        self.check(response).await?;
-        Ok(())
-    }
-
-    /// PUT a JSON body, discarding the (204) response.
-    async fn put_json_ok<B: Serialize>(&self, url: Url, body: &B) -> BResult<()> {
-        let response = self.send(self.client.put(url).json(body)).await?;
-        self.check(response).await?;
-        Ok(())
-    }
-
-    /// DELETE, discarding the (204) response.
-    async fn delete_ok(&self, url: Url) -> BResult<()> {
-        self.delete_ok_within(url, REQUEST_TIMEOUT).await
-    }
-
-    /// [`Self::delete_ok`] with a per-request `timeout` overriding the
-    /// client-wide [`REQUEST_TIMEOUT`] (used by interactive review writes — see
-    /// [`REVIEW_WRITE_TIMEOUT`]).
-    async fn delete_ok_within(&self, url: Url, timeout: Duration) -> BResult<()> {
-        let response = self.send(self.client.delete(url).timeout(timeout)).await?;
-        self.check(response).await?;
-        Ok(())
-    }
-
-    /// Fetch the workspace + agent-state snapshots and content-hash them
-    /// together. The poll loop compares this against the previous hash to decide
-    /// whether observable state moved. Any HTTP/transport failure propagates so
-    /// the poller can go [`ConnectionState::Degraded`].
-    pub(crate) async fn poll_hashes(&self) -> BResult<u64> {
-        let workspace = self.get_bytes(self.endpoint(&["workspace"])).await?;
-        let agent_states = self.get_bytes(self.endpoint(&["agent-states"])).await?;
-        let mut hasher = Xxh3::new();
-        hasher.update(&workspace);
-        hasher.update(b"\x00");
-        hasher.update(&agent_states);
-        Ok(hasher.digest())
-    }
-}
-
-async fn decode_json<T: DeserializeOwned>(response: Response) -> BResult<T> {
-    response.json::<T>().await.map_err(crate::error::body_error)
-}
-
-/// The server wraps created-resource ids as `{ "id": … }`.
-#[derive(serde::Deserialize)]
-struct IdEnvelope<T> {
-    id: T,
-}
-
-/// `POST /sessions/{id}/files/reviewed` → `{ "reviewed": bool }`.
-#[derive(serde::Deserialize)]
-struct ReviewedBody {
-    reviewed: bool,
-}
-
-/// `POST /projects/scan` → `{ added, skipped }` (core's `ScanResult` isn't
-/// `Deserialize`, so we mirror the fields and rebuild it).
-#[derive(serde::Deserialize)]
-struct ScanBody {
-    added: usize,
-    skipped: usize,
-}
-
-/// Request body for `POST /projects/scan`: the directory to scan.
-#[derive(serde::Serialize)]
-struct ScanRequest {
-    path: PathBuf,
-}
-
-fn diff_side_param(side: DiffSide) -> &'static str {
-    match side {
-        DiffSide::Old => "old",
-        DiffSide::New => "new",
-    }
-}
+use crate::attach::RemoteAttachConnection;
+use crate::error::into_backend_error;
 
 /// A [`CommanderBackend`] that drives a remote `claude-commander-server` over
-/// HTTP. Construct with [`RemoteBackend::new`]; the change-feed and connection
-/// health are served by a background [`Poller`] spawned at construction and
-/// aborted when the backend is dropped.
+/// HTTP + WebSocket. Construct with [`RemoteBackend::new`]; the change-feed and
+/// connection health are served by a background [`Poller`] spawned at
+/// construction and aborted when the backend is dropped.
+///
+/// The poll task holds the `Arc<RemoteClient>` — never the `RemoteBackend`
+/// itself — so there's no reference cycle.
 pub struct RemoteBackend {
-    inner: Arc<RemoteInner>,
+    client: Arc<RemoteClient>,
     poller: Poller,
 }
 
@@ -345,69 +57,23 @@ impl RemoteBackend {
     }
 
     /// Like [`Self::new`], with an explicit poll cadence + backoff (tests inject
-    /// a fast interval; Phase G will wire this from config).
+    /// a fast interval; a frontend wires this from config).
     pub fn with_config(spec: RemoteServerSpec, config: PollConfig) -> BResult<Self> {
-        let base = Url::parse(&spec.base_url)
-            .map_err(|e| BackendError::InvalidRequest(format!("invalid server url: {e}")))?;
-        if base.cannot_be_a_base() || base.host().is_none() {
-            return Err(BackendError::InvalidRequest(
-                "server url must include a host (e.g. http://host:port)".to_string(),
-            ));
-        }
-        // The WS attach URL is derived by rewriting the scheme (http→ws,
-        // https→wss); any other scheme would yield an unusable endpoint that
-        // `ws_attach_url` passes through unchanged. Reject it here.
-        if !matches!(base.scheme(), "http" | "https") {
-            return Err(BackendError::InvalidRequest(format!(
-                "server url must use http or https (got '{}')",
-                base.scheme()
-            )));
-        }
-        let client = Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .timeout(REQUEST_TIMEOUT)
-            .build()
-            .map_err(|e| BackendError::Unavailable {
-                reason: format!("could not build http client: {e}"),
-            })?;
-        let inner = Arc::new(RemoteInner {
-            name: spec.name,
-            client,
-            base,
-            token: spec.token,
-        });
-        let poller = poller::spawn(Arc::clone(&inner), config);
-        Ok(Self { inner, poller })
+        let client = Arc::new(RemoteClient::new(spec).map_err(into_backend_error)?);
+        let poller = spawn_poller(Arc::clone(&client), config);
+        Ok(Self { client, poller })
     }
 
     /// The current connection health (cheap; no `.await`). The TUI reaches this
     /// via [`CommanderBackend::as_any`] downcast to render the server header.
     pub fn connection_state(&self) -> ConnectionState {
-        self.poller.connection.borrow().clone()
+        self.poller.connection_state()
     }
 
     /// A reactive watch on the connection health, mirroring the change-feed's
-    /// shape, for the later TUI wiring that renders health as it changes.
+    /// shape, for the TUI wiring that renders health as it changes.
     pub fn connection_feed(&self) -> ConnectionFeed {
-        ConnectionFeed::new(self.poller.connection.clone())
-    }
-
-    fn session_url(&self, id: SessionId, tail: &[&str]) -> Url {
-        let sid = id.as_uuid().to_string();
-        let mut segments = Vec::with_capacity(2 + tail.len());
-        segments.push("sessions");
-        segments.push(&sid);
-        segments.extend_from_slice(tail);
-        self.inner.endpoint(&segments)
-    }
-
-    fn project_url(&self, id: ProjectId, tail: &[&str]) -> Url {
-        let pid = id.as_uuid().to_string();
-        let mut segments = Vec::with_capacity(2 + tail.len());
-        segments.push("projects");
-        segments.push(&pid);
-        segments.extend_from_slice(tail);
-        self.inner.endpoint(&segments)
+        self.poller.connection_feed()
     }
 }
 
@@ -417,7 +83,7 @@ impl CommanderBackend for RemoteBackend {
 
     fn descriptor(&self) -> BackendDescriptor {
         BackendDescriptor {
-            name: self.inner.name.clone(),
+            name: self.client.name().to_string(),
             kind: BackendKind::Remote,
         }
     }
@@ -448,13 +114,13 @@ impl CommanderBackend for RemoteBackend {
     }
 
     fn change_feed(&self) -> BackendChangeFeed {
-        BackendChangeFeed::new(self.poller.generation.clone())
+        BackendChangeFeed::new(self.poller.generation_watch())
     }
 
     fn connection_watch(&self) -> Option<tokio::sync::watch::Receiver<ConnectionState>> {
         // Expose the poller's connection watch so the TUI renders this server's
         // health live (Connecting → Connected → Degraded) in its header.
-        Some(self.poller.connection.clone())
+        Some(self.poller.connection_watch())
     }
 
     // `startup_reconcile`, `reconcile_sections`, `reconcile_one_section`,
@@ -464,24 +130,26 @@ impl CommanderBackend for RemoteBackend {
 
     /// Ask the server to re-check PR metadata (it runs the PR-status loop).
     async fn request_pr_refresh(&self) -> BResult<()> {
-        self.inner
-            .post_empty_ok(self.inner.endpoint(&["pr-refresh"]))
+        self.client
+            .request_pr_refresh()
             .await
+            .map_err(into_backend_error)
     }
 
     // -- Queries --
 
     async fn workspace_snapshot(&self) -> BResult<WorkspaceSnapshot> {
-        self.inner
-            .get_json(self.inner.endpoint(&["workspace"]))
+        self.client
+            .workspace_snapshot()
             .await
+            .map_err(into_backend_error)
     }
 
     async fn agent_states(&self, fresh: bool) -> BResult<AgentStatesSnapshot> {
-        let mut url = self.inner.endpoint(&["agent-states"]);
-        url.query_pairs_mut()
-            .append_pair("fresh", if fresh { "true" } else { "false" });
-        self.inner.get_json(url).await
+        self.client
+            .agent_states(fresh)
+            .await
+            .map_err(into_backend_error)
     }
 
     async fn session_detail(
@@ -489,160 +157,153 @@ impl CommanderBackend for RemoteBackend {
         query: &str,
         lines: Option<usize>,
     ) -> BResult<Option<SessionDetail>> {
-        let mut url = self.inner.endpoint(&["sessions", query, "detail"]);
-        if let Some(lines) = lines {
-            url.query_pairs_mut()
-                .append_pair("lines", &lines.to_string());
-        }
-        self.inner.get_json_opt(url).await
+        self.client
+            .session_detail(query, lines)
+            .await
+            .map_err(into_backend_error)
     }
 
     async fn preview(&self, target: PreviewTarget) -> BResult<PreviewData> {
-        let url = match target {
-            PreviewTarget::Session { id, lines } => {
-                let mut url = self.session_url(id, &["preview"]);
-                if let Some(lines) = lines {
-                    url.query_pairs_mut()
-                        .append_pair("lines", &lines.to_string());
-                }
-                url
-            }
-            PreviewTarget::Project(id) => self.project_url(id, &["preview"]),
+        let result = match target {
+            PreviewTarget::Session { id, lines } => self.client.session_preview(id, lines).await,
+            PreviewTarget::Project(id) => self.client.project_preview(id).await,
         };
-        self.inner.get_json(url).await
+        result.map_err(into_backend_error)
     }
 
     async fn branch_diff(&self, id: SessionId) -> BResult<String> {
-        self.inner
-            .get_text(self.session_url(id, &["branch-diff"]))
+        self.client
+            .branch_diff(id)
             .await
+            .map_err(into_backend_error)
     }
 
     async fn list_branches(&self, project: ProjectId, fetch: bool) -> BResult<Vec<BranchInfo>> {
-        let mut url = self.project_url(project, &["branches"]);
-        url.query_pairs_mut()
-            .append_pair("fetch", if fetch { "true" } else { "false" });
-        self.inner.get_json(url).await
+        self.client
+            .list_branches(project, fetch)
+            .await
+            .map_err(into_backend_error)
     }
 
     async fn create_options(&self) -> BResult<CreateOptions> {
-        self.inner
-            .get_json(self.inner.endpoint(&["create-options"]))
+        self.client
+            .create_options()
             .await
+            .map_err(into_backend_error)
     }
 
     async fn set_programs(&self, programs: Vec<ProgramInfo>) -> BResult<()> {
-        self.inner
-            .put_json_ok(
-                self.inner.endpoint(&["config", "programs"]),
-                &SetProgramsRequest { programs },
-            )
+        self.client
+            .set_programs(programs)
             .await
+            .map_err(into_backend_error)
     }
 
     async fn pending_comment_sessions(&self) -> BResult<Vec<SessionId>> {
-        self.inner
-            .get_json(self.inner.endpoint(&["comments", "pending"]))
+        self.client
+            .pending_comment_sessions()
             .await
+            .map_err(into_backend_error)
     }
 
     // -- Session mutations --
 
     async fn create_session(&self, opts: CreateSessionOpts) -> BResult<SessionId> {
-        let env: IdEnvelope<SessionId> = self
-            .inner
-            .post_json(self.inner.endpoint(&["sessions"]), &opts)
-            .await?;
-        Ok(env.id)
+        self.client
+            .create_session(opts)
+            .await
+            .map_err(into_backend_error)
     }
 
     async fn kill_session(&self, id: SessionId) -> BResult<()> {
-        self.inner
-            .post_empty_ok(self.session_url(id, &["kill"]))
+        self.client
+            .kill_session(id)
             .await
+            .map_err(into_backend_error)
     }
 
     async fn restart_session(&self, id: SessionId) -> BResult<()> {
-        self.inner
-            .post_empty_ok(self.session_url(id, &["restart"]))
+        self.client
+            .restart_session(id)
             .await
-    }
-
-    async fn paste_image(&self, id: SessionId, png: Vec<u8>) -> BResult<()> {
-        self.inner
-            .post_bytes_ok(self.session_url(id, &["paste-image"]), png, "image/png")
-            .await
+            .map_err(into_backend_error)
     }
 
     async fn delete_session(&self, id: SessionId) -> BResult<()> {
-        self.inner.delete_ok(self.session_url(id, &[])).await
+        self.client
+            .delete_session(id)
+            .await
+            .map_err(into_backend_error)
     }
 
     async fn rename_session(&self, id: SessionId, title: String) -> BResult<()> {
-        let body = serde_json::json!({ "op": "rename", "title": title });
-        self.inner
-            .patch_json_ok(self.session_url(id, &[]), &body)
+        self.client
+            .rename_session(id, title)
             .await
-    }
-
-    async fn change_program(&self, id: SessionId, program: String) -> BResult<()> {
-        let body = serde_json::json!({ "op": "change_program", "program": program });
-        self.inner
-            .patch_json_ok(self.session_url(id, &[]), &body)
-            .await
+            .map_err(into_backend_error)
     }
 
     async fn set_section(&self, id: SessionId, section: Option<String>) -> BResult<()> {
-        let body = serde_json::json!({ "op": "set_section", "section": section });
-        self.inner
-            .patch_json_ok(self.session_url(id, &[]), &body)
+        self.client
+            .set_section(id, section)
             .await
+            .map_err(into_backend_error)
+    }
+    async fn change_program(&self, id: SessionId, program: String) -> BResult<()> {
+        self.client
+            .change_program(id, program)
+            .await
+            .map_err(into_backend_error)
+    }
+    async fn paste_image(&self, id: SessionId, png: Vec<u8>) -> BResult<()> {
+        self.client
+            .paste_image(id, png)
+            .await
+            .map_err(into_backend_error)
     }
 
     async fn mark_read(&self, id: SessionId) -> BResult<()> {
-        self.inner
-            .post_empty_ok(self.session_url(id, &["read"]))
-            .await
+        self.client.mark_read(id).await.map_err(into_backend_error)
     }
 
     async fn toggle_keep_alive(&self, id: SessionId) -> BResult<bool> {
-        self.inner
-            .post_empty_json(self.session_url(id, &["keep-alive"]))
+        self.client
+            .toggle_keep_alive(id)
             .await
+            .map_err(into_backend_error)
     }
 
     async fn mark_unread(&self, ids: Vec<SessionId>) -> BResult<()> {
-        // Batch counterpart to `mark_read`: `POST /api/sessions/unread` with
-        // `{ "ids": [...] }`. Unknown ids are silently skipped server-side,
-        // matching the local backend.
-        let ids: Vec<String> = ids.iter().map(|id| id.as_uuid().to_string()).collect();
-        let body = serde_json::json!({ "ids": ids });
-        self.inner
-            .post_json_ok(self.inner.endpoint(&["sessions", "unread"]), &body)
+        self.client
+            .mark_unread(ids)
             .await
+            .map_err(into_backend_error)
     }
 
     // -- Projects --
 
     async fn add_project(&self, path: PathBuf) -> BResult<ProjectId> {
-        let body = serde_json::json!({ "path": path });
-        let env: IdEnvelope<ProjectId> = self
-            .inner
-            .post_json(self.inner.endpoint(&["projects"]), &body)
-            .await?;
-        Ok(env.id)
+        self.client
+            .add_project(path)
+            .await
+            .map_err(into_backend_error)
     }
 
     async fn remove_project(&self, id: ProjectId) -> BResult<()> {
-        self.inner.delete_ok(self.project_url(id, &[])).await
+        self.client
+            .remove_project(id)
+            .await
+            .map_err(into_backend_error)
     }
 
     async fn scan_directory(&self, dir: PathBuf) -> BResult<ScanResult> {
-        let url = self.inner.endpoint(&["projects", "scan"]);
-        let body: ScanBody = self
-            .inner
-            .post_json(url, &ScanRequest { path: dir })
-            .await?;
+        // The wire response mirrors `ScanResult`'s fields (which isn't
+        // `Deserialize`); rebuild the core type from it.
+        let body = self
+            .client
+            .scan_directory(dir)
+            .await
+            .map_err(into_backend_error)?;
         Ok(ScanResult {
             added: body.added,
             skipped: body.skipped,
@@ -652,39 +313,44 @@ impl CommanderBackend for RemoteBackend {
     // -- Cascade / push-stack --
 
     async fn cascade_merge(&self, id: SessionId) -> BResult<OperationStatus> {
-        self.inner
-            .post_empty_json(self.session_url(id, &["cascade"]))
+        self.client
+            .cascade_merge(id)
             .await
+            .map_err(into_backend_error)
     }
 
     async fn cascade_resume(&self) -> BResult<OperationStatus> {
-        self.inner
-            .post_empty_json(self.inner.endpoint(&["cascade", "resume"]))
+        self.client
+            .cascade_resume()
             .await
+            .map_err(into_backend_error)
     }
 
     async fn cascade_abandon(&self) -> BResult<()> {
-        self.inner
-            .post_empty_ok(self.inner.endpoint(&["cascade", "abandon"]))
+        self.client
+            .cascade_abandon()
             .await
+            .map_err(into_backend_error)
     }
 
     async fn push_stack(&self, id: SessionId) -> BResult<OperationStatus> {
-        self.inner
-            .post_empty_json(self.session_url(id, &["push-stack"]))
-            .await
+        self.client.push_stack(id).await.map_err(into_backend_error)
     }
 
     // -- Review / comments --
 
     async fn list_comments(&self, id: SessionId) -> BResult<Vec<Comment>> {
-        self.inner
-            .get_json_within(self.session_url(id, &["comments"]), REVIEW_WRITE_TIMEOUT)
+        self.client
+            .list_comments(id)
             .await
+            .map_err(into_backend_error)
     }
 
     async fn open_review(&self, id: SessionId) -> BResult<ReviewSnapshot> {
-        self.inner.get_json(self.session_url(id, &["review"])).await
+        self.client
+            .open_review(id)
+            .await
+            .map_err(into_backend_error)
     }
 
     async fn refresh_review_if_changed(
@@ -692,54 +358,38 @@ impl CommanderBackend for RemoteBackend {
         id: SessionId,
         prev_hash: u64,
     ) -> BResult<Option<ReviewSnapshot>> {
-        let mut url = self.session_url(id, &["review", "refresh"]);
-        url.query_pairs_mut()
-            .append_pair("prev_hash", &prev_hash.to_string());
-        self.inner.get_json_if_present(url).await
+        self.client
+            .refresh_review_if_changed(id, prev_hash)
+            .await
+            .map_err(into_backend_error)
     }
 
     async fn create_comment(&self, id: SessionId, draft: NewComment) -> BResult<Uuid> {
-        let env: IdEnvelope<Uuid> = self
-            .inner
-            .post_json_within(
-                self.session_url(id, &["comments"]),
-                &draft,
-                REVIEW_WRITE_TIMEOUT,
-            )
-            .await?;
-        Ok(env.id)
+        self.client
+            .create_comment(id, draft)
+            .await
+            .map_err(into_backend_error)
     }
 
     async fn delete_comment(&self, id: SessionId, comment_id: Uuid) -> BResult<()> {
-        let cid = comment_id.to_string();
-        self.inner
-            .delete_ok_within(
-                self.session_url(id, &["comments", &cid]),
-                REVIEW_WRITE_TIMEOUT,
-            )
+        self.client
+            .delete_comment(id, comment_id)
             .await
+            .map_err(into_backend_error)
     }
 
     async fn apply_comments(&self, id: SessionId) -> BResult<ApplyOutcome> {
-        self.inner
-            .post_empty_json_within(
-                self.session_url(id, &["comments", "apply"]),
-                APPLY_COMMENTS_TIMEOUT,
-            )
+        self.client
+            .apply_comments(id)
             .await
+            .map_err(into_backend_error)
     }
 
     async fn toggle_file_reviewed(&self, id: SessionId, display_path: String) -> BResult<bool> {
-        let body = ToggleReviewed { display_path };
-        let out: ReviewedBody = self
-            .inner
-            .post_json_within(
-                self.session_url(id, &["files", "reviewed"]),
-                &body,
-                REVIEW_WRITE_TIMEOUT,
-            )
-            .await?;
-        Ok(out.reviewed)
+        self.client
+            .toggle_file_reviewed(id, display_path)
+            .await
+            .map_err(into_backend_error)
     }
 
     async fn fetch_diff_blob(
@@ -748,11 +398,10 @@ impl CommanderBackend for RemoteBackend {
         side: DiffSide,
         path: String,
     ) -> BResult<Vec<u8>> {
-        let mut url = self.session_url(id, &["blob"]);
-        url.query_pairs_mut()
-            .append_pair("side", diff_side_param(side))
-            .append_pair("path", &path);
-        self.inner.get_bytes(url).await
+        self.client
+            .fetch_diff_blob(id, side, path)
+            .await
+            .map_err(into_backend_error)
     }
 
     // -- Attach --
@@ -771,15 +420,12 @@ impl CommanderBackend for RemoteBackend {
             AttachKind::Agent => WsAttachKind::Agent,
             AttachKind::Shell => WsAttachKind::Shell,
         };
-        crate::attach::connect(
-            &self.inner.ws_attach_url(),
-            self.inner.token(),
-            id.as_uuid().to_string(),
-            cols,
-            rows,
-            pane,
-        )
-        .await
+        let conn = self
+            .client
+            .attach(id, cols, rows, pane)
+            .await
+            .map_err(into_backend_error)?;
+        Ok(Box::new(RemoteAttachConnection(conn)))
     }
 }
 
@@ -788,9 +434,11 @@ mod tests {
     use super::*;
     use std::net::SocketAddr;
     use std::sync::Arc;
+    use std::time::Duration;
 
+    use claude_commander_client::SecretString;
     use claude_commander_core::api::CommanderService;
-    use claude_commander_core::backend::{AttachEnd, AttachStreams};
+    use claude_commander_core::backend::{AttachEnd, AttachStreams, BackendError};
     use claude_commander_core::config::storage::AppState as CoreState;
     use claude_commander_core::config::{Config, ConfigStore, StateStore};
     use claude_commander_core::session::{Project, WorktreeSession};
@@ -803,38 +451,8 @@ mod tests {
     use tempfile::TempDir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    use crate::poller::PollConfig;
-
     /// A distinctive token that must never surface in an error or log line.
     const SECRET: &str = "TOKEN_DO_NOT_LEAK_9f3a1c";
-
-    /// Interactive review reads/writes must be bounded tighter than the 30s
-    /// [`REQUEST_TIMEOUT`] so a wedged server surfaces promptly, and the
-    /// heavier `apply_comments` must sit between the two: strictly above the
-    /// quick-write bound (it recomposes a diff + drives tmux) yet strictly
-    /// below the overall ceiling. Asserted at the constant level rather than by
-    /// wall-clock so it stays deterministic. Red against HEAD: neither
-    /// [`REVIEW_WRITE_TIMEOUT`] nor [`APPLY_COMMENTS_TIMEOUT`] existed, so the
-    /// symbols don't resolve.
-    #[test]
-    fn review_timeouts_are_bounded_between_write_and_request_ceiling() {
-        assert!(
-            REVIEW_WRITE_TIMEOUT < APPLY_COMMENTS_TIMEOUT,
-            "quick review writes must be tighter than the apply bound"
-        );
-        assert!(
-            APPLY_COMMENTS_TIMEOUT < REQUEST_TIMEOUT,
-            "apply_comments must stay under the overall request ceiling"
-        );
-        // The tightest interactive bound must still cover the TCP connect
-        // budget (which reqwest counts inside the total request timeout), or a
-        // healthy-but-slow-to-connect link could time out with no budget left
-        // for the response.
-        assert!(
-            REVIEW_WRITE_TIMEOUT >= CONNECT_TIMEOUT,
-            "review-write budget must at least cover the connect budget"
-        );
-    }
 
     fn fast_config() -> PollConfig {
         PollConfig {
@@ -911,6 +529,7 @@ mod tests {
     #[test]
     fn with_config_rejects_non_http_scheme() {
         // Scheme validation happens before any tokio work, so no runtime needed.
+        // The client's InvalidRequest must map through to a BackendError.
         let spec = RemoteServerSpec {
             name: "box".to_string(),
             base_url: "ftp://box".to_string(),
@@ -1166,11 +785,6 @@ mod tests {
         assert!(matches!(err, BackendError::NotFound), "got {err:?}");
     }
 
-    /// A `change_program` for an unknown session round-trips over HTTP to the
-    /// PATCH route and comes back `NotFound` (the service's existence check fires
-    /// before the relaunch, so no tmux is touched). This proves the client's
-    /// `op` tag matches the server's serde discriminant end-to-end: a mismatch
-    /// would fail deserialization as a 400 → `InvalidRequest`, not `NotFound`.
     #[tokio::test]
     async fn unknown_session_change_program_is_not_found() {
         let (addr, _service, _d, _w) = serve_disabled().await;
@@ -1182,12 +796,6 @@ mod tests {
         assert!(matches!(err, BackendError::NotFound), "got {err:?}");
     }
 
-    /// A valid PNG for an unknown session round-trips over HTTP to the
-    /// `paste-image` route (proving the byte body + `image/png` content-type +
-    /// URL all reach the server and pass image validation) and comes back as a
-    /// `NotFound` because the session doesn't exist. A junk body would instead
-    /// fail validation with `InvalidRequest`, so this also confirms the bytes
-    /// arrive intact.
     #[tokio::test]
     async fn paste_image_valid_png_unknown_session_is_not_found() {
         const TINY_PNG: &[u8] = &[
@@ -1206,8 +814,6 @@ mod tests {
         assert!(matches!(err, BackendError::NotFound), "got {err:?}");
     }
 
-    /// A junk (non-image) body is rejected by server-side validation as a 400,
-    /// which maps to `InvalidRequest` — independent of session existence.
     #[tokio::test]
     async fn paste_image_non_image_is_invalid_request() {
         let (addr, _service, _d, _w) = serve_disabled().await;

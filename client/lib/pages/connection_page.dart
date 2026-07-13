@@ -2,19 +2,25 @@ import 'package:flutter/material.dart';
 
 import '../server_config.dart';
 import '../services/commander_api.dart';
-import 'session_list_page.dart';
 
 /// First-run / settings screen: enter the server URL + bearer token, test the
-/// connection, and save. On save we navigate to the session list.
+/// connection, and save. On save we persist the config and hand off to
+/// [onConnected], which owns establishing (or reconnecting) the live handle.
 class ConnectionPage extends StatefulWidget {
   final CommanderApi api;
   final ServerConfigStore store;
   final ServerConfig? existing;
+
+  /// Invoked with the saved config after a successful save. The app builds or
+  /// reconnects the shared store here; this page never touches the handle.
+  final Future<void> Function(ServerConfig config) onConnected;
+
   const ConnectionPage({
     super.key,
     required this.api,
     required this.store,
     this.existing,
+    required this.onConnected,
   });
 
   @override
@@ -93,16 +99,15 @@ class _ConnectionPageState extends State<ConnectionPage> {
     try {
       final cfg = _config;
       await widget.store.save(cfg);
+      // The app owns the handle: it builds the store on first run or reconnects
+      // it from settings (releasing the old handle). We never connect directly.
+      await widget.onConnected(cfg);
       if (!mounted) return;
-      Navigator.of(context).pushReplacement(
-        MaterialPageRoute(
-          builder: (_) => SessionListPage(
-            api: widget.api,
-            store: widget.store,
-            config: cfg,
-          ),
-        ),
-      );
+      // First run is the home route (nothing to pop → the app swaps in the
+      // session list); the settings route is pushed → pop back to the list.
+      if (Navigator.of(context).canPop()) Navigator.of(context).pop();
+    } catch (e) {
+      _snack('Connect failed: $e', error: true);
     } finally {
       if (mounted) setState(() => _busy = false);
     }

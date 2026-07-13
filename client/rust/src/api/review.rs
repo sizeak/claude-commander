@@ -15,40 +15,15 @@
 //! convert into the plain-struct / unit-enum DTOs defined below before handing
 //! them to frb.
 
-use std::sync::OnceLock;
-
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::{DateTime, Utc};
-use claude_commander_protocol::api::{NewComment, ReviewSnapshot, ToggleReviewed};
+use claude_commander_protocol::api::{DiffSide, NewComment, ReviewSnapshot};
 use claude_commander_protocol::comment::{ApplyOutcome, Comment, CommentSide, CommentStatus};
 use claude_commander_protocol::diff::{
     BinaryKind, DiffLine, FileDiff, FileStatus, Hunk, LineOrigin, ParsedDiff,
 };
-use reqwest::blocking::{Client, Response};
-use reqwest::StatusCode;
 
-/// Trim a trailing slash so `{base}/path` joins cleanly.
-fn base(base_url: &str) -> &str {
-    base_url.trim_end_matches('/')
-}
-
-/// A process-wide blocking client (shared pool; `Client` is `Arc`-backed so the
-/// clone is cheap).
-fn client() -> Client {
-    static CLIENT: OnceLock<Client> = OnceLock::new();
-    CLIENT.get_or_init(Client::new).clone()
-}
-
-/// Map a response to a `Result`: a 401 becomes a friendly auth error, any other
-/// non-2xx surfaces via `error_for_status`, and a 2xx passes through. `what`
-/// labels the failing call in the error message.
-fn ok_or_status(resp: Response, what: &str) -> Result<Response> {
-    if resp.status() == StatusCode::UNAUTHORIZED {
-        anyhow::bail!("authentication failed (check your token)");
-    }
-    resp.error_for_status()
-        .with_context(|| format!("{what}: server returned an error status"))
-}
+use crate::api::registry::{call, parse_session_id, with_client};
 
 // ---------------------------------------------------------------------------
 // DTOs — plain structs + unit enums only (no freezed).
@@ -334,91 +309,66 @@ impl From<ApplyOutcome> for ApplyResult {
     }
 }
 
-// ---------------------------------------------------------------------------
-// cdylib functions.
-// ---------------------------------------------------------------------------
-
-/// `GET {base_url}/api/sessions/{session_id}/review` → the review snapshot
-/// (parsed diff + re-anchored comments + reviewed marks), converted to DTOs.
-pub fn open_review(
-    base_url: String,
-    token: String,
-    session_id: String,
-) -> Result<ReviewSnapshotDto> {
-    let resp = client()
-        .get(format!(
-            "{}/api/sessions/{}/review",
-            base(&base_url),
-            session_id
-        ))
-        .bearer_auth(token)
-        .send()
-        .context("open_review request failed")?;
-    let snapshot = ok_or_status(resp, "open_review")?
-        .json::<ReviewSnapshot>()
-        .context("response did not match the ReviewSnapshot contract")?;
-    Ok(snapshot.into())
+/// Parse the Dart-facing `"old"`/`"new"` side string into a protocol enum.
+fn parse_side(side: &str) -> Result<CommentSide> {
+    match side {
+        "old" => Ok(CommentSide::Old),
+        "new" => Ok(CommentSide::New),
+        other => anyhow::bail!("invalid comment side {other:?} (expected \"old\" or \"new\")"),
+    }
 }
 
-/// `GET {base_url}/api/sessions/{session_id}/review/refresh?prev_hash=` → a
-/// fresh snapshot, or `None` (204) when the diff is unchanged. `prev_hash` is
-/// the `content_hash` string from a prior snapshot, parsed back to a `u64`.
+/// Same, for the diff-blob side (`DiffSide`).
+fn parse_diff_side(side: &str) -> Result<DiffSide> {
+    match side {
+        "old" => Ok(DiffSide::Old),
+        "new" => Ok(DiffSide::New),
+        other => anyhow::bail!("invalid diff side {other:?} (expected \"old\" or \"new\")"),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// cdylib functions. Each resolves the server `handle` to a `RemoteClient`,
+// drives the async route, and converts the protocol type to a DTO.
+// ---------------------------------------------------------------------------
+
+/// Open the review snapshot (parsed diff + re-anchored comments + reviewed
+/// marks) for a session, converted to DTOs.
+pub fn open_review(handle: String, session_id: String) -> Result<ReviewSnapshotDto> {
+    let client = with_client(&handle)?;
+    let sid = parse_session_id(&session_id)?;
+    Ok(call(client.open_review(sid))?.into())
+}
+
+/// A fresh snapshot, or `None` when the diff is unchanged. `prev_hash` is the
+/// `content_hash` string from a prior snapshot, parsed back to a `u64`.
 pub fn refresh_review(
-    base_url: String,
-    token: String,
+    handle: String,
     session_id: String,
     prev_hash: String,
 ) -> Result<Option<ReviewSnapshotDto>> {
+    let client = with_client(&handle)?;
+    let sid = parse_session_id(&session_id)?;
     let prev_hash: u64 = prev_hash
         .parse()
-        .context("prev_hash was not a valid content hash")?;
-    let resp = client()
-        .get(format!(
-            "{}/api/sessions/{}/review/refresh?prev_hash={}",
-            base(&base_url),
-            session_id,
-            prev_hash
-        ))
-        .bearer_auth(token)
-        .send()
-        .context("refresh_review request failed")?;
-    if resp.status() == StatusCode::NO_CONTENT {
-        return Ok(None);
-    }
-    let snapshot = ok_or_status(resp, "refresh_review")?
-        .json::<ReviewSnapshot>()
-        .context("response did not match the ReviewSnapshot contract")?;
-    Ok(Some(snapshot.into()))
+        .map_err(|_| anyhow::anyhow!("prev_hash was not a valid content hash"))?;
+    Ok(call(client.refresh_review_if_changed(sid, prev_hash))?.map(Into::into))
 }
 
-/// `GET {base_url}/api/sessions/{session_id}/comments` → the session's comments.
-pub fn list_comments(
-    base_url: String,
-    token: String,
-    session_id: String,
-) -> Result<Vec<CommentDto>> {
-    let resp = client()
-        .get(format!(
-            "{}/api/sessions/{}/comments",
-            base(&base_url),
-            session_id
-        ))
-        .bearer_auth(token)
-        .send()
-        .context("list_comments request failed")?;
-    let comments = ok_or_status(resp, "list_comments")?
-        .json::<Vec<Comment>>()
-        .context("response did not match the Comment contract")?;
-    Ok(comments.into_iter().map(Into::into).collect())
+/// The session's comments (re-anchored), as DTOs.
+pub fn list_comments(handle: String, session_id: String) -> Result<Vec<CommentDto>> {
+    let client = with_client(&handle)?;
+    let sid = parse_session_id(&session_id)?;
+    Ok(call(client.list_comments(sid))?
+        .into_iter()
+        .map(Into::into)
+        .collect())
 }
 
-/// `POST {base_url}/api/sessions/{session_id}/comments` (body = `NewComment`)
-/// → 201 `{ "id": ... }`, returning the new comment id. `side` is `"old"` or
-/// `"new"`.
+/// Stage a new comment, returning its id. `side` is `"old"` or `"new"`.
 #[allow(clippy::too_many_arguments)]
 pub fn create_comment(
-    base_url: String,
-    token: String,
+    handle: String,
     session_id: String,
     file: String,
     side: String,
@@ -427,131 +377,57 @@ pub fn create_comment(
     snippet: String,
     comment: String,
 ) -> Result<String> {
-    let side: CommentSide = match side.as_str() {
-        "old" => CommentSide::Old,
-        "new" => CommentSide::New,
-        other => anyhow::bail!("invalid comment side {other:?} (expected \"old\" or \"new\")"),
-    };
-    let body = NewComment {
+    let client = with_client(&handle)?;
+    let sid = parse_session_id(&session_id)?;
+    let draft = NewComment {
         file,
-        side,
+        side: parse_side(&side)?,
         line_range: (line_start as usize, line_end as usize),
         snippet,
         comment,
     };
-    let resp = client()
-        .post(format!(
-            "{}/api/sessions/{}/comments",
-            base(&base_url),
-            session_id
-        ))
-        .bearer_auth(token)
-        .json(&body)
-        .send()
-        .context("create_comment request failed")?;
-    let value: serde_json::Value = ok_or_status(resp, "create_comment")?
-        .json()
-        .context("could not read create_comment response body")?;
-    value
-        .get("id")
-        .and_then(|v| v.as_str())
-        .map(str::to_owned)
-        .context("create_comment response was missing the new comment id")
+    Ok(call(client.create_comment(sid, draft))?.to_string())
 }
 
-/// `DELETE {base_url}/api/sessions/{session_id}/comments/{comment_id}` (204).
-pub fn delete_comment(
-    base_url: String,
-    token: String,
-    session_id: String,
-    comment_id: String,
-) -> Result<()> {
-    let resp = client()
-        .delete(format!(
-            "{}/api/sessions/{}/comments/{}",
-            base(&base_url),
-            session_id,
-            comment_id
-        ))
-        .bearer_auth(token)
-        .send()
-        .context("delete_comment request failed")?;
-    ok_or_status(resp, "delete_comment")?;
-    Ok(())
+/// Delete a staged comment by id.
+pub fn delete_comment(handle: String, session_id: String, comment_id: String) -> Result<()> {
+    let client = with_client(&handle)?;
+    let sid = parse_session_id(&session_id)?;
+    let cid = uuid::Uuid::parse_str(&comment_id)
+        .map_err(|_| anyhow::anyhow!("invalid comment id {comment_id:?}"))?;
+    call(client.delete_comment(sid, cid))
 }
 
-/// `POST {base_url}/api/sessions/{session_id}/comments/apply` → `ApplyOutcome`,
-/// converted to the flattened [`ApplyResult`] DTO.
-pub fn apply_comments(base_url: String, token: String, session_id: String) -> Result<ApplyResult> {
-    let resp = client()
-        .post(format!(
-            "{}/api/sessions/{}/comments/apply",
-            base(&base_url),
-            session_id
-        ))
-        .bearer_auth(token)
-        .send()
-        .context("apply_comments request failed")?;
-    let outcome = ok_or_status(resp, "apply_comments")?
-        .json::<ApplyOutcome>()
-        .context("response did not match the ApplyOutcome contract")?;
-    Ok(outcome.into())
+/// Apply a session's staged comments, returning the flattened [`ApplyResult`].
+pub fn apply_comments(handle: String, session_id: String) -> Result<ApplyResult> {
+    let client = with_client(&handle)?;
+    let sid = parse_session_id(&session_id)?;
+    Ok(call(client.apply_comments(sid))?.into())
 }
 
-/// `GET {base_url}/api/sessions/{session_id}/blob?side=&path=` → the raw file
-/// bytes for one side of a (binary) diff. `side` is `"old"` or `"new"`; `path`
-/// is the file's display path. Used to render binary images in the review view.
+/// Raw file bytes for one side of a (binary) diff. `side` is `"old"`/`"new"`;
+/// `path` is the file's display path. Used to render binary images.
 pub fn fetch_blob(
-    base_url: String,
-    token: String,
+    handle: String,
     session_id: String,
     side: String,
     path: String,
 ) -> Result<Vec<u8>> {
-    let resp = client()
-        .get(format!(
-            "{}/api/sessions/{}/blob",
-            base(&base_url),
-            session_id
-        ))
-        .query(&[("side", side.as_str()), ("path", path.as_str())])
-        .bearer_auth(token)
-        .send()
-        .context("fetch_blob request failed")?;
-    let bytes = ok_or_status(resp, "fetch_blob")?
-        .bytes()
-        .context("could not read blob bytes")?;
-    Ok(bytes.to_vec())
+    let client = with_client(&handle)?;
+    let sid = parse_session_id(&session_id)?;
+    call(client.fetch_diff_blob(sid, parse_diff_side(&side)?, path))
 }
 
-/// `POST {base_url}/api/sessions/{session_id}/files/reviewed` (body =
-/// [`ToggleReviewed`]) → toggle a file's reviewed mark, returning the new
-/// state. Only the display path crosses the wire — the server resolves the
-/// file in the *current* review diff itself, so no client-side `FileDiff`
-/// caching is needed and a mark can't be recorded against a stale copy.
+/// Toggle a file's reviewed mark, returning the new state. Only the display path
+/// crosses the wire — the server resolves the file in the *current* review diff.
 pub fn toggle_file_reviewed(
-    base_url: String,
-    token: String,
+    handle: String,
     session_id: String,
     display_path: String,
 ) -> Result<bool> {
-    let resp = client()
-        .post(format!(
-            "{}/api/sessions/{}/files/reviewed",
-            base(&base_url),
-            session_id
-        ))
-        .bearer_auth(token)
-        .json(&ToggleReviewed { display_path })
-        .send()
-        .context("toggle_file_reviewed request failed")?;
-    let value: serde_json::Value = ok_or_status(resp, "toggle_file_reviewed")?
-        .json()
-        .context("could not read toggle_file_reviewed response body")?;
-    Ok(value
-        .get("reviewed")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false))
+    let client = with_client(&handle)?;
+    let sid = parse_session_id(&session_id)?;
+    call(client.toggle_file_reviewed(sid, display_path))
 }
 
 #[cfg(test)]
@@ -561,9 +437,13 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn base_trims_trailing_slash() {
-        assert_eq!(base("http://host:1234/"), "http://host:1234");
-        assert_eq!(base("http://host:1234"), "http://host:1234");
+    fn parse_side_and_diff_side_accept_wire_forms() {
+        assert!(matches!(parse_side("old").unwrap(), CommentSide::Old));
+        assert!(matches!(parse_side("new").unwrap(), CommentSide::New));
+        assert!(parse_side("sideways").is_err());
+        assert!(matches!(parse_diff_side("old").unwrap(), DiffSide::Old));
+        assert!(matches!(parse_diff_side("new").unwrap(), DiffSide::New));
+        assert!(parse_diff_side("").is_err());
     }
 
     #[test]

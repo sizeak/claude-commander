@@ -212,6 +212,7 @@ backend as you make them.
 - **[Usage guide](docs/usage.md)** — CLI commands, the session list, PR stacks (cascade merge / push stack), and AI summaries
 - **[Configuration](docs/configuration.md)** — all config options, theme presets, session-list sections (with optional advisory WIP limits), and data-storage paths
 - **[Contributing](CONTRIBUTING.md)** — releasing, the local dev loop, and architecture overview
+- **[Flutter client](client/README.md)** — cross-platform GUI client (Linux desktop + Android) for `claude-commander-server`
 
 ## Telemetry & Privacy
 

@@ -1,82 +1,147 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 
-import '../server_config.dart';
-import '../services/commander_api.dart';
 import '../src/rust/api/mirrors.dart';
+import '../state/commander_store.dart';
+import '../state/commander_store_scope.dart';
 import '../widgets/session_chips.dart';
 import 'review_page.dart';
 import 'terminal_page.dart';
 
-/// Detail view for a single session: live agent state, diff summary, and a
-/// pane snapshot, plus kill/restart/delete lifecycle actions. Polls the detail
-/// endpoint on a timer so the agent state and pane preview stay current. The
-/// live attached terminal is Phase 3 — this view shows a static snapshot.
-class SessionDetailPage extends StatefulWidget {
-  final CommanderApi api;
-  final ServerConfig config;
-
-  /// The session to show. The list already has this, so the page renders
-  /// immediately and refines it with polled detail.
+/// Detail view for a single session, layout-agnostic (no Scaffold, no route).
+/// Live status and agent state come straight from the [CommanderStore] (refreshed
+/// off the change feed — no local timer); the pane snapshot and diff stat, which
+/// the workspace snapshot doesn't carry, are fetched on demand and re-fetched
+/// whenever the store ticks.
+///
+/// The narrow [SessionDetailPage] wraps this in a Scaffold and pushes
+/// terminal/review routes; the wide shell places it in a detail pane whose
+/// terminal/review views are tabs, so the open/dismiss actions are supplied as
+/// callbacks rather than owned here.
+class SessionDetailBody extends StatefulWidget {
+  /// The session to show. The list already has this, so the body renders
+  /// immediately and refines it with store-fed and fetched detail.
   final SessionInfo session;
 
-  const SessionDetailPage({
+  /// Open a live attach of the given [AttachKind] (agent pane or paired shell).
+  /// Narrow: push a route; wide: switch the pane tab.
+  final ValueChanged<AttachKind> onOpenTerminal;
+
+  /// Open the review view (narrow: push a route; wide: switch the pane tab).
+  final VoidCallback onOpenReview;
+
+  /// Called after a successful delete (narrow: pop the route; wide: clear the
+  /// selection).
+  final VoidCallback onDeleted;
+
+  /// Called from the gone-state's dismiss button (narrow: pop; wide: clear).
+  final VoidCallback onDismiss;
+
+  const SessionDetailBody({
     super.key,
-    required this.api,
-    required this.config,
     required this.session,
+    required this.onOpenTerminal,
+    required this.onOpenReview,
+    required this.onDeleted,
+    required this.onDismiss,
   });
 
   @override
-  State<SessionDetailPage> createState() => _SessionDetailPageState();
+  State<SessionDetailBody> createState() => _SessionDetailBodyState();
 }
 
-class _SessionDetailPageState extends State<SessionDetailPage> {
-  static const _pollInterval = Duration(seconds: 2);
-
-  Timer? _timer;
+class _SessionDetailBodyState extends State<SessionDetailBody> {
+  CommanderStore? _store;
   SessionDetail? _detail;
   String? _error;
 
-  /// Set once a poll confirms the session is gone (detail endpoint returned
-  /// null → 404). Polling stops and the page renders a terminal gone-state
-  /// instead of pretending the stale session is still live.
+  /// Set once a detail fetch returns null (404 → session gone). Rendering
+  /// switches to the gone-state and no further detail is fetched.
   bool _gone = false;
 
-  /// Set while a lifecycle action is in flight, to disable the buttons and
-  /// pause polling so a refresh doesn't race the mutation.
+  /// Set while a lifecycle action is in flight, to disable the buttons and skip
+  /// detail fetches so a refresh doesn't race the mutation.
   bool _busy = false;
+
+  /// Guards against overlapping detail fetches when the store ticks rapidly.
+  bool _fetching = false;
+
+  bool _fetchedOnce = false;
+
+  /// Set once we've asked the server to mark this session read, so opening the
+  /// body only fires [CommanderStore.markRead] once (and never for an
+  /// already-read session). Reset when the pane is reused for another session.
+  bool _markReadRequested = false;
 
   String get _id => widget.session.id;
 
   @override
-  void initState() {
-    super.initState();
-    _poll();
-    _timer = Timer.periodic(_pollInterval, (_) => _poll());
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final store = CommanderStoreScope.of(context);
+    if (!identical(store, _store)) {
+      _store?.removeListener(_onStoreChanged);
+      _store = store;
+      _store?.addListener(_onStoreChanged);
+    }
+    if (!_fetchedOnce) {
+      _fetchedOnce = true;
+      _fetchDetail();
+      _maybeMarkRead();
+    }
+  }
+
+  @override
+  void didUpdateWidget(covariant SessionDetailBody old) {
+    super.didUpdateWidget(old);
+    // The wide pane reuses this State for a newly selected session; reset the
+    // per-session fetch state and pull fresh detail.
+    if (old.session.id != widget.session.id) {
+      _detail = null;
+      _error = null;
+      _gone = false;
+      _busy = false;
+      _markReadRequested = false;
+      _fetchDetail();
+      _maybeMarkRead();
+    }
+  }
+
+  /// Mark the session read when its detail is opened — but only once, and only
+  /// when it is currently unread, so we don't spam the server on every rebuild.
+  Future<void> _maybeMarkRead() async {
+    final store = _store;
+    if (store == null || _markReadRequested) return;
+    if (!_info.unread) return;
+    _markReadRequested = true;
+    try {
+      await store.markRead(_id);
+    } catch (_) {
+      // Best-effort: a failed mark-read just leaves the dot; not worth a toast.
+    }
   }
 
   @override
   void dispose() {
-    _timer?.cancel();
+    _store?.removeListener(_onStoreChanged);
     super.dispose();
   }
 
-  Future<void> _poll() async {
-    if (_busy) return;
+  void _onStoreChanged() {
+    if (!mounted) return;
+    // Rebuild to pick up the store's fresh session info / agent state, and pull
+    // the on-demand detail (pane/diff) back in sync.
+    setState(() {});
+    _fetchDetail();
+  }
+
+  Future<void> _fetchDetail() async {
+    final store = _store;
+    if (store == null || _busy || _fetching || _gone) return;
+    _fetching = true;
     try {
-      final detail = await widget.api.getSessionDetail(
-        baseUrl: widget.config.baseUrl,
-        token: widget.config.token,
-        query: _id,
-        lines: 200,
-      );
+      final detail = await store.sessionDetail(_id, lines: 200);
       if (!mounted) return;
       if (detail == null) {
-        // Null after a successful call means the session no longer exists.
-        // Stop polling and switch to the gone-state.
-        _timer?.cancel();
         setState(() {
           _gone = true;
           _error = null;
@@ -90,19 +155,22 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = e.toString());
+    } finally {
+      _fetching = false;
     }
   }
 
-  /// Run a lifecycle action with a confirm dialog, a busy guard, and a
-  /// success/failure snackbar. `popOnSuccess` returns to the list (for delete).
-  Future<void> _runAction({
+  Future<void> _refresh() async {
+    await _store?.refresh();
+    await _fetchDetail();
+  }
+
+  /// Show a confirm dialog and resolve to true only if the user confirms.
+  Future<bool> _confirm({
     required String title,
     required String message,
     required String confirmLabel,
-    required Color confirmColor,
-    required Future<void> Function() action,
-    required String successMessage,
-    bool popOnSuccess = false,
+    Color? confirmColor,
   }) async {
     final confirmed = await showDialog<bool>(
       context: context,
@@ -115,14 +183,38 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
             child: const Text('Cancel'),
           ),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: confirmColor),
+            style: confirmColor == null
+                ? null
+                : FilledButton.styleFrom(backgroundColor: confirmColor),
             onPressed: () => Navigator.of(ctx).pop(true),
             child: Text(confirmLabel),
           ),
         ],
       ),
     );
-    if (confirmed != true) return;
+    return confirmed == true;
+  }
+
+  /// Run a lifecycle action with a confirm dialog, a busy guard, and a
+  /// success/failure snackbar. `leaveOnSuccess` invokes [widget.onDeleted] (for
+  /// delete).
+  Future<void> _runAction({
+    required String title,
+    required String message,
+    required String confirmLabel,
+    required Color confirmColor,
+    required Future<void> Function() action,
+    required String successMessage,
+    bool leaveOnSuccess = false,
+  }) async {
+    if (!await _confirm(
+      title: title,
+      message: message,
+      confirmLabel: confirmLabel,
+      confirmColor: confirmColor,
+    )) {
+      return;
+    }
 
     setState(() => _busy = true);
     try {
@@ -131,12 +223,12 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(SnackBar(content: Text(successMessage)));
-      if (popOnSuccess) {
-        Navigator.of(context).pop(true);
+      if (leaveOnSuccess) {
+        widget.onDeleted();
         return;
       }
       setState(() => _busy = false);
-      await _poll();
+      await _fetchDetail();
     } catch (e) {
       if (!mounted) return;
       setState(() => _busy = false);
@@ -152,11 +244,7 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
     confirmLabel: 'Kill',
     confirmColor: Colors.orange,
     successMessage: 'Session killed',
-    action: () => widget.api.killSession(
-      baseUrl: widget.config.baseUrl,
-      token: widget.config.token,
-      id: _id,
-    ),
+    action: () => _store!.killSession(_id),
   );
 
   void _restart() => _runAction(
@@ -165,11 +253,7 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
     confirmLabel: 'Restart',
     confirmColor: Colors.teal,
     successMessage: 'Session restarted',
-    action: () => widget.api.restartSession(
-      baseUrl: widget.config.baseUrl,
-      token: widget.config.token,
-      id: _id,
-    ),
+    action: () => _store!.restartSession(_id),
   );
 
   void _delete() => _runAction(
@@ -180,56 +264,129 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
     confirmLabel: 'Delete',
     confirmColor: Colors.red,
     successMessage: 'Session deleted',
-    popOnSuccess: true,
-    action: () => widget.api.deleteSession(
-      baseUrl: widget.config.baseUrl,
-      token: widget.config.token,
-      id: _id,
-    ),
+    leaveOnSuccess: true,
+    action: () => _store!.deleteSession(_id),
   );
 
-  void _openTerminal(SessionInfo info) {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) =>
-            TerminalPage(api: widget.api, config: widget.config, session: info),
+  /// Run a stack operation (cascade / push-stack) with a confirm dialog, a busy
+  /// guard, and a snackbar reporting the returned [OperationStatusDto] outcome
+  /// (succeeded / paused / failed, plus its detail).
+  Future<void> _runOperation({
+    required String title,
+    required String message,
+    required String confirmLabel,
+    required Future<OperationStatusDto> Function() action,
+  }) async {
+    if (!await _confirm(
+      title: title,
+      message: message,
+      confirmLabel: confirmLabel,
+    )) {
+      return;
+    }
+    setState(() => _busy = true);
+    try {
+      final status = await action();
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(describeOperation(status))));
+      setState(() => _busy = false);
+      await _fetchDetail();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _busy = false);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed: $e')));
+    }
+  }
+
+  void _cascadeMerge() => _runOperation(
+    title: 'Cascade merge?',
+    message:
+        'Merges this session and everything stacked below it, in order. '
+        'Pauses for a decision if a merge needs attention.',
+    confirmLabel: 'Cascade',
+    action: () => _store!.cascadeMerge(_id),
+  );
+
+  void _pushStack() => _runOperation(
+    title: 'Push stack?',
+    message: 'Pushes this session and its ancestors as a stack of branches.',
+    confirmLabel: 'Push',
+    action: () => _store!.pushStack(_id),
+  );
+
+  /// Run a mutation (no confirm dialog) with a busy guard + success/failure
+  /// snackbar, then re-sync detail. Shared by rename/section/keep-alive.
+  Future<void> _mutate(Future<void> Function() action, String ok) async {
+    setState(() => _busy = true);
+    try {
+      await action();
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(ok)));
+      setState(() => _busy = false);
+      await _fetchDetail();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _busy = false);
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed: $e')));
+    }
+  }
+
+  Future<void> _rename(SessionInfo info) async {
+    final name = await showDialog<String>(
+      context: context,
+      builder: (_) => _TextPromptDialog(
+        title: 'Rename session',
+        label: 'Title',
+        confirmLabel: 'Rename',
+        initialValue: info.title,
       ),
+    );
+    if (name == null || name.isEmpty) return;
+    await _mutate(() => _store!.renameSession(_id, name), 'Renamed');
+  }
+
+  Future<void> _section(SessionInfo info) async {
+    // Returns the trimmed section on Save, or null on Cancel; an empty string
+    // clears the section override.
+    final result = await showDialog<String>(
+      context: context,
+      builder: (_) => _TextPromptDialog(
+        title: 'Set section',
+        label: 'Section',
+        hint: 'leave empty to clear',
+        confirmLabel: 'Save',
+        initialValue: info.sectionOverride ?? info.currentSection ?? '',
+      ),
+    );
+    if (result == null) return; // cancelled
+    await _mutate(
+      () => _store!.setSection(_id, result.isEmpty ? null : result),
+      'Section updated',
     );
   }
 
-  void _openReview(SessionInfo info) {
-    Navigator.of(context).push(
-      MaterialPageRoute(
-        builder: (_) =>
-            ReviewPage(api: widget.api, config: widget.config, session: info),
-      ),
-    );
-  }
+  Future<void> _toggleKeepAlive() =>
+      _mutate(() => _store!.toggleKeepAlive(_id), 'Keep-alive toggled');
+
+  /// The freshest session info: the store's live copy, then the fetched detail,
+  /// then the list's snapshot the body was opened with.
+  SessionInfo get _info =>
+      _store?.sessionById(_id) ?? _detail?.info ?? widget.session;
+
+  AgentState get _agentState =>
+      _store?.agentStateFor(_id) ?? _detail?.agentState ?? AgentState.unknown;
 
   @override
   Widget build(BuildContext context) {
-    // Prefer the freshest info from polling, falling back to what the list gave us.
-    final info = _detail?.info ?? widget.session;
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(info.title, overflow: TextOverflow.ellipsis),
-        actions: _gone
-            ? const []
-            : [
-                IconButton(
-                  onPressed: () => _openReview(info),
-                  icon: const Icon(Icons.rate_review),
-                  tooltip: 'Review changes',
-                ),
-                IconButton(
-                  onPressed: () => _openTerminal(info),
-                  icon: const Icon(Icons.terminal),
-                  tooltip: 'Open live terminal',
-                ),
-              ],
-      ),
-      body: _gone ? _goneView(context) : _liveBody(context, info),
-    );
+    return _gone ? _goneView(context) : _liveBody(context, _info);
   }
 
   Widget _goneView(BuildContext context) {
@@ -258,7 +415,7 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
             ),
             const SizedBox(height: 16),
             FilledButton.tonal(
-              onPressed: () => Navigator.of(context).maybePop(),
+              onPressed: widget.onDismiss,
               child: const Text('Back'),
             ),
           ],
@@ -269,16 +426,20 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
 
   Widget _liveBody(BuildContext context, SessionInfo info) {
     return RefreshIndicator(
-      onRefresh: _poll,
+      onRefresh: _refresh,
       child: ListView(
         padding: const EdgeInsets.all(16),
         children: [
           _header(context, info),
-          const SizedBox(height: 16),
+          const SizedBox(height: 12),
+          _viewButtons(context),
+          const SizedBox(height: 12),
+          _manage(context, info),
+          const SizedBox(height: 12),
           if (_error != null) _errorBanner(context, _error!),
           _detailSection(context),
           const SizedBox(height: 16),
-          _paneSection(context),
+          _paneSection(context, info),
           const SizedBox(height: 24),
           _actions(context, info),
         ],
@@ -302,8 +463,8 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
           runSpacing: 4,
           children: [
             statusChip(context, info.status),
-            if (_detail != null && info.status == SessionStatus.running)
-              agentStateChip(context, _detail!.agentState),
+            if (info.status == SessionStatus.running)
+              agentStateChip(context, _agentState),
             if (info.prNumber != null)
               prChip(context, info.prNumber!, info.prState),
           ],
@@ -312,9 +473,61 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
     );
   }
 
+  Widget _viewButtons(BuildContext context) {
+    return Wrap(
+      spacing: 12,
+      runSpacing: 8,
+      children: [
+        OutlinedButton.icon(
+          onPressed: () => widget.onOpenTerminal(AttachKind.agent),
+          icon: const Icon(Icons.terminal, size: 18),
+          label: const Text('Terminal'),
+        ),
+        OutlinedButton.icon(
+          onPressed: () => widget.onOpenTerminal(AttachKind.shell),
+          icon: const Icon(Icons.code, size: 18),
+          label: const Text('Shell'),
+        ),
+        OutlinedButton.icon(
+          onPressed: widget.onOpenReview,
+          icon: const Icon(Icons.rate_review, size: 18),
+          label: const Text('Review'),
+        ),
+      ],
+    );
+  }
+
+  /// Management actions available regardless of run state: rename, section, and
+  /// the keep-alive toggle (which stops the server hibernating an idle session).
+  Widget _manage(BuildContext context, SessionInfo info) {
+    return Wrap(
+      spacing: 12,
+      runSpacing: 8,
+      crossAxisAlignment: WrapCrossAlignment.center,
+      children: [
+        OutlinedButton.icon(
+          onPressed: _busy ? null : () => _rename(info),
+          icon: const Icon(Icons.edit, size: 18),
+          label: const Text('Rename'),
+        ),
+        OutlinedButton.icon(
+          onPressed: _busy ? null : () => _section(info),
+          icon: const Icon(Icons.folder_outlined, size: 18),
+          label: Text(
+            info.sectionOverride ?? info.currentSection ?? 'Section',
+          ),
+        ),
+        FilterChip(
+          label: const Text('Keep alive'),
+          selected: info.keepAlive,
+          onSelected: _busy ? null : (_) => _toggleKeepAlive(),
+        ),
+      ],
+    );
+  }
+
   Widget _detailSection(BuildContext context) {
-    final detail = _detail;
-    final diffStat = detail?.diffStat;
+    final diffStat = _detail?.diffStat;
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(12),
@@ -333,7 +546,7 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
     );
   }
 
-  Widget _paneSection(BuildContext context) {
+  Widget _paneSection(BuildContext context, SessionInfo info) {
     final pane = _detail?.paneContent;
     return Card(
       child: Padding(
@@ -349,8 +562,7 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
                 ),
                 const Spacer(),
                 TextButton.icon(
-                  onPressed: () =>
-                      _openTerminal(_detail?.info ?? widget.session),
+                  onPressed: () => widget.onOpenTerminal(AttachKind.agent),
                   icon: const Icon(Icons.terminal, size: 16),
                   label: const Text('Live'),
                 ),
@@ -399,6 +611,16 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
           label: const Text('Restart'),
         ),
         FilledButton.tonalIcon(
+          onPressed: _busy ? null : _cascadeMerge,
+          icon: const Icon(Icons.merge_type),
+          label: const Text('Cascade merge'),
+        ),
+        FilledButton.tonalIcon(
+          onPressed: _busy ? null : _pushStack,
+          icon: const Icon(Icons.publish),
+          label: const Text('Push stack'),
+        ),
+        FilledButton.tonalIcon(
           onPressed: _busy ? null : _delete,
           style: FilledButton.styleFrom(
             foregroundColor: Theme.of(context).colorScheme.error,
@@ -439,6 +661,139 @@ class _SessionDetailPageState extends State<SessionDetailPage> {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// The phone (stacked-navigation) detail screen: a Scaffold titled by the
+/// session, wrapping a [SessionDetailBody] whose terminal/review actions push
+/// routes and whose delete/dismiss pop back to the list.
+class SessionDetailPage extends StatelessWidget {
+  /// The session to show.
+  final SessionInfo session;
+
+  const SessionDetailPage({super.key, required this.session});
+
+  void _openTerminal(
+    BuildContext context,
+    CommanderStore store,
+    AttachKind kind,
+  ) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => TerminalPage(
+          api: store.api,
+          handle: store.handle!,
+          session: session,
+          kind: kind,
+        ),
+      ),
+    );
+  }
+
+  void _openReview(BuildContext context, CommanderStore store) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => ReviewPage(
+          api: store.api,
+          handle: store.handle!,
+          session: session,
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final store = CommanderStoreScope.of(context)!;
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(session.title, overflow: TextOverflow.ellipsis),
+      ),
+      body: SessionDetailBody(
+        session: session,
+        onOpenTerminal: (kind) => _openTerminal(context, store, kind),
+        onOpenReview: () => _openReview(context, store),
+        onDeleted: () => Navigator.of(context).pop(true),
+        onDismiss: () => Navigator.of(context).maybePop(),
+      ),
+    );
+  }
+}
+
+/// A one-line human summary of a completed stack operation, for a snackbar:
+/// e.g. "Cascade merge succeeded", or "Push stack failed" with its detail
+/// appended. Shared by the detail actions and the paused-cascade banner.
+String describeOperation(OperationStatusDto status) {
+  final what = switch (status.kind) {
+    OperationKind.cascade => 'Cascade merge',
+    OperationKind.pushStack => 'Push stack',
+  };
+  final verb = switch (status.outcome.kind) {
+    OperationOutcomeKind.succeeded => 'succeeded',
+    OperationOutcomeKind.paused => 'paused',
+    OperationOutcomeKind.failed => 'failed',
+  };
+  final detail = status.outcome.detail.trim();
+  return detail.isEmpty ? '$what $verb' : '$what $verb: $detail';
+}
+
+/// A small text-prompt dialog that owns its [TextEditingController] and disposes
+/// it when its own route is removed — so the controller is never used after
+/// disposal during the dialog's exit transition. Pops with the trimmed text on
+/// confirm, or null on cancel.
+class _TextPromptDialog extends StatefulWidget {
+  final String title;
+  final String label;
+  final String confirmLabel;
+  final String? hint;
+  final String initialValue;
+
+  const _TextPromptDialog({
+    required this.title,
+    required this.label,
+    required this.confirmLabel,
+    this.hint,
+    this.initialValue = '',
+  });
+
+  @override
+  State<_TextPromptDialog> createState() => _TextPromptDialogState();
+}
+
+class _TextPromptDialogState extends State<_TextPromptDialog> {
+  late final TextEditingController _controller = TextEditingController(
+    text: widget.initialValue,
+  );
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() => Navigator.of(context).pop(_controller.text.trim());
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.title),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        decoration: InputDecoration(
+          labelText: widget.label,
+          hintText: widget.hint,
+        ),
+        onSubmitted: (_) => _submit(),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        FilledButton(onPressed: _submit, child: Text(widget.confirmLabel)),
+      ],
     );
   }
 }
