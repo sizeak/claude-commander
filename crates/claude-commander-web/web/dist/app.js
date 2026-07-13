@@ -447,6 +447,12 @@ function ensureTerm() {
     fontSize: 13,
     scrollback: 5000,
     theme: { background: "#000000" },
+    // When the remote app has mouse reporting on (Claude's TUI does), a plain
+    // drag is forwarded to the app and never becomes a selection. These let the
+    // user force a real selection to copy: Option(⌥)+drag on macOS, Shift+drag
+    // elsewhere; right-click selects the word under the cursor.
+    macOptionClickForcesSelection: true,
+    rightClickSelectsWord: true,
   });
   state.fit = new FitAddon.FitAddon();
   state.term.loadAddon(state.fit);
