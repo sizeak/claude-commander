@@ -298,6 +298,12 @@ pub struct Config {
     #[serde(default)]
     pub in_progress_limit: Option<u32>,
 
+    /// Number of most-recently-attached sessions to surface in the "Recent"
+    /// block at the top of the session list (across all servers). `0` hides
+    /// the block entirely. Default 5.
+    #[serde(default = "default_recent_sessions_limit")]
+    pub recent_sessions_limit: u32,
+
     /// Enable the persistent top-level "commander" Claude session — a session
     /// (not tied to any project) that coordinates other sessions via the CLI.
     /// Disabled by default; opt-in via config or the settings UI.
@@ -544,6 +550,7 @@ impl Default for Config {
             precompute_review_caches: true,
             sections: Vec::new(),
             in_progress_limit: None,
+            recent_sessions_limit: default_recent_sessions_limit(),
             commander_enabled: false,
             commander_program: None,
             commander_dir: None,
@@ -557,6 +564,10 @@ impl Default for Config {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_recent_sessions_limit() -> u32 {
+    5
 }
 
 fn default_hibernate_idle_timeout_secs() -> u64 {

@@ -146,6 +146,11 @@ impl App {
                         c.hide_empty_sections,
                         "hide_empty_sections",
                     ),
+                    SettingsRow::text(
+                        "Recent Sessions Limit",
+                        c.recent_sessions_limit.to_string(),
+                        "recent_sessions_limit",
+                    ),
                     SettingsRow::toggle("Rounded Borders", c.rounded_borders, "rounded_borders"),
                     SettingsRow::header("Performance"),
                     SettingsRow::text(
@@ -1037,6 +1042,11 @@ impl App {
                 "session_number_debounce_ms" => {
                     if let Ok(v) = value.parse::<u64>() {
                         self.config.session_number_debounce_ms = v;
+                    }
+                }
+                "recent_sessions_limit" => {
+                    if let Ok(v) = value.parse::<u32>() {
+                        self.config.recent_sessions_limit = v;
                     }
                 }
                 "ai_summary_model" => {

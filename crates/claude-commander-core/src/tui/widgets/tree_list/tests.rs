@@ -90,6 +90,93 @@ where
     terminal.backend().buffer().clone()
 }
 
+/// A `Worktree` row with a caller-chosen id, so a recents shortcut can point
+/// at the exact same session.
+fn make_worktree_with_id(title: &str, id: SessionId) -> SessionListItem {
+    let mut w = make_worktree(title);
+    if let SessionListItem::Worktree { id: wid, .. } = &mut w {
+        *wid = id;
+    }
+    w
+}
+
+fn make_recent(title: &str, id: SessionId) -> SessionListItem {
+    SessionListItem::RecentSession {
+        session: crate::backend::SessionRef::local(id),
+        project_id: ProjectId::new(),
+        title: title.to_string(),
+        status: SessionStatus::Running,
+        agent_state: None,
+        unread: false,
+    }
+}
+
+#[test]
+fn recent_row_mirrors_the_real_rows_number() {
+    // The second project's session is #2 in its real position. A recents
+    // shortcut to that same session at the top must show "2" too, even though
+    // it renders before any project row.
+    let target = SessionId::new();
+    let items = vec![
+        SessionListItem::RecentsHeader,
+        make_recent("session-b", target),
+        SessionListItem::Spacer,
+        make_project("proj-a", 1),
+        make_worktree("session-a"), // #1
+        make_project("proj-b", 1),
+        make_worktree_with_id("session-b", target), // #2
+    ];
+    let lines = render_tree(&items, 40, 8);
+    assert!(lines[0].contains("Recent"), "header line: '{}'", lines[0]);
+    // The recent shortcut row (line 1) carries the mirrored number 2.
+    assert!(
+        lines[1].trim_start().starts_with("2 "),
+        "recent row should mirror number 2: '{}'",
+        lines[1]
+    );
+    assert!(
+        lines[1].contains("session-b"),
+        "recent title: '{}'",
+        lines[1]
+    );
+    // The real row below still numbers normally.
+    assert!(
+        lines[6].trim_start().starts_with("2 "),
+        "real row #2: '{}'",
+        lines[6]
+    );
+}
+
+#[test]
+fn pinned_recents_slice_mirrors_numbers_from_full_list_map() {
+    // The pinned recents panel renders ONLY its own slice, so it can't derive
+    // worktree numbers itself. The caller computes the map over the full list
+    // and passes it in; the recent row must then show the real row's number.
+    let target = SessionId::new();
+    let full = vec![
+        SessionListItem::RecentsHeader,
+        make_recent("session-b", target),
+        SessionListItem::Spacer,
+        make_project("proj-a", 1),
+        make_worktree("session-a"), // #1
+        make_project("proj-b", 1),
+        make_worktree_with_id("session-b", target), // #2
+    ];
+    let theme = Theme::basic();
+    let info = super::worktree_display_info(&full, &theme);
+    assert_eq!(info.get(&target).map(|(n, _)| *n), Some(2));
+
+    // Render only the pinned slice (header + recent + divider) with the map.
+    let slice = &full[..3];
+    let lines = render_tree_with(slice, 40, 3, |t| t.recent_display_info(info));
+    assert!(lines[0].contains("Recent"), "header: '{}'", lines[0]);
+    assert!(
+        lines[1].trim_start().starts_with("2 "),
+        "recent row mirrors #2 from the full-list map: '{}'",
+        lines[1]
+    );
+}
+
 fn make_worktree_with_program(title: &str, program: &str) -> SessionListItem {
     let mut w = make_worktree(title);
     if let SessionListItem::Worktree { program: p, .. } = &mut w {

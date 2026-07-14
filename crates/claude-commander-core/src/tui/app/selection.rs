@@ -76,9 +76,16 @@ impl App {
                     SessionListItem::Worktree { id, project_id, .. } => {
                         SelKind::Worktree(*id, *project_id)
                     }
+                    // A recent-session row resolves to the same session as its
+                    // real row below; the backend is re-derived from the id.
+                    SessionListItem::RecentSession {
+                        session,
+                        project_id,
+                        ..
+                    } => SelKind::Worktree(session.id, *project_id),
                     SessionListItem::SectionHeader { .. }
                     | SessionListItem::ServerHeader { .. } => SelKind::Clear,
-                    SessionListItem::Spacer => SelKind::Keep,
+                    SessionListItem::Spacer | SessionListItem::RecentsHeader => SelKind::Keep,
                 });
 
         match selected {
@@ -146,7 +153,8 @@ impl App {
             row,
             self.ui_state.terminal_size,
             self.ui_state.left_pane_pct,
-            self.ui_state.list_state.list_state.offset(),
+            self.ui_state.recents_len,
+            self.ui_state.main_list_offset,
             self.ui_state.list_items.len(),
         )
     }
@@ -281,14 +289,20 @@ pub(super) fn worktree_list_index(
 /// Mirrors the layout in `App::render` (see `render.rs`): the content area
 /// inset by 1 on each side and 3 on the bottom (for status bar), split
 /// horizontally by `left_pane_pct`, then the left column is split vertically
-/// into a 1-row heading and the list below it. The list itself has no
-/// border, so the list's top-left maps directly to item index `offset`.
+/// into a 1-row heading and the list below it.
+///
+/// When `recents_len > 0` (and there is a scrolling list beneath it), the body
+/// is further split into a fixed recents panel of `recents_len` rows (offset 0)
+/// and the scrolling main list below it, whose top row is item
+/// `recents_len + main_offset`. With no recents panel the body is a single list
+/// whose top row is item `main_offset`.
 pub(super) fn list_index_at(
     col: u16,
     row: u16,
     terminal_size: Rect,
     left_pane_pct: u16,
-    offset: usize,
+    recents_len: usize,
+    main_offset: usize,
     item_count: usize,
 ) -> Option<usize> {
     if terminal_size.width == 0 || terminal_size.height == 0 {
@@ -311,8 +325,8 @@ pub(super) fn list_index_at(
         .split(content_area);
     let left = main_chunks[0];
 
-    // Left pane: 1-line heading then the list. The list area starts at
-    // `left.y + 1` and runs to `left.bottom()`.
+    // Left pane: 1-line heading then the body. The body starts at `left.y + 1`
+    // and runs to `left.bottom()`.
     let list_y = left.y.checked_add(1)?;
     if col < left.x || col >= left.right() {
         return None;
@@ -321,12 +335,29 @@ pub(super) fn list_index_at(
         return None;
     }
 
-    let visible = (row - list_y) as usize;
-    let idx = offset.checked_add(visible)?;
-    if idx >= item_count {
-        return None;
+    // The recents panel is shown only when it doesn't consume the whole list
+    // (matching `render_session_list`); its height is capped to leave the main
+    // list at least one row.
+    let show_panel = recents_len > 0 && recents_len < item_count;
+    let body_h = left.bottom().saturating_sub(list_y);
+    let rec_h = if show_panel {
+        (recents_len as u16).min(body_h.saturating_sub(1))
+    } else {
+        0
+    };
+    let main_y = list_y.checked_add(rec_h)?;
+
+    if show_panel && row < main_y {
+        // Click landed in the pinned recents panel (rendered at offset 0).
+        let idx = (row - list_y) as usize;
+        return (idx < recents_len).then_some(idx);
     }
-    Some(idx)
+
+    // Click landed in the scrolling main list.
+    let visible = (row - main_y) as usize;
+    let base = if show_panel { recents_len } else { 0 };
+    let idx = base.checked_add(main_offset)?.checked_add(visible)?;
+    (idx < item_count).then_some(idx)
 }
 
 /// Name of the section containing the list row at `idx` — the nearest
@@ -455,14 +486,14 @@ mod tests {
     #[test]
     fn list_index_at_first_row_with_no_offset_is_zero() {
         let lr = list_rect();
-        assert_eq!(list_index_at(lr.x, lr.y, term(), 30, 0, 10), Some(0));
+        assert_eq!(list_index_at(lr.x, lr.y, term(), 30, 0, 0, 10), Some(0));
     }
 
     #[test]
     fn list_index_at_adds_scroll_offset() {
         let lr = list_rect();
         // Second visible row, list scrolled by 5 → item index 6
-        assert_eq!(list_index_at(lr.x, lr.y + 1, term(), 30, 5, 20), Some(6));
+        assert_eq!(list_index_at(lr.x, lr.y + 1, term(), 30, 0, 5, 20), Some(6));
     }
 
     #[test]
@@ -470,15 +501,15 @@ mod tests {
         // The heading row sits at `list_rect().y - 1` (the first row of the
         // left pane, before the list). A click there must not select a row.
         let lr = list_rect();
-        assert_eq!(list_index_at(lr.x, lr.y - 1, term(), 30, 0, 10), None);
+        assert_eq!(list_index_at(lr.x, lr.y - 1, term(), 30, 0, 0, 10), None);
     }
 
     #[test]
     fn list_index_at_returns_none_beyond_item_count() {
         let lr = list_rect();
         // Click far enough down that the item index exceeds item_count.
-        assert_eq!(list_index_at(lr.x, lr.y, term(), 30, 0, 0), None);
-        assert_eq!(list_index_at(lr.x, lr.y + 5, term(), 30, 0, 3), None);
+        assert_eq!(list_index_at(lr.x, lr.y, term(), 30, 0, 0, 0), None);
+        assert_eq!(list_index_at(lr.x, lr.y + 5, term(), 30, 0, 0, 3), None);
     }
 
     #[test]
@@ -486,7 +517,7 @@ mod tests {
         let lr = list_rect();
         // Click in the right pane — should map to nothing in the list.
         let right_col = lr.right() + 1;
-        assert_eq!(list_index_at(right_col, lr.y, term(), 30, 0, 10), None);
+        assert_eq!(list_index_at(right_col, lr.y, term(), 30, 0, 0, 10), None);
     }
 
     #[test]
@@ -495,12 +526,49 @@ mod tests {
         // Click on the status-bar row at the bottom of the terminal.
         let below = term().bottom() - 1;
         assert!(below >= lr.bottom());
-        assert_eq!(list_index_at(lr.x, below, term(), 30, 0, 100), None);
+        assert_eq!(list_index_at(lr.x, below, term(), 30, 0, 0, 100), None);
     }
 
     #[test]
     fn list_index_at_zero_size_terminal_returns_none() {
         let size = Rect::new(0, 0, 0, 0);
-        assert_eq!(list_index_at(0, 0, size, 30, 0, 10), None);
+        assert_eq!(list_index_at(0, 0, size, 30, 0, 0, 10), None);
+    }
+
+    #[test]
+    fn list_index_at_maps_pinned_recents_panel_rows_directly() {
+        // A 3-row recents block (header + 1 recent + divider) pins the top of
+        // the body; those rows map straight to indices 0,1,2 regardless of the
+        // main list's scroll offset.
+        let lr = list_rect();
+        let recents_len = 3;
+        let item_count = 20;
+        let main_offset = 5;
+        assert_eq!(
+            list_index_at(lr.x, lr.y, term(), 30, recents_len, main_offset, item_count),
+            Some(0)
+        );
+        assert_eq!(
+            list_index_at(
+                lr.x,
+                lr.y + 2,
+                term(),
+                30,
+                recents_len,
+                main_offset,
+                item_count
+            ),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn list_index_at_maps_main_list_below_pinned_panel_with_offset() {
+        // The first row below a 3-row recents panel is the main list's scrolled
+        // top: recents_len(3) + main_offset(5) = index 8.
+        let lr = list_rect();
+        assert_eq!(list_index_at(lr.x, lr.y + 3, term(), 30, 3, 5, 20), Some(8));
+        // Next row down is index 9.
+        assert_eq!(list_index_at(lr.x, lr.y + 4, term(), 30, 3, 5, 20), Some(9));
     }
 }

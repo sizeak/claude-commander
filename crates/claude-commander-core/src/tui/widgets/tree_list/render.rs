@@ -53,6 +53,18 @@ impl<'a> TreeList<'a> {
         let mut project_index: usize = 0;
         let mut worktree_number: usize = 0;
         let mut current_session_color = self.theme.project_color(0).1;
+        // Number + colour each recent-session row mirrors from its real row.
+        // Normally supplied by the caller (computed over the full list, since
+        // the recents panel renders only its own slice); fall back to deriving
+        // it from our own items when rendered as a single combined list.
+        let owned_info;
+        let recent_info: &HashMap<SessionId, (usize, Color)> =
+            if self.recent_display_info.is_empty() {
+                owned_info = super::worktree_display_info(self.items, self.theme);
+                &owned_info
+            } else {
+                &self.recent_display_info
+            };
 
         self.items
             .iter()
@@ -113,6 +125,54 @@ impl<'a> TreeList<'a> {
                         ),
                     ]);
                     ListItem::new(line)
+                }
+                SessionListItem::RecentsHeader => {
+                    let line = Line::from(vec![
+                        Span::raw(" "),
+                        Span::styled(
+                            "Recent",
+                            Style::default()
+                                .fg(self.theme.text_secondary)
+                                .add_modifier(Modifier::BOLD | Modifier::DIM),
+                        ),
+                    ]);
+                    ListItem::new(line)
+                }
+                SessionListItem::RecentSession {
+                    session,
+                    title,
+                    status,
+                    agent_state,
+                    unread,
+                    ..
+                } => {
+                    // Mirror the number and project colour from the real row.
+                    let (num_str, color) = match recent_info.get(&session.id) {
+                        Some((n, c)) => (format!("{:>width$} ", n, width = NUMBER_WIDTH), *c),
+                        None => (
+                            format!("{:>width$} ", "", width = NUMBER_WIDTH),
+                            self.theme.text_primary,
+                        ),
+                    };
+                    let mut spans = vec![Span::styled(
+                        num_str,
+                        Style::default().fg(self.theme.text_secondary),
+                    )];
+                    if let Some((glyph, glyph_color)) =
+                        self.session_status_glyph(*status, *agent_state, *unread)
+                    {
+                        spans.push(Span::styled(
+                            format!("{glyph} "),
+                            Style::default().fg(glyph_color),
+                        ));
+                    }
+                    let title_style = if *unread {
+                        Style::default().fg(color).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(color)
+                    };
+                    spans.push(Span::styled(title.clone(), title_style));
+                    ListItem::new(Line::from(spans))
                 }
 
                 SessionListItem::Worktree {
