@@ -551,13 +551,6 @@ function ensureTerm() {
   // terminal is still caught.
   state.term.onSelectionChange(() => {
     pendingCopy = state.term.hasSelection();
-    // TEMP diagnostic — shows whether xterm registers a selection at all.
-    console.log(
-      "[cc] selectionchange hasSelection=",
-      pendingCopy,
-      "text=",
-      JSON.stringify(state.term.getSelection())
-    );
   });
   document.addEventListener("mouseup", flushCopyOnSelect);
   document.addEventListener("touchend", flushCopyOnSelect);
@@ -1424,36 +1417,5 @@ async function boot() {
   if (isMobile() && !state.selectedId) openDrawer();
   setInterval(refreshAll, POLL_MS);
 }
-
-// Fire a test notification on demand: run `ccTestNotify()` in the console.
-window.ccTestNotify = () => {
-  if (!("Notification" in window)) return "this browser has no Notification API";
-  if (Notification.permission !== "granted") {
-    Notification.requestPermission();
-    return `permission is "${Notification.permission}" — allow it, then run ccTestNotify() again`;
-  }
-  const n = new Notification("Claude Commander — test", {
-    body: "Notifications are working ✅",
-    tag: "cc-test",
-    renotify: true,
-  });
-  n.onclick = () => {
-    window.focus();
-    n.close();
-  };
-  return "fired";
-};
-
-// TEMP diagnostic — run `ccCopyDebug()` in the console (ideally right after an
-// Option+drag while a selection is visible).
-window.ccCopyDebug = () => ({
-  mode: state.mode,
-  secureContext: window.isSecureContext,
-  url: location.href,
-  hasClipboard: !!(navigator.clipboard && navigator.clipboard.writeText),
-  hasTerm: !!state.term,
-  hasSelection: state.term ? state.term.hasSelection() : null,
-  selectionText: state.term ? state.term.getSelection() : null,
-});
 
 boot();
