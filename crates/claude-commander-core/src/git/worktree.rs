@@ -302,10 +302,20 @@ fn build_worktree_add_command(
         // Checkout existing branch (start_point is not applicable here)
         cmd.arg(worktree_path).arg(branch_name);
     } else {
-        // Create new branch, optionally from a specific start point
-        cmd.arg("-b").arg(branch_name).arg(worktree_path);
+        // Create new branch, optionally from a specific start point.
+        cmd.arg("-b").arg(branch_name);
         if let Some(sp) = start_point {
-            cmd.arg(sp);
+            // Suppress upstream tracking unless we're adopting this branch's
+            // own remote ref (origin/<branch_name>, i.e. the Checkout-modal
+            // case). Forking a fresh branch off origin/<main> would otherwise
+            // set main as the upstream (git's autoSetupMerge default), so a
+            // bare `git pull` in the worktree would merge main in — a footgun.
+            if sp != format!("origin/{branch_name}") {
+                cmd.arg("--no-track");
+            }
+            cmd.arg(worktree_path).arg(sp);
+        } else {
+            cmd.arg(worktree_path);
         }
     }
 
@@ -468,9 +478,46 @@ branch refs/heads/feature-branch
                 "add",
                 "-b",
                 "feature",
+                "--no-track",
                 "/repo/wt",
                 "origin/main"
             ]
+        );
+    }
+
+    fn worktree_add_args(branch: &str, start_point: Option<&str>) -> Vec<String> {
+        build_worktree_add_command(
+            Path::new("/repo"),
+            Path::new("/repo/wt"),
+            branch,
+            false,
+            start_point,
+            false,
+        )
+        .get_args()
+        .map(|a| a.to_string_lossy().into_owned())
+        .collect()
+    }
+
+    #[test]
+    fn test_worktree_add_tracks_when_adopting_own_remote_branch() {
+        // Checkout-modal case: forking `feature` off `origin/feature` should
+        // keep git's default tracking (no --no-track).
+        let args = worktree_add_args("feature", Some("origin/feature"));
+        assert!(
+            !args.iter().any(|a| a == "--no-track"),
+            "expected tracking to be preserved for origin/<branch>, got {args:?}"
+        );
+    }
+
+    #[test]
+    fn test_worktree_add_no_track_when_forking_off_base() {
+        // base-branch / stacked fork case: forking `feature` off a different
+        // remote ref must not set that ref as the upstream.
+        let args = worktree_add_args("feature", Some("origin/develop"));
+        assert!(
+            args.iter().any(|a| a == "--no-track"),
+            "expected --no-track when forking off a non-matching base, got {args:?}"
         );
     }
 }

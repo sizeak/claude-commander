@@ -139,6 +139,13 @@ impl SessionManager {
         );
         let finalize_start = std::time::Instant::now();
 
+        // Kick off a background `nix develop` pre-warm for the project's dev
+        // shell now, so it overlaps the slow steps below (git fetch + worktree
+        // add). The new worktree checks out the same commit, so by the time its
+        // pane runs `nix develop` the shared store is warm and the pane reuses
+        // it instead of building from cold. No-op for non-flake projects.
+        self.prewarm_nix_shell(&repo_path);
+
         // Fetch latest changes from origin
         if self.config_store.read().fetch_before_create {
             info!(
@@ -537,6 +544,23 @@ impl SessionManager {
                 self.status_bar_info(session, &state),
             )
         };
+
+        // Bump last_active_at *before* the destructive kill, mirroring
+        // [`Self::restart_session`]. A hibernation pass that snapshotted this
+        // session earlier compares the stamp at its pre-kill recheck
+        // ([`still_hibernatable`]); bumping it now means an in-flight
+        // fresh-restart — pane killed, not yet recreated — presents a changed
+        // stamp, so the racing hibernate bails instead of killing the pane we
+        // are about to rebuild. Matters for user-initiated relaunches of
+        // long-idle sessions (e.g. `change_program`), not just the attach-loop
+        // caller whose session was active moments ago.
+        self.store
+            .mutate(move |state| {
+                if let Some(session) = state.get_session_mut(&session_id) {
+                    session.touch();
+                }
+            })
+            .await?;
 
         let _ = self.tmux.kill_session(tmux_name).await;
 
@@ -1091,6 +1115,24 @@ mod lifecycle_tests {
         );
     }
 
+    #[test]
+    fn model_flag_injected_for_opencode() {
+        assert_eq!(
+            program_with_agent_flags("opencode", None, None, Some("anthropic/claude-sonnet-4-5")),
+            "opencode --model anthropic/claude-sonnet-4-5"
+        );
+        // Claude-only flags are ignored for OpenCode.
+        assert_eq!(
+            program_with_agent_flags(
+                "opencode",
+                Some("auto"),
+                Some("high"),
+                Some("anthropic/claude-sonnet-4-5")
+            ),
+            "opencode --model anthropic/claude-sonnet-4-5"
+        );
+    }
+
     // --- program_with_session_name ---
 
     #[test]
@@ -1112,6 +1154,9 @@ mod lifecycle_tests {
         // Codex has no `-n` session-name flag — leave its command untouched.
         let codex = program_with_session_name("codex", "my session");
         assert_eq!(codex, "codex");
+        // OpenCode has no `-n` session-name flag either.
+        let opencode = program_with_session_name("opencode", "my session");
+        assert_eq!(opencode, "opencode");
     }
 
     #[test]
@@ -1132,7 +1177,12 @@ mod lifecycle_tests {
     fn resume_program_for_forces_resume_per_harness() {
         assert_eq!(resume_program_for("claude", true), "claude --resume");
         assert_eq!(resume_program_for("codex", true), "codex resume --last");
-        // Flags on the base command survive the resume rewrite.
+        assert_eq!(resume_program_for("opencode", true), "opencode --continue");
+        assert_eq!(
+            resume_program_for("opencode --auto", true),
+            "opencode --auto --continue"
+        );
+
         assert_eq!(resume_program_for("claude -c", true), "claude -c --resume");
     }
 

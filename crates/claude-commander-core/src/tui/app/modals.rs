@@ -562,6 +562,7 @@ impl App {
                     PaletteMode::CommandOnly => " Commands ",
                     PaletteMode::SectionPicker { .. } => " Move to Section ",
                     PaletteMode::RemoteServerPicker => " Remove Remote Server ",
+                    PaletteMode::ProgramPicker { .. } => " Change Program ",
                 };
                 let block = Block::default()
                     .title(title)
@@ -700,7 +701,8 @@ impl App {
                             frame.render_widget(Paragraph::new(line).style(row_style), line_area);
                         }
                         QuickSwitchItem::SectionMove { label, .. }
-                        | QuickSwitchItem::RemoteServerRemove { label, .. } => {
+                        | QuickSwitchItem::RemoteServerRemove { label, .. }
+                        | QuickSwitchItem::ProgramChange { label, .. } => {
                             let style = if is_selected {
                                 self.theme.selection()
                             } else {

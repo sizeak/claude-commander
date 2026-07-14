@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:claude_commander_client/pages/terminal_page.dart';
 import 'package:claude_commander_client/services/commander_api.dart';
+import 'package:claude_commander_client/src/rust/api/mirrors.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:xterm/xterm.dart';
@@ -15,7 +16,7 @@ void main() {
   setUp(() => api = FakeCommanderApi());
 
   Widget wrap() => MaterialApp(
-    home: TerminalPage(api: api, config: testConfig, session: sessionInfo()),
+    home: TerminalPage(api: api, handle: testHandle, session: sessionInfo()),
   );
 
   TerminalEvent output(List<int> bytes) => TerminalEvent(
@@ -135,5 +136,28 @@ void main() {
     await tester.pump();
 
     expect(api.attachTerminalCount, 2);
+  });
+
+  testWidgets('defaults to an agent-pane attach', (tester) async {
+    await tester.pumpWidget(wrap());
+    await tester.pump();
+
+    expect(api.lastCall('attachTerminal')!.args['kind'], AttachKind.agent);
+  });
+
+  testWidgets('a shell page attaches to the paired shell pane', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: TerminalPage(
+          api: api,
+          handle: testHandle,
+          session: sessionInfo(),
+          kind: AttachKind.shell,
+        ),
+      ),
+    );
+    await tester.pump();
+
+    expect(api.lastCall('attachTerminal')!.args['kind'], AttachKind.shell);
   });
 }

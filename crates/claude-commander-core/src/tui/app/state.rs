@@ -332,6 +332,22 @@ impl App {
                     *program_picker = Some(picker);
                 }
             }
+            StateUpdate::ProgramChoicesLoaded {
+                session_id,
+                choices,
+            } => {
+                // Apply only if the change-program palette is still open for the
+                // same session; the user may have dismissed it or moved on.
+                if let Modal::QuickSwitch {
+                    mode: PaletteMode::ProgramPicker { session_id: sid },
+                    ..
+                } = &self.ui_state.modal
+                    && *sid == session_id
+                {
+                    self.ui_state.program_picker_choices = choices;
+                    self.refilter_quick_switch();
+                }
+            }
             StateUpdate::ServerProgramsLoaded {
                 backend,
                 generation,
@@ -494,11 +510,11 @@ impl App {
             StateUpdate::CascadeAbandonFinished { backend_id, result } => {
                 self.handle_cascade_abandon_finished(BackendId(backend_id), result);
             }
-            StateUpdate::LfsPullFinished { session_id } => {
-                if self.ui_state.lfs_pull_in_flight.remove(&session_id) {
-                    debug!("lfs pull finished for {}", session_id);
-                    self.refresh_list_items().await;
-                }
+            StateUpdate::LfsPullFinished { session_id }
+                if self.ui_state.lfs_pull_in_flight.remove(&session_id) =>
+            {
+                debug!("lfs pull finished for {}", session_id);
+                self.refresh_list_items().await;
             }
             _ => {}
         }
@@ -594,6 +610,45 @@ impl App {
         // the tree renders exactly as a single-machine setup always has.
         let single_backend = self.backends.len() == 1;
         let mut items: Vec<SessionListItem> = Vec::new();
+
+        // Recent-sessions block, prepended above the per-backend tree and
+        // independent of any server. Each row is a shortcut to a session that
+        // still appears in its normal place below; its number and project
+        // colour are mirrored from the real row at render time. Sessions never
+        // attached (no `last_attached_at`) are excluded. `recent_sessions_limit
+        // == 0` hides the block entirely.
+        let recent_limit = self.config.recent_sessions_limit as usize;
+        if recent_limit > 0 {
+            let mut candidates: Vec<(chrono::DateTime<chrono::Utc>, SessionListItem)> = Vec::new();
+            for handle in &self.backends {
+                let agent_states = &handle.view.agent_states.states;
+                for s in &handle.view.snapshot.sessions {
+                    if let Some(at) = s.last_attached_at {
+                        candidates.push((
+                            at,
+                            SessionListItem::RecentSession {
+                                session: crate::backend::SessionRef::new(handle.id, s.session_id),
+                                project_id: s.project_id,
+                                title: s.title.clone(),
+                                status: s.status,
+                                agent_state: agent_states.get(&s.session_id).copied(),
+                                unread: s.unread,
+                            },
+                        ));
+                    }
+                }
+            }
+            let recents = order_recent(candidates, recent_limit);
+            if !recents.is_empty() {
+                items.push(SessionListItem::RecentsHeader);
+                items.extend(recents);
+                items.push(SessionListItem::Spacer);
+            }
+        }
+        // Everything pushed so far is the pinned recents block (header + rows +
+        // divider); the per-backend tree appended below is the scrolling list.
+        let recents_len = items.len();
+
         // A stale-server warning to surface once (deferred until after the loop
         // so `ui_state` isn't mutated while `self.backends` is borrowed). This
         // seam covers every snapshot-fold path by construction, since they all
@@ -640,6 +695,7 @@ impl App {
                     self.config.in_progress_limit,
                     agent_states,
                     &self.ui_state.collapsed_sections,
+                    self.config.hide_empty_sections,
                 ),
                 ViewMode::SectionStacks => build_stacked_section_items(
                     snapshot,
@@ -647,6 +703,7 @@ impl App {
                     self.config.in_progress_limit,
                     agent_states,
                     &self.ui_state.collapsed_sections,
+                    self.config.hide_empty_sections,
                 ),
             };
             items.append(&mut backend_items);
@@ -693,18 +750,17 @@ impl App {
         let selectable: Vec<bool> = items.iter().map(|i| i.is_selectable()).collect();
         let group_starts: Vec<bool> = items.iter().map(|i| i.is_group_header()).collect();
         self.ui_state.list_items = items;
+        self.ui_state.recents_len = recents_len;
         // The footer's "resume cascade" hint shows if *any* backend is paused.
         self.ui_state.cascade_paused = self
             .backends
             .iter()
             .any(|h| h.view.snapshot.cascade_paused.is_some());
-        if matches!(self.ui_state.view_mode, ViewMode::ProjectGrouped) {
-            self.ui_state
-                .list_state
-                .set_item_count(self.ui_state.list_items.len());
-        } else {
-            self.ui_state.list_state.set_selectable(selectable);
-        }
+        // Always install the selectable mask: even ProjectGrouped now carries
+        // non-selectable rows (the recents header and its divider), which the
+        // old "all rows selectable" `set_item_count` path would let the cursor
+        // land on.
+        self.ui_state.list_state.set_selectable(selectable);
         self.ui_state.list_state.set_group_starts(group_starts);
 
         // Pre-compute stack chain for the selected session, from the snapshot of
@@ -812,7 +868,10 @@ impl App {
             }
             SessionListItem::SectionHeader { .. }
             | SessionListItem::ServerHeader { .. }
-            | SessionListItem::Spacer => false,
+            | SessionListItem::Spacer
+            // Recent rows are shortcuts; restore always lands on the real row.
+            | SessionListItem::RecentsHeader
+            | SessionListItem::RecentSession { .. } => false,
         };
         let owning_backend = |item: &SessionListItem| match item {
             SessionListItem::Worktree { id, .. } => Some(self.backend_of_session(*id)),
@@ -835,6 +894,22 @@ impl App {
             self.ui_state.list_state.select(Some(0));
         }
     }
+}
+
+/// Order recent-session candidates newest-attached first and cap at `limit`.
+/// Each candidate pairs its `last_attached_at` with the row to display. The
+/// sort is stable, so equal timestamps keep their input (backend then tree)
+/// order. Mirrors the MRU ordering used by the in-tmux session switcher.
+pub(super) fn order_recent<T>(
+    mut candidates: Vec<(chrono::DateTime<chrono::Utc>, T)>,
+    limit: usize,
+) -> Vec<T> {
+    candidates.sort_by_key(|b| std::cmp::Reverse(b.0));
+    candidates
+        .into_iter()
+        .take(limit)
+        .map(|(_, row)| row)
+        .collect()
 }
 
 /// Compute the display order of a project's sessions, grouping each stack
@@ -994,6 +1069,7 @@ pub(super) fn build_section_grouped_items(
     in_progress_limit: Option<u32>,
     agent_states: &BTreeMap<SessionId, AgentState>,
     collapsed_sections: &std::collections::HashSet<String>,
+    hide_empty_sections: bool,
 ) -> Vec<SessionListItem> {
     let by_id = session_index(snapshot);
     let groups = crate::session::build_sections(&snapshot.sessions, sections);
@@ -1002,10 +1078,15 @@ pub(super) fn build_section_grouped_items(
     projects.sort_by(|a, b| a.name.cmp(&b.name));
 
     let mut items = Vec::new();
-    for (group_idx, group) in groups.iter().enumerate() {
-        if group_idx > 0 {
+    let mut first_section = true;
+    for group in groups.iter() {
+        if hide_empty_sections && group.sessions.is_empty() {
+            continue;
+        }
+        if !first_section {
             items.push(SessionListItem::Spacer);
         }
+        first_section = false;
         let collapsed = collapsed_sections.contains(&group.name);
         items.push(SessionListItem::SectionHeader {
             name: group.name.clone(),
@@ -1070,6 +1151,7 @@ pub(super) fn build_stacked_section_items(
     in_progress_limit: Option<u32>,
     agent_states: &BTreeMap<SessionId, AgentState>,
     collapsed_sections: &std::collections::HashSet<String>,
+    hide_empty_sections: bool,
 ) -> Vec<SessionListItem> {
     use chrono::{DateTime, Utc};
 
@@ -1201,11 +1283,8 @@ pub(super) fn build_stacked_section_items(
         .collect();
 
     let mut items = Vec::new();
-    for (idx, section_name) in section_order.iter().enumerate() {
-        if idx > 0 {
-            items.push(SessionListItem::Spacer);
-        }
-
+    let mut first_section = true;
+    for section_name in section_order.iter() {
         let project_groups = by_section.get(section_name);
         let total_count: usize = project_groups
             .map(|m| {
@@ -1215,6 +1294,14 @@ pub(super) fn build_stacked_section_items(
                     .sum()
             })
             .unwrap_or(0);
+
+        if hide_empty_sections && total_count == 0 {
+            continue;
+        }
+        if !first_section {
+            items.push(SessionListItem::Spacer);
+        }
+        first_section = false;
 
         let collapsed = collapsed_sections.contains(section_name);
         items.push(SessionListItem::SectionHeader {
@@ -1581,7 +1668,8 @@ mod stack_order_tests {
         let agent_states = BTreeMap::new();
         let collapsed = std::collections::HashSet::new();
 
-        let items = build_stacked_section_items(&state, &sections, None, &agent_states, &collapsed);
+        let items =
+            build_stacked_section_items(&state, &sections, None, &agent_states, &collapsed, false);
 
         // Walk items: find the "Open" header, then base+child should follow.
         let found_open = items.iter().any(
@@ -1661,6 +1749,7 @@ mod stack_order_tests {
             None,
             &BTreeMap::new(),
             &std::collections::HashSet::new(),
+            false,
         );
 
         let pinned_rows: Vec<_> = items
@@ -1707,6 +1796,7 @@ mod stack_order_tests {
             None,
             &BTreeMap::new(),
             &std::collections::HashSet::new(),
+            false,
         );
 
         // Walk items tracking the enclosing section header, then read off
@@ -1754,6 +1844,7 @@ mod stack_order_tests {
             None,
             &BTreeMap::new(),
             &std::collections::HashSet::new(),
+            false,
         );
 
         let open_session_ids: Vec<_> = items
@@ -1828,6 +1919,7 @@ mod stack_order_tests {
             None,
             &BTreeMap::new(),
             &std::collections::HashSet::new(),
+            false,
         );
 
         let pinned_count = items
@@ -1903,14 +1995,26 @@ mod stack_order_tests {
         let sections = vec![section_named("Open")];
         let collapsed = std::collections::HashSet::new();
 
-        let first =
-            build_stacked_section_items(&state, &sections, None, &BTreeMap::new(), &collapsed);
+        let first = build_stacked_section_items(
+            &state,
+            &sections,
+            None,
+            &BTreeMap::new(),
+            &collapsed,
+            false,
+        );
         // Call many times — every iteration constructs fresh internal
         // HashMaps with a new RandomState, so any non-determinism shows up
         // here. 32 calls is well past the birthday-paradox threshold.
         for _ in 0..32 {
-            let again =
-                build_stacked_section_items(&state, &sections, None, &BTreeMap::new(), &collapsed);
+            let again = build_stacked_section_items(
+                &state,
+                &sections,
+                None,
+                &BTreeMap::new(),
+                &collapsed,
+                false,
+            );
             assert_eq!(
                 again, first,
                 "build_stacked_section_items must produce identical output on every call"
@@ -1938,6 +2042,7 @@ mod stack_order_tests {
             None,
             &BTreeMap::new(),
             &std::collections::HashSet::new(),
+            false,
         );
 
         let open_session_order: Vec<_> = items
@@ -2018,6 +2123,7 @@ mod stack_order_tests {
             None,
             &BTreeMap::new(),
             &std::collections::HashSet::new(),
+            false,
         );
 
         let review_header = items.iter().find_map(|i| match i {
@@ -2047,6 +2153,7 @@ mod stack_order_tests {
             Some(2),
             &BTreeMap::new(),
             &std::collections::HashSet::new(),
+            false,
         );
 
         let ip_header = items.iter().find_map(|i| match i {
@@ -2077,6 +2184,7 @@ mod stack_order_tests {
             Some(1),
             &BTreeMap::new(),
             &std::collections::HashSet::new(),
+            false,
         );
 
         let review_limit = items.iter().find_map(|i| match i {
@@ -2093,6 +2201,109 @@ mod stack_order_tests {
         });
         assert_eq!(review_limit, Some(Some(4)));
         assert_eq!(ip_limit, Some(Some(1)));
+    }
+
+    #[test]
+    fn hide_empty_sections_grouped_omits_empty_sections() {
+        let project_id = ProjectId::new();
+        let mut s = make_session_in_section("s", "s", 0, "Review");
+        s.project_id = project_id;
+
+        let state = appstate_from(vec![s]);
+        let sections = vec![section_named("Open"), section_named("Review")];
+
+        // With hide_empty_sections=false, all sections appear.
+        let items = super::build_section_grouped_items(
+            &state,
+            &sections,
+            None,
+            &BTreeMap::new(),
+            &std::collections::HashSet::new(),
+            false,
+        );
+        let headers: Vec<_> = items
+            .iter()
+            .filter_map(|i| match i {
+                SessionListItem::SectionHeader { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            headers.contains(&crate::session::IN_PROGRESS),
+            "In Progress should appear when hide_empty_sections is false",
+        );
+        assert!(
+            headers.contains(&"Open"),
+            "Open should appear when hide_empty_sections is false"
+        );
+        assert!(headers.contains(&"Review"), "Review should appear");
+
+        // With hide_empty_sections=true, empty sections are omitted.
+        let items = super::build_section_grouped_items(
+            &state,
+            &sections,
+            None,
+            &BTreeMap::new(),
+            &std::collections::HashSet::new(),
+            true,
+        );
+        let headers: Vec<_> = items
+            .iter()
+            .filter_map(|i| match i {
+                SessionListItem::SectionHeader { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headers, vec!["Review"]);
+    }
+
+    #[test]
+    fn hide_empty_sections_stacked_omits_empty_sections() {
+        let project_id = ProjectId::new();
+        let mut s = make_session_in_section("s", "s", 0, "Review");
+        s.project_id = project_id;
+
+        let state = appstate_from(vec![s]);
+        let sections = vec![section_named("Open"), section_named("Review")];
+
+        // With hide_empty_sections=true, empty sections are omitted.
+        let items = build_stacked_section_items(
+            &state,
+            &sections,
+            None,
+            &BTreeMap::new(),
+            &std::collections::HashSet::new(),
+            true,
+        );
+        let headers: Vec<_> = items
+            .iter()
+            .filter_map(|i| match i {
+                SessionListItem::SectionHeader { name, .. } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(headers, vec!["Review"]);
+    }
+
+    #[test]
+    fn hide_empty_sections_no_spacers_when_all_hidden() {
+        // When all sections are empty and hide_empty_sections is true,
+        // the result should be empty (no spacers or headers).
+        let state = appstate_from(Vec::<WorktreeSession>::new());
+        let sections = vec![section_named("Open"), section_named("Review")];
+
+        let items = super::build_section_grouped_items(
+            &state,
+            &sections,
+            None,
+            &BTreeMap::new(),
+            &std::collections::HashSet::new(),
+            true,
+        );
+        assert!(
+            items.is_empty(),
+            "empty state with hide_empty_sections should yield no items"
+        );
     }
 
     #[test]
@@ -2265,6 +2476,7 @@ mod stack_order_tests {
                 Some(5),
                 &agent_states,
                 &collapsed,
+                false,
             ));
         });
         time("section_stacks", &mut || {
@@ -2274,7 +2486,49 @@ mod stack_order_tests {
                 Some(5),
                 &agent_states,
                 &collapsed,
+                false,
             ));
         });
+    }
+}
+
+#[cfg(test)]
+mod order_recent_tests {
+    use super::order_recent;
+    use chrono::{Duration as ChronoDuration, Utc};
+
+    #[test]
+    fn orders_newest_attached_first_and_caps_at_limit() {
+        let now = Utc::now();
+        // Deliberately shuffled input; oldest-to-newest offsets -30, 0, -10.
+        let candidates = vec![
+            (now - ChronoDuration::seconds(30), "old"),
+            (now, "newest"),
+            (now - ChronoDuration::seconds(10), "mid"),
+        ];
+        assert_eq!(
+            order_recent(candidates.clone(), 5),
+            vec!["newest", "mid", "old"]
+        );
+        // The limit truncates the tail after ordering.
+        assert_eq!(order_recent(candidates, 2), vec!["newest", "mid"]);
+    }
+
+    #[test]
+    fn zero_limit_and_empty_input_yield_nothing() {
+        let now = Utc::now();
+        assert!(order_recent(vec![(now, "x")], 0).is_empty());
+        assert!(order_recent(Vec::<(_, &str)>::new(), 5).is_empty());
+    }
+
+    #[test]
+    fn equal_timestamps_keep_input_order() {
+        // A stable sort preserves the input (backend-then-tree) order for ties.
+        let t = Utc::now();
+        let candidates = vec![(t, "first"), (t, "second"), (t, "third")];
+        assert_eq!(
+            order_recent(candidates, 3),
+            vec!["first", "second", "third"]
+        );
     }
 }

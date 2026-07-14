@@ -35,13 +35,54 @@ fn isolated_tmux_tmpdir(temp_dir: &TempDir) -> PathBuf {
 }
 
 /// Helper to create an isolated ConfigStore for testing. Pins `tmux_tmpdir` so
-/// any `SessionManager` built from it spawns tmux on a throwaway server.
+/// any `SessionManager` built from it spawns tmux on a throwaway server, and
+/// force-disables usage telemetry so a `CommanderService` built from it can
+/// never post to the production OpenObserve endpoint. The `cfg!(test)` guard in
+/// `telemetry::would_be_enabled` does NOT cover this file: an integration test
+/// links the core crate as a normal dependency (compiled without `--test`), so
+/// telemetry would otherwise be live here. Centralising the disable means a new
+/// test can't forget it. Guarded by `isolated_config_store_disables_telemetry`.
 fn create_isolated_config_store(temp_dir: &TempDir, mut config: Config) -> Arc<ConfigStore> {
     config.tmux_tmpdir = Some(isolated_tmux_tmpdir(temp_dir));
+    config.telemetry.enabled = false;
     let config_path = temp_dir.path().join("config.toml");
     let toml = toml::to_string_pretty(&config).unwrap();
     std::fs::write(&config_path, toml).unwrap();
     Arc::new(ConfigStore::with_path(config, config_path))
+}
+
+/// Guard: a `CommanderService` built from `create_isolated_config_store` must
+/// NOT emit telemetry. Telemetry is opt-out by default with a baked ingest
+/// credential, and — unlike the core crate's own unit tests — `cfg!(test)` is
+/// false in this integration-test crate (core is linked as an ordinary
+/// dependency), so nothing but the helper's config-level disable stands between
+/// `cargo test` and the production OpenObserve endpoint. Fails if that
+/// force-disable is dropped.
+#[tokio::test]
+async fn isolated_config_store_disables_telemetry() {
+    use claude_commander_core::api::CommanderService;
+    use claude_commander_core::telemetry::FrontendInfo;
+
+    let temp_dir = TempDir::new().unwrap();
+    let config_store = create_isolated_config_store(&temp_dir, Config::default());
+    let store = create_isolated_store(&temp_dir);
+    let service = CommanderService::new(
+        config_store,
+        store,
+        FrontendInfo::new("integration-test", "0.0.0"),
+    );
+    // Env-independent gate: assert the config flag itself. `is_active()` below
+    // is the behavioural check, but it also returns false under `DO_NOT_TRACK`
+    // (set workspace-wide in CI), which would mask a dropped force-disable — so
+    // this assertion, which holds regardless of environment, is the real guard.
+    assert!(
+        !service.read_config().telemetry.enabled,
+        "create_isolated_config_store must force telemetry off in the config itself"
+    );
+    assert!(
+        !service.telemetry().is_active(),
+        "integration-test services must not emit telemetry (would pollute production OpenObserve)"
+    );
 }
 
 /// Helper to create a test git repository
@@ -427,6 +468,94 @@ async fn test_session_manager_restart() {
     // Cleanup
     let _ = manager.kill_session(&session_id, true).await;
 
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
+    drop(worktrees_dir);
+}
+
+/// `CommanderService::change_program` must persist the new program on the
+/// session and relaunch its pane so the new agent actually runs. Regression:
+/// the stored `program` is the single source of truth for the harness, and it
+/// only takes effect at launch — changing it without relaunching would leave
+/// the old agent running.
+#[tokio::test]
+async fn test_change_program_updates_field_and_relaunches() {
+    use claude_commander_core::api::CommanderService;
+    use claude_commander_core::telemetry::FrontendInfo;
+
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let state_temp_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+    let config = Config {
+        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        ..Config::default()
+    };
+
+    let config_store = create_isolated_config_store(&state_temp_dir, config);
+    let store = create_isolated_store(&state_temp_dir);
+    let manager = SessionManager::new(config_store.clone(), store.clone(), "");
+    let service = CommanderService::new(
+        config_store,
+        store.clone(),
+        FrontendInfo::new("integration-test", "0.0.0"),
+    );
+
+    let project_id = manager.add_project(repo_path).await.unwrap();
+    let session_id = manager
+        .prepare_session(
+            &project_id,
+            "change-program-test".to_string(),
+            Some("sleep 60".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+    manager
+        .finalize_session(&session_id, None, None)
+        .await
+        .unwrap();
+
+    let tmux_name = {
+        let state = store.read().await;
+        let s = state.get_session(&session_id).unwrap();
+        assert_eq!(s.program, "sleep 60");
+        s.tmux_session_name.clone()
+    };
+
+    // Empty program is rejected before touching the pane.
+    assert!(
+        service.change_program(&session_id, "  ").await.is_err(),
+        "an empty program must be rejected"
+    );
+
+    // Change to a different program; the pane is relaunched.
+    service
+        .change_program(&session_id, "cat")
+        .await
+        .expect("change_program should succeed");
+
+    {
+        let state = store.read().await;
+        let s = state.get_session(&session_id).unwrap();
+        assert_eq!(s.program, "cat", "the new program must be persisted");
+        assert_eq!(
+            s.status,
+            SessionStatus::Running,
+            "the session must be Running after the relaunch"
+        );
+    }
+    assert!(
+        manager.tmux.session_exists(&tmux_name).await.unwrap(),
+        "the tmux pane must be live after the program change"
+    );
+
+    // Cleanup
+    let _ = manager.kill_session(&session_id, true).await;
     drop(repo_temp_dir);
     drop(state_temp_dir);
     drop(worktrees_dir);
@@ -1516,13 +1645,10 @@ async fn test_ensure_attachable_by_tmux_name_revives_dead_session() {
     let (repo_temp_dir, repo_path) = create_test_repo().await;
     let state_temp_dir = TempDir::new().unwrap();
     let worktrees_dir = TempDir::new().unwrap();
-    let mut config = Config {
+    let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
         ..Config::default()
     };
-    // Never post telemetry from the test suite.
-    config.telemetry.enabled = false;
-
     // A manager (for setup) and a service (under test) share the same
     // config/state stores, so the service resolves the session the manager
     // creates and both drive the same isolated tmux server.
@@ -1705,14 +1831,11 @@ async fn test_paste_image_writes_file_and_injects_path() {
     // Redirect paste-image writes (and the store's prune) into a TempDir instead
     // of the real /tmp/paste-images, per the repo's test-isolation rule.
     let paste_dir = TempDir::new().unwrap();
-    let mut config = Config {
+    let config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
         paste_images_dir: Some(paste_dir.path().to_path_buf()),
         ..Config::default()
     };
-    // Never post telemetry from the test suite.
-    config.telemetry.enabled = false;
-
     // A manager (for setup) and a service (under test) share the same
     // config/state stores, so the service resolves the session the manager
     // creates and both drive the same isolated tmux server.

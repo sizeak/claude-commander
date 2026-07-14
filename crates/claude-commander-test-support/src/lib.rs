@@ -130,6 +130,13 @@ mod tests {
         let data_dir = TempDir::new().unwrap();
         let worktrees_dir = TempDir::new().unwrap();
         let state = test_state(&data_dir, &worktrees_dir);
+        // Env-independent gate: assert the config flag itself. `is_active()` also
+        // returns false under `DO_NOT_TRACK` (set workspace-wide in CI), which
+        // would mask a dropped `enabled = false` — this holds regardless of env.
+        assert!(
+            !state.service.read_config().telemetry.enabled,
+            "test-support fixtures must force telemetry off in the config itself"
+        );
         assert!(
             !state.service.telemetry().is_active(),
             "test-support fixtures must not emit telemetry (would pollute production OpenObserve)"

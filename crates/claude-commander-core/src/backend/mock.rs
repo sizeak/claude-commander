@@ -42,6 +42,9 @@ pub struct MockBackend {
     reconciled: Mutex<Vec<SessionId>>,
     /// Sessions passed to [`Self::restart_session`], for routing asserts.
     restarted: Mutex<Vec<SessionId>>,
+    /// `(session, program)` pairs passed to [`Self::change_program`], for
+    /// call-recording asserts.
+    program_changes: Mutex<Vec<(SessionId, String)>>,
     /// Count of [`Self::request_pr_refresh`] calls, for call-recording asserts.
     pr_refresh_calls: Mutex<usize>,
     /// Sessions passed to [`Self::mark_read`], for call-recording asserts.
@@ -88,6 +91,7 @@ impl MockBackend {
             created: Mutex::new(Vec::new()),
             reconciled: Mutex::new(Vec::new()),
             restarted: Mutex::new(Vec::new()),
+            program_changes: Mutex::new(Vec::new()),
             pr_refresh_calls: Mutex::new(0),
             read_marked: Mutex::new(Vec::new()),
             mark_read_gate: Mutex::new(None),
@@ -134,6 +138,11 @@ impl MockBackend {
     /// Sessions passed to [`Self::reconcile_one_section`], in call order.
     pub fn reconciled_sessions(&self) -> Vec<SessionId> {
         self.reconciled.lock().unwrap().clone()
+    }
+
+    /// `(session, program)` pairs passed to [`Self::change_program`], in call order.
+    pub fn program_changes(&self) -> Vec<(SessionId, String)> {
+        self.program_changes.lock().unwrap().clone()
     }
 
     /// Sessions passed to [`Self::restart_session`], in call order.
@@ -332,6 +341,12 @@ impl CommanderBackend for MockBackend {
 
     async fn rename_session(&self, _id: SessionId, _title: String) -> BResult<()> {
         self.guard()
+    }
+
+    async fn change_program(&self, id: SessionId, program: String) -> BResult<()> {
+        self.guard()?;
+        self.program_changes.lock().unwrap().push((id, program));
+        Ok(())
     }
 
     async fn set_section(&self, _id: SessionId, _section: Option<String>) -> BResult<()> {

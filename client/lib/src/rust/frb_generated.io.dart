@@ -4,6 +4,7 @@
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
 import 'api/mirrors.dart';
+import 'api/registry.dart';
 import 'api/review.dart';
 import 'api/simple.dart';
 import 'api/terminal.dart';
@@ -29,9 +30,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DateTime dco_decode_Chrono_Utc(dynamic raw);
 
   @protected
+  RustStreamSink<ConnectionStateDto>
+  dco_decode_StreamSink_connection_state_dto_Sse(dynamic raw);
+
+  @protected
   RustStreamSink<TerminalEvent> dco_decode_StreamSink_terminal_event_Sse(
     dynamic raw,
   );
+
+  @protected
+  RustStreamSink<BigInt> dco_decode_StreamSink_u_64_Sse(dynamic raw);
 
   @protected
   String dco_decode_String(dynamic raw);
@@ -43,16 +51,31 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AgentState dco_decode_agent_state(dynamic raw);
 
   @protected
+  AgentStateEntryDto dco_decode_agent_state_entry_dto(dynamic raw);
+
+  @protected
+  AgentStatesSnapshotDto dco_decode_agent_states_snapshot_dto(dynamic raw);
+
+  @protected
   ApplyResult dco_decode_apply_result(dynamic raw);
 
   @protected
   ApplyResultKind dco_decode_apply_result_kind(dynamic raw);
 
   @protected
+  AttachKind dco_decode_attach_kind(dynamic raw);
+
+  @protected
   bool dco_decode_bool(dynamic raw);
 
   @protected
   DateTime dco_decode_box_autoadd_Chrono_Utc(dynamic raw);
+
+  @protected
+  DiffStatDto dco_decode_box_autoadd_diff_stat_dto(dynamic raw);
+
+  @protected
+  PullBlockReason dco_decode_box_autoadd_pull_block_reason(dynamic raw);
 
   @protected
   ReviewDecision dco_decode_box_autoadd_review_decision(dynamic raw);
@@ -70,7 +93,22 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int dco_decode_box_autoadd_u_32(dynamic raw);
 
   @protected
+  BranchInfo dco_decode_branch_info(dynamic raw);
+
+  @protected
   CommentDto dco_decode_comment_dto(dynamic raw);
+
+  @protected
+  ConnectionStateDto dco_decode_connection_state_dto(dynamic raw);
+
+  @protected
+  ConnectionStateKind dco_decode_connection_state_kind(dynamic raw);
+
+  @protected
+  CreateOptions dco_decode_create_options(dynamic raw);
+
+  @protected
+  DiffStatDto dco_decode_diff_stat_dto(dynamic raw);
 
   @protected
   int dco_decode_i_32(dynamic raw);
@@ -82,13 +120,31 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<String> dco_decode_list_String(dynamic raw);
 
   @protected
+  List<AgentStateEntryDto> dco_decode_list_agent_state_entry_dto(dynamic raw);
+
+  @protected
+  List<BranchInfo> dco_decode_list_branch_info(dynamic raw);
+
+  @protected
   List<CommentDto> dco_decode_list_comment_dto(dynamic raw);
+
+  @protected
+  List<OperationStatusDto> dco_decode_list_operation_status_dto(dynamic raw);
 
   @protected
   List<int> dco_decode_list_prim_u_8_loose(dynamic raw);
 
   @protected
   Uint8List dco_decode_list_prim_u_8_strict(dynamic raw);
+
+  @protected
+  List<ProgramInfo> dco_decode_list_program_info(dynamic raw);
+
+  @protected
+  List<ProjectInfoDto> dco_decode_list_project_info_dto(dynamic raw);
+
+  @protected
+  List<ProjectPullDto> dco_decode_list_project_pull_dto(dynamic raw);
 
   @protected
   List<ReviewFileDto> dco_decode_list_review_file_dto(dynamic raw);
@@ -100,13 +156,34 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<ReviewLineDto> dco_decode_list_review_line_dto(dynamic raw);
 
   @protected
+  List<SessionId> dco_decode_list_session_id(dynamic raw);
+
+  @protected
   List<SessionInfo> dco_decode_list_session_info(dynamic raw);
+
+  @protected
+  OperationKind dco_decode_operation_kind(dynamic raw);
+
+  @protected
+  OperationOutcomeDto dco_decode_operation_outcome_dto(dynamic raw);
+
+  @protected
+  OperationOutcomeKind dco_decode_operation_outcome_kind(dynamic raw);
+
+  @protected
+  OperationStatusDto dco_decode_operation_status_dto(dynamic raw);
 
   @protected
   String? dco_decode_opt_String(dynamic raw);
 
   @protected
   DateTime? dco_decode_opt_box_autoadd_Chrono_Utc(dynamic raw);
+
+  @protected
+  DiffStatDto? dco_decode_opt_box_autoadd_diff_stat_dto(dynamic raw);
+
+  @protected
+  PullBlockReason? dco_decode_opt_box_autoadd_pull_block_reason(dynamic raw);
 
   @protected
   ReviewDecision? dco_decode_opt_box_autoadd_review_decision(dynamic raw);
@@ -129,7 +206,28 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PrState dco_decode_pr_state(dynamic raw);
 
   @protected
+  PreviewDataDto dco_decode_preview_data_dto(dynamic raw);
+
+  @protected
+  ProgramInfo dco_decode_program_info(dynamic raw);
+
+  @protected
   ProjectId dco_decode_project_id(dynamic raw);
+
+  @protected
+  ProjectInfoDto dco_decode_project_info_dto(dynamic raw);
+
+  @protected
+  ProjectPullDto dco_decode_project_pull_dto(dynamic raw);
+
+  @protected
+  PullBlockReason dco_decode_pull_block_reason(dynamic raw);
+
+  @protected
+  PullStatusDto dco_decode_pull_status_dto(dynamic raw);
+
+  @protected
+  PullStatusKind dco_decode_pull_status_kind(dynamic raw);
 
   @protected
   ReviewCommentSide dco_decode_review_comment_side(dynamic raw);
@@ -159,6 +257,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   ReviewSnapshotDto dco_decode_review_snapshot_dto(dynamic raw);
 
   @protected
+  ScanResultDto dco_decode_scan_result_dto(dynamic raw);
+
+  @protected
+  ServerStatus dco_decode_server_status(dynamic raw);
+
+  @protected
   SessionDetail dco_decode_session_detail(dynamic raw);
 
   @protected
@@ -183,10 +287,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int dco_decode_u_32(dynamic raw);
 
   @protected
+  BigInt dco_decode_u_64(dynamic raw);
+
+  @protected
   int dco_decode_u_8(dynamic raw);
 
   @protected
   void dco_decode_unit(dynamic raw);
+
+  @protected
+  WorkspaceSnapshotDto dco_decode_workspace_snapshot_dto(dynamic raw);
 
   @protected
   AnyhowException sse_decode_AnyhowException(SseDeserializer deserializer);
@@ -195,7 +305,16 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   DateTime sse_decode_Chrono_Utc(SseDeserializer deserializer);
 
   @protected
+  RustStreamSink<ConnectionStateDto>
+  sse_decode_StreamSink_connection_state_dto_Sse(SseDeserializer deserializer);
+
+  @protected
   RustStreamSink<TerminalEvent> sse_decode_StreamSink_terminal_event_Sse(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  RustStreamSink<BigInt> sse_decode_StreamSink_u_64_Sse(
     SseDeserializer deserializer,
   );
 
@@ -209,16 +328,39 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   AgentState sse_decode_agent_state(SseDeserializer deserializer);
 
   @protected
+  AgentStateEntryDto sse_decode_agent_state_entry_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  AgentStatesSnapshotDto sse_decode_agent_states_snapshot_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
   ApplyResult sse_decode_apply_result(SseDeserializer deserializer);
 
   @protected
   ApplyResultKind sse_decode_apply_result_kind(SseDeserializer deserializer);
 
   @protected
+  AttachKind sse_decode_attach_kind(SseDeserializer deserializer);
+
+  @protected
   bool sse_decode_bool(SseDeserializer deserializer);
 
   @protected
   DateTime sse_decode_box_autoadd_Chrono_Utc(SseDeserializer deserializer);
+
+  @protected
+  DiffStatDto sse_decode_box_autoadd_diff_stat_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  PullBlockReason sse_decode_box_autoadd_pull_block_reason(
+    SseDeserializer deserializer,
+  );
 
   @protected
   ReviewDecision sse_decode_box_autoadd_review_decision(
@@ -242,7 +384,26 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int sse_decode_box_autoadd_u_32(SseDeserializer deserializer);
 
   @protected
+  BranchInfo sse_decode_branch_info(SseDeserializer deserializer);
+
+  @protected
   CommentDto sse_decode_comment_dto(SseDeserializer deserializer);
+
+  @protected
+  ConnectionStateDto sse_decode_connection_state_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  ConnectionStateKind sse_decode_connection_state_kind(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  CreateOptions sse_decode_create_options(SseDeserializer deserializer);
+
+  @protected
+  DiffStatDto sse_decode_diff_stat_dto(SseDeserializer deserializer);
 
   @protected
   int sse_decode_i_32(SseDeserializer deserializer);
@@ -254,13 +415,39 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   List<String> sse_decode_list_String(SseDeserializer deserializer);
 
   @protected
+  List<AgentStateEntryDto> sse_decode_list_agent_state_entry_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<BranchInfo> sse_decode_list_branch_info(SseDeserializer deserializer);
+
+  @protected
   List<CommentDto> sse_decode_list_comment_dto(SseDeserializer deserializer);
+
+  @protected
+  List<OperationStatusDto> sse_decode_list_operation_status_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<int> sse_decode_list_prim_u_8_loose(SseDeserializer deserializer);
 
   @protected
   Uint8List sse_decode_list_prim_u_8_strict(SseDeserializer deserializer);
+
+  @protected
+  List<ProgramInfo> sse_decode_list_program_info(SseDeserializer deserializer);
+
+  @protected
+  List<ProjectInfoDto> sse_decode_list_project_info_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  List<ProjectPullDto> sse_decode_list_project_pull_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   List<ReviewFileDto> sse_decode_list_review_file_dto(
@@ -278,13 +465,44 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  List<SessionId> sse_decode_list_session_id(SseDeserializer deserializer);
+
+  @protected
   List<SessionInfo> sse_decode_list_session_info(SseDeserializer deserializer);
+
+  @protected
+  OperationKind sse_decode_operation_kind(SseDeserializer deserializer);
+
+  @protected
+  OperationOutcomeDto sse_decode_operation_outcome_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  OperationOutcomeKind sse_decode_operation_outcome_kind(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  OperationStatusDto sse_decode_operation_status_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   String? sse_decode_opt_String(SseDeserializer deserializer);
 
   @protected
   DateTime? sse_decode_opt_box_autoadd_Chrono_Utc(SseDeserializer deserializer);
+
+  @protected
+  DiffStatDto? sse_decode_opt_box_autoadd_diff_stat_dto(
+    SseDeserializer deserializer,
+  );
+
+  @protected
+  PullBlockReason? sse_decode_opt_box_autoadd_pull_block_reason(
+    SseDeserializer deserializer,
+  );
 
   @protected
   ReviewDecision? sse_decode_opt_box_autoadd_review_decision(
@@ -313,7 +531,28 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   PrState sse_decode_pr_state(SseDeserializer deserializer);
 
   @protected
+  PreviewDataDto sse_decode_preview_data_dto(SseDeserializer deserializer);
+
+  @protected
+  ProgramInfo sse_decode_program_info(SseDeserializer deserializer);
+
+  @protected
   ProjectId sse_decode_project_id(SseDeserializer deserializer);
+
+  @protected
+  ProjectInfoDto sse_decode_project_info_dto(SseDeserializer deserializer);
+
+  @protected
+  ProjectPullDto sse_decode_project_pull_dto(SseDeserializer deserializer);
+
+  @protected
+  PullBlockReason sse_decode_pull_block_reason(SseDeserializer deserializer);
+
+  @protected
+  PullStatusDto sse_decode_pull_status_dto(SseDeserializer deserializer);
+
+  @protected
+  PullStatusKind sse_decode_pull_status_kind(SseDeserializer deserializer);
 
   @protected
   ReviewCommentSide sse_decode_review_comment_side(
@@ -349,6 +588,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  ScanResultDto sse_decode_scan_result_dto(SseDeserializer deserializer);
+
+  @protected
+  ServerStatus sse_decode_server_status(SseDeserializer deserializer);
+
+  @protected
   SessionDetail sse_decode_session_detail(SseDeserializer deserializer);
 
   @protected
@@ -375,10 +620,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   int sse_decode_u_32(SseDeserializer deserializer);
 
   @protected
+  BigInt sse_decode_u_64(SseDeserializer deserializer);
+
+  @protected
   int sse_decode_u_8(SseDeserializer deserializer);
 
   @protected
   void sse_decode_unit(SseDeserializer deserializer);
+
+  @protected
+  WorkspaceSnapshotDto sse_decode_workspace_snapshot_dto(
+    SseDeserializer deserializer,
+  );
 
   @protected
   void sse_encode_AnyhowException(
@@ -390,8 +643,20 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_Chrono_Utc(DateTime self, SseSerializer serializer);
 
   @protected
+  void sse_encode_StreamSink_connection_state_dto_Sse(
+    RustStreamSink<ConnectionStateDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_StreamSink_terminal_event_Sse(
     RustStreamSink<TerminalEvent> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_StreamSink_u_64_Sse(
+    RustStreamSink<BigInt> self,
     SseSerializer serializer,
   );
 
@@ -405,6 +670,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_agent_state(AgentState self, SseSerializer serializer);
 
   @protected
+  void sse_encode_agent_state_entry_dto(
+    AgentStateEntryDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_agent_states_snapshot_dto(
+    AgentStatesSnapshotDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_apply_result(ApplyResult self, SseSerializer serializer);
 
   @protected
@@ -414,11 +691,26 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_attach_kind(AttachKind self, SseSerializer serializer);
+
+  @protected
   void sse_encode_bool(bool self, SseSerializer serializer);
 
   @protected
   void sse_encode_box_autoadd_Chrono_Utc(
     DateTime self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_diff_stat_dto(
+    DiffStatDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_box_autoadd_pull_block_reason(
+    PullBlockReason self,
     SseSerializer serializer,
   );
 
@@ -450,7 +742,28 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_box_autoadd_u_32(int self, SseSerializer serializer);
 
   @protected
+  void sse_encode_branch_info(BranchInfo self, SseSerializer serializer);
+
+  @protected
   void sse_encode_comment_dto(CommentDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_connection_state_dto(
+    ConnectionStateDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_connection_state_kind(
+    ConnectionStateKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_create_options(CreateOptions self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_diff_stat_dto(DiffStatDto self, SseSerializer serializer);
 
   @protected
   void sse_encode_i_32(int self, SseSerializer serializer);
@@ -462,8 +775,26 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_list_String(List<String> self, SseSerializer serializer);
 
   @protected
+  void sse_encode_list_agent_state_entry_dto(
+    List<AgentStateEntryDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_branch_info(
+    List<BranchInfo> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_comment_dto(
     List<CommentDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_operation_status_dto(
+    List<OperationStatusDto> self,
     SseSerializer serializer,
   );
 
@@ -473,6 +804,24 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_list_prim_u_8_strict(
     Uint8List self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_program_info(
+    List<ProgramInfo> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_project_info_dto(
+    List<ProjectInfoDto> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_list_project_pull_dto(
+    List<ProjectPullDto> self,
     SseSerializer serializer,
   );
 
@@ -495,8 +844,35 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_list_session_id(
+    List<SessionId> self,
+    SseSerializer serializer,
+  );
+
+  @protected
   void sse_encode_list_session_info(
     List<SessionInfo> self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_operation_kind(OperationKind self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_operation_outcome_dto(
+    OperationOutcomeDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_operation_outcome_kind(
+    OperationOutcomeKind self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_operation_status_dto(
+    OperationStatusDto self,
     SseSerializer serializer,
   );
 
@@ -506,6 +882,18 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   @protected
   void sse_encode_opt_box_autoadd_Chrono_Utc(
     DateTime? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_diff_stat_dto(
+    DiffStatDto? self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_opt_box_autoadd_pull_block_reason(
+    PullBlockReason? self,
     SseSerializer serializer,
   );
 
@@ -540,7 +928,43 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_pr_state(PrState self, SseSerializer serializer);
 
   @protected
+  void sse_encode_preview_data_dto(
+    PreviewDataDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_program_info(ProgramInfo self, SseSerializer serializer);
+
+  @protected
   void sse_encode_project_id(ProjectId self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_project_info_dto(
+    ProjectInfoDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_project_pull_dto(
+    ProjectPullDto self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_pull_block_reason(
+    PullBlockReason self,
+    SseSerializer serializer,
+  );
+
+  @protected
+  void sse_encode_pull_status_dto(PullStatusDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_pull_status_kind(
+    PullStatusKind self,
+    SseSerializer serializer,
+  );
 
   @protected
   void sse_encode_review_comment_side(
@@ -588,6 +1012,12 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   );
 
   @protected
+  void sse_encode_scan_result_dto(ScanResultDto self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_server_status(ServerStatus self, SseSerializer serializer);
+
+  @protected
   void sse_encode_session_detail(SessionDetail self, SseSerializer serializer);
 
   @protected
@@ -615,10 +1045,19 @@ abstract class RustLibApiImplPlatform extends BaseApiImpl<RustLibWire> {
   void sse_encode_u_32(int self, SseSerializer serializer);
 
   @protected
+  void sse_encode_u_64(BigInt self, SseSerializer serializer);
+
+  @protected
   void sse_encode_u_8(int self, SseSerializer serializer);
 
   @protected
   void sse_encode_unit(void self, SseSerializer serializer);
+
+  @protected
+  void sse_encode_workspace_snapshot_dto(
+    WorkspaceSnapshotDto self,
+    SseSerializer serializer,
+  );
 }
 
 // Section: wire_class

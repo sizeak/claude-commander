@@ -5,7 +5,7 @@ edition.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "HTTP client backend that drives a remote claude-commander-server over the wire"
+description = "Thin adapter exposing claude-commander-client's transport as a core CommanderBackend"
 publish = false
 
 # Only the `claude-commander` bin crate drives the release (single shared tag).
@@ -21,42 +21,20 @@ path = "src/lib.rs"
 # live in core. Drop the default `audio` feature: this crate is a network client
 # and never touches a mic/speaker, so it must not drag in ALSA-linked rodio/cpal.
 claude-commander-core = { path = "../claude-commander-core", default-features = false }
-# The wire DTOs (also re-exported through core, but depended on directly so the
-# serde shapes have one source of truth).
+# The pure HTTP + WebSocket transport this crate adapts. Owns the reqwest/
+# tungstenite/xxhash machinery (moved out of here) so it can be shared with the
+# mobile cdylib without pulling in core.
+claude-commander-client = { path = "../claude-commander-client" }
+# The wire DTOs (also re-exported through core, but depended on directly for the
+# WS `AttachKind` mapped in the attach adapter).
 claude-commander-protocol = { path = "../claude-commander-protocol" }
 
-# Async runtime + trait objects.
+# Async runtime + trait objects (the `CommanderBackend`/`AttachTerminator` impls).
 tokio = { workspace = true }
 async-trait = "0.1"
 
-# HTTP client. rustls (not OpenSSL) to keep the pure-Rust lean, matching core's
-# own reqwest usage.
-reqwest = { version = "0.13", default-features = false, features = [
-    "json",
-    "rustls",
-] }
-
-# WebSocket client for the interactive attach transport. rustls (webpki roots) to
-# match reqwest's TLS stack — no OpenSSL. Same pin/features as the Flutter
-# client's cdylib so both speak the wire protocol over the one locked version.
-tokio-tungstenite = { version = "0.29", default-features = false, features = [
-    "connect",
-    "rustls-tls-webpki-roots",
-] }
-futures-util = { version = "0.3", default-features = false, features = ["sink"] }
-
-# Serialization (request bodies + response decode).
-serde = { workspace = true }
-serde_json = { workspace = true }
-
-# Observability. The bearer token is NEVER logged.
-tracing = { workspace = true }
-
-# Content-hash the polled snapshots to detect change without diffing (same crate
-# core already uses for its caches).
-xxhash-rust = { version = "0.8", features = ["xxh3"] }
-
-# Comment ids returned by the create-comment endpoint.
+# Ids returned by the create-comment endpoint / used in trait signatures. The
+# reqwest/tungstenite/xxhash/serde transport deps moved to claude-commander-client.
 uuid = { version = "1.23", features = ["v4", "serde"] }
 
 [dev-dependencies]

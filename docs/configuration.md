@@ -180,8 +180,20 @@ dim_unfocused_opacity = 0.4
 # for a single-program setup. Disabled by default; set to true to show it.
 # show_session_program = false
 
+# Hide empty section headers in the session list. When enabled, sections with
+# zero sessions (including "In Progress") are omitted along with their spacers,
+# reducing visual clutter. Enabled by default; set to false to always show all
+# section headers.
+# hide_empty_sections = true
+
 # Debounce delay in ms when typing multi-digit session numbers
 # session_number_debounce_ms = 250
+
+# Number of most-recently-attached sessions to surface in the "Recent" block at
+# the top of the session list. The block spans all servers, colours each row by
+# its project, and reuses the same number the session has in its normal position
+# below (so the block acts as a view, not a duplicate). Set to 0 to hide it.
+# recent_sessions_limit = 5
 
 # Interval in milliseconds for syncing state file changes from other instances (0 = disabled)
 state_sync_interval_ms = 2000

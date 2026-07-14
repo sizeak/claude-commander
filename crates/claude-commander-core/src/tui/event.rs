@@ -154,6 +154,14 @@ pub enum StateUpdate {
         project_id: ProjectId,
         picker: super::app::ProgramPicker,
     },
+    /// The owning backend's program list finished loading for the open
+    /// change-program palette. Replaces the palette's fallback choices (seeded
+    /// from local config) if it's still open for the same session. Spawned so a
+    /// slow remote never blocks the event loop before the palette appears.
+    ProgramChoicesLoaded {
+        session_id: SessionId,
+        choices: Vec<crate::config::ProgramEntry>,
+    },
     /// A remote backend's program list finished loading (or failed) for the
     /// Settings → Programs tab. Applied only if that tab is still open for the
     /// same `backend` and `gen` (a stale response for a superseded target is
@@ -289,6 +297,8 @@ pub enum UserCommand {
     RenameSession,
     /// Restart current session (kill tmux and recreate)
     RestartSession,
+    /// Change the program (agent) of the selected session and relaunch it
+    ChangeProgram,
     /// Toggle keep-alive on the selected session (opt out of auto-hibernation)
     ToggleKeepAlive,
     /// Remove an entire project
@@ -398,15 +408,22 @@ impl UserCommand {
     /// UI-level features that don't otherwise reach the service are named here.
     pub fn telemetry_feature(&self) -> Option<&'static str> {
         match self {
-            // -- Recorded at the service layer; skip here to avoid double count.
+            // -- Recorded at the service layer under the same feature name; skip
+            // here to avoid double-counting. (Commands like CascadeMergeMain that
+            // use a *distinct* UI name from their service method stay below.)
             UserCommand::NewSession
             | UserCommand::NewStackedSession
             | UserCommand::DeleteSession
             | UserCommand::RestartSession
+            | UserCommand::ChangeProgram
             | UserCommand::ToggleKeepAlive
             | UserCommand::NewProject
             | UserCommand::ScanDirectory
-            | UserCommand::OpenReviewDiff => None,
+            | UserCommand::OpenReviewDiff
+            | UserCommand::RenameSession
+            | UserCommand::RemoveProject
+            | UserCommand::CascadeResume
+            | UserCommand::PushStack => None,
 
             // -- Navigation / scroll / modal mechanics: pure noise.
             UserCommand::NavigateUp
@@ -430,14 +447,10 @@ impl UserCommand {
             // -- UI-level features worth tracking.
             UserCommand::Select => Some("session.attach"),
             UserCommand::SelectShell => Some("session.open_shell"),
-            UserCommand::RenameSession => Some("session.rename"),
             UserCommand::CheckoutBranch => Some("session.checkout_branch"),
             UserCommand::DeleteMergedPrSessions => Some("session.delete_merged_prs"),
-            UserCommand::RemoveProject => Some("project.remove"),
             UserCommand::CascadeMergeMain => Some("cascade.merge_main"),
-            UserCommand::CascadeResume => Some("cascade.resume"),
             UserCommand::CascadeAbandon => Some("cascade.abandon"),
-            UserCommand::PushStack => Some("stack.push"),
             UserCommand::OpenInEditor => Some("editor.open"),
             UserCommand::OpenPullRequest => Some("pr.open"),
             UserCommand::RefreshPrStatus => Some("pr.refresh_status"),
@@ -482,6 +495,7 @@ impl From<BindableAction> for UserCommand {
             BindableAction::DeleteMergedPrSessions => Self::DeleteMergedPrSessions,
             BindableAction::RenameSession => Self::RenameSession,
             BindableAction::RestartSession => Self::RestartSession,
+            BindableAction::ChangeProgram => Self::ChangeProgram,
             BindableAction::ToggleKeepAlive => Self::ToggleKeepAlive,
             BindableAction::RemoveProject => Self::RemoveProject,
             BindableAction::OpenInEditor => Self::OpenInEditor,
@@ -695,6 +709,13 @@ mod tests {
             UserCommand::RestartSession,
             UserCommand::NewProject,
             UserCommand::OpenReviewDiff,
+            // These reach an already-instrumented service method under the same
+            // feature name, so the TUI chokepoint must stay silent to avoid ~2x
+            // inflation of these counts relative to other frontends.
+            UserCommand::RenameSession,
+            UserCommand::RemoveProject,
+            UserCommand::CascadeResume,
+            UserCommand::PushStack,
         ] {
             assert_eq!(
                 cmd.telemetry_feature(),

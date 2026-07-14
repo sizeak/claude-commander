@@ -396,6 +396,88 @@ pub async fn attach_to_session(
     run_attach(streams, cfg).await
 }
 
+/// Clipboard-image sink that forwards a captured PNG through a
+/// [`CommanderBackend`](crate::backend::CommanderBackend)'s `paste_image` route.
+/// The canonical [`ImagePasteSink`] used by every frontend attaching to a
+/// *remote* session (the TUI and the CLI both construct it via [`Self::sink`]).
+pub struct BackendImagePaste {
+    backend: Arc<dyn crate::backend::CommanderBackend>,
+    id: crate::session::SessionId,
+}
+
+impl BackendImagePaste {
+    /// Build a sink that uploads captured clipboard images to `backend` for the
+    /// session `id`, boxed as the [`ImagePasteSink`] trait object the attach
+    /// loop's `image_paste` slot expects. Named `sink` rather than `new` because
+    /// it returns the trait object, not `Self`.
+    pub fn sink(
+        backend: Arc<dyn crate::backend::CommanderBackend>,
+        id: crate::session::SessionId,
+    ) -> Arc<dyn ImagePasteSink> {
+        Arc::new(Self { backend, id })
+    }
+}
+
+#[async_trait::async_trait]
+impl ImagePasteSink for BackendImagePaste {
+    async fn upload(&self, png: Vec<u8>) -> std::result::Result<(), String> {
+        self.backend
+            .paste_image(self.id, png)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Attach to a session on a `backend` — the remote entry point mirroring
+/// [`attach_to_session`]'s local PTY path. Resolves `query` to a session via the
+/// backend, opens an attach connection (a WebSocket for a remote backend), and
+/// drives it through [`run_attach`] with the CLI-appropriate policy: the
+/// in-session switcher and voice input are TUI-only affordances so they stay
+/// off, while clipboard-image paste is enabled when the backend advertises
+/// `client_side_image_paste`.
+///
+/// Lives in core (not `main.rs`) so the config assembly is unit-testable and the
+/// CLI stays thin.
+pub async fn attach_backend_session(
+    backend: Arc<dyn crate::backend::CommanderBackend>,
+    query: &str,
+    editor_triggers: Vec<Vec<u8>>,
+) -> crate::backend::BResult<AttachOutcome> {
+    use crate::backend::{AttachKind, BackendError};
+
+    let detail = backend
+        .session_detail(query, None)
+        .await?
+        .ok_or(BackendError::NotFound)?;
+    let id = detail.info.session_id;
+
+    let (cols, rows) = terminal::size().unwrap_or((80, 24));
+    let conn = backend.attach(id, cols, rows, AttachKind::Agent).await?;
+    let streams = conn.split();
+
+    let image_paste: Option<Arc<dyn ImagePasteSink>> = backend
+        .capabilities()
+        .client_side_image_paste
+        .then(|| BackendImagePaste::sink(backend.clone(), id));
+
+    let cfg = AttachConfig {
+        editor_triggers,
+        review_triggers: Vec::new(),
+        voice_triggers: Vec::new(),
+        voice_listener: None,
+        recording: Arc::new(AtomicBool::new(false)),
+        intercept_ctrl_z: true,
+        // Local-only affordance: the switcher popup runs `tmux display-popup`
+        // against the operator's own server, where the remote session isn't.
+        switcher_enabled: false,
+        session_name: None,
+        switcher_revive: None,
+        image_paste,
+    };
+
+    Ok(run_attach(streams, cfg).await?)
+}
+
 /// Drive one interactive attach over transport-agnostic [`AttachStreams`]
 /// (a local PTY, or a remote WebSocket via the backend). Enters raw mode, pumps
 /// stdin/stdout through the [`classify_input`] interception state machine,
@@ -919,6 +1001,25 @@ async fn run_switcher_popup_inner(current_session: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn attach_backend_session_unknown_query_is_not_found() {
+        // A query that resolves to no session must fail with NotFound *before*
+        // the loop touches the terminal — the mock's `session_detail` returns
+        // `None`, so the early return fires and raw mode is never entered.
+        use crate::backend::mock::MockBackend;
+        use crate::backend::{BackendError, empty_snapshot};
+
+        let backend: Arc<dyn crate::backend::CommanderBackend> =
+            Arc::new(MockBackend::new("test", empty_snapshot()));
+        let err = attach_backend_session(backend, "does-not-exist", Vec::new())
+            .await
+            .expect_err("unknown session query must not attach");
+        assert!(
+            matches!(err, BackendError::NotFound),
+            "expected NotFound, got {err:?}"
+        );
+    }
 
     #[test]
     fn test_contains_subsequence_finds_needle() {

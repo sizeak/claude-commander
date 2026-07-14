@@ -13,10 +13,11 @@ default-members = [
     "crates/claude-commander-core",
     "crates/claude-commander",
     "crates/claude-commander-remote",
+    "crates/claude-commander-client",
 ]
 
 [workspace.package]
-version = "0.26.0"
+version = "0.29.0"
 edition = "2024"
 authors = ["Claude Commander Contributors"]
 license = "MIT"

@@ -291,6 +291,12 @@ impl CommanderBackend for LocalBackend {
         Ok(self.service.rename_session(&id, title).await?)
     }
 
+    async fn change_program(&self, id: SessionId, program: String) -> BResult<()> {
+        // Relaunches the pane (tmux) → not `Send`; run on the local pool.
+        let svc = self.service.clone();
+        Ok(run_local(move || async move { svc.change_program(&id, program).await }).await?)
+    }
+
     async fn set_section(&self, id: SessionId, section: Option<String>) -> BResult<()> {
         Ok(self.service.set_section(&id, section).await?)
     }

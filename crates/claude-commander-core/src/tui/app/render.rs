@@ -115,7 +115,7 @@ impl App {
 
     /// Render the session list
     pub(super) fn render_session_list(&mut self, frame: &mut Frame, area: Rect) {
-        // Split into a 1-line heading bar and the list below
+        // Split into a 1-line heading bar and the body below
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Length(1), Constraint::Min(0)])
@@ -131,6 +131,59 @@ impl App {
         .style(heading_style);
         frame.render_widget(heading, chunks[0]);
 
+        let body = chunks[1];
+        let recents_len = self
+            .ui_state
+            .recents_len
+            .min(self.ui_state.list_items.len());
+        let global_sel = self.ui_state.list_state.list_state.selected();
+
+        // With a recents block present, pin it in a fixed panel at the top of
+        // the body and scroll the rest of the list independently below it. One
+        // global selection index spans both; each rendered slice highlights it
+        // only when it falls inside that slice.
+        if recents_len > 0 && recents_len < self.ui_state.list_items.len() {
+            let rec_h = (recents_len as u16).min(body.height.saturating_sub(1));
+            let sub = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(rec_h), Constraint::Min(0)])
+                .split(body);
+
+            // Number + colour for recent rows, computed over the FULL list so
+            // they mirror the real rows in the scrolling list below.
+            let display_info =
+                crate::tui::widgets::worktree_display_info(&self.ui_state.list_items, &self.theme);
+
+            let mut rec_state = ratatui::widgets::ListState::default();
+            if let Some(s) = global_sel
+                && s < recents_len
+            {
+                rec_state.select(Some(s));
+            }
+            let recents_tree = TreeList::new(&self.ui_state.list_items[..recents_len], &self.theme)
+                .tick(self.ui_state.tick_count)
+                .highlight_style(self.theme.selection().add_modifier(Modifier::BOLD))
+                .recent_display_info(display_info);
+            frame.render_stateful_widget(recents_tree, sub[0], &mut rec_state);
+
+            self.render_main_list(frame, sub[1], recents_len, global_sel);
+        } else {
+            self.render_main_list(frame, body, 0, global_sel);
+        }
+    }
+
+    /// Render the scrolling session list (everything after the pinned recents
+    /// block). `offset` is the number of leading `list_items` that belong to
+    /// the recents panel — `0` when there is none — so the global selection
+    /// index is translated into this slice and the persisted scroll offset is
+    /// kept across frames.
+    fn render_main_list(
+        &mut self,
+        frame: &mut Frame,
+        area: Rect,
+        offset: usize,
+        global_sel: Option<usize>,
+    ) {
         let blocked: std::collections::HashMap<ProjectId, &str> = self
             .ui_state
             .project_pull_blocked
@@ -138,7 +191,7 @@ impl App {
             .map(|(id, r)| (*id, r.as_str()))
             .collect();
 
-        let tree_list = TreeList::new(&self.ui_state.list_items, &self.theme)
+        let tree_list = TreeList::new(&self.ui_state.list_items[offset..], &self.theme)
             .tick(self.ui_state.tick_count)
             .highlight_style(self.theme.selection().add_modifier(Modifier::BOLD))
             .review_labels(&self.config.pr_review_labels)
@@ -147,11 +200,16 @@ impl App {
             .pull_blocked_projects(blocked)
             .comment_sessions(self.ui_state.sessions_with_comments.clone());
 
-        frame.render_stateful_widget(
-            tree_list,
-            chunks[1],
-            &mut self.ui_state.list_state.list_state,
-        );
+        let mut main_state = ratatui::widgets::ListState::default();
+        *main_state.offset_mut() = self.ui_state.main_list_offset;
+        match global_sel {
+            Some(s) if s >= offset => main_state.select(Some(s - offset)),
+            _ => main_state.select(None),
+        }
+        frame.render_stateful_widget(tree_list, area, &mut main_state);
+        // Persist the (possibly ratatui-adjusted) scroll offset for the next
+        // frame and for mouse hit-testing.
+        self.ui_state.main_list_offset = main_state.offset();
     }
 
     /// Build a styled tab title line for the pane header.

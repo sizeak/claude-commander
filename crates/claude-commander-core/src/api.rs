@@ -1398,6 +1398,35 @@ impl CommanderService {
             .await
     }
 
+    /// Change a session's launch program (which agent harness runs) and relaunch
+    /// its pane so the new program takes effect. The stored `program` is the
+    /// single source of truth for the harness ([`AgentKind`] is derived from it)
+    /// and only applies at launch, so the pane is restarted *fresh* — a different
+    /// harness cannot resume the previous one's conversation. Runs on the
+    /// session's owning host (called directly by the local backend and by the
+    /// server's PATCH handler for remote sessions).
+    pub async fn change_program(&self, id: &SessionId, program: impl Into<String>) -> Result<()> {
+        let program = program.into().trim().to_string();
+        if program.is_empty() {
+            return Err(SessionError::InvalidProgram("program cannot be empty".to_string()).into());
+        }
+        self.ensure_session_exists(id).await?;
+        self.telemetry.feature("session.change_program");
+        let sid = *id;
+        let prog = program.clone();
+        self.store
+            .mutate(move |state| {
+                if let Some(s) = state.get_session_mut(&sid) {
+                    s.program = prog;
+                }
+            })
+            .await?;
+        // Relaunch so the newly-chosen agent actually runs. Fresh (no `--resume`):
+        // the previous harness's conversation belongs to a different CLI and
+        // can't be resumed by the new one.
+        self.manager.restart_session_fresh(id).await
+    }
+
     /// Move a session to a section (`Some(name)`) or clear its manual override
     /// and re-run predicate assignment (`None`). Mirrors the TUI's
     /// `apply_section_move`.
@@ -2246,11 +2275,11 @@ pub fn validate_program_flags(opts: &CreateSessionOpts, resolved_program: &str) 
         ))
         .into());
     }
-    // `--model` is understood by both Claude and Codex.
+    // `--model` is understood by Claude, Codex, and OpenCode.
     if opts.model.is_some() && !kind.supports_model_flag() {
         return Err(SessionError::InvalidProgram(format!(
             "--model is only supported for programs that accept it, e.g. \
-             claude or codex (got {:?})",
+             claude, codex, or opencode (got {:?})",
             resolved_program
         ))
         .into());
@@ -2322,10 +2351,11 @@ fn ensure_install_id(store: &Arc<StateStore>) -> String {
 // Construction that needs core's domain model is done by
 // `session_info_from_session` below.
 pub use claude_commander_protocol::api::{
-    AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, DiffStat,
-    NewComment, OperationKind, OperationOutcome, OperationStatus, PreviewData, ProgramInfo,
-    ProjectInfo, PullBlockReason, PullStatus, RenameSession, ReviewSnapshot, ServerStatus,
-    SessionDetail, SessionInfo, SetProgramsRequest, SetSection, ToggleReviewed, WorkspaceSnapshot,
+    AgentStatesSnapshot, BranchInfo, ChangeProgram, CreateOptions, CreateSessionOpts, DiffSide,
+    DiffStat, NewComment, OperationKind, OperationOutcome, OperationStatus, PreviewData,
+    ProgramInfo, ProjectInfo, PullBlockReason, PullStatus, RenameSession, ReviewSnapshot,
+    ServerStatus, SessionDetail, SessionInfo, SetProgramsRequest, SetSection, ToggleReviewed,
+    WorkspaceSnapshot,
 };
 
 /// Build a [`SessionInfo`] wire DTO from core's `WorktreeSession` domain model.
@@ -2728,6 +2758,23 @@ mod tests {
             stack_parent: None,
         };
         validate_program_flags(&opts, "codex").unwrap();
+    }
+
+    #[test]
+    fn validate_allows_opencode_with_model() {
+        let opts = CreateSessionOpts {
+            project_path: PathBuf::from("/tmp/repo"),
+            title: "test".to_string(),
+            program: Some("opencode".to_string()),
+            initial_prompt: None,
+            effort: None,
+            mode: None,
+            model: Some("anthropic/claude-sonnet-4-5".to_string()),
+            base_branch: None,
+            section: None,
+            stack_parent: None,
+        };
+        validate_program_flags(&opts, "opencode").unwrap();
     }
 
     #[test]

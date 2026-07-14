@@ -7,9 +7,265 @@ import '../frb_generated.dart';
 import 'package:flutter_rust_bridge/flutter_rust_bridge_for_generated.dart';
 import 'package:uuid/uuid.dart';
 
+// These functions are ignored because they are not marked as `pub`: `commander_sentinel_id`
+// These function are ignored because they are on traits that is not defined in current crate (put an empty `#[frb]` on it to unignore): `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`, `from`
+
 enum AgentState { working, idle, waitingForInput, unknown }
 
+/// One session's agent state (flattened from the snapshot's
+/// `BTreeMap<SessionId, AgentState>`). The commander *sentinel* id is never
+/// present here — [`AgentStatesSnapshotDto::from`] drops it.
+class AgentStateEntryDto {
+  final SessionId sessionId;
+  final AgentState state;
+
+  const AgentStateEntryDto({required this.sessionId, required this.state});
+
+  @override
+  int get hashCode => sessionId.hashCode ^ state.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AgentStateEntryDto &&
+          runtimeType == other.runtimeType &&
+          sessionId == other.sessionId &&
+          state == other.state;
+}
+
+/// Bulk agent-state snapshot, map flattened to a `Vec` with the synthetic
+/// commander sentinel entry stripped (its running-ness is `commander_running`).
+class AgentStatesSnapshotDto {
+  final List<AgentStateEntryDto> states;
+  final bool commanderRunning;
+
+  const AgentStatesSnapshotDto({
+    required this.states,
+    required this.commanderRunning,
+  });
+
+  @override
+  int get hashCode => states.hashCode ^ commanderRunning.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is AgentStatesSnapshotDto &&
+          runtimeType == other.runtimeType &&
+          states == other.states &&
+          commanderRunning == other.commanderRunning;
+}
+
+/// Which pane of a session to attach to (agent vs the paired shell).
+enum AttachKind { agent, shell }
+
+class BranchInfo {
+  final String name;
+  final bool isRemote;
+
+  const BranchInfo({required this.name, required this.isRemote});
+
+  @override
+  int get hashCode => name.hashCode ^ isRemote.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is BranchInfo &&
+          runtimeType == other.runtimeType &&
+          name == other.name &&
+          isRemote == other.isRemote;
+}
+
+/// A backend's connection health, streamed over `connection_feed`.
+class ConnectionStateDto {
+  final ConnectionStateKind kind;
+
+  /// Short user-facing note (`Degraded` only); empty otherwise.
+  final String reason;
+
+  const ConnectionStateDto({required this.kind, required this.reason});
+
+  @override
+  int get hashCode => kind.hashCode ^ reason.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ConnectionStateDto &&
+          runtimeType == other.runtimeType &&
+          kind == other.kind &&
+          reason == other.reason;
+}
+
+/// Which kind of [`ConnectionStateDto`] this is (flattens the data-carrying
+/// [`ConnectionState`]); `reason` is populated only for `Degraded`.
+enum ConnectionStateKind { connecting, connected, degraded }
+
+class CreateOptions {
+  final String defaultProgram;
+  final List<ProgramInfo> programs;
+  final List<String> sections;
+
+  const CreateOptions({
+    required this.defaultProgram,
+    required this.programs,
+    required this.sections,
+  });
+
+  @override
+  int get hashCode =>
+      defaultProgram.hashCode ^ programs.hashCode ^ sections.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CreateOptions &&
+          runtimeType == other.runtimeType &&
+          defaultProgram == other.defaultProgram &&
+          programs == other.programs &&
+          sections == other.sections;
+}
+
+/// Numeric diff counts. `usize` → `u32` (matching `api::review`'s line numbers).
+class DiffStatDto {
+  final int filesChanged;
+  final int linesAdded;
+  final int linesRemoved;
+
+  const DiffStatDto({
+    required this.filesChanged,
+    required this.linesAdded,
+    required this.linesRemoved,
+  });
+
+  @override
+  int get hashCode =>
+      filesChanged.hashCode ^ linesAdded.hashCode ^ linesRemoved.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is DiffStatDto &&
+          runtimeType == other.runtimeType &&
+          filesChanged == other.filesChanged &&
+          linesAdded == other.linesAdded &&
+          linesRemoved == other.linesRemoved;
+}
+
+enum OperationKind { cascade, pushStack }
+
+/// Terminal result of a stack operation. `detail` is the human summary
+/// (`Succeeded`/`Paused`) or the error message (`Failed`).
+class OperationOutcomeDto {
+  final OperationOutcomeKind kind;
+  final String detail;
+
+  const OperationOutcomeDto({required this.kind, required this.detail});
+
+  @override
+  int get hashCode => kind.hashCode ^ detail.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is OperationOutcomeDto &&
+          runtimeType == other.runtimeType &&
+          kind == other.kind &&
+          detail == other.detail;
+}
+
+/// Which kind of [`OperationOutcomeDto`] this is (flattens the data-carrying
+/// [`OperationOutcome`]). `Paused` only occurs for a cascade.
+enum OperationOutcomeKind { succeeded, paused, failed }
+
+/// One recent cascade / push-stack operation. `id` is monotonic per process.
+class OperationStatusDto {
+  final BigInt id;
+  final OperationKind kind;
+  final OperationOutcomeDto outcome;
+  final DateTime? finishedAt;
+
+  const OperationStatusDto({
+    required this.id,
+    required this.kind,
+    required this.outcome,
+    this.finishedAt,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^ kind.hashCode ^ outcome.hashCode ^ finishedAt.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is OperationStatusDto &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          kind == other.kind &&
+          outcome == other.outcome &&
+          finishedAt == other.finishedAt;
+}
+
 enum PrState { open, closed, merged }
+
+/// Preview payload for a session or project: pane/shell snapshots plus the diff
+/// text, its one-line stat, and structured counts.
+class PreviewDataDto {
+  final String? pane;
+  final String diffText;
+  final String? diffStat;
+  final DiffStatDto? stats;
+  final String? shell;
+
+  const PreviewDataDto({
+    this.pane,
+    required this.diffText,
+    this.diffStat,
+    this.stats,
+    this.shell,
+  });
+
+  @override
+  int get hashCode =>
+      pane.hashCode ^
+      diffText.hashCode ^
+      diffStat.hashCode ^
+      stats.hashCode ^
+      shell.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PreviewDataDto &&
+          runtimeType == other.runtimeType &&
+          pane == other.pane &&
+          diffText == other.diffText &&
+          diffStat == other.diffStat &&
+          stats == other.stats &&
+          shell == other.shell;
+}
+
+/// A launch program option. Mirrored (not a DTO) so it can also be *constructed*
+/// on the Dart side and passed straight back to `set_programs`.
+class ProgramInfo {
+  final String label;
+  final String command;
+
+  const ProgramInfo({required this.label, required this.command});
+
+  @override
+  int get hashCode => label.hashCode ^ command.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ProgramInfo &&
+          runtimeType == other.runtimeType &&
+          label == other.label &&
+          command == other.command;
+}
 
 class ProjectId {
   final UuidValue field0;
@@ -27,7 +283,113 @@ class ProjectId {
           field0 == other.field0;
 }
 
+/// A project (git repo). `repo_path` is flattened `PathBuf` → `String` (matching
+/// `SessionInfo.worktree_path`), which frb transfers cleanly.
+class ProjectInfoDto {
+  final ProjectId id;
+  final String name;
+  final String repoPath;
+  final String mainBranch;
+  final List<SessionId> sessionIds;
+
+  const ProjectInfoDto({
+    required this.id,
+    required this.name,
+    required this.repoPath,
+    required this.mainBranch,
+    required this.sessionIds,
+  });
+
+  @override
+  int get hashCode =>
+      id.hashCode ^
+      name.hashCode ^
+      repoPath.hashCode ^
+      mainBranch.hashCode ^
+      sessionIds.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ProjectInfoDto &&
+          runtimeType == other.runtimeType &&
+          id == other.id &&
+          name == other.name &&
+          repoPath == other.repoPath &&
+          mainBranch == other.mainBranch &&
+          sessionIds == other.sessionIds;
+}
+
+/// One project's pull status — the flattened form of the snapshot's
+/// `BTreeMap<ProjectId, PullStatus>` (frb doesn't render maps).
+class ProjectPullDto {
+  final ProjectId projectId;
+  final PullStatusDto status;
+
+  const ProjectPullDto({required this.projectId, required this.status});
+
+  @override
+  int get hashCode => projectId.hashCode ^ status.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ProjectPullDto &&
+          runtimeType == other.runtimeType &&
+          projectId == other.projectId &&
+          status == other.status;
+}
+
+enum PullBlockReason { dirty, diverged, worktreeConflict }
+
+/// Outcome of a project's most recent background pull.
+class PullStatusDto {
+  final PullStatusKind kind;
+  final PullBlockReason? blockedReason;
+
+  const PullStatusDto({required this.kind, this.blockedReason});
+
+  @override
+  int get hashCode => kind.hashCode ^ blockedReason.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is PullStatusDto &&
+          runtimeType == other.runtimeType &&
+          kind == other.kind &&
+          blockedReason == other.blockedReason;
+}
+
+/// Which kind of [`PullStatusDto`] this is (flattens the data-carrying
+/// [`PullStatus`]); `blocked_reason` is populated only for `Blocked`.
+enum PullStatusKind { advanced, upToDate, blocked, softFail }
+
 enum ReviewDecision { reviewRequired, approved, changesRequested }
+
+class ServerStatus {
+  final bool ghAvailable;
+  final bool tmuxOk;
+  final String version;
+
+  const ServerStatus({
+    required this.ghAvailable,
+    required this.tmuxOk,
+    required this.version,
+  });
+
+  @override
+  int get hashCode => ghAvailable.hashCode ^ tmuxOk.hashCode ^ version.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is ServerStatus &&
+          runtimeType == other.runtimeType &&
+          ghAvailable == other.ghAvailable &&
+          tmuxOk == other.tmuxOk &&
+          version == other.version;
+}
 
 class SessionDetail {
   final SessionInfo info;
@@ -206,4 +568,49 @@ enum SessionStatus {
   merging,
   cascadePaused,
   pushing,
+}
+
+/// A single snapshot of everything the session tree renders. The `BTreeMap`
+/// pull statuses are flattened to a `Vec`; every data enum is flattened above.
+class WorkspaceSnapshotDto {
+  final List<ProjectInfoDto> projects;
+  final List<SessionInfo> sessions;
+  final SessionId? cascadePaused;
+  final List<SessionId> pendingCommentSessions;
+  final List<ProjectPullDto> projectPull;
+  final List<OperationStatusDto> operations;
+  final ServerStatus server;
+
+  const WorkspaceSnapshotDto({
+    required this.projects,
+    required this.sessions,
+    this.cascadePaused,
+    required this.pendingCommentSessions,
+    required this.projectPull,
+    required this.operations,
+    required this.server,
+  });
+
+  @override
+  int get hashCode =>
+      projects.hashCode ^
+      sessions.hashCode ^
+      cascadePaused.hashCode ^
+      pendingCommentSessions.hashCode ^
+      projectPull.hashCode ^
+      operations.hashCode ^
+      server.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is WorkspaceSnapshotDto &&
+          runtimeType == other.runtimeType &&
+          projects == other.projects &&
+          sessions == other.sessions &&
+          cascadePaused == other.cascadePaused &&
+          pendingCommentSessions == other.pendingCommentSessions &&
+          projectPull == other.projectPull &&
+          operations == other.operations &&
+          server == other.server;
 }

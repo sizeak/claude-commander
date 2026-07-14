@@ -235,25 +235,6 @@ pub enum AttachTarget {
     LocalName(String),
 }
 
-/// Adapts a backend + session id to the attach loop's
-/// [`ImagePasteSink`](crate::tmux::ImagePasteSink): a remote attach captures the
-/// operator's local clipboard image and uploads it through the owning backend's
-/// `paste_image` route, which writes it server-side and injects the path.
-struct BackendImagePaste {
-    backend: Arc<dyn CommanderBackend>,
-    id: SessionId,
-}
-
-#[async_trait::async_trait]
-impl crate::tmux::ImagePasteSink for BackendImagePaste {
-    async fn upload(&self, png: Vec<u8>) -> std::result::Result<(), String> {
-        self.backend
-            .paste_image(self.id, png)
-            .await
-            .map_err(|e| e.to_string())
-    }
-}
-
 /// Minimum left pane width as a percentage of the content area
 const MIN_LEFT_PANE_PCT: u16 = 15;
 /// Maximum left pane width as a percentage of the content area
@@ -483,6 +464,12 @@ pub enum PaletteMode {
     /// Remote-server picker for the remove-server flow: one entry per
     /// configured `[[remote_servers]]`; selecting one opens a confirm modal.
     RemoteServerPicker,
+    /// Program (agent) picker for a specific session. The palette lists the
+    /// owning backend's configured programs; selecting one opens a confirm modal
+    /// that changes the session's program and relaunches it.
+    ProgramPicker {
+        session_id: SessionId,
+    },
 }
 
 /// A row in the quick-switch palette — either an open session, a
@@ -504,6 +491,15 @@ pub enum QuickSwitchItem {
     RemoteServerRemove {
         name: String,
         /// Pre-formatted display label (`name (url)`).
+        label: String,
+    },
+    /// Selecting this row opens a confirm modal to change `session_id`'s program
+    /// to `program` and relaunch it (program-picker palette mode).
+    ProgramChange {
+        session_id: SessionId,
+        /// The launch command to switch to.
+        program: String,
+        /// Pre-formatted display label.
         label: String,
     },
 }
@@ -1043,7 +1039,7 @@ impl ProjectPicker {
                 })
                 .collect();
             // Highest score first; ties keep the original (name-sorted) order.
-            scored.sort_by(|a, b| b.1.cmp(&a.1));
+            scored.sort_by_key(|b| std::cmp::Reverse(b.1));
             self.filtered = scored.into_iter().map(|(i, _)| i).collect();
         }
         self.selected = prev_id
@@ -1097,6 +1093,11 @@ pub enum ConfirmAction {
     RestartSession {
         session_id: SessionId,
     },
+    /// Change a session's program (agent) to `program` and relaunch it fresh.
+    ChangeProgram {
+        session_id: SessionId,
+        program: String,
+    },
     RemoveProject {
         project_id: ProjectId,
     },
@@ -1128,8 +1129,18 @@ pub struct AppUiState {
     pub right_pane_view: RightPaneView,
     /// Current modal
     pub modal: Modal,
-    /// Session list items (flattened hierarchy)
+    /// Session list items (flattened hierarchy). The first `recents_len` items
+    /// form the pinned "Recent" block (header + shortcut rows + divider) that
+    /// renders in a fixed panel above the scrolling list; the rest render in
+    /// the scrollable main list. `0` when there is no recents block.
     pub list_items: Vec<SessionListItem>,
+    /// Number of leading `list_items` that make up the pinned recents block.
+    pub recents_len: usize,
+    /// Persisted scroll offset of the main (scrolling) list — the item index,
+    /// relative to `list_items[recents_len..]`, shown at the top of the list
+    /// area. Kept across frames so the main list remembers its scroll position
+    /// while the recents panel stays pinned. ratatui updates it each render.
+    pub main_list_offset: usize,
     /// Preview content
     pub preview_content: String,
     /// Shell pane state
@@ -1248,6 +1259,17 @@ pub struct AppUiState {
     /// (The project-pull scheduler state that used to sit alongside this
     /// moved into `CommanderService`'s background tasks.)
     pub lfs_pull_in_flight: std::collections::HashSet<SessionId>,
+    /// Program choices for the change-program palette (`ProgramPicker` mode).
+    /// Re-seeded from local config each time the palette opens and replaced by
+    /// the owning backend's list once `ProgramChoicesLoaded` arrives for a remote
+    /// session. The refilter rebuilds the palette rows from this. Only read while
+    /// the `ProgramPicker` palette is open, so a stale value between opens is
+    /// inert (not cleared on close).
+    pub program_picker_choices: Vec<crate::config::ProgramEntry>,
+    /// The current program of the session the change-program palette targets, so
+    /// its row can be flagged. Re-set each time the palette opens; like
+    /// `program_picker_choices`, only read while that palette is open.
+    pub program_picker_current: String,
 }
 
 impl Default for AppUiState {
@@ -1264,6 +1286,8 @@ impl Default for AppUiState {
             right_pane_view: RightPaneView::default(),
             modal: Modal::None,
             list_items: Vec::new(),
+            recents_len: 0,
+            main_list_offset: 0,
             preview_content: String::new(),
             diff_info: Arc::new(DiffInfo::empty()),
             status_message: None, // (message, expiry)
@@ -1302,6 +1326,8 @@ impl Default for AppUiState {
             stack_chain: Vec::new(),
             project_pull_blocked: HashMap::new(),
             lfs_pull_in_flight: std::collections::HashSet::new(),
+            program_picker_choices: Vec::new(),
+            program_picker_current: String::new(),
         }
     }
 }
@@ -1329,6 +1355,7 @@ impl AppUiState {
             | BindableAction::DeleteSession
             | BindableAction::RenameSession
             | BindableAction::RestartSession
+            | BindableAction::ChangeProgram
             | BindableAction::ToggleKeepAlive
             | BindableAction::OpenPullRequest
             | BindableAction::OpenReviewDiff
@@ -2322,11 +2349,10 @@ impl App {
                                     } => self.backend(session.backend).and_then(|h| {
                                         h.backend.capabilities().client_side_image_paste.then(
                                             || {
-                                                Arc::new(BackendImagePaste {
-                                                    backend: h.backend.clone(),
-                                                    id: session.id,
-                                                })
-                                                    as Arc<dyn crate::tmux::ImagePasteSink>
+                                                crate::tmux::BackendImagePaste::sink(
+                                                    h.backend.clone(),
+                                                    session.id,
+                                                )
                                             },
                                         )
                                     }),

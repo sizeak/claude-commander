@@ -193,6 +193,52 @@ fn make_worktree_with_id(id: SessionId) -> SessionListItem {
     }
 }
 
+fn make_recent_session(id: SessionId) -> SessionListItem {
+    SessionListItem::RecentSession {
+        session: crate::backend::SessionRef::local(id),
+        project_id: ProjectId::new(),
+        title: "recent".to_string(),
+        status: SessionStatus::Running,
+        agent_state: None,
+        unread: false,
+    }
+}
+
+#[test]
+fn test_recent_rows_do_not_shift_session_numbers() {
+    // A recents block (header + shortcut rows + divider) sits above the real
+    // tree. Those rows must NOT be counted as worktrees, so the session
+    // numbers still map to the real `Worktree` rows exactly as they would
+    // without the block.
+    let real_a = SessionId::new();
+    let real_b = SessionId::new();
+    let items = vec![
+        SessionListItem::RecentsHeader,
+        make_recent_session(real_b),
+        make_recent_session(real_a),
+        SessionListItem::Spacer,
+        make_project(),
+        make_worktree_with_id(real_a), // session #1
+        make_worktree_with_id(real_b), // session #2
+    ];
+    // #1 and #2 resolve to the real worktree rows, not the recent shortcuts.
+    assert_eq!(session_number_to_list_index(&items, 1), Some(5));
+    assert_eq!(session_number_to_list_index(&items, 2), Some(6));
+    // Only two sessions exist despite four session-bearing rows on screen.
+    assert_eq!(session_number_to_list_index(&items, 3), None);
+}
+
+#[test]
+fn test_recents_header_and_divider_are_not_selectable() {
+    assert!(!SessionListItem::RecentsHeader.is_selectable());
+    assert!(!SessionListItem::Spacer.is_selectable());
+    // A recent-session row is a navigable shortcut.
+    assert!(make_recent_session(SessionId::new()).is_selectable());
+    // Neither the header nor a recent row is a group-jump target.
+    assert!(!SessionListItem::RecentsHeader.is_group_header());
+    assert!(!make_recent_session(SessionId::new()).is_group_header());
+}
+
 #[test]
 fn test_session_number_to_list_index_basic() {
     let items = vec![
@@ -966,6 +1012,26 @@ fn test_toggle_commander_enabled_via_bool_path() {
     assert!(app.config.commander_enabled);
     app.apply_bool_setting("commander_enabled", false);
     assert!(!app.config.commander_enabled);
+}
+
+#[test]
+fn test_hide_empty_sections_toggle_and_apply() {
+    let mut app = make_test_app();
+    // Default is on.
+    assert!(app.config.hide_empty_sections);
+    // Row is present with correct default value.
+    let rows = app.build_settings_rows(SettingsTab::General);
+    let row = rows
+        .iter()
+        .find(|r| r.field_key == "hide_empty_sections")
+        .unwrap_or_else(|| panic!("missing hide_empty_sections row"));
+    assert_eq!(row.kind, SettingsRowKind::Toggle(true));
+    // Apply false via bool path (what the toggle uses).
+    app.apply_bool_setting("hide_empty_sections", false);
+    assert!(!app.config.hide_empty_sections);
+    // Flip back.
+    app.apply_bool_setting("hide_empty_sections", true);
+    assert!(app.config.hide_empty_sections);
 }
 
 #[test]
@@ -5026,6 +5092,179 @@ async fn restart_confirm_spawns_against_owning_backend_and_toasts() {
         .clone()
         .expect("a status toast after restart");
     assert!(msg.contains("restarted"), "toast: {msg}");
+}
+
+#[tokio::test]
+async fn change_program_confirm_spawns_against_owning_backend_and_routes_program() {
+    // Confirming a program change must spawn `change_program` on the OWNING
+    // backend (not the local one) with the chosen command, off the event loop.
+    let (app, remote_sid) = app_with_remote_session().await;
+    let mut app = app;
+
+    app.handle_confirm(super::ConfirmAction::ChangeProgram {
+        session_id: remote_sid,
+        program: "codex".to_string(),
+    })
+    .await;
+
+    // Drive the completion event the spawned change posts (reuses RestartFinished).
+    loop {
+        match app.event_loop.next().await.expect("a change-program event") {
+            AppEvent::StateUpdate(su @ StateUpdate::RestartFinished { .. }) => {
+                app.handle_state_update(su).await;
+                break;
+            }
+            _ => continue,
+        }
+    }
+
+    assert_eq!(
+        remote_mock(&app, BackendId(1)).program_changes(),
+        vec![(remote_sid, "codex".to_string())],
+        "change_program must route to the owning backend with the chosen program"
+    );
+}
+
+#[tokio::test]
+async fn program_picker_items_flag_current_and_filter() {
+    // `gather_program_picker_items` flags the row matching the session's current
+    // program and filters rows by a label/command substring.
+    let (app, sid) = app_with_remote_session().await;
+    let mut app = app;
+    app.ui_state.program_picker_current = "codex".to_string();
+    app.ui_state.program_picker_choices = vec![
+        crate::config::ProgramEntry {
+            label: "Claude".to_string(),
+            command: "claude".to_string(),
+        },
+        crate::config::ProgramEntry {
+            label: "Codex".to_string(),
+            command: "codex".to_string(),
+        },
+        crate::config::ProgramEntry {
+            label: "OpenCode".to_string(),
+            command: "opencode".to_string(),
+        },
+    ];
+
+    let all = app.gather_program_picker_items(sid, "");
+    assert_eq!(all.len(), 3, "no filter lists every choice");
+    let codex = all
+        .iter()
+        .find_map(|i| match i {
+            QuickSwitchItem::ProgramChange { program, label, .. } if program == "codex" => {
+                Some(label.clone())
+            }
+            _ => None,
+        })
+        .expect("a codex row");
+    assert!(
+        codex.contains("current"),
+        "current program is flagged: {codex}"
+    );
+
+    let filtered = app.gather_program_picker_items(sid, "open");
+    assert_eq!(filtered.len(), 1, "substring filter narrows the list");
+    match &filtered[0] {
+        QuickSwitchItem::ProgramChange { program, .. } => assert_eq!(program, "opencode"),
+        other => panic!("expected a ProgramChange row, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn program_choices_loaded_replaces_only_for_matching_open_palette() {
+    // The remote program-list load must replace the palette's fallback choices
+    // only when the change-program palette is still open for the SAME session.
+    let (app, sid) = app_with_remote_session().await;
+    let mut app = app;
+    app.ui_state.program_picker_choices = vec![crate::config::ProgramEntry {
+        label: "Claude".to_string(),
+        command: "claude".to_string(),
+    }];
+    app.ui_state.modal = Modal::QuickSwitch {
+        mode: super::PaletteMode::ProgramPicker { session_id: sid },
+        query: super::Input::default(),
+        matches: Vec::new(),
+        selected_idx: 0,
+        scroll: 0,
+    };
+
+    // A load for a DIFFERENT session is dropped.
+    app.handle_state_update(StateUpdate::ProgramChoicesLoaded {
+        session_id: SessionId::new(),
+        choices: vec![crate::config::ProgramEntry {
+            label: "Codex".to_string(),
+            command: "codex".to_string(),
+        }],
+    })
+    .await;
+    assert_eq!(
+        app.ui_state.program_picker_choices.len(),
+        1,
+        "a load for another session must not touch these choices"
+    );
+
+    // A load for the open palette's session replaces the choices and rebuilds rows.
+    app.handle_state_update(StateUpdate::ProgramChoicesLoaded {
+        session_id: sid,
+        choices: vec![
+            crate::config::ProgramEntry {
+                label: "Codex".to_string(),
+                command: "codex".to_string(),
+            },
+            crate::config::ProgramEntry {
+                label: "OpenCode".to_string(),
+                command: "opencode".to_string(),
+            },
+        ],
+    })
+    .await;
+    assert_eq!(app.ui_state.program_picker_choices.len(), 2);
+    match &app.ui_state.modal {
+        Modal::QuickSwitch { matches, .. } => {
+            assert_eq!(matches.len(), 2, "rows rebuilt from the loaded choices")
+        }
+        other => panic!("expected the palette to stay open, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn selecting_program_row_opens_change_program_confirm() {
+    // Selecting a program row in the change-program palette must open a confirm
+    // modal carrying the target session and chosen program (not apply directly).
+    let (app, remote_sid) = app_with_remote_session().await;
+    let mut app = app;
+
+    app.ui_state.modal = Modal::QuickSwitch {
+        mode: super::PaletteMode::ProgramPicker {
+            session_id: remote_sid,
+        },
+        query: super::Input::default(),
+        matches: vec![QuickSwitchItem::ProgramChange {
+            session_id: remote_sid,
+            program: "opencode".to_string(),
+            label: "opencode".to_string(),
+        }],
+        selected_idx: 0,
+        scroll: 0,
+    };
+
+    app.activate_quick_switch_selection().await;
+
+    match &app.ui_state.modal {
+        Modal::Confirm {
+            on_confirm:
+                super::ConfirmAction::ChangeProgram {
+                    session_id,
+                    program,
+                },
+            ..
+        } => {
+            assert_eq!(*session_id, remote_sid);
+            assert_eq!(program, "opencode");
+        }
+        other => panic!("expected ChangeProgram confirm modal, got {other:?}"),
+    }
 }
 
 #[tokio::test]

@@ -18,31 +18,20 @@ flutter_rust_bridge = { version = "=2.11.1", features = ["chrono", "uuid"] }
 # responses into these exact types, so drift fails loudly in Rust. The mirrors
 # in `api::mirrors` re-export these for flutter_rust_bridge.
 claude-commander-protocol = { path = "../../crates/claude-commander-protocol" }
+# The pure HTTP + WebSocket transport (RemoteClient + Poller + attach). The
+# cdylib now drives this instead of hand-rolling reqwest/tungstenite, so the
+# whole server surface reaches Dart through one wrapped, opaque per-server handle.
+claude-commander-client = { path = "../../crates/claude-commander-client" }
 # Same major versions as the protocol crate so the `Uuid`/`DateTime` in the
 # mirrors are the *same* types cargo resolves for the protocol DTOs.
 uuid = { version = "1.23", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
-# HTTP client. rustls (not OpenSSL) keeps Android/iOS cross-compiles painless.
-reqwest = { version = "0.13", default-features = false, features = [
-    "blocking",
-    "json",
-    # reqwest 0.13 gates `RequestBuilder::query` behind this feature (it was
-    # always available in 0.12); `review.rs` builds blob URLs with `.query(..)`.
-    "query",
-    "rustls",
-] }
 serde_json = "1"
 anyhow = "1"
-# Live terminal bridge (Phase 3 spike): an async WS to the server's /ws/attach.
-# A small multi-thread tokio runtime drives the socket off the Dart isolate.
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
-# rustls (webpki roots) to match reqwest's TLS stack and keep mobile cross-builds
-# painless — no OpenSSL.
-tokio-tungstenite = { version = "0.29", default-features = false, features = [
-    "connect",
-    "rustls-tls-webpki-roots",
-] }
-futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+# Drives the RemoteClient's async calls from the synchronous frb worker threads
+# (a process-wide multi-thread runtime), plus the attach pump + poller tasks. The
+# reqwest/tungstenite/futures-util transport deps moved to claude-commander-client.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util"] }
 
 [dev-dependencies]
 # Host-only: the shared hermetic-server + git/tmux harness, plus core for session

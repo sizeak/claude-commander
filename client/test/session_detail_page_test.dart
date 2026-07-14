@@ -1,7 +1,10 @@
 import 'dart:async';
 
 import 'package:claude_commander_client/pages/session_detail_page.dart';
+import 'package:claude_commander_client/pages/terminal_page.dart';
 import 'package:claude_commander_client/src/rust/api/mirrors.dart';
+import 'package:claude_commander_client/state/commander_store.dart';
+import 'package:claude_commander_client/state/commander_store_scope.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -10,41 +13,47 @@ import 'support/fixtures.dart';
 
 void main() {
   late FakeCommanderApi api;
+  late CommanderStore store;
 
-  setUp(() => api = FakeCommanderApi());
+  setUp(() {
+    api = FakeCommanderApi();
+    store = CommanderStore(api: api, config: testConfig);
+  });
 
-  Widget wrap(SessionInfo session) => MaterialApp(
-    home: SessionDetailPage(api: api, config: testConfig, session: session),
-  );
+  tearDown(() => store.dispose());
 
-  // The page polls on a periodic Timer, so pumpAndSettle never quiets. Pump a
-  // couple of frames to let the first poll's Future resolve, then stop.
-  Future<void> settleFirstPoll(WidgetTester tester) async {
-    await tester.pump(); // build
-    await tester.pump(const Duration(milliseconds: 10)); // first poll resolves
+  Widget scope(Widget child) =>
+      CommanderStoreScope(store: store, child: MaterialApp(home: child));
+
+  Widget wrap(SessionInfo session) => scope(SessionDetailPage(session: session));
+
+  /// Connect the store (so the page has a live handle), then pump the page and
+  /// let the initial on-demand detail fetch resolve.
+  Future<void> pump(WidgetTester tester, SessionInfo session) async {
+    await store.connect();
+    await tester.pumpWidget(wrap(session));
+    await tester.pumpAndSettle();
   }
 
-  testWidgets('renders detail from the fake', (tester) async {
+  testWidgets('renders detail from the store', (tester) async {
     api.getSessionDetailResponse = sessionDetail(
       info: sessionInfo(title: 'Detail me', status: SessionStatus.running),
       diffStat: '3 files changed',
       paneContent: 'hello world',
     );
-    await tester.pumpWidget(wrap(sessionInfo(title: 'Detail me')));
-    await settleFirstPoll(tester);
+    await pump(tester, sessionInfo(title: 'Detail me'));
 
     expect(find.text('Detail me'), findsWidgets);
     expect(find.text('3 files changed'), findsOneWidget);
     expect(find.text('hello world'), findsOneWidget);
   });
 
-  testWidgets('a deleted session shows a gone state and stops polling', (
+  testWidgets('a deleted session shows a gone state and stops fetching', (
     tester,
   ) async {
     // getSessionDetail returns null (404 → session gone by design).
     api.getSessionDetailResponse = null;
-    await tester.pumpWidget(wrap(sessionInfo(title: 'Gone one')));
-    await settleFirstPoll(tester);
+    await pump(tester, sessionInfo(title: 'Gone one'));
 
     expect(find.textContaining('no longer exists'), findsOneWidget);
     // The lifecycle actions are gone (or disabled) — no live controls.
@@ -52,9 +61,10 @@ void main() {
     expect(find.widgetWithText(FilledButton, 'Restart'), findsNothing);
     expect(find.widgetWithText(FilledButton, 'Delete'), findsNothing);
 
-    // The poll timer is cancelled: no further getSessionDetail calls fire.
+    // Once gone, a change-feed tick must not fetch detail again.
     final callsSoFar = api.countOf('getSessionDetail');
-    await tester.pump(const Duration(seconds: 5));
+    api.emitChange();
+    await tester.pumpAndSettle();
     expect(api.countOf('getSessionDetail'), callsSoFar);
   });
 
@@ -84,8 +94,7 @@ void main() {
   ) async {
     final info = sessionInfo(status: SessionStatus.running);
     api.getSessionDetailResponse = sessionDetail(info: info);
-    await tester.pumpWidget(wrap(info));
-    await settleFirstPoll(tester);
+    await pump(tester, info);
 
     await confirmAction(tester, button: 'Kill', confirmLabel: 'Kill');
     expect(api.countOf('killSession'), 1);
@@ -96,8 +105,7 @@ void main() {
   ) async {
     final info = sessionInfo(status: SessionStatus.running);
     api.getSessionDetailResponse = sessionDetail(info: info);
-    await tester.pumpWidget(wrap(info));
-    await settleFirstPoll(tester);
+    await pump(tester, info);
 
     await confirmAction(tester, button: 'Restart', confirmLabel: 'Restart');
     expect(api.countOf('restartSession'), 1);
@@ -106,21 +114,18 @@ void main() {
   testWidgets('delete confirms, calls deleteSession, and pops', (tester) async {
     final info = sessionInfo(status: SessionStatus.running);
     api.getSessionDetailResponse = sessionDetail(info: info);
+    await store.connect();
     // Push the detail page as a second route (over a placeholder home) so the
     // delete-pop has an underlying route to return to.
     await tester.pumpWidget(
-      MaterialApp(
-        home: Builder(
+      scope(
+        Builder(
           builder: (context) => Scaffold(
             body: Center(
               child: ElevatedButton(
                 onPressed: () => Navigator.of(context).push(
                   MaterialPageRoute(
-                    builder: (_) => SessionDetailPage(
-                      api: api,
-                      config: testConfig,
-                      session: info,
-                    ),
+                    builder: (_) => SessionDetailPage(session: info),
                   ),
                 ),
                 child: const Text('open'),
@@ -131,7 +136,7 @@ void main() {
       ),
     );
     await tester.tap(find.text('open'));
-    await settleFirstPoll(tester);
+    await tester.pumpAndSettle();
 
     await confirmAction(tester, button: 'Delete', confirmLabel: 'Delete');
     expect(api.countOf('deleteSession'), 1);
@@ -150,13 +155,17 @@ void main() {
     gate.getSessionDetailResponse = sessionDetail(
       info: sessionInfo(status: SessionStatus.running),
     );
+    final gstore = CommanderStore(api: gate, config: testConfig);
+    addTearDown(gstore.dispose);
+    await gstore.connect();
     final info = sessionInfo(status: SessionStatus.running);
     await tester.pumpWidget(
-      MaterialApp(
-        home: SessionDetailPage(api: gate, config: testConfig, session: info),
+      CommanderStoreScope(
+        store: gstore,
+        child: MaterialApp(home: SessionDetailPage(session: info)),
       ),
     );
-    await settleFirstPoll(tester);
+    await tester.pumpAndSettle();
 
     // Confirm kill; the completer is not yet complete, so the action hangs.
     await tester.tap(find.widgetWithText(FilledButton, 'Kill'));
@@ -185,6 +194,151 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 10));
   });
+
+  testWidgets('rename edits the title via renameSession', (tester) async {
+    final info = sessionInfo(title: 'Old', status: SessionStatus.running);
+    api.getSessionDetailResponse = sessionDetail(info: info);
+    await pump(tester, info);
+
+    await tester.tap(find.widgetWithText(OutlinedButton, 'Rename'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Title'),
+      'New name',
+    );
+    await tester.tap(
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.widgetWithText(FilledButton, 'Rename'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(api.countOf('renameSession'), 1);
+    expect(api.lastCall('renameSession')!.args['title'], 'New name');
+  });
+
+  testWidgets('setting a section calls setSection', (tester) async {
+    final info = sessionInfo(status: SessionStatus.running);
+    api.getSessionDetailResponse = sessionDetail(info: info);
+    await pump(tester, info);
+
+    await tester.tap(find.widgetWithText(OutlinedButton, 'Section'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+      find.widgetWithText(TextField, 'Section'),
+      'review',
+    );
+    await tester.tap(
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.widgetWithText(FilledButton, 'Save'),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(api.lastCall('setSection')!.args['section'], 'review');
+  });
+
+  testWidgets('toggling keep-alive calls toggleKeepAlive', (tester) async {
+    final info = sessionInfo(status: SessionStatus.running);
+    api.getSessionDetailResponse = sessionDetail(info: info);
+    await pump(tester, info);
+
+    await tester.tap(find.widgetWithText(FilterChip, 'Keep alive'));
+    await tester.pumpAndSettle();
+
+    expect(api.countOf('toggleKeepAlive'), 1);
+  });
+
+  testWidgets('opening an unread session marks it read once', (tester) async {
+    final info = sessionInfo(unread: true);
+    api.getSessionDetailResponse = sessionDetail(info: info);
+    await pump(tester, info);
+
+    expect(api.countOf('markRead'), 1);
+
+    // A subsequent change-feed tick must not re-mark it read.
+    api.emitChange();
+    await tester.pumpAndSettle();
+    expect(api.countOf('markRead'), 1);
+  });
+
+  testWidgets('opening an already-read session does not mark read', (
+    tester,
+  ) async {
+    final info = sessionInfo(unread: false);
+    api.getSessionDetailResponse = sessionDetail(info: info);
+    await pump(tester, info);
+
+    expect(api.countOf('markRead'), 0);
+  });
+
+  testWidgets('cascade merge confirms, calls cascadeMerge, reports outcome', (
+    tester,
+  ) async {
+    final info = sessionInfo(status: SessionStatus.running);
+    api.getSessionDetailResponse = sessionDetail(info: info);
+    api.operationStatusResponse = OperationStatusDto(
+      id: BigInt.one,
+      kind: OperationKind.cascade,
+      outcome: const OperationOutcomeDto(
+        kind: OperationOutcomeKind.succeeded,
+        detail: '',
+      ),
+    );
+    await pump(tester, info);
+
+    await confirmAction(tester, button: 'Cascade merge', confirmLabel: 'Cascade');
+    expect(api.countOf('cascadeMerge'), 1);
+    expect(find.textContaining('Cascade merge succeeded'), findsOneWidget);
+  });
+
+  testWidgets('a paused cascade outcome is reported in the snackbar', (
+    tester,
+  ) async {
+    final info = sessionInfo(status: SessionStatus.running);
+    api.getSessionDetailResponse = sessionDetail(info: info);
+    api.operationStatusResponse = OperationStatusDto(
+      id: BigInt.one,
+      kind: OperationKind.cascade,
+      outcome: const OperationOutcomeDto(
+        kind: OperationOutcomeKind.paused,
+        detail: 'conflict in foo.rs',
+      ),
+    );
+    await pump(tester, info);
+
+    await confirmAction(tester, button: 'Cascade merge', confirmLabel: 'Cascade');
+    expect(
+      find.textContaining('Cascade merge paused: conflict in foo.rs'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('push stack confirms then calls pushStack', (tester) async {
+    final info = sessionInfo(status: SessionStatus.running);
+    api.getSessionDetailResponse = sessionDetail(info: info);
+    await pump(tester, info);
+
+    await confirmAction(tester, button: 'Push stack', confirmLabel: 'Push');
+    expect(api.countOf('pushStack'), 1);
+  });
+
+  testWidgets('the Shell action opens a shell terminal attach', (tester) async {
+    final info = sessionInfo(status: SessionStatus.running);
+    api.getSessionDetailResponse = sessionDetail(info: info);
+    await pump(tester, info);
+
+    await tester.tap(find.widgetWithText(OutlinedButton, 'Shell'));
+    await tester.pump();
+    // Let the pushed route build (and TerminalBody attach); avoid pumpAndSettle
+    // because the terminal's 1s throughput timer never settles.
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.byType(TerminalPage), findsOneWidget);
+    expect(api.lastCall('attachTerminal')!.args['kind'], AttachKind.shell);
+  });
 }
 
 /// A [FakeCommanderApi] whose `killSession` blocks on a completer, so a test can
@@ -195,11 +349,7 @@ class GatedCommanderApi extends FakeCommanderApi {
   void releaseKill() => _killGate.complete();
 
   @override
-  Future<void> killSession({
-    required String baseUrl,
-    required String token,
-    required String id,
-  }) async {
+  Future<void> killSession({required String handle, required String id}) async {
     calls.add(RecordedCall('killSession', {'id': id}));
     await _killGate.future;
   }
