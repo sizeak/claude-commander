@@ -191,9 +191,14 @@ async function refreshAll() {
       apiGet("/api/workspace"),
       apiGet("/api/agent-states").catch(() => ({ states: {} })),
     ]);
+    const prevAgents = state.agentStates;
     state.sessions = ws.sessions || [];
     state.projects = ws.projects || [];
     state.agentStates = (agents && agents.states) || {};
+    // Skip the first poll (no baseline) so we don't notify for pre-existing
+    // states on load.
+    if (agentsBaselined) notifyTransitions(prevAgents, state.agentStates);
+    agentsBaselined = true;
     setConn("ok", "connected");
     renderTree();
   } catch (e) {
@@ -203,6 +208,46 @@ async function refreshAll() {
 
 function agentStateFor(s) {
   return state.agentStates[s.id] || state.agentStates[s.session_id] || "unknown";
+}
+
+// ---- Desktop notifications (only while the page is open, e.g. another tab) ----
+
+let agentsBaselined = false;
+
+// Browsers only allow requesting permission from a user gesture, so ask on the
+// first click.
+function ensureNotifyPermission() {
+  if ("Notification" in window && Notification.permission === "default") {
+    Notification.requestPermission().catch(() => {});
+  }
+}
+document.addEventListener("click", ensureNotifyPermission, { once: true });
+
+// Notify when a session flips to needs-input or finished — but only while this
+// tab is backgrounded (if it's the active tab you can already see it).
+// Edge-triggered: fires once per transition.
+function notifyTransitions(prev, next) {
+  if (!("Notification" in window) || Notification.permission !== "granted") return;
+  if (document.visibilityState !== "hidden") return;
+  for (const [key, st] of Object.entries(next)) {
+    if (st === prev[key]) continue;
+    let msg = null;
+    if (st === "waiting_for_input") msg = "needs your input";
+    else if (st === "idle" && prev[key] === "working") msg = "finished";
+    if (!msg) continue;
+    const s = state.sessions.find((x) => x.id === key || x.session_id === key);
+    const id = s ? s.id : key;
+    const n = new Notification(`${s ? s.title : "Session"} — ${msg}`, {
+      body: s ? `${s.project_name} · ${s.branch}` : "",
+      tag: id, // replaces an earlier notification for the same session
+      renotify: true,
+    });
+    n.onclick = () => {
+      window.focus();
+      if (s) selectSession(id);
+      n.close();
+    };
+  }
 }
 
 // ---- Tree render ----
