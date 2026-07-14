@@ -1129,8 +1129,18 @@ pub struct AppUiState {
     pub right_pane_view: RightPaneView,
     /// Current modal
     pub modal: Modal,
-    /// Session list items (flattened hierarchy)
+    /// Session list items (flattened hierarchy). The first `recents_len` items
+    /// form the pinned "Recent" block (header + shortcut rows + divider) that
+    /// renders in a fixed panel above the scrolling list; the rest render in
+    /// the scrollable main list. `0` when there is no recents block.
     pub list_items: Vec<SessionListItem>,
+    /// Number of leading `list_items` that make up the pinned recents block.
+    pub recents_len: usize,
+    /// Persisted scroll offset of the main (scrolling) list — the item index,
+    /// relative to `list_items[recents_len..]`, shown at the top of the list
+    /// area. Kept across frames so the main list remembers its scroll position
+    /// while the recents panel stays pinned. ratatui updates it each render.
+    pub main_list_offset: usize,
     /// Preview content
     pub preview_content: String,
     /// Shell pane state
@@ -1276,6 +1286,8 @@ impl Default for AppUiState {
             right_pane_view: RightPaneView::default(),
             modal: Modal::None,
             list_items: Vec::new(),
+            recents_len: 0,
+            main_list_offset: 0,
             preview_content: String::new(),
             diff_info: Arc::new(DiffInfo::empty()),
             status_message: None, // (message, expiry)

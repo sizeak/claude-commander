@@ -597,6 +597,24 @@ pub enum SessionListItem {
     /// A blank spacer row for visual separation between sections.
     /// Not selectable.
     Spacer,
+    /// Label row heading the "Recent" block at the very top of the list.
+    /// A view over recently-attached sessions, independent of any backend.
+    /// Not selectable — the cursor skips it.
+    RecentsHeader,
+    /// A recent-session shortcut row in the top "Recent" block. It mirrors a
+    /// real [`Worktree`](Self::Worktree) row that still appears in its normal
+    /// place below; it carries the backend-qualified [`SessionRef`] so
+    /// selection and actions resolve to that same session. Its displayed
+    /// number and project colour are looked up from the real row at render
+    /// time, so they always match the session's usual position.
+    RecentSession {
+        session: crate::backend::SessionRef,
+        project_id: ProjectId,
+        title: String,
+        status: SessionStatus,
+        agent_state: Option<AgentState>,
+        unread: bool,
+    },
 }
 
 impl SessionListItem {
@@ -608,6 +626,8 @@ impl SessionListItem {
             Self::ServerHeader { backend, .. } => format!("server:{}", backend.0),
             Self::SectionHeader { name, .. } => format!("section:{}", name),
             Self::Spacer => "spacer".to_string(),
+            Self::RecentsHeader => "recents-header".to_string(),
+            Self::RecentSession { session, .. } => format!("recent:{}", session.id),
         }
     }
 
@@ -623,7 +643,7 @@ impl SessionListItem {
 
     /// Whether navigation/selection should land on this row.
     pub fn is_selectable(&self) -> bool {
-        !matches!(self, Self::Spacer)
+        !matches!(self, Self::Spacer | Self::RecentsHeader)
     }
 
     /// Whether this row begins a group — a project, section, or server header.

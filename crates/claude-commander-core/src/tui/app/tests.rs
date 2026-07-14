@@ -193,6 +193,52 @@ fn make_worktree_with_id(id: SessionId) -> SessionListItem {
     }
 }
 
+fn make_recent_session(id: SessionId) -> SessionListItem {
+    SessionListItem::RecentSession {
+        session: crate::backend::SessionRef::local(id),
+        project_id: ProjectId::new(),
+        title: "recent".to_string(),
+        status: SessionStatus::Running,
+        agent_state: None,
+        unread: false,
+    }
+}
+
+#[test]
+fn test_recent_rows_do_not_shift_session_numbers() {
+    // A recents block (header + shortcut rows + divider) sits above the real
+    // tree. Those rows must NOT be counted as worktrees, so the session
+    // numbers still map to the real `Worktree` rows exactly as they would
+    // without the block.
+    let real_a = SessionId::new();
+    let real_b = SessionId::new();
+    let items = vec![
+        SessionListItem::RecentsHeader,
+        make_recent_session(real_b),
+        make_recent_session(real_a),
+        SessionListItem::Spacer,
+        make_project(),
+        make_worktree_with_id(real_a), // session #1
+        make_worktree_with_id(real_b), // session #2
+    ];
+    // #1 and #2 resolve to the real worktree rows, not the recent shortcuts.
+    assert_eq!(session_number_to_list_index(&items, 1), Some(5));
+    assert_eq!(session_number_to_list_index(&items, 2), Some(6));
+    // Only two sessions exist despite four session-bearing rows on screen.
+    assert_eq!(session_number_to_list_index(&items, 3), None);
+}
+
+#[test]
+fn test_recents_header_and_divider_are_not_selectable() {
+    assert!(!SessionListItem::RecentsHeader.is_selectable());
+    assert!(!SessionListItem::Spacer.is_selectable());
+    // A recent-session row is a navigable shortcut.
+    assert!(make_recent_session(SessionId::new()).is_selectable());
+    // Neither the header nor a recent row is a group-jump target.
+    assert!(!SessionListItem::RecentsHeader.is_group_header());
+    assert!(!make_recent_session(SessionId::new()).is_group_header());
+}
+
 #[test]
 fn test_session_number_to_list_index_basic() {
     let items = vec![

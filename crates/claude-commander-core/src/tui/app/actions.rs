@@ -1264,9 +1264,13 @@ impl App {
                     SessionListItem::Worktree { id, .. } => {
                         project_names.insert(*id, current_project_name.clone());
                     }
+                    // Recent-block rows duplicate real worktree rows, which are
+                    // already scored below — skip them here.
                     SessionListItem::SectionHeader { .. }
                     | SessionListItem::ServerHeader { .. }
-                    | SessionListItem::Spacer => {}
+                    | SessionListItem::Spacer
+                    | SessionListItem::RecentsHeader
+                    | SessionListItem::RecentSession { .. } => {}
                 }
             }
 

@@ -610,6 +610,45 @@ impl App {
         // the tree renders exactly as a single-machine setup always has.
         let single_backend = self.backends.len() == 1;
         let mut items: Vec<SessionListItem> = Vec::new();
+
+        // Recent-sessions block, prepended above the per-backend tree and
+        // independent of any server. Each row is a shortcut to a session that
+        // still appears in its normal place below; its number and project
+        // colour are mirrored from the real row at render time. Sessions never
+        // attached (no `last_attached_at`) are excluded. `recent_sessions_limit
+        // == 0` hides the block entirely.
+        let recent_limit = self.config.recent_sessions_limit as usize;
+        if recent_limit > 0 {
+            let mut candidates: Vec<(chrono::DateTime<chrono::Utc>, SessionListItem)> = Vec::new();
+            for handle in &self.backends {
+                let agent_states = &handle.view.agent_states.states;
+                for s in &handle.view.snapshot.sessions {
+                    if let Some(at) = s.last_attached_at {
+                        candidates.push((
+                            at,
+                            SessionListItem::RecentSession {
+                                session: crate::backend::SessionRef::new(handle.id, s.session_id),
+                                project_id: s.project_id,
+                                title: s.title.clone(),
+                                status: s.status,
+                                agent_state: agent_states.get(&s.session_id).copied(),
+                                unread: s.unread,
+                            },
+                        ));
+                    }
+                }
+            }
+            let recents = order_recent(candidates, recent_limit);
+            if !recents.is_empty() {
+                items.push(SessionListItem::RecentsHeader);
+                items.extend(recents);
+                items.push(SessionListItem::Spacer);
+            }
+        }
+        // Everything pushed so far is the pinned recents block (header + rows +
+        // divider); the per-backend tree appended below is the scrolling list.
+        let recents_len = items.len();
+
         // A stale-server warning to surface once (deferred until after the loop
         // so `ui_state` isn't mutated while `self.backends` is borrowed). This
         // seam covers every snapshot-fold path by construction, since they all
@@ -711,18 +750,17 @@ impl App {
         let selectable: Vec<bool> = items.iter().map(|i| i.is_selectable()).collect();
         let group_starts: Vec<bool> = items.iter().map(|i| i.is_group_header()).collect();
         self.ui_state.list_items = items;
+        self.ui_state.recents_len = recents_len;
         // The footer's "resume cascade" hint shows if *any* backend is paused.
         self.ui_state.cascade_paused = self
             .backends
             .iter()
             .any(|h| h.view.snapshot.cascade_paused.is_some());
-        if matches!(self.ui_state.view_mode, ViewMode::ProjectGrouped) {
-            self.ui_state
-                .list_state
-                .set_item_count(self.ui_state.list_items.len());
-        } else {
-            self.ui_state.list_state.set_selectable(selectable);
-        }
+        // Always install the selectable mask: even ProjectGrouped now carries
+        // non-selectable rows (the recents header and its divider), which the
+        // old "all rows selectable" `set_item_count` path would let the cursor
+        // land on.
+        self.ui_state.list_state.set_selectable(selectable);
         self.ui_state.list_state.set_group_starts(group_starts);
 
         // Pre-compute stack chain for the selected session, from the snapshot of
@@ -830,7 +868,10 @@ impl App {
             }
             SessionListItem::SectionHeader { .. }
             | SessionListItem::ServerHeader { .. }
-            | SessionListItem::Spacer => false,
+            | SessionListItem::Spacer
+            // Recent rows are shortcuts; restore always lands on the real row.
+            | SessionListItem::RecentsHeader
+            | SessionListItem::RecentSession { .. } => false,
         };
         let owning_backend = |item: &SessionListItem| match item {
             SessionListItem::Worktree { id, .. } => Some(self.backend_of_session(*id)),
@@ -853,6 +894,22 @@ impl App {
             self.ui_state.list_state.select(Some(0));
         }
     }
+}
+
+/// Order recent-session candidates newest-attached first and cap at `limit`.
+/// Each candidate pairs its `last_attached_at` with the row to display. The
+/// sort is stable, so equal timestamps keep their input (backend then tree)
+/// order. Mirrors the MRU ordering used by the in-tmux session switcher.
+pub(super) fn order_recent<T>(
+    mut candidates: Vec<(chrono::DateTime<chrono::Utc>, T)>,
+    limit: usize,
+) -> Vec<T> {
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates
+        .into_iter()
+        .take(limit)
+        .map(|(_, row)| row)
+        .collect()
 }
 
 /// Compute the display order of a project's sessions, grouping each stack
@@ -2432,5 +2489,46 @@ mod stack_order_tests {
                 false,
             ));
         });
+    }
+}
+
+#[cfg(test)]
+mod order_recent_tests {
+    use super::order_recent;
+    use chrono::{Duration as ChronoDuration, Utc};
+
+    #[test]
+    fn orders_newest_attached_first_and_caps_at_limit() {
+        let now = Utc::now();
+        // Deliberately shuffled input; oldest-to-newest offsets -30, 0, -10.
+        let candidates = vec![
+            (now - ChronoDuration::seconds(30), "old"),
+            (now, "newest"),
+            (now - ChronoDuration::seconds(10), "mid"),
+        ];
+        assert_eq!(
+            order_recent(candidates.clone(), 5),
+            vec!["newest", "mid", "old"]
+        );
+        // The limit truncates the tail after ordering.
+        assert_eq!(order_recent(candidates, 2), vec!["newest", "mid"]);
+    }
+
+    #[test]
+    fn zero_limit_and_empty_input_yield_nothing() {
+        let now = Utc::now();
+        assert!(order_recent(vec![(now, "x")], 0).is_empty());
+        assert!(order_recent(Vec::<(_, &str)>::new(), 5).is_empty());
+    }
+
+    #[test]
+    fn equal_timestamps_keep_input_order() {
+        // A stable sort preserves the input (backend-then-tree) order for ties.
+        let t = Utc::now();
+        let candidates = vec![(t, "first"), (t, "second"), (t, "third")];
+        assert_eq!(
+            order_recent(candidates, 3),
+            vec!["first", "second", "third"]
+        );
     }
 }

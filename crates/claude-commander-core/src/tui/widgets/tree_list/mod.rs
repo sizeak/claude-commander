@@ -66,6 +66,11 @@ pub struct TreeList<'a> {
     /// Sessions with at least one pending review comment. A `*` marker is
     /// rendered on each matching session row.
     comment_sessions: HashSet<SessionId>,
+    /// Number + session colour for each worktree, precomputed over the full
+    /// list. Recent-session rows look their values up here so they match the
+    /// real row's number/colour even though the recents panel renders only its
+    /// own slice. Empty for lists with no recents panel.
+    recent_display_info: HashMap<SessionId, (usize, Color)>,
 }
 
 impl<'a> TreeList<'a> {
@@ -82,6 +87,7 @@ impl<'a> TreeList<'a> {
             show_session_program: true,
             pull_blocked_projects: HashMap::new(),
             comment_sessions: HashSet::new(),
+            recent_display_info: HashMap::new(),
         }
     }
 
@@ -190,6 +196,16 @@ impl<'a> TreeList<'a> {
         Some(("○".to_string(), self.theme.status_stopped))
     }
 
+    /// Supply the precomputed number/colour map used to render recent-session
+    /// rows (see [`worktree_display_info`]). The recents panel renders only its
+    /// own slice of the list, so it can't derive numbers from the worktree rows
+    /// itself — the caller computes the map over the *full* list and passes it
+    /// in here.
+    pub fn recent_display_info(mut self, info: HashMap<SessionId, (usize, Color)>) -> Self {
+        self.recent_display_info = info;
+        self
+    }
+
     /// Check whether sessions use more than one distinct program
     fn has_mixed_programs(&self) -> bool {
         let mut first = None;
@@ -209,4 +225,33 @@ impl<'a> TreeList<'a> {
 /// The base program name, excluding any arguments (e.g. "claude --mode auto" -> "claude").
 pub(super) fn program_name(program: &str) -> &str {
     program.split_whitespace().next().unwrap_or(program)
+}
+
+/// Precompute each worktree's displayed number and session colour by walking
+/// the list once, mirroring the counters in [`TreeList::to_list_items`]. The
+/// recents panel looks its rows up here so each shows the exact same number and
+/// colour the session has in its real position below. `RecentsHeader` /
+/// `RecentSession` rows are skipped, so they never perturb the numbering.
+pub fn worktree_display_info(
+    items: &[SessionListItem],
+    theme: &Theme,
+) -> HashMap<SessionId, (usize, Color)> {
+    let mut map = HashMap::new();
+    let mut project_index: usize = 0;
+    let mut current_session_color = theme.project_color(0).1;
+    let mut worktree_number: usize = 0;
+    for item in items {
+        match item {
+            SessionListItem::Project { .. } => {
+                current_session_color = theme.project_color(project_index).1;
+                project_index += 1;
+            }
+            SessionListItem::Worktree { id, .. } => {
+                worktree_number += 1;
+                map.insert(*id, (worktree_number, current_session_color));
+            }
+            _ => {}
+        }
+    }
+    map
 }
