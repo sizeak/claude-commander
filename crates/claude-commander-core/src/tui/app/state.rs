@@ -510,11 +510,11 @@ impl App {
             StateUpdate::CascadeAbandonFinished { backend_id, result } => {
                 self.handle_cascade_abandon_finished(BackendId(backend_id), result);
             }
-            StateUpdate::LfsPullFinished { session_id } => {
-                if self.ui_state.lfs_pull_in_flight.remove(&session_id) {
-                    debug!("lfs pull finished for {}", session_id);
-                    self.refresh_list_items().await;
-                }
+            StateUpdate::LfsPullFinished { session_id }
+                if self.ui_state.lfs_pull_in_flight.remove(&session_id) =>
+            {
+                debug!("lfs pull finished for {}", session_id);
+                self.refresh_list_items().await;
             }
             _ => {}
         }
@@ -904,7 +904,7 @@ pub(super) fn order_recent<T>(
     mut candidates: Vec<(chrono::DateTime<chrono::Utc>, T)>,
     limit: usize,
 ) -> Vec<T> {
-    candidates.sort_by(|a, b| b.0.cmp(&a.0));
+    candidates.sort_by_key(|b| std::cmp::Reverse(b.0));
     candidates
         .into_iter()
         .take(limit)

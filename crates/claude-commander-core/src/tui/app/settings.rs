@@ -2200,11 +2200,9 @@ impl App {
                     KeyCode::BackTab => switch_tab = Some(false),
                     // `t` cycles which backend's program list is being edited.
                     KeyCode::Char('t') => self.cycle_programs_target(prog),
-                    KeyCode::Right | KeyCode::Enter => {
-                        if programs_len > 0 {
-                            prog.focus = ProgramsFocus::Fields;
-                            prog.field_selected = 0;
-                        }
+                    KeyCode::Right | KeyCode::Enter if programs_len > 0 => {
+                        prog.focus = ProgramsFocus::Fields;
+                        prog.field_selected = 0;
                     }
                     KeyCode::Char('n') if editable => {
                         // Add the entry immediately so it shows in the list while
@@ -2222,36 +2220,28 @@ impl App {
                             value: super::Input::default(),
                         });
                     }
-                    KeyCode::Char('r') if editable => {
-                        if prog.selected < programs_len {
-                            let current = prog.entries[prog.selected].label.clone();
-                            prog.editing = Some(ProgramsEditing::RenamingLabel {
-                                value: current.into(),
-                            });
-                        }
+                    KeyCode::Char('r') if editable && prog.selected < programs_len => {
+                        let current = prog.entries[prog.selected].label.clone();
+                        prog.editing = Some(ProgramsEditing::RenamingLabel {
+                            value: current.into(),
+                        });
                     }
-                    KeyCode::Char('d') if editable => {
-                        if prog.selected < programs_len {
-                            prog.entries.remove(prog.selected);
-                            if prog.selected >= prog.entries.len() && prog.selected > 0 {
-                                prog.selected -= 1;
-                            }
-                            changed = true;
-                        }
-                    }
-                    KeyCode::Char('J') if editable => {
-                        if prog.selected + 1 < programs_len {
-                            prog.entries.swap(prog.selected, prog.selected + 1);
-                            prog.selected += 1;
-                            changed = true;
-                        }
-                    }
-                    KeyCode::Char('K') if editable => {
-                        if prog.selected > 0 && programs_len > 0 {
-                            prog.entries.swap(prog.selected, prog.selected - 1);
+                    KeyCode::Char('d') if editable && prog.selected < programs_len => {
+                        prog.entries.remove(prog.selected);
+                        if prog.selected >= prog.entries.len() && prog.selected > 0 {
                             prog.selected -= 1;
-                            changed = true;
                         }
+                        changed = true;
+                    }
+                    KeyCode::Char('J') if editable && prog.selected + 1 < programs_len => {
+                        prog.entries.swap(prog.selected, prog.selected + 1);
+                        prog.selected += 1;
+                        changed = true;
+                    }
+                    KeyCode::Char('K') if editable && prog.selected > 0 && programs_len > 0 => {
+                        prog.entries.swap(prog.selected, prog.selected - 1);
+                        prog.selected -= 1;
+                        changed = true;
                     }
                     _ => {}
                 },
@@ -2266,18 +2256,16 @@ impl App {
                     KeyCode::Esc | KeyCode::Left => prog.focus = ProgramsFocus::List,
                     KeyCode::Tab => switch_tab = Some(true),
                     KeyCode::BackTab => switch_tab = Some(false),
-                    KeyCode::Enter if editable => {
-                        if prog.selected < programs_len {
-                            let entry = &prog.entries[prog.selected];
-                            let current = if prog.field_selected == 0 {
-                                entry.label.clone()
-                            } else {
-                                entry.command.clone()
-                            };
-                            prog.editing = Some(ProgramsEditing::EditingField {
-                                value: current.into(),
-                            });
-                        }
+                    KeyCode::Enter if editable && prog.selected < programs_len => {
+                        let entry = &prog.entries[prog.selected];
+                        let current = if prog.field_selected == 0 {
+                            entry.label.clone()
+                        } else {
+                            entry.command.clone()
+                        };
+                        prog.editing = Some(ProgramsEditing::EditingField {
+                            value: current.into(),
+                        });
                     }
                     _ => {}
                 },

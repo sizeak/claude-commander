@@ -472,7 +472,7 @@ impl App {
                 repo_path: p.repo_path.clone(),
             })
             .collect();
-        choices.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        choices.sort_by_key(|a| a.name.to_lowercase());
         let mut picker = super::ProjectPicker::new(choices, default);
         // The existing-branch hint scans the repo locally; only meaningful for a
         // local project (a remote project's path lives on the server).
