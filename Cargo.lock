@@ -923,7 +923,7 @@ dependencies = [
 
 [[package]]
 name = "claude-commander-web"
-version = "0.26.0"
+version = "0.29.0"
 dependencies = [
  "axum",
  "base64",

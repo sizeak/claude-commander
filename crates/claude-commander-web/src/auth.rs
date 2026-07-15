@@ -18,7 +18,11 @@ use base64::Engine as _;
 use crate::config::{AppState, AuthMode};
 
 /// Reject requests that don't present valid Basic credentials (BFF mode only).
-pub async fn require_basic_auth(State(state): State<AppState>, req: Request, next: Next) -> Response {
+pub async fn require_basic_auth(
+    State(state): State<AppState>,
+    req: Request,
+    next: Next,
+) -> Response {
     if let AuthMode::Bff {
         username, password, ..
     } = state.auth.as_ref()

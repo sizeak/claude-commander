@@ -11,8 +11,8 @@
 //! [`AuthMode::PassThrough`] the browser sends its own `auth` frame and we relay
 //! everything transparently.
 
-use axum::extract::ws::{Message as AxMessage, WebSocket, WebSocketUpgrade};
 use axum::extract::State;
+use axum::extract::ws::{Message as AxMessage, WebSocket, WebSocketUpgrade};
 use axum::response::Response;
 use claude_commander_protocol::ws::ClientControl;
 use futures::{SinkExt, StreamExt};
