@@ -187,3 +187,35 @@ impl Player {
 
     pub fn stop(&self) {}
 }
+
+#[cfg(test)]
+mod tests {
+    /// Regression guard for the "audio stream error" console spam on a default
+    /// device change. cpal's native PipeWire backend reroutes our default-output
+    /// stream to the new default automatically (it opens the default with no
+    /// fixed target + AUTOCONNECT), so the change needs no handling on our side —
+    /// except that cpal reports it through rodio's error callback, and rodio,
+    /// built without its `tracing` feature, prints that (and its device-sink drop
+    /// notice) via `eprintln!` straight to stderr, corrupting the TUI. Enabling
+    /// the feature routes those through the `tracing` subscriber (→ the TUI's log
+    /// file) instead. There is no unit-testable seam for the callback itself, so
+    /// we assert the dependency feature that makes the fix hold stays enabled.
+    #[test]
+    fn rodio_dependency_keeps_tracing_feature() {
+        let manifest = include_str!("../../Cargo.toml");
+        let doc: toml::Value = toml::from_str(manifest).expect("Cargo.toml parses");
+        let rodio = doc
+            .get("dependencies")
+            .and_then(|d| d.get("rodio"))
+            .expect("rodio dependency present");
+        let features = rodio
+            .get("features")
+            .and_then(|f| f.as_array())
+            .expect("rodio has an explicit feature list");
+        assert!(
+            features.iter().any(|f| f.as_str() == Some("tracing")),
+            "rodio must keep the `tracing` feature or its stream-error/drop \
+             messages leak to stderr and corrupt the TUI on device change"
+        );
+    }
+}

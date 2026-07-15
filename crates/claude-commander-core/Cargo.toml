@@ -133,9 +133,16 @@ reqwest = { version = "0.13", default-features = false, features = [
 # rodio master moved to cpal 0.18 and forwards `pipewire = ["cpal/pipewire"]`, so
 # both playback (rodio) and capture (our direct cpal) unify onto a single
 # PipeWire-backed cpal 0.18. Bump this rev when a rodio release ships cpal 0.18.
+# The `tracing` feature is essential, not cosmetic: without it rodio's internal
+# messages (the cpal stream-error callback that fires when the default output
+# device changes, and the device-sink drop notice) fall back to `eprintln!`
+# straight to stderr. In the TUI those land on the terminal and corrupt the
+# display — the `tracing` feature reroutes them through the subscriber, which the
+# TUI sends to the log file. Don't drop it.
 rodio = { git = "https://github.com/RustAudio/rodio", rev = "ee3c21f2f3d926110706a2780658d098831c1ed9", default-features = false, features = [
     "playback",
     "pipewire",
+    "tracing",
     "wav",
     "mp3",
 ], optional = true }
