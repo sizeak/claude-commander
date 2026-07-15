@@ -4687,6 +4687,79 @@ async fn palette_includes_remote_backend_sessions() {
     );
 }
 
+/// Build a snapshot holding several sessions with the given `(title,
+/// last_attached_at)` pairs, all under one project.
+fn snapshot_with_attach_times(
+    sessions: &[(&str, Option<chrono::DateTime<chrono::Utc>>)],
+) -> (WorkspaceSnapshot, Vec<SessionId>) {
+    use crate::session::{Project, SessionStatus, WorktreeSession};
+    let mut state = crate::config::AppState::default();
+    let mut project = Project::new("proj", std::path::PathBuf::from("/tmp/p"), "main");
+    let pid = project.id;
+    let mut ids = Vec::new();
+    for (title, attached) in sessions {
+        let mut s = WorktreeSession::new(pid, *title, *title, std::path::PathBuf::new(), "claude");
+        s.status = SessionStatus::Running;
+        s.last_attached_at = *attached;
+        let id = s.id;
+        project.add_worktree(id);
+        state.sessions.insert(id, s);
+        ids.push(id);
+    }
+    state.projects.insert(pid, project);
+    (crate::api::workspace_snapshot_from_state(&state), ids)
+}
+
+/// Both palette build paths (initial `gather_quick_switch_matches` and the
+/// per-keystroke `refilter_quick_switch`) must order an empty query by
+/// most-recent attach, newest first, with never-attached sessions last.
+#[tokio::test]
+async fn quick_switch_empty_query_orders_by_recency() {
+    use chrono::Duration;
+
+    let now = chrono::Utc::now();
+    let (snap, ids) = snapshot_with_attach_times(&[
+        ("alpha", Some(now - Duration::minutes(5))),
+        ("bravo", Some(now - Duration::minutes(1))),
+        ("charlie", Some(now - Duration::minutes(10))),
+        ("delta-never", None),
+    ]);
+    let (alpha, bravo, charlie, never) = (ids[0], ids[1], ids[2], ids[3]);
+
+    let mut app = build_app_with_mock_remotes(vec![("box", snap)]);
+    app.bootstrap_backend_views().await;
+    app.refresh_backend_view(BackendId(1)).await;
+
+    // Path 1: initial open.
+    let matches = app.gather_quick_switch_matches("").await;
+    let ids: Vec<SessionId> = matches.iter().map(|m| m.session_id).collect();
+    assert_eq!(
+        ids,
+        vec![bravo, alpha, charlie, never],
+        "gather_quick_switch_matches must rank empty query by recency, never-attached last"
+    );
+
+    // Path 2: per-keystroke refilter, which builds from list_items.
+    app.refresh_list_items().await;
+    app.open_quick_switch_with_mode(PaletteMode::Unified).await;
+    app.refilter_quick_switch();
+    let Modal::QuickSwitch { matches, .. } = &app.ui_state.modal else {
+        panic!("expected quick-switch modal");
+    };
+    let ids: Vec<SessionId> = matches
+        .iter()
+        .filter_map(|m| match m {
+            QuickSwitchItem::Session(s) => Some(s.session_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ids,
+        vec![bravo, alpha, charlie, never],
+        "refilter_quick_switch must rank empty query by recency, never-attached last"
+    );
+}
+
 #[tokio::test]
 async fn session_id_by_tmux_name_resolves_against_remote_view() {
     let (remote_snap, remote_sid, _pid) = snapshot_with_one_session();

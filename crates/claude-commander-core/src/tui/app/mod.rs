@@ -444,6 +444,10 @@ pub struct QuickSwitchMatch {
     pub branch: String,
     pub project_name: String,
     pub status: SessionStatus,
+    /// Most-recent attach time, used to rank the palette by recency when the
+    /// query is empty (newest first, mirroring the pinned "Recent" block).
+    /// `None` for sessions never attached, which sort to the bottom.
+    pub last_attached_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// How the quick-switch palette was opened.
