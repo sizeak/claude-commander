@@ -54,6 +54,30 @@ pub(super) fn adjust_list_scroll(selected_idx: usize, scroll: usize, visible_row
     }
 }
 
+/// Order quick-switch session matches newest-attached first, then by title.
+/// Sessions never attached (`None`) sort to the bottom. Used for the
+/// empty-query palette so the most-recently-used session is at the top,
+/// mirroring the pinned "Recent" block and the in-tmux session picker.
+pub(super) fn recency_then_title(a: &QuickSwitchMatch, b: &QuickSwitchMatch) -> std::cmp::Ordering {
+    b.last_attached_at
+        .cmp(&a.last_attached_at)
+        .then_with(|| a.title.cmp(&b.title))
+}
+
+/// Order scored palette session matches in place. A non-empty query ranks by
+/// fuzzy score (best first, title tiebreak); an empty query falls back to
+/// most-recently-attached order via [`recency_then_title`]. Shared by both
+/// palette build paths (`gather_quick_switch_matches` and
+/// `refilter_quick_switch`) so their ordering can never drift apart — the
+/// original recency bug was exactly these two branches diverging.
+pub(super) fn sort_palette_matches(scored: &mut [(i64, QuickSwitchMatch)], query_is_empty: bool) {
+    if query_is_empty {
+        scored.sort_by(|a, b| recency_then_title(&a.1, &b.1));
+    } else {
+        scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.title.cmp(&b.1.title)));
+    }
+}
+
 /// Confirmation prompt for deleting a session. Names the session by its
 /// title when known so the user can tell what they're about to destroy;
 /// falls back to a generic phrasing if the title can't be resolved.
@@ -1031,7 +1055,7 @@ impl App {
     /// Gather session matches for a query (empty query = all sessions).
     ///
     /// Non-empty queries are ranked by fuzzy score (best match first);
-    /// empty queries fall back to alphabetical title order.
+    /// empty queries fall back to most-recently-attached order.
     pub(super) async fn gather_quick_switch_matches(&self, query: &str) -> Vec<QuickSwitchMatch> {
         let mut scored: Vec<(i64, QuickSwitchMatch)> = Vec::new();
 
@@ -1065,16 +1089,13 @@ impl App {
                         branch: session.branch.clone(),
                         project_name: session.project_name.clone(),
                         status: session.status,
+                        last_attached_at: session.last_attached_at,
                     },
                 ));
             }
         }
 
-        if query.is_empty() {
-            scored.sort_by(|a, b| a.1.title.cmp(&b.1.title));
-        } else {
-            scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.title.cmp(&b.1.title)));
-        }
+        sort_palette_matches(&mut scored, query.is_empty());
         scored.into_iter().map(|(_, m)| m).collect()
     }
 
@@ -1252,6 +1273,20 @@ impl App {
         // can run without awaiting the store lock on every keystroke.
         let mut scored_sessions: Vec<(i64, QuickSwitchMatch)> = Vec::new();
         if eff_mode == PaletteMode::Unified {
+            // Attach-time lookup, sourced from the cached backend snapshots
+            // (the `list_items` rows don't carry it). Drives the empty-query
+            // recency ordering below.
+            let mut last_attached: std::collections::HashMap<
+                SessionId,
+                chrono::DateTime<chrono::Utc>,
+            > = std::collections::HashMap::new();
+            for handle in &self.backends {
+                for s in &handle.view.snapshot.sessions {
+                    if let Some(at) = s.last_attached_at {
+                        last_attached.insert(s.session_id, at);
+                    }
+                }
+            }
             // Build project name lookup from list items
             let mut project_names: std::collections::HashMap<SessionId, String> =
                 std::collections::HashMap::new();
@@ -1298,17 +1333,16 @@ impl App {
                             branch: branch.clone(),
                             project_name,
                             status: *status,
+                            last_attached_at: last_attached.get(id).copied(),
                         },
                     ));
                 }
             }
 
-            if eff_query.is_empty() {
-                // Preserve tree order for empty queries.
-            } else {
-                scored_sessions
-                    .sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.title.cmp(&b.1.title)));
-            }
+            // Empty query ranks by recency (newest attach first), matching the
+            // pinned "Recent" block and the in-tmux session picker; a real query
+            // ranks by fuzzy score.
+            sort_palette_matches(&mut scored_sessions, eff_query.is_empty());
         }
         let session_items: Vec<QuickSwitchItem> = scored_sessions
             .into_iter()
