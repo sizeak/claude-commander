@@ -661,9 +661,9 @@ fn test_adjust_list_scroll_short_list_stays_at_top() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn test_view_mode_default_is_project_grouped() {
+fn test_view_mode_default_is_section_stacks() {
     let s = AppUiState::default();
-    assert_eq!(s.view_mode, ViewMode::ProjectGrouped);
+    assert_eq!(s.view_mode, ViewMode::SectionStacks);
 }
 
 #[test]

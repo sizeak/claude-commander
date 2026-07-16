@@ -2227,13 +2227,13 @@ impl App {
 
         // Restore the last-selected view if the user has previously chosen
         // one. If they haven't, fall back to the section-aware default:
-        // SectionGrouped when sections are configured, else ProjectGrouped.
+        // SectionStacks when sections are configured, else ProjectGrouped.
         // Any section view falls back to ProjectGrouped at refresh time if
         // sections have since been removed from config.
         let persisted_view = self.tui_prefs.prefs().view_mode;
         self.ui_state.view_mode = match persisted_view {
             Some(view) => view,
-            None if !self.config.sections.is_empty() => ViewMode::SectionGrouped,
+            None if !self.config.sections.is_empty() => ViewMode::SectionStacks,
             None => ViewMode::ProjectGrouped,
         };
 

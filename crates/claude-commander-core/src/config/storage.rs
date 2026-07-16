@@ -82,14 +82,20 @@ pub struct AppState {
     #[serde(default)]
     pub cascade_paused_at: Option<SessionId>,
 
-    /// Application version that last wrote this state
+    /// Application version that last wrote this state. Informational only —
+    /// **never gate a migration on this field.** It is stamped on every load
+    /// and every save but never read to make a decision, so a comparison
+    /// against it can't tell whether a given migration has run. For a one-time
+    /// mutation use a dedicated schema counter (see the "Migrations" note in
+    /// CLAUDE.md); for `state.json` specifically, prefer repair-on-every-read
+    /// (see [`Self::backfill_base_branch`]) because an older binary may still
+    /// write this file after any gate would have flipped.
     #[serde(default)]
     pub version: String,
 
-    /// Last-selected session list view (Project / Sections / Stacks).
-    /// `None` means the user has never made a choice — the TUI then picks a
-    /// section-aware default at startup (SectionGrouped if sections are
-    /// configured, otherwise ProjectGrouped).
+    /// Legacy: the live session-list view now persists in `tui.json`
+    /// (`TuiPrefs`); this field is only read once to migrate that value across
+    /// on first launch after the split. `None` means no persisted choice.
     #[serde(default)]
     pub view_mode: Option<ViewMode>,
 

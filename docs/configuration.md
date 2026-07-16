@@ -478,9 +478,9 @@ Individual color overrides (e.g. `border_focused = "#ff6600"`) still apply on to
 
 Group the session list under configurable headers based on GitHub PR state.
 
-By default `[[sections]]` is empty and the list keeps its project-grouped view. Once you declare one or more sections, the list switches to a section-grouped layout: section headers at the top level, each repo nested beneath as a sub-header, and sessions indented below their repo.
+By default `[[sections]]` is empty and the list keeps its project-grouped view. Once you declare one or more sections, the list defaults to the **Section Stacks** layout: section headers at the top level, each repo nested beneath as a sub-header, and sessions indented below their repo, with each PR stack kept together as a unit under the section chosen by its newest member. Press `v` to cycle between this, the plain **Sections** layout, and the project-grouped view.
 
-Sections replace [PR-stack grouping](usage.md#pr-stacks) — when sections are configured, stacked children are no longer visually nested under their stack base. The underlying stack links are still tracked and the `t` hotkey still stacks new sessions onto the top of a stack, but ordering within the list follows the section rules.
+In the plain **Sections** layout, [PR-stack grouping](usage.md#pr-stacks) is dropped — stacked children are no longer visually nested under their stack base, and ordering within the list follows the section rules instead (a base and its child may land in different sections depending on their PR state). The **Section Stacks** layout keeps each stack nested as a unit. In either case the underlying stack links are still tracked and the `t` hotkey still stacks new sessions onto the top of a stack.
 
 An implicit **"In Progress"** section is always the first row and acts as the catch-all — any session whose PR state doesn't match a later section's predicate lands here. It also lists every repo that hasn't placed a session into a later section, so newly added projects remain visible.
 
