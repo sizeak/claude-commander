@@ -5,10 +5,12 @@
 //! - `WorktreeSession` - A worktree session within a project (child)
 //! - `SessionManager` - Coordinates session lifecycle
 
+mod branch_reconcile;
 mod manager;
 pub mod section;
 mod types;
 
+pub use branch_reconcile::decide_branch_reconcile;
 pub use manager::*;
 pub use section::{
     IN_PROGRESS, RenderedSection, SectionAssignment, SectionConfig, apply_assignment,
