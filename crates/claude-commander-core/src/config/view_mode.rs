@@ -11,15 +11,16 @@ use serde::{Deserialize, Serialize};
 /// Three modes are supported and the user cycles between them with the
 /// `ToggleViewMode` key (default `v`):
 /// * `ProjectGrouped` — flat tree, sessions indented under their project,
-///   stacks indented under their parent. The default.
+///   stacks indented under their parent.
 /// * `SectionGrouped` — sessions bucketed by user-configured sections based
 ///   on each session's own PR state. Stacks may be split across sections.
 /// * `SectionStacks` — same section layout, but stacks are
 ///   grouped as a unit; the whole stack lands in the section chosen by
-///   the newest leaf, and indentation is preserved.
+///   the newest leaf, and indentation is preserved. The default (used when
+///   sections are configured; a section-less setup falls back to
+///   `ProjectGrouped`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum ViewMode {
-    #[default]
     ProjectGrouped,
     SectionGrouped,
     // Accept the pre-rename variant name so state.json files written by
@@ -28,6 +29,7 @@ pub enum ViewMode {
     // deserialization fails and `main.rs` falls back to a fresh empty
     // AppState — making it look like every project has been wiped.
     #[serde(alias = "SectionGroupedWithStacks")]
+    #[default]
     SectionStacks,
 }
 

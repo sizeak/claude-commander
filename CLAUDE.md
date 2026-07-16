@@ -61,6 +61,21 @@ Paths are determined by the `directories` crate (`ProjectDirs::from("com", "clau
 
 See `Config` struct in `config/settings.rs` for all config fields. The worktrees directory can be overridden via the `worktrees_dir` config option.
 
+TUI-only preferences (session-list view, last selection, pane width) live in a separate `tui.json` alongside `state.json` — see `tui/prefs.rs` (`TuiPrefs`). It's kept out of `state.json` so a remote backend's session data never lands in a file the local TUI persists.
+
+### Migrations
+
+There is deliberately **no single migration framework** — the persisted files have different constraints, so pick the mechanism by what changed, not by habit. In rough order of preference:
+
+- **`#[serde(alias = "…")]`** for a renamed field/variant. Cheapest, and mandatory when renaming anything persisted (a missing alias wipes user data on next load). For `config.toml` the alias is permanent (the file is never rewritten); for JSON state it converges to the new spelling on the next save.
+- **Shape-consumed transform** when the change has a self-destructing trigger (an obsolete key, a missing field). Idempotent for free — no marker needed. Two flavours: one-time raw-TOML rewrite for `config.toml` (`config/migrations.rs`, `toml_edit`), and repair-on-every-read on the deserialized model for `state.json` (`AppState::backfill_base_branch`).
+- **Schema counter** (`schema_version` + a `migrate_*` fn, e.g. `tui/prefs.rs`) for a one-time mutation that has *no* self-destructing signal — typically resetting a value that can legitimately reappear (e.g. "make X the new default, once, for everyone"). This is the only case that needs a persisted marker.
+
+Two hard rules:
+
+- **Never gate a migration on `AppState.version`** — it's stamped on write but never read, so it can't tell you whether anything ran.
+- **Never version-gate `state.json`.** It's multi-writer (two instances under `flock`, *and an older binary may still write it*), so a one-shot gate is unsound: after it flips, an old binary can write old-shape records back and the gate never re-fires. Use repair-on-every-read there. A schema counter is only sound for single-owner machine files like `tui.json`.
+
 ## Testing
 
 Unit tests are co-located in source files (`#[cfg(test)]`). Integration tests in `tests/integration_test.rs` require tmux. All async tests use `#[tokio::test]`.

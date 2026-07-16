@@ -24,10 +24,19 @@ use crate::config::store::{atomic_write, open_lock_file};
 use crate::error::{ConfigError, Result};
 use crate::session::{ProjectId, SessionId};
 
+/// Current `tui.json` schema version. Bump this and extend [`migrate_prefs_schema`]
+/// whenever an upgrade must rewrite existing prefs exactly once.
+const CURRENT_PREFS_SCHEMA: u32 = 1;
+
 /// Persisted TUI preferences. Every field is optional so an absent/empty
 /// `tui.json` (or a field a newer version added) loads as "no preference".
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TuiPrefs {
+    /// Schema version of this prefs file, used to gate one-time migrations.
+    /// Absent (a file written before this field existed) deserialises to 0.
+    /// See [`migrate_prefs_schema`].
+    #[serde(default)]
+    pub schema_version: u32,
     /// Last-selected session-list view (Project / Sections / Stacks). `None`
     /// means the user never chose one, so the TUI picks a section-aware default.
     #[serde(default)]
@@ -69,6 +78,9 @@ struct LegacyStatePrefs {
 impl From<LegacyStatePrefs> for TuiPrefs {
     fn from(l: LegacyStatePrefs) -> Self {
         Self {
+            // Legacy state.json predates the schema field, so start at 0 and let
+            // `migrate_prefs_schema` bring it forward on this same load.
+            schema_version: 0,
             view_mode: l.view_mode,
             last_selected_session: l.last_selected_session,
             last_selected_project: l.last_selected_project,
@@ -97,19 +109,25 @@ impl TuiPrefsStore {
         let path = data_dir.join("tui.json");
         let lock_path = path.with_extension("json.lock");
 
-        let prefs = if path.exists() {
+        let existed = path.exists();
+        let mut prefs = if existed {
             read_prefs(&path)
         } else {
-            let migrated = migrate_from_state_json(&data_dir.join("state.json"));
-            // Persist the migrated prefs immediately so the migration is a
-            // one-time event even if the user changes nothing this session.
-            if migrated != TuiPrefs::default()
-                && let Err(e) = persist(&path, &lock_path, &migrated)
-            {
-                warn!("Failed to persist migrated TUI prefs: {e}");
-            }
-            migrated
+            migrate_from_state_json(&data_dir.join("state.json"))
         };
+
+        // Persist through when we either lifted legacy UI prefs out of
+        // `state.json` (first run after `tui.json` was introduced) or applied a
+        // schema migration (e.g. resetting to the new SectionStacks default).
+        // Either way the single write makes each migration a one-time event even
+        // if the user changes nothing this session.
+        let migrated_legacy = !existed && prefs != TuiPrefs::default();
+        let migrated_schema = migrate_prefs_schema(&mut prefs);
+        if (migrated_legacy || migrated_schema)
+            && let Err(e) = persist(&path, &lock_path, &prefs)
+        {
+            warn!("Failed to persist migrated TUI prefs: {e}");
+        }
 
         Self {
             path,
@@ -194,6 +212,25 @@ fn migrate_from_state_json(state_path: &Path) -> TuiPrefs {
         .into()
 }
 
+/// Apply one-time schema migrations to `prefs` in place, returning `true` if
+/// anything changed (so the caller persists the result and the migration runs
+/// exactly once). Idempotent: prefs already at [`CURRENT_PREFS_SCHEMA`] are left
+/// untouched.
+fn migrate_prefs_schema(prefs: &mut TuiPrefs) -> bool {
+    if prefs.schema_version >= CURRENT_PREFS_SCHEMA {
+        return false;
+    }
+    // v0 -> v1: SectionStacks became the default session-list view. Drop any
+    // previously-persisted view choice so every existing user re-defers to the
+    // new section-aware default exactly once; their next manual toggle
+    // re-persists a choice as normal.
+    if prefs.schema_version < 1 {
+        prefs.view_mode = None;
+    }
+    prefs.schema_version = CURRENT_PREFS_SCHEMA;
+    true
+}
+
 /// Write `prefs` to `path` under an exclusive advisory lock, reusing the
 /// [`StateStore`](crate::config::StateStore) atomic-write plumbing.
 fn persist(path: &Path, lock_path: &Path, prefs: &TuiPrefs) -> Result<()> {
@@ -214,37 +251,88 @@ mod tests {
     fn absent_tui_json_migrates_prefs_out_of_state_json() {
         let dir = TempDir::new().unwrap();
         // Seed a state.json carrying the legacy UI prefs (and unrelated fields
-        // the migration must ignore).
+        // the migration must ignore). The legacy state predates the schema
+        // field, so the schema migration also runs and resets the view choice.
         std::fs::write(
             dir.path().join("state.json"),
             r#"{
                 "projects": {},
                 "sessions": {},
-                "view_mode": "SectionStacks",
+                "view_mode": "ProjectGrouped",
                 "left_pane_pct": 42
             }"#,
         )
         .unwrap();
 
-        // First load with no tui.json migrates the values through…
+        // First load with no tui.json lifts the values across, then the v0->v1
+        // schema migration drops the view choice so this user re-defers to the
+        // new SectionStacks default. Unrelated prefs (pane width) survive.
         let store = TuiPrefsStore::load(dir.path());
         let prefs = store.prefs();
-        assert_eq!(prefs.view_mode, Some(ViewMode::SectionStacks));
+        assert_eq!(prefs.view_mode, None);
         assert_eq!(prefs.left_pane_pct, Some(42));
+        assert_eq!(prefs.schema_version, CURRENT_PREFS_SCHEMA);
 
-        // …and writes tui.json so a second, independent load reads them back
-        // without touching state.json again.
+        // …and writes tui.json so a second, independent load reads it back
+        // without touching state.json or re-running the migration.
         assert!(dir.path().join("tui.json").exists());
         let reloaded = TuiPrefsStore::load(dir.path()).prefs();
-        assert_eq!(reloaded.view_mode, Some(ViewMode::SectionStacks));
+        assert_eq!(reloaded.view_mode, None);
         assert_eq!(reloaded.left_pane_pct, Some(42));
+        assert_eq!(reloaded.schema_version, CURRENT_PREFS_SCHEMA);
     }
 
     #[test]
-    fn missing_both_files_yields_default_prefs() {
+    fn missing_both_files_yields_current_schema_default_prefs() {
         let dir = TempDir::new().unwrap();
         let prefs = TuiPrefsStore::load(dir.path()).prefs();
-        assert_eq!(prefs, TuiPrefs::default());
+        assert_eq!(
+            prefs,
+            TuiPrefs {
+                schema_version: CURRENT_PREFS_SCHEMA,
+                ..Default::default()
+            }
+        );
+    }
+
+    #[test]
+    fn schema_migration_resets_existing_view_choice_once() {
+        let dir = TempDir::new().unwrap();
+        // A pre-migration tui.json: an explicit view choice, no schema field.
+        std::fs::write(
+            dir.path().join("tui.json"),
+            r#"{"view_mode": "ProjectGrouped", "left_pane_pct": 30}"#,
+        )
+        .unwrap();
+
+        // The v0->v1 migration clears the choice (forcing the new default) but
+        // leaves unrelated prefs intact, and persists the bump.
+        let prefs = TuiPrefsStore::load(dir.path()).prefs();
+        assert_eq!(prefs.view_mode, None);
+        assert_eq!(prefs.left_pane_pct, Some(30));
+        assert_eq!(prefs.schema_version, CURRENT_PREFS_SCHEMA);
+
+        let reloaded = TuiPrefsStore::load(dir.path()).prefs();
+        assert_eq!(reloaded.view_mode, None);
+        assert_eq!(reloaded.schema_version, CURRENT_PREFS_SCHEMA);
+    }
+
+    #[test]
+    fn schema_migration_preserves_choice_made_after_migration() {
+        let dir = TempDir::new().unwrap();
+        // A tui.json already at the current schema with an explicit choice —
+        // i.e. the user toggled *after* upgrading. It must be left untouched.
+        std::fs::write(
+            dir.path().join("tui.json"),
+            format!(
+                r#"{{"schema_version": {CURRENT_PREFS_SCHEMA}, "view_mode": "ProjectGrouped"}}"#
+            ),
+        )
+        .unwrap();
+
+        let prefs = TuiPrefsStore::load(dir.path()).prefs();
+        assert_eq!(prefs.view_mode, Some(ViewMode::ProjectGrouped));
+        assert_eq!(prefs.schema_version, CURRENT_PREFS_SCHEMA);
     }
 
     #[tokio::test]
