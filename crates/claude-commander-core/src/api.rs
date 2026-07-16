@@ -1,6 +1,6 @@
 //! Commander API — unified service layer for CLI and TUI consumers.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -19,13 +19,14 @@ use crate::config::{AppState, Config, ConfigStore, ProgramEntry, StateStore};
 use crate::error::{Result, SessionError};
 use crate::git::{
     FileDiff, GitBackend, PrCheckResult, compose_review_diff, compute_branch_diff,
-    diff_stat_summary, effective_pr_state, enrich_binary_sizes, is_gh_available,
-    parse_unified_diff, prefer_remote_branch, read_base_blob, read_worktree_file,
+    diff_stat_summary, effective_pr_state, enrich_binary_sizes, is_gh_available, list_worktrees_at,
+    parse_unified_diff, prefer_remote_branch, read_base_blob, read_worktree_file, ref_exists_cli,
 };
 use crate::reviewed::ReviewedStore;
 use crate::session::{
     AgentState, CascadeOutcome, ProjectId, ScanResult, SessionId, SessionManager, SessionStatus,
-    WorktreeSession, apply_assignment, clear_override_and_reassign, program_with_agent_flags,
+    WorktreeSession, apply_assignment, clear_override_and_reassign, decide_branch_reconcile,
+    program_with_agent_flags,
 };
 use crate::telemetry::{ConfigSnapshot, EnvFingerprint, FrontendInfo, Telemetry};
 use crate::tmux::{AgentStateDetector, StatusBarInfo, TmuxExecutor};
@@ -728,6 +729,12 @@ impl CommanderService {
             }
         }
 
+        // 3b. Adopt any branch renames so PR polling, cascade-merge, and PR
+        // retargeting key off the live branch name rather than a stale one.
+        if let Err(e) = self.reconcile_session_branches().await {
+            debug!("Failed to reconcile session branches: {e}");
+        }
+
         // 4. Reconcile section assignments against current config.
         self.reconcile_all_section_assignments().await?;
 
@@ -768,6 +775,156 @@ impl CommanderService {
             .mutate(move |state| {
                 if let Some(session) = state.get_session_mut(&session_id) {
                     crate::session::apply_assignment(session, &sections, now);
+                }
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Reconcile each session's stored `branch` with its worktree's live git
+    /// HEAD, adopting the live name only when the stored branch was **renamed**
+    /// away (see [`decide_branch_reconcile`] for the exact rule).
+    ///
+    /// A stale `session.branch` silently breaks PR polling (`gh pr list --head`
+    /// queries a branch that no longer has a PR, so PR + stack topology vanish),
+    /// cascade-merge (merges by branch name), and delete-time PR retargeting.
+    /// Running this at the top of every PR-poll tick keeps the one stored name
+    /// authoritative.
+    ///
+    /// Subprocess-only (no gix repository held across an `.await`) so the future
+    /// stays `Send` for the spawned PR-status loop. Idempotent: a pass with no
+    /// renames performs no writes.
+    pub async fn reconcile_session_branches(&self) -> Result<()> {
+        // Snapshot each project's repo path + main branch under the read lock,
+        // plus its reconcile candidates (non-Creating sessions) and the branch
+        // names of *all* its sessions (the collision set — a rename must not be
+        // adopted onto a name any session, including a Creating one whose branch
+        // is reserved, already holds).
+        struct Cand {
+            id: SessionId,
+            worktree_path: PathBuf,
+            stored: String,
+        }
+        struct ProjectSnapshot {
+            repo_path: PathBuf,
+            main_branch: String,
+            cands: Vec<Cand>,
+            all_branches: Vec<(SessionId, String)>,
+        }
+        let projects: Vec<ProjectSnapshot> = {
+            let state = self.store.read().await;
+            state
+                .projects
+                .values()
+                .map(|project| {
+                    let sessions = || {
+                        project
+                            .worktrees
+                            .iter()
+                            .filter_map(|sid| state.get_session(sid))
+                    };
+                    let cands = sessions()
+                        .filter(|s| s.status != SessionStatus::Creating)
+                        .map(|s| Cand {
+                            id: s.id,
+                            worktree_path: s.worktree_path.clone(),
+                            stored: s.branch.clone(),
+                        })
+                        .collect();
+                    let all_branches = sessions().map(|s| (s.id, s.branch.clone())).collect();
+                    ProjectSnapshot {
+                        repo_path: project.repo_path.clone(),
+                        main_branch: project.main_branch.clone(),
+                        cands,
+                        all_branches,
+                    }
+                })
+                .collect()
+        };
+
+        // Off-lock: per project, map each worktree's canonical path to its live
+        // branch, then decide per session. Each update carries the expected old
+        // branch so the write is a compare-and-set (below).
+        let mut updates: Vec<(SessionId, String, String)> = Vec::new();
+        for ProjectSnapshot {
+            repo_path,
+            main_branch,
+            cands,
+            all_branches,
+        } in &projects
+        {
+            if cands.is_empty() {
+                continue;
+            }
+            let worktrees = match list_worktrees_at(repo_path).await {
+                Ok(w) => w,
+                Err(e) => {
+                    debug!("branch reconcile: list_worktrees_at({repo_path:?}) failed: {e}");
+                    continue;
+                }
+            };
+            // Canonicalize worktree paths so symlinked/relative session paths
+            // match git's absolute output.
+            let mut live_by_path: HashMap<PathBuf, String> = HashMap::new();
+            for wt in &worktrees {
+                let key = tokio::fs::canonicalize(&wt.path)
+                    .await
+                    .unwrap_or_else(|_| wt.path.clone());
+                live_by_path.insert(key, wt.branch.clone());
+            }
+
+            for cand in cands {
+                let canonical = tokio::fs::canonicalize(&cand.worktree_path)
+                    .await
+                    .unwrap_or_else(|_| cand.worktree_path.clone());
+                let live = live_by_path.get(&canonical).map(String::as_str);
+                // Only pay for ref-existence checks once there is a real
+                // candidate (live branch present, differs, not detached).
+                if !matches!(live, Some(b) if b != cand.stored && b != "HEAD") {
+                    continue;
+                }
+                let local = ref_exists_cli(repo_path, &format!("refs/heads/{}", cand.stored)).await;
+                let remote =
+                    ref_exists_cli(repo_path, &format!("refs/remotes/origin/{}", cand.stored))
+                        .await;
+                // Collision set: every *other* session's branch in this project
+                // (including Creating sessions, whose branch names are reserved).
+                let siblings: Vec<&str> = all_branches
+                    .iter()
+                    .filter(|(id, _)| *id != cand.id)
+                    .map(|(_, b)| b.as_str())
+                    .collect();
+                if let Some(new_branch) = decide_branch_reconcile(
+                    &cand.stored,
+                    live,
+                    local,
+                    remote,
+                    main_branch,
+                    &siblings,
+                ) {
+                    debug!(
+                        "branch reconcile: session {} '{}' -> '{}'",
+                        cand.id, cand.stored, new_branch
+                    );
+                    updates.push((cand.id, cand.stored.clone(), new_branch));
+                }
+            }
+        }
+
+        if updates.is_empty() {
+            return Ok(());
+        }
+        self.store
+            .mutate(move |state| {
+                for (id, expected_old, new_branch) in updates {
+                    if let Some(session) = state.get_session_mut(&id) {
+                        // Compare-and-set: only adopt if the branch still matches
+                        // what we based the decision on, so a concurrent writer
+                        // between snapshot and mutate is never clobbered.
+                        if session.branch == expected_old {
+                            session.branch = new_branch;
+                        }
+                    }
                 }
             })
             .await?;
@@ -1773,13 +1930,32 @@ impl CommanderService {
         })
     }
 
+    /// The `(session id, branch, repo path)` triples the PR poll fans out over:
+    /// every non-`Creating` session paired with its project's repo path. Reads a
+    /// snapshot under the lock so the poll's per-branch `gh` calls run off-lock.
+    ///
+    /// Extracted from the poll loop so the reconcile→poll ordering is testable:
+    /// after [`Self::reconcile_session_branches`] adopts a rename, the targets
+    /// returned here carry the corrected `--head` branch on the same tick.
+    async fn pr_poll_targets(&self) -> Vec<(SessionId, String, PathBuf)> {
+        let state = self.store.read().await;
+        state
+            .sessions
+            .values()
+            .filter(|s| s.status != SessionStatus::Creating)
+            .filter_map(|s| {
+                let project = state.projects.get(&s.project_id)?;
+                Some((s.id, s.branch.clone(), project.repo_path.clone()))
+            })
+            .collect()
+    }
+
     /// Fan out `gh pr list` across all sessions on a fixed cadence (and on
     /// [`Self::request_pr_refresh`]), then persist results via
     /// [`Self::apply_pr_results`]. When `interval_secs` is 0 the periodic tick is
     /// disabled but a manual refresh still runs.
     fn spawn_pr_status_loop(&self, interval_secs: u64) -> tokio::task::JoinHandle<()> {
         let service = self.clone();
-        let store = self.store.clone();
         let notify = self.pr_refresh.clone();
         let last_check = self.last_pr_check.clone();
         tokio::spawn(async move {
@@ -1805,21 +1981,15 @@ impl CommanderService {
                     }
                     *lc = Some(now);
                 }
+                // Adopt any branch renames before polling, so this same tick
+                // queries GitHub with the corrected `--head` name.
+                if let Err(e) = service.reconcile_session_branches().await {
+                    debug!("reconcile_session_branches failed: {e}");
+                }
                 if !service.gh_available().await {
                     continue;
                 }
-                let sessions_to_check: Vec<(SessionId, String, PathBuf)> = {
-                    let state = store.read().await;
-                    state
-                        .sessions
-                        .values()
-                        .filter(|s| s.status != SessionStatus::Creating)
-                        .filter_map(|s| {
-                            let project = state.projects.get(&s.project_id)?;
-                            Some((s.id, s.branch.clone(), project.repo_path.clone()))
-                        })
-                        .collect()
-                };
+                let sessions_to_check = service.pr_poll_targets().await;
                 if sessions_to_check.is_empty() {
                     continue;
                 }
@@ -3088,6 +3258,164 @@ mod tests {
         let s = state.get_session(&sid).unwrap();
         assert!(s.pr_number.is_none());
         assert!(s.pr_base_branch.is_none());
+    }
+
+    /// Run `git` in `dir`, panicking on failure. GPG signing is forced off so
+    /// the repo's `commit.gpgsign` policy can't break isolated tests.
+    fn run_git(dir: &Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(["-c", "commit.gpgsign=false", "-c", "gc.auto=0"])
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("spawn git");
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    #[tokio::test]
+    async fn reconcile_session_branches_adopts_local_rename() {
+        // Regression: renaming a worktree's branch (`git branch -m`) left
+        // `session.branch` stale, so PR polling queried a branch with no PR and
+        // silently dropped the session's PR + stack topology. Reconcile must
+        // adopt the live branch when the old name no longer exists.
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+
+        // A real repo on `main` with one commit, plus a linked worktree on
+        // branch `feature`.
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.t"]);
+        run_git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f.txt"), "x").unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-m", "init"]);
+        let wt = dir.path().join("wt-feature");
+        run_git(
+            &repo,
+            &["worktree", "add", "-b", "feature", wt.to_str().unwrap()],
+        );
+
+        let project = Project::new("repo", repo.clone(), "main");
+        let pid = project.id;
+        let session = WorktreeSession::new(pid, "feature", "feature", wt.clone(), "claude");
+        let sid = session.id;
+        svc.store()
+            .mutate(move |state| {
+                state.add_project(project);
+                state.add_session(session);
+            })
+            .await
+            .unwrap();
+
+        // Rename the branch in the worktree; the old name ceases to exist.
+        run_git(&wt, &["branch", "-m", "feature", "renamed-feature"]);
+
+        svc.reconcile_session_branches().await.unwrap();
+
+        let state = svc.store().read().await;
+        assert_eq!(
+            state.get_session(&sid).unwrap().branch,
+            "renamed-feature",
+            "a renamed worktree branch must be adopted as the session's branch"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_then_pr_poll_targets_use_new_branch() {
+        // The property the whole fix exists to provide: reconciling a rename and
+        // then gathering PR-poll targets (as the poll tick does, in order) yields
+        // the corrected `--head` branch — so the same tick polls the right PR.
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.t"]);
+        run_git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f.txt"), "x").unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-m", "init"]);
+        let wt = dir.path().join("wt-feature");
+        run_git(
+            &repo,
+            &["worktree", "add", "-b", "feature", wt.to_str().unwrap()],
+        );
+
+        let project = Project::new("repo", repo.clone(), "main");
+        let pid = project.id;
+        let session = WorktreeSession::new(pid, "feature", "feature", wt.clone(), "claude");
+        let sid = session.id;
+        svc.store()
+            .mutate(move |state| {
+                state.add_project(project);
+                state.add_session(session);
+            })
+            .await
+            .unwrap();
+
+        run_git(&wt, &["branch", "-m", "feature", "renamed-feature"]);
+
+        svc.reconcile_session_branches().await.unwrap();
+        let targets = svc.pr_poll_targets().await;
+
+        let target = targets.iter().find(|(id, _, _)| *id == sid).unwrap();
+        assert_eq!(
+            target.1, "renamed-feature",
+            "the tick that reconciles must poll GitHub with the corrected branch"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_session_branches_ignores_plain_switch() {
+        // Switching a worktree to another *existing* branch is transient — the
+        // session must stay anchored to its original branch, not follow.
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        run_git(&repo, &["init", "-b", "main"]);
+        run_git(&repo, &["config", "user.email", "t@t.t"]);
+        run_git(&repo, &["config", "user.name", "t"]);
+        std::fs::write(repo.join("f.txt"), "x").unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-m", "init"]);
+        let wt = dir.path().join("wt-feature");
+        run_git(
+            &repo,
+            &["worktree", "add", "-b", "feature", wt.to_str().unwrap()],
+        );
+        // A second branch exists to switch to; `feature` is kept.
+        run_git(&wt, &["branch", "other"]);
+
+        let project = Project::new("repo", repo.clone(), "main");
+        let pid = project.id;
+        let session = WorktreeSession::new(pid, "feature", "feature", wt.clone(), "claude");
+        let sid = session.id;
+        svc.store()
+            .mutate(move |state| {
+                state.add_project(project);
+                state.add_session(session);
+            })
+            .await
+            .unwrap();
+
+        run_git(&wt, &["switch", "other"]);
+
+        svc.reconcile_session_branches().await.unwrap();
+
+        let state = svc.store().read().await;
+        assert_eq!(
+            state.get_session(&sid).unwrap().branch,
+            "feature",
+            "a plain switch to an existing branch must not move the session"
+        );
     }
 
     #[tokio::test]
