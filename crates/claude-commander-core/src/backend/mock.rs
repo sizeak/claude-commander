@@ -64,6 +64,10 @@ pub struct MockBackend {
     toggled_reviewed: Mutex<Vec<(SessionId, String)>>,
     /// `(session, side, path)` passed to [`Self::fetch_diff_blob`].
     fetched_blobs: Mutex<Vec<(SessionId, DiffSide, String)>>,
+    /// Overrides the `open_editor` capability (default `false`, matching a
+    /// remote backend). Set by [`Self::set_open_editor`] so a test can exercise
+    /// the local-editor launch path through the review view.
+    open_editor: Mutex<bool>,
     conn_tx: watch::Sender<ConnectionState>,
     conn_rx: watch::Receiver<ConnectionState>,
     gen_tx: watch::Sender<u64>,
@@ -101,6 +105,7 @@ impl MockBackend {
             applied_comments: Mutex::new(Vec::new()),
             toggled_reviewed: Mutex::new(Vec::new()),
             fetched_blobs: Mutex::new(Vec::new()),
+            open_editor: Mutex::new(false),
             conn_tx,
             conn_rx,
             gen_tx,
@@ -118,6 +123,12 @@ impl MockBackend {
     /// Make every query fail with `Unavailable` (a downed server).
     pub fn set_failing(&self, fail: bool) {
         *self.fail.lock().unwrap() = fail;
+    }
+
+    /// Advertise the `open_editor` capability, so the review view will drive the
+    /// operator's local editor for this backend's sessions rather than toasting.
+    pub fn set_open_editor(&self, on: bool) {
+        *self.open_editor.lock().unwrap() = on;
     }
 
     /// Set the branch list served by [`Self::list_branches`].
@@ -226,7 +237,7 @@ impl CommanderBackend for MockBackend {
 
     fn capabilities(&self) -> BackendCapabilities {
         BackendCapabilities {
-            open_editor: false,
+            open_editor: *self.open_editor.lock().unwrap(),
             switcher_popup: false,
             commander_session: false,
             shell_toggle: false,

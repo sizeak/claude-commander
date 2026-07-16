@@ -184,6 +184,11 @@ foreground-only colouring on 256- and 16-colour terminals.
   i.e. finishes a turn — folding its changes in while keeping your place (same
   file, clamped cursor/scroll). Press `r` to re-compose on demand at any time;
   it reports "Review refreshed" or "Review already up to date".
+- **Open in editor**: press `.` (the same open-in-editor binding as the session
+  list) to open the session's worktree in your configured editor without leaving
+  the review — a GUI editor launches alongside the TUI, a terminal editor takes
+  over until you exit. Unavailable for remote sessions, whose worktrees live on
+  the server.
 - **Drift**: if the code under a comment changes before you apply, the view
   re-anchors it by its captured snippet. If it can't be located unambiguously
   the comment is marked `⚠` (drifted) and blocks apply until you review or

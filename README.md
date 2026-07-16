@@ -147,7 +147,7 @@ The status bar surfaces the most useful actions for the focused pane as clickabl
 | `d` | Delete session |
 | `R` | Restart session (kill tmux + recreate; adds `--resume` when `resume_session = true`) |
 | `D` | Remove project |
-| `.` or `Ctrl-.` | Open in editor/IDE |
+| `.` or `Ctrl-.` | Open in editor/IDE (also works inside the review diff, opening that session's worktree) |
 | `o` | Open PR in browser (when the session has a PR) |
 | palette only | Refresh PR status (force an immediate re-check for all sessions instead of waiting for the `pr_check_interval_secs` cadence) |
 | `C` | Open the commander session (a persistent, project-less Claude session that coordinates others; requires `commander_enabled = true`). While it is running, a `● Commander` chip in the footer status bar shows its live state (`· working` / `· waiting` / `· idle`) |

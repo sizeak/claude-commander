@@ -3004,7 +3004,7 @@ pub(super) fn filter_keybinding_rows(rows: Vec<SettingsRow>, query: &str) -> Vec
     with_section_spacers(out)
 }
 
-fn truncate_str(s: &str, max: usize) -> String {
+pub(super) fn truncate_str(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else if max > 1 {

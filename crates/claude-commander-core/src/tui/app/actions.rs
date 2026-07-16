@@ -9,6 +9,20 @@ enum CascadeAction {
     Resume,
 }
 
+/// Outcome of [`App::open_path_in_editor`], so each caller chooses how to
+/// surface a non-launch (the session list uses a toast / error modal; the
+/// review view keeps itself open and reports inline).
+pub(super) enum EditorLaunch {
+    /// A GUI editor was spawned, or a terminal editor was queued for launch.
+    Launched,
+    /// The owning backend can't drive the operator's local editor (remote
+    /// session); carries the message to show.
+    Unavailable(String),
+    /// A hard failure (no editor configured, or the GUI spawn errored); carries
+    /// the message to show.
+    Failed(String),
+}
+
 /// Delete each `(owning-backend, session-id)` pair strictly one at a time on a
 /// single task. Sessions in the same repo must not have their worktrees removed
 /// concurrently — parallel `git worktree remove` in one repo races — so the
@@ -354,41 +368,61 @@ impl App {
             return;
         };
 
-        // The editor launches on a local path; a remote backend's worktree
-        // lives on the server, so the path here would be meaningless.
-        if !self.backend_arc(backend).capabilities().open_editor {
-            self.ui_state.status_message = Some((
-                "Open in editor is not available for remote sessions".to_string(),
-                Instant::now() + Duration::from_secs(3),
-            ));
-            return;
-        }
-
         let Some(path) = path else {
             return;
         };
 
+        // The session list surfaces a soft "unavailable" as a transient toast
+        // and a hard failure as a blocking error modal.
+        match self.open_path_in_editor(backend, path) {
+            EditorLaunch::Launched => {}
+            EditorLaunch::Unavailable(msg) => {
+                self.ui_state.status_message = Some((msg, Instant::now() + Duration::from_secs(3)));
+            }
+            EditorLaunch::Failed(message) => {
+                self.ui_state.modal = Modal::Error { message };
+            }
+        }
+    }
+
+    /// Launch the configured editor on a local `path` owned by `backend`. Shared
+    /// by the session-list [`handle_open_in_editor`](Self::handle_open_in_editor)
+    /// and the review view, so both honour the same capability gate, editor
+    /// resolution, and GUI-vs-terminal launch behaviour. Returns the outcome so
+    /// each caller can surface failures in the way that fits its surface (error
+    /// modal vs. inline review status) rather than this helper picking one.
+    pub(super) fn open_path_in_editor(
+        &mut self,
+        backend: BackendId,
+        path: std::path::PathBuf,
+    ) -> EditorLaunch {
+        // The editor launches on a local path; a remote backend's worktree
+        // lives on the server, so the path here would be meaningless.
+        if !self.backend_arc(backend).capabilities().open_editor {
+            return EditorLaunch::Unavailable(
+                "Open in editor is not available for remote sessions".to_string(),
+            );
+        }
+
         let Some(editor) = self.config.resolve_editor() else {
-            self.ui_state.modal = Modal::Error {
-                message: "No editor configured. Set 'editor' in config.toml or \
-                          set $VISUAL / $EDITOR."
+            return EditorLaunch::Failed(
+                "No editor configured. Set 'editor' in config.toml or \
+                 set $VISUAL / $EDITOR."
                     .to_string(),
-            };
-            return;
+            );
         };
 
         if self.config.is_gui_editor(&editor) {
             // GUI editor: spawn detached, TUI stays up
             if let Err(e) = std::process::Command::new(&editor).arg(&path).spawn() {
-                self.ui_state.modal = Modal::Error {
-                    message: format!("Failed to launch '{}': {}", editor, e),
-                };
+                return EditorLaunch::Failed(format!("Failed to launch '{}': {}", editor, e));
             }
         } else {
             // Terminal editor: tear down TUI, run foreground, restore
             self.ui_state.editor_command = Some((editor, path));
             self.ui_state.should_quit = true;
         }
+        EditorLaunch::Launched
     }
 
     /// Handle "open PR in browser" — looks up the selected session's

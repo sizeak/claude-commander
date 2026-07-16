@@ -4872,6 +4872,33 @@ async fn app_with_remote_session() -> (App, SessionId) {
     (app, remote_sid)
 }
 
+/// An `App` whose single session's backend advertises the `open_editor`
+/// capability and whose config pins a deterministic terminal (non-GUI) editor,
+/// for driving the review view's open-in-editor path. Returns the app, the
+/// session id, and the session's worktree path.
+async fn app_with_editor_capable_session() -> (App, SessionId, std::path::PathBuf) {
+    use crate::session::{Project, SessionStatus, WorktreeSession};
+    let mut state = crate::config::AppState::default();
+    let mut project = Project::new("proj", std::path::PathBuf::from("/tmp/rp"), "main");
+    let pid = project.id;
+    let worktree = std::path::PathBuf::from("/tmp/wt/session-a");
+    let mut sess = WorktreeSession::new(pid, "sess", "br", worktree.clone(), "claude");
+    sess.status = SessionStatus::Running;
+    let sid = sess.id;
+    project.add_worktree(sid);
+    state.projects.insert(pid, project);
+    state.sessions.insert(sid, sess);
+    let snap = crate::api::workspace_snapshot_from_state(&state);
+
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", snap)]);
+    app.bootstrap_backend_views().await;
+    app.refresh_backend_view(BackendId(1)).await;
+    remote_mock(&app, BackendId(1)).set_open_editor(true);
+    app.config.editor = Some("vi".to_string());
+    app.config.editor_gui = Some(false);
+    (app, sid, worktree)
+}
+
 /// A two-file text diff review state for `sid` (first selectable line is a.rs's
 /// context line, so `build_draft((0, 0), …)` yields a New-side comment).
 fn review_state_for(sid: SessionId) -> Box<DiffReviewState> {
@@ -4951,6 +4978,154 @@ async fn review_toggle_file_reviewed_routes_to_owning_backend() {
         remote_mock(&app, BackendId(1)).toggled_reviewed_files(),
         vec![(remote_sid, "a.rs".to_string())],
         "toggle_file_reviewed must route to the owning backend, by display path"
+    );
+}
+
+#[tokio::test]
+async fn review_open_in_editor_key_routes_to_owning_backend() {
+    // Pressing the OpenInEditor binding (`.` by default) inside the review view
+    // must be intercepted and routed through the shared editor path, honouring
+    // the owning backend's capability gate. The mock backend can't drive the
+    // local editor, so it toasts rather than launching — proving the key is now
+    // wired up in the review view (before the fix it was a no-op).
+    let (mut app, remote_sid) = app_with_remote_session().await;
+    let state = review_state_for(remote_sid);
+    let dot = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('.'),
+        crossterm::event::KeyModifiers::NONE,
+    );
+
+    app.handle_review_key(dot, state).await;
+
+    assert!(
+        app.ui_state.editor_command.is_none(),
+        "must not queue a local editor launch for a remote-owned review"
+    );
+    assert!(
+        !app.ui_state.should_quit,
+        "must not tear down the TUI to launch an editor"
+    );
+    let (msg, _) = app
+        .ui_state
+        .status_message
+        .clone()
+        .expect("a toast explaining the editor is unavailable");
+    assert!(
+        msg.contains("not available for remote"),
+        "unexpected toast: {msg}"
+    );
+    // The review view stays open after the key is handled.
+    assert!(
+        matches!(app.ui_state.modal, Modal::ReviewDiff(_)),
+        "review modal must remain open"
+    );
+}
+
+#[tokio::test]
+async fn review_open_in_editor_key_launches_terminal_editor_for_local_session() {
+    // A backend that can drive the local editor + a terminal (non-GUI) editor:
+    // pressing `.` in the review view queues the editor on that session's own
+    // worktree and tears the TUI down to run it, leaving the review restored so
+    // it reopens when the editor exits.
+    let (mut app, sid, worktree) = app_with_editor_capable_session().await;
+
+    let review = review_state_for(sid);
+    let dot = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('.'),
+        crossterm::event::KeyModifiers::NONE,
+    );
+
+    app.handle_review_key(dot, review).await;
+
+    assert_eq!(
+        app.ui_state.editor_command,
+        Some(("vi".to_string(), worktree)),
+        "must queue the terminal editor on the review session's worktree"
+    );
+    assert!(
+        app.ui_state.should_quit,
+        "a terminal editor tears the TUI down to run foreground"
+    );
+    assert!(
+        matches!(app.ui_state.modal, Modal::ReviewDiff(_)),
+        "review modal must be restored so it reopens after the editor exits"
+    );
+}
+
+#[test]
+fn review_footer_surfaces_live_status_message() {
+    // The review view is a full-screen takeover that never draws the normal
+    // status bar, so a status message must appear in its footer instead —
+    // otherwise apply/refresh results and editor errors would be invisible.
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    let sid = SessionId::new();
+    app.ui_state.modal = Modal::ReviewDiff(review_state_for(sid));
+    app.ui_state.status_message = Some((
+        "Editor unavailable here".to_string(),
+        Instant::now() + Duration::from_secs(3),
+    ));
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+
+    assert!(
+        buffer_text(&terminal).contains("Editor unavailable here"),
+        "review footer must render the live status message"
+    );
+}
+
+#[test]
+fn review_footer_truncates_a_long_status_message_instead_of_blanking() {
+    // A status message wider than the footer must be truncated to fit, not
+    // dropped — dropping would blank the footer for the toast's lifetime, the
+    // exact invisibility the footer toast exists to prevent (and long messages
+    // are usually errors, which matter most).
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    app.ui_state.modal = Modal::ReviewDiff(review_state_for(SessionId::new()));
+    app.ui_state.status_message = Some((
+        "Failed to launch '/usr/local/bin/my-editor': No such file or directory (os error 2)"
+            .to_string(),
+        Instant::now() + Duration::from_secs(3),
+    ));
+
+    // Narrow terminal: the full message can't fit on the footer row.
+    let mut terminal = Terminal::new(TestBackend::new(40, 20)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+
+    let text = buffer_text(&terminal);
+    assert!(
+        text.contains("Failed to launch") && text.contains('…'),
+        "a long status message must be truncated with an ellipsis, not dropped: {text:?}"
+    );
+}
+
+#[tokio::test]
+async fn review_open_in_editor_key_ignored_in_visual_mode() {
+    // In visual (line-select) mode the editor shortcut is inert — it must not
+    // tear the TUI down mid-selection, matching the footer, which only offers
+    // "edit" outside comment/visual sub-modes.
+    let (mut app, sid, _worktree) = app_with_editor_capable_session().await;
+
+    // Enter visual mode in the body, then press the editor key.
+    let mut review = review_state_for(sid);
+    review.focus = super::review::ReviewFocus::Body;
+    review.visual_anchor = Some(review.cursor);
+    let dot = crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Char('.'),
+        crossterm::event::KeyModifiers::NONE,
+    );
+
+    app.handle_review_key(dot, review).await;
+
+    assert!(
+        app.ui_state.editor_command.is_none() && !app.ui_state.should_quit,
+        "editor shortcut must be inert during a visual selection"
     );
 }
 
