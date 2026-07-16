@@ -108,7 +108,35 @@ fn make_recent(title: &str, id: SessionId) -> SessionListItem {
         status: SessionStatus::Running,
         agent_state: None,
         unread: false,
+        branch: "feat".to_string(),
+        program: "claude".to_string(),
+        keep_alive: false,
+        lfs_pulling: false,
+        pr_number: None,
+        pr_url: None,
+        pr_merged: false,
+        pr_state: None,
+        pr_draft: false,
+        pr_labels: Vec::new(),
     }
+}
+
+/// A recents shortcut carrying an open PR, so the badge-rendering path is
+/// exercised.
+fn make_recent_with_pr(title: &str, id: SessionId, pr_number: u32) -> SessionListItem {
+    let mut r = make_recent(title, id);
+    if let SessionListItem::RecentSession {
+        pr_number: n,
+        pr_url,
+        pr_state,
+        ..
+    } = &mut r
+    {
+        *n = Some(pr_number);
+        *pr_url = Some(format!("https://example.com/pr/{pr_number}"));
+        *pr_state = Some(PrState::Open);
+    }
+    r
 }
 
 #[test]
@@ -175,6 +203,100 @@ fn pinned_recents_slice_mirrors_numbers_from_full_list_map() {
         "recent row mirrors #2 from the full-list map: '{}'",
         lines[1]
     );
+}
+
+#[test]
+fn recent_row_shows_pr_badge() {
+    // A recents shortcut to a session with an open PR must show the same
+    // "PR #<n>" badge the real Worktree row shows below.
+    let target = SessionId::new();
+    let items = vec![
+        SessionListItem::RecentsHeader,
+        make_recent_with_pr("session-b", target, 42),
+        SessionListItem::Spacer,
+        make_project("proj-a", 1),
+        make_worktree_with_id("session-b", target),
+    ];
+    let lines = render_tree(&items, 40, 6);
+    // The badge text is wrapped per-character in OSC 8 hyperlink escapes (the
+    // same treatment real Worktree rows get), so strip those before matching.
+    assert!(
+        strip_osc8(&lines[1]).contains("PR #42"),
+        "recent row should show the PR badge: '{}'",
+        lines[1]
+    );
+}
+
+#[test]
+fn recent_row_renders_identically_to_its_real_row() {
+    // A recents shortcut must be indistinguishable from the real row it points
+    // at — same number, glyph, title, keep-alive anchor, branch, and PR badge.
+    let target = SessionId::new();
+    let branch = "my-feature-branch";
+
+    let mut recent = make_recent_with_pr("session-x", target, 7);
+    if let SessionListItem::RecentSession {
+        branch: b,
+        keep_alive,
+        ..
+    } = &mut recent
+    {
+        *b = branch.to_string();
+        *keep_alive = true;
+    }
+
+    let mut real = make_worktree_with_id("session-x", target);
+    if let SessionListItem::Worktree {
+        branch: b,
+        keep_alive,
+        pr_number,
+        pr_url,
+        pr_state,
+        ..
+    } = &mut real
+    {
+        *b = branch.to_string();
+        *keep_alive = true;
+        *pr_number = Some(7);
+        *pr_url = Some("https://example.com/pr/7".to_string());
+        *pr_state = Some(PrState::Open);
+    }
+
+    let items = vec![
+        SessionListItem::RecentsHeader,
+        recent,
+        SessionListItem::Spacer,
+        make_project("proj", 1),
+        real, // #1
+    ];
+    let lines = render_tree(&items, 60, 6);
+    assert_eq!(
+        strip_osc8(&lines[1]),
+        strip_osc8(&lines[4]),
+        "recent row must render identically to its real row\nrecent: '{}'\nreal:   '{}'",
+        lines[1],
+        lines[4],
+    );
+}
+
+/// Remove OSC 8 hyperlink escape sequences (`ESC ] 8 ; ; <url> BEL`) so a
+/// rendered line can be matched against its plain badge text.
+fn strip_osc8(line: &str) -> String {
+    let mut out = String::new();
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1B' {
+            // Skip up to and including the terminating BEL.
+            for c in chars.by_ref() {
+                if c == '\x07' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn make_worktree_with_program(title: &str, program: &str) -> SessionListItem {
