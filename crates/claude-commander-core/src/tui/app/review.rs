@@ -890,6 +890,17 @@ impl DiffReviewState {
         };
     }
 
+    /// Scroll the file-list pane by one row (free of the tree cursor), for a
+    /// mouse wheel over the file list.
+    pub fn wheel_tree(&mut self, down: bool) {
+        let max = self.visible_rows().len().saturating_sub(1) as u16;
+        self.tree_scroll = if down {
+            (self.tree_scroll + 1).min(max)
+        } else {
+            self.tree_scroll.saturating_sub(1)
+        };
+    }
+
     /// Left-click at a screen position. Clicking a comment box folds or unfolds
     /// it; clicking a diff line focuses the body and moves the cursor there
     /// (clearing any selection).
@@ -4867,5 +4878,22 @@ diff --git a/x.rs b/x.rs
         assert_eq!(s.scroll, 3);
         s.wheel(false);
         assert_eq!(s.scroll, 2);
+    }
+
+    #[test]
+    fn wheel_tree_scrolls_file_list_within_bounds() {
+        let mut s = state_with_two_files();
+        // Two root files → 2 visible rows → max tree_scroll 1.
+        assert_eq!(s.tree_scroll, 0);
+        for _ in 0..10 {
+            s.wheel_tree(true);
+        }
+        assert_eq!(s.tree_scroll, 1);
+        // The wheel scrolls the file list without touching the diff body.
+        assert_eq!(s.scroll, 0);
+        s.wheel_tree(false);
+        assert_eq!(s.tree_scroll, 0);
+        s.wheel_tree(false);
+        assert_eq!(s.tree_scroll, 0);
     }
 }

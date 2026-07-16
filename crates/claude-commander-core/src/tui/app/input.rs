@@ -375,8 +375,15 @@ impl App {
             }
             InputEvent::Mouse(mouse) => match mouse.kind {
                 MouseEventKind::ScrollUp => {
-                    if let Modal::ReviewDiff(state) = &mut self.ui_state.modal {
-                        state.wheel(false);
+                    if matches!(self.ui_state.modal, Modal::ReviewDiff(_)) {
+                        let over_files = self.review_wheel_over_file_list(&mouse);
+                        if let Modal::ReviewDiff(state) = &mut self.ui_state.modal {
+                            if over_files {
+                                state.wheel_tree(false);
+                            } else {
+                                state.wheel(false);
+                            }
+                        }
                     } else if !matches!(self.ui_state.modal, Modal::None) {
                         self.modal_wheel(false);
                     } else {
@@ -384,8 +391,15 @@ impl App {
                     }
                 }
                 MouseEventKind::ScrollDown => {
-                    if let Modal::ReviewDiff(state) = &mut self.ui_state.modal {
-                        state.wheel(true);
+                    if matches!(self.ui_state.modal, Modal::ReviewDiff(_)) {
+                        let over_files = self.review_wheel_over_file_list(&mouse);
+                        if let Modal::ReviewDiff(state) = &mut self.ui_state.modal {
+                            if over_files {
+                                state.wheel_tree(true);
+                            } else {
+                                state.wheel(true);
+                            }
+                        }
                     } else if !matches!(self.ui_state.modal, Modal::None) {
                         self.modal_wheel(true);
                     } else {
@@ -1098,6 +1112,17 @@ impl App {
         };
         self.ui_state.modal = Modal::None;
         self.handle_input_submit(action, submit_value, None).await;
+    }
+
+    /// Whether a review-view wheel event landed over the file-list pane (so it
+    /// should scroll the file list rather than the diff body).
+    fn review_wheel_over_file_list(&self, mouse: &crossterm::event::MouseEvent) -> bool {
+        self.ui_state.review_file_list_rect.is_some_and(|r| {
+            mouse.column >= r.x
+                && mouse.column < r.x + r.width
+                && mouse.row >= r.y
+                && mouse.row < r.y + r.height
+        })
     }
 
     /// Mouse wheel while a (non-review) modal is open. List modals move the
