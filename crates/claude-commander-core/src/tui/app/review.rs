@@ -45,11 +45,13 @@ pub struct ReviewButton {
     pub key: KeyEvent,
 }
 
-/// One segment of the review footer: either a non-actionable key legend
-/// (`Plain`) or a clickable `Button` that replays `key` on click.
+/// One segment of the review footer: a non-actionable key legend (`Plain`), a
+/// clickable `Button` that replays `key` on click, or a transient status message
+/// (`Toast`) that momentarily claims the bar.
 enum FooterItem {
     Plain(&'static str),
     Button { label: &'static str, key: KeyEvent },
+    Toast(String),
 }
 
 /// The key of the footer button containing `(col, row)`, or `None`. First
@@ -73,6 +75,11 @@ impl FooterItem {
         match self {
             FooterItem::Plain(text) => {
                 let span = Span::styled((*text).to_string(), base);
+                let width = span.width() as u16;
+                (vec![span], width)
+            }
+            FooterItem::Toast(text) => {
+                let span = Span::styled(text.clone(), base.add_modifier(Modifier::BOLD));
                 let width = span.width() as u16;
                 (vec![span], width)
             }
@@ -1450,6 +1457,37 @@ impl App {
             return;
         }
 
+        // Open the review's session worktree in the editor, honouring the
+        // configurable OpenInEditor binding (`.` by default) so the shortcut
+        // works here as it does in the session list. Skipped in visual mode so
+        // it doesn't tear the TUI down mid-selection (matching the footer, which
+        // only offers "edit" outside comment/visual sub-modes). Failures surface
+        // as an inline status so the review view stays open rather than being
+        // replaced by an error modal.
+        if state.visual_anchor.is_none()
+            && self
+                .config
+                .keybindings
+                .keys_for(BindableAction::OpenInEditor)
+                .iter()
+                .any(|kb| kb.matches(&key))
+        {
+            self.record_feature("editor.open");
+            let backend = self.backend_of_session(state.session_id);
+            if let Some(path) = self
+                .session(SessionRef::new(backend, state.session_id))
+                .map(|s| std::path::PathBuf::from(&s.worktree_path))
+            {
+                match self.open_path_in_editor(backend, path) {
+                    super::actions::EditorLaunch::Launched => {}
+                    super::actions::EditorLaunch::Unavailable(msg)
+                    | super::actions::EditorLaunch::Failed(msg) => self.set_review_status(&msg),
+                }
+            }
+            self.ui_state.modal = Modal::ReviewDiff(state);
+            return;
+        }
+
         // Ctrl-n / Ctrl-p mirror the arrow keys (and j/k) for navigation,
         // matching the convention used by the other list modals.
         let nav_code = review_nav_keycode(key);
@@ -1773,6 +1811,27 @@ impl App {
                 ));
             }
         }
+        // Open the session's worktree in the editor (default `.`), shown only
+        // outside comment/visual sub-modes and when the owning backend can drive
+        // the operator's local editor (remote sessions can't).
+        if state.comment.is_none()
+            && state.visual_anchor.is_none()
+            && let Some(kb) = self
+                .config
+                .keybindings
+                .keys_for(BindableAction::OpenInEditor)
+                .first()
+            && self
+                .backend_arc(self.backend_of_session(state.session_id))
+                .capabilities()
+                .open_editor
+        {
+            items.push(FooterItem::Button {
+                label: "edit",
+                key: KeyEvent::new(kb.code, kb.modifiers),
+            });
+        }
+
         // The session re-attach toggle is available in every non-comment mode.
         if state.comment.is_none()
             && let Some(kb) = &toggle_key
@@ -1781,6 +1840,19 @@ impl App {
                 label: "session",
                 key: KeyEvent::new(kb.code, kb.modifiers),
             });
+        }
+
+        // A live status message momentarily claims the footer (this view's
+        // status bar), mirroring the main status bar where a toast replaces the
+        // action buttons. Without this the review view — a full-screen takeover
+        // that never draws the normal status bar — would silently swallow every
+        // `set_review_status` (apply/refresh/mark results, editor errors, …).
+        // Not shown while editing a comment, where the footer hosts the editor.
+        if state.comment.is_none()
+            && let Some((msg, expires)) = &self.ui_state.status_message
+            && Instant::now() < *expires
+        {
+            items = vec![FooterItem::Toast(msg.clone())];
         }
 
         // Close is pinned to the right edge (Ctrl-Q always closes the view) —
@@ -1827,6 +1899,20 @@ impl App {
             let (item_spans, width) = item.render(base, accent);
             let lead = if i == 0 { 0 } else { SEP_WIDTH };
             if x.saturating_add(lead).saturating_add(width) > items_right {
+                // A `Toast` is the review view's only status channel, so on a
+                // narrow terminal truncate it to fit rather than dropping it,
+                // which would blank the footer for the toast's lifetime — the
+                // exact invisibility this override exists to prevent. Optional
+                // key-hint items still just drop on overflow.
+                if let FooterItem::Toast(text) = item {
+                    if i != 0 {
+                        spans.push(Span::styled(SEP, base));
+                        x += SEP_WIDTH;
+                    }
+                    let avail = items_right.saturating_sub(x) as usize;
+                    let truncated = super::settings::truncate_str(text, avail);
+                    spans.push(Span::styled(truncated, base.add_modifier(Modifier::BOLD)));
+                }
                 break;
             }
             if i != 0 {
