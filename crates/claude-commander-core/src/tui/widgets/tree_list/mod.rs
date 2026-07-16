@@ -60,6 +60,12 @@ pub struct TreeList<'a> {
     /// When true (default), show the running program as a `(program)`
     /// suffix on session rows when sessions use more than one program.
     show_session_program: bool,
+    /// Forces the `(program)` suffix decision instead of deriving it from this
+    /// widget's own items. The pinned recents panel renders only its slice, so
+    /// it can't see whether the *real* rows use mixed programs; the caller
+    /// computes that over the full list and passes it here so recents rows
+    /// mirror the real rows' suffix exactly. `None` = derive locally (default).
+    show_program_override: Option<bool>,
     /// Projects whose most recent auto-pull was held back, with a short
     /// reason string. A small ⚠ badge is rendered on each blocked row.
     pull_blocked_projects: HashMap<ProjectId, &'a str>,
@@ -85,6 +91,7 @@ impl<'a> TreeList<'a> {
             review_labels: &[],
             invert_pr_label_color: false,
             show_session_program: true,
+            show_program_override: None,
             pull_blocked_projects: HashMap::new(),
             comment_sessions: HashSet::new(),
             recent_display_info: HashMap::new(),
@@ -119,6 +126,15 @@ impl<'a> TreeList<'a> {
     /// show it only if the list has more than one distinct program.
     pub fn show_session_program(mut self, b: bool) -> Self {
         self.show_session_program = b;
+        self
+    }
+
+    /// Force the `(program)` suffix decision (see [`show_program_override`]).
+    /// Used by the pinned recents panel so its rows mirror the real rows.
+    ///
+    /// [`show_program_override`]: Self::show_program_override
+    pub fn show_program_override(mut self, b: bool) -> Self {
+        self.show_program_override = Some(b);
         self
     }
 
@@ -206,20 +222,30 @@ impl<'a> TreeList<'a> {
         self
     }
 
-    /// Check whether sessions use more than one distinct program
+    /// Check whether this widget's sessions use more than one distinct program.
     fn has_mixed_programs(&self) -> bool {
-        let mut first = None;
-        for item in self.items {
-            if let SessionListItem::Worktree { program, .. } = item {
-                match first {
-                    None => first = Some(program_name(program)),
-                    Some(p) if p != program_name(program) => return true,
-                    _ => {}
-                }
-            }
-        }
-        false
+        list_has_mixed_programs(self.items)
     }
+}
+
+/// Whether the session rows in `items` use more than one distinct program.
+/// Drives the `(program)` suffix. Exposed so a caller (the recents panel) can
+/// compute the decision over the *full* list and mirror it onto a slice.
+pub fn list_has_mixed_programs(items: &[SessionListItem]) -> bool {
+    let mut first = None;
+    for item in items {
+        let program = match item {
+            SessionListItem::Worktree { program, .. }
+            | SessionListItem::RecentSession { program, .. } => program,
+            _ => continue,
+        };
+        match first {
+            None => first = Some(program_name(program)),
+            Some(p) if p != program_name(program) => return true,
+            _ => {}
+        }
+    }
+    false
 }
 
 /// The base program name, excluding any arguments (e.g. "claude --mode auto" -> "claude").

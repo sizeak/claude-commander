@@ -154,6 +154,14 @@ impl App {
             let display_info =
                 crate::tui::widgets::worktree_display_info(&self.ui_state.list_items, &self.theme);
 
+            // Whether the *real* rows show the `(program)` suffix — decided over
+            // the scrolling list below, then mirrored onto the recents slice so
+            // recents rows match (the slice alone can't see the real programs).
+            let show_program = self.config.show_session_program
+                && crate::tui::widgets::list_has_mixed_programs(
+                    &self.ui_state.list_items[recents_len..],
+                );
+
             let mut rec_state = ratatui::widgets::ListState::default();
             if let Some(s) = global_sel
                 && s < recents_len
@@ -163,6 +171,10 @@ impl App {
             let recents_tree = TreeList::new(&self.ui_state.list_items[..recents_len], &self.theme)
                 .tick(self.ui_state.tick_count)
                 .highlight_style(self.theme.selection().add_modifier(Modifier::BOLD))
+                .review_labels(&self.config.pr_review_labels)
+                .invert_pr_label_color(self.config.invert_pr_label_color)
+                .show_program_override(show_program)
+                .comment_sessions(self.ui_state.sessions_with_comments.clone())
                 .recent_display_info(display_info);
             frame.render_stateful_widget(recents_tree, sub[0], &mut rec_state);
 

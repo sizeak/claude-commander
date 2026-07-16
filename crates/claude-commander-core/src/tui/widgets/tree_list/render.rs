@@ -23,6 +23,11 @@ impl<'a> StatefulWidget for TreeList<'a> {
                     pr_number: Some(n),
                     pr_url: Some(url),
                     ..
+                }
+                | SessionListItem::RecentSession {
+                    pr_number: Some(n),
+                    pr_url: Some(url),
+                    ..
                 } => Some((*n, url.clone())),
                 _ => None,
             })
@@ -46,10 +51,174 @@ impl<'a> StatefulWidget for TreeList<'a> {
     }
 }
 
+/// Everything needed to render a single session row. A tree `Worktree` and its
+/// pinned-panel `RecentSession` mirror both build one of these and hand it to
+/// [`TreeList::session_row_line`], so the two render byte-for-byte identically.
+struct SessionRow<'r> {
+    /// Displayed session number; `None` renders a blank slot (used only as the
+    /// recents fallback when the mirror map is missing an entry).
+    number: Option<usize>,
+    stacked_child: bool,
+    status: SessionStatus,
+    agent_state: Option<AgentState>,
+    unread: bool,
+    color: Color,
+    title: &'r str,
+    branch: &'r str,
+    program: &'r str,
+    show_program: bool,
+    keep_alive: bool,
+    has_comments: bool,
+    lfs_pulling: bool,
+    pr_number: Option<u32>,
+    pr_state: Option<crate::git::PrState>,
+    pr_merged: bool,
+    pr_draft: bool,
+    pr_labels: &'r [String],
+}
+
 impl<'a> TreeList<'a> {
+    /// Render a session row from its display inputs. Shared by the `Worktree`
+    /// and `RecentSession` arms so a recents shortcut is indistinguishable from
+    /// the real row it mirrors.
+    fn session_row_line(&self, row: SessionRow) -> Line<'static> {
+        // Right-aligned session number prefix, with an extra indent for stacked
+        // children so they sit one level deeper than their stack base.
+        let stack_prefix = if row.stacked_child { STACK_INDENT } else { "" };
+        let num_str = match row.number {
+            Some(n) => format!("{stack_prefix}{:>width$} ", n, width = NUMBER_WIDTH),
+            None => format!("{stack_prefix}{:>width$} ", "", width = NUMBER_WIDTH),
+        };
+        let mut spans = vec![Span::styled(
+            num_str,
+            Style::default().fg(self.theme.text_secondary),
+        )];
+
+        // Single status glyph: spinner > waiting > unread > running > stopped
+        if let Some((glyph, color)) =
+            self.session_status_glyph(row.status, row.agent_state, row.unread)
+        {
+            spans.push(Span::styled(
+                format!("{glyph} "),
+                Style::default().fg(color),
+            ));
+        }
+
+        let title_style = if row.unread {
+            Style::default().fg(row.color).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(row.color)
+        };
+        spans.push(Span::styled(row.title.to_string(), title_style));
+
+        if row.has_comments {
+            spans.push(Span::styled(
+                format!(" {COMMENT_MARKER}"),
+                Style::default().fg(self.theme.diff_file_header),
+            ));
+        }
+        if row.keep_alive {
+            // Anchored: opted out of auto-hibernation.
+            spans.push(Span::styled(
+                format!(" {KEEP_ALIVE_MARKER}"),
+                Style::default().fg(self.theme.text_accent),
+            ));
+        }
+        if let Some(shown_branch) = crate::session::display_branch(row.title, row.branch) {
+            spans.push(Span::styled(
+                format!(" [{}]", shown_branch),
+                Style::default().fg(self.theme.text_accent),
+            ));
+        }
+
+        spans.extend(self.pr_badge_spans(
+            row.pr_number,
+            row.pr_state,
+            row.pr_merged,
+            row.pr_draft,
+            row.pr_labels,
+        ));
+
+        if row.show_program {
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                format!("({})", program_name(row.program)),
+                Style::default().fg(self.theme.text_secondary),
+            ));
+        }
+
+        if row.lfs_pulling {
+            spans.push(Span::styled(
+                " ⇣ LFS",
+                Style::default()
+                    .fg(self.theme.text_secondary)
+                    .add_modifier(Modifier::DIM),
+            ));
+        }
+
+        Line::from(spans)
+    }
+
+    /// Build the PR badge span(s) for a session row. Empty when the row has no
+    /// PR. Rendered as a colored pill (default) or, when `invert_pr_label_color`
+    /// is set, colored text on the default background (pre-pill behavior).
+    /// Shared by the `Worktree` and `RecentSession` rows so the recents shortcut
+    /// mirrors the real row's badge exactly.
+    fn pr_badge_spans(
+        &self,
+        pr_number: Option<u32>,
+        pr_state: Option<crate::git::PrState>,
+        pr_merged: bool,
+        pr_draft: bool,
+        pr_labels: &[String],
+    ) -> Vec<Span<'static>> {
+        let Some(pr_num) = pr_number else {
+            return Vec::new();
+        };
+        if self.invert_pr_label_color {
+            // Pre-pill behavior: colored text on default bg.
+            let badge_color = pr_colors::pr_badge_color(
+                self.theme,
+                pr_state,
+                pr_merged,
+                pr_draft,
+                pr_labels,
+                self.review_labels,
+            );
+            vec![Span::styled(
+                format!(" PR #{}", pr_num),
+                Style::default().fg(badge_color),
+            )]
+        } else {
+            // Pill: non-colored separator space, then a pill with internal
+            // padding, colored bg, and bold contrast text so it stands out from
+            // the row.
+            let pill_bg = pr_colors::pr_pill_bg_color(
+                self.theme,
+                pr_state,
+                pr_merged,
+                pr_draft,
+                pr_labels,
+                self.review_labels,
+            );
+            vec![
+                Span::raw(" "),
+                Span::styled(
+                    format!(" PR #{} ", pr_num),
+                    Style::default()
+                        .bg(pill_bg)
+                        .fg(self.theme.pr_pill_text)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]
+        }
+    }
+
     /// Convert items to list items
     pub(super) fn to_list_items(&self) -> Vec<ListItem<'a>> {
-        let show_program = self.show_session_program && self.has_mixed_programs();
+        let show_program = self
+            .show_program_override
+            .unwrap_or_else(|| self.show_session_program && self.has_mixed_programs());
         let mut project_index: usize = 0;
         let mut worktree_number: usize = 0;
         let mut current_session_color = self.theme.project_color(0).1;
@@ -141,38 +310,48 @@ impl<'a> TreeList<'a> {
                 SessionListItem::RecentSession {
                     session,
                     title,
+                    branch,
                     status,
+                    program,
                     agent_state,
                     unread,
+                    keep_alive,
+                    lfs_pulling,
+                    pr_number,
+                    pr_state,
+                    pr_merged,
+                    pr_draft,
+                    pr_labels,
                     ..
                 } => {
                     // Mirror the number and project colour from the real row.
-                    let (num_str, color) = match recent_info.get(&session.id) {
-                        Some((n, c)) => (format!("{:>width$} ", n, width = NUMBER_WIDTH), *c),
-                        None => (
-                            format!("{:>width$} ", "", width = NUMBER_WIDTH),
-                            self.theme.text_primary,
-                        ),
+                    // The recents panel is a flat list, so the stack indent (a
+                    // tree-position marker) never applies here.
+                    let (number, color) = match recent_info.get(&session.id) {
+                        Some((n, c)) => (Some(*n), *c),
+                        None => (None, self.theme.text_primary),
                     };
-                    let mut spans = vec![Span::styled(
-                        num_str,
-                        Style::default().fg(self.theme.text_secondary),
-                    )];
-                    if let Some((glyph, glyph_color)) =
-                        self.session_status_glyph(*status, *agent_state, *unread)
-                    {
-                        spans.push(Span::styled(
-                            format!("{glyph} "),
-                            Style::default().fg(glyph_color),
-                        ));
-                    }
-                    let title_style = if *unread {
-                        Style::default().fg(color).add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(color)
-                    };
-                    spans.push(Span::styled(title.clone(), title_style));
-                    ListItem::new(Line::from(spans))
+                    let line = self.session_row_line(SessionRow {
+                        number,
+                        stacked_child: false,
+                        status: *status,
+                        agent_state: *agent_state,
+                        unread: *unread,
+                        color,
+                        title,
+                        branch,
+                        program,
+                        show_program,
+                        keep_alive: *keep_alive,
+                        has_comments: self.session_has_comments(&session.id),
+                        lfs_pulling: *lfs_pulling,
+                        pr_number: *pr_number,
+                        pr_state: *pr_state,
+                        pr_merged: *pr_merged,
+                        pr_draft: *pr_draft,
+                        pr_labels,
+                    });
+                    ListItem::new(line)
                 }
 
                 SessionListItem::Worktree {
@@ -194,116 +373,26 @@ impl<'a> TreeList<'a> {
                     ..
                 } => {
                     worktree_number += 1;
-
-                    // Right-aligned session number prefix, with an extra
-                    // indent for stacked children so they sit one level deeper
-                    // than their stack base.
-                    let stack_prefix = if *stacked_child { STACK_INDENT } else { "" };
-                    let indent_span = Span::styled(
-                        format!(
-                            "{stack_prefix}{:>width$} ",
-                            worktree_number,
-                            width = NUMBER_WIDTH
-                        ),
-                        Style::default().fg(self.theme.text_secondary),
-                    );
-                    let mut spans = vec![indent_span];
-
-                    // Single status glyph: spinner > waiting > unread > running > stopped
-                    if let Some((glyph, color)) =
-                        self.session_status_glyph(*status, *agent_state, *unread)
-                    {
-                        spans.push(Span::styled(
-                            format!("{glyph} "),
-                            Style::default().fg(color),
-                        ));
-                    }
-
-                    let title_style = if *unread {
-                        Style::default()
-                            .fg(current_session_color)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(current_session_color)
-                    };
-                    spans.push(Span::styled(title.clone(), title_style));
-                    if self.session_has_comments(id) {
-                        spans.push(Span::styled(
-                            format!(" {COMMENT_MARKER}"),
-                            Style::default().fg(self.theme.diff_file_header),
-                        ));
-                    }
-                    if *keep_alive {
-                        // Anchored: opted out of auto-hibernation.
-                        spans.push(Span::styled(
-                            format!(" {KEEP_ALIVE_MARKER}"),
-                            Style::default().fg(self.theme.text_accent),
-                        ));
-                    }
-                    if let Some(shown_branch) = crate::session::display_branch(title, branch) {
-                        spans.push(Span::styled(
-                            format!(" [{}]", shown_branch),
-                            Style::default().fg(self.theme.text_accent),
-                        ));
-                    }
-
-                    if let Some(pr_num) = pr_number {
-                        if self.invert_pr_label_color {
-                            // Pre-pill behavior: colored text on default bg.
-                            let badge_color = pr_colors::pr_badge_color(
-                                self.theme,
-                                *pr_state,
-                                *pr_merged,
-                                *pr_draft,
-                                pr_labels,
-                                self.review_labels,
-                            );
-                            spans.push(Span::styled(
-                                format!(" PR #{}", pr_num),
-                                Style::default().fg(badge_color),
-                            ));
-                        } else {
-                            // Pill: non-colored separator space, then a pill
-                            // with internal padding, colored bg, and bold
-                            // contrast text so it stands out from the row.
-                            let pill_bg = pr_colors::pr_pill_bg_color(
-                                self.theme,
-                                *pr_state,
-                                *pr_merged,
-                                *pr_draft,
-                                pr_labels,
-                                self.review_labels,
-                            );
-                            spans.push(Span::raw(" "));
-                            spans.push(Span::styled(
-                                format!(" PR #{} ", pr_num),
-                                Style::default()
-                                    .bg(pill_bg)
-                                    .fg(self.theme.pr_pill_text)
-                                    .add_modifier(Modifier::BOLD),
-                            ));
-                        }
-                    }
-
-                    if show_program {
-                        spans.push(Span::raw(" "));
-                        spans.push(Span::styled(
-                            format!("({})", program_name(program)),
-                            Style::default().fg(self.theme.text_secondary),
-                        ));
-                    }
-
-                    if *lfs_pulling {
-                        spans.push(Span::styled(
-                            " ⇣ LFS",
-                            Style::default()
-                                .fg(self.theme.text_secondary)
-                                .add_modifier(Modifier::DIM),
-                        ));
-                    }
-
-                    let line = Line::from(spans);
-
+                    let line = self.session_row_line(SessionRow {
+                        number: Some(worktree_number),
+                        stacked_child: *stacked_child,
+                        status: *status,
+                        agent_state: *agent_state,
+                        unread: *unread,
+                        color: current_session_color,
+                        title,
+                        branch,
+                        program,
+                        show_program,
+                        keep_alive: *keep_alive,
+                        has_comments: self.session_has_comments(id),
+                        lfs_pulling: *lfs_pulling,
+                        pr_number: *pr_number,
+                        pr_state: *pr_state,
+                        pr_merged: *pr_merged,
+                        pr_draft: *pr_draft,
+                        pr_labels,
+                    });
                     ListItem::new(line)
                 }
                 SessionListItem::ServerHeader {

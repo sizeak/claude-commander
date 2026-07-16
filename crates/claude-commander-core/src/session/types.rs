@@ -614,6 +614,19 @@ pub enum SessionListItem {
         status: SessionStatus,
         agent_state: Option<AgentState>,
         unread: bool,
+        /// The following fields mirror the real [`Worktree`](Self::Worktree) row
+        /// this shortcut points at, so the recents row renders identically. See
+        /// the `Worktree` variant for the individual field meanings.
+        branch: String,
+        program: String,
+        keep_alive: bool,
+        lfs_pulling: bool,
+        pr_number: Option<u32>,
+        pr_url: Option<String>,
+        pr_merged: bool,
+        pr_state: Option<crate::git::PrState>,
+        pr_draft: bool,
+        pr_labels: Vec<String>,
     },
 }
 

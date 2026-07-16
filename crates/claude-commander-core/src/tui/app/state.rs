@@ -633,6 +633,20 @@ impl App {
                                 status: s.status,
                                 agent_state: agent_states.get(&s.session_id).copied(),
                                 unread: s.unread,
+                                branch: s.branch.clone(),
+                                program: s.program.clone(),
+                                keep_alive: s.keep_alive,
+                                // Set below by the same LFS-marking pass that
+                                // marks the real Worktree rows.
+                                lfs_pulling: false,
+                                pr_number: s.pr_number,
+                                pr_url: s.pr_url.clone(),
+                                pr_merged: s.pr_merged,
+                                // The DTO carries the already-effective PR state;
+                                // wrapping in Some mirrors the real Worktree row.
+                                pr_state: Some(s.pr_state),
+                                pr_draft: s.pr_draft,
+                                pr_labels: s.pr_labels.clone(),
                             },
                         ));
                     }
@@ -738,11 +752,21 @@ impl App {
         // store's read-modify-write cycle untouched.
         if !self.ui_state.lfs_pull_in_flight.is_empty() {
             for item in &mut items {
-                if let SessionListItem::Worktree {
-                    id, lfs_pulling, ..
-                } = item
-                {
-                    *lfs_pulling = self.ui_state.lfs_pull_in_flight.contains(id);
+                match item {
+                    SessionListItem::Worktree {
+                        id, lfs_pulling, ..
+                    } => {
+                        *lfs_pulling = self.ui_state.lfs_pull_in_flight.contains(id);
+                    }
+                    // Keep the recents mirror in step with its real row.
+                    SessionListItem::RecentSession {
+                        session,
+                        lfs_pulling,
+                        ..
+                    } => {
+                        *lfs_pulling = self.ui_state.lfs_pull_in_flight.contains(&session.id);
+                    }
+                    _ => {}
                 }
             }
         }

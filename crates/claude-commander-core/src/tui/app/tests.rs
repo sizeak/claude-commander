@@ -201,6 +201,16 @@ fn make_recent_session(id: SessionId) -> SessionListItem {
         status: SessionStatus::Running,
         agent_state: None,
         unread: false,
+        branch: "feat".to_string(),
+        program: "claude".to_string(),
+        keep_alive: false,
+        lfs_pulling: false,
+        pr_number: None,
+        pr_url: None,
+        pr_merged: false,
+        pr_state: None,
+        pr_draft: false,
+        pr_labels: Vec::new(),
     }
 }
 
