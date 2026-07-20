@@ -71,7 +71,7 @@ Press `t` on any session in a stack to create a new session on top of that stack
 
 Stacks are detected from the PR's `baseRefName` returned by the `gh` CLI, so they stay accurate across GitHub's auto-retargeting when a stack member is merged.
 
-Stack grouping (children indented under their base) is active in the project-grouped view and in the **Section Stacks** view — the default when [Session List Sections](configuration.md#session-list-sections) is configured — which keeps each stack together as a unit inside the section chosen by its newest member. In the plain **Sections** view, sessions are ordered by their section instead and stacked children render at the normal indent — the `t` hotkey and `stack_parent_session_id` still work, but a base and its child may land in different sections depending on their PR state. Cycle between the three views with `v`.
+Stack grouping (children indented under their base) is active in the project-grouped view and in the **Section Stacks** view — the default when [Session List Sections](configuration.md#session-list-sections) is configured — which keeps each stack together as a unit inside the section chosen by its base (the stack root), so a draft or early-stage session stacked on top never drags the whole stack out of the base's section. In the plain **Sections** view, sessions are ordered by their section instead and stacked children render at the normal indent — the `t` hotkey and `stack_parent_session_id` still work, but a base and its child may land in different sections depending on their PR state. Cycle between the three views with `v`.
 
 #### Cascade merge main through a stack
 

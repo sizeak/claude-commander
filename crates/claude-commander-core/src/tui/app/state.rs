@@ -1182,12 +1182,12 @@ pub(super) fn build_stacked_section_items(
     #[derive(Clone)]
     struct GroupRender {
         sort_key: DateTime<Utc>,
-        // Tiebreaker for groups whose leaves share an entered_section_at —
+        // Tiebreaker for groups whose roots share an entered_section_at —
         // common when one apply_assignment pass stamps multiple sessions
         // with the same `now`. Without a stable tiebreaker, HashMap-
         // randomised insertion order leaks into the sort and the UI
         // appears to churn on every refresh.
-        leaf_id: SessionId,
+        root_id: SessionId,
         order: Vec<(SessionId, bool)>,
     }
 
@@ -1241,17 +1241,24 @@ pub(super) fn build_stacked_section_items(
 
         for root_id in group_roots {
             let members = groups.remove(&root_id).unwrap_or_default();
-            // Pick the leaf in the whole subgraph; its section drives placement.
-            let leaf_id = crate::session::stack_top(root_id, &project_sessions);
-            let Some(leaf) = members.iter().find(|s| s.session_id == leaf_id).copied() else {
+            // Placement is anchored on the stack ROOT (the base session), not
+            // the leaf: the root's section decides where the whole stack lands,
+            // so a child's automatic section (e.g. a draft leaf) can't drag an
+            // already-advanced root into an earlier section.
+            let Some(root) = members.iter().find(|s| s.session_id == root_id).copied() else {
                 continue;
             };
 
-            // Walk leaf → root. First *valid* section_override encountered
-            // wins (stale ones are skipped, see below); overrides on off-path
-            // siblings are not considered.
+            // Walk leaf → root along the main line collecting the *root-most*
+            // valid `section_override` (stale ones — naming a section no longer
+            // in config — are skipped, same as `assign_section`, so we fall back
+            // to `current_section` rather than dumping into In Progress).
+            // Root-most wins so the root's own override takes precedence, but a
+            // manual override on a child is still honoured when the root has
+            // none — the section picker writes the override to the selected row,
+            // which may be a child. Off-path siblings are not considered.
             let mut effective: Option<String> = None;
-            let mut cursor = leaf.session_id;
+            let mut cursor = crate::session::stack_top(root_id, &project_sessions);
             for _ in 0..project_sessions.len() {
                 let Some(cur) = project_sessions
                     .iter()
@@ -1260,15 +1267,10 @@ pub(super) fn build_stacked_section_items(
                 else {
                     break;
                 };
-                // Only a *valid* override stops the walk. A stale override
-                // (naming a section no longer in config) is ignored — same as
-                // `assign_section` — so the session falls back to its
-                // `current_section` instead of being dumped into In Progress.
                 if let Some(ovr) = &cur.section_override
                     && valid_section(ovr)
                 {
                     effective = Some(ovr.clone());
-                    break;
                 }
                 match crate::session::resolve_stack_parent(cur, &project_sessions) {
                     Some(parent) => cursor = parent,
@@ -1276,7 +1278,7 @@ pub(super) fn build_stacked_section_items(
                 }
             }
             let section_name = effective
-                .or_else(|| leaf.current_section.clone())
+                .or_else(|| root.current_section.clone())
                 .filter(|n| valid_section(n))
                 .unwrap_or_else(|| crate::session::IN_PROGRESS.to_string());
 
@@ -1293,8 +1295,8 @@ pub(super) fn build_stacked_section_items(
                 .entry(project.id)
                 .or_default()
                 .push(GroupRender {
-                    sort_key: leaf.entered_section_at.unwrap_or_default(),
-                    leaf_id,
+                    sort_key: root.entered_section_at.unwrap_or_default(),
+                    root_id,
                     order,
                 });
         }
@@ -1357,12 +1359,12 @@ pub(super) fn build_stacked_section_items(
                 nested: true,
             });
 
-            // Stacks within a section sort by their leaf's
-            // entered_section_at, with leaf_id as a stable tiebreaker so
+            // Stacks within a section sort by their root's
+            // entered_section_at, with root_id as a stable tiebreaker so
             // batched apply_assignment calls (which stamp many sessions
             // with the same `now`) don't make the view churn.
             groups_in_proj
-                .sort_by(|a, b| a.sort_key.cmp(&b.sort_key).then(a.leaf_id.cmp(&b.leaf_id)));
+                .sort_by(|a, b| a.sort_key.cmp(&b.sort_key).then(a.root_id.cmp(&b.root_id)));
             for group in groups_in_proj {
                 for (sid, stacked_child) in group.order {
                     if let Some(session) = by_id.get(&sid).copied() {
@@ -1676,10 +1678,11 @@ mod stack_order_tests {
     }
 
     #[test]
-    fn stacked_sections_group_whole_stack_under_leaf_section() {
-        // base.current_section = "Review" (older), child.current_section = "Open" (leaf).
-        // In the new stacked-section view the whole stack should appear under
-        // "Open" (the leaf's section), with `child` indented beneath `base`.
+    fn stacked_sections_group_whole_stack_under_root_section() {
+        // base.current_section = "Review" (the root), child.current_section =
+        // "Open" (the leaf). In the stacked-section view the whole stack is
+        // placed by the ROOT, so it appears under "Review" (not the leaf's
+        // "Open"), with `child` indented beneath `base`.
         let project_id = ProjectId::new();
         let mut base = make_session_in_section("base", "base", 0, "Review");
         base.project_id = project_id;
@@ -1695,20 +1698,20 @@ mod stack_order_tests {
         let items =
             build_stacked_section_items(&state, &sections, None, &agent_states, &collapsed, false);
 
-        // Walk items: find the "Open" header, then base+child should follow.
-        let found_open = items.iter().any(
-            |item| matches!(item, SessionListItem::SectionHeader { name, .. } if name == "Open"),
+        // Walk items: find the "Review" header, then base+child should follow.
+        let found_review = items.iter().any(
+            |item| matches!(item, SessionListItem::SectionHeader { name, .. } if name == "Review"),
         );
         assert!(
-            found_open,
-            "Open section header should be present: {items:?}"
+            found_review,
+            "Review section header should be present: {items:?}"
         );
 
-        // After the Open header, expect: Project → base (stacked_child:false) → child (stacked_child:true)
+        // After the Review header, expect: Project → base (stacked_child:false) → child (stacked_child:true)
         let after = items
             .iter()
             .skip_while(
-                |i| !matches!(i, SessionListItem::SectionHeader { name, .. } if name == "Open"),
+                |i| !matches!(i, SessionListItem::SectionHeader { name, .. } if name == "Review"),
             )
             .skip(1)
             .collect::<Vec<_>>();
@@ -1725,14 +1728,14 @@ mod stack_order_tests {
         assert_eq!(
             session_rows,
             vec![(base.id, false), (child.id, true)],
-            "stack should render under leaf's section with indentation preserved"
+            "stack should render under root's section with indentation preserved"
         );
 
-        // And there should be no Worktree row under "Review".
-        let review_rows: Vec<_> = items
+        // And there should be no Worktree row under "Open".
+        let open_rows: Vec<_> = items
             .iter()
             .skip_while(
-                |i| !matches!(i, SessionListItem::SectionHeader { name, .. } if name == "Review"),
+                |i| !matches!(i, SessionListItem::SectionHeader { name, .. } if name == "Open"),
             )
             .skip(1)
             .take_while(|i| {
@@ -1744,15 +1747,69 @@ mod stack_order_tests {
             .filter(|i| matches!(i, SessionListItem::Worktree { .. }))
             .collect();
         assert!(
-            review_rows.is_empty(),
-            "stack-base should have moved out of Review section: {review_rows:?}"
+            open_rows.is_empty(),
+            "stack should not appear under the leaf's Open section: {open_rows:?}"
         );
     }
 
     #[test]
-    fn stacked_sections_override_closest_to_leaf_wins() {
-        // base has section_override = "Pinned"; child (leaf) has no override.
-        // Whole stack lands in "Pinned".
+    fn stacked_sections_place_by_root_not_draft_child_leaf() {
+        // Regression for the "why is my non-draft session in Drafts?" report:
+        // a non-draft stack *root* in "In Review" with a *draft child* stacked
+        // on top (the leaf) whose current_section is "Drafts". The whole stack
+        // must be placed by the root's section ("In Review"), NOT the leaf's
+        // ("Drafts") — otherwise a draft child drags its already-approved root
+        // into the Drafts section.
+        let project_id = ProjectId::new();
+        let mut root = make_session_in_section("root", "root", 0, "In Review");
+        root.project_id = project_id;
+        let mut child = make_session_in_section("child", "child", 10, "Drafts");
+        child.project_id = project_id;
+        child.stack_parent_session_id = Some(root.id);
+
+        let state = appstate_from(vec![root.clone(), child.clone()]);
+        let sections = vec![section_named("In Review"), section_named("Drafts")];
+        let items = build_stacked_section_items(
+            &state,
+            &sections,
+            None,
+            &BTreeMap::new(),
+            &std::collections::HashSet::new(),
+            false,
+        );
+
+        // Track the enclosing section header for each session row.
+        let mut current_header: Option<String> = None;
+        let mut landed: std::collections::HashMap<SessionId, String> = Default::default();
+        for item in &items {
+            match item {
+                SessionListItem::SectionHeader { name, .. } => {
+                    current_header = Some(name.clone());
+                }
+                SessionListItem::Worktree { id, .. } => {
+                    if let Some(h) = &current_header {
+                        landed.insert(*id, h.clone());
+                    }
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(
+            landed.get(&root.id).map(String::as_str),
+            Some("In Review"),
+            "stack should be placed by the root's section, not the draft leaf's"
+        );
+        assert_eq!(
+            landed.get(&child.id).map(String::as_str),
+            Some("In Review"),
+            "the draft child renders with its stack under the root's section"
+        );
+    }
+
+    #[test]
+    fn stacked_sections_root_override_places_whole_stack() {
+        // base (root) has section_override = "Pinned"; child (leaf) has no
+        // override. The root's own override anchors the whole stack in "Pinned".
         let project_id = ProjectId::new();
         let mut base = make_session_in_section("base", "base", 0, "Review");
         base.project_id = project_id;
@@ -1798,7 +1855,138 @@ mod stack_order_tests {
         assert_eq!(
             pinned_rows,
             vec![(base.id, false), (child.id, true)],
-            "whole stack should land in the closest-to-leaf overridden section"
+            "whole stack should land in the root's overridden section"
+        );
+    }
+
+    #[test]
+    fn stacked_sections_root_override_beats_child_override() {
+        // Root and child BOTH carry a valid (but different) override. Placement
+        // is root-anchored, so the root's override wins and the whole stack
+        // lands in "Pinned" — not the child's "Open". This pins the precedence
+        // rule (root-most valid override wins) that the two single-override
+        // tests can't discriminate.
+        let project_id = ProjectId::new();
+        let mut base = make_session_in_section("base", "base", 0, "Review");
+        base.project_id = project_id;
+        base.section_override = Some("Pinned".to_string());
+        let mut child = make_session_in_section("child", "child", 10, "Review");
+        child.project_id = project_id;
+        child.stack_parent_session_id = Some(base.id);
+        child.section_override = Some("Open".to_string());
+
+        let state = appstate_from(vec![base.clone(), child.clone()]);
+        let sections = vec![
+            section_named("Open"),
+            section_named("Review"),
+            section_named("Pinned"),
+        ];
+        let items = build_stacked_section_items(
+            &state,
+            &sections,
+            None,
+            &BTreeMap::new(),
+            &std::collections::HashSet::new(),
+            false,
+        );
+
+        let pinned_rows: Vec<_> = items
+            .iter()
+            .skip_while(
+                |i| !matches!(i, SessionListItem::SectionHeader { name, .. } if name == "Pinned"),
+            )
+            .skip(1)
+            .take_while(|i| {
+                !matches!(
+                    i,
+                    SessionListItem::SectionHeader { .. } | SessionListItem::Spacer
+                )
+            })
+            .filter_map(|i| match i {
+                SessionListItem::Worktree { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            pinned_rows,
+            vec![base.id, child.id],
+            "root's override should win over the child's"
+        );
+
+        // Nothing should land under the child's "Open" override.
+        let open_count = items
+            .iter()
+            .skip_while(
+                |i| !matches!(i, SessionListItem::SectionHeader { name, .. } if name == "Open"),
+            )
+            .skip(1)
+            .take_while(|i| {
+                !matches!(
+                    i,
+                    SessionListItem::SectionHeader { .. } | SessionListItem::Spacer
+                )
+            })
+            .filter(|i| matches!(i, SessionListItem::Worktree { .. }))
+            .count();
+        assert_eq!(
+            open_count, 0,
+            "child's override must not win over the root's"
+        );
+    }
+
+    #[test]
+    fn stacked_sections_child_override_still_moves_whole_stack() {
+        // The section picker writes the override to the *selected* row, which
+        // may be a stacked child. Placement is root-anchored, but a manual
+        // override on the child (root has none) must still relocate the whole
+        // stack — otherwise "move to section" would silently do nothing when a
+        // child row is selected.
+        let project_id = ProjectId::new();
+        let mut base = make_session_in_section("base", "base", 0, "Review");
+        base.project_id = project_id;
+        let mut child = make_session_in_section("child", "child", 10, "Open");
+        child.project_id = project_id;
+        child.stack_parent_session_id = Some(base.id);
+        child.section_override = Some("Pinned".to_string());
+
+        let state = appstate_from(vec![base.clone(), child.clone()]);
+        let sections = vec![
+            section_named("Open"),
+            section_named("Review"),
+            section_named("Pinned"),
+        ];
+        let items = build_stacked_section_items(
+            &state,
+            &sections,
+            None,
+            &BTreeMap::new(),
+            &std::collections::HashSet::new(),
+            false,
+        );
+
+        let pinned_rows: Vec<_> = items
+            .iter()
+            .skip_while(
+                |i| !matches!(i, SessionListItem::SectionHeader { name, .. } if name == "Pinned"),
+            )
+            .skip(1)
+            .take_while(|i| {
+                !matches!(
+                    i,
+                    SessionListItem::SectionHeader { .. } | SessionListItem::Spacer
+                )
+            })
+            .filter_map(|i| match i {
+                SessionListItem::Worktree {
+                    id, stacked_child, ..
+                } => Some((*id, *stacked_child)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            pinned_rows,
+            vec![(base.id, false), (child.id, true)],
+            "a manual override on the child should relocate the whole stack"
         );
     }
 
@@ -1846,10 +2034,11 @@ mod stack_order_tests {
     }
 
     #[test]
-    fn stacked_sections_fan_out_groups_share_root_and_use_newest_leaf() {
-        // Fan-out: base has two children, B (older) and C (newer).
-        // C is the newest leaf in the subgraph, so the whole stack (base+B+C)
-        // appears under C's current_section.
+    fn stacked_sections_fan_out_groups_share_root_and_use_root_section() {
+        // Fan-out: base has two children, B (older) and C (newer, the leaf).
+        // Placement is anchored on the root, so the whole stack (base+B+C)
+        // appears under base's current_section ("Review"), regardless of the
+        // newest leaf C sitting in "Open".
         let project_id = ProjectId::new();
         let mut base = make_session_in_section("base", "base", 0, "Review");
         base.project_id = project_id;
@@ -1871,10 +2060,10 @@ mod stack_order_tests {
             false,
         );
 
-        let open_session_ids: Vec<_> = items
+        let review_session_ids: Vec<_> = items
             .iter()
             .skip_while(
-                |i| !matches!(i, SessionListItem::SectionHeader { name, .. } if name == "Open"),
+                |i| !matches!(i, SessionListItem::SectionHeader { name, .. } if name == "Review"),
             )
             .skip(1)
             .take_while(|i| {
@@ -1889,16 +2078,16 @@ mod stack_order_tests {
             })
             .collect();
         assert!(
-            open_session_ids.contains(&base.id)
-                && open_session_ids.contains(&b.id)
-                && open_session_ids.contains(&c.id),
-            "all three subgraph members should appear under Open: {open_session_ids:?}"
+            review_session_ids.contains(&base.id)
+                && review_session_ids.contains(&b.id)
+                && review_session_ids.contains(&c.id),
+            "all three subgraph members should appear under Review: {review_session_ids:?}"
         );
 
-        let review_session_count = items
+        let open_session_count = items
             .iter()
             .skip_while(
-                |i| !matches!(i, SessionListItem::SectionHeader { name, .. } if name == "Review"),
+                |i| !matches!(i, SessionListItem::SectionHeader { name, .. } if name == "Open"),
             )
             .skip(1)
             .take_while(|i| {
@@ -1910,16 +2099,18 @@ mod stack_order_tests {
             .filter(|i| matches!(i, SessionListItem::Worktree { .. }))
             .count();
         assert_eq!(
-            review_session_count, 0,
-            "Review should be empty because B follows the stack into Open"
+            open_session_count, 0,
+            "Open should be empty because the whole stack follows the root into Review"
         );
     }
 
     #[test]
     fn stacked_sections_sibling_override_off_leaf_path_is_ignored() {
         // base ← B (override "Pinned"), base ← C (newer leaf, no override).
-        // The chosen leaf is C; walking C → base, B is off-path so its
-        // override doesn't count. Stack goes to C's current_section.
+        // The override walk runs along the main line leaf(C) → base; B is
+        // off-path so its "Pinned" override doesn't count. With no on-path
+        // override, the stack is placed by the root, so it lands in base's
+        // current_section ("Review") — not "Pinned", and not the leaf's "Open".
         let project_id = ProjectId::new();
         let mut base = make_session_in_section("base", "base", 0, "Review");
         base.project_id = project_id;
@@ -1965,10 +2156,10 @@ mod stack_order_tests {
             "off-leaf-path overrides should not pull the stack into their section"
         );
 
-        let open_count = items
+        let review_count = items
             .iter()
             .skip_while(
-                |i| !matches!(i, SessionListItem::SectionHeader { name, .. } if name == "Open"),
+                |i| !matches!(i, SessionListItem::SectionHeader { name, .. } if name == "Review"),
             )
             .skip(1)
             .take_while(|i| {
@@ -1980,8 +2171,8 @@ mod stack_order_tests {
             .filter(|i| matches!(i, SessionListItem::Worktree { .. }))
             .count();
         assert_eq!(
-            open_count, 3,
-            "all three subgraph members should appear under Open: {items:?}"
+            review_count, 3,
+            "all three subgraph members should appear under the root's Review: {items:?}"
         );
     }
 
@@ -2047,11 +2238,12 @@ mod stack_order_tests {
     }
 
     #[test]
-    fn stacked_sections_sort_groups_by_leaf_entered_section_at() {
-        // Two unstacked sessions both in "Open"; the newer one's
-        // entered_section_at should sort it... wait — build_sections sorts
-        // oldest-first within a section. The newer leaf has a later
-        // entered_section_at and therefore appears AFTER the older one.
+    fn stacked_sections_sort_groups_by_root_entered_section_at() {
+        // Two unstacked sessions both in "Open" (each is its own root); the
+        // newer one's entered_section_at should sort it... wait —
+        // build_sections sorts oldest-first within a section. The newer root
+        // has a later entered_section_at and therefore appears AFTER the older
+        // one.
         let project_id = ProjectId::new();
         let mut older = make_session_in_section("older", "older", 0, "Open");
         older.project_id = project_id;
