@@ -90,7 +90,7 @@ class WorkspaceStore extends ChangeNotifier {
   Future<void> loadAndConnectAll() async {
     final configs = await _listStore.load();
     for (final cfg in configs) {
-      _spinUp(cfg);
+      unawaited(_spinUp(cfg).connect());
     }
     if (!_disposed) notifyListeners();
   }
@@ -104,13 +104,17 @@ class WorkspaceStore extends ChangeNotifier {
     await store.connect();
   }
 
-  /// Update an existing server in place (URL/token/name edit): reconnect its
-  /// store (releasing the old handle first) and persist. A no-op add if the id
-  /// isn't known.
+  /// Update an existing server in place (URL/token/name edit): apply the config
+  /// synchronously, persist, then reconnect its store (releasing the old handle
+  /// first). A no-op add if the id isn't known.
   Future<void> updateServer(ServerConfig config) async {
     final store = serverById(config.id);
     if (store == null) return addServer(config);
-    await _persist(overrides: {config.id: config});
+    // Apply first so the store carries the new config before we persist — else
+    // a concurrent add/remove persist would read the pre-edit config and write
+    // it back over the edit.
+    store.applyConfig(config);
+    await _persist();
     if (!_disposed) notifyListeners();
     await store.reconnect(config);
   }
@@ -139,15 +143,9 @@ class WorkspaceStore extends ChangeNotifier {
     return store;
   }
 
-  /// Persist the current server list. [overrides] swaps in edited configs by id
-  /// (used by [updateServer], whose store still holds the pre-edit config until
-  /// reconnect completes).
-  Future<void> _persist({Map<String, ServerConfig> overrides = const {}}) {
-    final configs = [
-      for (final s in _stores) overrides[s.config.id] ?? s.config,
-    ];
-    return _listStore.save(configs);
-  }
+  /// Persist the current server list from each store's live config.
+  Future<void> _persist() =>
+      _listStore.save([for (final s in _stores) s.config]);
 
   void _onChildChanged() {
     if (!_disposed) notifyListeners();

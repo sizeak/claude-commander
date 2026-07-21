@@ -122,7 +122,13 @@ class KeyedServerListStore implements ServerListStore {
   Future<List<ServerConfig>> load() async {
     final raw = await _secrets.read(_kServers);
     if (raw != null && raw.isNotEmpty) {
-      return _parse(raw);
+      try {
+        return await _parse(raw);
+      } catch (_) {
+        // A corrupt/unexpected blob must not brick startup: fall back to
+        // first-run (empty) rather than throwing out of main().
+        return const [];
+      }
     }
     // Migration: fold a legacy single-server config into a one-entry list, then
     // delete the legacy keys so this runs exactly once (shape-consumed).
@@ -171,14 +177,18 @@ class KeyedServerListStore implements ServerListStore {
 
   @override
   Future<void> save(List<ServerConfig> servers) async {
+    // Write tokens BEFORE the metadata blob so the metadata write is the commit
+    // point: a crash before it leaves the previous consistent state; a crash
+    // after it can only orphan a token (harmless), never load a server with a
+    // missing token.
+    for (final s in servers) {
+      await _secrets.write(_kToken(s.id), s.token);
+    }
     final meta = [
       for (final s in servers)
         {'id': s.id, 'name': s.name, 'baseUrl': s.baseUrl},
     ];
     await _secrets.write(_kServers, jsonEncode(meta));
-    for (final s in servers) {
-      await _secrets.write(_kToken(s.id), s.token);
-    }
     // Drop tokens for any server no longer present, so a removed server leaves
     // nothing behind.
     final liveIds = {for (final s in servers) s.id};

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:claude_commander_client/server_config.dart';
 import 'package:claude_commander_client/state/commander_store.dart';
 import 'package:claude_commander_client/state/workspace_store.dart';
@@ -79,6 +81,53 @@ void main() {
     expect(fakes['id-a']!.countOf('disconnectServer'), 1);
     // The surviving server is untouched.
     expect(fakes['id-b']!.countOf('disconnectServer'), 0);
+  });
+
+  test('loadAndConnectAll connects every saved server on relaunch', () async {
+    final a = _cfg('id-a', 'laptop');
+    final b = _cfg('id-b', 'codespace');
+    final localFakes = {a.id: FakeCommanderApi(), b.id: FakeCommanderApi()};
+    localFakes[a.id]!.listSessionsResponse = [
+      sessionInfo(id: '11111111-1111-1111-1111-111111111111', projectName: 'A'),
+    ];
+    final ws = WorkspaceStore(
+      api: FakeCommanderApi(),
+      listStore: InMemoryServerListStore([a, b]),
+      storeFactory: (cfg) => CommanderStore(api: localFakes[cfg.id]!, config: cfg),
+    );
+
+    await ws.loadAndConnectAll();
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+
+    // Both saved servers actually connected (not left as eternal spinners).
+    expect(localFakes[a.id]!.countOf('connectServer'), 1);
+    expect(localFakes[b.id]!.countOf('connectServer'), 1);
+    expect(ws.serverById('id-a')!.handle, isNotNull);
+    expect(ws.serverById('id-a')!.sessions.single.projectName, 'A');
+  });
+
+  test('disposing a store mid-connect releases the handle and wires no feeds',
+      () async {
+    final a = _cfg('id-a', 'laptop');
+    final fake = FakeCommanderApi()..connectGate = Completer<void>();
+    final ws = WorkspaceStore(
+      api: FakeCommanderApi(),
+      listStore: InMemoryServerListStore([a]),
+      storeFactory: (cfg) => CommanderStore(api: fake, config: cfg),
+    );
+
+    await ws.loadAndConnectAll(); // connect starts, parks on the gate
+    await Future<void>.delayed(Duration.zero);
+    await ws.removeServer('id-a'); // dispose while connect is in flight
+    fake.connectGate!.complete(); // connect resumes on the disposed store
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
+
+    // The freshly-acquired handle is released, and no feed was ever subscribed.
+    expect(fake.countOf('connectServer'), 1);
+    expect(fake.countOf('disconnectServer'), 1);
+    expect(fake.countOf('changeFeed'), 0);
   });
 
   test('a server that fails to connect stays visible without sinking others',

@@ -129,12 +129,19 @@ class CommanderStore extends ChangeNotifier {
   Future<void> connect() async {
     _loading = true;
     _error = null;
-    notifyListeners();
+    if (!_disposed) notifyListeners();
     try {
       final h = await _api.connectServer(
         baseUrl: _config.baseUrl,
         token: _config.token,
       );
+      // The store may have been disposed (server removed) while connectServer
+      // was in flight. Release the freshly-acquired handle and bail rather than
+      // subscribing feeds that would never be torn down.
+      if (_disposed) {
+        unawaited(_api.disconnectServer(handle: h));
+        return;
+      }
       _handle = h;
       _changeSub = _api
           .changeFeed(handle: h)
@@ -177,8 +184,17 @@ class CommanderStore extends ChangeNotifier {
       kind: ConnectionStateKind.connecting,
       reason: '',
     );
-    notifyListeners();
+    if (!_disposed) notifyListeners();
     await connect();
+  }
+
+  /// Update the stored config (name/URL/token) synchronously, ahead of a
+  /// [reconnect]. Lets the workspace persist the edited config immediately —
+  /// `reconnect` only assigns `_config` after several awaits, so a concurrent
+  /// save would otherwise write the pre-edit config back to disk.
+  void applyConfig(ServerConfig config) {
+    _config = config;
+    if (!_disposed) notifyListeners();
   }
 
   /// Force a snapshot refetch (pull-to-refresh); a no-op reconnect if the handle

@@ -43,6 +43,14 @@ void main() {
       final store = KeyedServerListStore(InMemorySecretKeyStore());
       expect(await store.load(), isEmpty);
     });
+
+    test('a corrupt metadata blob falls back to empty (never bricks startup)',
+        () async {
+      final store = KeyedServerListStore(
+        InMemorySecretKeyStore({'servers_v1': 'not json {['}),
+      );
+      expect(await store.load(), isEmpty);
+    });
   });
 
   group('KeyedServerListStore round-trip', () {
