@@ -3,9 +3,9 @@ import 'dart:async';
 import 'package:claude_commander_client/pages/adaptive_shell.dart';
 import 'package:claude_commander_client/pages/session_detail_page.dart';
 import 'package:claude_commander_client/pages/session_list_page.dart';
-import 'package:claude_commander_client/server_config.dart';
 import 'package:claude_commander_client/state/commander_store.dart';
 import 'package:claude_commander_client/state/commander_store_scope.dart';
+import 'package:claude_commander_client/state/workspace_store.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -14,22 +14,20 @@ import 'support/fixtures.dart';
 
 void main() {
   late FakeCommanderApi api;
-  late InMemoryServerConfigStore configStore;
   late CommanderStore store;
+  late WorkspaceStore workspace;
 
   setUp(() {
     api = FakeCommanderApi();
-    configStore = InMemoryServerConfigStore();
     store = CommanderStore(api: api, config: testConfig);
+    workspace = WorkspaceStore.withStores([store]);
   });
 
-  tearDown(() => store.dispose());
+  tearDown(() => workspace.dispose());
 
-  Widget wrap() => CommanderStoreScope(
-    store: store,
-    child: MaterialApp(
-      home: AdaptiveShell(configStore: configStore, onConnected: (_) async {}),
-    ),
+  Widget wrap() => WorkspaceScope(
+    workspace: workspace,
+    child: const MaterialApp(home: AdaptiveShell()),
   );
 
   void useSize(WidgetTester tester, Size size) {

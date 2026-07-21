@@ -7,28 +7,25 @@ import 'support/fake_commander_api.dart';
 
 void main() {
   late FakeCommanderApi api;
-  late InMemoryServerConfigStore store;
-  ServerConfig? connectedWith;
+  ServerConfig? submitted;
 
   setUp(() {
     api = FakeCommanderApi();
-    store = InMemoryServerConfigStore();
-    connectedWith = null;
+    submitted = null;
   });
 
-  Widget wrap() => MaterialApp(
+  Widget wrap({ServerConfig? existing}) => MaterialApp(
     home: ConnectionPage(
       api: api,
-      store: store,
-      onConnected: (cfg) async => connectedWith = cfg,
+      existing: existing,
+      onSubmit: (cfg) async => submitted = cfg,
     ),
   );
 
-  testWidgets('an empty URL blocks save (form validation, no connect)', (
+  testWidgets('an empty URL blocks save (form validation, no submit)', (
     tester,
   ) async {
     await tester.pumpWidget(wrap());
-    // Clear the pre-filled URL so the field is empty.
     await tester.enterText(
       find.widgetWithText(TextFormField, 'Server URL'),
       '',
@@ -37,15 +34,16 @@ void main() {
       find.widgetWithText(TextFormField, 'Bearer token'),
       'tok',
     );
-    await tester.tap(find.text('Save & connect'));
+    await tester.tap(find.widgetWithText(FilledButton, 'Add server'));
     await tester.pumpAndSettle();
 
     expect(find.text('Required'), findsOneWidget);
-    expect(connectedWith, isNull);
-    expect(await store.load(), isNull);
+    expect(submitted, isNull);
   });
 
-  testWidgets('a failing health shows an error', (tester) async {
+  testWidgets('a failing health shows an error (test probe never submits)', (
+    tester,
+  ) async {
     api.healthResponse = false;
     await tester.pumpWidget(wrap());
     await tester.enterText(
@@ -56,17 +54,17 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.textContaining('did not return OK'), findsOneWidget);
-    // A test-connection probe never saves or connects.
-    expect(await store.load(), isNull);
-    expect(connectedWith, isNull);
+    expect(submitted, isNull);
   });
 
-  testWidgets('success saves the config and hands off to onConnected', (
-    tester,
-  ) async {
+  testWidgets('a successful probe submits the assembled config', (tester) async {
     api.healthResponse = true;
     api.healthTmuxResponse = true;
     await tester.pumpWidget(wrap());
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Name'),
+      'laptop',
+    );
     await tester.enterText(
       find.widgetWithText(TextFormField, 'Server URL'),
       'http://example.test:7878',
@@ -75,15 +73,65 @@ void main() {
       find.widgetWithText(TextFormField, 'Bearer token'),
       'secret',
     );
-    await tester.tap(find.text('Save & connect'));
+    await tester.tap(find.widgetWithText(FilledButton, 'Add server'));
     await tester.pumpAndSettle();
 
-    final saved = await store.load();
-    expect(saved, isNotNull);
-    expect(saved!.baseUrl, 'http://example.test:7878');
-    expect(saved.token, 'secret');
-    // The app (not the page) owns the handle; the page just hands off the config.
-    expect(connectedWith?.baseUrl, 'http://example.test:7878');
-    expect(connectedWith?.token, 'secret');
+    expect(submitted, isNotNull);
+    expect(submitted!.name, 'laptop');
+    expect(submitted!.baseUrl, 'http://example.test:7878');
+    expect(submitted!.token, 'secret');
+    expect(submitted!.id, isNotEmpty);
+  });
+
+  testWidgets('a failed probe offers "Save anyway", which submits', (
+    tester,
+  ) async {
+    api.healthResponse = false; // probe will fail
+    await tester.pumpWidget(wrap());
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Server URL'),
+      'http://down.test:7878',
+    );
+    await tester.enterText(
+      find.widgetWithText(TextFormField, 'Bearer token'),
+      'secret',
+    );
+    await tester.tap(find.widgetWithText(FilledButton, 'Add server'));
+    // Explicit pumps (not pumpAndSettle): while the confirm dialog is open the
+    // save button shows a spinner (_busy), an animation that never settles.
+    await tester.pump(); // start _save → probe
+    await tester.pump(const Duration(milliseconds: 50)); // probe resolves, dialog opens
+
+    // The confirm dialog appears; nothing submitted yet.
+    expect(find.text('Connection test failed'), findsOneWidget);
+    expect(submitted, isNull);
+
+    await tester.tap(find.widgetWithText(FilledButton, 'Save anyway'));
+    await tester.pump(); // dialog pops, onSubmit runs
+    await tester.pump(const Duration(milliseconds: 50));
+
+    expect(submitted, isNotNull);
+    // Name defaulted from the host when none was typed.
+    expect(submitted!.name, 'down.test:7878');
+    expect(submitted!.baseUrl, 'http://down.test:7878');
+  });
+
+  testWidgets('editing preserves the server id', (tester) async {
+    api.healthResponse = true;
+    api.healthTmuxResponse = true;
+    await tester.pumpWidget(
+      wrap(
+        existing: const ServerConfig(
+          id: 'keep-me',
+          name: 'laptop',
+          baseUrl: 'http://a:7878',
+          token: 'tok',
+        ),
+      ),
+    );
+    await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+    await tester.pumpAndSettle();
+
+    expect(submitted!.id, 'keep-me');
   });
 }

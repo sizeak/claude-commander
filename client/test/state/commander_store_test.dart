@@ -13,6 +13,8 @@ void main() {
   setUp(() => api = FakeCommanderApi());
 
   const otherConfig = ServerConfig(
+    id: 'other-server',
+    name: 'other',
     baseUrl: 'http://other.test:9999',
     token: 'other-token',
   );
