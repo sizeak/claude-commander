@@ -177,11 +177,12 @@ pub struct WorktreeSession {
     /// has been idle. Toggled per-session from the TUI/CLI.
     #[serde(default)]
     pub keep_alive: bool,
-    /// Set when this session was stopped by the auto-hibernation policy (as
-    /// opposed to a manual kill). Drives the wake path to resume the prior
-    /// agent conversation *even when* the global `resume_session` config is
-    /// off — hibernation is only non-destructive with `--resume`. Cleared when
-    /// the session is next recreated.
+    /// Set when this session was stopped non-destructively — by the
+    /// auto-hibernation policy or a manual kill that kept the worktree.
+    /// Drives the wake path to resume the prior agent conversation *even
+    /// when* the global `resume_session` config is off — stopping is only
+    /// non-destructive with `--resume`. Cleared when the session is next
+    /// recreated.
     #[serde(default)]
     pub hibernated: bool,
 }

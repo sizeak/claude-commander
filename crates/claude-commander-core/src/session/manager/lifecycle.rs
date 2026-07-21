@@ -606,7 +606,12 @@ impl SessionManager {
         Ok(())
     }
 
-    /// Kill a session (stop tmux, optionally remove worktree)
+    /// Kill a session (stop tmux, optionally remove worktree).
+    ///
+    /// When the worktree is kept the kill is non-destructive, so the session
+    /// is marked `hibernated` — the next wake then resumes the prior agent
+    /// conversation even when the global `resume_session` config is off,
+    /// exactly like an auto-hibernated session.
     #[instrument(skip(self))]
     pub async fn kill_session(&self, session_id: &SessionId, remove_worktree: bool) -> Result<()> {
         let session = {
@@ -635,12 +640,15 @@ impl SessionManager {
                 .await?;
         }
 
-        // Update state
+        // Update state. A kill that keeps the worktree is non-destructive, so
+        // flag it for resume-on-wake; a destructive kill leaves nothing to
+        // resume into.
         let sid = *session_id;
         self.store
             .mutate(move |state| {
                 if let Some(session) = state.get_session_mut(&sid) {
                     session.set_status(SessionStatus::Stopped);
+                    session.hibernated = !remove_worktree;
                 }
             })
             .await?;
@@ -650,10 +658,12 @@ impl SessionManager {
     }
 
     /// Hibernate a session: stop its tmux process to free memory while keeping
-    /// the worktree, branch, and all metadata intact. Unlike [`kill_session`]
-    /// this is a *policy* action driven by the idle-hibernation loop, so it
-    /// marks the session `hibernated` — the wake path then resumes the agent
-    /// conversation even when the global `resume_session` config is off.
+    /// the worktree, branch, and all metadata intact. Unlike
+    /// [`kill_session`](Self::kill_session) — which shares the non-destructive
+    /// stop + `hibernated` marker when the worktree is kept — this is a
+    /// *policy* action driven by the idle-hibernation loop, so it guards
+    /// against racing attaches and restarts. The wake path then resumes the
+    /// agent conversation even when the global `resume_session` config is off.
     ///
     /// Guards against racing a concurrent manual restart or a late attach:
     ///  - `last_active_at` is snapshotted at the top of this function; the

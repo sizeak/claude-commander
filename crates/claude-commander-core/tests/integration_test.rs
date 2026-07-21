@@ -1627,6 +1627,102 @@ async fn test_hibernate_session_keeps_worktree_and_wakes_with_resume() {
     drop(worktrees_dir);
 }
 
+/// A manual kill that keeps the worktree is non-destructive, exactly like
+/// hibernation: the session is marked `hibernated` so the next wake resumes
+/// the prior agent conversation even when the global `resume_session` config
+/// is off.
+#[tokio::test]
+async fn test_manual_kill_marks_session_for_resume_on_wake() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let state_temp_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+
+    // resume_session = false so the test proves the marker alone forces the
+    // resume-on-wake behaviour, not the global flag.
+    let config = Config {
+        worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
+        resume_session: false,
+        ..Config::default()
+    };
+
+    let store = create_isolated_store(&state_temp_dir);
+    let config_store = Arc::new(ConfigStore::new(config).unwrap());
+    let manager = SessionManager::new(config_store, store.clone(), "");
+
+    let project_id = manager.add_project(repo_path).await.unwrap();
+    let session_id = manager
+        .prepare_session(
+            &project_id,
+            "manual-kill-test".to_string(),
+            Some("bash".to_string()),
+            None,
+        )
+        .await
+        .unwrap();
+    manager
+        .finalize_session(&session_id, None, None)
+        .await
+        .unwrap();
+
+    let (tmux_name, worktree_path) = {
+        let state = store.read().await;
+        let s = state.get_session(&session_id).unwrap();
+        (s.tmux_session_name.clone(), s.worktree_path.clone())
+    };
+
+    // Manual kill keeping the worktree: must flag the session for resume.
+    manager.kill_session(&session_id, false).await.unwrap();
+    {
+        let state = store.read().await;
+        let s = state.get_session(&session_id).unwrap();
+        assert_eq!(s.status, SessionStatus::Stopped, "should be Stopped");
+        assert!(
+            s.hibernated,
+            "manual kill keeping the worktree must mark the session for resume-on-wake"
+        );
+    }
+    assert!(
+        !manager.tmux.session_exists(&tmux_name).await.unwrap(),
+        "tmux session should be killed"
+    );
+    assert!(
+        worktree_path.exists(),
+        "worktree must be preserved by a non-destructive kill"
+    );
+
+    // Wake via the attach path: recreates tmux, flips back to Running, and
+    // clears the marker — even though resume_session is false.
+    manager.get_attach_command(&session_id).await.unwrap();
+    {
+        let state = store.read().await;
+        let s = state.get_session(&session_id).unwrap();
+        assert_eq!(s.status, SessionStatus::Running, "should be Running again");
+        assert!(!s.hibernated, "resume marker must be cleared on wake");
+    }
+
+    // A destructive kill (worktree removed) must NOT leave the session flagged
+    // for resume — there is nothing left to resume into.
+    manager.kill_session(&session_id, true).await.unwrap();
+    {
+        let state = store.read().await;
+        let s = state.get_session(&session_id).unwrap();
+        assert_eq!(s.status, SessionStatus::Stopped);
+        assert!(
+            !s.hibernated,
+            "destructive kill must not mark the session for resume"
+        );
+    }
+
+    drop(repo_temp_dir);
+    drop(state_temp_dir);
+    drop(worktrees_dir);
+}
+
 /// The in-session Ctrl+Space switcher resolves its pick by tmux session name.
 /// Reviving through that path must behave exactly like the tree-view attach:
 /// a session whose tmux session died behind commander's back (e.g. after a

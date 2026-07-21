@@ -240,7 +240,9 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
 
   void _kill() => _runAction(
     title: 'Kill session?',
-    message: 'Stops the running program. The worktree is kept.',
+    message:
+        'Stops the running program. The worktree is kept and the '
+        'conversation resumes on next attach.',
     confirmLabel: 'Kill',
     confirmColor: Colors.orange,
     successMessage: 'Session killed',
