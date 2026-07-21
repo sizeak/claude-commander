@@ -7,6 +7,8 @@ import 'package:uuid/uuid.dart';
 /// with plausible defaults so tests only pass what they assert on.
 
 const testConfig = ServerConfig(
+  id: 'test-server',
+  name: 'test',
   baseUrl: 'http://127.0.0.1:7878',
   token: 'test-token',
 );

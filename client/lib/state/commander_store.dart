@@ -43,6 +43,14 @@ class CommanderStore extends ChangeNotifier {
   /// a [reconnect] is in flight.
   String? get handle => _handle;
 
+  /// Monotonic connect generation. Bumped at the start of every [connect] (and
+  /// [reconnect]) so an earlier in-flight connect, on resuming after an await,
+  /// can detect it has been superseded — release the handle it just acquired and
+  /// bail rather than leaking it and orphaning its feeds. Closes the
+  /// connect-vs-connect race (e.g. a double-tapped retry, or an edit while a
+  /// slow connect is still parked).
+  int _connectEpoch = 0;
+
   WorkspaceSnapshotDto? _workspace;
   WorkspaceSnapshotDto? get workspace => _workspace;
 
@@ -127,14 +135,23 @@ class CommanderStore extends ChangeNotifier {
 
   /// Acquire the handle, wire up the feeds, and load the first snapshot.
   Future<void> connect() async {
+    final epoch = ++_connectEpoch;
     _loading = true;
     _error = null;
-    notifyListeners();
+    if (!_disposed) notifyListeners();
     try {
       final h = await _api.connectServer(
         baseUrl: _config.baseUrl,
         token: _config.token,
       );
+      // While connectServer was in flight the store may have been disposed
+      // (server removed) or superseded by a newer connect/reconnect (double-tap,
+      // edit). Release the freshly-acquired handle and bail rather than
+      // subscribing feeds that would never be torn down.
+      if (_disposed || epoch != _connectEpoch) {
+        unawaited(_api.disconnectServer(handle: h));
+        return;
+      }
       _handle = h;
       _changeSub = _api
           .changeFeed(handle: h)
@@ -144,10 +161,14 @@ class CommanderStore extends ChangeNotifier {
           .listen(_onConnection, onError: (_) {});
       await _refresh();
     } catch (e) {
-      _error = e;
+      if (epoch == _connectEpoch) _error = e;
     } finally {
-      _loading = false;
-      if (!_disposed) notifyListeners();
+      // Only the live connect owns the shared state; a superseded one must not
+      // clobber the newer connect's loading flag / error.
+      if (epoch == _connectEpoch) {
+        _loading = false;
+        if (!_disposed) notifyListeners();
+      }
     }
   }
 
@@ -156,6 +177,9 @@ class CommanderStore extends ChangeNotifier {
   /// connect afresh. This is the fix for the reconnect leak — the store owns the
   /// handle so a settings change can't abandon it.
   Future<void> reconnect(ServerConfig next) async {
+    // Supersede any in-flight connect immediately (before our own awaits) so it
+    // releases its handle when it resumes instead of racing this reconnect.
+    _connectEpoch++;
     await _teardownSubs();
     final old = _handle;
     _handle = null;
@@ -177,8 +201,17 @@ class CommanderStore extends ChangeNotifier {
       kind: ConnectionStateKind.connecting,
       reason: '',
     );
-    notifyListeners();
+    if (!_disposed) notifyListeners();
     await connect();
+  }
+
+  /// Update the stored config (name/URL/token) synchronously, ahead of a
+  /// [reconnect]. Lets the workspace persist the edited config immediately —
+  /// `reconnect` only assigns `_config` after several awaits, so a concurrent
+  /// save would otherwise write the pre-edit config back to disk.
+  void applyConfig(ServerConfig config) {
+    _config = config;
+    if (!_disposed) notifyListeners();
   }
 
   /// Force a snapshot refetch (pull-to-refresh); a no-op reconnect if the handle

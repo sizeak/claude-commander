@@ -1,168 +1,246 @@
 import 'package:flutter/material.dart';
 
-import '../server_config.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
+import '../state/workspace_store.dart';
 import '../widgets/session_chips.dart';
-import 'connection_page.dart';
 import 'create_session_page.dart';
 import 'programs_page.dart';
 import 'projects_page.dart';
+import 'servers_page.dart';
 import 'session_detail_page.dart';
 
-/// The session list content, grouped by project — layout-agnostic (no Scaffold,
-/// no route). Rendered reactively from the [CommanderStore]: the poller's change
-/// feed refreshes it, so there's no local timer or FutureBuilder. The narrow
-/// [SessionListPage] wraps this in a Scaffold and pushes a detail route on tap;
-/// the wide shell places it in the master column and updates a detail pane in
-/// place (so it passes [selectedId] to highlight the open session).
+/// The aggregated session list, grouped by server → project — layout-agnostic
+/// (no Scaffold, no route). Enumerates the servers from the [WorkspaceStore] and
+/// renders each server's grouped sessions under a header (suppressed when only
+/// one server is configured, so single-server trees look unchanged). Each server
+/// section re-provides its own [CommanderStoreScope] so per-server consumers
+/// (detail, cascade banner) keep their single-store contract.
 class SessionListBody extends StatelessWidget {
   /// The id of the session shown in the detail pane, highlighted in the list.
   /// Null in the narrow (push) flow, where there is no persistent selection.
   final String? selectedId;
 
-  /// Invoked when a session row is tapped.
-  final ValueChanged<SessionInfo> onSelect;
+  /// Invoked when a session row is tapped, with the server that owns it.
+  final void Function(CommanderStore store, SessionInfo session) onSelect;
 
-  const SessionListBody({
-    super.key,
-    this.selectedId,
+  const SessionListBody({super.key, this.selectedId, required this.onSelect});
+
+  @override
+  Widget build(BuildContext context) {
+    final workspace = WorkspaceScope.of(context)!;
+    return ListenableBuilder(
+      listenable: workspace,
+      builder: (context, _) {
+        final servers = workspace.servers;
+        final multi = servers.length > 1;
+        return RefreshIndicator(
+          onRefresh: workspace.refreshAll,
+          child: ListView(
+            children: [
+              for (final store in servers)
+                _ServerSection(
+                  store: store,
+                  showHeader: multi,
+                  selectedId: selectedId,
+                  onSelect: onSelect,
+                ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+/// One server's slice of the aggregated list: an optional header, a paused-
+/// cascade banner, and its project-grouped session tiles — all under that
+/// server's [CommanderStoreScope] so the banner and pushed routes resolve to it.
+class _ServerSection extends StatelessWidget {
+  final CommanderStore store;
+  final bool showHeader;
+  final String? selectedId;
+  final void Function(CommanderStore store, SessionInfo session) onSelect;
+
+  const _ServerSection({
+    required this.store,
+    required this.showHeader,
+    required this.selectedId,
     required this.onSelect,
   });
 
   @override
   Widget build(BuildContext context) {
-    final store = CommanderStoreScope.of(context)!;
     return ListenableBuilder(
       listenable: store,
-      builder: (context, _) => RefreshIndicator(
-        onRefresh: store.refresh,
-        child: _content(context, store),
+      builder: (context, _) => CommanderStoreScope(
+        store: store,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (showHeader) _ServerHeader(store: store),
+            ..._content(context),
+          ],
+        ),
       ),
     );
   }
 
-  Widget _content(BuildContext context, CommanderStore store) {
+  List<Widget> _content(BuildContext context) {
     if (store.workspace == null) {
+      // This server hasn't loaded yet (or failed) — show a compact per-server
+      // state so a slow/down server never blanks the whole list.
       if (store.error != null) {
-        return _ErrorView(error: store.error.toString(), onRetry: store.retry);
+        return [
+          _InlineNote(
+            icon: Icons.cloud_off,
+            text: store.error.toString(),
+            action: ('Retry', store.retry),
+            color: Theme.of(context).colorScheme.error,
+          ),
+        ];
       }
-      return const Center(child: CircularProgressIndicator());
+      return const [
+        Padding(
+          padding: EdgeInsets.symmetric(vertical: 24),
+          child: Center(child: CircularProgressIndicator()),
+        ),
+      ];
     }
-    // A paused cascade blocks the whole workspace, so surface it at the top of
-    // the list (shared by both layouts, which both render this body).
-    final banner = store.cascadePaused == null
-        ? null
-        : const CascadeBanner();
-    // Group by project (workspace order); drop projects with no sessions.
     final groups = [
       for (final g in store.sessionsByProject)
         if (g.sessions.isNotEmpty) g,
     ];
-    if (groups.isEmpty) return _emptyState(banner);
-    return ListView(
-      children: [
-        ?banner,
+    return [
+      if (store.cascadePaused != null) const CascadeBanner(),
+      if (groups.isEmpty)
+        const _InlineNote(icon: Icons.inbox_outlined, text: 'No sessions')
+      else
         for (final group in groups) ...[
           _ProjectHeader(name: group.project.name),
           for (final session in group.sessions)
             _SessionTile(
               session: session,
               selected: session.id == selectedId,
-              onTap: () => onSelect(session),
+              onTap: () => onSelect(store, session),
             ),
         ],
-      ],
-    );
-  }
-
-  Widget _emptyState([Widget? banner]) {
-    // ListView so pull-to-refresh still works when empty.
-    return ListView(
-      children: [
-        ?banner,
-        const SizedBox(height: 120),
-        const Center(child: Icon(Icons.inbox_outlined, size: 48)),
-        const SizedBox(height: 12),
-        const Center(child: Text('No sessions')),
-      ],
-    );
+    ];
   }
 }
 
-/// Lists the server's sessions in the phone (stacked-navigation) layout: an app
-/// bar with the live connection state and a settings link, a create FAB, and a
-/// [SessionListBody] whose taps push the detail route.
+/// The narrow (phone) session list: an app bar with a refresh + settings menu, a
+/// create FAB, and a [SessionListBody] whose taps push the detail route (wrapped
+/// in the owning server's scope so the detail page resolves the right server).
 class SessionListPage extends StatelessWidget {
-  /// The config store, threaded through so the settings route can re-open the
-  /// connection page with the same (possibly in-memory) store.
-  final ServerConfigStore configStore;
-
-  /// Handed to the settings connection page so a reconnect goes through the app
-  /// (which reconnects the shared store rather than minting a new handle).
-  final Future<void> Function(ServerConfig config) onConnected;
-
-  const SessionListPage({
-    super.key,
-    required this.configStore,
-    required this.onConnected,
-  });
+  const SessionListPage({super.key});
 
   @override
   Widget build(BuildContext context) {
-    final store = CommanderStoreScope.of(context)!;
+    final workspace = WorkspaceScope.of(context)!;
     return ListenableBuilder(
-      listenable: store,
+      listenable: workspace,
       builder: (context, _) {
+        final servers = workspace.servers;
+        // A lone server shows its connection state in the app bar (no header);
+        // with several, each header carries its own dot.
+        final soleConnection = servers.length == 1
+            ? servers.single.connection
+            : null;
         return Scaffold(
           appBar: AppBar(
             title: const Text('Sessions'),
-            bottom: connectionBar(context, store.connection),
+            bottom: soleConnection == null
+                ? null
+                : connectionBar(context, soleConnection),
             actions: [
               IconButton(
-                onPressed: store.refresh,
+                onPressed: workspace.refreshAll,
                 icon: const Icon(Icons.refresh),
                 tooltip: 'Refresh',
               ),
-              SettingsMenu(
-                store: store,
-                configStore: configStore,
-                onConnected: onConnected,
-              ),
+              SettingsMenu(workspace: workspace),
             ],
           ),
-          floatingActionButton: store.handle == null
-              ? null
-              : FloatingActionButton(
-                  onPressed: () => openCreateSession(context, store),
-                  tooltip: 'New session',
-                  child: const Icon(Icons.add),
-                ),
+          floatingActionButton: FloatingActionButton(
+            onPressed: () => openCreateSession(context, workspace),
+            tooltip: 'New session',
+            child: const Icon(Icons.add),
+          ),
           body: SessionListBody(
-            onSelect: (session) => _openDetail(context, session),
+            onSelect: (store, session) => _openDetail(context, store, session),
           ),
         );
       },
     );
   }
 
-  Future<void> _openDetail(BuildContext context, SessionInfo session) async {
+  Future<void> _openDetail(
+    BuildContext context,
+    CommanderStore store,
+    SessionInfo session,
+  ) async {
     await Navigator.of(context).push<bool>(
       MaterialPageRoute(
-        builder: (_) => SessionDetailPage(session: session),
+        // Re-provide the owning server's scope so the detail page's
+        // markRead/cascade/terminal/review calls hit the right server.
+        builder: (_) => CommanderStoreScope(
+          store: store,
+          child: SessionDetailPage(session: session),
+        ),
       ),
     );
     // A lifecycle action bumps the change feed, so the list refreshes itself.
   }
 }
 
-/// Push the create-session route. Shared by the narrow app bar and the wide
-/// shell's create action. The new session arrives via the change feed.
+/// Resolve the server to act on for a per-server action (create/projects/
+/// programs). Returns it directly when there is one server; otherwise prompts.
+/// Null means "no server / user cancelled".
+Future<CommanderStore?> pickServer(
+  BuildContext context,
+  WorkspaceStore workspace, {
+  String title = 'Choose a server',
+}) async {
+  final servers = workspace.servers;
+  if (servers.isEmpty) return null;
+  if (servers.length == 1) return servers.single;
+  return showModalBottomSheet<CommanderStore>(
+    context: context,
+    builder: (context) => SafeArea(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Text(title, style: Theme.of(context).textTheme.titleMedium),
+          ),
+          for (final store in servers)
+            ListTile(
+              leading: const Icon(Icons.dns_outlined),
+              title: Text(store.config.name),
+              subtitle: Text(
+                store.config.baseUrl,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              onTap: () => Navigator.of(context).pop(store),
+            ),
+        ],
+      ),
+    ),
+  );
+}
+
+/// Push the create-session route for a chosen server. Shared by both layouts.
 Future<void> openCreateSession(
   BuildContext context,
-  CommanderStore store,
+  WorkspaceStore workspace,
 ) async {
+  final store = await pickServer(context, workspace, title: 'Create on…');
+  if (store == null || store.handle == null || !context.mounted) return;
   await Navigator.of(context).push<String>(
     MaterialPageRoute(
       builder: (_) => CreateSessionPage(api: store.api, handle: store.handle!),
@@ -170,86 +248,76 @@ Future<void> openCreateSession(
   );
 }
 
-/// Push the server-settings connection page. Shared by both layouts.
-void openServerSettings(
+/// Push the servers manager (add/edit/remove).
+void openServers(BuildContext context, WorkspaceStore workspace) {
+  Navigator.of(context).push(
+    MaterialPageRoute(builder: (_) => ServersPage(workspace: workspace)),
+  );
+}
+
+/// Push the program-list editor for a chosen server (`PUT /api/config/programs`).
+Future<void> openPrograms(
   BuildContext context,
-  CommanderStore store,
-  ServerConfigStore configStore,
-  Future<void> Function(ServerConfig config) onConnected,
-) {
+  WorkspaceStore workspace,
+) async {
+  final store = await pickServer(context, workspace, title: 'Programs on…');
+  final handle = store?.handle;
+  if (store == null || handle == null || !context.mounted) return;
   Navigator.of(context).push(
-    MaterialPageRoute(
-      builder: (_) => ConnectionPage(
-        api: store.api,
-        store: configStore,
-        existing: store.config,
-        onConnected: onConnected,
-      ),
-    ),
+    MaterialPageRoute(builder: (_) => ProgramsPage(api: store.api, handle: handle)),
   );
 }
 
-/// Push the program-list editor (`PUT /api/config/programs`). Shared by both
-/// layouts; disabled while disconnected (no handle).
-void openPrograms(BuildContext context, CommanderStore store) {
-  final handle = store.handle;
-  if (handle == null) return;
-  Navigator.of(context).push(
-    MaterialPageRoute(
-      builder: (_) => ProgramsPage(api: store.api, handle: handle),
-    ),
-  );
-}
-
-/// Push the projects manager (add/remove/scan + branch browsing). Shared by both
-/// layouts; disabled while disconnected (no handle).
-void openProjects(BuildContext context, CommanderStore store) {
-  if (store.handle == null) return;
+/// Push the projects manager for a chosen server (add/remove/scan + branches).
+Future<void> openProjects(
+  BuildContext context,
+  WorkspaceStore workspace,
+) async {
+  final store = await pickServer(context, workspace, title: 'Projects on…');
+  if (store == null || store.handle == null || !context.mounted) return;
   Navigator.of(context).push(
     MaterialPageRoute(builder: (_) => ProjectsPage(store: store)),
   );
 }
 
-/// The app-bar overflow menu shared by the narrow and wide shells: server
-/// settings, the program-list editor, and the projects manager. Kept in one
-/// place so both layouts offer the same actions.
-class SettingsMenu extends StatelessWidget {
-  final CommanderStore store;
-  final ServerConfigStore configStore;
-  final Future<void> Function(ServerConfig config) onConnected;
+/// True when at least one server has a live handle (per-server actions need one).
+bool _anyConnected(WorkspaceStore workspace) =>
+    workspace.servers.any((s) => s.handle != null);
 
-  const SettingsMenu({
-    super.key,
-    required this.store,
-    required this.configStore,
-    required this.onConnected,
-  });
+/// The app-bar overflow menu shared by both shells: manage servers, plus the
+/// per-server projects/programs editors (which prompt for a server when more
+/// than one is configured).
+class SettingsMenu extends StatelessWidget {
+  final WorkspaceStore workspace;
+
+  const SettingsMenu({super.key, required this.workspace});
 
   @override
   Widget build(BuildContext context) {
+    final enabled = _anyConnected(workspace);
     return PopupMenuButton<String>(
       icon: const Icon(Icons.settings),
       tooltip: 'Settings',
       onSelected: (value) {
         switch (value) {
-          case 'server':
-            openServerSettings(context, store, configStore, onConnected);
-          case 'programs':
-            openPrograms(context, store);
+          case 'servers':
+            openServers(context, workspace);
           case 'projects':
-            openProjects(context, store);
+            openProjects(context, workspace);
+          case 'programs':
+            openPrograms(context, workspace);
         }
       },
       itemBuilder: (context) => [
-        const PopupMenuItem(value: 'server', child: Text('Server settings')),
+        const PopupMenuItem(value: 'servers', child: Text('Servers')),
         PopupMenuItem(
           value: 'projects',
-          enabled: store.handle != null,
+          enabled: enabled,
           child: const Text('Projects'),
         ),
         PopupMenuItem(
           value: 'programs',
-          enabled: store.handle != null,
+          enabled: enabled,
           child: const Text('Programs'),
         ),
       ],
@@ -294,7 +362,8 @@ PreferredSizeWidget? connectionBar(
 /// A prominent banner shown while a cascade is paused awaiting a decision. It
 /// offers Resume (which continues the cascade and reports the next outcome) and
 /// Abandon (which leaves the stack where it stopped). Owns its own busy guard so
-/// a double-tap can't fire twice.
+/// a double-tap can't fire twice. Reads the server from the enclosing scope, so
+/// it acts on the server whose group it is rendered in.
 class CascadeBanner extends StatefulWidget {
   const CascadeBanner({super.key});
 
@@ -385,6 +454,105 @@ class _CascadeBannerState extends State<CascadeBanner> {
   }
 }
 
+/// A server-group header: the server name plus a live connection dot. A degraded
+/// server is greyed + dimmed with its failure reason shown (mirrors the TUI), so
+/// a down server reads as inert but never vanishes from the list.
+class _ServerHeader extends StatelessWidget {
+  final CommanderStore store;
+  const _ServerHeader({required this.store});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final conn = store.connection;
+    final (color, note, degraded) = switch (conn.kind) {
+      ConnectionStateKind.connected => (Colors.green, null, false),
+      ConnectionStateKind.connecting => (
+        scheme.tertiary,
+        'connecting…',
+        false,
+      ),
+      ConnectionStateKind.degraded => (
+        scheme.error,
+        conn.reason.isEmpty ? 'degraded' : conn.reason,
+        true,
+      ),
+    };
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 16, 12, 4),
+      child: Row(
+        children: [
+          Container(
+            width: 10,
+            height: 10,
+            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              store.config.name,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                fontWeight: FontWeight.w700,
+                color: degraded ? scheme.onSurfaceVariant : scheme.onSurface,
+              ),
+            ),
+          ),
+          if (note != null) ...[
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                note,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(color: color),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// A compact inline note (loading-failed / empty) rendered inside a server
+/// section, with an optional action button.
+class _InlineNote extends StatelessWidget {
+  final IconData icon;
+  final String text;
+  final (String, Future<void> Function())? action;
+  final Color? color;
+  const _InlineNote({
+    required this.icon,
+    required this.text,
+    this.action,
+    this.color,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+      child: Column(
+        children: [
+          Icon(icon, color: color ?? Theme.of(context).colorScheme.outline),
+          const SizedBox(height: 8),
+          Text(text, textAlign: TextAlign.center),
+          if (action != null) ...[
+            const SizedBox(height: 8),
+            FilledButton.icon(
+              onPressed: action!.$2,
+              icon: const Icon(Icons.refresh),
+              label: Text(action!.$1),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
 /// A subtle section header naming the project a run of session tiles belongs to.
 class _ProjectHeader extends StatelessWidget {
   final String name;
@@ -393,7 +561,7 @@ class _ProjectHeader extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
       child: Text(
         name,
         style: Theme.of(context).textTheme.labelLarge?.copyWith(
@@ -473,39 +641,6 @@ class _SessionTile extends StatelessWidget {
           ],
         ),
       ),
-    );
-  }
-}
-
-class _ErrorView extends StatelessWidget {
-  final String error;
-  final Future<void> Function() onRetry;
-  const _ErrorView({required this.error, required this.onRetry});
-
-  @override
-  Widget build(BuildContext context) {
-    return ListView(
-      children: [
-        const SizedBox(height: 80),
-        Icon(
-          Icons.cloud_off,
-          size: 48,
-          color: Theme.of(context).colorScheme.error,
-        ),
-        const SizedBox(height: 12),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 24),
-          child: Text(error, textAlign: TextAlign.center),
-        ),
-        const SizedBox(height: 16),
-        Center(
-          child: FilledButton.icon(
-            onPressed: onRetry,
-            icon: const Icon(Icons.refresh),
-            label: const Text('Retry'),
-          ),
-        ),
-      ],
     );
   }
 }

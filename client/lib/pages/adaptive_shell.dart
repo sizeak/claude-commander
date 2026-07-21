@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 
-import '../server_config.dart';
 import '../services/commander_api.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
@@ -16,47 +15,46 @@ const double kWideBreakpoint = 900;
 
 /// The responsive home. Below [kWideBreakpoint] it is the phone
 /// [SessionListPage] (a stacked `Navigator.push` flow: list → detail →
-/// terminal/review). At or above it, a master-detail desktop layout: a server
-/// sidebar + session list on the left, and a persistent detail pane on the right
-/// whose detail / terminal / review views are switched in place.
+/// terminal/review). At or above it, a master-detail desktop layout: the grouped
+/// (multi-server) session list on the left, and a persistent detail pane on the
+/// right whose detail / terminal / review views are switched in place.
 ///
 /// The same page *bodies* ([SessionListBody], [SessionDetailBody], [TerminalBody],
 /// [ReviewBody]) serve both layouts; only the surrounding shell differs.
 class AdaptiveShell extends StatefulWidget {
-  /// The config store, threaded through so the settings route can re-open the
-  /// connection page with the same (possibly in-memory) store.
-  final ServerConfigStore configStore;
-
-  /// Handed to the settings connection page so a reconnect goes through the app
-  /// (which reconnects the shared store rather than minting a new handle).
-  final Future<void> Function(ServerConfig config) onConnected;
-
-  const AdaptiveShell({
-    super.key,
-    required this.configStore,
-    required this.onConnected,
-  });
+  const AdaptiveShell({super.key});
 
   @override
   State<AdaptiveShell> createState() => _AdaptiveShellState();
 }
 
 class _AdaptiveShellState extends State<AdaptiveShell> {
+  /// The server that owns [_selected]. Held alongside the session so the detail
+  /// pane can be scoped to (and driven by) the right server.
+  CommanderStore? _selectedStore;
+
   /// The session shown in the wide layout's detail pane, or null when nothing is
-  /// selected. Re-resolved from the store on every build so it tracks live
-  /// updates and survives a session vanishing (the detail body then shows its
-  /// gone-state until dismissed).
+  /// selected. Re-resolved from its owning store on every build so it tracks
+  /// live updates and survives a session vanishing (the detail body then shows
+  /// its gone-state until dismissed).
   SessionInfo? _selected;
+
+  void _select(CommanderStore store, SessionInfo session) => setState(() {
+    _selectedStore = store;
+    _selected = session;
+  });
+
+  void _clear() => setState(() {
+    _selectedStore = null;
+    _selected = null;
+  });
 
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
         if (constraints.maxWidth < kWideBreakpoint) {
-          return SessionListPage(
-            configStore: widget.configStore,
-            onConnected: widget.onConnected,
-          );
+          return const SessionListPage();
         }
         return _wide(context);
       },
@@ -64,15 +62,22 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
   }
 
   Widget _wide(BuildContext context) {
-    final store = CommanderStoreScope.of(context)!;
+    final workspace = WorkspaceScope.of(context)!;
     return ListenableBuilder(
-      listenable: store,
+      listenable: workspace,
       builder: (context, _) {
+        // Drop a selection whose server was removed.
+        var store = _selectedStore;
+        if (store != null && !workspace.servers.contains(store)) {
+          store = null;
+          _selectedStore = null;
+          _selected = null;
+        }
         // Re-resolve the selection against the latest snapshot: pick up fresh
         // info, and fall back to the last-known info if the session vanished so
         // the detail pane can show its gone-state rather than blanking.
         final sel = _selected;
-        final resolved = sel == null
+        final resolved = (store == null || sel == null)
             ? null
             : (store.sessionById(sel.id) ?? sel);
         return Scaffold(
@@ -80,47 +85,44 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
             title: const Text('Claude Commander'),
             actions: [
               IconButton(
-                onPressed: store.refresh,
+                onPressed: workspace.refreshAll,
                 icon: const Icon(Icons.refresh),
                 tooltip: 'Refresh',
               ),
-              SettingsMenu(
-                store: store,
-                configStore: widget.configStore,
-                onConnected: widget.onConnected,
-              ),
+              SettingsMenu(workspace: workspace),
             ],
           ),
-          floatingActionButton: store.handle == null
-              ? null
-              : FloatingActionButton(
-                  onPressed: () => openCreateSession(context, store),
-                  tooltip: 'New session',
-                  child: const Icon(Icons.add),
-                ),
+          floatingActionButton: FloatingActionButton(
+            onPressed: () => openCreateSession(context, workspace),
+            tooltip: 'New session',
+            child: const Icon(Icons.add),
+          ),
           body: Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               SizedBox(
                 width: 340,
-                child: _MasterColumn(
-                  store: store,
+                child: SessionListBody(
                   selectedId: resolved?.id,
-                  onSelect: (s) => setState(() => _selected = s),
+                  onSelect: _select,
                 ),
               ),
               const VerticalDivider(width: 1),
               Expanded(
-                child: resolved == null
+                child: (resolved == null || store == null)
                     ? const _EmptyDetail()
-                    : _DetailPane(
-                        // Rekey per session so switching selection rebuilds the
-                        // pane (resets the tab + tears down any live terminal).
-                        key: ValueKey(resolved.id),
-                        session: resolved,
-                        api: store.api,
-                        handle: store.handle,
-                        onDismiss: () => setState(() => _selected = null),
+                    : CommanderStoreScope(
+                        store: store,
+                        // Rekey per (server, session) so switching selection
+                        // rebuilds the pane (resets the tab + tears down any
+                        // live terminal).
+                        child: _DetailPane(
+                          key: ValueKey('${store.config.id}:${resolved.id}'),
+                          session: resolved,
+                          api: store.api,
+                          handle: store.handle,
+                          onDismiss: _clear,
+                        ),
                       ),
               ),
             ],
@@ -128,80 +130,6 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
         );
       },
     );
-  }
-}
-
-/// The wide layout's left column: a server sidebar slot on top (single server for
-/// now) and the grouped session list below.
-class _MasterColumn extends StatelessWidget {
-  final CommanderStore store;
-  final String? selectedId;
-  final ValueChanged<SessionInfo> onSelect;
-
-  const _MasterColumn({
-    required this.store,
-    required this.selectedId,
-    required this.onSelect,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        _ServerSidebar(store: store),
-        const Divider(height: 1),
-        Expanded(
-          child: SessionListBody(selectedId: selectedId, onSelect: onSelect),
-        ),
-      ],
-    );
-  }
-}
-
-/// The reserved server-sidebar slot: the single connected server's name plus a
-/// live connection indicator. Shaped as one row so a future multi-server list
-/// drops a column of these in unchanged.
-class _ServerSidebar extends StatelessWidget {
-  final CommanderStore store;
-  const _ServerSidebar({required this.store});
-
-  @override
-  Widget build(BuildContext context) {
-    final (color, label) = _indicator(context, store.connection);
-    return ListTile(
-      dense: true,
-      leading: Icon(Icons.dns_outlined, color: color),
-      title: Text(
-        store.config.baseUrl,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: Theme.of(context).textTheme.bodyMedium,
-      ),
-      subtitle: Row(
-        children: [
-          Container(
-            width: 8,
-            height: 8,
-            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-          ),
-          const SizedBox(width: 6),
-          Text(label, style: Theme.of(context).textTheme.labelSmall),
-        ],
-      ),
-    );
-  }
-
-  (Color, String) _indicator(BuildContext context, ConnectionStateDto conn) {
-    final scheme = Theme.of(context).colorScheme;
-    return switch (conn.kind) {
-      ConnectionStateKind.connected => (Colors.green, 'Connected'),
-      ConnectionStateKind.connecting => (scheme.tertiary, 'Connecting…'),
-      ConnectionStateKind.degraded => (
-        scheme.error,
-        conn.reason.isEmpty ? 'Degraded' : 'Degraded: ${conn.reason}',
-      ),
-    };
   }
 }
 
