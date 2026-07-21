@@ -165,7 +165,7 @@ Future<void> openCreateSession(
 ) async {
   await Navigator.of(context).push<String>(
     MaterialPageRoute(
-      builder: (_) => CreateSessionPage(api: store.api, handle: store.handle!),
+      builder: (_) => CreateSessionPage(store: store),
     ),
   );
 }

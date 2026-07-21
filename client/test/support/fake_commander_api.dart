@@ -315,6 +315,8 @@ class FakeCommanderApi implements CommanderApi {
       'projectPath': projectPath,
       'title': title,
       'program': program,
+      'initialPrompt': initialPrompt,
+      'baseBranch': baseBranch,
     });
     if (createSessionError != null) throw createSessionError!;
     return createSessionResponse;
