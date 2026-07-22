@@ -41,23 +41,15 @@ pub fn commander_sentinel_id() -> SessionId {
 /// runtime so the generated `CLAUDE.md` never drifts from the actual commands.
 const COMMANDER_PRIME: &str = include_str!("commander_prime.md");
 
-/// Slack-mode addendum appended to `CLAUDE.md` only when priming the commander
-/// directory for a **headless Slack invocation** (see [`PrimeMode::Slack`]). It
-/// tells the agent it is short-lived, to emit Slack mrkdwn, thread etiquette,
-/// and to pass the `--slack-*` origin flags when creating sessions.
+/// Slack-mode section of `CLAUDE.md`. Included in **every** prime — interactive
+/// and headless share one directory and must write identical content, or each
+/// would clobber the other's copy (the interactive commander rewrites the file
+/// on every open). The section is worded conditionally: it applies only when a
+/// prompt announces it came from Slack, so the interactive commander carries it
+/// harmlessly. It tells the agent it is short-lived, to emit Slack mrkdwn,
+/// thread etiquette, and to pass the `--slack-*` origin flags when creating
+/// sessions.
 const COMMANDER_SLACK_APPENDIX: &str = include_str!("commander_slack_appendix.md");
-
-/// How the commander directory is being primed. The interactive TUI commander
-/// and the headless Slack commander share the same directory and regenerated
-/// `CLAUDE.md`; the Slack path additionally appends [`COMMANDER_SLACK_APPENDIX`]
-/// so the agent knows it is running short-lived over Slack.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PrimeMode {
-    /// Interactive commander session in the TUI.
-    Interactive,
-    /// Headless, short-lived commander driven from the Slack bridge.
-    Slack,
-}
 
 /// Seed contents for `NOTES.md`. Written only if the file is absent, so the
 /// commander's accumulated notes are never clobbered.
@@ -66,29 +58,21 @@ const NOTES_SEED: &str = "# Commander notes\n\n\
     Claude Commander never touches this file.\n\n\
     ## Active workflows\n";
 
-/// Build the interactive `CLAUDE.md` body: the handwritten preamble followed by
-/// a CLI reference generated from the live clap command tree.
+/// Build the `CLAUDE.md` body: the handwritten preamble, a CLI reference
+/// generated from the live clap command tree, and the (conditionally-worded)
+/// Slack-mode section. One content for every prime path — see
+/// [`COMMANDER_SLACK_APPENDIX`] for why it must not vary by caller.
 pub fn claude_md_content(cmd: &clap::Command) -> String {
-    claude_md_content_for(cmd, PrimeMode::Interactive)
-}
-
-/// Build the `CLAUDE.md` body for a given [`PrimeMode`]. The base (preamble +
-/// generated CLI reference) is identical to the interactive commander; the
-/// Slack mode appends the short-lived/mrkdwn appendix.
-pub fn claude_md_content_for(cmd: &clap::Command, mode: PrimeMode) -> String {
     let base = format!(
         "{}\n{}",
         COMMANDER_PRIME.trim_end(),
         generate_cli_reference(cmd)
     );
-    match mode {
-        PrimeMode::Interactive => base,
-        PrimeMode::Slack => format!(
-            "{}\n{}\n",
-            base.trim_end(),
-            COMMANDER_SLACK_APPENDIX.trim_end()
-        ),
-    }
+    format!(
+        "{}\n{}\n",
+        base.trim_end(),
+        COMMANDER_SLACK_APPENDIX.trim_end()
+    )
 }
 
 /// Render a markdown CLI reference by walking the clap command tree and
@@ -118,12 +102,7 @@ pub fn generate_cli_reference(cmd: &clap::Command) -> String {
 /// write never blocks the executor. The CLI reference is composed synchronously
 /// (pure CPU) before the `await`.
 pub async fn write_claude_md(dir: &Path, cmd: &clap::Command) -> Result<()> {
-    write_claude_md_for(dir, cmd, PrimeMode::Interactive).await
-}
-
-/// Write `CLAUDE.md` for a given [`PrimeMode`]. See [`write_claude_md`].
-pub async fn write_claude_md_for(dir: &Path, cmd: &clap::Command, mode: PrimeMode) -> Result<()> {
-    tokio::fs::write(dir.join("CLAUDE.md"), claude_md_content_for(cmd, mode)).await?;
+    tokio::fs::write(dir.join("CLAUDE.md"), claude_md_content(cmd)).await?;
     Ok(())
 }
 
@@ -131,19 +110,15 @@ pub async fn write_claude_md_for(dir: &Path, cmd: &clap::Command, mode: PrimeMod
 /// run there: create it, (re)write `CLAUDE.md` from the live CLI, and seed
 /// `NOTES.md` when absent. Returns the directory path. Shared by
 /// [`ensure_session`] (interactive tmux) and the headless Slack commander, so
-/// both prime the same directory identically — only the [`PrimeMode`] differs.
+/// both prime the same directory with **identical** content.
 ///
 /// Unlike [`ensure_session`], this does **no** tmux work and is **not** gated on
 /// `commander_enabled`: the headless Slack path is gated by `[slack]` config
 /// alone, so priming must not require the interactive feature to be on.
-pub async fn prime_commander_dir(
-    config: &Config,
-    cmd: &clap::Command,
-    mode: PrimeMode,
-) -> Result<PathBuf> {
+pub async fn prime_commander_dir(config: &Config, cmd: &clap::Command) -> Result<PathBuf> {
     let dir = config.commander_dir()?;
     tokio::fs::create_dir_all(&dir).await?;
-    write_claude_md_for(&dir, cmd, mode).await?;
+    write_claude_md(&dir, cmd).await?;
     seed_notes_md(&dir).await?;
     Ok(dir)
 }
@@ -204,7 +179,7 @@ pub async fn ensure_session(
     // Friendly error on tmux-less machines, matching the create-session path.
     tmux.check_installed().await?;
 
-    let dir = prime_commander_dir(config, cmd, PrimeMode::Interactive).await?;
+    let dir = prime_commander_dir(config, cmd).await?;
 
     let exists = tmux.session_exists(COMMANDER_TMUX_NAME).await?;
     let pane_dead = if exists {
@@ -285,58 +260,50 @@ mod tests {
     }
 
     #[test]
-    fn slack_prime_appends_appendix_interactive_does_not() {
-        let interactive = claude_md_content_for(&sample_cli(), PrimeMode::Interactive);
-        let slack = claude_md_content_for(&sample_cli(), PrimeMode::Slack);
-
-        // Both share the same base (preamble + CLI reference).
-        assert!(interactive.starts_with("# Commander Claude"));
-        assert!(slack.starts_with("# Commander Claude"));
-        assert!(slack.contains("claude-commander list"));
-
-        // Only the Slack body carries the mode appendix.
-        assert!(slack.contains("## Slack mode"));
+    fn claude_md_includes_conditional_slack_section() {
+        // One shared content for every prime path: the Slack section rides along
+        // in the interactive commander's CLAUDE.md too (worded to apply only to
+        // Slack-originated prompts), so the two writers can never clobber each
+        // other with differing copies.
+        let content = claude_md_content(&sample_cli());
+        assert!(content.starts_with("# Commander Claude"));
+        assert!(content.contains("claude-commander list"));
+        assert!(content.contains("## Slack mode"));
         assert!(
-            slack.contains("mrkdwn"),
-            "slack appendix must instruct the agent to emit mrkdwn"
+            content.contains("mrkdwn"),
+            "slack section must instruct the agent to emit mrkdwn"
         );
         assert!(
-            slack.contains("--slack-channel") && slack.contains("--slack-thread-ts"),
-            "slack appendix must name the concrete origin flags"
+            content.contains("--slack-channel") && content.contains("--slack-thread-ts"),
+            "slack section must name the concrete origin flags"
         );
+        // Worded conditionally: it must scope itself to Slack-originated prompts.
         assert!(
-            !interactive.contains("## Slack mode"),
-            "the interactive commander must not receive the Slack appendix"
+            content.contains("only to those requests"),
+            "slack section must be scoped to Slack-originated prompts"
         );
-        // The appendix comes after the base, not before it.
-        assert!(slack.find("## Slack mode") > slack.find("claude-commander list"));
+        // The section comes after the base, not before it.
+        assert!(content.find("## Slack mode") > content.find("claude-commander list"));
     }
 
     #[tokio::test]
-    async fn prime_commander_dir_regenerates_claude_md_with_slack_appendix() {
+    async fn prime_commander_dir_regenerates_claude_md_and_seeds_notes() {
         let dir = TempDir::new().unwrap();
         let config = Config {
             commander_dir: Some(dir.path().join("commander")),
             ..Config::default()
         };
 
-        // First prime interactively, then re-prime for Slack: the file must be
-        // regenerated (not appended-to twice) and now carry the appendix.
-        let primed = prime_commander_dir(&config, &sample_cli(), PrimeMode::Interactive)
-            .await
-            .unwrap();
-        let interactive = std::fs::read_to_string(primed.join("CLAUDE.md")).unwrap();
-        assert!(!interactive.contains("## Slack mode"));
-
-        let primed2 = prime_commander_dir(&config, &sample_cli(), PrimeMode::Slack)
-            .await
-            .unwrap();
+        // Priming twice regenerates the file (not appended-to twice), and every
+        // prime carries the shared Slack section.
+        let primed = prime_commander_dir(&config, &sample_cli()).await.unwrap();
+        let primed2 = prime_commander_dir(&config, &sample_cli()).await.unwrap();
         assert_eq!(primed, primed2);
-        let slack = std::fs::read_to_string(primed2.join("CLAUDE.md")).unwrap();
-        assert!(slack.starts_with("# Commander Claude"));
-        assert!(slack.contains("## Slack mode"));
+        let content = std::fs::read_to_string(primed2.join("CLAUDE.md")).unwrap();
+        assert!(content.starts_with("# Commander Claude"));
+        assert!(content.contains("## Slack mode"));
         // Regenerated, not doubled: the preamble appears exactly once.
-        assert_eq!(slack.matches("# Commander Claude").count(), 1);
+        assert_eq!(content.matches("# Commander Claude").count(), 1);
         // NOTES.md is seeded.
         assert!(
             std::fs::read_to_string(primed2.join("NOTES.md"))

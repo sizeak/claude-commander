@@ -2550,8 +2550,8 @@ fn build_headless(
     data_dir: &Path,
     spawn: Arc<dyn crate::commander::headless::CommanderSpawn>,
 ) -> crate::commander::headless::HeadlessCommander {
-    use crate::commander::{PrimeMode, claude_md_content_for, headless};
-    let claude_md = claude_md_content_for(&crate::cli_args::cli_command(), PrimeMode::Slack);
+    use crate::commander::{claude_md_content, headless};
+    let claude_md = claude_md_content(&crate::cli_args::cli_command());
     let commander_dir = config_store
         .read()
         .commander_dir()

@@ -426,12 +426,10 @@ pub fn stream_event_to_wire(ev: StreamEvent) -> claude_commander_protocol::api::
 }
 
 impl HeadlessCommander {
-    /// Construct the manager. `claude_md` is the Slack-primed `CLAUDE.md` body
-    /// (built once by the caller from the live CLI) written to `commander_dir`
-    /// atomically before **every** process spawn — the interactive commander
-    /// rewrites the same file without the Slack appendix, so a stale copy left by
-    /// an interactive open must be corrected ahead of each headless launch. No IO
-    /// happens here.
+    /// Construct the manager. `claude_md` is the shared `CLAUDE.md` body (built
+    /// once by the caller from the live CLI — identical to what the interactive
+    /// commander writes) written to `commander_dir` on first use. No IO happens
+    /// here.
     pub fn new(
         config_store: Arc<ConfigStore>,
         claude_md: String,
@@ -728,15 +726,17 @@ impl HeadlessCommander {
 
     // -- helpers --
 
-    /// One-time directory prep: create the commander dir and seed `NOTES.md`.
-    /// `CLAUDE.md` is deliberately **not** written here — it is rewritten before
-    /// every spawn (see [`Self::write_claude_md`]) so an interactive open that
-    /// clobbered it without the Slack appendix cannot poison later headless runs.
+    /// One-time directory prep: create the commander dir, write `CLAUDE.md`,
+    /// and seed `NOTES.md`. Once per process is enough: the interactive
+    /// commander writes byte-identical content (the Slack section is part of
+    /// the single shared prime — see `commander::claude_md_content`), so a
+    /// later interactive open can never leave the file meaningfully stale.
     async fn ensure_primed(&self) -> Result<()> {
         self.inner
             .primed
             .get_or_try_init(|| async {
                 tokio::fs::create_dir_all(&self.inner.commander_dir).await?;
+                self.write_claude_md().await?;
                 crate::commander::seed_notes_md(&self.inner.commander_dir).await?;
                 Ok::<(), crate::Error>(())
             })
@@ -744,14 +744,13 @@ impl HeadlessCommander {
         Ok(())
     }
 
-    /// Atomically (temp-file + rename) write the Slack-primed `CLAUDE.md` so a
-    /// concurrently-spawning `claude` never reads a torn file. Called before
-    /// every spawn.
+    /// Atomically (temp-file + rename) write `CLAUDE.md` so a concurrently-
+    /// launching `claude` never reads a torn file.
     ///
     /// Not `config::write_private_file`: that names its temp by pid alone, which
-    /// collides when two conversations spawn concurrently into the shared
-    /// commander dir (expected here — different keys run in parallel), so one
-    /// rename would fail. A per-call sequence number keeps each temp unique.
+    /// collides when two managers prime the shared commander dir concurrently,
+    /// so one rename would fail. A per-call sequence number keeps each temp
+    /// unique.
     async fn write_claude_md(&self) -> Result<()> {
         let dir = &self.inner.commander_dir;
         let seq = PRIME_SEQ.fetch_add(1, Ordering::Relaxed);
@@ -769,9 +768,6 @@ impl HeadlessCommander {
     }
 
     async fn spawn_child(&self, resume: Option<&str>) -> Result<Box<dyn CommanderChild>> {
-        // Rewrite CLAUDE.md ahead of every launch: an interactive commander open
-        // may have overwritten it without the Slack appendix since the last spawn.
-        self.write_claude_md().await?;
         let program = self.inner.config_store.read().commander_program();
         let spec = SpawnSpec {
             program,
@@ -1020,59 +1016,6 @@ mod tests {
         // Exactly one process spawned; CLAUDE.md was primed.
         assert_eq!(spawn.spawn_count.load(Ordering::SeqCst), 1);
         assert!(dir.path().join("commander/CLAUDE.md").exists());
-    }
-
-    #[tokio::test]
-    async fn claude_md_is_rewritten_before_every_spawn() {
-        // The interactive commander rewrites the shared CLAUDE.md without the
-        // Slack appendix; a later headless spawn must re-prime it, not trust the
-        // one-time OnceCell prime. Two distinct keys force two real spawns.
-        let dir = TempDir::new().unwrap();
-        let spawn = FakeSpawn::new(vec![
-            Blueprint {
-                events: turn("sess-1"),
-                hang_when_empty: false,
-            },
-            Blueprint {
-                events: turn("sess-2"),
-                hang_when_empty: false,
-            },
-        ]);
-        let config_store = Arc::new(ConfigStore::with_path(
-            Config::default(),
-            dir.path().join("config.toml"),
-        ));
-        let sessions = Arc::new(SlackSessionStore::load(dir.path().join("slack.json")));
-        let slack_md = "# primed\n## Slack mode appendix marker";
-        let mgr = HeadlessCommander::new(
-            config_store,
-            slack_md.to_string(),
-            dir.path().join("commander"),
-            spawn.clone(),
-            sessions,
-        );
-
-        drain(mgr.ask("slack:C:A", "hi")).await;
-        let md_path = dir.path().join("commander/CLAUDE.md");
-        assert!(
-            std::fs::read_to_string(&md_path)
-                .unwrap()
-                .contains("Slack mode appendix marker")
-        );
-
-        // Simulate the interactive commander clobbering CLAUDE.md (no appendix).
-        std::fs::write(&md_path, "# interactive only, no appendix").unwrap();
-
-        // A brand-new key can't reuse the lingering process, so it spawns anew
-        // and must rewrite CLAUDE.md with the appendix before launching claude.
-        drain(mgr.ask("slack:C:B", "hi again")).await;
-        assert!(
-            std::fs::read_to_string(&md_path)
-                .unwrap()
-                .contains("Slack mode appendix marker"),
-            "CLAUDE.md must be re-primed before the second spawn"
-        );
-        assert_eq!(spawn.spawn_count.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
