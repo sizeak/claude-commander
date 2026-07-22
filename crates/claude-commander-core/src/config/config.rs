@@ -336,6 +336,11 @@ pub struct Config {
     #[serde(default)]
     pub telemetry: TelemetryConfig,
 
+    /// Slack-integration settings (`[slack]` table). Disabled unless both tokens
+    /// are set and an allowlist is configured — see [`SlackConfig::is_enabled`].
+    #[serde(default)]
+    pub slack: SlackConfig,
+
     /// Remote `claude-commander-server` instances the TUI drives alongside the
     /// local backend. Each entry becomes a per-server node in the session tree,
     /// in declared order after the always-present local backend. Empty by
@@ -503,6 +508,95 @@ impl Default for TelemetryConfig {
     }
 }
 
+/// Slack-integration settings (`[slack]` table).
+///
+/// Off unless [`SlackConfig::is_enabled`] — both tokens set and at least one
+/// allowlisted user. The two tokens are secrets: they are stripped by
+/// [`Config::with_secrets_redacted`] before the config is served over the wire,
+/// and the hand-written `Debug` impl redacts them so an accidental `{:?}` on the
+/// enclosing [`Config`] can't leak them.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SlackConfig {
+    /// Socket Mode app-level token (`xapp-…`). Required to connect the bridge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_token: Option<String>,
+
+    /// Bot user OAuth token (`xoxb-…`). Required for Web API calls
+    /// (post message, add reaction, open DM, fetch thread).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_token: Option<String>,
+
+    /// Slack user ids permitted to invoke the bridge (`@commander` mentions and
+    /// DMs). Anyone not listed is ignored. The feature stays disabled while this
+    /// is empty, so a misconfigured token pair can't accidentally accept
+    /// everyone.
+    #[serde(default)]
+    pub allowed_user_ids: Vec<String>,
+
+    /// Hard cap in seconds on a single headless invocation before it is killed
+    /// (then retried once with a "be brief" nudge). Default 300 (5 min).
+    #[serde(default = "default_slack_invocation_timeout_secs")]
+    pub invocation_timeout_secs: u64,
+
+    /// How long in seconds a headless process lingers after replying, ready for
+    /// an instant follow-up in the same thread, before it is reaped. Default 300
+    /// (5 min).
+    #[serde(default = "default_slack_linger_secs")]
+    pub linger_secs: u64,
+
+    /// Keep one warm (non-resume) process ready so a brand-new thread doesn't
+    /// pay cold-start latency. Default true.
+    #[serde(default = "default_true")]
+    pub warm_pool: bool,
+
+    /// How often in seconds the warm process is respawned to avoid staleness.
+    /// Default 3600 (1 hour).
+    #[serde(default = "default_slack_warm_respawn_secs")]
+    pub warm_respawn_secs: u64,
+}
+
+impl Default for SlackConfig {
+    fn default() -> Self {
+        Self {
+            app_token: None,
+            bot_token: None,
+            allowed_user_ids: Vec::new(),
+            invocation_timeout_secs: default_slack_invocation_timeout_secs(),
+            linger_secs: default_slack_linger_secs(),
+            warm_pool: true,
+            warm_respawn_secs: default_slack_warm_respawn_secs(),
+        }
+    }
+}
+
+impl SlackConfig {
+    /// Whether the Slack bridge should run: both tokens present (non-empty) and
+    /// at least one allowlisted user. Independent of `commander_enabled` — the
+    /// bridge is gated by this config alone.
+    pub fn is_enabled(&self) -> bool {
+        self.app_token.as_ref().is_some_and(|t| !t.is_empty())
+            && self.bot_token.as_ref().is_some_and(|t| !t.is_empty())
+            && !self.allowed_user_ids.is_empty()
+    }
+}
+
+impl std::fmt::Debug for SlackConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print the tokens — redact their presence, not their value.
+        let redact = |t: &Option<String>| t.as_ref().map(|_| "<redacted>").unwrap_or("None");
+        f.debug_struct("SlackConfig")
+            .field("app_token", &redact(&self.app_token))
+            .field("bot_token", &redact(&self.bot_token))
+            .field("allowed_user_ids", &self.allowed_user_ids)
+            .field("invocation_timeout_secs", &self.invocation_timeout_secs)
+            .field("linger_secs", &self.linger_secs)
+            .field("warm_pool", &self.warm_pool)
+            .field("warm_respawn_secs", &self.warm_respawn_secs)
+            .finish()
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -557,6 +651,7 @@ impl Default for Config {
             conversation: ConversationConfig::default(),
             stt: SttConfig::default(),
             telemetry: TelemetryConfig::default(),
+            slack: SlackConfig::default(),
             remote_servers: Vec::new(),
         }
     }
@@ -576,6 +671,18 @@ fn default_hibernate_idle_timeout_secs() -> u64 {
 
 fn default_hibernate_check_interval_secs() -> u64 {
     600
+}
+
+fn default_slack_invocation_timeout_secs() -> u64 {
+    300
+}
+
+fn default_slack_linger_secs() -> u64 {
+    300
+}
+
+fn default_slack_warm_respawn_secs() -> u64 {
+    3600
 }
 
 fn default_pr_review_labels() -> Vec<String> {
@@ -598,6 +705,8 @@ impl Config {
         }
         self.stt.api_key = None;
         self.telemetry.token = None;
+        self.slack.app_token = None;
+        self.slack.bot_token = None;
         self
     }
 
@@ -996,6 +1105,12 @@ mod tests {
                 token: Some("telemetry-secret".into()),
                 ..Default::default()
             },
+            slack: SlackConfig {
+                app_token: Some("slack-app-secret".into()),
+                bot_token: Some("slack-bot-secret".into()),
+                allowed_user_ids: vec!["U123".into()],
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -1003,12 +1118,122 @@ mod tests {
         assert!(redacted.remote_servers[0].token.is_none());
         assert!(redacted.stt.api_key.is_none());
         assert!(redacted.telemetry.token.is_none());
+        assert!(redacted.slack.app_token.is_none());
+        assert!(redacted.slack.bot_token.is_none());
         // Non-secret fields survive.
         assert_eq!(redacted.remote_servers[0].url, "http://b:7878");
+        assert_eq!(redacted.slack.allowed_user_ids, vec!["U123".to_string()]);
         let json = serde_json::to_string(&redacted).unwrap();
-        for secret in ["server-secret", "stt-secret", "telemetry-secret"] {
+        for secret in [
+            "server-secret",
+            "stt-secret",
+            "telemetry-secret",
+            "slack-app-secret",
+            "slack-bot-secret",
+        ] {
             assert!(!json.contains(secret), "{secret} survived redaction");
         }
+    }
+
+    #[test]
+    fn test_slack_defaults() {
+        let c = SlackConfig::default();
+        assert!(c.app_token.is_none());
+        assert!(c.bot_token.is_none());
+        assert!(c.allowed_user_ids.is_empty());
+        assert_eq!(c.invocation_timeout_secs, 300);
+        assert_eq!(c.linger_secs, 300);
+        assert!(c.warm_pool);
+        assert_eq!(c.warm_respawn_secs, 3600);
+        // A default (empty) config never enables the bridge.
+        assert!(!c.is_enabled());
+        assert!(!Config::default().slack.is_enabled());
+    }
+
+    #[test]
+    fn test_slack_is_enabled_requires_both_tokens_and_allowlist() {
+        // Both tokens but no allowlisted user → disabled.
+        let c = SlackConfig {
+            app_token: Some("xapp-1".into()),
+            bot_token: Some("xoxb-1".into()),
+            allowed_user_ids: Vec::new(),
+            ..Default::default()
+        };
+        assert!(!c.is_enabled());
+
+        // Missing bot token → disabled.
+        let c = SlackConfig {
+            app_token: Some("xapp-1".into()),
+            bot_token: None,
+            allowed_user_ids: vec!["U1".into()],
+            ..Default::default()
+        };
+        assert!(!c.is_enabled());
+
+        // Empty-string token counts as absent.
+        let c = SlackConfig {
+            app_token: Some(String::new()),
+            bot_token: Some("xoxb-1".into()),
+            allowed_user_ids: vec!["U1".into()],
+            ..Default::default()
+        };
+        assert!(!c.is_enabled());
+
+        // Both tokens + an allowlisted user → enabled.
+        let c = SlackConfig {
+            app_token: Some("xapp-1".into()),
+            bot_token: Some("xoxb-1".into()),
+            allowed_user_ids: vec!["U1".into()],
+            ..Default::default()
+        };
+        assert!(c.is_enabled());
+    }
+
+    #[test]
+    fn test_slack_toml_roundtrip_and_tunable_defaults() {
+        let toml_src = r#"
+[slack]
+app_token = "xapp-abc"
+bot_token = "xoxb-def"
+allowed_user_ids = ["U111", "U222"]
+linger_secs = 120
+"#;
+        let config: Config = toml::from_str(toml_src).expect("toml parse");
+        assert_eq!(config.slack.app_token.as_deref(), Some("xapp-abc"));
+        assert_eq!(config.slack.bot_token.as_deref(), Some("xoxb-def"));
+        assert_eq!(config.slack.allowed_user_ids, vec!["U111", "U222"]);
+        // Explicit override survives.
+        assert_eq!(config.slack.linger_secs, 120);
+        // Unspecified tunables keep their defaults.
+        assert_eq!(config.slack.invocation_timeout_secs, 300);
+        assert!(config.slack.warm_pool);
+        assert_eq!(config.slack.warm_respawn_secs, 3600);
+        assert!(config.slack.is_enabled());
+    }
+
+    #[test]
+    fn test_empty_toml_yields_slack_defaults() {
+        let config: Config = toml::from_str("").expect("empty toml");
+        assert!(!config.slack.is_enabled());
+        assert_eq!(config.slack.invocation_timeout_secs, 300);
+    }
+
+    #[test]
+    fn test_slack_debug_redacts_tokens() {
+        let c = SlackConfig {
+            app_token: Some("xapp-supersecret".into()),
+            bot_token: Some("xoxb-supersecret".into()),
+            allowed_user_ids: vec!["U1".into()],
+            ..Default::default()
+        };
+        let dbg = format!("{c:?}");
+        assert!(
+            !dbg.contains("supersecret"),
+            "token leaked via Debug: {dbg}"
+        );
+        assert!(dbg.contains("<redacted>"));
+        // Non-secret fields are still shown.
+        assert!(dbg.contains("U1"));
     }
 
     use super::*;

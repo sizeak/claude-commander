@@ -4,6 +4,7 @@
 use std::net::SocketAddr;
 
 use clap::Parser;
+use claude_commander_core::ServerInfo;
 use claude_commander_core::api::{BackgroundOpts, CommanderService};
 use claude_commander_core::telemetry::FrontendInfo;
 use tracing::{info, warn};
@@ -123,6 +124,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     let auth = resolve_auth(&cfg, cli.allow_no_auth);
+    // The bearer clients must present, or None when auth is disabled — recorded
+    // in the runtime info file below so a local CLI can reach this server.
+    let info_token = match &auth {
+        AuthConfig::Token(token) => Some(token.clone()),
+        AuthConfig::Disabled => None,
+    };
 
     if cli.tls {
         warn!("--tls requested; TLS support requires the `tls` build feature (not yet wired)");
@@ -148,6 +155,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!("claude-commander-server listening on http://{addr}");
 
-    axum::serve(listener, app).await?;
+    // Advertise this server to local CLIs via a runtime info file in the data
+    // dir (best-effort: a write failure must not stop the server serving).
+    let data_dir = claude_commander_core::Config::data_dir()?;
+    let server_info = ServerInfo::new(format!("http://{addr}"), info_token);
+    if let Err(e) = server_info.write_to(&data_dir) {
+        warn!("could not write server runtime info file: {e}");
+    }
+
+    let serve_result = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await;
+
+    // Clean-shutdown cleanup: remove the info file so a stale entry doesn't
+    // outlive the process. Best-effort — a killed process leaves it behind, and
+    // the reader tolerates an unreachable server.
+    ServerInfo::remove_from(&data_dir);
+    serve_result?;
     Ok(())
+}
+
+/// Resolve once either SIGINT (Ctrl-C) or, on Unix, SIGTERM is received, so
+/// `axum`'s graceful shutdown drains in-flight requests and control returns to
+/// `main` for info-file cleanup.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
 }

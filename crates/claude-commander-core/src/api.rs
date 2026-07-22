@@ -2560,6 +2560,7 @@ fn session_info_from_session(session: &WorktreeSession, project_name: &str) -> S
         keep_alive: session.keep_alive,
         worktree_path: session.worktree_path.to_string_lossy().into_owned(),
         tmux_session_name: session.tmux_session_name.clone(),
+        slack_origin: session.slack_origin.clone(),
     }
 }
 

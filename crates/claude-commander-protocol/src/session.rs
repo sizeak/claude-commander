@@ -149,6 +149,26 @@ impl fmt::Display for SessionStatus {
     }
 }
 
+/// Where a session was created from Slack: the channel, the thread it belongs
+/// to, and a permalink back to the originating message.
+///
+/// Recorded on a session created via the Slack bridge so the notify path can
+/// route a worker's message back to the right thread. Persisted on the session
+/// record and carried on the wire DTO; `#[serde(default,
+/// skip_serializing_if = "Option::is_none")]` on the enclosing field keeps old
+/// `state.json` files and old binaries round-tripping safely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SlackOrigin {
+    /// Slack channel id the session was requested in (e.g. `C0AR48X88L9`).
+    pub channel: String,
+    /// Thread timestamp identifying the conversation (`app_mention`/`message.im`
+    /// thread root, or the message ts when not yet threaded).
+    pub thread_ts: String,
+    /// Permalink to the originating Slack message, embedded in the agent's
+    /// initial prompt so it can reference the source.
+    pub permalink: String,
+}
+
 /// Sub-state of a Running Claude Code session, detected via pane content parsing.
 /// This is ephemeral (not persisted) and only meaningful when SessionStatus == Running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -242,6 +262,18 @@ mod tests {
         // Nil UUID also round-trips — pins down both mutants in a second case.
         let nil = SessionId::from_uuid(Uuid::nil());
         assert_eq!(*nil.as_uuid(), Uuid::nil());
+    }
+
+    #[test]
+    fn slack_origin_round_trips() {
+        let origin = SlackOrigin {
+            channel: "C0AR48X88L9".to_string(),
+            thread_ts: "1700000000.000100".to_string(),
+            permalink: "https://slack.example/archives/C0AR48X88L9/p1700000000000100".to_string(),
+        };
+        let json = serde_json::to_string(&origin).unwrap();
+        let back: SlackOrigin = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, origin);
     }
 
     #[test]

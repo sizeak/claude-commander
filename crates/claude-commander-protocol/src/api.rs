@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::comment::{Comment, CommentSide};
 use crate::diff::ParsedDiff;
 use crate::pr::{PrState, ReviewDecision};
-use crate::session::{AgentState, ProjectId, SessionId, SessionStatus};
+use crate::session::{AgentState, ProjectId, SessionId, SessionStatus, SlackOrigin};
 
 /// A session as returned by the list/find/detail endpoints.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -86,6 +86,13 @@ pub struct SessionInfo {
     /// tmux session name backing this session.
     #[serde(default)]
     pub tmux_session_name: String,
+    /// Where this session was created from Slack, when it was. Absent for
+    /// sessions created outside the Slack bridge. Additive: old payloads that
+    /// omit it deserialize with `None`, and it is elided from the wire when
+    /// unset.
+    /// FLUTTER: new SessionInfo field — mirror it in the Dart model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slack_origin: Option<SlackOrigin>,
 }
 
 /// A session plus its live detail: agent sub-state, diff summary, and a pane
@@ -514,6 +521,56 @@ mod tests {
         assert!(info.last_attached_at.is_none());
         assert_eq!(info.worktree_path, String::new());
         assert_eq!(info.tmux_session_name, "");
+        assert!(info.slack_origin.is_none());
+    }
+
+    /// A `SessionInfo` carrying a `slack_origin` round-trips, and the field is
+    /// elided from the wire when absent (so old clients never see an unexpected
+    /// null key).
+    #[test]
+    fn session_info_slack_origin_round_trips_and_elides_when_absent() {
+        let mut info: SessionInfo = serde_json::from_str(
+            r#"{
+                "id": "abc",
+                "session_id": "00000000-0000-0000-0000-000000000000",
+                "title": "t",
+                "branch": "b",
+                "status": "running",
+                "program": "claude",
+                "project_id": "00000000-0000-0000-0000-000000000000",
+                "project_name": "p",
+                "pr_number": null,
+                "pr_url": null,
+                "pr_state": "open",
+                "pr_draft": false,
+                "pr_labels": [],
+                "review_decision": null,
+                "pr_reviewers": [],
+                "created_at": "2024-01-01T00:00:00Z"
+            }"#,
+        )
+        .unwrap();
+
+        // Absent → elided from the serialized form.
+        let json = serde_json::to_string(&info).unwrap();
+        assert!(
+            !json.contains("slack_origin"),
+            "slack_origin must be elided when None"
+        );
+
+        // Present → round-trips.
+        info.slack_origin = Some(SlackOrigin {
+            channel: "C123".to_string(),
+            thread_ts: "1700000000.000100".to_string(),
+            permalink: "https://slack.example/archives/C123/p1700000000000100".to_string(),
+        });
+        let json = serde_json::to_string(&info).unwrap();
+        let back: SessionInfo = serde_json::from_str(&json).unwrap();
+        let origin = back
+            .slack_origin
+            .expect("slack_origin must survive round-trip");
+        assert_eq!(origin.channel, "C123");
+        assert_eq!(origin.thread_ts, "1700000000.000100");
     }
 
     #[test]
