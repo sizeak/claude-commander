@@ -27,6 +27,7 @@ SessionInfo sessionInfo({
   PrState prState = PrState.open,
   bool unread = false,
   SessionId? stackParentSessionId,
+  DateTime? lastAttachedAt,
 }) {
   final uuid = UuidValue.fromString(id);
   return SessionInfo(
@@ -53,7 +54,7 @@ SessionInfo sessionInfo({
     currentSection: null,
     sectionOverride: null,
     enteredSectionAt: null,
-    lastAttachedAt: null,
+    lastAttachedAt: lastAttachedAt,
     worktreePath: '/tmp/test-worktree',
     tmuxSessionName: 'cc-test',
     keepAlive: false,
