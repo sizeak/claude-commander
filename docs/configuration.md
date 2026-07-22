@@ -320,6 +320,11 @@ so a remote client can neither read nor set them — set them only by editing th
 file. They're likewise redacted from any debug log of the config. See
 [Slack integration](slack.md) for the end-to-end setup.
 
+The entire `[slack]` table (tokens, allowlist, and the timeout/linger/warm-pool
+tunables) is read once at server boot when the bridge and its warm pool start;
+`POST /api/config/reload` does not reconfigure a running bridge, so **`[slack]`
+changes require a `claude-commander-server` restart** to take effect.
+
 ## Idle-session hibernation
 
 Each live session holds a `claude` process open in tmux (~400MB RAM) whether or

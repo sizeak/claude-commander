@@ -105,15 +105,25 @@ pub async fn handle_accepted(api: &dyn SlackApi, asker: &dyn Asker, accepted: &A
         Err(err) => (error_reply(&err), false),
     };
 
-    if let Err(e) = api.post_message(channel, thread, &reply).await {
-        debug!(target: "slack", "post reply failed: {e}");
-    }
+    // The reply post is load-bearing: if it fails, the user sees no answer, so
+    // the final reaction must be ❌ regardless of whether the ask itself succeeded.
+    let posted = match api.post_message(channel, thread, &reply).await {
+        Ok(()) => true,
+        Err(e) => {
+            debug!(target: "slack", "post reply failed: {e}");
+            false
+        }
+    };
 
     // Swap 👀 → ✅/❌. Removing the ack first keeps the final state unambiguous.
     if let Err(e) = api.remove_reaction(channel, trigger, REACTION_ACK).await {
         debug!(target: "slack", "remove ack reaction failed: {e}");
     }
-    let final_reaction = if ok { REACTION_DONE } else { REACTION_FAILED };
+    let final_reaction = if ok && posted {
+        REACTION_DONE
+    } else {
+        REACTION_FAILED
+    };
     if let Err(e) = api.add_reaction(channel, trigger, final_reaction).await {
         debug!(target: "slack", "add final reaction failed: {e}");
     }
@@ -152,6 +162,7 @@ mod tests {
         calls: Mutex<Vec<Call>>,
         replies: Vec<ThreadMessage>,
         fail_permalink: bool,
+        fail_post: bool,
     }
 
     #[async_trait]
@@ -167,7 +178,11 @@ mod tests {
                 thread: thread_ts.into(),
                 text: text.into(),
             });
-            Ok(())
+            if self.fail_post {
+                Err(SlackError("post failed".into()))
+            } else {
+                Ok(())
+            }
         }
         async fn add_reaction(&self, _channel: &str, ts: &str, name: &str) -> SlackResult<()> {
             self.calls.lock().unwrap().push(Call::Add {
@@ -305,6 +320,33 @@ mod tests {
             c,
             Call::Post { text, .. } if text.contains("timed out")
         )));
+    }
+
+    #[tokio::test]
+    async fn failed_reply_post_yields_x_even_when_ask_succeeded() {
+        // The commander answered, but posting the reply to Slack failed — the
+        // user sees nothing, so the honest final reaction is ❌, never ✅.
+        let api = FakeSlack {
+            fail_post: true,
+            ..Default::default()
+        };
+        let asker = FakeAsker {
+            outcome: Ok("all good".into()),
+            seen: Mutex::new(None),
+        };
+        handle_accepted(&api, &asker, &top_level_mention()).await;
+
+        let calls = api.calls.lock().unwrap().clone();
+        assert!(calls.contains(&Call::Add {
+            ts: "100.1".into(),
+            name: REACTION_FAILED.into()
+        }));
+        assert!(
+            !calls
+                .iter()
+                .any(|c| matches!(c, Call::Add { name, .. } if name == REACTION_DONE)),
+            "a failed reply post must not leave a ✅"
+        );
     }
 
     #[tokio::test]

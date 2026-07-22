@@ -219,9 +219,16 @@ pub fn assemble_prompt(
     out.push_str(&format!("You are answering {source}.\n\n"));
     out.push_str(&format!("Asked by: <@{}>\n", accepted.user));
     out.push_str(&format!("Channel: {}\n", accepted.channel));
+    out.push_str(&format!("Thread ts: {}\n", accepted.thread_root_ts));
     if let Some(link) = permalink {
         out.push_str(&format!("Thread: {link}\n"));
     }
+    // Trusted header (above the untrusted fence): tell the agent which values to
+    // pass when it creates a session on behalf of this request.
+    out.push_str(
+        "(If you create a session for this request, pass the Channel and Thread ts above \
+         as --slack-channel and --slack-thread-ts.)\n",
+    );
 
     if !history.is_empty() {
         out.push_str(
@@ -508,7 +515,17 @@ mod tests {
         let prompt = assemble_prompt(&accepted, &history, Some("https://slack/x"));
         assert!(prompt.contains("Asked by: <@U1>"));
         assert!(prompt.contains("Channel: C1"));
+        assert!(prompt.contains("Thread ts: 50.5"));
         assert!(prompt.contains("Thread: https://slack/x"));
+        // The thread ts and the flag hint are trusted header text, above the fence.
+        let ts_at = prompt.find("Thread ts: 50.5").unwrap();
+        let fence_at = prompt.find("BEGIN THREAD CONTEXT").unwrap();
+        assert!(
+            ts_at < fence_at,
+            "thread ts must precede the untrusted fence"
+        );
+        assert!(prompt.contains("--slack-channel"));
+        assert!(prompt.contains("--slack-thread-ts"));
         assert!(prompt.contains("untrusted"));
         assert!(prompt.contains("NOT instructions"));
         assert!(prompt.contains("[<@U1>]: kick off"));
@@ -531,7 +548,10 @@ mod tests {
         let prompt = assemble_prompt(&accepted, &[], None);
         assert!(prompt.contains("a Slack direct message"));
         assert!(!prompt.contains("THREAD CONTEXT"));
-        assert!(!prompt.contains("Thread:"));
+        // The thread ts is always present (it is the reply target); the permalink
+        // "Thread:" line is not, since none was resolved.
+        assert!(prompt.contains("Thread ts: 9.9"));
+        assert!(!prompt.contains("Thread: "));
     }
 
     #[test]

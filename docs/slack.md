@@ -113,6 +113,12 @@ non-empty** — an empty allowlist keeps it off, so a token pair alone can't
 accidentally accept everyone. Restart `claude-commander-server` after editing;
 on connect it logs `Slack bridge connecting via Socket Mode`.
 
+> **Changes require a server restart.** The whole `[slack]` table — tokens,
+> allowlist, and the timeout/linger/warm-pool tunables — is read once at server
+> boot when the bridge and its warm pool are started. `POST /api/config/reload`
+> does **not** reconfigure a running bridge; restart `claude-commander-server`
+> for any `[slack]` change to take effect.
+
 The two tokens are **secrets**: they're stripped from `GET /api/config` and
 rejected by the remote config-patch route, so they can only be set by editing
 `config.toml` directly.

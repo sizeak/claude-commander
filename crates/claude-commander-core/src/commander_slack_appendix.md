@@ -42,6 +42,8 @@ distil the thread into a clear `--initial-prompt` and pick the project from the
 project list. So the resulting session remembers where it came from, **always
 pass the Slack origin flags**: `--slack-channel <id>` and `--slack-thread-ts
 <ts>` (both required together), plus `--slack-permalink <url>` when you have it.
+The channel id and thread ts to use appear in the prompt header (the `Channel:`
+and `Thread ts:` lines).
 These stamp the session so a worker's `claude-commander slack notify` reports
 back to this exact thread when it finishes. Without them, a worker's notify
 falls back to a DM instead of this thread.

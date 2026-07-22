@@ -2542,8 +2542,9 @@ pub fn validate_program_flags(opts: &CreateSessionOpts, resolved_program: &str) 
 /// Construct the headless commander over a given process spawner. Shared by
 /// [`CommanderService::new`] (with `RealSpawn`) and
 /// [`CommanderService::with_commander_spawn`] (with a test fake) so the priming
-/// wiring lives in one place. Does no IO: `claude_md` is rendered from the live
-/// CLI and the directory is written lazily on first ask.
+/// wiring lives in one place. The only IO is `SlackSessionStore::load` reading
+/// `slack.json` (tolerating its absence); `claude_md` is rendered from the live
+/// CLI and the commander directory is written lazily at spawn time.
 fn build_headless(
     config_store: &Arc<ConfigStore>,
     data_dir: &Path,
