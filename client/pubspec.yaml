@@ -65,8 +65,9 @@ dev_dependencies:
   flutter_launcher_icons: ^0.14.4
 
 # App launcher icon generation. Source art lives in tool/icon/ (SVG masters
-# alongside the rendered PNGs). The adaptive background carries the purple
-# gradient; the coral rank chevrons sit on the transparent foreground layer.
+# alongside the rendered PNGs). The adaptive background carries the dark navy
+# gradient; the green/yellow rank chevrons sit on the transparent foreground
+# layer.
 flutter_launcher_icons:
   android: true
   ios: false
