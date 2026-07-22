@@ -164,7 +164,13 @@ jobs:
           restore-keys: pub-${{ runner.os }}-
 
       - name: Fetch Flutter Packages
-        run: nix develop .#clientCi -c bash -c 'cd client && flutter pub get'
+        # The pub cache is restored via a restore-keys prefix, so it can carry a
+        # stale/partial checkout of a git dependency (the xterm fork) from an
+        # older run whose pin differed. pub then mis-resolves the git dep and
+        # fails generating package_graph.json ("dependencies for `zmodem`
+        # missing"). Drop just the git portion so git deps are re-cloned fresh;
+        # the large hosted-package cache is still reused.
+        run: nix develop .#clientCi -c bash -c 'rm -rf ~/.pub-cache/git && cd client && flutter pub get'
 
       - name: Analyze Dart
         run: nix develop .#clientCi -c bash -c 'cd client && flutter analyze lib test integration_test'
