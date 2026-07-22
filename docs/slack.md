@@ -189,7 +189,20 @@ server machine — so it's locked down by design:
   tight and the channels trusted.
 - **Agent lockdown.** The headless commander runs with a restricted tool set (the
   `claude-commander` CLI plus read-only Read/Grep/Glob) — no arbitrary shell, no
-  `Write`/`Edit` — and each invocation is capped by `invocation_timeout_secs`.
+  `Write`/`Edit` — and each invocation is capped by `invocation_timeout_secs`. It
+  **can** create sessions (`claude-commander new`), and a created session runs a
+  program in its own tmux pane. Because that program is otherwise caller-chosen
+  (`--program`) and would run *outside* the read-only deny fence, Slack-originated
+  creates are restricted to the server's **configured programs**: a `new` that
+  descends from the headless commander (detected by an inherited environment
+  marker the agent cannot forge or strip) may only launch an entry from the
+  `programs` list or the configured default. An injected
+  `--program "bash -lc '…'"` payload is rejected before the session is created,
+  so it cannot achieve code execution. This does not make the agent
+  untrusted-input-proof in general: allowlisted **users** are trusted, thread
+  **history** is treated as untrusted and fenced (see above), and the CLI's own
+  guarded surface is the boundary — do not widen `ALLOWED_TOOLS` or the configured
+  programs to anything that shells out freely.
 - **Read fencing.** Read access is broad by necessity (the agent inspects
   worktrees, which live outside its working directory), so a `permissions.deny`
   rule set blocks reads of sensitive locations regardless: `~/.ssh`, `~/.aws`,

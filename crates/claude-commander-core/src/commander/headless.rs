@@ -76,6 +76,23 @@ const PERMISSION_MODE: &str = "default";
 /// Prepended to the prompt on the single automatic retry after a timeout.
 const TIMEOUT_NUDGE: &str = "Your previous attempt timed out — be brief and direct.";
 
+/// Environment marker set on the headless `claude` child (see
+/// [`RealChild::spawn`]). It is inherited by that `claude` process and, in turn,
+/// by any `claude-commander` the agent launches through its
+/// `Bash(claude-commander:*)` allowance — so a `claude-commander new` invocation
+/// can tell it descends from the headless Slack commander and must restrict
+/// `--program` to the server's configured set
+/// ([`Config::ensure_slack_program_allowed`](crate::config::Config::ensure_slack_program_allowed),
+/// enforced at the CLI boundary in `main.rs`).
+///
+/// The agent cannot forge or strip it: its Bash allowance matches
+/// `claude-commander:*` only, so an `env -u CLAUDE_COMMANDER_PROGRAM_LOCK
+/// claude-commander …` or `CLAUDE_COMMANDER_PROGRAM_LOCK= claude-commander …`
+/// prefix parses as a *different* leading command (`env`, or a shell
+/// assignment), which is not on the allow-list and would need a permission
+/// prompt no headless process can answer.
+pub const PROGRAM_LOCK_ENV: &str = "CLAUDE_COMMANDER_PROGRAM_LOCK";
+
 /// Current schema of the persisted `slack.json` map.
 const SLACK_SCHEMA_VERSION: u32 = 1;
 
@@ -140,8 +157,44 @@ pub(crate) fn sensitive_read_denies(config_dir: Option<&Path>, data_dir: &Path) 
 /// Format an absolute-path Read deny rule. A leading `//` anchors to the
 /// filesystem root; `dir` already begins with `/`, so one extra slash produces
 /// the `//<abs>` form Claude Code expects.
+///
+/// `dir` is a machine-generated config/data directory (via the `directories`
+/// crate), so in practice it is plain UTF-8 with no glob metacharacters. We
+/// still harden two edge cases so a path we don't fully control can't
+/// *under*-fence (let a secret through):
+///
+/// - **Glob metacharacters** (`*`, `?`, `[`, `]`, `\`) in the literal path are
+///   backslash-escaped ([`escape_glob_meta`]) so a directory literally named,
+///   e.g., `proj[1]` is matched as that name rather than as a character class.
+///   This relies on Claude Code's gitignore-style matcher honouring backslash
+///   escapes (as gitignore itself does).
+/// - **Non-UTF-8 paths** have no faithful `str` form — `Path::display` would
+///   substitute U+FFFD and yield a rule matching the *wrong* path. We instead
+///   fall back to the broadest safe rule, `//**/<tail>`, which denies `tail`
+///   everywhere. This fails *closed* (over- rather than under-fencing).
+///   Documented limitation: on such a system the deny is filesystem-wide for
+///   this `tail`, not scoped to `dir` — acceptably safe, and effectively never
+///   hit for these OS-standard config/data dirs.
 fn deny_abs_glob(dir: &Path, tail: &str) -> String {
-    format!("Read(/{}/{tail})", dir.display())
+    match dir.to_str() {
+        Some(s) => format!("Read(/{}/{tail})", escape_glob_meta(s)),
+        None => format!("Read(//**/{tail})"),
+    }
+}
+
+/// Backslash-escape gitignore-style glob metacharacters so each matches itself.
+/// `\` is handled by the same arm, and since it is pushed *before* the char it
+/// escapes, an input backslash becomes `\\` (not a stray escape of the next
+/// char).
+fn escape_glob_meta(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if matches!(ch, '\\' | '*' | '?' | '[' | ']') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
 }
 
 /// Spawns [`CommanderChild`] processes. The seam that lets tests substitute a
@@ -192,6 +245,13 @@ impl RealChild {
 
         let mut cmd = Command::new(program);
         cmd.current_dir(&spec.cwd)
+            // Marks this process — and every `claude-commander` the agent spawns
+            // through its `Bash(claude-commander:*)` allowance, which inherits the
+            // environment — as descending from the headless commander, so a
+            // `claude-commander new` restricts `--program` to the configured set
+            // (see [`PROGRAM_LOCK_ENV`]). The agent cannot strip an inherited var
+            // without prefixing a different (disallowed) leading command.
+            .env(PROGRAM_LOCK_ENV, "1")
             .args(args)
             .arg("-p")
             .args(["--input-format", "stream-json"])
@@ -1308,6 +1368,40 @@ mod tests {
                 .any(|d| d == "Read(//home/u/.local/share/claude-commander/**)"),
             "data dir must not be denied wholesale"
         );
+    }
+
+    #[test]
+    fn deny_abs_glob_escapes_glob_metacharacters_in_the_path() {
+        // A config dir whose literal name contains gitignore glob metacharacters
+        // must be escaped, or `[abc]` would be read as a character class and the
+        // rule would fence the wrong (or no) path — under-fencing a secret dir.
+        let dir = Path::new("/home/u/.config/proj[1]*?");
+        assert_eq!(
+            deny_abs_glob(dir, "**"),
+            r"Read(//home/u/.config/proj\[1\]\*\?/**)"
+        );
+        // A backslash in the path is itself escaped (not left to escape its
+        // neighbour).
+        assert_eq!(
+            deny_abs_glob(Path::new(r"/a\b"), "*.json"),
+            r"Read(//a\\b/*.json)"
+        );
+        // The common clean-path case is unchanged.
+        assert_eq!(
+            deny_abs_glob(Path::new("/home/u/.config/cc"), "**"),
+            "Read(//home/u/.config/cc/**)"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deny_abs_glob_non_utf8_path_fails_closed() {
+        use std::os::unix::ffi::OsStrExt;
+        // A non-UTF-8 path has no faithful string form; rather than emit a rule
+        // matching the wrong path (via lossy display), fall back to the broadest
+        // safe rule that denies `tail` filesystem-wide (fails closed).
+        let dir = Path::new(std::ffi::OsStr::from_bytes(b"/home/u/\xff\xfe"));
+        assert_eq!(deny_abs_glob(dir, "*.json"), "Read(//**/*.json)");
     }
 
     #[tokio::test(start_paused = true)]

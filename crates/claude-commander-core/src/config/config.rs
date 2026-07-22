@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::keybindings::KeyBindings;
 use crate::config::migrations;
 use crate::config::theme::ThemeOverrides;
-use crate::error::{ConfigError, Error, Result};
+use crate::error::{ConfigError, Error, Result, SessionError};
 
 /// A selectable agent harness in the new-session program picker: a display
 /// `label` paired with the `command` to launch (program plus any flags).
@@ -894,6 +894,44 @@ impl Config {
         }
     }
 
+    /// Gate which program a Slack-originated `claude-commander new` may launch.
+    ///
+    /// The headless Slack commander is allowed to run `claude-commander new`, and
+    /// its `--program` flag chooses the program executed in the created session's
+    /// tmux pane. Prompt-injected thread text could otherwise steer the agent into
+    /// `new --program "bash -lc '<payload>'"` — arbitrary code execution on the
+    /// host, outside the read-only deny fence. So when a `new` invocation is known
+    /// to descend from the headless commander (detected at the CLI boundary via the
+    /// inherited [`crate::commander::headless::PROGRAM_LOCK_ENV`] marker, which the
+    /// agent can neither forge nor strip), it may only launch a *configured*
+    /// program:
+    ///
+    /// - `None` — the caller did not override `--program`, so the server's own
+    ///   configured default is used. Always allowed.
+    /// - `Some(p)` — allowed iff `p` exactly matches one of the configured
+    ///   [`programs`](Self::programs) commands or the
+    ///   [`default_session_program`](Self::default_session_program). Any other
+    ///   string (an injected payload) is rejected with
+    ///   [`SessionError::ProgramNotAllowed`].
+    ///
+    /// Pure over its inputs (no env access) so it is unit-testable; the env marker
+    /// is read once at the CLI boundary and its result passed in as the gate.
+    pub fn ensure_slack_program_allowed(
+        &self,
+        program: Option<&str>,
+    ) -> std::result::Result<(), SessionError> {
+        let Some(program) = program else {
+            return Ok(());
+        };
+        let allowed = program == self.default_session_program()
+            || self.programs.iter().any(|p| p.command == program);
+        if allowed {
+            Ok(())
+        } else {
+            Err(SessionError::ProgramNotAllowed(program.to_string()))
+        }
+    }
+
     /// The non-empty list of harnesses offered in the new-session program
     /// picker. Returns the configured `programs` verbatim, or — when none are
     /// configured — a single built-in `claude` entry, so the picker always has
@@ -1425,6 +1463,62 @@ speed = 1.25
         };
 
         assert_eq!(config.default_session_program(), "codex");
+    }
+
+    #[test]
+    fn slack_program_lock_allows_configured_and_default_rejects_arbitrary() {
+        let config = Config {
+            programs: vec![
+                ProgramEntry {
+                    label: "Claude".to_string(),
+                    command: "claude".to_string(),
+                },
+                ProgramEntry {
+                    label: "Codex".to_string(),
+                    command: "codex --model o3".to_string(),
+                },
+            ],
+            ..Config::default()
+        };
+
+        // No override → the server's configured default is used → always allowed.
+        assert!(config.ensure_slack_program_allowed(None).is_ok());
+
+        // The default session program (first entry) is allowed.
+        assert_eq!(config.default_session_program(), "claude");
+        assert!(config.ensure_slack_program_allowed(Some("claude")).is_ok());
+
+        // Any other configured program is allowed, matched exactly (with flags).
+        assert!(
+            config
+                .ensure_slack_program_allowed(Some("codex --model o3"))
+                .is_ok()
+        );
+
+        // An arbitrary injected payload is rejected.
+        let err = config
+            .ensure_slack_program_allowed(Some("bash -lc 'id'"))
+            .unwrap_err();
+        assert!(matches!(err, SessionError::ProgramNotAllowed(p) if p == "bash -lc 'id'"));
+
+        // A near-miss (extra flag on a configured command) is not an exact match.
+        assert!(
+            config
+                .ensure_slack_program_allowed(Some("claude --dangerously-skip-permissions"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn slack_program_lock_allows_builtin_default_when_no_programs_configured() {
+        // Empty `programs` → default_session_program() is the built-in `claude`.
+        let config = Config {
+            programs: Vec::new(),
+            ..Config::default()
+        };
+        assert!(config.ensure_slack_program_allowed(None).is_ok());
+        assert!(config.ensure_slack_program_allowed(Some("claude")).is_ok());
+        assert!(config.ensure_slack_program_allowed(Some("codex")).is_err());
     }
 
     #[test]

@@ -51,6 +51,11 @@ pub enum SessionError {
     #[error("Invalid program: {0}")]
     InvalidProgram(String),
 
+    #[error(
+        "Program '{0}' is not permitted for a Slack-created session: such sessions may only launch a program configured in config.toml (an entry in `programs`, or the default). An injected `--program` override is rejected."
+    )]
+    ProgramNotAllowed(String),
+
     #[error("Failed to create session: {0}")]
     CreationFailed(String),
 

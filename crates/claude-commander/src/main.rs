@@ -485,6 +485,25 @@ async fn main() -> Result<()> {
         }) => {
             setup_logging(cli.debug, false)?;
 
+            // A `claude-commander new` that descends from the headless Slack
+            // commander (marked by an inherited env var the agent can neither
+            // forge nor strip — see `commander::headless::PROGRAM_LOCK_ENV`) may
+            // only launch a program the server has configured. This rejects an
+            // injected `--program "bash -lc '<payload>'"` before any session is
+            // created, closing the RCE path. Read the marker once here at the CLI
+            // boundary (env is process-global; keeping it out of the library fn
+            // keeps that fn pure and testable) and enforce via the library.
+            let program_locked =
+                std::env::var(claude_commander_core::commander::headless::PROGRAM_LOCK_ENV)
+                    .as_deref()
+                    == Ok("1");
+            if program_locked
+                && let Err(e) = config.ensure_slack_program_allowed(program.as_deref())
+            {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+
             // clap's `requires` guarantees channel + thread-ts are all-or-none
             // and permalink implies both, so a present channel means a full
             // origin (permalink optional).
