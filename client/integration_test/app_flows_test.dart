@@ -21,6 +21,7 @@ import 'package:claude_commander_client/main.dart';
 import 'package:claude_commander_client/server_config.dart';
 import 'package:claude_commander_client/services/commander_api.dart';
 import 'package:claude_commander_client/src/rust/frb_generated.dart';
+import 'package:claude_commander_client/state/workspace_store.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
@@ -129,16 +130,19 @@ void main() {
     await tester.pumpWidget(
       CommanderApp(
         api: const RustCommanderApi(),
-        store: InMemoryServerConfigStore(),
-        initialConfig: null,
+        workspace: WorkspaceStore(
+          api: const RustCommanderApi(),
+          listStore: InMemoryServerListStore(),
+        ),
       ),
     );
-    await waitFor(tester, find.text('Connect to server'));
+    await waitFor(tester, find.text('Add server'));
     // Focus each field before entering text: under headless xvfb the field
     // isn't auto-focused as on a real display, so a bare enterText can no-op and
     // leave the prefilled default URL. Tap → enterText → pump makes it stick.
-    final urlField = find.byType(TextFormField).at(0);
-    final tokenField = find.byType(TextFormField).at(1);
+    // Fields, in order: Name (0), Server URL (1), Bearer token (2).
+    final urlField = find.byType(TextFormField).at(1);
+    final tokenField = find.byType(TextFormField).at(2);
     await tester.tap(urlField);
     await tester.pump();
     await tester.enterText(urlField, _baseUrl);
@@ -155,7 +159,7 @@ void main() {
       )).controller?.text,
       _baseUrl,
     );
-    await tester.tap(find.widgetWithText(FilledButton, 'Save & connect'));
+    await tester.tap(find.widgetWithText(FilledButton, 'Add server'));
     await waitFor(tester, find.text('Sessions'));
     await waitFor(tester, find.text('No sessions')); // fresh hermetic server
 

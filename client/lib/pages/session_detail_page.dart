@@ -697,11 +697,18 @@ class SessionDetailPage extends StatelessWidget {
   ) {
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => TerminalPage(
-          api: store.api,
-          handle: store.handle!,
-          session: session,
-          kind: kind,
+        // Re-provide the owning scope: route builders don't inherit the pushing
+        // widget's context, and TerminalPage registers its active attach with
+        // the store (so reconnect/dispose can detach before releasing the
+        // handle) via CommanderStoreScope.of.
+        builder: (_) => CommanderStoreScope(
+          store: store,
+          child: TerminalPage(
+            api: store.api,
+            handle: store.handle!,
+            session: session,
+            kind: kind,
+          ),
         ),
       ),
     );
@@ -710,10 +717,13 @@ class SessionDetailPage extends StatelessWidget {
   void _openReview(BuildContext context, CommanderStore store) {
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => ReviewPage(
-          api: store.api,
-          handle: store.handle!,
-          session: session,
+        builder: (_) => CommanderStoreScope(
+          store: store,
+          child: ReviewPage(
+            api: store.api,
+            handle: store.handle!,
+            session: session,
+          ),
         ),
       ),
     );

@@ -7,6 +7,7 @@ import 'package:claude_commander_client/server_config.dart';
 import 'package:claude_commander_client/src/rust/api/mirrors.dart';
 import 'package:claude_commander_client/state/commander_store.dart';
 import 'package:claude_commander_client/state/commander_store_scope.dart';
+import 'package:claude_commander_client/state/workspace_store.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -15,25 +16,20 @@ import 'support/fixtures.dart';
 
 void main() {
   late FakeCommanderApi api;
-  late InMemoryServerConfigStore configStore;
   late CommanderStore store;
+  late WorkspaceStore workspace;
 
   setUp(() {
     api = FakeCommanderApi();
-    configStore = InMemoryServerConfigStore();
     store = CommanderStore(api: api, config: testConfig);
+    workspace = WorkspaceStore.withStores([store]);
   });
 
-  tearDown(() => store.dispose());
+  tearDown(() => workspace.dispose());
 
-  Widget wrap() => CommanderStoreScope(
-    store: store,
-    child: MaterialApp(
-      home: SessionListPage(
-        configStore: configStore,
-        onConnected: (_) async {},
-      ),
-    ),
+  Widget wrap() => WorkspaceScope(
+    workspace: workspace,
+    child: const MaterialApp(home: SessionListPage()),
   );
 
   testWidgets('shows a loading indicator until the snapshot resolves', (
@@ -178,6 +174,64 @@ void main() {
     expect(find.textContaining('Cascade paused'), findsNothing);
   });
 
+  testWidgets(
+    'with several servers, sessions are grouped under a header per server',
+    (tester) async {
+      final apiA = FakeCommanderApi()
+        ..listSessionsResponse = [
+          sessionInfo(
+            id: '11111111-1111-1111-1111-111111111111',
+            title: 'AlphaOnA',
+            projectName: 'repo-a',
+          ),
+        ];
+      final apiB = FakeCommanderApi()
+        ..listSessionsResponse = [
+          sessionInfo(
+            id: '22222222-2222-2222-2222-222222222222',
+            title: 'BetaOnB',
+            projectName: 'repo-b',
+          ),
+        ];
+      final storeA = CommanderStore(
+        api: apiA,
+        config: const ServerConfig(
+          id: 'a',
+          name: 'laptop',
+          baseUrl: 'http://a:7878',
+          token: 't',
+        ),
+      );
+      final storeB = CommanderStore(
+        api: apiB,
+        config: const ServerConfig(
+          id: 'b',
+          name: 'codespace',
+          baseUrl: 'http://b:7878',
+          token: 't',
+        ),
+      );
+      final ws = WorkspaceStore.withStores([storeA, storeB]);
+      addTearDown(ws.dispose);
+      unawaited(storeA.connect());
+      unawaited(storeB.connect());
+
+      await tester.pumpWidget(
+        WorkspaceScope(
+          workspace: ws,
+          child: const MaterialApp(home: SessionListPage()),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Both server headers show, each with its own session.
+      expect(find.text('laptop'), findsOneWidget);
+      expect(find.text('codespace'), findsOneWidget);
+      expect(find.text('AlphaOnA'), findsOneWidget);
+      expect(find.text('BetaOnB'), findsOneWidget);
+    },
+  );
+
   testWidgets('a long program name does not overflow a narrow tile', (
     tester,
   ) async {
@@ -193,13 +247,13 @@ void main() {
     // trailing Text used to throw "Trailing widget consumes the entire tile
     // width" for a long program string.
     await tester.pumpWidget(
-      CommanderStoreScope(
-        store: store,
+      WorkspaceScope(
+        workspace: workspace,
         child: MaterialApp(
           home: Scaffold(
             body: SizedBox(
               width: 340,
-              child: SessionListBody(onSelect: (_) {}),
+              child: SessionListBody(onSelect: (_, _) {}),
             ),
           ),
         ),

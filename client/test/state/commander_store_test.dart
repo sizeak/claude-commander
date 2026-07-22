@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:claude_commander_client/server_config.dart';
 import 'package:claude_commander_client/src/rust/api/mirrors.dart';
 import 'package:claude_commander_client/state/commander_store.dart';
@@ -13,6 +15,8 @@ void main() {
   setUp(() => api = FakeCommanderApi());
 
   const otherConfig = ServerConfig(
+    id: 'other-server',
+    name: 'other',
     baseUrl: 'http://other.test:9999',
     token: 'other-token',
   );
@@ -30,6 +34,32 @@ void main() {
   );
 
   CommanderStore build() => CommanderStore(api: api, config: testConfig);
+
+  test('a superseded in-flight connect releases its handle (no leak)', () async {
+    final store = build();
+    addTearDown(store.dispose);
+
+    // First connect parks inside connectServer.
+    final gate = Completer<void>();
+    api.connectGate = gate;
+    final first = store.connect();
+    await Future<void>.delayed(Duration.zero);
+
+    // A second connect (e.g. a double-tapped retry) supersedes the first.
+    api.connectGate = null;
+    await store.connect();
+
+    // The first now resumes on a stale epoch: it must release the handle it
+    // acquired and wire no feeds, rather than overwriting the live connection.
+    gate.complete();
+    await first;
+    await Future<void>.delayed(Duration.zero);
+
+    expect(api.countOf('connectServer'), 2);
+    expect(api.countOf('disconnectServer'), 1); // the superseded connect
+    expect(api.countOf('changeFeed'), 1); // only the live connect wired a feed
+    expect(store.handle, isNotNull);
+  });
 
   test('connect() acquires the handle and populates workspace + agent states', () async {
     api.connectServerResponse = 'handle-1';

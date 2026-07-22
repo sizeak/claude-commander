@@ -30,6 +30,10 @@ class FakeCommanderApi implements CommanderApi {
 
   // --- canned responses --------------------------------------------------
   String connectServerResponse = 'fake-handle';
+
+  /// When set, `connectServer` awaits this before returning — lets a test hold a
+  /// connect in flight (e.g. to dispose the store mid-connect).
+  Completer<void>? connectGate;
   Object? workspaceSnapshotError;
   bool healthResponse = true;
   bool healthTmuxResponse = true;
@@ -171,6 +175,7 @@ class FakeCommanderApi implements CommanderApi {
   @override
   Future<String> connectServer({required String baseUrl, String? token}) async {
     _record('connectServer', {'baseUrl': baseUrl, 'token': token});
+    if (connectGate != null) await connectGate!.future;
     return connectServerResponse;
   }
 
@@ -315,6 +320,8 @@ class FakeCommanderApi implements CommanderApi {
       'projectPath': projectPath,
       'title': title,
       'program': program,
+      'initialPrompt': initialPrompt,
+      'baseBranch': baseBranch,
     });
     if (createSessionError != null) throw createSessionError!;
     return createSessionResponse;
