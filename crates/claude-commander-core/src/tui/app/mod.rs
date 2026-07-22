@@ -72,6 +72,8 @@ mod state;
 #[cfg(test)]
 mod tests;
 
+#[cfg(test)]
+pub(crate) use modals::confirm_modal_area;
 pub use review::DiffReviewState;
 pub(crate) use review::ImageEntry;
 pub use review::ReviewPrepared;

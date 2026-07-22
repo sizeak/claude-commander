@@ -495,7 +495,7 @@ impl App {
             }
 
             Modal::Confirm { title, message, .. } => {
-                let modal_area = centered_rect(50, 15, area);
+                let modal_area = confirm_modal_area(message, area);
                 frame.render_widget(Clear, modal_area);
 
                 let block = Block::default()
@@ -1059,6 +1059,72 @@ pub(super) fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect 
         .split(popup_layout[1])[1]
 }
 
+/// Rows one logical line occupies once word-wrapped to `width` columns,
+/// mirroring ratatui's `WordWrapper` (the wrap `Paragraph` uses): whitespace-
+/// separated words are packed greedily, and a word longer than `width` is
+/// hard-split across rows. Char count stands in for display width (the confirm
+/// messages are ASCII branch names / prose); the estimate never *under*-counts
+/// versus the real wrap, so the modal is sized conservatively and never clips.
+fn wrapped_line_rows(line: &str, width: usize) -> u16 {
+    let mut rows: u16 = 1;
+    let mut col = 0usize; // columns already used on the current row
+    for word in line.split_whitespace() {
+        let wlen = word.chars().count();
+        // A space precedes the word only when the row already holds content.
+        if col > 0 && col + 1 + wlen > width {
+            rows += 1;
+            col = 0;
+        }
+        if wlen <= width {
+            col = if col == 0 { wlen } else { col + 1 + wlen };
+        } else {
+            // Over-long word (starts on a fresh row): fills whole rows, and the
+            // remainder — if any — continues packing on the last row.
+            let full = (wlen / width) as u16;
+            let rem = wlen % width;
+            if rem == 0 {
+                rows += full.saturating_sub(1);
+                col = width;
+            } else {
+                rows += full;
+                col = rem;
+            }
+        }
+    }
+    rows
+}
+
+/// Rows a multi-line block occupies once wrapped to `width`. Blank lines count
+/// as one row each, matching how `Paragraph` renders them.
+fn wrapped_rows(text: &str, width: usize) -> u16 {
+    text.split('\n').map(|l| wrapped_line_rows(l, width)).sum()
+}
+
+/// Geometry of a `Confirm` modal sized to fit `message` plus the confirm/cancel
+/// footer, rather than a fixed fraction of the screen. Height grows with the
+/// wrapped content and is capped at the terminal height so a long branch list
+/// (e.g. the "Delete merged-PR sessions" prompt) is fully shown instead of
+/// clipped. Width tracks 50% of the screen (min 40), centred like `centered_rect`.
+pub(crate) fn confirm_modal_area(message: &str, area: Rect) -> Rect {
+    const FOOTER: &str = "[Enter] Confirm  [Esc] Cancel";
+    // `min` last, not `clamp(40, ..)`: on a terminal narrower than 40 the low
+    // bound would exceed the high bound and `clamp` panics, so clamp down to the
+    // screen after applying the 40-col floor.
+    let modal_width = (area.width / 2).max(40).min(area.width.max(1));
+    let inner_width = (modal_width.saturating_sub(2).max(1)) as usize;
+
+    // message + blank separator + footer — mirrors the render arm's layout.
+    let content_rows = wrapped_rows(message, inner_width) + 1 + wrapped_rows(FOOTER, inner_width);
+    let modal_height = (content_rows + 2).min(area.height.max(1));
+
+    Rect {
+        x: area.x + (area.width.saturating_sub(modal_width)) / 2,
+        y: area.y + (area.height.saturating_sub(modal_height)) / 2,
+        width: modal_width,
+        height: modal_height,
+    }
+}
+
 // List-modal geometry, shared between the render arms and the mouse handler
 // so a click maps onto exactly the rows the renderer drew. Each `*_areas`
 // function returns `(modal_area, rows_area)` where `rows_area` covers only
@@ -1357,5 +1423,98 @@ mod tests {
 
         let (lines, _) = build("", Some(&project), None, InputFocus::Project, true);
         assert!(has_line(&lines, "(no matching projects)"));
+    }
+
+    #[test]
+    fn confirm_modal_grows_to_fit_a_long_message() {
+        use super::confirm_modal_area;
+        use ratatui::layout::Rect;
+
+        let screen = Rect::new(0, 0, 80, 40);
+        // A many-branch delete prompt like "Delete merged-PR sessions".
+        let message = "Delete 5 session(s) with merged PRs?\n\nBranches:\n  \
+            • flutter-android\n  • terminal-scroll\n  • flutter-new-session\n  \
+            • one-more\n  • and-another\n\nThis will kill the tmux sessions and \
+            remove the worktrees.";
+
+        let rect = confirm_modal_area(message, screen);
+
+        // Body rows: message lines + blank separator + footer, plus 2 for the
+        // border. The modal must be tall enough that no content line is clipped.
+        let body_rows = message.split('\n').count() as u16 + 1 /* blank */ + 1 /* footer */;
+        assert!(
+            rect.height >= body_rows + 2,
+            "modal height {} should fit {} content rows + border",
+            rect.height,
+            body_rows,
+        );
+        // The old fixed geometry was 15% of 40 = 6 rows, which clipped this
+        // message — the fit-to-content modal must be taller than that.
+        assert!(
+            rect.height > 6,
+            "modal should grow beyond the old fixed height"
+        );
+    }
+
+    #[test]
+    fn wrapped_line_rows_accounts_for_word_boundaries() {
+        use super::wrapped_line_rows;
+
+        // Three 20-char words at width 38: a naive char-ceil gives 60/38 = 2
+        // rows, but word-wrap can't split mid-word so each word after the first
+        // spills to its own row — 3 rows. The modal must be sized for 3.
+        let line = "wwwwwwwwwwwwwwwwwwww xxxxxxxxxxxxxxxxxxxx yyyyyyyyyyyyyyyyyyyy";
+        assert_eq!(wrapped_line_rows(line, 38), 3);
+        // A single word longer than the width is hard-split across full rows.
+        assert_eq!(wrapped_line_rows(&"z".repeat(80), 38), 3);
+        assert_eq!(wrapped_line_rows(&"z".repeat(76), 38), 2); // exact multiple
+        // Short content and blank lines are a single row.
+        assert_eq!(wrapped_line_rows("short", 38), 1);
+        assert_eq!(wrapped_line_rows("", 38), 1);
+    }
+
+    #[test]
+    fn confirm_modal_fits_a_word_wrapped_message() {
+        use super::confirm_modal_area;
+        use ratatui::layout::Rect;
+
+        // A long single-line prose message (like a git error in the "save
+        // anyway?" confirm) that only word-wrap sizes correctly.
+        let screen = Rect::new(0, 0, 80, 40);
+        let message = "Connection test failed: could not resolve host name and \
+            the request timed out after several retries against the configured \
+            remote server endpoint, so the session cannot be created right now.";
+        let rect = confirm_modal_area(message, screen);
+
+        let inner_width = rect.width.saturating_sub(2) as usize;
+        let expected = super::wrapped_rows(message, inner_width) + 1 /* blank */
+            + super::wrapped_rows("[Enter] Confirm  [Esc] Cancel", inner_width);
+        assert!(
+            rect.height >= expected + 2,
+            "modal height {} must fit {} word-wrapped rows + border",
+            rect.height,
+            expected,
+        );
+    }
+
+    #[test]
+    fn confirm_modal_is_capped_at_the_screen_height() {
+        use super::confirm_modal_area;
+        use ratatui::layout::Rect;
+
+        let screen = Rect::new(0, 0, 60, 10);
+        let message = (0..50)
+            .map(|i| format!("  • branch-{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let rect = confirm_modal_area(&message, screen);
+
+        assert!(
+            rect.height <= screen.height,
+            "modal height {} must not exceed screen height {}",
+            rect.height,
+            screen.height,
+        );
     }
 }
