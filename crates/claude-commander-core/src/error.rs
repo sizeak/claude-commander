@@ -56,6 +56,11 @@ pub enum SessionError {
     )]
     ProgramNotAllowed(String),
 
+    #[error(
+        "Permission mode '{0}' is not permitted for a Slack-created session: such sessions run unattended, so they may not disable the interactive permission prompt (`bypassPermissions` or `acceptEdits`). Use the default mode or `plan`."
+    )]
+    ModeNotAllowed(String),
+
     #[error("Failed to create session: {0}")]
     CreationFailed(String),
 
@@ -298,10 +303,19 @@ mod tests {
             SessionError::TmuxSessionNotFound("sess".to_string()),
             SessionError::CommanderDisabled,
             SessionError::FileNotInDiff("src/main.rs".to_string()),
+            SessionError::ProgramNotAllowed("bash -lc id".to_string()),
+            SessionError::ModeNotAllowed("bypassPermissions".to_string()),
         ];
         for err in variants {
             assert!(!err.to_string().is_empty(), "Empty display for {:?}", err);
         }
+        // The mode rejection names the offending mode so an operator can see
+        // which flag was refused.
+        assert!(
+            SessionError::ModeNotAllowed("bypassPermissions".to_string())
+                .to_string()
+                .contains("bypassPermissions")
+        );
     }
 
     #[test]

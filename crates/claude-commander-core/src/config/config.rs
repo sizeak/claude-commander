@@ -894,42 +894,60 @@ impl Config {
         }
     }
 
-    /// Gate which program a Slack-originated `claude-commander new` may launch.
+    /// Gate what a Slack-originated `claude-commander new` may launch: both the
+    /// `--program` and the `--mode` (permission mode) flags.
     ///
-    /// The headless Slack commander is allowed to run `claude-commander new`, and
-    /// its `--program` flag chooses the program executed in the created session's
-    /// tmux pane. Prompt-injected thread text could otherwise steer the agent into
-    /// `new --program "bash -lc '<payload>'"` — arbitrary code execution on the
-    /// host, outside the read-only deny fence. So when a `new` invocation is known
-    /// to descend from the headless commander (detected at the CLI boundary via the
-    /// inherited [`crate::commander::headless::PROGRAM_LOCK_ENV`] marker, which the
-    /// agent can neither forge nor strip), it may only launch a *configured*
-    /// program:
+    /// The headless Slack commander is allowed to run `claude-commander new`, so
+    /// prompt-injected thread text could otherwise steer it into an unattended
+    /// worker that executes arbitrary code. Two flags are RCE-relevant:
     ///
-    /// - `None` — the caller did not override `--program`, so the server's own
-    ///   configured default is used. Always allowed.
-    /// - `Some(p)` — allowed iff `p` exactly matches one of the configured
+    /// - `--program` chooses the binary executed in the created session's tmux
+    ///   pane; `new --program "bash -lc '<payload>'"` would be direct code
+    ///   execution outside the read-only deny fence.
+    /// - `--mode` is folded into the launched command as `--permission-mode` (see
+    ///   [`program_with_agent_flags`](crate::session::program_with_agent_flags)).
+    ///   With the allowed program `claude` but `--mode bypassPermissions`, the
+    ///   worker runs unattended with *no* permission prompt and an attacker's
+    ///   `-i` prompt — arbitrary code execution even though the program is
+    ///   benign.
+    ///
+    /// So when a `new` invocation is known to descend from the headless commander
+    /// (detected at the CLI boundary via the inherited
+    /// [`crate::commander::headless::PROGRAM_LOCK_ENV`] marker, which the agent can
+    /// neither forge nor strip):
+    ///
+    /// - `program`: `None` uses the server's configured default (allowed);
+    ///   `Some(p)` is allowed iff `p` exactly matches one of the configured
     ///   [`programs`](Self::programs) commands or the
     ///   [`default_session_program`](Self::default_session_program). Any other
-    ///   string (an injected payload) is rejected with
-    ///   [`SessionError::ProgramNotAllowed`].
+    ///   string is rejected with [`SessionError::ProgramNotAllowed`].
+    /// - `mode`: `None`, `default` and `plan` keep the permission prompt and are
+    ///   allowed; any mode that disables the prompt (`bypassPermissions`,
+    ///   `acceptEdits`) is rejected with [`SessionError::ModeNotAllowed`]. Benign
+    ///   flags (`--effort`, `--model`, `-i`) are *not* gated: a default-mode
+    ///   worker still prompts before executing tool calls, so they cannot on
+    ///   their own achieve unattended execution.
     ///
     /// Pure over its inputs (no env access) so it is unit-testable; the env marker
     /// is read once at the CLI boundary and its result passed in as the gate.
-    pub fn ensure_slack_program_allowed(
+    pub fn ensure_slack_create_allowed(
         &self,
         program: Option<&str>,
+        mode: Option<&str>,
     ) -> std::result::Result<(), SessionError> {
-        let Some(program) = program else {
-            return Ok(());
-        };
-        let allowed = program == self.default_session_program()
-            || self.programs.iter().any(|p| p.command == program);
-        if allowed {
-            Ok(())
-        } else {
-            Err(SessionError::ProgramNotAllowed(program.to_string()))
+        if let Some(program) = program {
+            let allowed = program == self.default_session_program()
+                || self.programs.iter().any(|p| p.command == program);
+            if !allowed {
+                return Err(SessionError::ProgramNotAllowed(program.to_string()));
+            }
         }
+        if let Some(mode) = mode
+            && mode_disables_permission_gate(mode)
+        {
+            return Err(SessionError::ModeNotAllowed(mode.to_string()));
+        }
+        Ok(())
     }
 
     /// The non-empty list of harnesses offered in the new-session program
@@ -1078,6 +1096,23 @@ impl Config {
             ))
         })
     }
+}
+
+/// Whether a `--mode` (Claude `--permission-mode`) value disables the
+/// interactive permission prompt, letting an unattended worker run tool calls
+/// with no human gate. Claude Code's permission modes are `default`, `plan`,
+/// `acceptEdits`, and `bypassPermissions`: `default`/`plan` keep the prompt,
+/// while `bypassPermissions` skips every prompt and `acceptEdits` auto-approves
+/// file edits/writes — both let a freshly-created, unattended Slack worker act
+/// without anyone to approve, so both are forbidden.
+///
+/// Matched case-insensitively after trimming so a case/whitespace variant of a
+/// dangerous mode cannot slip past (fails closed); an unrecognised mode is
+/// treated as safe here — Claude itself rejects it, so it never launches a
+/// bypassing worker.
+fn mode_disables_permission_gate(mode: &str) -> bool {
+    let m = mode.trim();
+    m.eq_ignore_ascii_case("bypassPermissions") || m.eq_ignore_ascii_case("acceptEdits")
 }
 
 /// Parse a key string like `" "`, `"ctrl+k"`, `"f1"` into crossterm types.
@@ -1482,29 +1517,33 @@ speed = 1.25
         };
 
         // No override → the server's configured default is used → always allowed.
-        assert!(config.ensure_slack_program_allowed(None).is_ok());
+        assert!(config.ensure_slack_create_allowed(None, None).is_ok());
 
         // The default session program (first entry) is allowed.
         assert_eq!(config.default_session_program(), "claude");
-        assert!(config.ensure_slack_program_allowed(Some("claude")).is_ok());
+        assert!(
+            config
+                .ensure_slack_create_allowed(Some("claude"), None)
+                .is_ok()
+        );
 
         // Any other configured program is allowed, matched exactly (with flags).
         assert!(
             config
-                .ensure_slack_program_allowed(Some("codex --model o3"))
+                .ensure_slack_create_allowed(Some("codex --model o3"), None)
                 .is_ok()
         );
 
         // An arbitrary injected payload is rejected.
         let err = config
-            .ensure_slack_program_allowed(Some("bash -lc 'id'"))
+            .ensure_slack_create_allowed(Some("bash -lc 'id'"), None)
             .unwrap_err();
         assert!(matches!(err, SessionError::ProgramNotAllowed(p) if p == "bash -lc 'id'"));
 
         // A near-miss (extra flag on a configured command) is not an exact match.
         assert!(
             config
-                .ensure_slack_program_allowed(Some("claude --dangerously-skip-permissions"))
+                .ensure_slack_create_allowed(Some("claude --dangerously-skip-permissions"), None)
                 .is_err()
         );
     }
@@ -1516,9 +1555,98 @@ speed = 1.25
             programs: Vec::new(),
             ..Config::default()
         };
-        assert!(config.ensure_slack_program_allowed(None).is_ok());
-        assert!(config.ensure_slack_program_allowed(Some("claude")).is_ok());
-        assert!(config.ensure_slack_program_allowed(Some("codex")).is_err());
+        assert!(config.ensure_slack_create_allowed(None, None).is_ok());
+        assert!(
+            config
+                .ensure_slack_create_allowed(Some("claude"), None)
+                .is_ok()
+        );
+        assert!(
+            config
+                .ensure_slack_create_allowed(Some("codex"), None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn slack_create_lock_rejects_permission_bypassing_modes() {
+        let config = Config {
+            programs: vec![ProgramEntry {
+                label: "Claude".to_string(),
+                command: "claude".to_string(),
+            }],
+            ..Config::default()
+        };
+
+        // Safe modes (and no mode) keep the interactive permission prompt, so an
+        // allowed program plus these is permitted.
+        assert!(
+            config
+                .ensure_slack_create_allowed(Some("claude"), None)
+                .is_ok()
+        );
+        assert!(
+            config
+                .ensure_slack_create_allowed(Some("claude"), Some("default"))
+                .is_ok()
+        );
+        assert!(
+            config
+                .ensure_slack_create_allowed(Some("claude"), Some("plan"))
+                .is_ok()
+        );
+
+        // Permission-bypassing modes are rejected even with an allowed program.
+        let err = config
+            .ensure_slack_create_allowed(Some("claude"), Some("bypassPermissions"))
+            .unwrap_err();
+        assert!(matches!(err, SessionError::ModeNotAllowed(m) if m == "bypassPermissions"));
+        assert!(matches!(
+            config
+                .ensure_slack_create_allowed(Some("claude"), Some("acceptEdits"))
+                .unwrap_err(),
+            SessionError::ModeNotAllowed(_)
+        ));
+
+        // Case/whitespace variants of a bypassing mode still fail closed.
+        assert!(
+            config
+                .ensure_slack_create_allowed(Some("claude"), Some(" BYPASSPERMISSIONS "))
+                .is_err()
+        );
+        assert!(
+            config
+                .ensure_slack_create_allowed(Some("claude"), Some("acceptedits"))
+                .is_err()
+        );
+
+        // The mode gate applies even when no program override is given (the
+        // configured default program is used, but the mode still disables the
+        // prompt).
+        assert!(
+            config
+                .ensure_slack_create_allowed(None, Some("bypassPermissions"))
+                .is_err()
+        );
+
+        // The program gate still fires first for an injected program.
+        assert!(matches!(
+            config
+                .ensure_slack_create_allowed(Some("bash -lc id"), Some("default"))
+                .unwrap_err(),
+            SessionError::ProgramNotAllowed(_)
+        ));
+    }
+
+    #[test]
+    fn mode_disables_permission_gate_classifies_modes() {
+        assert!(mode_disables_permission_gate("bypassPermissions"));
+        assert!(mode_disables_permission_gate("acceptEdits"));
+        assert!(mode_disables_permission_gate("  bypassPermissions  "));
+        assert!(mode_disables_permission_gate("BYPASSPERMISSIONS"));
+        assert!(!mode_disables_permission_gate("default"));
+        assert!(!mode_disables_permission_gate("plan"));
+        assert!(!mode_disables_permission_gate(""));
     }
 
     #[test]

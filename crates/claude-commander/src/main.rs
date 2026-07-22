@@ -488,8 +488,10 @@ async fn main() -> Result<()> {
             // A `claude-commander new` that descends from the headless Slack
             // commander (marked by an inherited env var the agent can neither
             // forge nor strip — see `commander::headless::PROGRAM_LOCK_ENV`) may
-            // only launch a program the server has configured. This rejects an
-            // injected `--program "bash -lc '<payload>'"` before any session is
+            // only launch a program the server has configured AND may not disable
+            // the interactive permission prompt via `--mode`. This rejects an
+            // injected `--program "bash -lc '<payload>'"` or a
+            // `--mode bypassPermissions`/`acceptEdits` before any session is
             // created, closing the RCE path. Read the marker once here at the CLI
             // boundary (env is process-global; keeping it out of the library fn
             // keeps that fn pure and testable) and enforce via the library.
@@ -498,7 +500,8 @@ async fn main() -> Result<()> {
                     .as_deref()
                     == Ok("1");
             if program_locked
-                && let Err(e) = config.ensure_slack_program_allowed(program.as_deref())
+                && let Err(e) =
+                    config.ensure_slack_create_allowed(program.as_deref(), mode.as_deref())
             {
                 eprintln!("{e}");
                 std::process::exit(1);

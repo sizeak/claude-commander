@@ -191,18 +191,29 @@ server machine — so it's locked down by design:
   `claude-commander` CLI plus read-only Read/Grep/Glob) — no arbitrary shell, no
   `Write`/`Edit` — and each invocation is capped by `invocation_timeout_secs`. It
   **can** create sessions (`claude-commander new`), and a created session runs a
-  program in its own tmux pane. Because that program is otherwise caller-chosen
-  (`--program`) and would run *outside* the read-only deny fence, Slack-originated
-  creates are restricted to the server's **configured programs**: a `new` that
-  descends from the headless commander (detected by an inherited environment
-  marker the agent cannot forge or strip) may only launch an entry from the
-  `programs` list or the configured default. An injected
-  `--program "bash -lc '…'"` payload is rejected before the session is created,
-  so it cannot achieve code execution. This does not make the agent
-  untrusted-input-proof in general: allowlisted **users** are trusted, thread
-  **history** is treated as untrusted and fenced (see above), and the CLI's own
-  guarded surface is the boundary — do not widen `ALLOWED_TOOLS` or the configured
-  programs to anything that shells out freely.
+  program in its own tmux pane. A `new` that descends from the headless commander
+  (detected by an inherited environment marker the agent cannot forge or strip)
+  is therefore restricted on **two** flags that could otherwise turn a created
+  session into unattended code execution:
+
+  - **Program** (`--program`): the launched binary would run *outside* the
+    read-only deny fence, so it may only be an entry from the server's `programs`
+    list or the configured default. An injected `--program "bash -lc '…'"` is
+    rejected before the session is created.
+  - **Permission mode** (`--mode`): even with an allowed program such as `claude`,
+    a mode that disables the interactive permission prompt (`bypassPermissions`,
+    `acceptEdits`) would let the freshly-created, unattended worker execute an
+    attacker-supplied `-i` prompt with no gate. Those modes are rejected; the
+    safe modes (no `--mode`, `default`, `plan`) are allowed. Benign flags
+    (`--effort`, `--model`, `-i`) are **not** restricted, because a default-mode
+    worker still prompts before acting, so they cannot on their own achieve
+    unattended execution.
+
+  Together these mean an injected `new` cannot achieve unattended code execution.
+  This does not make the agent untrusted-input-proof in general: allowlisted
+  **users** are trusted, thread **history** is treated as untrusted and fenced
+  (see above), and the CLI's own guarded surface is the boundary — do not widen
+  `ALLOWED_TOOLS` or the configured programs to anything that shells out freely.
 - **Read fencing.** Read access is broad by necessity (the agent inspects
   worktrees, which live outside its working directory), so a `permissions.deny`
   rule set blocks reads of sensitive locations regardless: `~/.ssh`, `~/.aws`,

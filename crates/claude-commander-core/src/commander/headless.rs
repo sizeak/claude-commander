@@ -80,9 +80,10 @@ const TIMEOUT_NUDGE: &str = "Your previous attempt timed out — be brief and di
 /// [`RealChild::spawn`]). It is inherited by that `claude` process and, in turn,
 /// by any `claude-commander` the agent launches through its
 /// `Bash(claude-commander:*)` allowance — so a `claude-commander new` invocation
-/// can tell it descends from the headless Slack commander and must restrict
-/// `--program` to the server's configured set
-/// ([`Config::ensure_slack_program_allowed`](crate::config::Config::ensure_slack_program_allowed),
+/// can tell it descends from the headless Slack commander and must restrict both
+/// `--program` (to the server's configured set) and `--mode` (no permission-
+/// bypassing mode)
+/// ([`Config::ensure_slack_create_allowed`](crate::config::Config::ensure_slack_create_allowed),
 /// enforced at the CLI boundary in `main.rs`).
 ///
 /// The agent cannot forge or strip it: its Bash allowance matches
