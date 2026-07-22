@@ -11,6 +11,7 @@ pub mod config;
 pub mod error;
 pub mod handlers;
 pub mod router;
+pub mod slack;
 pub mod state;
 pub mod ws;
 

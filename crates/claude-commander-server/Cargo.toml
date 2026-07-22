@@ -59,6 +59,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # CLI (derive macros)
 clap = { version = "4.6", features = ["derive"] }
 
+# Slack Socket Mode bridge (config-gated background task). The `hyper` feature
+# pulls in the rustls-based HTTPS connector + the tokio-tungstenite WebSocket
+# transport Socket Mode needs; no default features.
+slack-morphism = { version = "2.23", features = ["hyper"] }
+async-trait = "0.1"
+
 [features]
 default = []
 tls = ["dep:axum-server"]
@@ -68,9 +74,6 @@ tls = ["dep:axum-server"]
 # dev-dependency cycle (test-support depends on this crate); Cargo allows it
 # because it only closes through this crate's test targets, not its library.
 claude-commander-test-support = { path = "../claude-commander-test-support" }
-# The commander-route test implements the core `CommanderSpawn` trait (an
-# `#[async_trait]` trait) with a scripted fake, so it needs the macro.
-async-trait = "0.1"
 tempfile = "3.27"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

@@ -138,13 +138,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = claude_commander_core::Config::load()?;
     let commander_enabled = config.commander_enabled;
     // The headless commander (and its warm pool) is gated by `[slack]` config,
-    // independent of the interactive `commander_enabled` gate. Phase 3 adds the
-    // Socket Mode bridge; for now the warm pool primes ahead of the streaming
-    // `/api/commander/ask` route when Slack is configured.
+    // independent of the interactive `commander_enabled` gate. The warm pool
+    // primes processes ahead of the streaming `/api/commander/ask` route, and
+    // the Socket Mode bridge turns `@commander` mentions/DMs into headless turns.
     let slack_enabled = config.slack.is_enabled();
     let service = CommanderService::for_cli(config, frontend())?;
     if slack_enabled {
         service.start_commander_warm_pool();
+        let slack_config = service.read_config();
+        claude_commander_server::slack::spawn_bridge(service.clone(), &slack_config);
     }
     // Drive the same background loops the local TUI runs (agent-state polling,
     // PR-status checks, project auto-pull, state-sync) so remote clients see live
