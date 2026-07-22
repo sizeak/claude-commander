@@ -1322,6 +1322,14 @@ impl CommanderService {
             path.display()
         );
         self.manager.tmux.send_keys(&tmux_name, &prompt).await?;
+        // Some harnesses (Codex) fold an Enter that arrives in the same terminal
+        // read as the preceding text into the paste instead of submitting it,
+        // leaving the prompt unsent in the composer; wait for the harness to
+        // drain the text so the Enter lands as its own keystroke. See
+        // AgentKind::submit_key_delay.
+        if let Some(delay) = kind.submit_key_delay() {
+            tokio::time::sleep(delay).await;
+        }
         self.manager.tmux.send_keys(&tmux_name, "Enter").await?;
 
         // Delivering a prompt flips an idle agent back to working without
