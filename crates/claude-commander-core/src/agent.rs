@@ -11,6 +11,7 @@
 //! its methods — the compiler then flags every behaviour left unimplemented.
 
 use std::sync::LazyLock;
+use std::time::Duration;
 
 use regex::Regex;
 
@@ -129,6 +130,25 @@ impl AgentKind {
     /// unconstrained.
     pub fn supports_model_flag(self) -> bool {
         matches!(self, Self::Claude | Self::Codex | Self::OpenCode)
+    }
+
+    /// Delay to wait between injecting prompt *text* into the pane and sending
+    /// the submit `Enter`, or `None` to send the two back-to-back.
+    ///
+    /// Codex folds a carriage-return that arrives in the same terminal read as
+    /// the preceding text into the pasted text (as a literal newline) rather
+    /// than treating it as a submit keystroke, so a back-to-back text+Enter
+    /// leaves the prompt sitting unsent in the composer until a *separate* Enter
+    /// arrives. Spacing the Enter out lets Codex drain the text first, so the
+    /// Enter lands as its own read and submits. Claude Code submits on the
+    /// carriage-return regardless of timing, so it needs no delay. (Verified
+    /// against codex-cli 0.144.3: a coalesced text+Enter write never submitted
+    /// across 5/5 trials; a ~200ms gap submitted 15/15.)
+    pub fn submit_key_delay(self) -> Option<Duration> {
+        match self {
+            Self::Codex => Some(Duration::from_millis(250)),
+            _ => None,
+        }
     }
 
     /// Build the command that resumes this harness's previous session,
@@ -339,6 +359,21 @@ mod tests {
         assert!(AgentKind::Codex.supports_model_flag());
         assert!(AgentKind::OpenCode.supports_model_flag());
         assert!(!AgentKind::Unknown.supports_model_flag());
+    }
+
+    #[test]
+    fn submit_key_delay_only_for_codex() {
+        // Codex needs the submit Enter spaced out from the injected prompt text
+        // or it folds the newline into the paste and never submits; the other
+        // harnesses submit on the carriage-return regardless. Removing the delay
+        // reintroduces the "comments sit unsent in the composer" bug.
+        assert_eq!(
+            AgentKind::Codex.submit_key_delay(),
+            Some(Duration::from_millis(250))
+        );
+        assert_eq!(AgentKind::Claude.submit_key_delay(), None);
+        assert_eq!(AgentKind::OpenCode.submit_key_delay(), None);
+        assert_eq!(AgentKind::Unknown.submit_key_delay(), None);
     }
 
     // --- resume_command ---
