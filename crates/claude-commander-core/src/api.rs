@@ -25,8 +25,8 @@ use crate::git::{
 use crate::reviewed::ReviewedStore;
 use crate::session::{
     AgentState, CascadeOutcome, ProjectId, ScanResult, SessionId, SessionManager, SessionStatus,
-    WorktreeSession, apply_assignment, clear_override_and_reassign, decide_branch_reconcile,
-    program_with_agent_flags,
+    SlackOrigin, WorktreeSession, apply_assignment, clear_override_and_reassign,
+    decide_branch_reconcile, program_with_agent_flags,
 };
 use crate::telemetry::{ConfigSnapshot, EnvFingerprint, FrontendInfo, Telemetry};
 use crate::tmux::{AgentStateDetector, StatusBarInfo, TmuxExecutor};
@@ -330,6 +330,26 @@ impl CommanderService {
         })
     }
 
+    /// Resolve where a Slack `notify` for `query` should go, recording the
+    /// `slack_notify` feature. Returns `None` when no session matches (a 404 at
+    /// the route); otherwise the session's [`SlackOrigin`] (present → post into
+    /// that thread; absent → the caller falls back to a DM) plus a short label
+    /// identifying the session for the DM-fallback prefix.
+    ///
+    /// The actual Slack post lives in the server crate (it owns the only Slack
+    /// client); this method is the domain half — session resolution + the
+    /// telemetry record — so every frontend routes through it.
+    pub async fn slack_notify_target(&self, query: &str) -> Result<Option<SlackNotifyTarget>> {
+        self.telemetry.feature("slack_notify");
+        let state = self.store.read().await;
+        Ok(
+            crate::cli::find_session(&state, query).map(|session| SlackNotifyTarget {
+                origin: session.slack_origin.clone(),
+                label: slack_session_label(session),
+            }),
+        )
+    }
+
     pub async fn get_session_detail(
         &self,
         query: &str,
@@ -625,6 +645,20 @@ impl CommanderService {
                 .mutate(move |state| {
                     if let Some(session) = state.sessions.get_mut(&session_id) {
                         session.stack_parent_session_id = Some(parent);
+                    }
+                })
+                .await?;
+        }
+
+        // Slack origin (set when the commander agent creates a session from a
+        // Slack request via `new --slack-*`): stamp it on the record so the
+        // notify path can route a worker's message back to the originating
+        // thread.
+        if let Some(origin) = opts.slack_origin {
+            self.store
+                .mutate(move |state| {
+                    if let Some(session) = state.sessions.get_mut(&session_id) {
+                        session.slack_origin = Some(origin);
                     }
                 })
                 .await?;
@@ -2597,9 +2631,21 @@ pub use claude_commander_protocol::api::{
     AgentStatesSnapshot, BranchInfo, ChangeProgram, CreateOptions, CreateSessionOpts, DiffSide,
     DiffStat, NewComment, OperationKind, OperationOutcome, OperationStatus, PreviewData,
     ProgramInfo, ProjectInfo, PullBlockReason, PullStatus, RenameSession, ReviewSnapshot,
-    ServerStatus, SessionDetail, SessionInfo, SetProgramsRequest, SetSection, ToggleReviewed,
-    WorkspaceSnapshot,
+    ServerStatus, SessionDetail, SessionInfo, SetProgramsRequest, SetSection, SlackNotifyRequest,
+    ToggleReviewed, WorkspaceSnapshot,
 };
+
+/// Where a Slack `notify` should be delivered, resolved by
+/// [`CommanderService::slack_notify_target`]. The server crate (which owns the
+/// Slack client) consumes this: `origin` present → post into that thread;
+/// absent → DM the first allowlisted user, prefixed with `label`.
+#[derive(Debug, Clone)]
+pub struct SlackNotifyTarget {
+    /// The session's recorded Slack origin, if it was created from Slack.
+    pub origin: Option<SlackOrigin>,
+    /// Short session label for the DM-fallback prefix (e.g. `title (branch)`).
+    pub label: String,
+}
 
 /// Build a [`SessionInfo`] wire DTO from core's `WorktreeSession` domain model.
 /// (Was `SessionInfo::from_session`; relocated here because `SessionInfo` is now
@@ -2720,6 +2766,15 @@ fn find_session_info(state: &AppState, query: &str) -> Option<SessionInfo> {
     Some(session_info_from_session(session, project_name))
 }
 
+/// A short human label identifying a session for the Slack DM fallback prefix,
+/// so a worker's message names its source when there's no thread to reply in.
+fn slack_session_label(session: &WorktreeSession) -> String {
+    match crate::session::display_branch(&session.title, &session.branch) {
+        Some(branch) => format!("{} ({})", session.title, branch),
+        None => session.title.clone(),
+    }
+}
+
 async fn capture_pane(
     executor: &TmuxExecutor,
     tmux_name: &str,
@@ -2832,6 +2887,23 @@ mod tests {
     }
 
     #[test]
+    fn slack_session_label_includes_branch_when_distinct() {
+        // A session whose branch differs from its title labels as "title (branch)".
+        let session = make_session_for_project("fix-bug", ProjectId::new());
+        let label = slack_session_label(&session);
+        assert_eq!(label, "fix-bug (branch-fix-bug)");
+    }
+
+    #[test]
+    fn slack_session_label_is_title_only_when_branch_matches_title() {
+        // When the branch is just the sanitized title, `display_branch` returns
+        // None and the label is the bare title (no redundant parenthetical).
+        let mut session = make_session_for_project("fix-bug", ProjectId::new());
+        session.branch = "fix-bug".to_string();
+        assert_eq!(slack_session_label(&session), "fix-bug");
+    }
+
+    #[test]
     fn session_info_resolves_legacy_pr_merged() {
         let mut session = make_session_for_project("legacy", ProjectId::new());
         session.pr_number = Some(10);
@@ -2929,6 +3001,7 @@ mod tests {
             base_branch: None,
             section: None,
             stack_parent: None,
+            slack_origin: None,
         };
         let err = validate_program_flags(&opts, "bash").unwrap_err();
         assert!(err.to_string().contains("--effort"));
@@ -2947,6 +3020,7 @@ mod tests {
             base_branch: None,
             section: None,
             stack_parent: None,
+            slack_origin: None,
         };
         let err = validate_program_flags(&opts, "vim").unwrap_err();
         assert!(err.to_string().contains("--mode"));
@@ -2965,6 +3039,7 @@ mod tests {
             base_branch: None,
             section: None,
             stack_parent: None,
+            slack_origin: None,
         };
         validate_program_flags(&opts, "claude").unwrap();
     }
@@ -2982,6 +3057,7 @@ mod tests {
             base_branch: None,
             section: None,
             stack_parent: None,
+            slack_origin: None,
         };
         let err = validate_program_flags(&opts, "bash").unwrap_err();
         assert!(err.to_string().contains("--model"));
@@ -3000,6 +3076,7 @@ mod tests {
             base_branch: None,
             section: None,
             stack_parent: None,
+            slack_origin: None,
         };
         validate_program_flags(&opts, "codex").unwrap();
     }
@@ -3017,6 +3094,7 @@ mod tests {
             base_branch: None,
             section: None,
             stack_parent: None,
+            slack_origin: None,
         };
         validate_program_flags(&opts, "opencode").unwrap();
     }
@@ -3063,6 +3141,7 @@ mod tests {
             base_branch: None,
             section: None,
             stack_parent: None,
+            slack_origin: None,
         };
         validate_program_flags(&opts, "bash").unwrap();
     }

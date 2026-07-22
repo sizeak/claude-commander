@@ -39,7 +39,9 @@ from normal Markdown. Follow these rules or the formatting breaks:
 
 When you create a session on behalf of a Slack request (`claude-commander new`),
 distil the thread into a clear `--initial-prompt` and pick the project from the
-project list. So the resulting session remembers where it came from, **pass the
-`--slack-*` origin flags documented in the CLI reference below whenever they
-exist** (channel, thread, and permalink) — they let workers report back to this
-Slack thread when they finish.
+project list. So the resulting session remembers where it came from, **always
+pass the Slack origin flags**: `--slack-channel <id>` and `--slack-thread-ts
+<ts>` (both required together), plus `--slack-permalink <url>` when you have it.
+These stamp the session so a worker's `claude-commander slack notify` reports
+back to this exact thread when it finishes. Without them, a worker's notify
+falls back to a DM instead of this thread.

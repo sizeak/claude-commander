@@ -146,6 +146,23 @@ pub enum Commands {
         /// new one (the path is resolved on the server, not this machine).
         #[arg(long)]
         remote: Option<String>,
+
+        /// Slack channel id to record as this session's origin. Set by the
+        /// commander agent when creating a session from a Slack request so a
+        /// worker's `slack notify` can report back to the thread. Requires
+        /// `--slack-thread-ts`.
+        #[arg(long, requires = "slack_thread_ts")]
+        slack_channel: Option<String>,
+
+        /// Slack thread timestamp for the session's origin. Requires
+        /// `--slack-channel` (the two are all-or-none).
+        #[arg(long, requires = "slack_channel")]
+        slack_thread_ts: Option<String>,
+
+        /// Permalink to the originating Slack message, embedded in the session
+        /// origin. Requires `--slack-channel` (and thus `--slack-thread-ts`).
+        #[arg(long, requires = "slack_channel")]
+        slack_permalink: Option<String>,
     },
 
     /// Attach to an existing session
@@ -162,6 +179,12 @@ pub enum Commands {
     /// Open the persistent commander session — a project-less Claude session
     /// that coordinates other sessions via this CLI. Creates it on first use.
     Commander,
+
+    /// Slack integration commands.
+    Slack {
+        #[command(subcommand)]
+        command: SlackCommands,
+    },
 
     /// Show configuration
     Config {
@@ -200,6 +223,27 @@ pub enum Commands {
     },
 }
 
+/// `claude-commander slack …` subcommands.
+#[derive(Subcommand)]
+pub enum SlackCommands {
+    /// Relay a message to Slack about a session. A session created from Slack
+    /// posts back into its originating thread; any other session is DM'd to the
+    /// first allowlisted user. Worker sessions run this to report progress.
+    ///
+    /// Requires a running `claude-commander-server` (the server owns the Slack
+    /// client and is discovered via its runtime info file).
+    Notify {
+        /// Session to notify about (name or id prefix). Defaults to the session
+        /// whose worktree contains the current directory.
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Message text. If omitted, the message is read from stdin to EOF.
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+}
+
 /// The clap command tree for the CLI. Single source of truth shared by the
 /// binary's argument parsing and any library code that needs to introspect
 /// the available subcommands (e.g. commander CLAUDE.md generation).
@@ -225,10 +269,46 @@ mod tests {
             "commander",
             "listen-toggle",
             "keep-alive",
+            "slack",
         ] {
             assert!(
                 names.contains(&expected),
                 "cli_command() missing subcommand `{expected}`; got {names:?}"
+            );
+        }
+    }
+
+    /// The `slack` group exposes `notify`, and the generated commander CLI
+    /// reference (built from this tree) must surface it so the agent knows the
+    /// command exists.
+    #[test]
+    fn slack_group_exposes_notify() {
+        let cmd = cli_command();
+        let slack = cmd
+            .get_subcommands()
+            .find(|s| s.get_name() == "slack")
+            .expect("slack subcommand present");
+        let subs: Vec<&str> = slack.get_subcommands().map(|s| s.get_name()).collect();
+        assert!(
+            subs.contains(&"notify"),
+            "slack group missing notify: {subs:?}"
+        );
+    }
+
+    /// The `new` command carries the Slack-origin flags the commander agent uses
+    /// when creating a session from Slack.
+    #[test]
+    fn new_command_exposes_slack_origin_flags() {
+        let cmd = cli_command();
+        let new = cmd
+            .get_subcommands()
+            .find(|s| s.get_name() == "new")
+            .expect("new subcommand present");
+        let args: Vec<&str> = new.get_arguments().filter_map(|a| a.get_long()).collect();
+        for expected in ["slack-channel", "slack-thread-ts", "slack-permalink"] {
+            assert!(
+                args.contains(&expected),
+                "new missing --{expected}; got {args:?}"
             );
         }
     }

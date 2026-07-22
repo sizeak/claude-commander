@@ -1059,6 +1059,7 @@ impl App {
                 base_branch: Some(branch_name),
                 section: None,
                 stack_parent: None,
+                slack_origin: None,
             },
         );
     }
@@ -2030,6 +2031,7 @@ impl App {
                         base_branch: None,
                         section,
                         stack_parent: None,
+                        slack_origin: None,
                     },
                 );
             }
@@ -2072,6 +2074,7 @@ impl App {
                         base_branch: None,
                         section: None,
                         stack_parent: Some(parent_session_id),
+                        slack_origin: None,
                     },
                 );
             }

@@ -45,6 +45,11 @@ pub trait SlackApi: Send + Sync {
     ) -> SlackResult<Vec<ThreadMessage>>;
     /// A permalink to a message, for provenance in the prompt.
     async fn get_permalink(&self, channel: &str, ts: &str) -> SlackResult<String>;
+    /// Open (or fetch) the DM channel with a user, returning its channel id.
+    /// Used by the notify path when a session has no originating thread.
+    async fn open_dm(&self, user_id: &str) -> SlackResult<String>;
+    /// Post a top-level message to a channel (no thread). Used for DM notifies.
+    async fn post_channel_message(&self, channel: &str, text: &str) -> SlackResult<()>;
 }
 
 /// The headless-commander seam: ask a prompt in a conversation, get the final
@@ -198,6 +203,12 @@ mod tests {
             } else {
                 Ok("https://slack/permalink".into())
             }
+        }
+        async fn open_dm(&self, user_id: &str) -> SlackResult<String> {
+            Ok(format!("D-{user_id}"))
+        }
+        async fn post_channel_message(&self, _channel: &str, _text: &str) -> SlackResult<()> {
+            Ok(())
         }
     }
 

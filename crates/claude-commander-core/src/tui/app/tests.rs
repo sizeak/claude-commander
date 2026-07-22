@@ -5514,6 +5514,7 @@ async fn remote_session_created_selects_row_and_reconciles_owning_backend() {
             base_branch: None,
             section: None,
             stack_parent: None,
+            slack_origin: None,
         })
         .await
         .unwrap();

@@ -174,6 +174,13 @@ pub struct CreateSessionOpts {
     /// "new stacked session" flow. Additive; older clients omit it.
     #[serde(default)]
     pub stack_parent: Option<SessionId>,
+    /// Slack origin to stamp on the created session, set when the commander
+    /// agent creates a session on behalf of a Slack request (via the
+    /// `claude-commander new --slack-*` flags). Persisted on the session so the
+    /// notify path can route a worker's message back to the originating thread.
+    /// Additive; older clients omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slack_origin: Option<SlackOrigin>,
 }
 
 /// A project (git repository) as returned by the workspace/list endpoints.
@@ -420,6 +427,19 @@ pub struct CommanderAskRequest {
     pub conversation_key: String,
 }
 
+/// Request body for `POST /api/slack/notify`: which session the message is
+/// about (a free-form query — full/prefix session id or title, resolved by the
+/// server the same way the CLI/HTTP `find` does) and the message text a worker
+/// wants relayed to Slack.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SlackNotifyRequest {
+    /// Free-form session query. The CLI resolves this (from `--session` or the
+    /// current worktree) before posting, so it is always populated on the wire.
+    pub session: String,
+    /// The message text to relay to Slack.
+    pub message: String,
+}
+
 /// One event in the NDJSON stream returned by `POST /api/commander/ask` (one
 /// JSON object per line). Mirrors the core stream-json events the commander
 /// emits, minus the internal process-lifecycle events.
@@ -468,10 +488,58 @@ mod tests {
             base_branch: None,
             section: None,
             stack_parent: Some(parent),
+            slack_origin: None,
         };
         let json = serde_json::to_string(&opts).unwrap();
         let back: CreateSessionOpts = serde_json::from_str(&json).unwrap();
         assert_eq!(back.stack_parent, Some(parent));
+    }
+
+    #[test]
+    fn create_session_opts_slack_origin_round_trips_and_elides_when_absent() {
+        // Absent by default for an old body, and elided from the wire when None.
+        let minimal: CreateSessionOpts =
+            serde_json::from_str(r#"{"project_path":"/repo","title":"x"}"#).unwrap();
+        assert!(minimal.slack_origin.is_none());
+        assert!(
+            !serde_json::to_string(&minimal)
+                .unwrap()
+                .contains("slack_origin"),
+            "slack_origin must be elided when None"
+        );
+
+        let opts = CreateSessionOpts {
+            project_path: PathBuf::from("/repo"),
+            title: "from-slack".to_string(),
+            program: None,
+            initial_prompt: None,
+            effort: None,
+            mode: None,
+            model: None,
+            base_branch: None,
+            section: None,
+            stack_parent: None,
+            slack_origin: Some(SlackOrigin {
+                channel: "C1".to_string(),
+                thread_ts: "100.1".to_string(),
+                permalink: "https://slack/x".to_string(),
+            }),
+        };
+        let back: CreateSessionOpts =
+            serde_json::from_str(&serde_json::to_string(&opts).unwrap()).unwrap();
+        assert_eq!(back.slack_origin.unwrap().channel, "C1");
+    }
+
+    #[test]
+    fn slack_notify_request_round_trips() {
+        let req = SlackNotifyRequest {
+            session: "fix-auth".to_string(),
+            message: "PR is up".to_string(),
+        };
+        let back: SlackNotifyRequest =
+            serde_json::from_str(&serde_json::to_string(&req).unwrap()).unwrap();
+        assert_eq!(back.session, "fix-auth");
+        assert_eq!(back.message, "PR is up");
     }
 
     #[test]

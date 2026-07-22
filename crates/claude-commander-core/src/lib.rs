@@ -37,6 +37,7 @@ pub mod picker;
 pub mod reviewed;
 pub mod server_info;
 pub mod session;
+pub mod slack_notify;
 pub mod stream_json;
 pub mod telemetry;
 pub mod tmux;

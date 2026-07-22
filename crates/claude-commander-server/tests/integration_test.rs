@@ -127,6 +127,65 @@ async fn http_session_lifecycle_round_trip() {
     drop(worktrees_dir);
 }
 
+/// Creating a session with a `slack_origin` (as the commander agent does via
+/// `new --slack-*`) must persist that origin on the session record, so the
+/// notify path can later route a worker's message back to the thread. Runs
+/// through real tmux + git.
+#[tokio::test]
+async fn create_session_persists_slack_origin() {
+    if !tmux_available().await {
+        eprintln!("Skipping test: tmux not available");
+        return;
+    }
+
+    let (repo_temp_dir, repo_path) = create_test_repo().await;
+    let data_dir = TempDir::new().unwrap();
+    let worktrees_dir = TempDir::new().unwrap();
+    let state = test_state(&data_dir, &worktrees_dir);
+    let service = state.service.clone();
+
+    service.add_project(repo_path.clone()).await.unwrap();
+    let session_id = service
+        .create_session(claude_commander_core::api::CreateSessionOpts {
+            project_path: repo_path.clone(),
+            title: "from-slack".to_string(),
+            program: Some("bash".to_string()),
+            initial_prompt: None,
+            effort: None,
+            mode: None,
+            model: None,
+            base_branch: None,
+            section: None,
+            stack_parent: None,
+            slack_origin: Some(claude_commander_core::session::SlackOrigin {
+                channel: "C0AR48X88L9".to_string(),
+                thread_ts: "1717000000.001".to_string(),
+                permalink: "https://slack.example/archives/C0AR48X88L9/p1".to_string(),
+            }),
+        })
+        .await
+        .unwrap();
+
+    // Read the origin back off the persisted session record.
+    let sessions = service.list_sessions(true).await.unwrap();
+    let info = sessions
+        .iter()
+        .find(|s| s.session_id == session_id)
+        .expect("created session should be listed");
+    let origin = info
+        .slack_origin
+        .as_ref()
+        .expect("slack_origin must persist through the create path");
+    assert_eq!(origin.channel, "C0AR48X88L9");
+    assert_eq!(origin.thread_ts, "1717000000.001");
+
+    service.kill_session(&session_id).await.unwrap();
+
+    drop(repo_temp_dir);
+    drop(data_dir);
+    drop(worktrees_dir);
+}
+
 /// WebSocket attach: handshake (`auth` → `attach` → `resize`), assert `ready`,
 /// send a keystroke as a BINARY frame, assert PTY output arrives as binary
 /// frames, then `detach` and assert the tmux session **still exists** (detach ≠
@@ -160,6 +219,7 @@ async fn ws_attach_streams_and_detach_keeps_session_alive() {
             base_branch: None,
             section: None,
             stack_parent: None,
+            slack_origin: None,
         })
         .await
         .unwrap();
@@ -284,6 +344,7 @@ async fn ws_agent_attach_revives_dead_tmux_session() {
             base_branch: None,
             section: None,
             stack_parent: None,
+            slack_origin: None,
         })
         .await
         .unwrap();
@@ -384,6 +445,7 @@ async fn ws_attach_stamps_last_attached_at() {
             base_branch: None,
             section: None,
             stack_parent: None,
+            slack_origin: None,
         })
         .await
         .unwrap();

@@ -15,7 +15,7 @@ use std::time::Duration;
 use claude_commander_protocol::api::{
     AgentStatesSnapshot, BranchInfo, CreateOptions, CreateSessionOpts, DiffSide, NewComment,
     OperationStatus, PreviewData, ProgramInfo, ReviewSnapshot, SessionDetail, SetProgramsRequest,
-    ToggleReviewed, WorkspaceSnapshot,
+    SlackNotifyRequest, ToggleReviewed, WorkspaceSnapshot,
 };
 use claude_commander_protocol::comment::{ApplyOutcome, Comment};
 use claude_commander_protocol::session::{ProjectId, SessionId};
@@ -640,6 +640,14 @@ impl RemoteClient {
             .append_pair("side", diff_side_param(side))
             .append_pair("path", &path);
         self.get_bytes(url).await
+    }
+
+    /// Relay a worker's message to Slack via the server (`POST /api/slack/notify`).
+    /// The server owns the Slack client and resolves the session's thread/DM;
+    /// this is the one-shot call the CLI `slack notify` path makes.
+    pub async fn slack_notify(&self, req: &SlackNotifyRequest) -> ClientResult<()> {
+        self.post_json_ok(self.endpoint(&["slack", "notify"]), req)
+            .await
     }
 
     // -- Attach --

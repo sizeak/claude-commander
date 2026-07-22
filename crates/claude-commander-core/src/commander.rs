@@ -300,7 +300,10 @@ mod tests {
             slack.contains("mrkdwn"),
             "slack appendix must instruct the agent to emit mrkdwn"
         );
-        assert!(slack.contains("--slack-*"));
+        assert!(
+            slack.contains("--slack-channel") && slack.contains("--slack-thread-ts"),
+            "slack appendix must name the concrete origin flags"
+        );
         assert!(
             !interactive.contains("## Slack mode"),
             "the interactive commander must not receive the Slack appendix"

@@ -16,7 +16,7 @@ use tracing::warn;
 
 use crate::auth::require_bearer;
 use crate::handlers::{
-    blobs, cascade, commander, config, health, paste, projects, review, sessions, workspace,
+    blobs, cascade, commander, config, health, paste, projects, review, sessions, slack, workspace,
 };
 use crate::state::AppState;
 use crate::ws;
@@ -122,6 +122,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/projects/{id}/preview", get(projects::preview))
         // -- headless commander (Slack bridge + streaming ask) --
         .route("/commander/ask", post(commander::ask))
+        // -- Slack notify (worker → Slack thread/DM relay) --
+        .route("/slack/notify", post(slack::notify))
         // -- config + health --
         .route("/config", get(config::read).patch(config::update))
         .route("/config/programs", put(config::put_programs))

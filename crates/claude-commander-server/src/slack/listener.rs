@@ -34,36 +34,51 @@ struct BridgeState {
     bot_user_id: Option<String>,
 }
 
-/// Start the Slack bridge as a background task iff `[slack]` is configured.
-/// A no-op otherwise. The task runs for the process lifetime, reconnecting
-/// internally; if it exits (fatal connect error) the failure is logged.
-pub fn spawn_bridge(service: CommanderService, config: &Config) {
+/// Start the Slack bridge as a background task iff `[slack]` is configured, and
+/// return the shared Slack Web API client so the notify route can post through
+/// the *same* client the bridge uses. Returns `None` (and starts nothing) when
+/// Slack is disabled or the HTTP connector can't be built. The background task
+/// runs for the process lifetime, reconnecting internally; if it exits (fatal
+/// connect error) the failure is logged, but the returned client stays usable
+/// for the notify path (posting is independent of the Socket Mode connection).
+pub fn spawn_bridge(service: CommanderService, config: &Config) -> Option<Arc<dyn SlackApi>> {
     if !config.slack.is_enabled() {
-        return;
+        return None;
     }
     // `is_enabled()` guarantees both tokens are present and non-empty.
     let app_token = config.slack.app_token.clone().unwrap_or_default();
     let bot_token = config.slack.bot_token.clone().unwrap_or_default();
     let allowed = config.slack.allowed_user_ids.clone();
 
+    let connector = match SlackClientHyperConnector::new() {
+        Ok(c) => c,
+        Err(e) => {
+            error!(target: "slack", "could not build Slack HTTP connector: {e}");
+            return None;
+        }
+    };
+    let client = Arc::new(SlackClient::new(connector));
+    let web = Arc::new(SlackWebClient::new(client.clone(), bot_token));
+    let api: Arc<dyn SlackApi> = web.clone();
+    let asker: Arc<dyn Asker> = Arc::new(CommanderAsker::new(service));
+
     tokio::spawn(async move {
-        if let Err(e) = run_bridge(service, app_token, bot_token, allowed).await {
+        if let Err(e) = run_bridge(client, web, asker, app_token, allowed).await {
             error!(target: "slack", "Slack bridge stopped: {e}");
         }
     });
+
+    Some(api)
 }
 
 async fn run_bridge(
-    service: CommanderService,
+    client: Arc<SlackHyperClient>,
+    web: Arc<SlackWebClient>,
+    asker: Arc<dyn Asker>,
     app_token: String,
-    bot_token: String,
     allowed_user_ids: Vec<String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let client = Arc::new(SlackClient::new(SlackClientHyperConnector::new()?));
-
-    let web = Arc::new(SlackWebClient::new(client.clone(), bot_token));
     let bot_user_id = web.auth_user_id().await;
-    let asker = Arc::new(CommanderAsker::new(service));
 
     let state = Arc::new(BridgeState {
         api: web,

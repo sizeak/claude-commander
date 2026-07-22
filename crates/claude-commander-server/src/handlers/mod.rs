@@ -11,6 +11,7 @@ pub mod paste;
 pub mod projects;
 pub mod review;
 pub mod sessions;
+pub mod slack;
 pub mod workspace;
 
 #[cfg(test)]

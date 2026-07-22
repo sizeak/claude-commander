@@ -143,11 +143,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the Socket Mode bridge turns `@commander` mentions/DMs into headless turns.
     let slack_enabled = config.slack.is_enabled();
     let service = CommanderService::for_cli(config, frontend())?;
-    if slack_enabled {
+    // The Slack bridge and the notify route share one Web API client (the server
+    // owns the only Slack credentials); `spawn_bridge` returns it so the route
+    // can post through it. `None` when Slack is disabled → notify replies 503.
+    let slack_api = if slack_enabled {
         service.start_commander_warm_pool();
         let slack_config = service.read_config();
-        claude_commander_server::slack::spawn_bridge(service.clone(), &slack_config);
-    }
+        claude_commander_server::slack::spawn_bridge(service.clone(), &slack_config)
+    } else {
+        None
+    };
     // Drive the same background loops the local TUI runs (agent-state polling,
     // PR-status checks, project auto-pull, state-sync) so remote clients see live
     // data via `/workspace` + `/agent-states` polls. Handles run for the process
@@ -158,7 +163,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // as the TUI does. Without this a server-only deployment — the many-idle-
     // sessions case hibernation targets — would never hibernate.
     service.start_hibernation_loop();
-    let state = AppState::new(service, auth).with_cors(cfg.cors_allowed_origins.clone());
+    let state = AppState::new(service, auth)
+        .with_cors(cfg.cors_allowed_origins.clone())
+        .with_slack(slack_api);
     let app = build_router(state);
 
     let addr = SocketAddr::new(cfg.bind, cfg.port);

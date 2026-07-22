@@ -116,6 +116,24 @@ impl SlackApi for SlackWebClient {
         let resp = session.chat_get_permalink(&req).await.map_err(to_err)?;
         Ok(resp.permalink.to_string())
     }
+
+    async fn open_dm(&self, user_id: &str) -> SlackResult<String> {
+        let session = self.client.open_session(&self.token);
+        let req = SlackApiConversationsOpenRequest::new()
+            .with_users(vec![SlackUserId::new(user_id.to_string())]);
+        let resp = session.conversations_open(&req).await.map_err(to_err)?;
+        Ok(resp.channel.id.to_string())
+    }
+
+    async fn post_channel_message(&self, channel: &str, text: &str) -> SlackResult<()> {
+        let session = self.client.open_session(&self.token);
+        let req = SlackApiChatPostMessageRequest::new(
+            SlackChannelId::new(channel.to_string()),
+            SlackMessageContent::new().with_text(text.to_string()),
+        );
+        session.chat_post_message(&req).await.map_err(to_err)?;
+        Ok(())
+    }
 }
 
 /// The real headless-commander seam: stream one ask to completion and fold the
