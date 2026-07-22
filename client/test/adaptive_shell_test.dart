@@ -66,6 +66,32 @@ void main() {
     },
   );
 
+  testWidgets(
+    'the wide detail pane shows the terminal-snapshot preview and captures '
+    'pane lines for it',
+    (tester) async {
+      useSize(tester, const Size(1400, 900));
+      api.listSessionsResponse = [sessionInfo(title: 'Alpha')];
+      api.getSessionDetailResponse = sessionDetail(
+        info: sessionInfo(title: 'Alpha'),
+        paneContent: 'live pane text',
+      );
+      unawaited(store.connect());
+      await tester.pumpWidget(wrap());
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('Alpha'));
+      await tester.pumpAndSettle();
+
+      // The wide layout keeps the snapshot card...
+      expect(find.text('Terminal snapshot'), findsOneWidget);
+      expect(find.text('live pane text'), findsOneWidget);
+      // ...and therefore asks the server to capture pane lines (200 = the
+      // preview's capture depth; symmetric with the phone test's null).
+      expect(api.lastCall('getSessionDetail')!.args['lines'], 200);
+    },
+  );
+
   testWidgets('narrow layout uses the stacked push flow', (tester) async {
     useSize(tester, const Size(500, 900));
     api.listSessionsResponse = [sessionInfo(title: 'Alpha')];

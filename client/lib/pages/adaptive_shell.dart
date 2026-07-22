@@ -262,6 +262,9 @@ class _DetailPaneState extends State<_DetailPane> {
           onOpenReview: () => _go(_DetailTab.review),
           onDeleted: widget.onDismiss,
           onDismiss: widget.onDismiss,
+          // The wide landscape layout has room for the terminal snapshot
+          // alongside everything else, so keep it.
+          showPanePreview: true,
         );
       case _DetailTab.terminal:
         if (handle == null) return const _Reconnecting();

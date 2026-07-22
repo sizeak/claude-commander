@@ -36,6 +36,12 @@ class SessionDetailBody extends StatefulWidget {
   /// Called from the gone-state's dismiss button (narrow: pop; wide: clear).
   final VoidCallback onDismiss;
 
+  /// Whether to render the on-demand terminal-snapshot preview card. Phones
+  /// hide it (the live terminal is one tap away and far more useful in a small
+  /// viewport); the wide landscape layout keeps it. When false, the detail
+  /// fetch also skips capturing pane lines, so the server does no tmux capture.
+  final bool showPanePreview;
+
   const SessionDetailBody({
     super.key,
     required this.session,
@@ -43,6 +49,7 @@ class SessionDetailBody extends StatefulWidget {
     required this.onOpenReview,
     required this.onDeleted,
     required this.onDismiss,
+    required this.showPanePreview,
   });
 
   @override
@@ -139,7 +146,12 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
     if (store == null || _busy || _fetching || _gone) return;
     _fetching = true;
     try {
-      final detail = await store.sessionDetail(_id, lines: 200);
+      // Only capture pane lines when the preview card will render them; a null
+      // `lines` tells the server to skip the tmux capture entirely.
+      final detail = await store.sessionDetail(
+        _id,
+        lines: widget.showPanePreview ? 200 : null,
+      );
       if (!mounted) return;
       if (detail == null) {
         setState(() {
@@ -440,8 +452,10 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
           const SizedBox(height: 12),
           if (_error != null) _errorBanner(context, _error!),
           _detailSection(context),
-          const SizedBox(height: 16),
-          _paneSection(context, info),
+          if (widget.showPanePreview) ...[
+            const SizedBox(height: 16),
+            _paneSection(context, info),
+          ],
           const SizedBox(height: 24),
           _actions(context, info),
         ],
@@ -728,6 +742,9 @@ class SessionDetailPage extends StatelessWidget {
         onOpenReview: () => _openReview(context, store),
         onDeleted: () => Navigator.of(context).pop(true),
         onDismiss: () => Navigator.of(context).maybePop(),
+        // Phone form factor: drop the static snapshot in favour of the live
+        // terminal, which is a single tap away.
+        showPanePreview: false,
       ),
     );
   }

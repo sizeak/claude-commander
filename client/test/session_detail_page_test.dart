@@ -39,13 +39,39 @@ void main() {
     api.getSessionDetailResponse = sessionDetail(
       info: sessionInfo(title: 'Detail me', status: SessionStatus.running),
       diffStat: '3 files changed',
-      paneContent: 'hello world',
     );
     await pump(tester, sessionInfo(title: 'Detail me'));
 
     expect(find.text('Detail me'), findsWidgets);
     expect(find.text('3 files changed'), findsOneWidget);
-    expect(find.text('hello world'), findsOneWidget);
+  });
+
+  testWidgets('the phone detail hides the terminal-snapshot preview', (
+    tester,
+  ) async {
+    // Even when the server would return pane content, the phone layout does
+    // not render the snapshot card — the live terminal is one tap away and far
+    // more useful in a small viewport.
+    api.getSessionDetailResponse = sessionDetail(
+      info: sessionInfo(title: 'Detail me', status: SessionStatus.running),
+      paneContent: 'hello world',
+    );
+    await pump(tester, sessionInfo(title: 'Detail me'));
+
+    expect(find.text('Terminal snapshot'), findsNothing);
+    expect(find.text('hello world'), findsNothing);
+  });
+
+  testWidgets('the phone detail fetch skips pane capture (lines null)', (
+    tester,
+  ) async {
+    // With no preview to render, the phone must not ask the server to capture
+    // pane lines — `lines: null` tells the server to skip the tmux capture.
+    final info = sessionInfo(status: SessionStatus.running);
+    api.getSessionDetailResponse = sessionDetail(info: info);
+    await pump(tester, info);
+
+    expect(api.lastCall('getSessionDetail')!.args['lines'], isNull);
   });
 
   testWidgets('a deleted session shows a gone state and stops fetching', (
