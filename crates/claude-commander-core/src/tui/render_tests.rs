@@ -789,7 +789,10 @@ fn test_modal_confirm() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            let modal_area = centered_rect(50, 15, area);
+            let text = "Delete session 'fix-login'?\n\n[Enter] Confirm  [Esc] Cancel";
+            // Mirror the app's real Confirm geometry so the snapshot tracks it.
+            let modal_area =
+                crate::tui::app::confirm_modal_area("Delete session 'fix-login'?", area);
             frame.render_widget(Clear, modal_area);
 
             let block = Block::default()
@@ -801,7 +804,6 @@ fn test_modal_confirm() {
             let inner = block.inner(modal_area);
             frame.render_widget(block, modal_area);
 
-            let text = "Delete session 'fix-login'?\n\n[Enter] Confirm  [Esc] Cancel";
             let paragraph = Paragraph::new(text).wrap(Wrap { trim: true });
             frame.render_widget(paragraph, inner);
         })
@@ -819,7 +821,10 @@ fn test_modal_confirm_restart() {
     terminal
         .draw(|frame| {
             let area = frame.area();
-            let modal_area = centered_rect(50, 15, area);
+            let message = "This will kill the current tmux session and start a fresh one.\nClaude will pick up where it left off via /resume.";
+            let text = "This will kill the current tmux session and start a fresh one.\nClaude will pick up where it left off via /resume.\n\n[Enter] Confirm  [Esc] Cancel";
+            // Mirror the app's real Confirm geometry so the snapshot tracks it.
+            let modal_area = crate::tui::app::confirm_modal_area(message, area);
             frame.render_widget(Clear, modal_area);
 
             let block = Block::default()
@@ -831,7 +836,6 @@ fn test_modal_confirm_restart() {
             let inner = block.inner(modal_area);
             frame.render_widget(block, modal_area);
 
-            let text = "This will kill the current tmux session and start a fresh one.\nClaude will pick up where it left off via /resume.\n\n[Enter] Confirm  [Esc] Cancel";
             let paragraph = Paragraph::new(text).wrap(Wrap { trim: true });
             frame.render_widget(paragraph, inner);
         })

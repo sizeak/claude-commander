@@ -1,8 +1,7 @@
 ---
-source: src/tui/render_tests.rs
+source: crates/claude-commander-core/src/tui/render_tests.rs
 expression: terminal.backend()
 ---
-"                                                                                                                        "
 "                                                                                                                        "
 "                                                                                                                        "
 "                                                                                                                        "
@@ -15,6 +14,7 @@ expression: terminal.backend()
 "                              ╭ Delete Session ──────────────────────────────────────────╮                              "
 "                              │Delete session 'fix-login'?                               │                              "
 "                              │                                                          │                              "
+"                              │[Enter] Confirm  [Esc] Cancel                             │                              "
 "                              ╰──────────────────────────────────────────────────────────╯                              "
 "                                                                                                                        "
 "                                                                                                                        "
