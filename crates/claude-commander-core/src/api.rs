@@ -340,14 +340,17 @@ impl CommanderService {
     /// client); this method is the domain half — session resolution + the
     /// telemetry record — so every frontend routes through it.
     pub async fn slack_notify_target(&self, query: &str) -> Result<Option<SlackNotifyTarget>> {
-        self.telemetry.feature("slack_notify");
         let state = self.store.read().await;
-        Ok(
-            crate::cli::find_session(&state, query).map(|session| SlackNotifyTarget {
-                origin: session.slack_origin.clone(),
-                label: slack_session_label(session),
-            }),
-        )
+        let Some(session) = crate::cli::find_session(&state, query) else {
+            return Ok(None);
+        };
+        // Record the feature only once a session actually matched — a 404 lookup
+        // is not a use of the notify feature and must not inflate the count.
+        self.telemetry.feature("slack_notify");
+        Ok(Some(SlackNotifyTarget {
+            origin: session.slack_origin.clone(),
+            label: slack_session_label(session),
+        }))
     }
 
     pub async fn get_session_detail(
@@ -2559,12 +2562,18 @@ fn build_headless(
     let sessions = Arc::new(headless::SlackSessionStore::load(
         data_dir.join("slack.json"),
     ));
+    // Fence the (broadly read-allowed) Slack agent off from credential/secret
+    // locations. The config dir holds the Slack tokens; the data dir holds the
+    // server bearer token and state.
+    let config_dir = config_store.config_path().parent().map(Path::to_path_buf);
+    let deny_read = headless::sensitive_read_denies(config_dir.as_deref(), data_dir);
     headless::HeadlessCommander::new(
         config_store.clone(),
         claude_md,
         commander_dir,
         spawn,
         sessions,
+        deny_read,
     )
 }
 

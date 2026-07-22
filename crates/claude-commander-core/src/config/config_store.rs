@@ -119,6 +119,13 @@ impl ConfigStore {
         self.config.read().expect("config lock poisoned")
     }
 
+    /// Path to the backing `config.toml`. Its parent is the commander config
+    /// directory (holds the Slack tokens), which the headless read-deny list
+    /// fences the Slack agent off from.
+    pub fn config_path(&self) -> &std::path::Path {
+        &self.config_path
+    }
+
     /// Apply a mutation to the config, then persist to disk.
     ///
     /// Updates the tracked mtime so that `reload_if_changed()` won't

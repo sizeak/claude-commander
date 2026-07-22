@@ -9,6 +9,8 @@
 
 use std::path::Path;
 
+use thiserror::Error;
+
 use claude_commander_protocol::api::SlackNotifyRequest;
 
 use crate::config::AppState;
@@ -17,35 +19,20 @@ use crate::session::WorktreeSession;
 
 /// Why a `slack notify` could not be prepared. Every variant renders an
 /// actionable message so the CLI can print it and exit non-zero.
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum NotifyPrepError {
     /// No `--session` was given and the current directory isn't inside any
     /// session's worktree.
+    #[error("no session for the current directory; pass --session <name-or-id>")]
     NoSessionForCwd,
     /// No server is advertising itself (no `server-info.json`), so there's
     /// nothing to POST to.
+    #[error("server not running — notify unavailable (start claude-commander-server)")]
     ServerNotRunning,
     /// The info file exists but couldn't be read/parsed.
+    #[error("could not read server info: {0}")]
     ServerInfoUnreadable(String),
 }
-
-impl std::fmt::Display for NotifyPrepError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::NoSessionForCwd => write!(
-                f,
-                "no session for the current directory; pass --session <name-or-id>"
-            ),
-            Self::ServerNotRunning => write!(
-                f,
-                "server not running — notify unavailable (start claude-commander-server)"
-            ),
-            Self::ServerInfoUnreadable(e) => write!(f, "could not read server info: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for NotifyPrepError {}
 
 /// Find the session whose worktree contains `cwd` (equal to, or nested under,
 /// the worktree path). The deepest match wins so a nested worktree beats an

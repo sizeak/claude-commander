@@ -178,16 +178,30 @@ client and performs the delivery.
 Slack is a powerful entry point — it can create sessions that run programs on the
 server machine — so it's locked down by design:
 
-- **Allowlist.** Only `allowed_user_ids` are answered; an empty allowlist
-  disables the whole feature. There is no "allow everyone" mode.
+- **Allowlist gates *triggering*, not *content*.** Only `allowed_user_ids` can
+  trigger the bot; an empty allowlist disables the whole feature and there is no
+  "allow everyone" mode. But the allowlist does **not** limit what *reaches* the
+  agent: when an allowlisted user invokes the bot inside a thread, the bridge
+  fetches that thread's history and includes it in the prompt — so text written
+  by **anyone** who posted in the thread (allowlisted or not) is fed to the
+  agent. Thread content is fenced and labelled as untrusted context, not
+  commands, but treat it as attacker-controlled input and keep the allowlist
+  tight and the channels trusted.
 - **Agent lockdown.** The headless commander runs with a restricted tool set (the
-  `claude-commander` CLI plus read-only Read/Grep/Glob) — no arbitrary shell —
-  and each invocation is capped by `invocation_timeout_secs`.
-- **Untrusted thread text.** Message and thread content fetched from Slack is
-  passed to the agent as **context, not commands** — treat anything a user (or a
-  quoted message) types in a thread as untrusted input. Keep the allowlist tight.
+  `claude-commander` CLI plus read-only Read/Grep/Glob) — no arbitrary shell, no
+  `Write`/`Edit` — and each invocation is capped by `invocation_timeout_secs`.
+- **Read fencing.** Read access is broad by necessity (the agent inspects
+  worktrees, which live outside its working directory), so a `permissions.deny`
+  rule set blocks reads of sensitive locations regardless: `~/.ssh`, `~/.aws`,
+  `~/.gnupg`, `.env`/`.env.*` files anywhere, the commander **config dir** (where
+  `config.toml` holds the Slack tokens), and the JSON state files in the **data
+  dir** (`server-info.json`'s bearer token, `state.json`). This is enforced by
+  Claude Code's permission model, which applies `Read` deny rules to every
+  built-in file tool (`Read`/`Grep`/`Glob`) and to `cat`/`head`-style Bash
+  commands. It does **not** extend to arbitrary subprocesses — but the tool set
+  above permits none — and everything the deny list does not name (all ordinary
+  repo and worktree files) the agent **can** read. Do not rely on file secrecy
+  for anything outside the denied paths on a machine running the bridge.
 - **Secrets stay local.** The tokens never leave the server's `config.toml`
   (redacted from the API, not remotely patchable), and worker sessions relay
   through the server rather than holding Slack credentials themselves.
-</content>
-</invoke>

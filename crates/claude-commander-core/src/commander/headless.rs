@@ -57,6 +57,14 @@ use crate::stream_json::{StreamEvent, parse_event, user_message_line};
 /// the `claude-commander` CLI (to inspect/create sessions) plus read-only
 /// filesystem tools. No arbitrary `Bash`, no `Write`/`Edit` — a Slack-driven
 /// agent must never mutate the host beyond the CLI's own guarded surface.
+///
+/// The `Read`/`Grep`/`Glob` entries are **not** redundant: within the commander
+/// working directory those tools need no permission, but the worktrees the agent
+/// must inspect live *outside* it, and only a standing allow rule lets a headless
+/// (unpromptable) process read them. That allowance is broad, so read
+/// *exfiltration* is fenced separately by the [`sensitive_read_denies`] deny
+/// list — deny rules beat allow rules — not by omitting these entries (omitting
+/// them would only break legitimate worktree reads, not stop secret reads).
 const ALLOWED_TOOLS: &[&str] = &["Bash(claude-commander:*)", "Read", "Grep", "Glob"];
 
 /// Permission mode for the headless process. `default` (NOT `bypassPermissions`)
@@ -90,8 +98,50 @@ pub struct SpawnSpec {
     pub resume: Option<String>,
     /// Tools the process is allowed to use (`--allowedTools`).
     pub allowed_tools: Vec<String>,
+    /// `permissions.deny` Read rules passed via `--settings`, fencing the agent
+    /// off from credential/secret locations even though `Read` is broadly
+    /// allowed (see [`sensitive_read_denies`]).
+    pub deny_read: Vec<String>,
     /// `--permission-mode` value.
     pub permission_mode: String,
+}
+
+/// Build the `permissions.deny` Read rules that fence the headless Slack agent
+/// off from credential and secret locations. These are *deny* rules, which take
+/// precedence over the broad `Read`/`Grep`/`Glob` allowance ([`ALLOWED_TOOLS`]),
+/// so an agent acting on prompt-injected thread text still cannot read them.
+///
+/// A `Read(...)` deny rule covers every built-in file-reading tool (`Read`,
+/// `Grep`, `Glob`) plus recognised file commands in `Bash` (`cat`, `head`, …),
+/// per the Claude Code permission model. Paths use its gitignore-style syntax:
+/// `~` is home-relative and a leading `//` anchors an absolute filesystem path.
+pub(crate) fn sensitive_read_denies(config_dir: Option<&Path>, data_dir: &Path) -> Vec<String> {
+    let mut denies = vec![
+        "Read(~/.ssh/**)".to_string(),
+        "Read(~/.aws/**)".to_string(),
+        "Read(~/.gnupg/**)".to_string(),
+        // `.env` / `.env.*` files anywhere on the filesystem.
+        "Read(//**/.env)".to_string(),
+        "Read(//**/.env.*)".to_string(),
+    ];
+    // The commander config dir holds `config.toml` (Slack + other tokens) and is
+    // never something the agent legitimately reads, so deny it wholesale.
+    if let Some(dir) = config_dir {
+        denies.push(deny_abs_glob(dir, "**"));
+    }
+    // The data-dir root holds `server-info.json` (server bearer token),
+    // `state.json` and `slack.json`. Deny only the JSON files at the root — NOT
+    // the whole dir, since the worktrees the agent must read live under it (and
+    // `*` never crosses a path separator, so `worktrees/…` is untouched).
+    denies.push(deny_abs_glob(data_dir, "*.json"));
+    denies
+}
+
+/// Format an absolute-path Read deny rule. A leading `//` anchors to the
+/// filesystem root; `dir` already begins with `/`, so one extra slash produces
+/// the `//<abs>` form Claude Code expects.
+fn deny_abs_glob(dir: &Path, tail: &str) -> String {
+    format!("Read(/{}/{tail})", dir.display())
 }
 
 /// Spawns [`CommanderChild`] processes. The seam that lets tests substitute a
@@ -152,6 +202,15 @@ impl RealChild {
         if let Some(id) = spec.resume.as_deref().filter(|id| !id.is_empty()) {
             cmd.args(["--resume", id]);
         }
+        // Read-deny rules ride in on `--settings` (accepts an inline JSON string).
+        // Must precede the variadic `--allowedTools` below, which greedily
+        // consumes the remaining argv.
+        if !spec.deny_read.is_empty() {
+            let settings = serde_json::json!({
+                "permissions": { "deny": spec.deny_read }
+            });
+            cmd.args(["--settings", &settings.to_string()]);
+        }
         // `--allowedTools` is variadic (`<tools...>`), so it must come last: it
         // greedily consumes the remaining argv. With stream-json input there is
         // no trailing positional prompt to be swallowed.
@@ -196,14 +255,13 @@ impl RealChild {
 #[async_trait]
 impl CommanderChild for RealChild {
     async fn send(&mut self, text: &str) -> Result<()> {
+        // A broken pipe here is an IO failure, not a bad program string, so it
+        // surfaces through the `Error::Io` variant (via `?`) rather than
+        // `InvalidProgram`.
         self.stdin
             .write_all(user_message_line(text).as_bytes())
-            .await
-            .map_err(|e| SessionError::InvalidProgram(format!("write to commander failed: {e}")))?;
-        self.stdin
-            .flush()
-            .await
-            .map_err(|e| SessionError::InvalidProgram(format!("flush to commander failed: {e}")))?;
+            .await?;
+        self.stdin.flush().await?;
         Ok(())
     }
 
@@ -311,6 +369,23 @@ impl SlackSessionStore {
             warn!(target: "commander", "failed to persist slack.json: {e}");
         }
     }
+
+    /// Drop `key`'s recorded session id and persist. Used to recover from a
+    /// stale `--resume` id whose Claude session no longer exists: the resumed
+    /// spawn dies immediately, so the mapping is cleared and the next ask cold-
+    /// starts instead of resuming a dead id forever.
+    pub fn remove(&self, key: &str) {
+        let snapshot = {
+            let mut data = self.data.lock().unwrap();
+            if data.sessions.remove(key).is_none() {
+                return; // nothing changed → nothing to persist
+            }
+            data.clone()
+        };
+        if let Err(e) = persist(&self.path, &snapshot) {
+            warn!(target: "commander", "failed to persist slack.json after remove: {e}");
+        }
+    }
 }
 
 /// Migrate an older on-disk shape forward. No prior versions exist yet; the hook
@@ -322,12 +397,26 @@ fn migrate(mut data: SlackSessionData) -> SlackSessionData {
     data
 }
 
+/// Persist atomically (temp-file + rename) so a concurrent reader never sees a
+/// torn file, and a crash mid-write can't truncate the existing map. The temp
+/// name carries pid + a per-process sequence (shared with the `CLAUDE.md`
+/// writer's [`PRIME_SEQ`]) so two writers can't collide on it.
 fn persist(path: &Path, data: &SlackSessionData) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let bytes = serde_json::to_vec_pretty(data)?;
-    std::fs::write(path, bytes)
+    let seq = PRIME_SEQ.fetch_add(1, Ordering::Relaxed);
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("slack.json");
+    let tmp = path.with_file_name(format!(".{file_name}.tmp.{}.{seq}", std::process::id()));
+    if let Err(e) = std::fs::write(&tmp, &bytes) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    std::fs::rename(&tmp, path)
 }
 
 // ---------------------------------------------------------------------------
@@ -363,6 +452,15 @@ struct Inner {
     /// Pre-rendered Slack-primed `CLAUDE.md` (written on first use).
     claude_md: String,
     commander_dir: PathBuf,
+    /// `permissions.deny` Read rules applied to every spawn (see
+    /// [`sensitive_read_denies`]). Computed once at construction from the
+    /// process's config/data dirs, which do not change for its lifetime.
+    deny_read: Vec<String>,
+    /// Per-conversation entries. Grows by one small `Arc` per distinct thread
+    /// key ever seen and is never evicted: the growth is bounded in practice
+    /// (one entry per Slack thread the bot is used in), and eviction would have
+    /// to race the per-key serialization lock for a negligible memory win, so it
+    /// is deliberately omitted.
     keys: StdMutex<HashMap<String, Arc<KeyEntry>>>,
     warm: Mutex<WarmState>,
     /// Signalled when the warm process is consumed, so maintenance refills it.
@@ -377,10 +475,12 @@ pub struct HeadlessCommander {
     inner: Arc<Inner>,
 }
 
-/// Outcome of a single turn (internal).
+/// Outcome of a single turn (internal). A failure carries its terminal message
+/// so the caller ([`HeadlessCommander::run_ask`]) decides whether to surface it
+/// as a [`StreamEvent::Error`] or first attempt a stale-resume recovery.
 enum TurnOutcome {
     Complete,
-    Failed,
+    Failed(String),
 }
 
 /// Result of streaming one turn to completion (internal).
@@ -428,14 +528,16 @@ pub fn stream_event_to_wire(ev: StreamEvent) -> claude_commander_protocol::api::
 impl HeadlessCommander {
     /// Construct the manager. `claude_md` is the shared `CLAUDE.md` body (built
     /// once by the caller from the live CLI — identical to what the interactive
-    /// commander writes) written to `commander_dir` on first use. No IO happens
-    /// here.
+    /// commander writes) written to `commander_dir` on first use. `deny_read` is
+    /// the read-deny rule set applied to every spawn (see
+    /// [`sensitive_read_denies`]). No IO happens here.
     pub fn new(
         config_store: Arc<ConfigStore>,
         claude_md: String,
         commander_dir: PathBuf,
         spawn: Arc<dyn CommanderSpawn>,
         sessions: Arc<SlackSessionStore>,
+        deny_read: Vec<String>,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
@@ -444,6 +546,7 @@ impl HeadlessCommander {
                 sessions,
                 claude_md,
                 commander_dir,
+                deny_read,
                 keys: StdMutex::new(HashMap::new()),
                 warm: Mutex::new(WarmState::default()),
                 warm_refill: Notify::new(),
@@ -507,10 +610,10 @@ impl HeadlessCommander {
         let mut proc = entry.proc.lock().await;
         let generation = entry.generation.fetch_add(1, Ordering::SeqCst) + 1;
 
-        let mut child = match proc.live.take() {
-            Some(c) => c, // reuse the lingering live process
+        let (mut child, resumed_store_id) = match proc.live.take() {
+            Some(c) => (c, None), // reuse the lingering live process
             None => match self.acquire_fresh(&key).await {
-                Ok(c) => c,
+                Ok(pair) => pair,
                 Err(e) => {
                     let _ = tx.send(StreamEvent::Error(format!(
                         "failed to start commander: {e}"
@@ -521,12 +624,38 @@ impl HeadlessCommander {
         };
 
         let mut session_id = proc.session_id.clone();
-        let outcome = self
+        let mut outcome = self
             .run_turn(&mut child, &prompt, &mut session_id, &tx, &key)
             .await;
 
+        // Stale-resume recovery: a process spawned by resuming a *stored* id that
+        // failed before ever emitting `Started` (so `session_id` is still `None`)
+        // almost always means that Claude session no longer exists — and left
+        // untouched the dead mapping would fail every future ask identically.
+        // Drop it and retry ONCE on a fresh (no-resume) process. This is
+        // independent of `run_turn`'s timeout retries and bounded to one attempt
+        // per ask, so it can't loop.
+        if matches!(outcome, TurnOutcome::Failed(_))
+            && resumed_store_id.is_some()
+            && session_id.is_none()
+        {
+            self.inner.sessions.remove(&key);
+            match self.spawn_child(None).await {
+                Ok(fresh) => {
+                    child = fresh;
+                    outcome = self
+                        .run_turn(&mut child, &prompt, &mut session_id, &tx, &key)
+                        .await;
+                }
+                Err(e) => {
+                    warn!(target: "commander", "stale-resume recovery spawn failed: {e}");
+                }
+            }
+        }
+
         // A turn always advances the conversation, so record the session id for
-        // a future `--resume` even when it failed/timed out.
+        // a future `--resume` even when it failed/timed out. Done after recovery
+        // so the fresh process's *new* id wins over the dead one we cleared.
         if let Some(id) = &session_id {
             self.inner.sessions.set(&key, id);
         }
@@ -538,10 +667,11 @@ impl HeadlessCommander {
                 drop(proc); // release the key so the reaper / next ask can run
                 self.schedule_reap(&key, generation);
             }
-            TurnOutcome::Failed => {
+            TurnOutcome::Failed(msg) => {
                 // `run_turn` already killed the child on every failure path;
                 // dropping it here also triggers `kill_on_drop` for the real
                 // process, so we must not double-kill.
+                let _ = tx.send(StreamEvent::Error(msg));
                 proc.session_id = session_id;
                 proc.live = None;
             }
@@ -549,20 +679,25 @@ impl HeadlessCommander {
     }
 
     /// Acquire a process for a key with no lingering process: resume a recorded
-    /// conversation, else take the warm process, else spawn fresh.
-    async fn acquire_fresh(&self, key: &str) -> Result<Box<dyn CommanderChild>> {
+    /// conversation, else take the warm process, else spawn fresh. The returned
+    /// `Option<String>` is the store id we resumed from (`None` for a warm/fresh
+    /// process), so [`run_ask`](Self::run_ask) can recover if a resume turns out
+    /// to be stale.
+    async fn acquire_fresh(&self, key: &str) -> Result<(Box<dyn CommanderChild>, Option<String>)> {
         if let Some(id) = self.inner.sessions.get(key) {
-            return self.spawn_child(Some(&id)).await;
+            return Ok((self.spawn_child(Some(&id)).await?, Some(id)));
         }
         if let Some(warm) = self.take_warm().await {
-            return Ok(warm);
+            return Ok((warm, None));
         }
-        self.spawn_child(None).await
+        Ok((self.spawn_child(None).await?, None))
     }
 
     /// Drive one turn, enforcing the invocation timeout with a single automatic
     /// retry (resuming the conversation, with a "be brief" nudge). Forwards
-    /// events on `tx`; emits at most one terminal [`StreamEvent::Error`].
+    /// deltas/breaks/started/turn-complete on `tx`; the terminal error is *not*
+    /// emitted here — it is returned in [`TurnOutcome::Failed`] so the caller can
+    /// attempt stale-resume recovery before surfacing it.
     async fn run_turn(
         &self,
         child: &mut Box<dyn CommanderChild>,
@@ -578,31 +713,27 @@ impl HeadlessCommander {
         loop {
             if let Err(e) = child.send(&prompt_to_send).await {
                 child.kill().await;
-                let _ = tx.send(StreamEvent::Error(format!("failed to send prompt: {e}")));
-                return TurnOutcome::Failed;
+                return TurnOutcome::Failed(format!("failed to send prompt: {e}"));
             }
 
             match self.stream_turn(child, session_id, tx, timeout).await {
                 StreamResult::Complete => return TurnOutcome::Complete,
                 StreamResult::Failed(msg) => {
                     child.kill().await;
-                    let _ = tx.send(StreamEvent::Error(msg));
-                    return TurnOutcome::Failed;
+                    return TurnOutcome::Failed(msg);
                 }
                 StreamResult::TimedOut => {
                     child.kill().await;
                     attempts += 1;
                     if attempts >= 2 {
-                        let _ = tx.send(StreamEvent::Error("timed out".to_string()));
-                        return TurnOutcome::Failed;
+                        return TurnOutcome::Failed("timed out".to_string());
                     }
                     // Retry once on a fresh process resuming the same conversation.
                     let resume = session_id.clone().or_else(|| self.inner.sessions.get(key));
                     match self.spawn_child(resume.as_deref()).await {
                         Ok(c) => *child = c,
                         Err(e) => {
-                            let _ = tx.send(StreamEvent::Error(format!("retry spawn failed: {e}")));
-                            return TurnOutcome::Failed;
+                            return TurnOutcome::Failed(format!("retry spawn failed: {e}"));
                         }
                     }
                     prompt_to_send = format!("{TIMEOUT_NUDGE}\n\n{prompt}");
@@ -774,6 +905,7 @@ impl HeadlessCommander {
             cwd: self.inner.commander_dir.clone(),
             resume: resume.map(|s| s.to_string()),
             allowed_tools: ALLOWED_TOOLS.iter().map(|s| s.to_string()).collect(),
+            deny_read: self.inner.deny_read.clone(),
             permission_mode: PERMISSION_MODE.to_string(),
         };
         self.inner.spawn.spawn(spec).await
@@ -845,6 +977,33 @@ mod tests {
         std::fs::write(&corrupt, b"not json at all").unwrap();
         let store = SlackSessionStore::load(corrupt);
         assert_eq!(store.get("x"), None);
+    }
+
+    #[test]
+    fn slack_store_remove_drops_key_and_persists_atomically() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("slack.json");
+        let store = SlackSessionStore::load(path.clone());
+        store.set("k1", "v1");
+        store.set("k2", "v2");
+
+        store.remove("k1");
+        assert_eq!(store.get("k1"), None);
+        assert_eq!(store.get("k2").as_deref(), Some("v2"));
+
+        // The removal is durable across a reload, and no temp file leaks.
+        let reloaded = SlackSessionStore::load(path);
+        assert_eq!(reloaded.get("k1"), None);
+        assert_eq!(reloaded.get("k2").as_deref(), Some("v2"));
+        let leftover: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp."))
+            .collect();
+        assert!(leftover.is_empty(), "atomic write left a temp file behind");
+
+        // Removing an absent key is a no-op (and must not panic).
+        store.remove("nope");
     }
 
     #[test]
@@ -970,12 +1129,16 @@ mod tests {
             dir.path().join("config.toml"),
         ));
         let sessions = Arc::new(SlackSessionStore::load(dir.path().join("slack.json")));
+        // Realistic deny rules (config dir + data dir both the temp dir) so the
+        // spec-assertion test sees what production would generate.
+        let deny_read = sensitive_read_denies(Some(dir.path()), dir.path());
         HeadlessCommander::new(
             config_store,
             "# primed".to_string(),
             dir.path().join("commander"),
             spawn,
             sessions,
+            deny_read,
         )
     }
 
@@ -1066,6 +1229,84 @@ mod tests {
                 .allowed_tools
                 .iter()
                 .any(|t| t.contains("claude-commander"))
+        );
+        // Read-deny rules ride on every spawn, fencing off secret locations.
+        assert!(specs[0].deny_read.iter().any(|d| d == "Read(~/.ssh/**)"));
+        assert!(specs[0].deny_read.iter().any(|d| d == "Read(//**/.env)"));
+    }
+
+    #[tokio::test]
+    async fn stale_resume_id_is_dropped_and_recovered_on_a_fresh_spawn() {
+        let dir = TempDir::new().unwrap();
+        // Pre-seed a dead recorded id: the first (resumed) spawn's stream closes
+        // immediately — as `claude -p --resume <dead-id>` does when that Claude
+        // session no longer exists.
+        let sessions = SlackSessionStore::load(dir.path().join("slack.json"));
+        sessions.set("slack:C:T", "dead-id");
+        drop(sessions);
+
+        let spawn = FakeSpawn::new(vec![
+            // First child: resumed from the dead id — recv returns None at once.
+            Blueprint {
+                events: vec![],
+                hang_when_empty: false,
+            },
+            // Second child: fresh (no resume) — plays a normal turn.
+            Blueprint {
+                events: turn("fresh-sess"),
+                hang_when_empty: false,
+            },
+        ]);
+        let mgr = manager(&dir, spawn.clone(), Config::default());
+
+        let events = drain(mgr.ask("slack:C:T", "hi")).await;
+        // The ask ultimately completes — no terminal error reaches the consumer.
+        assert_eq!(events.last(), Some(&StreamEvent::TurnComplete));
+        assert!(!events.iter().any(|e| matches!(e, StreamEvent::Error(_))));
+
+        let specs = spawn.specs.lock().unwrap();
+        assert_eq!(specs.len(), 2);
+        // First spawn resumed the dead id; the recovery spawn is fresh.
+        assert_eq!(specs[0].resume.as_deref(), Some("dead-id"));
+        assert_eq!(specs[1].resume, None);
+        drop(specs);
+
+        // The dead mapping was replaced by the fresh session id.
+        assert_eq!(
+            mgr.inner.sessions.get("slack:C:T").as_deref(),
+            Some("fresh-sess")
+        );
+    }
+
+    #[test]
+    fn sensitive_read_denies_covers_secrets_and_spares_worktrees() {
+        let config_dir = Path::new("/home/u/.config/claude-commander");
+        let data_dir = Path::new("/home/u/.local/share/claude-commander");
+        let denies = sensitive_read_denies(Some(config_dir), data_dir);
+
+        for expected in [
+            "Read(~/.ssh/**)",
+            "Read(~/.aws/**)",
+            "Read(~/.gnupg/**)",
+            "Read(//**/.env)",
+            "Read(//**/.env.*)",
+            // Config dir denied wholesale (leading `//` anchors an absolute path).
+            "Read(//home/u/.config/claude-commander/**)",
+            // Data-dir JSON denied at the root only.
+            "Read(//home/u/.local/share/claude-commander/*.json)",
+        ] {
+            assert!(
+                denies.iter().any(|d| d == expected),
+                "missing deny rule {expected}; got {denies:?}"
+            );
+        }
+        // The data dir is NOT denied wholesale — the worktrees under it must stay
+        // readable.
+        assert!(
+            !denies
+                .iter()
+                .any(|d| d == "Read(//home/u/.local/share/claude-commander/**)"),
+            "data dir must not be denied wholesale"
         );
     }
 
@@ -1291,6 +1532,7 @@ mod tests {
                 counters: counters.clone(),
             }),
             sessions,
+            Vec::new(),
         )
     }
 

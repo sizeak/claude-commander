@@ -16,7 +16,7 @@ use slack_morphism::prelude::*;
 use tracing::{debug, error, info};
 
 use super::client::{CommanderAsker, SlackWebClient};
-use super::decision::{Decision, DedupSet, IncomingMessage, MessageKind, classify};
+use super::decision::{Decision, DedupSet, IncomingMessage, MessageKind, classify, dedup_key};
 use super::handler::{Asker, SlackApi, handle_accepted};
 
 /// How long a seen event id is remembered for dedup, and how many at most.
@@ -126,8 +126,11 @@ async fn on_push_event(
         return Ok(());
     };
 
-    // Redelivery guard: Slack resends events it thinks weren't acked.
-    let is_new = state.dedup.lock().unwrap().insert_if_new(&msg.event_id);
+    // Redelivery guard: Slack resends events it thinks weren't acked, and
+    // delivers a DM that @mentions the bot as two distinct events. Dedup on the
+    // message identity `(channel, ts)`, not the envelope id, so both collapse to
+    // one turn.
+    let is_new = state.dedup.lock().unwrap().insert_if_new(&dedup_key(&msg));
     if !is_new {
         debug!(target: "slack", "dropping redelivered event {}", msg.event_id);
         return Ok(());

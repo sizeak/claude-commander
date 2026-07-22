@@ -155,6 +155,15 @@ pub fn conversation_key(channel: &str, thread_root_ts: &str) -> String {
     format!("slack:{channel}:{thread_root_ts}")
 }
 
+/// The dedup identity of a message: its `(channel, ts)` pair. A DM that
+/// @mentions the bot is delivered as BOTH an `app_mention` and a `message.im`
+/// event with *distinct* envelope ids, so deduping on `event_id` would admit
+/// both and reply twice. Those two envelopes describe one and the same message —
+/// identified by where and when it was posted — so the bridge dedups on that.
+pub fn dedup_key(msg: &IncomingMessage) -> String {
+    format!("{}:{}", msg.channel, msg.ts)
+}
+
 /// Strip the bot's `<@ID>` mention token(s) from `text`. When `bot_user_id` is
 /// known, only that id's tokens (plain `<@ID>` and labelled `<@ID|name>`) are
 /// removed, so mentions of *other* users survive as context. When it is unknown
@@ -487,6 +496,29 @@ mod tests {
     #[test]
     fn conversation_key_format() {
         assert_eq!(conversation_key("C1", "100.1"), "slack:C1:100.1");
+    }
+
+    #[test]
+    fn dedup_key_collapses_mention_and_dm_of_the_same_message() {
+        let mut mention = msg("<@BOT> hi");
+        mention.kind = MessageKind::Mention;
+        mention.event_id = "Ev-mention".into();
+        let mut dm = mention.clone();
+        dm.kind = MessageKind::DirectMessage;
+        dm.event_id = "Ev-dm".into();
+        // Same channel+ts → identical dedup key despite differing kind/event id,
+        // so the second delivery of the same message is dropped.
+        assert_eq!(dedup_key(&mention), dedup_key(&dm));
+
+        // A genuinely different message (different ts) keys differently.
+        let mut later = mention.clone();
+        later.ts = "200.2".into();
+        assert_ne!(dedup_key(&mention), dedup_key(&later));
+
+        // Same ts in a different channel is also distinct.
+        let mut elsewhere = mention.clone();
+        elsewhere.channel = "C2".into();
+        assert_ne!(dedup_key(&mention), dedup_key(&elsewhere));
     }
 
     #[test]
