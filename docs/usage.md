@@ -47,6 +47,11 @@ claude-commander attach feature-remote --remote workstation
 # Dump recent terminal output from a session (default 100 lines, max 10000)
 claude-commander log feature-auth --lines 200
 
+# Report a message back to Slack about a session (worker sessions use this to
+# report progress; needs a running server with Slack configured — see
+# docs/slack.md). Defaults to the session for the current directory.
+claude-commander slack notify --message "Tests pass, PR is up"
+
 # Show configuration
 claude-commander config
 

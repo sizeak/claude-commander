@@ -13,6 +13,7 @@ A high-performance terminal UI for managing Claude coding sessions, written in R
 - **Agent state detection** - Detect if agent is waiting for input, processing, or errored
 - **Persistent state** - Sessions survive restarts
 - **Auto-pull project main** - Periodically fast-forwards each project's main branch from `origin` so it doesn't drift stale
+- **Slack integration** - Allowlisted users drive the commander from Slack by @mentioning the bot or DMing it; it answers questions, creates sessions, and reports back in-thread (see [Slack integration](docs/slack.md))
 
 ## Requirements
 
@@ -211,6 +212,7 @@ backend as you make them.
 
 - **[Usage guide](docs/usage.md)** — CLI commands, the session list, PR stacks (cascade merge / push stack), and AI summaries
 - **[Configuration](docs/configuration.md)** — all config options, theme presets, session-list sections (with optional advisory WIP limits), and data-storage paths
+- **[Slack integration](docs/slack.md)** — drive the commander from Slack (app setup + manifest, tokens, allowlist, `slack notify`)
 - **[Contributing](CONTRIBUTING.md)** — releasing, the local dev loop, and architecture overview
 - **[Flutter client](client/README.md)** — cross-platform GUI client (Linux desktop + Android) for `claude-commander-server`
 
