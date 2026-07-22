@@ -85,6 +85,9 @@ pub struct CommanderService {
     /// [`Self::workspace_snapshot`] polling (~2s cadence) doesn't fork a
     /// subprocess on every poll. See [`Self::cached_tmux_ok`].
     tmux_ok_cache: Arc<std::sync::Mutex<Option<(std::time::Instant, bool)>>>,
+    /// Headless commander conversation layer (Slack bridge + `/api/commander/ask`).
+    /// Independent of `commander_enabled`; callers gate it.
+    headless: crate::commander::headless::HeadlessCommander,
 }
 
 /// Max entries kept in the operation ledger before the oldest are evicted.
@@ -133,6 +136,14 @@ impl CommanderService {
             manager.tmux.clone(),
             AGENT_STATE_CACHE_TTL,
         )));
+        // Headless commander: primed once with the Slack CLAUDE.md rendered from
+        // the live CLI. The directory itself is written lazily on first ask, so
+        // constructing this does no IO — safe for one-shot CLI paths too.
+        let headless = build_headless(
+            &config_store,
+            &data_dir,
+            Arc::new(crate::commander::headless::RealSpawn),
+        );
         Self {
             manager,
             store,
@@ -154,6 +165,7 @@ impl CommanderService {
             pr_refresh: Arc::new(tokio::sync::Notify::new()),
             background_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             tmux_ok_cache: Arc::new(std::sync::Mutex::new(None)),
+            headless,
         }
     }
 
@@ -192,6 +204,39 @@ impl CommanderService {
 
     pub fn store(&self) -> &Arc<StateStore> {
         &self.store
+    }
+
+    // -- Headless commander (Slack bridge + `/api/commander/ask`) --
+
+    /// Ask the headless commander `prompt` within conversation `key`, returning
+    /// a live stream of events. Independent of `commander_enabled`: the caller
+    /// gates access (the Slack bridge by `[slack]` config; the HTTP route serves
+    /// whenever a commander program resolves). Turns sharing a key continue one
+    /// conversation and are serialized; different keys run concurrently.
+    pub fn commander_ask(&self, key: &str, prompt: &str) -> crate::commander::headless::AskStream {
+        self.telemetry.feature("commander_ask");
+        self.headless.ask(key, prompt)
+    }
+
+    /// Start the headless commander's warm-pool maintenance loop (keep one fresh
+    /// process ready, respawn periodically). Long-lived frontends call this once;
+    /// a no-op-in-practice for one-shot CLI paths (which never call it).
+    pub fn start_commander_warm_pool(&self) {
+        self.headless.spawn_maintenance();
+    }
+
+    /// Rebuild the headless commander over a custom process spawner. Primarily a
+    /// test seam: the server's route tests substitute a scripted fake so the
+    /// NDJSON stream can be exercised without a real `claude` subprocess.
+    /// Production wires [`RealSpawn`](crate::commander::headless::RealSpawn) in
+    /// [`Self::new`].
+    pub fn with_commander_spawn(
+        mut self,
+        spawn: Arc<dyn crate::commander::headless::CommanderSpawn>,
+    ) -> Self {
+        let data_dir = self.store.data_dir();
+        self.headless = build_headless(&self.config_store, &data_dir, spawn);
+        self
     }
 
     // -- Config --
@@ -2460,6 +2505,34 @@ pub fn validate_program_flags(opts: &CreateSessionOpts, resolved_program: &str) 
 /// Build the telemetry handle for a freshly-constructed service: resolve the
 /// install id, construct the handle from config, and emit the once-per-launch
 /// `session_start` event. A no-op handle is returned when telemetry is disabled.
+/// Construct the headless commander over a given process spawner. Shared by
+/// [`CommanderService::new`] (with `RealSpawn`) and
+/// [`CommanderService::with_commander_spawn`] (with a test fake) so the priming
+/// wiring lives in one place. Does no IO: `claude_md` is rendered from the live
+/// CLI and the directory is written lazily on first ask.
+fn build_headless(
+    config_store: &Arc<ConfigStore>,
+    data_dir: &Path,
+    spawn: Arc<dyn crate::commander::headless::CommanderSpawn>,
+) -> crate::commander::headless::HeadlessCommander {
+    use crate::commander::{PrimeMode, claude_md_content_for, headless};
+    let claude_md = claude_md_content_for(&crate::cli_args::cli_command(), PrimeMode::Slack);
+    let commander_dir = config_store
+        .read()
+        .commander_dir()
+        .unwrap_or_else(|_| data_dir.join("commander"));
+    let sessions = Arc::new(headless::SlackSessionStore::load(
+        data_dir.join("slack.json"),
+    ));
+    headless::HeadlessCommander::new(
+        config_store.clone(),
+        claude_md,
+        commander_dir,
+        spawn,
+        sessions,
+    )
+}
+
 fn init_telemetry(
     config_store: &Arc<ConfigStore>,
     store: &Arc<StateStore>,

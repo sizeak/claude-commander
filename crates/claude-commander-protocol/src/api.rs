@@ -408,6 +408,36 @@ pub struct ChangeProgram {
     pub program: String,
 }
 
+/// Request body for `POST /api/commander/ask`: one turn to the headless
+/// commander in a given conversation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CommanderAskRequest {
+    /// The user turn to send to the commander.
+    pub prompt: String,
+    /// Opaque conversation key (the Slack bridge uses
+    /// `slack:<channel>:<thread_ts>`). Turns sharing a key continue one
+    /// conversation and are served in order.
+    pub conversation_key: String,
+}
+
+/// One event in the NDJSON stream returned by `POST /api/commander/ask` (one
+/// JSON object per line). Mirrors the core stream-json events the commander
+/// emits, minus the internal process-lifecycle events.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum CommanderEvent {
+    /// The conversation started; carries Claude's session id.
+    Started { session_id: String },
+    /// An incremental chunk of assistant text.
+    Delta { text: String },
+    /// A paragraph break between agentic text segments.
+    Break,
+    /// The turn finished successfully.
+    TurnComplete,
+    /// The turn failed (spawn failure, timeout, stream error).
+    Error { message: String },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -738,6 +768,43 @@ mod tests {
         // An empty list is a valid request (clears the picker to the fallback).
         let empty: SetProgramsRequest = serde_json::from_str(r#"{"programs":[]}"#).unwrap();
         assert!(empty.programs.is_empty());
+    }
+
+    #[test]
+    fn commander_ask_request_round_trip() {
+        let req: CommanderAskRequest =
+            serde_json::from_str(r#"{"prompt":"list sessions","conversation_key":"slack:C1:T1"}"#)
+                .unwrap();
+        assert_eq!(req.prompt, "list sessions");
+        assert_eq!(req.conversation_key, "slack:C1:T1");
+    }
+
+    #[test]
+    fn commander_event_wire_shape() {
+        // Tagged, snake_case: one self-describing JSON object per NDJSON line.
+        assert_eq!(
+            serde_json::to_value(CommanderEvent::Delta { text: "hi".into() }).unwrap(),
+            serde_json::json!({ "type": "delta", "text": "hi" })
+        );
+        assert_eq!(
+            serde_json::to_value(CommanderEvent::TurnComplete).unwrap(),
+            serde_json::json!({ "type": "turn_complete" })
+        );
+        assert_eq!(
+            serde_json::to_value(CommanderEvent::Error {
+                message: "timed out".into()
+            })
+            .unwrap(),
+            serde_json::json!({ "type": "error", "message": "timed out" })
+        );
+        let back: CommanderEvent =
+            serde_json::from_str(r#"{"type":"started","session_id":"s1"}"#).unwrap();
+        assert_eq!(
+            back,
+            CommanderEvent::Started {
+                session_id: "s1".into()
+            }
+        );
     }
 
     #[test]

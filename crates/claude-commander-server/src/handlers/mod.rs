@@ -4,6 +4,7 @@
 
 pub mod blobs;
 pub mod cascade;
+pub mod commander;
 pub mod config;
 pub mod health;
 pub mod paste;

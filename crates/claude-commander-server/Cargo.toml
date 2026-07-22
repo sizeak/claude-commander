@@ -68,6 +68,9 @@ tls = ["dep:axum-server"]
 # dev-dependency cycle (test-support depends on this crate); Cargo allows it
 # because it only closes through this crate's test targets, not its library.
 claude-commander-test-support = { path = "../claude-commander-test-support" }
+# The commander-route test implements the core `CommanderSpawn` trait (an
+# `#[async_trait]` trait) with a scripted fake, so it needs the macro.
+async-trait = "0.1"
 tempfile = "3.27"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
