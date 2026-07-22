@@ -264,4 +264,137 @@ void main() {
     expect(tester.takeException(), isNull);
     expect(find.text('Alpha'), findsOneWidget);
   });
+
+  testWidgets('typing in the search box filters the list', (tester) async {
+    api.listSessionsResponse = [
+      sessionInfo(title: 'Alpha refactor'),
+      sessionInfo(
+        id: '99999999-2222-3333-4444-555555555555',
+        title: 'Beta cleanup',
+      ),
+    ];
+    unawaited(store.connect());
+    await tester.pumpWidget(wrap());
+    await tester.pumpAndSettle();
+
+    // Both rows visible before searching.
+    expect(find.text('Alpha refactor'), findsOneWidget);
+    expect(find.text('Beta cleanup'), findsOneWidget);
+
+    await tester.enterText(find.byType(TextField), 'alpha');
+    await tester.pumpAndSettle();
+
+    // The query fuzzy-filters in place: only the match survives.
+    expect(find.text('Alpha refactor'), findsOneWidget);
+    expect(find.text('Beta cleanup'), findsNothing);
+
+    // A query that matches nothing shows the no-matches note.
+    await tester.enterText(find.byType(TextField), 'zzzzz');
+    await tester.pumpAndSettle();
+    expect(find.text('No matches'), findsOneWidget);
+  });
+
+  testWidgets('the Recent view shows attached sessions newest-first and hides '
+      'never-attached', (tester) async {
+    api.listSessionsResponse = [
+      sessionInfo(
+        id: '11111111-2222-3333-4444-555555555555',
+        title: 'Older',
+        lastAttachedAt: DateTime.utc(2026, 1, 1),
+      ),
+      sessionInfo(
+        id: '22222222-2222-3333-4444-555555555555',
+        title: 'Newer',
+        lastAttachedAt: DateTime.utc(2026, 1, 5),
+      ),
+      sessionInfo(
+        id: '33333333-2222-3333-4444-555555555555',
+        title: 'Never',
+        lastAttachedAt: null,
+      ),
+    ];
+    unawaited(store.connect());
+    await tester.pumpWidget(wrap());
+    await tester.pumpAndSettle();
+
+    // Switch to the Recent tab.
+    await tester.tap(find.text('Recent'));
+    await tester.pumpAndSettle();
+
+    // Never-attached is excluded; the two attached ones show newest-first.
+    expect(find.text('Never'), findsNothing);
+    expect(find.text('Newer'), findsOneWidget);
+    expect(find.text('Older'), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.text('Newer')).dy,
+      lessThan(tester.getTopLeft(find.text('Older')).dy),
+    );
+  });
+
+  testWidgets('searching within the Recent tab filters it', (tester) async {
+    api.listSessionsResponse = [
+      sessionInfo(
+        id: '11111111-2222-3333-4444-555555555555',
+        title: 'Alpha',
+        lastAttachedAt: DateTime.utc(2026, 1, 1),
+      ),
+      sessionInfo(
+        id: '22222222-2222-3333-4444-555555555555',
+        title: 'Beta',
+        lastAttachedAt: DateTime.utc(2026, 1, 2),
+      ),
+    ];
+    unawaited(store.connect());
+    await tester.pumpWidget(wrap());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Recent'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'alpha');
+    await tester.pumpAndSettle();
+
+    expect(find.text('Alpha'), findsOneWidget);
+    expect(find.text('Beta'), findsNothing);
+  });
+
+  testWidgets('the clear button empties the query and restores the list', (
+    tester,
+  ) async {
+    api.listSessionsResponse = [
+      sessionInfo(title: 'Alpha'),
+      sessionInfo(id: '22222222-2222-3333-4444-555555555555', title: 'Beta'),
+    ];
+    unawaited(store.connect());
+    await tester.pumpWidget(wrap());
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField), 'alpha');
+    await tester.pumpAndSettle();
+    expect(find.text('Beta'), findsNothing);
+
+    await tester.tap(find.byTooltip('Clear'));
+    await tester.pumpAndSettle();
+
+    // Field emptied and both rows are back.
+    expect(find.byTooltip('Clear'), findsNothing);
+    expect(find.text('Alpha'), findsOneWidget);
+    expect(find.text('Beta'), findsOneWidget);
+  });
+
+  testWidgets('the Recent tab shows a spinner while the server is loading', (
+    tester,
+  ) async {
+    api.listSessionsResponse = const [];
+    // Pump before connecting: no snapshot yet.
+    await tester.pumpWidget(wrap());
+    await tester.tap(find.text('Recent'));
+    await tester.pump();
+
+    // The loading state surfaces on Recent too, not a bare empty note.
+    expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(find.text('No recent sessions'), findsNothing);
+
+    await store.connect();
+    await tester.pumpAndSettle();
+  });
 }

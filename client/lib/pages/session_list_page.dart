@@ -4,6 +4,7 @@ import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
 import '../state/workspace_store.dart';
+import '../util/session_filter.dart';
 import '../widgets/session_chips.dart';
 import 'create_session_page.dart';
 import 'programs_page.dart';
@@ -11,13 +12,19 @@ import 'projects_page.dart';
 import 'servers_page.dart';
 import 'session_detail_page.dart';
 
-/// The aggregated session list, grouped by server → project — layout-agnostic
-/// (no Scaffold, no route). Enumerates the servers from the [WorkspaceStore] and
-/// renders each server's grouped sessions under a header (suppressed when only
-/// one server is configured, so single-server trees look unchanged). Each server
-/// section re-provides its own [CommanderStoreScope] so per-server consumers
-/// (detail, cascade banner) keep their single-store contract.
-class SessionListBody extends StatelessWidget {
+/// Which slice of the sessions the list is showing: everything (grouped by
+/// server → project) or the recently-attached sessions in MRU order.
+enum _SessionView { all, recent }
+
+/// The aggregated session list — layout-agnostic (no Scaffold, no route). A
+/// pinned header carries a live search box (fuzzy-filtering the list in place)
+/// and an All/Recent toggle; below it the body is either the servers' sessions
+/// grouped by project (All) or a flat, cross-server most-recently-attached list
+/// (Recent). Enumerates the servers from the [WorkspaceStore]; in All mode each
+/// server section re-provides its own [CommanderStoreScope] so per-server
+/// consumers (detail, cascade banner) keep their single-store contract, and its
+/// header is suppressed when only one server is configured.
+class SessionListBody extends StatefulWidget {
   /// The id of the session shown in the detail pane, highlighted in the list.
   /// Null in the narrow (push) flow, where there is no persistent selection.
   final String? selectedId;
@@ -28,6 +35,23 @@ class SessionListBody extends StatelessWidget {
   const SessionListBody({super.key, this.selectedId, required this.onSelect});
 
   @override
+  State<SessionListBody> createState() => _SessionListBodyState();
+}
+
+class _SessionListBodyState extends State<SessionListBody> {
+  final TextEditingController _search = TextEditingController();
+  String _query = '';
+  _SessionView _view = _SessionView.all;
+
+  @override
+  void dispose() {
+    _search.dispose();
+    super.dispose();
+  }
+
+  void _setQuery(String value) => setState(() => _query = value.trim());
+
+  @override
   Widget build(BuildContext context) {
     final workspace = WorkspaceScope.of(context)!;
     return ListenableBuilder(
@@ -35,22 +59,153 @@ class SessionListBody extends StatelessWidget {
       builder: (context, _) {
         final servers = workspace.servers;
         final multi = servers.length > 1;
-        return RefreshIndicator(
-          onRefresh: workspace.refreshAll,
-          child: ListView(
-            children: [
-              for (final store in servers)
-                _ServerSection(
-                  store: store,
-                  showHeader: multi,
-                  selectedId: selectedId,
-                  onSelect: onSelect,
-                ),
-            ],
-          ),
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _buildHeader(),
+            Expanded(
+              child: RefreshIndicator(
+                onRefresh: workspace.refreshAll,
+                child: _view == _SessionView.recent
+                    ? _buildRecent(context, servers)
+                    : _buildAll(servers, multi),
+              ),
+            ),
+          ],
         );
       },
     );
+  }
+
+  Widget _buildHeader() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+      child: Column(
+        children: [
+          TextField(
+            controller: _search,
+            onChanged: _setQuery,
+            textInputAction: TextInputAction.search,
+            decoration: InputDecoration(
+              isDense: true,
+              prefixIcon: const Icon(Icons.search),
+              hintText: 'Search sessions',
+              border: const OutlineInputBorder(),
+              suffixIcon: _search.text.isEmpty
+                  ? null
+                  : IconButton(
+                      icon: const Icon(Icons.clear),
+                      tooltip: 'Clear',
+                      onPressed: () {
+                        _search.clear();
+                        _setQuery('');
+                      },
+                    ),
+            ),
+          ),
+          const SizedBox(height: 8),
+          SizedBox(
+            width: double.infinity,
+            child: SegmentedButton<_SessionView>(
+              showSelectedIcon: false,
+              segments: const [
+                ButtonSegment(
+                  value: _SessionView.all,
+                  label: Text('All'),
+                  icon: Icon(Icons.list),
+                ),
+                ButtonSegment(
+                  value: _SessionView.recent,
+                  label: Text('Recent'),
+                  icon: Icon(Icons.history),
+                ),
+              ],
+              selected: {_view},
+              onSelectionChanged: (s) => setState(() => _view = s.first),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAll(List<CommanderStore> servers, bool multi) {
+    return ListView(
+      children: [
+        for (final store in servers)
+          _ServerSection(
+            store: store,
+            showHeader: multi,
+            selectedId: widget.selectedId,
+            onSelect: widget.onSelect,
+            query: _query,
+          ),
+      ],
+    );
+  }
+
+  /// The Recent tab: every server's sessions flattened to (store, session)
+  /// pairs, attached-only, newest-attach first (the TUI's MRU order). A live
+  /// query filters that set by fuzzy score, ranking best matches first while
+  /// keeping recency as the stable tie-break.
+  ///
+  /// Unlike the TUI's pinned recents block (capped at `recent_sessions_limit`),
+  /// a dedicated tab shows *all* attached sessions — the cap is intentionally
+  /// omitted here.
+  Widget _buildRecent(BuildContext context, List<CommanderStore> servers) {
+    var pairs = <(CommanderStore, SessionInfo)>[
+      for (final store in servers)
+        for (final s in store.sessions) (store, s),
+    ];
+    pairs = mostRecent(pairs, (p) => p.$2.lastAttachedAt);
+    if (_query.isNotEmpty) {
+      pairs = rankByScore(pairs, (p) => sessionFuzzyScore(p.$2, _query));
+    }
+
+    if (pairs.isEmpty) {
+      return ListView(children: [_recentEmptyState(context, servers)]);
+    }
+    return ListView(
+      children: [
+        for (final (store, session) in pairs)
+          _SessionTile(
+            session: session,
+            selected: session.id == widget.selectedId,
+            onTap: () => widget.onSelect(store, session),
+          ),
+      ],
+    );
+  }
+
+  /// What to show when the flattened recent list is empty. A bare "No recent
+  /// sessions" would hide a server that is merely still connecting or down, so
+  /// mirror All mode: surface a spinner while any server is loading and an
+  /// error+Retry when one has failed, before falling back to the empty note.
+  Widget _recentEmptyState(BuildContext context, List<CommanderStore> servers) {
+    // Loading/error take priority over the query notes, so typing while the
+    // only server is still connecting shows the spinner (as All mode does),
+    // not a misleading "No matches".
+    final loading = servers.any((s) => s.workspace == null && s.error == null);
+    if (loading) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 24),
+        child: Center(child: CircularProgressIndicator()),
+      );
+    }
+    final failed = servers.where((s) => s.error != null).toList();
+    if (failed.isNotEmpty) {
+      final store = failed.first;
+      return _InlineNote(
+        icon: Icons.cloud_off,
+        text: store.error.toString(),
+        action: ('Retry', store.retry),
+        color: Theme.of(context).colorScheme.error,
+      );
+    }
+    if (_query.isNotEmpty) {
+      return const _InlineNote(icon: Icons.search_off, text: 'No matches');
+    }
+    return const _InlineNote(icon: Icons.history, text: 'No recent sessions');
   }
 }
 
@@ -63,11 +218,16 @@ class _ServerSection extends StatelessWidget {
   final String? selectedId;
   final void Function(CommanderStore store, SessionInfo session) onSelect;
 
+  /// The active search query. Empty shows the full grouped list; otherwise each
+  /// group is fuzzy-filtered and emptied groups drop out.
+  final String query;
+
   const _ServerSection({
     required this.store,
     required this.showHeader,
     required this.selectedId,
     required this.onSelect,
+    required this.query,
   });
 
   @override
@@ -109,14 +269,20 @@ class _ServerSection extends StatelessWidget {
         ),
       ];
     }
-    final groups = [
-      for (final g in store.sessionsByProject)
-        if (g.sessions.isNotEmpty) g,
-    ];
+    final groups = <ProjectSessions>[];
+    for (final g in store.sessionsByProject) {
+      final sessions = matchingSessions(g.sessions, query);
+      if (sessions.isNotEmpty) {
+        groups.add(ProjectSessions(project: g.project, sessions: sessions));
+      }
+    }
     return [
       if (store.cascadePaused != null) const CascadeBanner(),
       if (groups.isEmpty)
-        const _InlineNote(icon: Icons.inbox_outlined, text: 'No sessions')
+        _InlineNote(
+          icon: query.isEmpty ? Icons.inbox_outlined : Icons.search_off,
+          text: query.isEmpty ? 'No sessions' : 'No matches',
+        )
       else
         for (final group in groups) ...[
           _ProjectHeader(name: group.project.name),
@@ -242,17 +408,15 @@ Future<void> openCreateSession(
   final store = await pickServer(context, workspace, title: 'Create on…');
   if (store == null || store.handle == null || !context.mounted) return;
   await Navigator.of(context).push<String>(
-    MaterialPageRoute(
-      builder: (_) => CreateSessionPage(store: store),
-    ),
+    MaterialPageRoute(builder: (_) => CreateSessionPage(store: store)),
   );
 }
 
 /// Push the servers manager (add/edit/remove).
 void openServers(BuildContext context, WorkspaceStore workspace) {
-  Navigator.of(context).push(
-    MaterialPageRoute(builder: (_) => ServersPage(workspace: workspace)),
-  );
+  Navigator.of(
+    context,
+  ).push(MaterialPageRoute(builder: (_) => ServersPage(workspace: workspace)));
 }
 
 /// Push the program-list editor for a chosen server (`PUT /api/config/programs`).
@@ -264,7 +428,9 @@ Future<void> openPrograms(
   final handle = store?.handle;
   if (store == null || handle == null || !context.mounted) return;
   Navigator.of(context).push(
-    MaterialPageRoute(builder: (_) => ProgramsPage(api: store.api, handle: handle)),
+    MaterialPageRoute(
+      builder: (_) => ProgramsPage(api: store.api, handle: handle),
+    ),
   );
 }
 
@@ -275,9 +441,9 @@ Future<void> openProjects(
 ) async {
   final store = await pickServer(context, workspace, title: 'Projects on…');
   if (store == null || store.handle == null || !context.mounted) return;
-  Navigator.of(context).push(
-    MaterialPageRoute(builder: (_) => ProjectsPage(store: store)),
-  );
+  Navigator.of(
+    context,
+  ).push(MaterialPageRoute(builder: (_) => ProjectsPage(store: store)));
 }
 
 /// True when at least one server has a live handle (per-server actions need one).
@@ -419,7 +585,10 @@ class _CascadeBannerState extends State<CascadeBanner> {
           children: [
             Row(
               children: [
-                Icon(Icons.pause_circle_outline, color: scheme.onTertiaryContainer),
+                Icon(
+                  Icons.pause_circle_outline,
+                  color: scheme.onTertiaryContainer,
+                ),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
@@ -467,11 +636,7 @@ class _ServerHeader extends StatelessWidget {
     final conn = store.connection;
     final (color, note, degraded) = switch (conn.kind) {
       ConnectionStateKind.connected => (Colors.green, null, false),
-      ConnectionStateKind.connecting => (
-        scheme.tertiary,
-        'connecting…',
-        false,
-      ),
+      ConnectionStateKind.connecting => (scheme.tertiary, 'connecting…', false),
       ConnectionStateKind.degraded => (
         scheme.error,
         conn.reason.isEmpty ? 'degraded' : conn.reason,
@@ -506,7 +671,9 @@ class _ServerHeader extends StatelessWidget {
                 note,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.labelSmall?.copyWith(color: color),
+                style: Theme.of(
+                  context,
+                ).textTheme.labelSmall?.copyWith(color: color),
               ),
             ),
           ],
