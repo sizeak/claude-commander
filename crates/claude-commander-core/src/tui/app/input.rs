@@ -443,7 +443,7 @@ impl App {
                                 // A double-click on the same body row selects that
                                 // line and opens its comment box (like right-click);
                                 // a single click just positions the cursor.
-                                use super::selection::DOUBLE_CLICK_WINDOW;
+                                use crate::tui::list_nav::DOUBLE_CLICK_WINDOW;
                                 let now = Instant::now();
                                 let is_double = matches!(
                                     self.ui_state.review_last_click,
@@ -855,7 +855,7 @@ impl App {
     /// same row within [`DOUBLE_CLICK_WINDOW`] act as `UserCommand::Select`
     /// (attach for sessions, toggle for section headers).
     async fn handle_left_click(&mut self, col: u16, row: u16) {
-        use super::selection::DOUBLE_CLICK_WINDOW;
+        use crate::tui::list_nav::DOUBLE_CLICK_WINDOW;
 
         // Status-bar action buttons sit outside the list. A hit dispatches the
         // bound command — behaving exactly like the keypress — and consumes the
@@ -926,8 +926,7 @@ impl App {
     /// second click on the same row within [`DOUBLE_CLICK_WINDOW`] activates
     /// it, exactly as Enter would. Clicks anywhere else are ignored.
     pub(super) async fn handle_modal_list_click(&mut self, col: u16, row: u16) {
-        use super::modals::modal_list_index_at;
-        use super::selection::DOUBLE_CLICK_WINDOW;
+        use crate::tui::list_nav::{DOUBLE_CLICK_WINDOW, list_index_at};
 
         let Some(rows) = self.ui_state.modal_list_rect else {
             return;
@@ -938,21 +937,20 @@ impl App {
                 selected_idx,
                 scroll,
                 ..
-            } => modal_list_index_at(col, row, rows, *scroll, matches.len())
+            } => list_index_at(col, row, rows, *scroll, matches.len())
                 .inspect(|&idx| *selected_idx = idx),
             Modal::CheckoutBranch {
                 filtered,
                 selected_idx,
                 scroll,
                 ..
-            } => modal_list_index_at(col, row, rows, *scroll, filtered.len())
+            } => list_index_at(col, row, rows, *scroll, filtered.len())
                 .inspect(|&idx| *selected_idx = idx),
             Modal::PathInput {
                 completer, scroll, ..
             } => {
                 let len = completer.visible_completions().0.len();
-                modal_list_index_at(col, row, rows, *scroll, len)
-                    .inspect(|&idx| completer.select(idx))
+                list_index_at(col, row, rows, *scroll, len).inspect(|&idx| completer.select(idx))
             }
             _ => return,
         };
@@ -1130,7 +1128,8 @@ impl App {
     /// content. Other modals swallow the event so the panes underneath
     /// don't scroll while covered.
     fn modal_wheel(&mut self, down: bool) {
-        use super::actions::{LIST_MAX_VISIBLE, adjust_list_scroll, wheel_step};
+        use super::actions::{LIST_MAX_VISIBLE, adjust_list_scroll};
+        use crate::tui::list_nav::wheel_step;
         match &mut self.ui_state.modal {
             Modal::QuickSwitch {
                 matches,

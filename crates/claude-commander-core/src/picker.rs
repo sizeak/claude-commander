@@ -9,9 +9,13 @@
 
 use std::io::{self, Stdout};
 use std::path::Path;
+use std::time::Instant;
 
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseButton, MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -29,6 +33,7 @@ use chrono::{DateTime, Utc};
 use crate::config::AppState;
 use crate::error::{Result, TuiError};
 use crate::session::{SessionStatus, display_branch};
+use crate::tui::list_nav::{DOUBLE_CLICK_WINDOW, list_index_at, wheel_step};
 
 struct Match {
     tmux_name: String,
@@ -98,14 +103,15 @@ pub fn run_session_picker(out_path: &Path, current: Option<&str>) -> Result<()> 
 
     enable_raw_mode().map_err(|e| TuiError::InitFailed(e.to_string()))?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen).map_err(|e| TuiError::InitFailed(e.to_string()))?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)
+        .map_err(|e| TuiError::InitFailed(e.to_string()))?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend).map_err(|e| TuiError::InitFailed(e.to_string()))?;
 
     let result = run_loop(&mut terminal, &state, current);
 
     let _ = disable_raw_mode();
-    let _ = execute!(io::stdout(), LeaveAlternateScreen);
+    let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture);
     let _ = terminal.show_cursor();
 
     if let Some(tmux_name) = result? {
@@ -115,63 +121,167 @@ pub fn run_session_picker(out_path: &Path, current: Option<&str>) -> Result<()> 
     Ok(())
 }
 
+/// Mutable picker UI state threaded through [`handle_event`]. `scroll` is
+/// updated by `draw` (to keep the highlight visible) and read back when
+/// mapping a click position to a list row.
+struct PickerUi {
+    query: String,
+    selected_idx: usize,
+    scroll: usize,
+    /// Last clicked row and when, for double-click detection. Cleared on
+    /// any keystroke or non-row click, since those invalidate the pending
+    /// first click (same convention as the in-tree list modals).
+    last_click: Option<(usize, Instant)>,
+}
+
+/// What the event loop should do after an input event.
+#[derive(Debug, PartialEq, Eq)]
+enum Verdict {
+    Continue,
+    Cancel,
+    /// Return the match at this index as the pick.
+    Pick(usize),
+}
+
 fn run_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     state: &AppState,
     current: Option<&str>,
 ) -> Result<Option<String>> {
-    let mut query = String::new();
-    let mut selected_idx: usize = 0;
-    let mut scroll: usize = 0;
+    let mut ui = PickerUi {
+        query: String::new(),
+        selected_idx: 0,
+        scroll: 0,
+        last_click: None,
+    };
 
     loop {
-        let matches = gather_matches(state, &query, current);
-        if selected_idx >= matches.len() {
-            selected_idx = matches.len().saturating_sub(1);
+        let matches = gather_matches(state, &ui.query, current);
+        if ui.selected_idx >= matches.len() {
+            ui.selected_idx = matches.len().saturating_sub(1);
         }
 
         terminal
-            .draw(|f| draw(f, &query, &matches, selected_idx, &mut scroll))
+            .draw(|f| draw(f, &ui.query, &matches, ui.selected_idx, &mut ui.scroll))
             .map_err(|e| TuiError::InitFailed(e.to_string()))?;
 
-        let Event::Key(key) = event::read().map_err(|e| TuiError::InitFailed(e.to_string()))?
-        else {
-            continue;
-        };
-        if key.kind != KeyEventKind::Press {
-            continue;
-        }
-        match (key.code, key.modifiers) {
-            (KeyCode::Esc, _) => return Ok(None),
-            (KeyCode::Char('c' | 'g'), KeyModifiers::CONTROL) => return Ok(None),
-            (KeyCode::Enter, _) => {
-                if let Some(m) = matches.get(selected_idx) {
+        let area = terminal
+            .size()
+            .map(|s| Rect::new(0, 0, s.width, s.height))
+            .map_err(|e| TuiError::InitFailed(e.to_string()))?;
+        let ev = event::read().map_err(|e| TuiError::InitFailed(e.to_string()))?;
+        match handle_event(&mut ui, &ev, matches.len(), area, Instant::now()) {
+            Verdict::Continue => {}
+            Verdict::Cancel => return Ok(None),
+            Verdict::Pick(idx) => {
+                if let Some(m) = matches.get(idx) {
                     return Ok(Some(m.tmux_name.clone()));
                 }
             }
-            (KeyCode::Up, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
-                selected_idx = selected_idx.saturating_sub(1);
-            }
-            (KeyCode::Down, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL)
-                if selected_idx + 1 < matches.len() =>
-            {
-                selected_idx += 1;
-            }
-            (KeyCode::Backspace, _) => {
-                query.pop();
-                selected_idx = 0;
-                scroll = 0;
-            }
-            (KeyCode::Char(c), m)
-                if !m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) =>
-            {
-                query.push(c);
-                selected_idx = 0;
-                scroll = 0;
-            }
-            _ => {}
         }
     }
+}
+
+/// Advance the picker state by one input event. Pure with respect to the
+/// terminal so key and mouse behaviour can be unit-tested: `area` is the
+/// full popup area (as last drawn), `now` the event's arrival time.
+fn handle_event(
+    ui: &mut PickerUi,
+    ev: &Event,
+    n_matches: usize,
+    area: Rect,
+    now: Instant,
+) -> Verdict {
+    match ev {
+        Event::Key(key) => {
+            if key.kind != KeyEventKind::Press {
+                return Verdict::Continue;
+            }
+            ui.last_click = None;
+            match (key.code, key.modifiers) {
+                (KeyCode::Esc, _) => Verdict::Cancel,
+                (KeyCode::Char('c' | 'g'), KeyModifiers::CONTROL) => Verdict::Cancel,
+                (KeyCode::Enter, _) if n_matches > 0 => Verdict::Pick(ui.selected_idx),
+                (KeyCode::Up, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
+                    ui.selected_idx = ui.selected_idx.saturating_sub(1);
+                    Verdict::Continue
+                }
+                (KeyCode::Down, _) | (KeyCode::Char('n'), KeyModifiers::CONTROL)
+                    if ui.selected_idx + 1 < n_matches =>
+                {
+                    ui.selected_idx += 1;
+                    Verdict::Continue
+                }
+                (KeyCode::Backspace, _) => {
+                    ui.query.pop();
+                    ui.selected_idx = 0;
+                    ui.scroll = 0;
+                    Verdict::Continue
+                }
+                (KeyCode::Char(c), m)
+                    if !m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) =>
+                {
+                    ui.query.push(c);
+                    ui.selected_idx = 0;
+                    ui.scroll = 0;
+                    Verdict::Continue
+                }
+                _ => Verdict::Continue,
+            }
+        }
+        Event::Mouse(mouse) => match mouse.kind {
+            // Wheel moves the highlight, clamping at the ends; `draw`
+            // adjusts `scroll` to keep it visible (same semantics as the
+            // in-tree quick-switch palette).
+            MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if n_matches > 0 => {
+                let down = mouse.kind == MouseEventKind::ScrollDown;
+                ui.selected_idx = wheel_step(ui.selected_idx, down, n_matches);
+                Verdict::Continue
+            }
+            // A click highlights the row under the cursor; a second click
+            // on the same row within DOUBLE_CLICK_WINDOW picks it, exactly
+            // as Enter would.
+            MouseEventKind::Down(MouseButton::Left) => {
+                let idx = list_area(area).and_then(|rows| {
+                    list_index_at(mouse.column, mouse.row, rows, ui.scroll, n_matches)
+                });
+                let Some(idx) = idx else {
+                    // The query line or an empty row: any pending
+                    // first-click is stale.
+                    ui.last_click = None;
+                    return Verdict::Continue;
+                };
+                ui.selected_idx = idx;
+                let is_double = matches!(
+                    ui.last_click,
+                    Some((prev_idx, prev_at))
+                        if prev_idx == idx && now.duration_since(prev_at) <= DOUBLE_CLICK_WINDOW
+                );
+                if is_double {
+                    // Consume the click pair so a third click doesn't re-fire.
+                    ui.last_click = None;
+                    Verdict::Pick(idx)
+                } else {
+                    ui.last_click = Some((idx, now));
+                    Verdict::Continue
+                }
+            }
+            _ => Verdict::Continue,
+        },
+        _ => Verdict::Continue,
+    }
+}
+
+/// The rows-only list area beneath the one-line query input, or `None`
+/// when the popup is too short to show any rows. Shared by `draw` and the
+/// click mapping in [`handle_event`] so they can't disagree on geometry.
+fn list_area(area: Rect) -> Option<Rect> {
+    (area.height > 1).then(|| Rect {
+        x: area.x,
+        y: area.y + 1,
+        width: area.width,
+        height: area.height - 1,
+    })
 }
 
 fn draw(
@@ -197,14 +307,8 @@ fn draw(
         input_area,
     );
 
-    if area.height <= 1 {
+    let Some(list_area) = list_area(area) else {
         return;
-    }
-    let list_area = Rect {
-        x: area.x,
-        y: area.y + 1,
-        width: area.width,
-        height: area.height - 1,
     };
     let visible = list_area.height as usize;
     if visible == 0 {
@@ -340,6 +444,231 @@ mod tests {
         let matches = gather_matches(&state, "", Some("cc-bravo-sh"));
         let titles: Vec<&str> = matches.iter().map(|m| m.title.as_str()).collect();
         assert_eq!(titles, vec!["alpha"]);
+    }
+
+    // -- Mouse interaction (parity with the in-tree quick-switch palette) --
+
+    use crossterm::event::{KeyEvent, MouseEvent};
+    use std::time::Duration as StdDuration;
+
+    const AREA: Rect = Rect {
+        x: 0,
+        y: 0,
+        width: 40,
+        height: 6,
+    };
+
+    fn ui() -> PickerUi {
+        PickerUi {
+            query: String::new(),
+            selected_idx: 0,
+            scroll: 0,
+            last_click: None,
+        }
+    }
+
+    fn click(col: u16, row: u16) -> Event {
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    fn wheel(down: bool) -> Event {
+        Event::Mouse(MouseEvent {
+            kind: if down {
+                MouseEventKind::ScrollDown
+            } else {
+                MouseEventKind::ScrollUp
+            },
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    #[test]
+    fn wheel_moves_highlight_and_clamps_at_ends() {
+        let mut ui = ui();
+        let now = Instant::now();
+        assert_eq!(
+            handle_event(&mut ui, &wheel(false), 3, AREA, now),
+            Verdict::Continue
+        );
+        assert_eq!(ui.selected_idx, 0, "wheel up at the top clamps");
+        handle_event(&mut ui, &wheel(true), 3, AREA, now);
+        assert_eq!(ui.selected_idx, 1);
+        handle_event(&mut ui, &wheel(true), 3, AREA, now);
+        handle_event(&mut ui, &wheel(true), 3, AREA, now);
+        assert_eq!(ui.selected_idx, 2, "wheel down at the bottom clamps");
+    }
+
+    #[test]
+    fn single_click_highlights_row_without_picking() {
+        let mut ui = ui();
+        // Row 0 of the list sits at y=1 (the query line is y=0).
+        let verdict = handle_event(&mut ui, &click(5, 3), 5, AREA, Instant::now());
+        assert_eq!(verdict, Verdict::Continue);
+        assert_eq!(ui.selected_idx, 2);
+    }
+
+    #[test]
+    fn click_maps_through_scroll_offset() {
+        let mut ui = ui();
+        ui.scroll = 4;
+        handle_event(&mut ui, &click(5, 2), 10, AREA, Instant::now());
+        assert_eq!(ui.selected_idx, 5);
+    }
+
+    #[test]
+    fn double_click_on_same_row_picks_it() {
+        let mut ui = ui();
+        let t0 = Instant::now();
+        handle_event(&mut ui, &click(5, 3), 5, AREA, t0);
+        let verdict = handle_event(
+            &mut ui,
+            &click(5, 3),
+            5,
+            AREA,
+            t0 + StdDuration::from_millis(100),
+        );
+        assert_eq!(verdict, Verdict::Pick(2));
+    }
+
+    #[test]
+    fn slow_second_click_rehighlights_but_does_not_pick() {
+        let mut ui = ui();
+        let t0 = Instant::now();
+        handle_event(&mut ui, &click(5, 3), 5, AREA, t0);
+        let verdict = handle_event(
+            &mut ui,
+            &click(5, 3),
+            5,
+            AREA,
+            t0 + DOUBLE_CLICK_WINDOW + StdDuration::from_millis(1),
+        );
+        assert_eq!(verdict, Verdict::Continue);
+        assert_eq!(ui.selected_idx, 2);
+    }
+
+    #[test]
+    fn clicks_on_different_rows_do_not_pick() {
+        let mut ui = ui();
+        let t0 = Instant::now();
+        handle_event(&mut ui, &click(5, 3), 5, AREA, t0);
+        let verdict = handle_event(
+            &mut ui,
+            &click(5, 4),
+            5,
+            AREA,
+            t0 + StdDuration::from_millis(100),
+        );
+        assert_eq!(verdict, Verdict::Continue);
+        assert_eq!(ui.selected_idx, 3);
+    }
+
+    #[test]
+    fn click_off_the_list_clears_pending_first_click() {
+        let mut ui = ui();
+        let t0 = Instant::now();
+        handle_event(&mut ui, &click(5, 3), 2, AREA, t0);
+        // Row y=4 maps past the end of the 2-item list: not a row.
+        handle_event(
+            &mut ui,
+            &click(5, 4),
+            2,
+            AREA,
+            t0 + StdDuration::from_millis(50),
+        );
+        let verdict = handle_event(
+            &mut ui,
+            &click(5, 3),
+            2,
+            AREA,
+            t0 + StdDuration::from_millis(100),
+        );
+        assert_eq!(verdict, Verdict::Continue, "pending click was cleared");
+    }
+
+    #[test]
+    fn keystroke_clears_pending_first_click() {
+        let mut ui = ui();
+        let t0 = Instant::now();
+        handle_event(&mut ui, &click(5, 3), 5, AREA, t0);
+        handle_event(
+            &mut ui,
+            &Event::Key(KeyEvent::new(KeyCode::Down, KeyModifiers::NONE)),
+            5,
+            AREA,
+            t0 + StdDuration::from_millis(50),
+        );
+        let verdict = handle_event(
+            &mut ui,
+            &click(5, 3),
+            5,
+            AREA,
+            t0 + StdDuration::from_millis(100),
+        );
+        assert_eq!(verdict, Verdict::Continue, "pending click was cleared");
+    }
+
+    #[test]
+    fn enter_picks_highlighted_row_and_esc_cancels() {
+        let mut ui = ui();
+        ui.selected_idx = 3;
+        let now = Instant::now();
+        assert_eq!(
+            handle_event(
+                &mut ui,
+                &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+                5,
+                AREA,
+                now
+            ),
+            Verdict::Pick(3)
+        );
+        assert_eq!(
+            handle_event(
+                &mut ui,
+                &Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+                5,
+                AREA,
+                now
+            ),
+            Verdict::Cancel
+        );
+    }
+
+    #[test]
+    fn enter_with_no_matches_does_not_pick() {
+        let mut ui = ui();
+        let verdict = handle_event(
+            &mut ui,
+            &Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)),
+            0,
+            AREA,
+            Instant::now(),
+        );
+        assert_eq!(verdict, Verdict::Continue);
+    }
+
+    #[test]
+    fn typing_updates_query_and_resets_selection() {
+        let mut ui = ui();
+        ui.selected_idx = 2;
+        ui.scroll = 1;
+        handle_event(
+            &mut ui,
+            &Event::Key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE)),
+            5,
+            AREA,
+            Instant::now(),
+        );
+        assert_eq!(ui.query, "a");
+        assert_eq!(ui.selected_idx, 0);
+        assert_eq!(ui.scroll, 0);
     }
 
     #[test]
