@@ -39,8 +39,9 @@ dependencies:
   flutter_rust_bridge: 2.11.1
   flutter_secure_storage: ^10.3.1
   uuid: ^4.5.3
-  # Terminal emulator widget for the live PTY view (Phase 3 spike). Pinned to
-  # our fork at the v4.0.0 commit so we can carry local patches.
+  # Terminal emulator widget for the live PTY view. Pinned to our fork's
+  # `commander` branch, which carries local patches on top of upstream v4.0.0
+  # (see pubspec.lock resolved-ref for the exact commit).
   xterm:
     git:
       url: https://github.com/sizeak/xterm.dart.git

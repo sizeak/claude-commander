@@ -576,7 +576,7 @@ packages:
     description:
       path: "."
       ref: commander
-      resolved-ref: "4266ec2e501568f9dc494a88c8e56288db21ad7c"
+      resolved-ref: b326494286b15e19844c5821f7dbdc0231dff8d9
       url: "https://github.com/sizeak/xterm.dart.git"
     source: git
     version: "4.0.0"
