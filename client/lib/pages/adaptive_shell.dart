@@ -229,7 +229,7 @@ class _DetailPaneState extends State<_DetailPane> {
               ButtonSegment(
                 value: _DetailTab.terminal,
                 icon: Icon(Icons.terminal),
-                label: Text('Terminal'),
+                label: Text('Agent'),
               ),
               ButtonSegment(
                 value: _DetailTab.shell,

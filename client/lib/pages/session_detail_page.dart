@@ -497,7 +497,7 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
         OutlinedButton.icon(
           onPressed: () => widget.onOpenTerminal(AttachKind.agent),
           icon: const Icon(Icons.terminal, size: 18),
-          label: const Text('Terminal'),
+          label: const Text('Agent'),
         ),
         OutlinedButton.icon(
           onPressed: () => widget.onOpenTerminal(AttachKind.shell),
