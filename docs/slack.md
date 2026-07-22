@@ -204,10 +204,11 @@ server machine — so it's locked down by design:
     a mode that disables the interactive permission prompt (`bypassPermissions`,
     `acceptEdits`) would let the freshly-created, unattended worker execute an
     attacker-supplied `-i` prompt with no gate. Those modes are rejected; the
-    safe modes (no `--mode`, `default`, `plan`) are allowed. Benign flags
-    (`--effort`, `--model`, `-i`) are **not** restricted, because a default-mode
-    worker still prompts before acting, so they cannot on their own achieve
-    unattended execution.
+    safe modes (no `--mode`, `default`, `plan`) are allowed. Other agent flags
+    (`--effort`, `--model`, `-i`) are **not** restricted: the launch command is
+    run by `/bin/sh -c`, and each folded value is shell-escaped where it is
+    interpolated, so a value cannot inject shell execution. A default-mode
+    worker also still prompts before acting.
 
   Together these mean an injected `new` cannot achieve unattended code execution.
   This does not make the agent untrusted-input-proof in general: allowlisted

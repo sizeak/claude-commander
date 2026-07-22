@@ -911,6 +911,11 @@ impl Config {
     ///   `-i` prompt — arbitrary code execution even though the program is
     ///   benign.
     ///
+    /// Note the launch command becomes a `/bin/sh -c` string, so every folded
+    /// value (`--model`/`--effort`/`-i`/session name) is shell-escaped where it
+    /// is interpolated (see `program_with_agent_flags`); a value cannot inject
+    /// shell execution, which is why they need not be gated here.
+    ///
     /// So when a `new` invocation is known to descend from the headless commander
     /// (detected at the CLI boundary via the inherited
     /// [`crate::commander::headless::PROGRAM_LOCK_ENV`] marker, which the agent can
@@ -923,10 +928,11 @@ impl Config {
     ///   string is rejected with [`SessionError::ProgramNotAllowed`].
     /// - `mode`: `None`, `default` and `plan` keep the permission prompt and are
     ///   allowed; any mode that disables the prompt (`bypassPermissions`,
-    ///   `acceptEdits`) is rejected with [`SessionError::ModeNotAllowed`]. Benign
-    ///   flags (`--effort`, `--model`, `-i`) are *not* gated: a default-mode
-    ///   worker still prompts before executing tool calls, so they cannot on
-    ///   their own achieve unattended execution.
+    ///   `acceptEdits`) is rejected with [`SessionError::ModeNotAllowed`]. Other
+    ///   agent flags (`--effort`, `--model`, `-i`) are *not* gated: they are
+    ///   shell-escaped where they are folded into the launch command (see
+    ///   `program_with_agent_flags`), so they cannot inject shell execution, and
+    ///   a default-mode worker still prompts before executing tool calls.
     ///
     /// Pure over its inputs (no env access) so it is unit-testable; the env marker
     /// is read once at the CLI boundary and its result passed in as the gate.
