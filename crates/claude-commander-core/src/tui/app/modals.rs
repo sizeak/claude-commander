@@ -1143,26 +1143,6 @@ pub(super) fn path_input_areas(area: Rect) -> (Rect, Rect) {
     (modal_area, rows)
 }
 
-/// Map a mouse position to an absolute list index. `rows` is the rows-only
-/// area recorded at render time, `scroll` the index of the first visible
-/// row, `len` the list length. Returns `None` for positions outside `rows`
-/// or on an unpopulated row below the end of the list.
-pub(super) fn modal_list_index_at(
-    col: u16,
-    row: u16,
-    rows: Rect,
-    scroll: usize,
-    len: usize,
-) -> Option<usize> {
-    let inside =
-        col >= rows.x && col < rows.x + rows.width && row >= rows.y && row < rows.y + rows.height;
-    if !inside {
-        return None;
-    }
-    let idx = scroll + (row - rows.y) as usize;
-    (idx < len).then_some(idx)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{ActiveCursor, build_input_modal_lines};

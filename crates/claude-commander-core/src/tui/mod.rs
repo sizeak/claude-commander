@@ -10,6 +10,7 @@ mod app;
 mod digit_accumulator;
 mod event;
 pub mod hotkey;
+pub(crate) mod list_nav;
 mod path_completer;
 mod prefs;
 mod syntax_highlight;

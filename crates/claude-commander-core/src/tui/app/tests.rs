@@ -1480,9 +1480,7 @@ async fn apply_section_move_keeps_moved_session_selected() {
 // List-modal mouse support: geometry, row mapping, click state machine
 // ---------------------------------------------------------------------------
 
-use super::modals::{
-    checkout_branch_areas, modal_list_index_at, path_input_areas, quick_switch_areas,
-};
+use super::modals::{checkout_branch_areas, path_input_areas, quick_switch_areas};
 
 #[test]
 fn quick_switch_rows_area_sits_below_input_line() {
@@ -1525,40 +1523,6 @@ fn path_input_rows_area_uses_fixed_window() {
     assert_eq!(modal.height, 16);
     assert_eq!(rows.y, modal.y + 4); // border + 3-row prompt/input block
     assert_eq!(rows.height, super::actions::LIST_MAX_VISIBLE as u16);
-}
-
-#[test]
-fn modal_list_index_at_maps_rows_within_bounds() {
-    let rows = Rect::new(20, 12, 58, 5);
-    assert_eq!(modal_list_index_at(20, 12, rows, 0, 10), Some(0));
-    assert_eq!(modal_list_index_at(77, 16, rows, 0, 10), Some(4));
-    // Left/right of the rows area, the input line above, below the window.
-    assert_eq!(modal_list_index_at(19, 12, rows, 0, 10), None);
-    assert_eq!(modal_list_index_at(78, 12, rows, 0, 10), None);
-    assert_eq!(modal_list_index_at(20, 11, rows, 0, 10), None);
-    assert_eq!(modal_list_index_at(20, 17, rows, 0, 10), None);
-}
-
-#[test]
-fn modal_list_index_at_applies_scroll_offset() {
-    let rows = Rect::new(20, 12, 58, 5);
-    assert_eq!(modal_list_index_at(20, 13, rows, 3, 10), Some(4));
-}
-
-#[test]
-fn modal_list_index_at_rejects_rows_past_end_of_list() {
-    let rows = Rect::new(20, 12, 58, 5);
-    assert_eq!(modal_list_index_at(20, 14, rows, 0, 2), None);
-    assert_eq!(modal_list_index_at(20, 12, rows, 0, 0), None);
-}
-
-#[test]
-fn wheel_step_moves_one_row_and_clamps_at_ends() {
-    use super::actions::wheel_step;
-    assert_eq!(wheel_step(0, false, 5), 0);
-    assert_eq!(wheel_step(2, false, 5), 1);
-    assert_eq!(wheel_step(2, true, 5), 3);
-    assert_eq!(wheel_step(4, true, 5), 4);
 }
 
 /// App with an open section-picker palette of `n_items` rows and the rows

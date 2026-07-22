@@ -2,10 +2,6 @@
 
 use super::*;
 
-/// Maximum delay between two same-row left clicks for them to count as a
-/// double-click that triggers `UserCommand::Select`.
-pub(super) const DOUBLE_CLICK_WINDOW: Duration = Duration::from_millis(400);
-
 /// The identifying bits copied out of the selected list row, so the item's
 /// immutable borrow of `list_items` ends before we resolve the owning backend
 /// and mutate the selection fields.
