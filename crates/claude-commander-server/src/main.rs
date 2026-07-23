@@ -4,6 +4,7 @@
 use std::net::SocketAddr;
 
 use clap::Parser;
+use claude_commander_core::ServerInfo;
 use claude_commander_core::api::{BackgroundOpts, CommanderService};
 use claude_commander_core::telemetry::FrontendInfo;
 use tracing::{info, warn};
@@ -123,6 +124,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
     let auth = resolve_auth(&cfg, cli.allow_no_auth);
+    // The bearer clients must present, or None when auth is disabled — recorded
+    // in the runtime info file below so a local CLI can reach this server.
+    let info_token = match &auth {
+        AuthConfig::Token(token) => Some(token.clone()),
+        AuthConfig::Disabled => None,
+    };
 
     if cli.tls {
         warn!("--tls requested; TLS support requires the `tls` build feature (not yet wired)");
@@ -130,7 +137,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = claude_commander_core::Config::load()?;
     let commander_enabled = config.commander_enabled;
+    // The headless commander (and its warm pool) is gated by `[slack]` config,
+    // independent of the interactive `commander_enabled` gate. The warm pool
+    // primes processes ahead of the streaming `/api/commander/ask` route, and
+    // the Socket Mode bridge turns `@commander` mentions/DMs into headless turns.
+    let slack_enabled = config.slack.is_enabled();
     let service = CommanderService::for_cli(config, frontend())?;
+    // The Slack bridge and the notify route share one Web API client (the server
+    // owns the only Slack credentials); `spawn_bridge` returns it so the route
+    // can post through it. `None` when Slack is disabled → notify replies 503.
+    let slack_api = if slack_enabled {
+        service.start_commander_warm_pool();
+        let slack_config = service.read_config();
+        claude_commander_server::slack::spawn_bridge(service.clone(), &slack_config)
+    } else {
+        None
+    };
     // Drive the same background loops the local TUI runs (agent-state polling,
     // PR-status checks, project auto-pull, state-sync) so remote clients see live
     // data via `/workspace` + `/agent-states` polls. Handles run for the process
@@ -141,13 +163,58 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // as the TUI does. Without this a server-only deployment — the many-idle-
     // sessions case hibernation targets — would never hibernate.
     service.start_hibernation_loop();
-    let state = AppState::new(service, auth).with_cors(cfg.cors_allowed_origins.clone());
+    let state = AppState::new(service, auth)
+        .with_cors(cfg.cors_allowed_origins.clone())
+        .with_slack(slack_api);
     let app = build_router(state);
 
     let addr = SocketAddr::new(cfg.bind, cfg.port);
     let listener = tokio::net::TcpListener::bind(addr).await?;
     info!("claude-commander-server listening on http://{addr}");
 
-    axum::serve(listener, app).await?;
+    // Advertise this server to local CLIs via a runtime info file in the data
+    // dir (best-effort: a write failure must not stop the server serving).
+    let data_dir = claude_commander_core::Config::data_dir()?;
+    let server_info = ServerInfo::new(format!("http://{addr}"), info_token);
+    if let Err(e) = server_info.write_to(&data_dir) {
+        warn!("could not write server runtime info file: {e}");
+    }
+
+    let serve_result = axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await;
+
+    // Clean-shutdown cleanup: remove the info file so a stale entry doesn't
+    // outlive the process. Best-effort — a killed process leaves it behind, and
+    // the reader tolerates an unreachable server.
+    ServerInfo::remove_from(&data_dir);
+    serve_result?;
     Ok(())
+}
+
+/// Resolve once either SIGINT (Ctrl-C) or, on Unix, SIGTERM is received, so
+/// `axum`'s graceful shutdown drains in-flight requests and control returns to
+/// `main` for info-file cleanup.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
 }

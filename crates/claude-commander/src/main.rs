@@ -479,8 +479,53 @@ async fn main() -> Result<()> {
             base_branch,
             section,
             remote,
+            slack_channel,
+            slack_thread_ts,
+            slack_permalink,
         }) => {
             setup_logging(cli.debug, false)?;
+
+            // A `claude-commander new` that descends from the headless Slack
+            // commander (marked by an inherited env var the agent can neither
+            // forge nor strip — see `commander::headless::PROGRAM_LOCK_ENV`) may
+            // only launch a program the server has configured AND may not disable
+            // the interactive permission prompt via `--mode`. This rejects an
+            // injected `--program "bash -lc '<payload>'"` or a
+            // `--mode bypassPermissions`/`acceptEdits` before any session is
+            // created, closing the RCE path. Read the marker once here at the CLI
+            // boundary (env is process-global; keeping it out of the library fn
+            // keeps that fn pure and testable) and enforce via the library.
+            //
+            // Note: with `--remote`, this validates against the LOCAL config's
+            // program list, which may differ from the remote server's. That only
+            // ever over-rejects (fails closed) — a program the remote allows but
+            // the local config doesn't is refused — so it's a safety edge, never
+            // a bypass. The headless agent's create path is local anyway.
+            let program_locked =
+                std::env::var(claude_commander_core::commander::headless::PROGRAM_LOCK_ENV)
+                    .as_deref()
+                    == Ok("1");
+            if program_locked
+                && let Err(e) =
+                    config.ensure_slack_create_allowed(program.as_deref(), mode.as_deref())
+            {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+
+            // clap's `requires` guarantees channel + thread-ts are all-or-none
+            // and permalink implies both, so a present channel means a full
+            // origin (permalink optional).
+            let slack_origin = match (slack_channel, slack_thread_ts) {
+                (Some(channel), Some(thread_ts)) => {
+                    Some(claude_commander_core::session::SlackOrigin {
+                        channel,
+                        thread_ts,
+                        permalink: slack_permalink.unwrap_or_default(),
+                    })
+                }
+                _ => None,
+            };
 
             let backend = resolve_cli_backend(config, remote.as_deref())?;
 
@@ -522,6 +567,7 @@ async fn main() -> Result<()> {
                     base_branch,
                     section,
                     stack_parent: None,
+                    slack_origin,
                 })
                 .await
             {
@@ -613,6 +659,47 @@ async fn main() -> Result<()> {
                     std::process::exit(1);
                 }
                 Err(e) => return Err(e.into()),
+            }
+        }
+
+        Some(Commands::Slack { command }) => {
+            setup_logging(cli.debug, false)?;
+
+            match command {
+                claude_commander_core::cli_args::SlackCommands::Notify { session, message } => {
+                    // Message: the flag, else stdin to EOF (the worker pipes it).
+                    let message = match message {
+                        Some(m) => m,
+                        None => {
+                            let mut buf = String::new();
+                            std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+                            buf.trim_end().to_string()
+                        }
+                    };
+
+                    // Session resolution + server discovery live in the library
+                    // so they're unit-tested; main.rs only wires IO + transport.
+                    let app_state = AppState::load_or_exit();
+                    let data_dir = Config::data_dir()?;
+                    let cwd = std::env::current_dir().unwrap_or_default();
+                    let (info, req) = match claude_commander_core::slack_notify::prepare_notify(
+                        &app_state, &data_dir, session, message, &cwd,
+                    ) {
+                        Ok(prepared) => prepared,
+                        Err(e) => {
+                            eprintln!("{e}");
+                            std::process::exit(1);
+                        }
+                    };
+
+                    match claude_commander_remote::slack_notify(&info, &req).await {
+                        Ok(()) => println!("Message relayed to Slack."),
+                        Err(e) => {
+                            eprintln!("slack notify failed: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
             }
         }
 

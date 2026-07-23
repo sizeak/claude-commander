@@ -13,7 +13,9 @@ use serde::{Deserialize, Serialize};
 // `claude-commander-protocol` crate (`Serialize + Deserialize`, mobile-safe).
 // Re-exported here so `crate::session::{SessionId, SessionStatus, ...}` paths
 // and the `WorktreeSession`/`Project` model below keep working unchanged.
-pub use claude_commander_protocol::session::{AgentState, ProjectId, SessionId, SessionStatus};
+pub use claude_commander_protocol::session::{
+    AgentState, ProjectId, SessionId, SessionStatus, SlackOrigin,
+};
 
 /// Project represents a git repository (parent session)
 ///
@@ -185,6 +187,13 @@ pub struct WorktreeSession {
     /// recreated.
     #[serde(default)]
     pub hibernated: bool,
+    /// Where this session was created from Slack, when the Slack bridge created
+    /// it. Recorded so the notify path can route a worker's message back to the
+    /// originating thread. `#[serde(default, skip_serializing_if)]` keeps old
+    /// `state.json` files (and older binaries writing them back) round-tripping
+    /// safely — repair-on-read, no version gating.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slack_origin: Option<SlackOrigin>,
 }
 
 impl WorktreeSession {
@@ -234,6 +243,7 @@ impl WorktreeSession {
             last_attached_at: None,
             keep_alive: false,
             hibernated: false,
+            slack_origin: None,
         }
     }
 
@@ -283,6 +293,7 @@ impl WorktreeSession {
             last_attached_at: None,
             keep_alive: false,
             hibernated: false,
+            slack_origin: None,
         }
     }
 
@@ -1265,6 +1276,40 @@ mod tests {
         // Hibernation fields must default for pre-feature state.json files.
         assert!(!s.keep_alive);
         assert!(!s.hibernated);
+        // Old state.json files predate the Slack origin field.
+        assert!(s.slack_origin.is_none());
+    }
+
+    #[test]
+    fn serde_round_trip_slack_origin_persists_and_elides_when_absent() {
+        let mut s = WorktreeSession::new(
+            ProjectId::new(),
+            "t",
+            "b",
+            PathBuf::from("/tmp/wt"),
+            "claude",
+        );
+
+        // Absent → elided from the serialized state.json form.
+        let json = serde_json::to_string(&s).unwrap();
+        assert!(
+            !json.contains("slack_origin"),
+            "slack_origin must be elided when None"
+        );
+
+        // Present → round-trips.
+        s.slack_origin = Some(SlackOrigin {
+            channel: "C0AR48X88L9".to_string(),
+            thread_ts: "1700000000.000100".to_string(),
+            permalink: "https://slack.example/archives/C0AR48X88L9/p1700000000000100".to_string(),
+        });
+        let json = serde_json::to_string(&s).unwrap();
+        let back: WorktreeSession = serde_json::from_str(&json).unwrap();
+        let origin = back
+            .slack_origin
+            .expect("slack_origin must survive round-trip");
+        assert_eq!(origin.channel, "C0AR48X88L9");
+        assert!(origin.permalink.contains("C0AR48X88L9"));
     }
 
     #[test]
@@ -1418,6 +1463,7 @@ mod session_info_stack_node_tests {
             keep_alive: false,
             worktree_path: String::new(),
             tmux_session_name: String::new(),
+            slack_origin: None,
         }
     }
 

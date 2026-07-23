@@ -35,7 +35,10 @@ pub mod git;
 pub mod paste_image;
 pub mod picker;
 pub mod reviewed;
+pub mod server_info;
 pub mod session;
+pub mod slack_notify;
+pub mod stream_json;
 pub mod telemetry;
 pub mod tmux;
 pub mod tui;
@@ -43,6 +46,7 @@ pub mod tui;
 pub use config::keybindings::editor_trigger_bytes;
 pub use config::{AppState, Config, StateStore};
 pub use error::{Error, Result};
+pub use server_info::ServerInfo;
 pub use session::{
     AgentState, Project, ProjectId, SessionId, SessionListItem, SessionStatus, WorktreeSession,
 };

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::config::keybindings::KeyBindings;
 use crate::config::migrations;
 use crate::config::theme::ThemeOverrides;
-use crate::error::{ConfigError, Error, Result};
+use crate::error::{ConfigError, Error, Result, SessionError};
 
 /// A selectable agent harness in the new-session program picker: a display
 /// `label` paired with the `command` to launch (program plus any flags).
@@ -336,6 +336,11 @@ pub struct Config {
     #[serde(default)]
     pub telemetry: TelemetryConfig,
 
+    /// Slack-integration settings (`[slack]` table). Disabled unless both tokens
+    /// are set and an allowlist is configured — see [`SlackConfig::is_enabled`].
+    #[serde(default)]
+    pub slack: SlackConfig,
+
     /// Remote `claude-commander-server` instances the TUI drives alongside the
     /// local backend. Each entry becomes a per-server node in the session tree,
     /// in declared order after the always-present local backend. Empty by
@@ -503,6 +508,95 @@ impl Default for TelemetryConfig {
     }
 }
 
+/// Slack-integration settings (`[slack]` table).
+///
+/// Off unless [`SlackConfig::is_enabled`] — both tokens set and at least one
+/// allowlisted user. The two tokens are secrets: they are stripped by
+/// [`Config::with_secrets_redacted`] before the config is served over the wire,
+/// and the hand-written `Debug` impl redacts them so an accidental `{:?}` on the
+/// enclosing [`Config`] can't leak them.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SlackConfig {
+    /// Socket Mode app-level token (`xapp-…`). Required to connect the bridge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_token: Option<String>,
+
+    /// Bot user OAuth token (`xoxb-…`). Required for Web API calls
+    /// (post message, add reaction, open DM, fetch thread).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot_token: Option<String>,
+
+    /// Slack user ids permitted to invoke the bridge (`@commander` mentions and
+    /// DMs). Anyone not listed is ignored. The feature stays disabled while this
+    /// is empty, so a misconfigured token pair can't accidentally accept
+    /// everyone.
+    #[serde(default)]
+    pub allowed_user_ids: Vec<String>,
+
+    /// Hard cap in seconds on a single headless invocation before it is killed
+    /// (then retried once with a "be brief" nudge). Default 300 (5 min).
+    #[serde(default = "default_slack_invocation_timeout_secs")]
+    pub invocation_timeout_secs: u64,
+
+    /// How long in seconds a headless process lingers after replying, ready for
+    /// an instant follow-up in the same thread, before it is reaped. Default 300
+    /// (5 min).
+    #[serde(default = "default_slack_linger_secs")]
+    pub linger_secs: u64,
+
+    /// Keep one warm (non-resume) process ready so a brand-new thread doesn't
+    /// pay cold-start latency. Default true.
+    #[serde(default = "default_true")]
+    pub warm_pool: bool,
+
+    /// How often in seconds the warm process is respawned to avoid staleness.
+    /// Default 3600 (1 hour).
+    #[serde(default = "default_slack_warm_respawn_secs")]
+    pub warm_respawn_secs: u64,
+}
+
+impl Default for SlackConfig {
+    fn default() -> Self {
+        Self {
+            app_token: None,
+            bot_token: None,
+            allowed_user_ids: Vec::new(),
+            invocation_timeout_secs: default_slack_invocation_timeout_secs(),
+            linger_secs: default_slack_linger_secs(),
+            warm_pool: true,
+            warm_respawn_secs: default_slack_warm_respawn_secs(),
+        }
+    }
+}
+
+impl SlackConfig {
+    /// Whether the Slack bridge should run: both tokens present (non-empty) and
+    /// at least one allowlisted user. Independent of `commander_enabled` — the
+    /// bridge is gated by this config alone.
+    pub fn is_enabled(&self) -> bool {
+        self.app_token.as_ref().is_some_and(|t| !t.is_empty())
+            && self.bot_token.as_ref().is_some_and(|t| !t.is_empty())
+            && !self.allowed_user_ids.is_empty()
+    }
+}
+
+impl std::fmt::Debug for SlackConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print the tokens — redact their presence, not their value.
+        let redact = |t: &Option<String>| t.as_ref().map(|_| "<redacted>").unwrap_or("None");
+        f.debug_struct("SlackConfig")
+            .field("app_token", &redact(&self.app_token))
+            .field("bot_token", &redact(&self.bot_token))
+            .field("allowed_user_ids", &self.allowed_user_ids)
+            .field("invocation_timeout_secs", &self.invocation_timeout_secs)
+            .field("linger_secs", &self.linger_secs)
+            .field("warm_pool", &self.warm_pool)
+            .field("warm_respawn_secs", &self.warm_respawn_secs)
+            .finish()
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -557,6 +651,7 @@ impl Default for Config {
             conversation: ConversationConfig::default(),
             stt: SttConfig::default(),
             telemetry: TelemetryConfig::default(),
+            slack: SlackConfig::default(),
             remote_servers: Vec::new(),
         }
     }
@@ -576,6 +671,18 @@ fn default_hibernate_idle_timeout_secs() -> u64 {
 
 fn default_hibernate_check_interval_secs() -> u64 {
     600
+}
+
+fn default_slack_invocation_timeout_secs() -> u64 {
+    300
+}
+
+fn default_slack_linger_secs() -> u64 {
+    300
+}
+
+fn default_slack_warm_respawn_secs() -> u64 {
+    3600
 }
 
 fn default_pr_review_labels() -> Vec<String> {
@@ -598,6 +705,8 @@ impl Config {
         }
         self.stt.api_key = None;
         self.telemetry.token = None;
+        self.slack.app_token = None;
+        self.slack.bot_token = None;
         self
     }
 
@@ -785,6 +894,68 @@ impl Config {
         }
     }
 
+    /// Gate what a Slack-originated `claude-commander new` may launch: both the
+    /// `--program` and the `--mode` (permission mode) flags.
+    ///
+    /// The headless Slack commander is allowed to run `claude-commander new`, so
+    /// prompt-injected thread text could otherwise steer it into an unattended
+    /// worker that executes arbitrary code. Two flags are RCE-relevant:
+    ///
+    /// - `--program` chooses the binary executed in the created session's tmux
+    ///   pane; `new --program "bash -lc '<payload>'"` would be direct code
+    ///   execution outside the read-only deny fence.
+    /// - `--mode` is folded into the launched command as `--permission-mode` (see
+    ///   [`program_with_agent_flags`](crate::session::program_with_agent_flags)).
+    ///   With the allowed program `claude` but `--mode bypassPermissions`, the
+    ///   worker runs unattended with *no* permission prompt and an attacker's
+    ///   `-i` prompt — arbitrary code execution even though the program is
+    ///   benign.
+    ///
+    /// Note the launch command becomes a `/bin/sh -c` string, so every folded
+    /// value (`--model`/`--effort`/`-i`/session name) is shell-escaped where it
+    /// is interpolated (see `program_with_agent_flags`); a value cannot inject
+    /// shell execution, which is why they need not be gated here.
+    ///
+    /// So when a `new` invocation is known to descend from the headless commander
+    /// (detected at the CLI boundary via the inherited
+    /// [`crate::commander::headless::PROGRAM_LOCK_ENV`] marker, which the agent can
+    /// neither forge nor strip):
+    ///
+    /// - `program`: `None` uses the server's configured default (allowed);
+    ///   `Some(p)` is allowed iff `p` exactly matches one of the configured
+    ///   [`programs`](Self::programs) commands or the
+    ///   [`default_session_program`](Self::default_session_program). Any other
+    ///   string is rejected with [`SessionError::ProgramNotAllowed`].
+    /// - `mode`: `None`, `default` and `plan` keep the permission prompt and are
+    ///   allowed; any mode that disables the prompt (`bypassPermissions`,
+    ///   `acceptEdits`) is rejected with [`SessionError::ModeNotAllowed`]. Other
+    ///   agent flags (`--effort`, `--model`, `-i`) are *not* gated: they are
+    ///   shell-escaped where they are folded into the launch command (see
+    ///   `program_with_agent_flags`), so they cannot inject shell execution, and
+    ///   a default-mode worker still prompts before executing tool calls.
+    ///
+    /// Pure over its inputs (no env access) so it is unit-testable; the env marker
+    /// is read once at the CLI boundary and its result passed in as the gate.
+    pub fn ensure_slack_create_allowed(
+        &self,
+        program: Option<&str>,
+        mode: Option<&str>,
+    ) -> std::result::Result<(), SessionError> {
+        if let Some(program) = program {
+            let allowed = program == self.default_session_program()
+                || self.programs.iter().any(|p| p.command == program);
+            if !allowed {
+                return Err(SessionError::ProgramNotAllowed(program.to_string()));
+            }
+        }
+        if let Some(mode) = mode
+            && mode_disables_permission_gate(mode)
+        {
+            return Err(SessionError::ModeNotAllowed(mode.to_string()));
+        }
+        Ok(())
+    }
+
     /// The non-empty list of harnesses offered in the new-session program
     /// picker. Returns the configured `programs` verbatim, or — when none are
     /// configured — a single built-in `claude` entry, so the picker always has
@@ -933,6 +1104,23 @@ impl Config {
     }
 }
 
+/// Whether a `--mode` (Claude `--permission-mode`) value disables the
+/// interactive permission prompt, letting an unattended worker run tool calls
+/// with no human gate. Claude Code's permission modes are `default`, `plan`,
+/// `acceptEdits`, and `bypassPermissions`: `default`/`plan` keep the prompt,
+/// while `bypassPermissions` skips every prompt and `acceptEdits` auto-approves
+/// file edits/writes — both let a freshly-created, unattended Slack worker act
+/// without anyone to approve, so both are forbidden.
+///
+/// Matched case-insensitively after trimming so a case/whitespace variant of a
+/// dangerous mode cannot slip past (fails closed); an unrecognised mode is
+/// treated as safe here — Claude itself rejects it, so it never launches a
+/// bypassing worker.
+fn mode_disables_permission_gate(mode: &str) -> bool {
+    let m = mode.trim();
+    m.eq_ignore_ascii_case("bypassPermissions") || m.eq_ignore_ascii_case("acceptEdits")
+}
+
 /// Parse a key string like `" "`, `"ctrl+k"`, `"f1"` into crossterm types.
 fn parse_key_string(s: &str) -> (KeyCode, KeyModifiers) {
     let s = s.trim().to_lowercase();
@@ -996,6 +1184,12 @@ mod tests {
                 token: Some("telemetry-secret".into()),
                 ..Default::default()
             },
+            slack: SlackConfig {
+                app_token: Some("slack-app-secret".into()),
+                bot_token: Some("slack-bot-secret".into()),
+                allowed_user_ids: vec!["U123".into()],
+                ..Default::default()
+            },
             ..Default::default()
         };
 
@@ -1003,12 +1197,122 @@ mod tests {
         assert!(redacted.remote_servers[0].token.is_none());
         assert!(redacted.stt.api_key.is_none());
         assert!(redacted.telemetry.token.is_none());
+        assert!(redacted.slack.app_token.is_none());
+        assert!(redacted.slack.bot_token.is_none());
         // Non-secret fields survive.
         assert_eq!(redacted.remote_servers[0].url, "http://b:7878");
+        assert_eq!(redacted.slack.allowed_user_ids, vec!["U123".to_string()]);
         let json = serde_json::to_string(&redacted).unwrap();
-        for secret in ["server-secret", "stt-secret", "telemetry-secret"] {
+        for secret in [
+            "server-secret",
+            "stt-secret",
+            "telemetry-secret",
+            "slack-app-secret",
+            "slack-bot-secret",
+        ] {
             assert!(!json.contains(secret), "{secret} survived redaction");
         }
+    }
+
+    #[test]
+    fn test_slack_defaults() {
+        let c = SlackConfig::default();
+        assert!(c.app_token.is_none());
+        assert!(c.bot_token.is_none());
+        assert!(c.allowed_user_ids.is_empty());
+        assert_eq!(c.invocation_timeout_secs, 300);
+        assert_eq!(c.linger_secs, 300);
+        assert!(c.warm_pool);
+        assert_eq!(c.warm_respawn_secs, 3600);
+        // A default (empty) config never enables the bridge.
+        assert!(!c.is_enabled());
+        assert!(!Config::default().slack.is_enabled());
+    }
+
+    #[test]
+    fn test_slack_is_enabled_requires_both_tokens_and_allowlist() {
+        // Both tokens but no allowlisted user → disabled.
+        let c = SlackConfig {
+            app_token: Some("xapp-1".into()),
+            bot_token: Some("xoxb-1".into()),
+            allowed_user_ids: Vec::new(),
+            ..Default::default()
+        };
+        assert!(!c.is_enabled());
+
+        // Missing bot token → disabled.
+        let c = SlackConfig {
+            app_token: Some("xapp-1".into()),
+            bot_token: None,
+            allowed_user_ids: vec!["U1".into()],
+            ..Default::default()
+        };
+        assert!(!c.is_enabled());
+
+        // Empty-string token counts as absent.
+        let c = SlackConfig {
+            app_token: Some(String::new()),
+            bot_token: Some("xoxb-1".into()),
+            allowed_user_ids: vec!["U1".into()],
+            ..Default::default()
+        };
+        assert!(!c.is_enabled());
+
+        // Both tokens + an allowlisted user → enabled.
+        let c = SlackConfig {
+            app_token: Some("xapp-1".into()),
+            bot_token: Some("xoxb-1".into()),
+            allowed_user_ids: vec!["U1".into()],
+            ..Default::default()
+        };
+        assert!(c.is_enabled());
+    }
+
+    #[test]
+    fn test_slack_toml_roundtrip_and_tunable_defaults() {
+        let toml_src = r#"
+[slack]
+app_token = "xapp-abc"
+bot_token = "xoxb-def"
+allowed_user_ids = ["U111", "U222"]
+linger_secs = 120
+"#;
+        let config: Config = toml::from_str(toml_src).expect("toml parse");
+        assert_eq!(config.slack.app_token.as_deref(), Some("xapp-abc"));
+        assert_eq!(config.slack.bot_token.as_deref(), Some("xoxb-def"));
+        assert_eq!(config.slack.allowed_user_ids, vec!["U111", "U222"]);
+        // Explicit override survives.
+        assert_eq!(config.slack.linger_secs, 120);
+        // Unspecified tunables keep their defaults.
+        assert_eq!(config.slack.invocation_timeout_secs, 300);
+        assert!(config.slack.warm_pool);
+        assert_eq!(config.slack.warm_respawn_secs, 3600);
+        assert!(config.slack.is_enabled());
+    }
+
+    #[test]
+    fn test_empty_toml_yields_slack_defaults() {
+        let config: Config = toml::from_str("").expect("empty toml");
+        assert!(!config.slack.is_enabled());
+        assert_eq!(config.slack.invocation_timeout_secs, 300);
+    }
+
+    #[test]
+    fn test_slack_debug_redacts_tokens() {
+        let c = SlackConfig {
+            app_token: Some("xapp-supersecret".into()),
+            bot_token: Some("xoxb-supersecret".into()),
+            allowed_user_ids: vec!["U1".into()],
+            ..Default::default()
+        };
+        let dbg = format!("{c:?}");
+        assert!(
+            !dbg.contains("supersecret"),
+            "token leaked via Debug: {dbg}"
+        );
+        assert!(dbg.contains("<redacted>"));
+        // Non-secret fields are still shown.
+        assert!(dbg.contains("U1"));
     }
 
     use super::*;
@@ -1200,6 +1504,155 @@ speed = 1.25
         };
 
         assert_eq!(config.default_session_program(), "codex");
+    }
+
+    #[test]
+    fn slack_program_lock_allows_configured_and_default_rejects_arbitrary() {
+        let config = Config {
+            programs: vec![
+                ProgramEntry {
+                    label: "Claude".to_string(),
+                    command: "claude".to_string(),
+                },
+                ProgramEntry {
+                    label: "Codex".to_string(),
+                    command: "codex --model o3".to_string(),
+                },
+            ],
+            ..Config::default()
+        };
+
+        // No override → the server's configured default is used → always allowed.
+        assert!(config.ensure_slack_create_allowed(None, None).is_ok());
+
+        // The default session program (first entry) is allowed.
+        assert_eq!(config.default_session_program(), "claude");
+        assert!(
+            config
+                .ensure_slack_create_allowed(Some("claude"), None)
+                .is_ok()
+        );
+
+        // Any other configured program is allowed, matched exactly (with flags).
+        assert!(
+            config
+                .ensure_slack_create_allowed(Some("codex --model o3"), None)
+                .is_ok()
+        );
+
+        // An arbitrary injected payload is rejected.
+        let err = config
+            .ensure_slack_create_allowed(Some("bash -lc 'id'"), None)
+            .unwrap_err();
+        assert!(matches!(err, SessionError::ProgramNotAllowed(p) if p == "bash -lc 'id'"));
+
+        // A near-miss (extra flag on a configured command) is not an exact match.
+        assert!(
+            config
+                .ensure_slack_create_allowed(Some("claude --dangerously-skip-permissions"), None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn slack_program_lock_allows_builtin_default_when_no_programs_configured() {
+        // Empty `programs` → default_session_program() is the built-in `claude`.
+        let config = Config {
+            programs: Vec::new(),
+            ..Config::default()
+        };
+        assert!(config.ensure_slack_create_allowed(None, None).is_ok());
+        assert!(
+            config
+                .ensure_slack_create_allowed(Some("claude"), None)
+                .is_ok()
+        );
+        assert!(
+            config
+                .ensure_slack_create_allowed(Some("codex"), None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn slack_create_lock_rejects_permission_bypassing_modes() {
+        let config = Config {
+            programs: vec![ProgramEntry {
+                label: "Claude".to_string(),
+                command: "claude".to_string(),
+            }],
+            ..Config::default()
+        };
+
+        // Safe modes (and no mode) keep the interactive permission prompt, so an
+        // allowed program plus these is permitted.
+        assert!(
+            config
+                .ensure_slack_create_allowed(Some("claude"), None)
+                .is_ok()
+        );
+        assert!(
+            config
+                .ensure_slack_create_allowed(Some("claude"), Some("default"))
+                .is_ok()
+        );
+        assert!(
+            config
+                .ensure_slack_create_allowed(Some("claude"), Some("plan"))
+                .is_ok()
+        );
+
+        // Permission-bypassing modes are rejected even with an allowed program.
+        let err = config
+            .ensure_slack_create_allowed(Some("claude"), Some("bypassPermissions"))
+            .unwrap_err();
+        assert!(matches!(err, SessionError::ModeNotAllowed(m) if m == "bypassPermissions"));
+        assert!(matches!(
+            config
+                .ensure_slack_create_allowed(Some("claude"), Some("acceptEdits"))
+                .unwrap_err(),
+            SessionError::ModeNotAllowed(_)
+        ));
+
+        // Case/whitespace variants of a bypassing mode still fail closed.
+        assert!(
+            config
+                .ensure_slack_create_allowed(Some("claude"), Some(" BYPASSPERMISSIONS "))
+                .is_err()
+        );
+        assert!(
+            config
+                .ensure_slack_create_allowed(Some("claude"), Some("acceptedits"))
+                .is_err()
+        );
+
+        // The mode gate applies even when no program override is given (the
+        // configured default program is used, but the mode still disables the
+        // prompt).
+        assert!(
+            config
+                .ensure_slack_create_allowed(None, Some("bypassPermissions"))
+                .is_err()
+        );
+
+        // The program gate still fires first for an injected program.
+        assert!(matches!(
+            config
+                .ensure_slack_create_allowed(Some("bash -lc id"), Some("default"))
+                .unwrap_err(),
+            SessionError::ProgramNotAllowed(_)
+        ));
+    }
+
+    #[test]
+    fn mode_disables_permission_gate_classifies_modes() {
+        assert!(mode_disables_permission_gate("bypassPermissions"));
+        assert!(mode_disables_permission_gate("acceptEdits"));
+        assert!(mode_disables_permission_gate("  bypassPermissions  "));
+        assert!(mode_disables_permission_gate("BYPASSPERMISSIONS"));
+        assert!(!mode_disables_permission_gate("default"));
+        assert!(!mode_disables_permission_gate("plan"));
+        assert!(!mode_disables_permission_gate(""));
     }
 
     #[test]

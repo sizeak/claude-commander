@@ -219,6 +219,29 @@ state_sync_interval_ms = 2000
 # Working directory for the commander; defaults to <data dir>/commander.
 # commander_dir = "/path/to/commander"
 
+# Slack integration: let allowlisted users drive the commander from Slack by
+# @mentioning the bot in a channel or DMing it. Runs inside
+# `claude-commander-server` (not the TUI) and is gated by this table alone,
+# independent of `commander_enabled`. The bridge is active only when
+# `app_token` and `bot_token` are both set AND `allowed_user_ids` is non-empty
+# (an empty allowlist keeps it disabled, so a misconfigured token pair can't
+# accidentally accept everyone). See docs/slack.md for the full setup walkthrough
+# and the Slack app manifest.
+# [slack]
+# app_token = "xapp-..."          # Socket Mode app-level token (SECRET)
+# bot_token = "xoxb-..."          # bot user OAuth token (SECRET)
+# allowed_user_ids = ["U0123456"] # Slack user ids allowed to invoke the bridge
+# invocation_timeout_secs = 300   # hard cap on one headless invocation before it
+#                                 # is killed and retried once with a "be brief"
+#                                 # nudge (default 300 = 5 min)
+# linger_secs = 300               # how long a headless process lingers after
+#                                 # replying, ready for an instant thread
+#                                 # follow-up, before it is reaped (default 300)
+# warm_pool = true                # keep one warm (non-resume) process ready so a
+#                                 # brand-new thread skips cold-start latency
+# warm_respawn_secs = 3600        # how often the warm process is respawned to
+#                                 # avoid staleness (default 3600 = 1 hour)
+
 # Conversation mode: a full-screen chat (open with `Alt-c`) backed by a
 # dedicated headless Claude session, whose replies stream in and are spoken
 # aloud via an OpenAI-compatible TTS engine. See "Conversation mode" below.
@@ -289,6 +312,18 @@ and rows under the server header could be misrouted to the local backend. A
 loopback server is fine only when it runs against a **separate** data directory.
 claude-commander logs a warning when a configured server's URL is a loopback
 address as a reminder.
+
+The `[slack]` `app_token` and `bot_token` are **secrets**. Like other credential
+fields, they are stripped from `GET /api/config` (redacted before the config is
+served over the wire) and are **not** accepted by the remote config-patch route,
+so a remote client can neither read nor set them — set them only by editing this
+file. They're likewise redacted from any debug log of the config. See
+[Slack integration](slack.md) for the end-to-end setup.
+
+The entire `[slack]` table (tokens, allowlist, and the timeout/linger/warm-pool
+tunables) is read once at server boot when the bridge and its warm pool start;
+`POST /api/config/reload` does not reconfigure a running bridge, so **`[slack]`
+changes require a `claude-commander-server` restart** to take effect.
 
 ## Idle-session hibernation
 

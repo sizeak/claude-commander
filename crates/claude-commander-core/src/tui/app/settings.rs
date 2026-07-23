@@ -33,6 +33,14 @@ impl App {
                 // non-selectable header row; `with_section_spacers` inserts a
                 // blank line between groups so the long list is easy to scan
                 // (mirrors the Keybindings tab).
+                //
+                // The `[slack]` table is deliberately absent here. Its two tokens
+                // are secrets (never shown or edited in the UI, consistent with
+                // `Config::with_secrets_redacted` and the remote config-patch
+                // allow-list rejecting them), and the rest are tunables for the
+                // server-side Slack bridge — a feature the local TUI doesn't run,
+                // so editing them here would have no effect on a running server.
+                // Configure Slack by hand in `config.toml` (see docs/slack.md).
                 let c = &self.config;
                 with_section_spacers(vec![
                     SettingsRow::header("Sessions & Worktrees"),

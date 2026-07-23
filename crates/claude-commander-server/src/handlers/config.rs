@@ -317,6 +317,40 @@ mod tests {
         );
     }
 
+    /// Slack fields are off-limits on the config patch surface. The `[slack]`
+    /// table carries secret tokens (app/bot), so `deny_unknown_fields` must
+    /// reject a body naming any slack field, and the stored config must be
+    /// unchanged — a remote client can neither read nor set the tokens here.
+    #[tokio::test]
+    async fn patch_rejects_slack_fields() {
+        let dir = TempDir::new().unwrap();
+        let state = test_state(&dir);
+        let before = state.service.read_config();
+        assert!(
+            before.slack.app_token.is_none() && before.slack.bot_token.is_none(),
+            "fixture must start with no slack tokens"
+        );
+
+        // Both the nested table and any bare token key must be rejected.
+        for body in [
+            serde_json::json!({ "slack": { "app_token": "xapp-evil" } }),
+            serde_json::json!({ "app_token": "xapp-evil" }),
+            serde_json::json!({ "bot_token": "xoxb-evil" }),
+            serde_json::json!({ "allowed_user_ids": ["U-evil"] }),
+        ] {
+            let status = patch(state.clone(), body.clone()).await;
+            assert!(
+                status.is_client_error(),
+                "patching slack field {body} must be a 4xx, got {status}"
+            );
+        }
+
+        let after = state.service.read_config();
+        assert!(after.slack.app_token.is_none());
+        assert!(after.slack.bot_token.is_none());
+        assert!(after.slack.allowed_user_ids.is_empty());
+    }
+
     /// A merged config that fails validation (zero fps) is a 400 and is not
     /// persisted.
     #[tokio::test]

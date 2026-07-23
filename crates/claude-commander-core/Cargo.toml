@@ -91,6 +91,10 @@ regex = "1.12"
 # Async utilities
 async-trait = "0.1"
 
+# Split a configured program string (e.g. `claude --model opus`) into argv for a
+# direct (no-shell) spawn of the headless commander process.
+shell-words = "1.1"
+
 # PTY for terminal attachment
 pty-process = { version = "0.5", features = ["async"] }
 

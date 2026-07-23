@@ -59,6 +59,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # CLI (derive macros)
 clap = { version = "4.6", features = ["derive"] }
 
+# Slack Socket Mode bridge (config-gated background task). The `hyper` feature
+# pulls in the rustls-based HTTPS connector + the tokio-tungstenite WebSocket
+# transport Socket Mode needs; no default features.
+slack-morphism = { version = "2.23", features = ["hyper"] }
+async-trait = "0.1"
+
 [features]
 default = []
 tls = ["dep:axum-server"]
