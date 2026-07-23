@@ -119,6 +119,12 @@ pub struct Theme {
     pub diff_hunk_header: Color,
     pub diff_file_header: Color,
     pub diff_context: Color,
+    /// Background band behind revealed context lines (GitHub-style expand) in
+    /// the review diff view.
+    pub diff_expand_bg: Color,
+    /// Background band behind hunk-header (`@@ … @@`) lines in the review diff
+    /// view; kept dimmer than `diff_expand_bg`.
+    pub diff_hunk_header_bg: Color,
 
     // Modal borders
     pub modal_info: Color,
@@ -196,6 +202,14 @@ pub struct ReviewPalette {
     /// Subtle background band laid across file-tree rows marked reviewed, so a
     /// "read" file is obvious at a glance beyond the ` ✓` check alone.
     pub reviewed_bg: Color,
+    /// Subtle background band on revealed context lines (GitHub-style expand)
+    /// and their expand controls, so the extra file lines are clearly distinct
+    /// from the diff's own ±3 context.
+    pub context_bg: Color,
+    /// Very subtle background band behind hunk-header (`@@ … @@`) lines — dimmer
+    /// than [`Self::context_bg`] so a header reads as a quiet divider distinct
+    /// from the revealed-context band.
+    pub hunk_header_bg: Color,
 }
 
 impl Theme {
@@ -239,6 +253,9 @@ impl Theme {
             ColorMode::Indexed => Color::Indexed(22),
             ColorMode::Basic => Color::Reset,
         };
+        // Named theme bands for the review diff view.
+        let context_bg = self.diff_expand_bg;
+        let hunk_header_bg = self.diff_hunk_header_bg;
         ReviewPalette {
             add_bg,
             del_bg,
@@ -263,6 +280,8 @@ impl Theme {
             selection_bg: self.selection_bg,
             selection_fg: self.selection_fg,
             reviewed_bg,
+            context_bg,
+            hunk_header_bg,
         }
     }
 }
@@ -328,6 +347,9 @@ impl Theme {
             diff_hunk_header: Color::Cyan,
             diff_file_header: Color::Yellow,
             diff_context: Color::Reset,
+            // 16-colour has no room for subtle bands — foreground only.
+            diff_expand_bg: Color::Reset,
+            diff_hunk_header_bg: Color::Reset,
 
             modal_info: Color::Cyan,
             modal_warning: Color::Yellow,
@@ -391,6 +413,8 @@ impl Theme {
             diff_hunk_header: Color::Indexed(183), // Pastel orchid
             diff_file_header: Color::Indexed(223), // Pastel cream
             diff_context: Color::Reset,
+            diff_expand_bg: Color::Indexed(236), // Matches the status bar band
+            diff_hunk_header_bg: Color::Indexed(234), // Dimmer divider band
 
             modal_info: Color::Indexed(117),    // Pastel sky
             modal_warning: Color::Indexed(222), // Pastel peach
@@ -454,6 +478,8 @@ impl Theme {
             diff_hunk_header: Color::Rgb(203, 166, 247), // Pastel mauve
             diff_file_header: Color::Rgb(249, 226, 175), // Pastel peach
             diff_context: Color::Reset,
+            diff_expand_bg: Color::Rgb(49, 50, 68), // Matches the status bar band
+            diff_hunk_header_bg: Color::Rgb(30, 31, 44), // Dimmer divider band
 
             modal_info: Color::Rgb(137, 180, 250), // Pastel sky
             modal_warning: Color::Rgb(249, 226, 175), // Pastel peach
@@ -516,6 +542,8 @@ impl Theme {
             diff_hunk_header: Color::Rgb(197, 134, 192), // Muted purple #c586c0
             diff_file_header: Color::Rgb(220, 220, 170), // Muted yellow #dcdcaa
             diff_context: Color::Reset,
+            diff_expand_bg: Color::Rgb(45, 45, 45), // Matches the status bar band
+            diff_hunk_header_bg: Color::Rgb(28, 28, 28), // Dimmer divider band
 
             modal_info: Color::Rgb(124, 165, 212), // Muted blue #7ca5d4
             modal_warning: Color::Rgb(220, 220, 170), // Muted yellow #dcdcaa
@@ -578,6 +606,8 @@ impl Theme {
             diff_hunk_header: Color::Rgb(102, 217, 239), // Blue #66d9ef
             diff_file_header: Color::Rgb(230, 219, 116), // Yellow #e6db74
             diff_context: Color::Reset,
+            diff_expand_bg: Color::Rgb(30, 31, 28), // Matches the status bar band
+            diff_hunk_header_bg: Color::Rgb(18, 19, 17), // Dimmer divider band
 
             modal_info: Color::Rgb(102, 217, 239), // Cyan #66d9ef
             modal_warning: Color::Rgb(253, 151, 31), // Orange #fd971f
@@ -640,6 +670,8 @@ impl Theme {
             diff_hunk_header: Color::Rgb(196, 167, 231), // Iris #c4a7e7
             diff_file_header: Color::Rgb(246, 193, 119), // Gold #f6c177
             diff_context: Color::Reset,
+            diff_expand_bg: Color::Rgb(31, 29, 46), // Matches the status bar band
+            diff_hunk_header_bg: Color::Rgb(19, 18, 29), // Dimmer divider band
 
             modal_info: Color::Rgb(156, 207, 216), // Foam #9ccfd8
             modal_warning: Color::Rgb(246, 193, 119), // Gold #f6c177
@@ -709,6 +741,8 @@ impl Theme {
         apply!(diff_hunk_header);
         apply!(diff_file_header);
         apply!(diff_context);
+        apply!(diff_expand_bg);
+        apply!(diff_hunk_header_bg);
         apply!(modal_info);
         apply!(modal_warning);
         apply!(modal_error);
