@@ -7,6 +7,10 @@ import '../widgets/session_chips.dart';
 import 'review_page.dart';
 import 'terminal_page.dart';
 
+/// The low-frequency management actions, tucked into the detail header's
+/// overflow (⋮) menu rather than spending a button each.
+enum _ManageAction { rename, section, keepAlive }
+
 /// Detail view for a single session, layout-agnostic (no Scaffold, no route).
 /// Live status and agent state come straight from the [CommanderStore] (refreshed
 /// off the change feed — no local timer); the pane snapshot and diff stat, which
@@ -339,9 +343,7 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
     try {
       await action();
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text(ok)));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(ok)));
       setState(() => _busy = false);
       await _fetchDetail();
     } catch (e) {
@@ -445,10 +447,8 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
         padding: const EdgeInsets.all(16),
         children: [
           _header(context, info),
-          const SizedBox(height: 12),
-          _viewButtons(context),
-          const SizedBox(height: 12),
-          _manage(context, info),
+          const SizedBox(height: 16),
+          _primaryActions(context),
           const SizedBox(height: 12),
           if (_error != null) _errorBanner(context, _error!),
           _detailSection(context),
@@ -457,106 +457,172 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
             _paneSection(context, info),
           ],
           const SizedBox(height: 24),
-          _actions(context, info),
+          _lifecycleBar(context, info),
         ],
       ),
     );
   }
 
   Widget _header(BuildContext context, SessionInfo info) {
-    return Column(
+    final section = info.sectionOverride ?? info.currentSection;
+    return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          '${info.projectName} · ${info.branch}',
-          style: Theme.of(context).textTheme.bodyMedium,
-        ),
-        const SizedBox(height: 4),
-        Text(info.program, style: Theme.of(context).textTheme.labelSmall),
-        const SizedBox(height: 10),
-        Wrap(
-          spacing: 6,
-          runSpacing: 4,
-          children: [
-            statusChip(context, info.status),
-            if (info.status == SessionStatus.running)
-              agentStateChip(context, _agentState),
-            if (info.prNumber != null)
-              prChip(context, info.prNumber!, info.prState),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _viewButtons(BuildContext context) {
-    return Wrap(
-      spacing: 12,
-      runSpacing: 8,
-      children: [
-        OutlinedButton.icon(
-          onPressed: () => widget.onOpenTerminal(AttachKind.agent),
-          icon: const Icon(Icons.terminal, size: 18),
-          label: const Text('Agent'),
-        ),
-        OutlinedButton.icon(
-          onPressed: () => widget.onOpenTerminal(AttachKind.shell),
-          icon: const Icon(Icons.code, size: 18),
-          label: const Text('Shell'),
-        ),
-        OutlinedButton.icon(
-          onPressed: widget.onOpenReview,
-          icon: const Icon(Icons.rate_review, size: 18),
-          label: const Text('Review'),
-        ),
-      ],
-    );
-  }
-
-  /// Management actions available regardless of run state: rename, section, and
-  /// the keep-alive toggle (which stops the server hibernating an idle session).
-  Widget _manage(BuildContext context, SessionInfo info) {
-    return Wrap(
-      spacing: 12,
-      runSpacing: 8,
-      crossAxisAlignment: WrapCrossAlignment.center,
-      children: [
-        OutlinedButton.icon(
-          onPressed: _busy ? null : () => _rename(info),
-          icon: const Icon(Icons.edit, size: 18),
-          label: const Text('Rename'),
-        ),
-        OutlinedButton.icon(
-          onPressed: _busy ? null : () => _section(info),
-          icon: const Icon(Icons.folder_outlined, size: 18),
-          label: Text(
-            info.sectionOverride ?? info.currentSection ?? 'Section',
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '${info.projectName} · ${info.branch}',
+                style: Theme.of(context).textTheme.bodyMedium,
+              ),
+              const SizedBox(height: 4),
+              Text(info.program, style: Theme.of(context).textTheme.labelSmall),
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 6,
+                runSpacing: 4,
+                children: [
+                  statusChip(context, info.status),
+                  if (info.status == SessionStatus.running)
+                    agentStateChip(context, _agentState),
+                  if (info.prNumber != null)
+                    prChip(context, info.prNumber!, info.prState),
+                  if (section != null) sectionChip(context, section),
+                  if (info.keepAlive) keepAliveChip(context),
+                ],
+              ),
+            ],
           ),
         ),
-        FilterChip(
-          label: const Text('Keep alive'),
-          selected: info.keepAlive,
-          onSelected: _busy ? null : (_) => _toggleKeepAlive(),
+        _manageMenu(context, info),
+      ],
+    );
+  }
+
+  /// The overflow (⋮) menu of low-frequency management actions: rename, set
+  /// section, and the keep-alive toggle (which stops the server hibernating an
+  /// idle session). Disabled while a mutation is in flight.
+  Widget _manageMenu(BuildContext context, SessionInfo info) {
+    return PopupMenuButton<_ManageAction>(
+      enabled: !_busy,
+      tooltip: 'Manage session',
+      icon: const Icon(Icons.more_vert),
+      onSelected: (action) {
+        switch (action) {
+          case _ManageAction.rename:
+            _rename(info);
+          case _ManageAction.section:
+            _section(info);
+          case _ManageAction.keepAlive:
+            _toggleKeepAlive();
+        }
+      },
+      itemBuilder: (_) => [
+        _menuItem(_ManageAction.rename, Icons.edit, 'Rename'),
+        _menuItem(_ManageAction.section, Icons.folder_outlined, 'Set section'),
+        _menuItem(
+          _ManageAction.keepAlive,
+          info.keepAlive ? Icons.check_box : Icons.check_box_outline_blank,
+          'Keep alive',
         ),
       ],
     );
   }
 
+  PopupMenuItem<_ManageAction> _menuItem(
+    _ManageAction value,
+    IconData icon,
+    String label,
+  ) {
+    return PopupMenuItem(
+      value: value,
+      child: Row(
+        children: [
+          Icon(icon, size: 20),
+          const SizedBox(width: 12),
+          Text(label),
+        ],
+      ),
+    );
+  }
+
+  /// Primary navigation, on one line: Agent is the dominant action (filled,
+  /// taking two-thirds of the width), Shell the occasional secondary (outlined,
+  /// one-third). Review isn't here — the Changes card below is the diff entry
+  /// point. Both share the same height so they align.
+  Widget _primaryActions(BuildContext context) {
+    const padding = EdgeInsets.symmetric(vertical: 14);
+    return Row(
+      children: [
+        Expanded(
+          flex: 2,
+          child: FilledButton.icon(
+            onPressed: () => widget.onOpenTerminal(AttachKind.agent),
+            icon: const Icon(Icons.terminal),
+            label: const Text('Agent'),
+            style: FilledButton.styleFrom(padding: padding),
+          ),
+        ),
+        const SizedBox(width: 12),
+        Expanded(
+          flex: 1,
+          child: OutlinedButton.icon(
+            onPressed: () => widget.onOpenTerminal(AttachKind.shell),
+            icon: const Icon(Icons.code, size: 18),
+            label: const Text('Shell'),
+            style: OutlinedButton.styleFrom(padding: padding),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// The diffstat card, which doubles as the review entry point: tapping it
+  /// opens the diff (the review view). Stays tappable even with no changes —
+  /// the review view is then simply empty, and this keeps it reachable on the
+  /// phone layout, which has no review tab.
   Widget _detailSection(BuildContext context) {
     final diffStat = _detail?.diffStat;
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('Changes', style: Theme.of(context).textTheme.titleSmall),
-            const SizedBox(height: 6),
-            Text(
-              diffStat == null || diffStat.isEmpty ? 'No changes' : diffStat,
-              style: Theme.of(context).textTheme.bodySmall,
+    final outline = Theme.of(context).colorScheme.outline;
+    return Semantics(
+      button: true,
+      child: Card(
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: widget.onOpenReview,
+          child: Padding(
+            padding: const EdgeInsets.all(12),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Text(
+                            'Changes',
+                            style: Theme.of(context).textTheme.titleSmall,
+                          ),
+                          const SizedBox(width: 6),
+                          Icon(Icons.rate_review, size: 15, color: outline),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      Text(
+                        diffStat == null || diffStat.isEmpty
+                            ? 'No changes'
+                            : diffStat,
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                ),
+                Icon(Icons.chevron_right, color: outline),
+              ],
             ),
-          ],
+          ),
         ),
       ),
     );
@@ -610,39 +676,46 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
     );
   }
 
-  Widget _actions(BuildContext context, SessionInfo info) {
+  /// The session lifecycle controls, as a compact icon action bar: the common
+  /// kill/restart/merge/push on the left, destructive delete pushed to the far
+  /// right and tinted with the error colour. Labels live in tooltips.
+  Widget _lifecycleBar(BuildContext context, SessionInfo info) {
     final running = info.status == SessionStatus.running;
-    return Wrap(
-      spacing: 12,
-      runSpacing: 8,
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        FilledButton.tonalIcon(
-          onPressed: _busy || !running ? null : _kill,
-          icon: const Icon(Icons.stop),
-          label: const Text('Kill'),
-        ),
-        FilledButton.tonalIcon(
-          onPressed: _busy ? null : _restart,
-          icon: const Icon(Icons.restart_alt),
-          label: const Text('Restart'),
-        ),
-        FilledButton.tonalIcon(
-          onPressed: _busy ? null : _cascadeMerge,
-          icon: const Icon(Icons.merge_type),
-          label: const Text('Cascade merge'),
-        ),
-        FilledButton.tonalIcon(
-          onPressed: _busy ? null : _pushStack,
-          icon: const Icon(Icons.publish),
-          label: const Text('Push stack'),
-        ),
-        FilledButton.tonalIcon(
-          onPressed: _busy ? null : _delete,
-          style: FilledButton.styleFrom(
-            foregroundColor: Theme.of(context).colorScheme.error,
-          ),
-          icon: const Icon(Icons.delete_outline),
-          label: const Text('Delete'),
+        const Divider(),
+        Row(
+          children: [
+            IconButton(
+              onPressed: _busy || !running ? null : _kill,
+              icon: const Icon(Icons.stop),
+              tooltip: 'Kill',
+            ),
+            IconButton(
+              onPressed: _busy ? null : _restart,
+              icon: const Icon(Icons.restart_alt),
+              tooltip: 'Restart',
+            ),
+            IconButton(
+              onPressed: _busy ? null : _cascadeMerge,
+              icon: const Icon(Icons.merge_type),
+              tooltip: 'Cascade merge',
+            ),
+            IconButton(
+              onPressed: _busy ? null : _pushStack,
+              icon: const Icon(Icons.publish),
+              tooltip: 'Push stack',
+            ),
+            const Spacer(),
+            IconButton(
+              onPressed: _busy ? null : _delete,
+              icon: const Icon(Icons.delete_outline),
+              tooltip: 'Delete',
+              color: scheme.error,
+            ),
+          ],
         ),
       ],
     );
