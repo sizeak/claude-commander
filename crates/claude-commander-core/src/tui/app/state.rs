@@ -340,7 +340,16 @@ impl App {
                         *program_picker = Some(picker);
                     }
                     if section_picker.is_some() {
-                        *section_picker = Some(super::SectionPicker::new(sections, None));
+                        // Preserve the section baked into the pending action (the
+                        // cursor-derived default at open time) so a remote session
+                        // still lands where the cursor was, rather than resetting
+                        // to the catch-all.
+                        let default = match on_submit {
+                            InputAction::CreateSession { section, .. } => section.clone(),
+                            _ => None,
+                        };
+                        *section_picker =
+                            Some(super::SectionPicker::new(sections, default.as_deref()));
                     }
                 }
             }

@@ -555,31 +555,21 @@ impl App {
             return;
         };
 
-        let default_project = self
-            .view_for(backend)
-            .snapshot
-            .projects
-            .first()
-            .map(|p| p.id);
+        // The default target is the new backend's first project (its repo_path is
+        // reused for the branch hint, so read both from the one lookup).
+        let (default_project, repo_path) = {
+            let first = self.view_for(backend).snapshot.projects.first();
+            (first.map(|p| p.id), first.map(|p| p.repo_path.clone()))
+        };
         // The existing-branch hint is a local gix scan, meaningless for a remote
         // project (its repo path lives on the server).
         let existing_branches = if backend == LOCAL_BACKEND_ID {
-            default_project
-                .and_then(|pid| {
-                    self.view_for(backend)
-                        .snapshot
-                        .projects
-                        .iter()
-                        .find(|p| p.id == pid)
-                        .map(|p| p.repo_path.clone())
-                })
-                .and_then(|path| existing_branch_names(&path))
+            repo_path.and_then(|path| existing_branch_names(&path))
         } else {
             None
         };
-        let project_picker = self
-            .new_project_picker(backend, default_project.unwrap_or_default())
-            .await;
+        let default = default_project.unwrap_or_default();
+        let project_picker = self.new_project_picker(backend, default).await;
         let program_picker = self.new_program_picker();
         let section_picker = self.new_section_picker(backend, None);
 
@@ -588,6 +578,7 @@ impl App {
             project_picker: pp,
             program_picker: prog,
             section_picker: sp,
+            on_submit,
             expanded,
             focus,
             ..
@@ -597,11 +588,24 @@ impl App {
             *pp = Some(project_picker);
             *prog = Some(program_picker);
             *sp = Some(section_picker);
+            // Re-key the pending action to the new backend's default project and
+            // drop the old backend's cursor-derived section. This is what lets the
+            // async remote swap-in (keyed on `on_submit`'s project) correlate to
+            // THIS dialog, and makes a stale in-flight response for the previously
+            // selected backend fall through the guard instead of stomping it.
+            if let InputAction::CreateSession {
+                project_id,
+                section,
+            } = on_submit
+            {
+                *project_id = default;
+                *section = None;
+            }
             *expanded = false;
             *focus = super::InputFocus::Server;
         }
         // Swap in the chosen backend's supported programs + sections (no-op for
-        // the local backend, whose picker is already correct).
+        // the local backend, whose pickers are already correct).
         if let Some(pid) = default_project {
             self.spawn_remote_program_picker(backend, pid);
         }
@@ -2110,6 +2114,7 @@ impl App {
         action: InputAction,
         value: String,
         program: Option<String>,
+        backend: Option<BackendId>,
     ) {
         match action {
             InputAction::CreateSession {
@@ -2124,7 +2129,9 @@ impl App {
                     return;
                 }
                 self.ui_state.modal = Modal::None;
-                let backend_id = self.backend_of_project(project_id);
+                // The Server field is authoritative when present; only fall back
+                // to deriving the backend from the project when it isn't shown.
+                let backend_id = backend.unwrap_or_else(|| self.backend_of_project(project_id));
                 let Some(project_path) = self
                     .view_for(backend_id)
                     .snapshot

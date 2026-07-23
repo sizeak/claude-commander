@@ -1037,8 +1037,17 @@ impl SectionPicker {
     pub fn new(sections: Vec<String>, default: Option<&str>) -> Self {
         let mut choices = vec![crate::session::IN_PROGRESS.to_string()];
         choices.extend(sections);
+        // Match a configured section from row 1 on, so a default naming a section
+        // that happens to be spelled like the catch-all ("In Progress") still
+        // selects the real configured row rather than resolving to row 0.
         let selected = default
-            .and_then(|name| choices.iter().position(|c| c == name))
+            .and_then(|name| {
+                choices
+                    .iter()
+                    .skip(1)
+                    .position(|c| c == name)
+                    .map(|i| i + 1)
+            })
             .unwrap_or(0);
         Self { choices, selected }
     }

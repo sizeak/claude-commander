@@ -2695,6 +2695,22 @@ fn section_picker_pre_selects_the_default_row() {
     assert_eq!(p.selected_section(), None);
 }
 
+#[test]
+fn section_picker_default_prefers_a_configured_section_over_the_catch_all() {
+    // A section configured with the reserved catch-all spelling must still be
+    // selectable: matching a default starts from row 1, so it resolves to the
+    // configured row (index 1) rather than the catch-all (index 0).
+    let p = SectionPicker::new(
+        vec![crate::session::IN_PROGRESS.to_string()],
+        Some(crate::session::IN_PROGRESS),
+    );
+    assert_eq!(p.selected, 1);
+    assert_eq!(
+        p.selected_section().as_deref(),
+        Some(crate::session::IN_PROGRESS)
+    );
+}
+
 // --- InputFocus (Tab cycling in the input modal) ---
 
 /// All four optional fields present (the new-session dialog with >1 backend and
@@ -4104,8 +4120,13 @@ async fn add_remote_server_flow_chains_name_url_token() {
     ));
 
     // Name → URL step.
-    app.handle_input_submit(InputAction::AddRemoteServerName, "buildbox".into(), None)
-        .await;
+    app.handle_input_submit(
+        InputAction::AddRemoteServerName,
+        "buildbox".into(),
+        None,
+        None,
+    )
+    .await;
     assert!(matches!(
         &app.ui_state.modal,
         Modal::Input {
@@ -4121,6 +4142,7 @@ async fn add_remote_server_flow_chains_name_url_token() {
             name: "buildbox".into(),
         },
         "not a url".into(),
+        None,
         None,
     )
     .await;
@@ -4144,6 +4166,7 @@ async fn add_remote_server_flow_chains_name_url_token() {
         },
         "http://buildbox:7878".into(),
         None,
+        None,
     )
     .await;
     assert!(matches!(
@@ -4163,6 +4186,7 @@ async fn add_remote_server_flow_chains_name_url_token() {
         },
         "sekrit-token".into(),
         None,
+        None,
     )
     .await;
     assert!(matches!(&app.ui_state.modal, Modal::Loading { .. }));
@@ -4172,8 +4196,13 @@ async fn add_remote_server_flow_chains_name_url_token() {
 async fn add_remote_server_duplicate_name_reprompts() {
     let mut app = make_test_app();
     app.config.remote_servers = vec![server_cfg("buildbox", "http://b:7878")];
-    app.handle_input_submit(InputAction::AddRemoteServerName, "buildbox".into(), None)
-        .await;
+    app.handle_input_submit(
+        InputAction::AddRemoteServerName,
+        "buildbox".into(),
+        None,
+        None,
+    )
+    .await;
     assert!(matches!(
         &app.ui_state.modal,
         Modal::Input {
@@ -4943,6 +4972,180 @@ async fn new_session_shows_server_field_and_switch_rebuilds_pickers() {
             );
         }
         other => panic!("expected a rebuilt New Session modal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn server_switch_rekeys_pending_action_to_new_backend_project() {
+    // Regression (M1/M2): switching the Server field must re-key `on_submit`'s
+    // project to the newly selected backend's project and clear the old backend's
+    // section — otherwise the async remote swap-in (keyed on `on_submit`) can
+    // never correlate to the dialog, and a stale in-flight response would stomp
+    // it. Two remotes so both backends have projects with distinct ids.
+    let (snap1, _s1, pid1) = snapshot_with_one_session();
+    let (snap2, _s2, pid2) = snapshot_with_one_session();
+    let mut app = build_app_with_mock_remotes(vec![("r1", snap1), ("r2", snap2)]);
+    app.bootstrap_backend_views().await;
+    app.refresh_backend_view(BackendId(1)).await;
+    app.refresh_backend_view(BackendId(2)).await;
+    app.ui_state.selected_project_id = Some((BackendId(1), pid1));
+    app.handle_new_session().await;
+
+    // Switch the Server field to r2 and apply.
+    if let Modal::Input {
+        server_picker: Some(sp),
+        ..
+    } = &mut app.ui_state.modal
+    {
+        sp.selected = sp
+            .choices
+            .iter()
+            .position(|(id, _)| *id == BackendId(2))
+            .expect("r2 is in the picker");
+    }
+    app.on_new_session_server_changed().await;
+
+    match &app.ui_state.modal {
+        Modal::Input {
+            on_submit:
+                InputAction::CreateSession {
+                    project_id,
+                    section,
+                },
+            project_picker: Some(pp),
+            ..
+        } => {
+            assert_eq!(*project_id, pid2, "pending action re-keyed to r2's project");
+            assert!(
+                section.is_none(),
+                "old backend's section is cleared on switch"
+            );
+            assert_eq!(
+                pp.selected_id(),
+                Some(pid2),
+                "project picker holds r2's project"
+            );
+        }
+        other => panic!("expected a re-keyed CreateSession modal, got {other:?}"),
+    }
+}
+
+/// Build a New Session `Modal::Input` for the swap-in handler tests: a
+/// `CreateSession` action targeting `project_id` with `section`, a program picker
+/// (local fallback), and an as-yet-unfilled section picker (catch-all only, as a
+/// remote backend's dialog opens before `create_options` returns).
+fn open_create_session_modal(project_id: ProjectId, section: Option<String>) -> Modal {
+    Modal::Input {
+        title: "New Session".to_string(),
+        prompt: "Enter session name:".to_string(),
+        value: super::Input::default(),
+        on_submit: InputAction::CreateSession {
+            project_id,
+            section,
+        },
+        existing_branches: None,
+        project_picker: None,
+        program_picker: Some(ProgramPicker {
+            choices: vec![crate::config::ProgramEntry {
+                label: "bash".to_string(),
+                command: "bash".to_string(),
+            }],
+            selected: 0,
+        }),
+        server_picker: None,
+        section_picker: Some(SectionPicker::new(Vec::new(), None)),
+        focus: InputFocus::Name,
+        expanded: false,
+        mask: false,
+    }
+}
+
+#[tokio::test]
+async fn remote_options_swap_in_applies_when_correlated_and_preserves_cursor_section() {
+    // Regression (M1 + M3): a correlated `NewSessionProgramsLoaded` fills in the
+    // remote's programs and sections, and the section picker keeps the section
+    // baked into the pending action (the cursor-derived default) rather than
+    // resetting to the catch-all.
+    let mut app = make_test_app();
+    let pid = ProjectId::new();
+    app.ui_state.modal = open_create_session_modal(pid, Some("Open PRs".to_string()));
+
+    app.handle_state_update(StateUpdate::NewSessionProgramsLoaded {
+        project_id: pid,
+        picker: Some(ProgramPicker {
+            choices: vec![crate::config::ProgramEntry {
+                label: "claude".to_string(),
+                command: "claude".to_string(),
+            }],
+            selected: 0,
+        }),
+        sections: vec!["Open PRs".to_string(), "Merged".to_string()],
+    })
+    .await;
+
+    match &app.ui_state.modal {
+        Modal::Input {
+            program_picker: Some(prog),
+            section_picker: Some(sec),
+            ..
+        } => {
+            assert_eq!(
+                prog.selected_command().as_deref(),
+                Some("claude"),
+                "remote program list swapped in"
+            );
+            assert!(sec.choices.len() > 1, "remote sections swapped in");
+            assert_eq!(
+                sec.selected_section().as_deref(),
+                Some("Open PRs"),
+                "cursor-derived section survives the swap-in"
+            );
+        }
+        other => panic!("expected an updated New Session modal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn remote_options_swap_in_is_dropped_for_a_different_project() {
+    // Regression (M2): a swap-in whose project doesn't match the pending action
+    // (e.g. a stale response after the user switched the Server field) must be
+    // ignored, not written into a dialog now targeting a different backend.
+    let mut app = make_test_app();
+    let pid = ProjectId::new();
+    let other = ProjectId::new();
+    app.ui_state.modal = open_create_session_modal(pid, None);
+
+    app.handle_state_update(StateUpdate::NewSessionProgramsLoaded {
+        project_id: other,
+        picker: Some(ProgramPicker {
+            choices: vec![crate::config::ProgramEntry {
+                label: "claude".to_string(),
+                command: "claude".to_string(),
+            }],
+            selected: 0,
+        }),
+        sections: vec!["Open PRs".to_string()],
+    })
+    .await;
+
+    match &app.ui_state.modal {
+        Modal::Input {
+            program_picker: Some(prog),
+            section_picker: Some(sec),
+            ..
+        } => {
+            assert_eq!(
+                prog.selected_command().as_deref(),
+                Some("bash"),
+                "uncorrelated response must not replace the program picker"
+            );
+            assert_eq!(
+                sec.choices.len(),
+                1,
+                "uncorrelated response must not add sections"
+            );
+        }
+        other => panic!("expected the unchanged New Session modal, got {other:?}"),
     }
 }
 

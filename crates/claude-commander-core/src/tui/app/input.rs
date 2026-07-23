@@ -626,6 +626,7 @@ impl App {
                             on_submit,
                             project_picker,
                             program_picker,
+                            server_picker,
                             section_picker,
                             ..
                         } = &self.ui_state.modal
@@ -649,10 +650,16 @@ impl App {
                                 *section = picker.selected_section();
                             }
                         }
+                        // The Server field, when shown, is authoritative for which
+                        // backend the session is created on — don't re-derive it
+                        // from the project (two backend handles can expose the same
+                        // project id).
+                        let backend = server_picker.as_ref().and_then(|p| p.selected_backend());
                         let value = value.value().to_string();
                         let program = program_picker.as_ref().and_then(|p| p.selected_command());
                         self.ui_state.modal = Modal::None;
-                        self.handle_input_submit(action, value, program).await;
+                        self.handle_input_submit(action, value, program, backend)
+                            .await;
                     }
                 }
             }
@@ -1187,7 +1194,10 @@ impl App {
             _ => return,
         };
         self.ui_state.modal = Modal::None;
-        self.handle_input_submit(action, submit_value, None).await;
+        // Path-input flows (AddProject…) never create a session, so no backend
+        // override applies.
+        self.handle_input_submit(action, submit_value, None, None)
+            .await;
     }
 
     /// Whether a review-view wheel event landed over the file-list pane (so it
