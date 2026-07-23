@@ -347,6 +347,15 @@ pub enum Modal {
         /// field and the chosen entry's command launches the session. `None`
         /// for Input flows that don't create sessions (Rename, AddProject…).
         program_picker: Option<ProgramPicker>,
+        /// When `Some`, the dialog renders a server picker; the highlighted
+        /// backend is where the session is created (re-scoping the project and
+        /// program/section options). Only the New Session flow populates it, and
+        /// only when more than one backend is configured.
+        server_picker: Option<ServerPicker>,
+        /// When `Some` (and it holds more than just the catch-all), the dialog
+        /// renders a section picker; the highlighted row becomes the new
+        /// session's section (catch-all row = no override / auto-assign).
+        section_picker: Option<SectionPicker>,
         /// Which field currently has focus. Tab cycles through the fields that
         /// are present (see `InputFocus::next`).
         focus: InputFocus,
@@ -870,37 +879,57 @@ impl PickerOption {
 pub enum InputFocus {
     /// The session-name text field (default on open).
     Name,
+    /// The server/backend picker (only present when >1 backend is configured).
+    Server,
     /// The filterable project picker.
     Project,
     /// The program/agent picker.
     Program,
+    /// The section picker (only present when the backend has configured sections).
+    Section,
+}
+
+/// Which of the New Session dialog's picker fields are present, so the focus
+/// ring can skip the absent ones. Name is always present and so isn't tracked.
+#[derive(Debug, Clone, Copy)]
+pub struct FieldsPresent {
+    pub server: bool,
+    pub project: bool,
+    pub program: bool,
+    pub section: bool,
 }
 
 impl InputFocus {
-    /// Ordered ring of the fields that exist; Name is always present.
-    fn ring(has_project: bool, has_program: bool) -> Vec<InputFocus> {
+    /// Ordered ring of the fields that exist; Name is always present. The order
+    /// mirrors the dialog's top-to-bottom layout: Name → Server → Project →
+    /// Program → Section.
+    fn ring(fields: FieldsPresent) -> Vec<InputFocus> {
         let mut ring = vec![InputFocus::Name];
-        if has_project {
+        if fields.server {
+            ring.push(InputFocus::Server);
+        }
+        if fields.project {
             ring.push(InputFocus::Project);
         }
-        if has_program {
+        if fields.program {
             ring.push(InputFocus::Program);
+        }
+        if fields.section {
+            ring.push(InputFocus::Section);
         }
         ring
     }
 
     /// The next focus when Tab is pressed, skipping fields that aren't present.
-    /// Cycles Name → Project → Program → Name.
-    pub fn next(self, has_project: bool, has_program: bool) -> InputFocus {
-        let ring = Self::ring(has_project, has_program);
+    pub fn next(self, fields: FieldsPresent) -> InputFocus {
+        let ring = Self::ring(fields);
         let idx = ring.iter().position(|f| *f == self).unwrap_or(0);
         ring[(idx + 1) % ring.len()]
     }
 
     /// The previous focus when Shift+Tab is pressed, skipping absent fields.
-    /// Cycles Name → Program → Project → Name.
-    pub fn prev(self, has_project: bool, has_program: bool) -> InputFocus {
-        let ring = Self::ring(has_project, has_program);
+    pub fn prev(self, fields: FieldsPresent) -> InputFocus {
+        let ring = Self::ring(fields);
         let idx = ring.iter().position(|f| *f == self).unwrap_or(0);
         ring[(idx + ring.len() - 1) % ring.len()]
     }
@@ -925,6 +954,102 @@ impl ProgramPicker {
     /// The launch command of the highlighted entry, if any.
     pub fn selected_command(&self) -> Option<String> {
         self.choices.get(self.selected).map(|e| e.command.clone())
+    }
+
+    /// Move the highlight up one entry (saturating at the top).
+    pub fn select_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    /// Move the highlight down one entry (saturating at the bottom).
+    pub fn select_down(&mut self) {
+        if self.selected + 1 < self.choices.len() {
+            self.selected += 1;
+        }
+    }
+}
+
+/// Server-picker state embedded in the New Session input modal: the selectable
+/// backends and the highlighted index. Only present when more than one backend
+/// is configured (a single-backend setup hides the field, matching the
+/// suppressed server headers in the session list).
+#[derive(Debug, Clone)]
+pub struct ServerPicker {
+    /// Selectable backends as `(id, display name)`, in `App::backends` order.
+    pub choices: Vec<(BackendId, String)>,
+    /// Index into `choices` of the highlighted entry.
+    pub selected: usize,
+    /// Index of the last *applied* selection. A confirm that doesn't move off
+    /// this index is a no-op (no picker rebuild), so re-confirming the current
+    /// server never resets the project selection.
+    pub committed: usize,
+}
+
+impl ServerPicker {
+    /// Build a picker over `choices`, highlighting the entry for `default`
+    /// (falling back to the first entry).
+    pub fn new(choices: Vec<(BackendId, String)>, default: BackendId) -> Self {
+        let selected = choices
+            .iter()
+            .position(|(id, _)| *id == default)
+            .unwrap_or(0);
+        Self {
+            choices,
+            selected,
+            committed: selected,
+        }
+    }
+
+    /// The backend id of the highlighted entry, if any.
+    pub fn selected_backend(&self) -> Option<BackendId> {
+        self.choices.get(self.selected).map(|(id, _)| *id)
+    }
+
+    /// Move the highlight up one entry (saturating at the top).
+    pub fn select_up(&mut self) {
+        self.selected = self.selected.saturating_sub(1);
+    }
+
+    /// Move the highlight down one entry (saturating at the bottom).
+    pub fn select_down(&mut self) {
+        if self.selected + 1 < self.choices.len() {
+            self.selected += 1;
+        }
+    }
+}
+
+/// Section-picker state embedded in the New Session input modal. `choices[0]` is
+/// always the catch-all [`crate::session::IN_PROGRESS`] ("In Progress"); the rest
+/// are the backend's configured section names. The catch-all row maps to
+/// `section = None` (no override → auto-assign by rules).
+#[derive(Debug, Clone)]
+pub struct SectionPicker {
+    /// The catch-all first, then the configured section names.
+    pub choices: Vec<String>,
+    /// Index into `choices` of the highlighted entry.
+    pub selected: usize,
+}
+
+impl SectionPicker {
+    /// Build a picker over the catch-all plus the configured `sections`,
+    /// pre-selecting the row matching `default` (the catch-all when `default` is
+    /// `None`, or when it names a section that isn't configured).
+    pub fn new(sections: Vec<String>, default: Option<&str>) -> Self {
+        let mut choices = vec![crate::session::IN_PROGRESS.to_string()];
+        choices.extend(sections);
+        let selected = default
+            .and_then(|name| choices.iter().position(|c| c == name))
+            .unwrap_or(0);
+        Self { choices, selected }
+    }
+
+    /// The chosen section: `None` for the catch-all row (row 0), else the name.
+    pub fn selected_section(&self) -> Option<String> {
+        if self.selected == 0 {
+            None
+        } else {
+            self.choices.get(self.selected).cloned()
+        }
     }
 
     /// Move the highlight up one entry (saturating at the top).

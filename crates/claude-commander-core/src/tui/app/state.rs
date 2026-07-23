@@ -312,12 +312,17 @@ impl App {
                     self.spawn_preview_update();
                 }
             }
-            StateUpdate::NewSessionProgramsLoaded { project_id, picker } => {
-                // Patch the picker only if a New Session (plain or stacked) modal
+            StateUpdate::NewSessionProgramsLoaded {
+                project_id,
+                picker,
+                sections,
+            } => {
+                // Patch the pickers only if a New Session (plain or stacked) modal
                 // for the same project is still open; the user may have dismissed
                 // it or moved on to another project.
                 if let Modal::Input {
                     program_picker,
+                    section_picker,
                     on_submit,
                     ..
                 } = &mut self.ui_state.modal
@@ -329,7 +334,14 @@ impl App {
                             if *pid == project_id
                     )
                 {
-                    *program_picker = Some(picker);
+                    // The remote may have offered no programs — keep the local
+                    // fallback then; always adopt the remote's section list.
+                    if let Some(picker) = picker {
+                        *program_picker = Some(picker);
+                    }
+                    if section_picker.is_some() {
+                        *section_picker = Some(super::SectionPicker::new(sections, None));
+                    }
                 }
             }
             StateUpdate::ProgramChoicesLoaded {

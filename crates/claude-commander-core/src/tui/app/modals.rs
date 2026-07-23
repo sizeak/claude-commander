@@ -33,18 +33,22 @@ pub(super) enum ActiveCursor {
 /// Label column contents for the collapsed grid; the widest determines the
 /// value column offset.
 const NAME_LABEL: &str = "Session name";
+const SERVER_LABEL: &str = "Server";
 const PROJECT_LABEL: &str = "Project";
 const PROGRAM_LABEL: &str = "Program";
+const SECTION_LABEL: &str = "Section";
 
 /// Build the body lines for the New Session (`Modal::Input`) dialog.
 ///
 /// Pure so it can be unit-tested without a terminal. Laid out like the settings
-/// modal: the fields (Session name / Project / Program) are shown collapsed as
-/// aligned `label  value` rows, and a picker only expands into an inline
-/// dropdown — filter line + `theme.selection()` bar rows — when its row is
-/// focused and `expanded`. The `❯` caret marks only the two text inputs (the
-/// name value and, when open, the project filter). Flows without pickers
-/// (Rename, AddProject…) fall back to the original prompt + single input.
+/// modal: the fields (Session name / Server / Project / Program / Section) are
+/// shown collapsed as aligned `label  value` rows, and a picker only expands into
+/// an inline dropdown — filter line + `theme.selection()` bar rows — when its row
+/// is focused and `expanded`. The Server field appears only with >1 backend and
+/// the Section field only when the backend has configured sections. The `❯` caret
+/// marks only the two text inputs (the name value and, when open, the project
+/// filter). Flows without any picker (Rename, AddProject…) fall back to the
+/// original prompt + single input.
 /// `width` is the inner content width, used to pad the selection bar. Returns
 /// the lines plus where the active text cursor should be placed, if any.
 #[allow(clippy::too_many_arguments)]
@@ -54,6 +58,8 @@ pub(super) fn build_input_modal_lines(
     hint: Option<&str>,
     project_picker: Option<&ProjectPicker>,
     program_picker: Option<&ProgramPicker>,
+    server_picker: Option<&ServerPicker>,
+    section_picker: Option<&SectionPicker>,
     focus: InputFocus,
     expanded: bool,
     max_rows: usize,
@@ -71,7 +77,11 @@ pub(super) fn build_input_modal_lines(
 
     // Non-creating flows (Rename, AddProject…) have no pickers: keep the
     // original compact prompt + single input.
-    if project_picker.is_none() && program_picker.is_none() {
+    if project_picker.is_none()
+        && program_picker.is_none()
+        && server_picker.is_none()
+        && section_picker.is_none()
+    {
         let mut lines = vec![
             Line::from(prompt.to_string()),
             Line::from(""),
@@ -136,6 +146,25 @@ pub(super) fn build_input_modal_lines(
                 row: (lines.len() - 1) as u16,
                 base_col: value_col,
             });
+        }
+    }
+
+    // Server field (+ inline dropdown when open). Only shown when a picker is
+    // present (i.e. more than one backend is configured).
+    if let Some(picker) = server_picker {
+        let focused = focus == InputFocus::Server;
+        let open = focused && expanded;
+        let val = picker
+            .choices
+            .get(picker.selected)
+            .map(|(_, name)| name.clone())
+            .unwrap_or_default();
+        lines.push(field_row(SERVER_LABEL, val, focused, !open));
+
+        if open {
+            for (i, (_, name)) in picker.choices.iter().enumerate() {
+                lines.push(row_line(name.clone(), i == picker.selected));
+            }
         }
     }
 
@@ -205,6 +234,25 @@ pub(super) fn build_input_modal_lines(
         }
     }
 
+    // Section field (+ inline dropdown when open). Hidden unless the picker holds
+    // more than just the catch-all (no configured sections → nothing to choose).
+    if let Some(picker) = section_picker.filter(|p| p.choices.len() > 1) {
+        let focused = focus == InputFocus::Section;
+        let open = focused && expanded;
+        let val = picker
+            .choices
+            .get(picker.selected)
+            .cloned()
+            .unwrap_or_default();
+        lines.push(field_row(SECTION_LABEL, val, focused, !open));
+
+        if open {
+            for (i, name) in picker.choices.iter().enumerate() {
+                lines.push(row_line(name.clone(), i == picker.selected));
+            }
+        }
+    }
+
     if let Some(h) = hint {
         lines.push(Line::from(Span::styled(h.to_string(), italic_info)));
     }
@@ -261,6 +309,8 @@ impl App {
                 existing_branches,
                 project_picker,
                 program_picker,
+                server_picker,
+                section_picker,
                 focus,
                 expanded,
                 mask,
@@ -302,6 +352,8 @@ impl App {
                     hint.as_deref(),
                     project_picker.as_ref(),
                     program_picker.as_ref(),
+                    server_picker.as_ref(),
+                    section_picker.as_ref(),
                     *focus,
                     *expanded,
                     max_rows,
@@ -1212,9 +1264,12 @@ pub(super) fn path_input_areas(area: Rect) -> (Rect, Rect) {
 #[cfg(test)]
 mod tests {
     use super::{ActiveCursor, build_input_modal_lines};
+    use crate::backend::{BackendId, LOCAL_BACKEND_ID};
     use crate::config::ProgramEntry;
     use crate::session::ProjectId;
-    use crate::tui::app::{InputFocus, ProgramPicker, ProjectChoice, ProjectPicker};
+    use crate::tui::app::{
+        InputFocus, ProgramPicker, ProjectChoice, ProjectPicker, SectionPicker, ServerPicker,
+    };
     use crate::tui::theme::Theme;
     use ratatui::text::Line;
 
@@ -1272,11 +1327,26 @@ mod tests {
     }
 
     /// Build with the default test prompt/theme/width; the varying inputs are
-    /// the value, pickers, focus, and expansion.
+    /// the value, project/program pickers, focus, and expansion. No server or
+    /// section picker (see [`build_full`] for those).
     fn build(
         value: &str,
         project: Option<&ProjectPicker>,
         program: Option<&ProgramPicker>,
+        focus: InputFocus,
+        expanded: bool,
+    ) -> (Vec<Line<'static>>, Option<ActiveCursor>) {
+        build_full(value, project, program, None, None, focus, expanded)
+    }
+
+    /// Build with every picker specified, for the server/section field tests.
+    #[allow(clippy::too_many_arguments)]
+    fn build_full(
+        value: &str,
+        project: Option<&ProjectPicker>,
+        program: Option<&ProgramPicker>,
+        server: Option<&ServerPicker>,
+        section: Option<&SectionPicker>,
         focus: InputFocus,
         expanded: bool,
     ) -> (Vec<Line<'static>>, Option<ActiveCursor>) {
@@ -1286,6 +1356,8 @@ mod tests {
             None,
             project,
             program,
+            server,
+            section,
             focus,
             expanded,
             MAX_ROWS,
@@ -1423,6 +1495,119 @@ mod tests {
 
         let (lines, _) = build("", Some(&project), None, InputFocus::Project, true);
         assert!(has_line(&lines, "(no matching projects)"));
+    }
+
+    fn server_fixture(entries: &[(BackendId, &str)], selected: usize) -> ServerPicker {
+        let choices = entries.iter().map(|(id, n)| (*id, n.to_string())).collect();
+        let mut p = ServerPicker::new(choices, LOCAL_BACKEND_ID);
+        p.selected = selected;
+        p
+    }
+
+    #[test]
+    fn server_field_only_rendered_when_a_picker_is_present() {
+        let program = program_fixture(&[("claude", "claude")], 0);
+        // No server picker → no Server row.
+        let (lines, _) = build("", None, Some(&program), InputFocus::Name, false);
+        assert!(!has_line(&lines, "Server"));
+
+        // With a picker, the collapsed Server row shows the selected backend.
+        let server = server_fixture(
+            &[(LOCAL_BACKEND_ID, "local"), (BackendId(1), "buildbox")],
+            1,
+        );
+        let (lines, _) = build_full(
+            "",
+            None,
+            Some(&program),
+            Some(&server),
+            None,
+            InputFocus::Name,
+            false,
+        );
+        assert!(lines.iter().any(|l| {
+            let t = line_text(l);
+            t.contains("Server") && t.contains("buildbox")
+        }));
+    }
+
+    #[test]
+    fn server_dropdown_expands_only_when_focused() {
+        let server = server_fixture(
+            &[(LOCAL_BACKEND_ID, "local"), (BackendId(1), "buildbox")],
+            1,
+        );
+        let (lines, cursor) = build_full(
+            "",
+            None,
+            None,
+            Some(&server),
+            None,
+            InputFocus::Server,
+            true,
+        );
+        // A server picker has no filter → no caret from it; name caret only.
+        assert!(cursor.is_none());
+        assert_eq!(caret_lines(&lines), 1);
+        // The highlighted backend is the selection bar; the sibling isn't.
+        let sel = row_style(&lines, "buildbox").expect("selected server row rendered");
+        assert_eq!(sel.bg, Theme::basic().selection().bg);
+        assert!(
+            row_style(&lines, "local")
+                .expect("sibling rendered")
+                .bg
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn section_field_hidden_without_configured_sections() {
+        // A picker holding only the catch-all → the field is suppressed.
+        let section = SectionPicker::new(Vec::new(), None);
+        let (lines, _) = build_full(
+            "",
+            None,
+            None,
+            None,
+            Some(&section),
+            InputFocus::Name,
+            false,
+        );
+        assert!(!has_line(&lines, "Section"));
+    }
+
+    #[test]
+    fn section_dropdown_lists_catch_all_then_configured() {
+        let section = SectionPicker::new(vec!["Open PRs".to_string()], None);
+        // Collapsed: the Section row shows the catch-all (the default selection).
+        let (lines, _) = build_full(
+            "",
+            None,
+            None,
+            None,
+            Some(&section),
+            InputFocus::Name,
+            false,
+        );
+        assert!(lines.iter().any(|l| {
+            let t = line_text(l);
+            t.contains("Section") && t.contains(crate::session::IN_PROGRESS)
+        }));
+
+        // Expanded: both the catch-all and the configured section are listed, and
+        // the catch-all (row 0, the default) is the selection bar.
+        let (lines, _) = build_full(
+            "",
+            None,
+            None,
+            None,
+            Some(&section),
+            InputFocus::Section,
+            true,
+        );
+        assert!(has_line(&lines, "Open PRs"));
+        let sel = row_style(&lines, crate::session::IN_PROGRESS).expect("catch-all row rendered");
+        assert_eq!(sel.bg, Theme::basic().selection().bg);
     }
 
     #[test]
