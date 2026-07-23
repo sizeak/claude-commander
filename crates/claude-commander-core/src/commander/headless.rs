@@ -420,13 +420,10 @@ impl SlackSessionStore {
     /// propagated: losing the resume hint degrades to a cold start, it does not
     /// fail the ask.
     pub fn set(&self, key: &str, session_id: &str) {
-        let snapshot = {
-            let mut data = self.data.lock().unwrap();
-            data.sessions
-                .insert(key.to_string(), session_id.to_string());
-            data.clone()
-        };
-        if let Err(e) = persist(&self.path, &snapshot) {
+        let mut data = self.data.lock().unwrap();
+        data.sessions
+            .insert(key.to_string(), session_id.to_string());
+        if let Err(e) = persist(&self.path, &data) {
             warn!(target: "commander", "failed to persist slack.json: {e}");
         }
     }
@@ -436,14 +433,11 @@ impl SlackSessionStore {
     /// spawn dies immediately, so the mapping is cleared and the next ask cold-
     /// starts instead of resuming a dead id forever.
     pub fn remove(&self, key: &str) {
-        let snapshot = {
-            let mut data = self.data.lock().unwrap();
-            if data.sessions.remove(key).is_none() {
-                return; // nothing changed → nothing to persist
-            }
-            data.clone()
-        };
-        if let Err(e) = persist(&self.path, &snapshot) {
+        let mut data = self.data.lock().unwrap();
+        if data.sessions.remove(key).is_none() {
+            return; // nothing changed → nothing to persist
+        }
+        if let Err(e) = persist(&self.path, &data) {
             warn!(target: "commander", "failed to persist slack.json after remove: {e}");
         }
     }
@@ -462,6 +456,13 @@ fn migrate(mut data: SlackSessionData) -> SlackSessionData {
 /// torn file, and a crash mid-write can't truncate the existing map. The temp
 /// name carries pid + a per-process sequence (shared with the `CLAUDE.md`
 /// writer's [`PRIME_SEQ`]) so two writers can't collide on it.
+///
+/// Callers ([`SlackSessionStore::set`]/[`remove`](SlackSessionStore::remove))
+/// hold the store mutex across this call. That is deliberate: it serializes
+/// writers so the rename order matches the in-memory-state order, otherwise a
+/// slow writer holding an older snapshot could rename last and transiently drop
+/// a concurrent *other* key's mapping. The write is a tiny JSON blob, so holding
+/// the (sync) lock across it is cheap.
 fn persist(path: &Path, data: &SlackSessionData) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -1065,6 +1066,46 @@ mod tests {
 
         // Removing an absent key is a no-op (and must not panic).
         store.remove("nope");
+    }
+
+    #[test]
+    fn slack_store_concurrent_writes_across_keys_all_survive() {
+        // Regression: `set` persists while holding the store lock, so concurrent
+        // writes to *different* keys can't clobber each other. If the file write
+        // happened outside the lock, a writer holding an older snapshot could
+        // rename last and drop a concurrent key's mapping — here every key must
+        // survive to disk.
+        use std::sync::Barrier;
+
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("slack.json");
+        let store = Arc::new(SlackSessionStore::load(path.clone()));
+
+        const N: usize = 32;
+        let barrier = Arc::new(Barrier::new(N));
+        let handles: Vec<_> = (0..N)
+            .map(|i| {
+                let store = store.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait(); // maximise write overlap
+                    store.set(&format!("k{i}"), &format!("v{i}"));
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        // Every mapping is durable on disk after all writers finish.
+        let reloaded = SlackSessionStore::load(path);
+        for i in 0..N {
+            assert_eq!(
+                reloaded.get(&format!("k{i}")).as_deref(),
+                Some(format!("v{i}").as_str()),
+                "k{i} was dropped by a concurrent write"
+            );
+        }
     }
 
     #[test]

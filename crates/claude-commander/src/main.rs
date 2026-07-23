@@ -495,6 +495,12 @@ async fn main() -> Result<()> {
             // created, closing the RCE path. Read the marker once here at the CLI
             // boundary (env is process-global; keeping it out of the library fn
             // keeps that fn pure and testable) and enforce via the library.
+            //
+            // Note: with `--remote`, this validates against the LOCAL config's
+            // program list, which may differ from the remote server's. That only
+            // ever over-rejects (fails closed) — a program the remote allows but
+            // the local config doesn't is refused — so it's a safety edge, never
+            // a bypass. The headless agent's create path is local anyway.
             let program_locked =
                 std::env::var(claude_commander_core::commander::headless::PROGRAM_LOCK_ENV)
                     .as_deref()

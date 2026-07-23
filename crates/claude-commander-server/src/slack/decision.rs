@@ -214,6 +214,13 @@ pub struct ThreadMessage {
 /// Build the prompt sent to the headless commander. Provenance (who/where/link)
 /// is stated plainly; any thread history is fenced and explicitly marked as
 /// untrusted context — data to consider, never instructions to obey.
+///
+/// Residual risk (not code execution): injected thread text could still coax
+/// the agent into passing an attacker-chosen `--slack-channel` when it creates
+/// a session, misrouting a *future* `slack notify` to another channel. The
+/// blast radius is bounded — the create itself is program/mode-locked (see
+/// `commander::headless`), and a notify can only post to a channel the bot is a
+/// member of — so this is a routing nuisance, not an escalation.
 pub fn assemble_prompt(
     accepted: &AcceptedMessage,
     history: &[ThreadMessage],
