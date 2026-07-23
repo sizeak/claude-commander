@@ -38,6 +38,18 @@ Widget prChip(BuildContext context, int number, PrState state) {
   return _chip('PR #$number ${state.name}', color);
 }
 
+/// The session's section, shown read-only in the detail header (editing lives in
+/// the overflow menu). Uses the theme's outline colour so it reads as neutral
+/// metadata rather than a status.
+Widget sectionChip(BuildContext context, String section) =>
+    _chip('§ $section', Theme.of(context).colorScheme.outline);
+
+/// Marker that the session is pinned alive (won't be hibernated). Tinted with
+/// the theme's tertiary accent — it's an opt-in mode worth highlighting, not a
+/// passive status.
+Widget keepAliveChip(BuildContext context) =>
+    _chip('keep alive', Theme.of(context).colorScheme.tertiary);
+
 Widget _chip(String label, Color color) {
   return Container(
     padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),

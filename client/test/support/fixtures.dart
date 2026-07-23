@@ -28,6 +28,9 @@ SessionInfo sessionInfo({
   bool unread = false,
   SessionId? stackParentSessionId,
   DateTime? lastAttachedAt,
+  bool keepAlive = false,
+  String? currentSection,
+  String? sectionOverride,
 }) {
   final uuid = UuidValue.fromString(id);
   return SessionInfo(
@@ -51,13 +54,13 @@ SessionInfo sessionInfo({
     stackParentSessionId: stackParentSessionId,
     prBaseBranch: null,
     prMerged: false,
-    currentSection: null,
-    sectionOverride: null,
+    currentSection: currentSection,
+    sectionOverride: sectionOverride,
     enteredSectionAt: null,
     lastAttachedAt: lastAttachedAt,
     worktreePath: '/tmp/test-worktree',
     tmuxSessionName: 'cc-test',
-    keepAlive: false,
+    keepAlive: keepAlive,
   );
 }
 
