@@ -145,17 +145,21 @@ class _SessionListBodyState extends State<SessionListBody> {
   }
 
   /// The Recent tab: every server's sessions flattened to (store, session)
-  /// pairs, attached-only, newest-attach first (the TUI's MRU order). A live
-  /// query filters that set by fuzzy score, ranking best matches first while
-  /// keeping recency as the stable tie-break.
+  /// pairs, active-and-attached-only, newest-attach first (the TUI's MRU
+  /// order). A live query filters that set by fuzzy score, ranking best matches
+  /// first while keeping recency as the stable tie-break.
   ///
-  /// Unlike the TUI's pinned recents block (capped at `recent_sessions_limit`),
-  /// a dedicated tab shows *all* attached sessions — the cap is intentionally
-  /// omitted here.
+  /// Two deliberate differences from the TUI's pinned recents block, and they
+  /// go together: this tab is uncapped (the TUI caps at `recent_sessions_limit`)
+  /// *and* it excludes stopped sessions (the TUI shows any attached session
+  /// regardless of status). The TUI's fixed cap already bounds how much stale
+  /// history shows; an uncapped list has no such bound, so it filters to active
+  /// sessions to avoid accumulating dead ones indefinitely.
   Widget _buildRecent(BuildContext context, List<CommanderStore> servers) {
     var pairs = <(CommanderStore, SessionInfo)>[
       for (final store in servers)
-        for (final s in store.sessions) (store, s),
+        for (final s in store.sessions)
+          if (s.status.isActive) (store, s),
     ];
     pairs = mostRecent(pairs, (p) => p.$2.lastAttachedAt);
     if (_query.isNotEmpty) {
