@@ -501,6 +501,116 @@ impl App {
         }
     }
 
+    /// Build the server picker for a new-session dialog, or `None` when only one
+    /// backend is configured (the field is hidden then, matching the suppressed
+    /// server headers in the list). Highlights `current`.
+    pub(super) fn new_server_picker(&self, current: BackendId) -> Option<super::ServerPicker> {
+        if self.backends.len() <= 1 {
+            return None;
+        }
+        let choices = self
+            .backends
+            .iter()
+            .map(|h| (h.id, h.backend.descriptor().name))
+            .collect();
+        Some(super::ServerPicker::new(choices, current))
+    }
+
+    /// Build the section picker for a new-session dialog on `backend`,
+    /// pre-selecting `default` (the section under the list cursor). Section names
+    /// come from local config for the local backend; a remote backend starts with
+    /// just the catch-all and has its sections swapped in when `create_options`
+    /// returns (see [`Self::spawn_remote_program_picker`]).
+    pub(super) fn new_section_picker(
+        &self,
+        backend: BackendId,
+        default: Option<&str>,
+    ) -> super::SectionPicker {
+        let sections = if backend == LOCAL_BACKEND_ID {
+            self.config
+                .sections
+                .iter()
+                .map(|s| s.name.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        super::SectionPicker::new(sections, default)
+    }
+
+    /// Rebuild the New Session dialog's dependent pickers after the server picker
+    /// landed on a different backend: the project list, program list, section
+    /// list, and branch-collision hint all belong to the chosen backend, so they
+    /// reset to that backend's defaults. A remote backend then has its supported
+    /// programs and sections swapped in when `create_options` returns.
+    pub(super) async fn on_new_session_server_changed(&mut self) {
+        let backend = match &self.ui_state.modal {
+            Modal::Input {
+                server_picker: Some(sp),
+                ..
+            } => sp.selected_backend(),
+            _ => None,
+        };
+        let Some(backend) = backend else {
+            return;
+        };
+
+        // The default target is the new backend's first project (its repo_path is
+        // reused for the branch hint, so read both from the one lookup).
+        let (default_project, repo_path) = {
+            let first = self.view_for(backend).snapshot.projects.first();
+            (first.map(|p| p.id), first.map(|p| p.repo_path.clone()))
+        };
+        // The existing-branch hint is a local gix scan, meaningless for a remote
+        // project (its repo path lives on the server).
+        let existing_branches = if backend == LOCAL_BACKEND_ID {
+            repo_path.and_then(|path| existing_branch_names(&path))
+        } else {
+            None
+        };
+        let default = default_project.unwrap_or_default();
+        let project_picker = self.new_project_picker(backend, default).await;
+        let program_picker = self.new_program_picker();
+        let section_picker = self.new_section_picker(backend, None);
+
+        if let Modal::Input {
+            existing_branches: eb,
+            project_picker: pp,
+            program_picker: prog,
+            section_picker: sp,
+            on_submit,
+            expanded,
+            focus,
+            ..
+        } = &mut self.ui_state.modal
+        {
+            *eb = existing_branches;
+            *pp = Some(project_picker);
+            *prog = Some(program_picker);
+            *sp = Some(section_picker);
+            // Re-key the pending action to the new backend's default project and
+            // drop the old backend's cursor-derived section. This is what lets the
+            // async remote swap-in (keyed on `on_submit`'s project) correlate to
+            // THIS dialog, and makes a stale in-flight response for the previously
+            // selected backend fall through the guard instead of stomping it.
+            if let InputAction::CreateSession {
+                project_id,
+                section,
+            } = on_submit
+            {
+                *project_id = default;
+                *section = None;
+            }
+            *expanded = false;
+            *focus = super::InputFocus::Server;
+        }
+        // Swap in the chosen backend's supported programs + sections (no-op for
+        // the local backend, whose pickers are already correct).
+        if let Some(pid) = default_project {
+            self.spawn_remote_program_picker(backend, pid);
+        }
+    }
+
     /// Build the project picker for a new-session dialog: every project sorted
     /// by name, with `default` pre-selected.
     async fn new_project_picker(
@@ -529,10 +639,11 @@ impl App {
 
     /// For a remote `backend`, spawn a background task that loads its
     /// `create_options` and posts [`StateUpdate::NewSessionProgramsLoaded`] to
-    /// patch the just-opened New Session modal's program picker with the
-    /// harnesses that backend actually supports. No-op for the local backend
-    /// (its picker comes from local config and is set synchronously) so the
-    /// event loop never blocks on a remote `create_options` request.
+    /// patch the just-opened New Session modal's program picker (with the
+    /// harnesses that backend actually supports) and section picker (with the
+    /// server's configured sections). No-op for the local backend (its pickers
+    /// come from local config and are set synchronously) so the event loop never
+    /// blocks on a remote `create_options` request.
     fn spawn_remote_program_picker(&self, backend: BackendId, project_id: ProjectId) {
         if backend == LOCAL_BACKEND_ID {
             return;
@@ -540,19 +651,19 @@ impl App {
         let backend = self.backend_arc(backend);
         let tx = self.event_loop.sender();
         tokio::spawn(async move {
-            let Some(picker) = backend
-                .create_options()
-                .await
-                .ok()
-                .and_then(program_picker_from_options)
-            else {
-                // Query failed or offered no programs — leave the local fallback
-                // picker the modal already shows.
+            let Ok(opts) = backend.create_options().await else {
+                // Query failed — leave the local fallback pickers in place.
                 return;
             };
+            let sections = opts.sections.clone();
+            let picker = program_picker_from_options(opts);
             let _ = tx
                 .send(AppEvent::StateUpdate(
-                    StateUpdate::NewSessionProgramsLoaded { project_id, picker },
+                    StateUpdate::NewSessionProgramsLoaded {
+                        project_id,
+                        picker,
+                        sections,
+                    },
                 ))
                 .await;
         });
@@ -584,9 +695,15 @@ impl App {
                 .selected()
                 .and_then(|idx| super::selection::section_at(&self.ui_state.list_items, idx));
             let project_picker = self.new_project_picker(backend, project_id).await;
+            // The server picker is hidden for a single-backend setup; the section
+            // picker pre-selects the section under the cursor (built before the
+            // literal so `section` can still move into `on_submit`).
+            let server_picker = self.new_server_picker(backend);
+            let section_picker = Some(self.new_section_picker(backend, section.as_deref()));
             // Open with the local-config picker immediately; for a remote
-            // backend, a background task swaps in its supported programs when
-            // `create_options` returns, so the modal never waits on that request.
+            // backend, a background task swaps in its supported programs (and
+            // sections) when `create_options` returns, so the modal never waits
+            // on that request.
             self.ui_state.modal = Modal::Input {
                 title: "New Session".to_string(),
                 prompt: "Enter session name:".to_string(),
@@ -598,6 +715,8 @@ impl App {
                 existing_branches,
                 project_picker: Some(project_picker),
                 program_picker: Some(self.new_program_picker()),
+                server_picker,
+                section_picker,
                 focus: super::InputFocus::Name,
                 expanded: false,
                 mask: false,
@@ -674,6 +793,8 @@ impl App {
             existing_branches,
             project_picker: None,
             program_picker: Some(self.new_program_picker()),
+            server_picker: None,
+            section_picker: None,
             focus: super::InputFocus::Name,
             expanded: false,
             mask: false,
@@ -1788,6 +1909,8 @@ impl App {
             existing_branches: None,
             project_picker: None,
             program_picker: None,
+            server_picker: None,
+            section_picker: None,
             focus: super::InputFocus::Name,
             expanded: false,
             mask: false,
@@ -1948,6 +2071,8 @@ impl App {
             existing_branches: None,
             project_picker: None,
             program_picker: None,
+            server_picker: None,
+            section_picker: None,
             focus: super::InputFocus::Name,
             expanded: false,
             mask: false,
@@ -1989,6 +2114,7 @@ impl App {
         action: InputAction,
         value: String,
         program: Option<String>,
+        backend: Option<BackendId>,
     ) {
         match action {
             InputAction::CreateSession {
@@ -2003,7 +2129,9 @@ impl App {
                     return;
                 }
                 self.ui_state.modal = Modal::None;
-                let backend_id = self.backend_of_project(project_id);
+                // The Server field is authoritative when present; only fall back
+                // to deriving the backend from the project when it isn't shown.
+                let backend_id = backend.unwrap_or_else(|| self.backend_of_project(project_id));
                 let Some(project_path) = self
                     .view_for(backend_id)
                     .snapshot
@@ -2245,6 +2373,8 @@ impl App {
                     existing_branches: None,
                     project_picker: None,
                     program_picker: None,
+                    server_picker: None,
+                    section_picker: None,
                     focus: super::InputFocus::Name,
                     expanded: false,
                     mask: false,
@@ -2274,6 +2404,8 @@ impl App {
                         existing_branches: None,
                         project_picker: None,
                         program_picker: None,
+                        server_picker: None,
+                        section_picker: None,
                         focus: super::InputFocus::Name,
                         expanded: false,
                         mask: false,
@@ -2288,6 +2420,8 @@ impl App {
                     existing_branches: None,
                     project_picker: None,
                     program_picker: None,
+                    server_picker: None,
+                    section_picker: None,
                     focus: super::InputFocus::Name,
                     expanded: false,
                     mask: true,

@@ -147,6 +147,9 @@ enum InputKeyOutcome {
     Submit,
     /// Close the dialog without submitting.
     Cancel,
+    /// The server picker confirmed a *different* backend; the caller must rebuild
+    /// the project/program/section pickers for it (an async, `App`-level step).
+    ServerChanged,
 }
 
 /// Pure key routing for the New Session dialog, mirroring `apply_paste_to_modal`
@@ -168,6 +171,8 @@ fn handle_input_modal_key(modal: &mut Modal, key: crossterm::event::KeyEvent) ->
         existing_branches,
         project_picker,
         program_picker,
+        server_picker,
+        section_picker,
         focus,
         expanded,
         ..
@@ -225,6 +230,47 @@ fn handle_input_modal_key(modal: &mut Modal, key: crossterm::event::KeyEvent) ->
                     _ => {}
                 }
             }
+            InputFocus::Section => {
+                let Some(picker) = section_picker.as_mut() else {
+                    *expanded = false;
+                    return InputKeyOutcome::Handled;
+                };
+                match key.code {
+                    KeyCode::Up => picker.select_up(),
+                    KeyCode::Down => picker.select_down(),
+                    KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Right | KeyCode::Esc => {
+                        *expanded = false;
+                    }
+                    _ => {}
+                }
+            }
+            InputFocus::Server => {
+                let Some(picker) = server_picker.as_mut() else {
+                    *expanded = false;
+                    return InputKeyOutcome::Handled;
+                };
+                match key.code {
+                    KeyCode::Up => picker.select_up(),
+                    KeyCode::Down => picker.select_down(),
+                    KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Right => {
+                        *expanded = false;
+                        // A confirm that moved off the applied selection needs the
+                        // caller to rebuild the dependent pickers for the new
+                        // backend; re-confirming the same server is a no-op.
+                        if picker.selected != picker.committed {
+                            picker.committed = picker.selected;
+                            return InputKeyOutcome::ServerChanged;
+                        }
+                    }
+                    // Esc abandons the in-progress highlight, snapping back to the
+                    // applied server so no rebuild is triggered.
+                    KeyCode::Esc => {
+                        picker.selected = picker.committed;
+                        *expanded = false;
+                    }
+                    _ => {}
+                }
+            }
             // The name field never expands; treat as a stray state and reset.
             InputFocus::Name => *expanded = false,
         }
@@ -234,6 +280,15 @@ fn handle_input_modal_key(modal: &mut Modal, key: crossterm::event::KeyEvent) ->
     // --- Collapsed: Enter/Esc act on the whole dialog; movement + activation. ---
     let has_project = project_picker.is_some();
     let has_program = program_picker.is_some();
+    // A section picker holding only the catch-all (no configured sections, or a
+    // remote whose options haven't loaded) is hidden and unfocusable.
+    let has_section = section_picker.as_ref().is_some_and(|p| p.choices.len() > 1);
+    let fields = super::FieldsPresent {
+        server: server_picker.is_some(),
+        project: has_project,
+        program: has_program,
+        section: has_section,
+    };
     match key.code {
         KeyCode::Enter => {
             // A project picker with no current match has nothing to create
@@ -252,11 +307,16 @@ fn handle_input_modal_key(modal: &mut Modal, key: crossterm::event::KeyEvent) ->
             return InputKeyOutcome::Submit;
         }
         KeyCode::Esc => return InputKeyOutcome::Cancel,
-        KeyCode::Tab | KeyCode::Down => *focus = focus.next(has_project, has_program),
-        KeyCode::BackTab | KeyCode::Up => *focus = focus.prev(has_project, has_program),
+        KeyCode::Tab | KeyCode::Down => *focus = focus.next(fields),
+        KeyCode::BackTab | KeyCode::Up => *focus = focus.prev(fields),
         _ => match focus {
             InputFocus::Name => {
                 super::edit_text_input(value, key);
+            }
+            InputFocus::Server => {
+                if matches!(key.code, KeyCode::Char(' ') | KeyCode::Right) && fields.server {
+                    *expanded = true;
+                }
             }
             InputFocus::Project => match key.code {
                 // Space / → open the dropdown.
@@ -275,6 +335,11 @@ fn handle_input_modal_key(modal: &mut Modal, key: crossterm::event::KeyEvent) ->
             },
             InputFocus::Program => {
                 if matches!(key.code, KeyCode::Char(' ') | KeyCode::Right) && has_program {
+                    *expanded = true;
+                }
+            }
+            InputFocus::Section => {
+                if matches!(key.code, KeyCode::Char(' ') | KeyCode::Right) && has_section {
                     *expanded = true;
                 }
             }
@@ -550,6 +615,9 @@ impl App {
                 match handle_input_modal_key(&mut self.ui_state.modal, key) {
                     InputKeyOutcome::Handled => {}
                     InputKeyOutcome::Cancel => self.ui_state.modal = Modal::None,
+                    InputKeyOutcome::ServerChanged => {
+                        self.on_new_session_server_changed().await;
+                    }
                     InputKeyOutcome::Submit => {
                         // `handle_input_modal_key` only returns `Submit` once a
                         // project (if any) is selectable, so no re-gating here.
@@ -558,23 +626,40 @@ impl App {
                             on_submit,
                             project_picker,
                             program_picker,
+                            server_picker,
+                            section_picker,
                             ..
                         } = &self.ui_state.modal
                         else {
                             return;
                         };
                         let mut action = on_submit.clone();
-                        // A chosen project overrides the one baked in at open time.
-                        if let (InputAction::CreateSession { project_id, .. }, Some(picker)) =
-                            (&mut action, project_picker.as_ref())
-                            && let Some(chosen) = picker.selected_id()
+                        // A chosen project and section override the ones baked in
+                        // at open time.
+                        if let InputAction::CreateSession {
+                            project_id,
+                            section,
+                        } = &mut action
                         {
-                            *project_id = chosen;
+                            if let Some(chosen) =
+                                project_picker.as_ref().and_then(|p| p.selected_id())
+                            {
+                                *project_id = chosen;
+                            }
+                            if let Some(picker) = section_picker.as_ref() {
+                                *section = picker.selected_section();
+                            }
                         }
+                        // The Server field, when shown, is authoritative for which
+                        // backend the session is created on — don't re-derive it
+                        // from the project (two backend handles can expose the same
+                        // project id).
+                        let backend = server_picker.as_ref().and_then(|p| p.selected_backend());
                         let value = value.value().to_string();
                         let program = program_picker.as_ref().and_then(|p| p.selected_command());
                         self.ui_state.modal = Modal::None;
-                        self.handle_input_submit(action, value, program).await;
+                        self.handle_input_submit(action, value, program, backend)
+                            .await;
                     }
                 }
             }
@@ -1109,7 +1194,10 @@ impl App {
             _ => return,
         };
         self.ui_state.modal = Modal::None;
-        self.handle_input_submit(action, submit_value, None).await;
+        // Path-input flows (AddProject…) never create a session, so no backend
+        // override applies.
+        self.handle_input_submit(action, submit_value, None, None)
+            .await;
     }
 
     /// Whether a review-view wheel event landed over the file-list pane (so it
@@ -1607,6 +1695,8 @@ mod tests {
             existing_branches: None,
             project_picker: None,
             program_picker: None,
+            server_picker: None,
+            section_picker: None,
             focus: crate::tui::app::InputFocus::Name,
             expanded: false,
             mask: false,
@@ -1762,8 +1852,11 @@ diff --git a/a.rs b/a.rs
     // collapsed field focus, dropdown expand/collapse, filtering, submit.
     // -----------------------------------------------------------------------
 
+    use crate::backend::{BackendId, LOCAL_BACKEND_ID};
     use crate::config::ProgramEntry;
-    use crate::tui::app::{InputFocus, ProgramPicker, ProjectChoice, ProjectPicker};
+    use crate::tui::app::{
+        InputFocus, ProgramPicker, ProjectChoice, ProjectPicker, SectionPicker, ServerPicker,
+    };
 
     fn project_fixture(names: &[&str], selected: usize) -> ProjectPicker {
         let choices: Vec<ProjectChoice> = names
@@ -1800,6 +1893,40 @@ diff --git a/a.rs b/a.rs
             existing_branches: None,
             project_picker: project,
             program_picker: program,
+            server_picker: None,
+            section_picker: None,
+            focus: InputFocus::Name,
+            expanded: false,
+            mask: false,
+        }
+    }
+
+    /// A new-session modal carrying a server picker (local + one remote) and a
+    /// section picker (catch-all + configured sections), for the server/section
+    /// key-handling tests.
+    fn session_modal_with_server_and_section() -> Modal {
+        Modal::Input {
+            title: String::new(),
+            prompt: String::new(),
+            value: "".into(),
+            on_submit: InputAction::CreateSession {
+                project_id: ProjectId::new(),
+                section: None,
+            },
+            existing_branches: None,
+            project_picker: Some(project_fixture(&["a"], 0)),
+            program_picker: Some(program_fixture(&["claude"], 0)),
+            server_picker: Some(ServerPicker::new(
+                vec![
+                    (LOCAL_BACKEND_ID, "local".to_string()),
+                    (BackendId(1), "buildbox".to_string()),
+                ],
+                LOCAL_BACKEND_ID,
+            )),
+            section_picker: Some(SectionPicker::new(
+                vec!["Open PRs".to_string(), "Merged".to_string()],
+                None,
+            )),
             focus: InputFocus::Name,
             expanded: false,
             mask: false,
@@ -1992,6 +2119,98 @@ diff --git a/a.rs b/a.rs
                 ..
             } => assert_eq!(p.selected, 1),
             _ => panic!("not an Input modal with program picker"),
+        }
+    }
+
+    #[test]
+    fn tab_visits_server_and_section_rows_when_present() {
+        let mut m = session_modal_with_server_and_section();
+        // Name → Server → Project → Program → Section → Name.
+        handle_input_modal_key(&mut m, key(KeyCode::Tab));
+        assert_eq!(focus_of(&m), InputFocus::Server);
+        handle_input_modal_key(&mut m, key(KeyCode::Tab));
+        assert_eq!(focus_of(&m), InputFocus::Project);
+        handle_input_modal_key(&mut m, key(KeyCode::Tab));
+        assert_eq!(focus_of(&m), InputFocus::Program);
+        handle_input_modal_key(&mut m, key(KeyCode::Tab));
+        assert_eq!(focus_of(&m), InputFocus::Section);
+        handle_input_modal_key(&mut m, key(KeyCode::Tab));
+        assert_eq!(focus_of(&m), InputFocus::Name);
+    }
+
+    #[test]
+    fn section_dropdown_selects_and_stays_local() {
+        let mut m = session_modal_with_server_and_section();
+        // Focus Section (last in the ring), open it, move down, confirm.
+        handle_input_modal_key(&mut m, key(KeyCode::BackTab)); // Name → Section
+        assert_eq!(focus_of(&m), InputFocus::Section);
+        handle_input_modal_key(&mut m, key(KeyCode::Char(' '))); // open
+        assert!(expanded_of(&m));
+        handle_input_modal_key(&mut m, key(KeyCode::Down)); // catch-all → "Open PRs"
+        assert_eq!(
+            handle_input_modal_key(&mut m, key(KeyCode::Enter)),
+            InputKeyOutcome::Handled
+        );
+        assert!(!expanded_of(&m));
+        match &m {
+            Modal::Input {
+                section_picker: Some(p),
+                ..
+            } => {
+                assert_eq!(p.selected, 1);
+                assert_eq!(p.selected_section().as_deref(), Some("Open PRs"));
+            }
+            _ => panic!("not an Input modal with a section picker"),
+        }
+    }
+
+    #[test]
+    fn server_confirm_after_change_signals_server_changed() {
+        let mut m = session_modal_with_server_and_section();
+        handle_input_modal_key(&mut m, key(KeyCode::Tab)); // Name → Server
+        handle_input_modal_key(&mut m, key(KeyCode::Char(' '))); // open
+        handle_input_modal_key(&mut m, key(KeyCode::Down)); // local → buildbox
+        // Confirming a *changed* selection bubbles up for the async rebuild…
+        assert_eq!(
+            handle_input_modal_key(&mut m, key(KeyCode::Enter)),
+            InputKeyOutcome::ServerChanged
+        );
+        match &m {
+            Modal::Input {
+                server_picker: Some(p),
+                ..
+            } => {
+                assert_eq!(p.selected_backend(), Some(BackendId(1)));
+                assert_eq!(p.committed, p.selected, "the change was committed");
+            }
+            _ => panic!("not an Input modal with a server picker"),
+        }
+        // …and re-confirming the same server is a no-op.
+        handle_input_modal_key(&mut m, key(KeyCode::Char(' '))); // reopen
+        assert_eq!(
+            handle_input_modal_key(&mut m, key(KeyCode::Enter)),
+            InputKeyOutcome::Handled
+        );
+    }
+
+    #[test]
+    fn server_dropdown_esc_snaps_back_without_signalling() {
+        let mut m = session_modal_with_server_and_section();
+        handle_input_modal_key(&mut m, key(KeyCode::Tab)); // Name → Server
+        handle_input_modal_key(&mut m, key(KeyCode::Char(' '))); // open
+        handle_input_modal_key(&mut m, key(KeyCode::Down)); // highlight buildbox
+        // Esc abandons the highlight → back to the applied server, no signal.
+        assert_eq!(
+            handle_input_modal_key(&mut m, key(KeyCode::Esc)),
+            InputKeyOutcome::Handled
+        );
+        assert!(!expanded_of(&m));
+        match &m {
+            Modal::Input {
+                server_picker: Some(p),
+                ..
+            } => assert_eq!(p.selected_backend(), Some(LOCAL_BACKEND_ID)),
+            _ => panic!("not an Input modal with a server picker"),
         }
     }
 }
