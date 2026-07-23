@@ -416,6 +416,7 @@ impl App {
                     state.prime_segments(segments);
                     self.reset_review_images();
                     self.ensure_review_image(&state).await;
+                    self.ensure_review_file_lines(&state).await;
                     self.ui_state.modal = Modal::ReviewDiff(Box::new(state));
                 }
             }
@@ -464,6 +465,29 @@ impl App {
                 };
                 self.review_images.borrow_mut().insert((path, side), entry);
             }
+            StateUpdate::ReviewFileLines {
+                generation,
+                session_id,
+                path,
+                lines,
+            } => {
+                // Drop a stale arrival (review since closed/reopened).
+                if generation != self.review_image_gen.get() {
+                    return;
+                }
+                // The fetch has reported back — allow a later re-fetch if needed.
+                self.review_file_loads.borrow_mut().remove(&path);
+                match lines {
+                    Ok(lines) => {
+                        if let Modal::ReviewDiff(state) = &mut self.ui_state.modal
+                            && state.session_id == session_id
+                        {
+                            state.set_file_lines(path, lines);
+                        }
+                    }
+                    Err(e) => self.set_review_status(&format!("Expand failed: {e}")),
+                }
+            }
             StateUpdate::ReviewRefreshed { refreshed, manual } => {
                 self.ui_state.review_refresh_in_flight = false;
                 match refreshed {
@@ -497,6 +521,12 @@ impl App {
                     }
                     None if manual => self.set_review_status("Review already up to date"),
                     None => {}
+                }
+                // A refresh clears the per-file line cache (hunk boundaries may
+                // have shifted); re-fetch the shown file so expand controls
+                // reappear without waiting for the next navigation key.
+                if let Modal::ReviewDiff(state) = &self.ui_state.modal {
+                    self.ensure_review_file_lines(state).await;
                 }
             }
             StateUpdate::CascadeFinished { backend_id, result } => {

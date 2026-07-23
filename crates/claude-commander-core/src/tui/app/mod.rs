@@ -1577,6 +1577,11 @@ pub struct App {
     /// stale generation and is dropped, so it can't poison the new review's
     /// cache (e.g. a same-named path in a different session).
     review_image_gen: Cell<u64>,
+    /// Display paths whose working-tree content is currently being fetched for
+    /// context expansion, so repeated expand triggers don't spawn duplicate
+    /// fetches. Loaded results land in `DiffReviewState.file_lines`; a path is
+    /// removed here once its fetch reports back. Cleared when a review opens.
+    review_file_loads: RefCell<HashSet<String>>,
 }
 
 impl App {
@@ -1645,6 +1650,7 @@ impl App {
             picker: None,
             review_images: RefCell::new(HashMap::new()),
             review_image_gen: Cell::new(0),
+            review_file_loads: RefCell::new(HashSet::new()),
         }
     }
 
