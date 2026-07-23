@@ -73,6 +73,14 @@ int? sessionFuzzyScore(SessionInfo session, String query) {
   return best;
 }
 
+/// Whether a session's tmux process is still alive — every status except
+/// `stopped`. Mirrors the Rust `SessionStatus::is_active`. The Recent tab
+/// shows only active sessions: a stopped one isn't something you're actively
+/// working in, so it shouldn't linger in the MRU list.
+extension SessionStatusActive on SessionStatus {
+  bool get isActive => this != SessionStatus.stopped;
+}
+
 /// [sessions] that match [query], in original order. An empty query keeps them
 /// all. Used to filter a project group in place without reordering it.
 List<SessionInfo> matchingSessions(

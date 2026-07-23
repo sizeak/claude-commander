@@ -331,6 +331,35 @@ void main() {
     );
   });
 
+  testWidgets('the Recent view hides stopped sessions even if attached', (
+    tester,
+  ) async {
+    api.listSessionsResponse = [
+      sessionInfo(
+        id: '11111111-2222-3333-4444-555555555555',
+        title: 'Live',
+        status: SessionStatus.running,
+        lastAttachedAt: DateTime.utc(2026, 1, 1),
+      ),
+      sessionInfo(
+        id: '22222222-2222-3333-4444-555555555555',
+        title: 'Dead',
+        status: SessionStatus.stopped,
+        lastAttachedAt: DateTime.utc(2026, 1, 5),
+      ),
+    ];
+    unawaited(store.connect());
+    await tester.pumpWidget(wrap());
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.text('Recent'));
+    await tester.pumpAndSettle();
+
+    // Stopped is excluded despite being the more-recently-attached of the two.
+    expect(find.text('Dead'), findsNothing);
+    expect(find.text('Live'), findsOneWidget);
+  });
+
   testWidgets('searching within the Recent tab filters it', (tester) async {
     api.listSessionsResponse = [
       sessionInfo(
