@@ -146,13 +146,19 @@ pub enum StateUpdate {
         backend_id: usize,
         session_id: SessionId,
     },
-    /// A newly-opened New Session modal's program picker finished loading from a
-    /// remote backend's `create_options` on a background task — patch the picker
-    /// in place if that modal is still open for the same project. Spawned so a
-    /// slow remote never blocks the event loop before the modal appears.
+    /// A newly-opened New Session modal's options finished loading from a remote
+    /// backend's `create_options` on a background task — patch the program and
+    /// section pickers in place if that modal is still open for the same project.
+    /// Spawned so a slow remote never blocks the event loop before the modal
+    /// appears.
     NewSessionProgramsLoaded {
         project_id: ProjectId,
-        picker: super::app::ProgramPicker,
+        /// The remote's supported programs, or `None` when it offered none (the
+        /// local fallback picker is then left in place).
+        picker: Option<super::app::ProgramPicker>,
+        /// The backend's configured section names (catch-all excluded), so the
+        /// modal's section picker can be rebuilt for the remote backend.
+        sections: Vec<String>,
     },
     /// The owning backend's program list finished loading for the open
     /// change-program palette. Replaces the palette's fallback choices (seeded

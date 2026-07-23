@@ -2639,38 +2639,153 @@ fn program_picker_navigation_saturates_at_ends() {
     assert_eq!(p.selected, 1);
 }
 
+// --- ServerPicker (new-session server selection) ---
+
+#[test]
+fn server_picker_selected_backend_and_default() {
+    let choices = vec![
+        (LOCAL_BACKEND_ID, "local".to_string()),
+        (BackendId(1), "buildbox".to_string()),
+    ];
+    // Defaults to the entry for the requested backend, and `committed` matches so
+    // an immediate confirm is a no-op.
+    let p = ServerPicker::new(choices.clone(), BackendId(1));
+    assert_eq!(p.selected, 1);
+    assert_eq!(p.committed, 1);
+    assert_eq!(p.selected_backend(), Some(BackendId(1)));
+    // An unknown default falls back to the first entry.
+    let p = ServerPicker::new(choices, BackendId(99));
+    assert_eq!(p.selected_backend(), Some(LOCAL_BACKEND_ID));
+}
+
+// --- SectionPicker (new-session section selection) ---
+
+#[test]
+fn section_picker_catch_all_maps_to_none() {
+    // Row 0 is always the catch-all → no override.
+    let p = SectionPicker::new(vec!["Open PRs".to_string()], None);
+    assert_eq!(p.choices[0], crate::session::IN_PROGRESS);
+    assert_eq!(p.selected, 0);
+    assert_eq!(p.selected_section(), None);
+}
+
+#[test]
+fn section_picker_selects_configured_row() {
+    let p = SectionPicker::new(vec!["Open PRs".to_string(), "Merged".to_string()], None);
+    // Highlight the second configured section (index 2, after the catch-all).
+    let mut p = p;
+    p.select_down();
+    p.select_down();
+    assert_eq!(p.selected, 2);
+    assert_eq!(p.selected_section().as_deref(), Some("Merged"));
+}
+
+#[test]
+fn section_picker_pre_selects_the_default_row() {
+    // A default naming a configured section pre-selects that row…
+    let p = SectionPicker::new(
+        vec!["Open PRs".to_string(), "Merged".to_string()],
+        Some("Merged"),
+    );
+    assert_eq!(p.selected, 2);
+    assert_eq!(p.selected_section().as_deref(), Some("Merged"));
+    // …while an unknown default falls back to the catch-all (row 0 / None).
+    let p = SectionPicker::new(vec!["Open PRs".to_string()], Some("Gone"));
+    assert_eq!(p.selected, 0);
+    assert_eq!(p.selected_section(), None);
+}
+
+#[test]
+fn section_picker_default_prefers_a_configured_section_over_the_catch_all() {
+    // A section configured with the reserved catch-all spelling must still be
+    // selectable: matching a default starts from row 1, so it resolves to the
+    // configured row (index 1) rather than the catch-all (index 0).
+    let p = SectionPicker::new(
+        vec![crate::session::IN_PROGRESS.to_string()],
+        Some(crate::session::IN_PROGRESS),
+    );
+    assert_eq!(p.selected, 1);
+    assert_eq!(
+        p.selected_section().as_deref(),
+        Some(crate::session::IN_PROGRESS)
+    );
+}
+
 // --- InputFocus (Tab cycling in the input modal) ---
+
+/// All four optional fields present (the new-session dialog with >1 backend and
+/// configured sections).
+fn all_fields() -> crate::tui::app::FieldsPresent {
+    crate::tui::app::FieldsPresent {
+        server: true,
+        project: true,
+        program: true,
+        section: true,
+    }
+}
+
+/// Only the project + program fields (single backend, no configured sections) —
+/// the classic layout before server/section were added.
+fn project_program_only() -> crate::tui::app::FieldsPresent {
+    crate::tui::app::FieldsPresent {
+        server: false,
+        project: true,
+        program: true,
+        section: false,
+    }
+}
 
 #[test]
 fn input_focus_cycles_all_present_fields() {
-    // Name → Project → Program → Name when both pickers are present.
-    assert_eq!(InputFocus::Name.next(true, true), InputFocus::Project);
-    assert_eq!(InputFocus::Project.next(true, true), InputFocus::Program);
-    assert_eq!(InputFocus::Program.next(true, true), InputFocus::Name);
+    // Name → Server → Project → Program → Section → Name with every field present.
+    let f = all_fields();
+    assert_eq!(InputFocus::Name.next(f), InputFocus::Server);
+    assert_eq!(InputFocus::Server.next(f), InputFocus::Project);
+    assert_eq!(InputFocus::Project.next(f), InputFocus::Program);
+    assert_eq!(InputFocus::Program.next(f), InputFocus::Section);
+    assert_eq!(InputFocus::Section.next(f), InputFocus::Name);
 }
 
 #[test]
 fn input_focus_skips_absent_fields() {
+    // No server/section: Name → Project → Program → Name.
+    let f = project_program_only();
+    assert_eq!(InputFocus::Name.next(f), InputFocus::Project);
+    assert_eq!(InputFocus::Project.next(f), InputFocus::Program);
+    assert_eq!(InputFocus::Program.next(f), InputFocus::Name);
     // No project picker: Name → Program → Name.
-    assert_eq!(InputFocus::Name.next(false, true), InputFocus::Program);
-    assert_eq!(InputFocus::Program.next(false, true), InputFocus::Name);
-    // No program picker: Name → Project → Name.
-    assert_eq!(InputFocus::Name.next(true, false), InputFocus::Project);
-    assert_eq!(InputFocus::Project.next(true, false), InputFocus::Name);
-    // Neither picker: Tab stays on the name field.
-    assert_eq!(InputFocus::Name.next(false, false), InputFocus::Name);
+    let no_project = crate::tui::app::FieldsPresent {
+        server: false,
+        project: false,
+        program: true,
+        section: false,
+    };
+    assert_eq!(InputFocus::Name.next(no_project), InputFocus::Program);
+    assert_eq!(InputFocus::Program.next(no_project), InputFocus::Name);
+    // Nothing optional present: Tab stays on the name field.
+    let none = crate::tui::app::FieldsPresent {
+        server: false,
+        project: false,
+        program: false,
+        section: false,
+    };
+    assert_eq!(InputFocus::Name.next(none), InputFocus::Name);
 }
 
 #[test]
 fn input_focus_prev_cycles_backward() {
-    // Shift+Tab reverses: Name → Program → Project → Name with both present.
-    assert_eq!(InputFocus::Name.prev(true, true), InputFocus::Program);
-    assert_eq!(InputFocus::Program.prev(true, true), InputFocus::Project);
-    assert_eq!(InputFocus::Project.prev(true, true), InputFocus::Name);
+    // Shift+Tab reverses the full ring.
+    let f = all_fields();
+    assert_eq!(InputFocus::Name.prev(f), InputFocus::Section);
+    assert_eq!(InputFocus::Section.prev(f), InputFocus::Program);
+    assert_eq!(InputFocus::Program.prev(f), InputFocus::Project);
+    assert_eq!(InputFocus::Project.prev(f), InputFocus::Server);
+    assert_eq!(InputFocus::Server.prev(f), InputFocus::Name);
     // Absent fields are skipped, same as forward cycling.
-    assert_eq!(InputFocus::Name.prev(false, true), InputFocus::Program);
-    assert_eq!(InputFocus::Name.prev(true, false), InputFocus::Project);
-    assert_eq!(InputFocus::Name.prev(false, false), InputFocus::Name);
+    let f = project_program_only();
+    assert_eq!(InputFocus::Name.prev(f), InputFocus::Program);
+    assert_eq!(InputFocus::Program.prev(f), InputFocus::Project);
+    assert_eq!(InputFocus::Project.prev(f), InputFocus::Name);
 }
 
 // --- ProjectPicker (new-session project selection) ---
@@ -4005,8 +4120,13 @@ async fn add_remote_server_flow_chains_name_url_token() {
     ));
 
     // Name → URL step.
-    app.handle_input_submit(InputAction::AddRemoteServerName, "buildbox".into(), None)
-        .await;
+    app.handle_input_submit(
+        InputAction::AddRemoteServerName,
+        "buildbox".into(),
+        None,
+        None,
+    )
+    .await;
     assert!(matches!(
         &app.ui_state.modal,
         Modal::Input {
@@ -4022,6 +4142,7 @@ async fn add_remote_server_flow_chains_name_url_token() {
             name: "buildbox".into(),
         },
         "not a url".into(),
+        None,
         None,
     )
     .await;
@@ -4045,6 +4166,7 @@ async fn add_remote_server_flow_chains_name_url_token() {
         },
         "http://buildbox:7878".into(),
         None,
+        None,
     )
     .await;
     assert!(matches!(
@@ -4064,6 +4186,7 @@ async fn add_remote_server_flow_chains_name_url_token() {
         },
         "sekrit-token".into(),
         None,
+        None,
     )
     .await;
     assert!(matches!(&app.ui_state.modal, Modal::Loading { .. }));
@@ -4073,8 +4196,13 @@ async fn add_remote_server_flow_chains_name_url_token() {
 async fn add_remote_server_duplicate_name_reprompts() {
     let mut app = make_test_app();
     app.config.remote_servers = vec![server_cfg("buildbox", "http://b:7878")];
-    app.handle_input_submit(InputAction::AddRemoteServerName, "buildbox".into(), None)
-        .await;
+    app.handle_input_submit(
+        InputAction::AddRemoteServerName,
+        "buildbox".into(),
+        None,
+        None,
+    )
+    .await;
     assert!(matches!(
         &app.ui_state.modal,
         Modal::Input {
@@ -4229,6 +4357,8 @@ fn masked_input_modal_renders_bullets_not_the_token() {
         existing_branches: None,
         project_picker: None,
         program_picker: None,
+        server_picker: None,
+        section_picker: None,
         focus: InputFocus::Name,
         expanded: false,
         mask: true,
@@ -4779,6 +4909,243 @@ async fn new_session_disables_local_branch_hint_for_remote_project() {
             );
         }
         other => panic!("expected New Session Input modal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn new_session_shows_server_field_and_switch_rebuilds_pickers() {
+    let (remote_snap, _sid, remote_pid) = snapshot_with_one_session();
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", remote_snap)]);
+    app.bootstrap_backend_views().await;
+    app.refresh_backend_view(BackendId(1)).await;
+    // Open the dialog on the remote project.
+    app.ui_state.selected_project_id = Some((BackendId(1), remote_pid));
+    app.handle_new_session().await;
+
+    // Two backends → the server field is present and defaults to the current
+    // (remote) backend; the remote project's picker disables the local hint.
+    match &app.ui_state.modal {
+        Modal::Input {
+            server_picker: Some(sp),
+            project_picker: Some(pp),
+            section_picker,
+            ..
+        } => {
+            assert_eq!(sp.selected_backend(), Some(BackendId(1)));
+            assert!(!pp.branch_hint_enabled, "remote project picker");
+            assert!(section_picker.is_some());
+        }
+        other => panic!("expected New Session modal with a server picker, got {other:?}"),
+    }
+
+    // Point the server picker at the local backend and apply the change.
+    if let Modal::Input {
+        server_picker: Some(sp),
+        ..
+    } = &mut app.ui_state.modal
+    {
+        sp.selected = sp
+            .choices
+            .iter()
+            .position(|(id, _)| *id == LOCAL_BACKEND_ID)
+            .expect("local backend is in the picker");
+    }
+    app.on_new_session_server_changed().await;
+
+    // The project picker is rebuilt for the local backend (hint re-enabled) and
+    // focus stays on the server field.
+    match &app.ui_state.modal {
+        Modal::Input {
+            project_picker: Some(pp),
+            section_picker: Some(_),
+            focus,
+            ..
+        } => {
+            assert!(
+                pp.branch_hint_enabled,
+                "a local project picker re-enables the gix branch hint"
+            );
+            assert_eq!(
+                *focus,
+                InputFocus::Server,
+                "focus stays on the server field"
+            );
+        }
+        other => panic!("expected a rebuilt New Session modal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn server_switch_rekeys_pending_action_to_new_backend_project() {
+    // Regression (M1/M2): switching the Server field must re-key `on_submit`'s
+    // project to the newly selected backend's project and clear the old backend's
+    // section — otherwise the async remote swap-in (keyed on `on_submit`) can
+    // never correlate to the dialog, and a stale in-flight response would stomp
+    // it. Two remotes so both backends have projects with distinct ids.
+    let (snap1, _s1, pid1) = snapshot_with_one_session();
+    let (snap2, _s2, pid2) = snapshot_with_one_session();
+    let mut app = build_app_with_mock_remotes(vec![("r1", snap1), ("r2", snap2)]);
+    app.bootstrap_backend_views().await;
+    app.refresh_backend_view(BackendId(1)).await;
+    app.refresh_backend_view(BackendId(2)).await;
+    app.ui_state.selected_project_id = Some((BackendId(1), pid1));
+    app.handle_new_session().await;
+
+    // Switch the Server field to r2 and apply.
+    if let Modal::Input {
+        server_picker: Some(sp),
+        ..
+    } = &mut app.ui_state.modal
+    {
+        sp.selected = sp
+            .choices
+            .iter()
+            .position(|(id, _)| *id == BackendId(2))
+            .expect("r2 is in the picker");
+    }
+    app.on_new_session_server_changed().await;
+
+    match &app.ui_state.modal {
+        Modal::Input {
+            on_submit:
+                InputAction::CreateSession {
+                    project_id,
+                    section,
+                },
+            project_picker: Some(pp),
+            ..
+        } => {
+            assert_eq!(*project_id, pid2, "pending action re-keyed to r2's project");
+            assert!(
+                section.is_none(),
+                "old backend's section is cleared on switch"
+            );
+            assert_eq!(
+                pp.selected_id(),
+                Some(pid2),
+                "project picker holds r2's project"
+            );
+        }
+        other => panic!("expected a re-keyed CreateSession modal, got {other:?}"),
+    }
+}
+
+/// Build a New Session `Modal::Input` for the swap-in handler tests: a
+/// `CreateSession` action targeting `project_id` with `section`, a program picker
+/// (local fallback), and an as-yet-unfilled section picker (catch-all only, as a
+/// remote backend's dialog opens before `create_options` returns).
+fn open_create_session_modal(project_id: ProjectId, section: Option<String>) -> Modal {
+    Modal::Input {
+        title: "New Session".to_string(),
+        prompt: "Enter session name:".to_string(),
+        value: super::Input::default(),
+        on_submit: InputAction::CreateSession {
+            project_id,
+            section,
+        },
+        existing_branches: None,
+        project_picker: None,
+        program_picker: Some(ProgramPicker {
+            choices: vec![crate::config::ProgramEntry {
+                label: "bash".to_string(),
+                command: "bash".to_string(),
+            }],
+            selected: 0,
+        }),
+        server_picker: None,
+        section_picker: Some(SectionPicker::new(Vec::new(), None)),
+        focus: InputFocus::Name,
+        expanded: false,
+        mask: false,
+    }
+}
+
+#[tokio::test]
+async fn remote_options_swap_in_applies_when_correlated_and_preserves_cursor_section() {
+    // Regression (M1 + M3): a correlated `NewSessionProgramsLoaded` fills in the
+    // remote's programs and sections, and the section picker keeps the section
+    // baked into the pending action (the cursor-derived default) rather than
+    // resetting to the catch-all.
+    let mut app = make_test_app();
+    let pid = ProjectId::new();
+    app.ui_state.modal = open_create_session_modal(pid, Some("Open PRs".to_string()));
+
+    app.handle_state_update(StateUpdate::NewSessionProgramsLoaded {
+        project_id: pid,
+        picker: Some(ProgramPicker {
+            choices: vec![crate::config::ProgramEntry {
+                label: "claude".to_string(),
+                command: "claude".to_string(),
+            }],
+            selected: 0,
+        }),
+        sections: vec!["Open PRs".to_string(), "Merged".to_string()],
+    })
+    .await;
+
+    match &app.ui_state.modal {
+        Modal::Input {
+            program_picker: Some(prog),
+            section_picker: Some(sec),
+            ..
+        } => {
+            assert_eq!(
+                prog.selected_command().as_deref(),
+                Some("claude"),
+                "remote program list swapped in"
+            );
+            assert!(sec.choices.len() > 1, "remote sections swapped in");
+            assert_eq!(
+                sec.selected_section().as_deref(),
+                Some("Open PRs"),
+                "cursor-derived section survives the swap-in"
+            );
+        }
+        other => panic!("expected an updated New Session modal, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn remote_options_swap_in_is_dropped_for_a_different_project() {
+    // Regression (M2): a swap-in whose project doesn't match the pending action
+    // (e.g. a stale response after the user switched the Server field) must be
+    // ignored, not written into a dialog now targeting a different backend.
+    let mut app = make_test_app();
+    let pid = ProjectId::new();
+    let other = ProjectId::new();
+    app.ui_state.modal = open_create_session_modal(pid, None);
+
+    app.handle_state_update(StateUpdate::NewSessionProgramsLoaded {
+        project_id: other,
+        picker: Some(ProgramPicker {
+            choices: vec![crate::config::ProgramEntry {
+                label: "claude".to_string(),
+                command: "claude".to_string(),
+            }],
+            selected: 0,
+        }),
+        sections: vec!["Open PRs".to_string()],
+    })
+    .await;
+
+    match &app.ui_state.modal {
+        Modal::Input {
+            program_picker: Some(prog),
+            section_picker: Some(sec),
+            ..
+        } => {
+            assert_eq!(
+                prog.selected_command().as_deref(),
+                Some("bash"),
+                "uncorrelated response must not replace the program picker"
+            );
+            assert_eq!(
+                sec.choices.len(),
+                1,
+                "uncorrelated response must not add sections"
+            );
+        }
+        other => panic!("expected the unchanged New Session modal, got {other:?}"),
     }
 }
 

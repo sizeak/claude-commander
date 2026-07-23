@@ -116,6 +116,19 @@ void main() {
     });
   });
 
+  group('SessionStatus.isActive', () {
+    test('stopped is inactive', () {
+      expect(SessionStatus.stopped.isActive, isFalse);
+    });
+
+    test('every non-stopped status is active', () {
+      for (final status in SessionStatus.values) {
+        if (status == SessionStatus.stopped) continue;
+        expect(status.isActive, isTrue, reason: '$status should be active');
+      }
+    });
+  });
+
   group('matchingSessions', () {
     test('empty query keeps every session in order', () {
       final a = sessionInfo(title: 'a');
