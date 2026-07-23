@@ -294,6 +294,8 @@ pub struct ThemeOverrides {
     pub diff_hunk_header: Option<ColorValue>,
     pub diff_file_header: Option<ColorValue>,
     pub diff_context: Option<ColorValue>,
+    pub diff_expand_bg: Option<ColorValue>,
+    pub diff_hunk_header_bg: Option<ColorValue>,
 
     // Modal borders
     pub modal_info: Option<ColorValue>,

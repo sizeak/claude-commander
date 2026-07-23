@@ -151,6 +151,13 @@ foreground-only colouring on 256- and 16-colour terminals.
   between inline and side-by-side layouts. In the inline layout, lines longer
   than the pane soft-wrap onto continuation rows (GitHub-style) so nothing runs
   off-screen; side-by-side truncates to keep its columns aligned.
+- **Expand context**: like GitHub, you can reveal more of the surrounding file
+  around a hunk. Each collapsed gap (before, between, and after hunks) shows a
+  clickable control — click `⌄`/`⌃` to reveal a chunk above/below, or `↕ all`
+  to reveal the whole gap. From the keyboard, `{` expands context above the
+  hunk under the cursor and `}` below it. Revealed lines are shown for context
+  only — they aren't selectable or commentable. Expansion resets when the diff
+  is refreshed.
 - **Mark reviewed**: press `m` to toggle a ✓ reviewed mark on the current
   file. Marking dims the file in the tree and auto-advances to the next
   unreviewed file (wrapping); unmarking stays put. Marks persist per session

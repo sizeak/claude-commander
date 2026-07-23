@@ -248,6 +248,17 @@ pub enum StateUpdate {
         side: crate::api::DiffSide,
         image: std::result::Result<Arc<image::DynamicImage>, String>,
     },
+    /// A file's working-tree content finished loading off the event loop, for
+    /// GitHub-style context expansion. Folded into the open review view's
+    /// per-file line cache so revealed context has concrete text to render.
+    ReviewFileLines {
+        /// The review generation this fetch was spawned under; a stale arrival
+        /// (review since closed/reopened) is dropped.
+        generation: u64,
+        session_id: SessionId,
+        path: String,
+        lines: std::result::Result<Arc<Vec<String>>, String>,
+    },
     /// An open review view's diff was re-composed in the background (agent went
     /// idle, or a manual refresh). `refreshed` carries the fresh, warmed payload
     /// to fold into the view in place; `None` means the working tree was

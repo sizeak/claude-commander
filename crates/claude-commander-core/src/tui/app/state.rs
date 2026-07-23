@@ -437,6 +437,7 @@ impl App {
                     state.prime_segments(segments);
                     self.reset_review_images();
                     self.ensure_review_image(&state).await;
+                    self.ensure_review_file_lines(&state).await;
                     self.ui_state.modal = Modal::ReviewDiff(Box::new(state));
                 }
             }
@@ -485,6 +486,43 @@ impl App {
                 };
                 self.review_images.borrow_mut().insert((path, side), entry);
             }
+            StateUpdate::ReviewFileLines {
+                generation,
+                session_id,
+                path,
+                lines,
+            } => {
+                // Drop a stale arrival — a review since closed/reopened, or a
+                // fetch spawned before the diff was refreshed (its content is
+                // indexed against the old diff's line numbers).
+                if generation != self.review_file_gen.get() {
+                    return;
+                }
+                match lines {
+                    Ok(lines) => {
+                        // The fetch succeeded — clear the in-flight marker so a
+                        // later refresh can re-fetch.
+                        self.review_file_loads.borrow_mut().remove(&path);
+                        if let Modal::ReviewDiff(state) = &mut self.ui_state.modal
+                            && state.session_id == session_id
+                        {
+                            state.set_file_lines(path, lines);
+                        }
+                    }
+                    Err(e) => {
+                        // Leave the path in the in-flight set as a negative cache
+                        // so we don't spawn a doomed fetch (and re-toast) on every
+                        // keypress; it clears on the next open/refresh, which is
+                        // when a deleted/renamed file could reappear. Only toast
+                        // if this session's review is still open.
+                        if let Modal::ReviewDiff(state) = &self.ui_state.modal
+                            && state.session_id == session_id
+                        {
+                            self.set_review_status(&format!("Expand failed: {e}"));
+                        }
+                    }
+                }
+            }
             StateUpdate::ReviewRefreshed { refreshed, manual } => {
                 self.ui_state.review_refresh_in_flight = false;
                 match refreshed {
@@ -518,6 +556,16 @@ impl App {
                     }
                     None if manual => self.set_review_status("Review already up to date"),
                     None => {}
+                }
+                // A refresh replaces the diff, so `refresh_diff` cleared the
+                // per-file line cache and any in-flight fetch now carries content
+                // indexed against the *old* diff. Bump the fetch generation (drops
+                // those arrivals) and clear the in-flight set, then re-fetch the
+                // shown file so expand controls reappear without waiting for the
+                // next navigation key.
+                self.invalidate_review_file_lines();
+                if let Modal::ReviewDiff(state) = &self.ui_state.modal {
+                    self.ensure_review_file_lines(state).await;
                 }
             }
             StateUpdate::CascadeFinished { backend_id, result } => {

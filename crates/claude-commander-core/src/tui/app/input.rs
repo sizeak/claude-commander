@@ -507,7 +507,8 @@ impl App {
                             } else if let Some(rect) = body {
                                 // A double-click on the same body row selects that
                                 // line and opens its comment box (like right-click);
-                                // a single click just positions the cursor.
+                                // a single click just positions the cursor (or
+                                // reveals context when it lands on an expand control).
                                 use crate::tui::list_nav::DOUBLE_CLICK_WINDOW;
                                 let now = Instant::now();
                                 let is_double = matches!(
@@ -522,18 +523,25 @@ impl App {
                                         state.click_at(col, row, rect);
                                     }
                                 } else {
-                                    state.click_at(col, row, rect);
+                                    if state.click_at(col, row, rect) {
+                                        self.record_feature("review.expand_context");
+                                    }
                                     self.ui_state.review_last_click = Some((row, now));
                                 }
                             }
                         }
-                        // A file-list click may have changed the selected file;
-                        // kick off the lazy image fetch for it. The keyboard nav
-                        // path does this in `handle_review_key`, but mouse
-                        // selection bypasses that — without this, clicking an
-                        // image file leaves it stuck on "Loading image…".
-                        if selected_file && let Modal::ReviewDiff(state) = &self.ui_state.modal {
-                            self.ensure_review_image(state).await;
+                        // A file-list click may have changed the selected file, or
+                        // a body click may have expanded context; either way kick
+                        // off the lazy image + working-tree-content fetches for the
+                        // shown file. The keyboard nav path does this in
+                        // `handle_review_key`, but mouse selection bypasses it —
+                        // without this, an image file stays on "Loading image…" and
+                        // an expand control has no lines to reveal.
+                        if let Modal::ReviewDiff(state) = &self.ui_state.modal {
+                            if selected_file {
+                                self.ensure_review_image(state).await;
+                            }
+                            self.ensure_review_file_lines(state).await;
                         }
                         return;
                     }

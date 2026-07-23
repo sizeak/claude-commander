@@ -1711,6 +1711,19 @@ pub struct App {
     /// stale generation and is dropped, so it can't poison the new review's
     /// cache (e.g. a same-named path in a different session).
     review_image_gen: Cell<u64>,
+    /// Display paths whose working-tree content is currently being fetched for
+    /// context expansion, so repeated expand triggers don't spawn duplicate
+    /// fetches. Loaded results land in `DiffReviewState.file_lines`; a path is
+    /// removed here once its fetch reports back (kept on failure as a negative
+    /// cache). Cleared when a review opens or its diff is refreshed.
+    review_file_loads: RefCell<HashSet<String>>,
+    /// Monotonic generation for context-expansion file-content fetches, bumped
+    /// when a review opens *and* when its diff is refreshed (both invalidate the
+    /// per-file line cache). A fetch captures the generation it was spawned
+    /// under; an arrival whose generation no longer matches is dropped, so a
+    /// pre-refresh fetch can't install stale content against the new diff's line
+    /// numbers.
+    review_file_gen: Cell<u64>,
 }
 
 impl App {
@@ -1779,6 +1792,8 @@ impl App {
             picker: None,
             review_images: RefCell::new(HashMap::new()),
             review_image_gen: Cell::new(0),
+            review_file_loads: RefCell::new(HashSet::new()),
+            review_file_gen: Cell::new(0),
         }
     }
 

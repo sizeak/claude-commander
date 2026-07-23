@@ -137,6 +137,96 @@ enum BodyRow {
     Comment { id: uuid::Uuid },
     /// A row belonging to the in-progress comment edit box.
     Draft,
+    /// A revealed context line (GitHub-style expand); display-only, so it is
+    /// never selectable. `cont` marks soft-wrap continuation rows.
+    Context { cont: bool },
+    /// A clickable "expand more context" control for the gap `gap`
+    /// (`0..=hunks.len()`; see [`DiffReviewState::gap_display`]).
+    ExpandControl { gap: usize },
+}
+
+/// Lines revealed per single expand step (GitHub reveals a fixed chunk); a gap
+/// with no more than this many hidden lines reveals fully in one step.
+const EXPAND_STEP: usize = 20;
+
+/// How much of a between/around-hunk gap the user has revealed as display-only
+/// context. `down` grows downward from the hunk *above* the gap; `up` grows
+/// upward from the hunk *below* it. Leading gaps use only `up`, the trailing gap
+/// only `down`; once `up + down` reaches the gap size it is fully revealed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct GapReveal {
+    up: usize,
+    down: usize,
+}
+
+/// Where a gap sits relative to the hunks, which determines the expand
+/// directions offered (leading: up only; trailing: down only; middle: both).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GapKind {
+    Leading,
+    Middle,
+    Trailing,
+}
+
+/// A single revealed context line (display-only), carrying the real file line
+/// numbers on each side so its gutter matches the surrounding diff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RevealLine {
+    old_lineno: usize,
+    new_lineno: usize,
+    content: String,
+}
+
+/// The clickable expand affordance shown in a partially-revealed gap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GapControl {
+    gap: usize,
+    kind: GapKind,
+    /// Lines still hidden in this gap.
+    hidden: usize,
+}
+
+/// What to render for one gap, in top-to-bottom order: a revealed block just
+/// below the hunk above (`top`), then the expand control (if lines remain
+/// hidden), then a revealed block just above the hunk below (`bottom`). A fully
+/// revealed gap puts every line in `top` with no control.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct GapDisplay {
+    top: Vec<RevealLine>,
+    control: Option<GapControl>,
+    bottom: Vec<RevealLine>,
+}
+
+/// New/old line bounds of a gap and the constant new−old offset through it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GapBounds {
+    /// First hidden new-side line number (inclusive).
+    first: usize,
+    /// Last hidden new-side line number (inclusive).
+    last: usize,
+    /// `new_lineno - old_lineno` for any line in this unchanged gap.
+    delta: i64,
+    kind: GapKind,
+}
+
+impl GapBounds {
+    fn size(&self) -> usize {
+        (self.last + 1).saturating_sub(self.first)
+    }
+    fn old_of(&self, new_lineno: usize) -> usize {
+        (new_lineno as i64 - self.delta).max(0) as usize
+    }
+}
+
+/// A direction (or "all") the user asked a gap to expand in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExpandAction {
+    /// Reveal more lines just below the hunk above the gap.
+    Down,
+    /// Reveal more lines just above the hunk below the gap.
+    Up,
+    /// Reveal the whole gap.
+    All,
 }
 
 /// Greedy word-wrap of `text` into rows at most `width` columns wide, returning
@@ -292,6 +382,13 @@ pub struct DiffReviewState {
     /// keypress-time cursor/scroll math wraps lines the same way the renderer
     /// does. Interior-mutable: the renderer holds `&self`.
     body_width: Cell<usize>,
+    /// How much context each gap has been expanded to reveal, keyed by
+    /// (display path, gap index). Absent = collapsed. Cleared on `refresh_diff`.
+    expanded: HashMap<(String, usize), GapReveal>,
+    /// Lazily-fetched working-tree lines (1-based) per display path, for
+    /// expansion. Populated by [`App::ensure_review_file_lines`] once a fetch
+    /// completes; cleared on `refresh_diff`.
+    file_lines: HashMap<String, std::sync::Arc<Vec<String>>>,
 }
 
 /// A node in the file tree: either a directory (with children) or a file leaf
@@ -361,6 +458,8 @@ impl DiffReviewState {
             // A reasonable default until the first render reports the real width
             // (keypress math before any render is then close enough to self-heal).
             body_width: Cell::new(120),
+            expanded: HashMap::new(),
+            file_lines: HashMap::new(),
         }
     }
 
@@ -429,6 +528,10 @@ impl DiffReviewState {
         let seg_slots = self.diff.files.len().max(1);
         self.seg_cache = RefCell::new(vec![None; seg_slots]);
         self.prime_segments(segments);
+        // Hunk boundaries (and gap indices) may have moved, so drop all
+        // expansion state and re-fetch file content lazily on next expand.
+        self.expanded.clear();
+        self.file_lines.clear();
         self.visual_anchor = None;
         // Re-locate the file that was on screen by its path; fall back to the
         // first file when it left the diff.
@@ -539,6 +642,313 @@ impl DiffReviewState {
 
     fn current_file(&self) -> Option<&FileDiff> {
         self.diff.files.get(self.selected_file)
+    }
+
+    /// Loaded working-tree lines for the current file, if fetched. `None` while
+    /// loading, on failure, or before a fetch was kicked — in which case no
+    /// context is revealed and no expand controls appear.
+    fn current_file_lines(&self) -> Option<&std::sync::Arc<Vec<String>>> {
+        let path = self.current_file()?.display_path();
+        self.file_lines.get(path)
+    }
+
+    /// Whether the current file could reveal more context (used to decide
+    /// whether a background file-content fetch is worthwhile). True for a
+    /// non-binary, modified/renamed file with at least one hunk.
+    fn current_file_expandable(&self) -> bool {
+        self.current_file().is_some_and(|f| {
+            f.binary.is_none()
+                && !f.hunks.is_empty()
+                && matches!(f.status, FileStatus::Modified | FileStatus::Renamed)
+        })
+    }
+
+    /// New/old line bounds of gap `gap` (`0` = before the first hunk,
+    /// `hunks.len()` = after the last), or `None` when there are no hidden
+    /// lines there. The trailing gap needs the file's line count (`file_len`,
+    /// from the loaded working tree), so it yields `None` until that is known.
+    fn gap_bounds(
+        &self,
+        file: &FileDiff,
+        gap: usize,
+        file_len: Option<usize>,
+    ) -> Option<GapBounds> {
+        let hunks = &file.hunks;
+        // New/old line just past a hunk (1-based first line below it).
+        let below = |h: &Hunk| (h.new_start + h.new_lines, h.old_start + h.old_lines);
+        let (first, last, delta, kind) = if gap == 0 {
+            // Leading gap: file start up to just above the first hunk.
+            let h = hunks.first()?;
+            let delta = h.new_start as i64 - h.old_start as i64;
+            (1, h.new_start.checked_sub(1)?, delta, GapKind::Leading)
+        } else if gap == hunks.len() {
+            // Trailing gap: just below the last hunk to end of file.
+            let h = hunks.last()?;
+            let (new_below, old_below) = below(h);
+            let last = file_len?;
+            (
+                new_below,
+                last,
+                new_below as i64 - old_below as i64,
+                GapKind::Trailing,
+            )
+        } else {
+            // Middle gap between hunk[gap-1] and hunk[gap].
+            let prev = hunks.get(gap - 1)?;
+            let next = hunks.get(gap)?;
+            let (new_below, old_below) = below(prev);
+            (
+                new_below,
+                next.new_start.checked_sub(1)?,
+                new_below as i64 - old_below as i64,
+                GapKind::Middle,
+            )
+        };
+        // Line numbers are 1-based, so a valid gap has `first >= 1`; this also
+        // rejects the degenerate `@@ -1,N +0,0 @@` (whole-file deletion) case.
+        (first >= 1 && last >= first).then_some(GapBounds {
+            first,
+            last,
+            delta,
+            kind,
+        })
+    }
+
+    /// Build the display for gap `gap`: the revealed context blocks plus any
+    /// expand control. Empty (nothing to show) until the file's content is
+    /// loaded, so every revealed line has concrete text to render/wrap.
+    fn gap_display(&self, gap: usize) -> GapDisplay {
+        let Some(file) = self.current_file() else {
+            return GapDisplay::default();
+        };
+        let Some(lines) = self.current_file_lines() else {
+            return GapDisplay::default();
+        };
+        let Some(bounds) = self.gap_bounds(file, gap, Some(lines.len())) else {
+            return GapDisplay::default();
+        };
+        let size = bounds.size();
+        let rev = self
+            .expanded
+            .get(&(file.display_path().to_string(), gap))
+            .copied()
+            .unwrap_or_default();
+        let down = rev.down.min(size);
+        let up = rev.up.min(size - down);
+
+        let make = |new_lineno: usize| RevealLine {
+            new_lineno,
+            old_lineno: bounds.old_of(new_lineno),
+            content: lines
+                .get(new_lineno.saturating_sub(1))
+                .cloned()
+                .unwrap_or_default(),
+        };
+
+        // Fully revealed: one contiguous block, no control.
+        if down + up >= size {
+            return GapDisplay {
+                top: (bounds.first..=bounds.last).map(make).collect(),
+                control: None,
+                bottom: Vec::new(),
+            };
+        }
+        let top = (bounds.first..bounds.first + down).map(make).collect();
+        let bottom = ((bounds.last + 1 - up)..=bounds.last).map(make).collect();
+        GapDisplay {
+            top,
+            control: Some(GapControl {
+                gap,
+                kind: bounds.kind,
+                hidden: size - down - up,
+            }),
+            bottom,
+        }
+    }
+
+    /// Apply an expand action to gap `gap`, growing its revealed counters
+    /// (clamped to the gap size). No-op when the gap has no hidden lines. The
+    /// caller kicks the file-content fetch so the revealed lines can render.
+    fn expand_gap(&mut self, gap: usize, action: ExpandAction) {
+        let Some(file) = self.current_file() else {
+            return;
+        };
+        let file_len = self.current_file_lines().map(|l| l.len());
+        let Some(bounds) = self.gap_bounds(file, gap, file_len) else {
+            // `None` is either the trailing gap whose size isn't known until the
+            // file loads — defer the request so it applies on arrival — or a gap
+            // with no hidden lines at all, which is a genuine no-op (don't record
+            // a phantom reveal for a first hunk at line 1, adjacent hunks, etc.).
+            if gap == file.hunks.len() && file_len.is_none() {
+                let entry = self
+                    .expanded
+                    .entry((file.display_path().to_string(), gap))
+                    .or_default();
+                match action {
+                    ExpandAction::Up => entry.up += EXPAND_STEP,
+                    ExpandAction::Down | ExpandAction::All => entry.down += EXPAND_STEP,
+                }
+            }
+            return;
+        };
+        let size = bounds.size();
+        let key = (file.display_path().to_string(), gap);
+        let entry = self.expanded.entry(key).or_default();
+        match action {
+            ExpandAction::Down => {
+                let room = size - entry.up.min(size);
+                entry.down = (entry.down + EXPAND_STEP).min(room);
+            }
+            ExpandAction::Up => {
+                let room = size - entry.down.min(size);
+                entry.up = (entry.up + EXPAND_STEP).min(room);
+            }
+            ExpandAction::All => {
+                entry.up = size - entry.down.min(size);
+            }
+        }
+    }
+
+    /// The hunk index containing selectable line `cursor`, or `None` when the
+    /// file has no selectable lines. Used to pick the gap a keyboard expand
+    /// acts on (the gap above/below the cursor's hunk).
+    fn hunk_of_cursor(&self) -> Option<usize> {
+        let file = self.current_file()?;
+        let mut acc = 0;
+        for (i, hunk) in file.hunks.iter().enumerate() {
+            acc += hunk.lines.len();
+            if self.cursor < acc {
+                return Some(i);
+            }
+        }
+        file.hunks.len().checked_sub(1)
+    }
+
+    /// Set (not increment) a gap's revealed content — used by tests and by the
+    /// physical-row parity checks to place the view in a known expanded state.
+    #[cfg(test)]
+    fn set_gap_reveal(&mut self, gap: usize, reveal: GapReveal) {
+        if let Some(file) = self.current_file() {
+            self.expanded
+                .insert((file.display_path().to_string(), gap), reveal);
+        }
+    }
+
+    /// Install loaded working-tree lines for `path` (test/handler entry point).
+    pub(super) fn set_file_lines(&mut self, path: String, lines: std::sync::Arc<Vec<String>>) {
+        self.file_lines.insert(path, lines);
+    }
+
+    /// The gap whose expand control sits at physical body row `body_row`, or
+    /// `None`. Handles both layouts; the side-by-side walk accounts for the
+    /// comment boxes interleaved after cell rows (which shift later rows down).
+    fn expand_control_gap_at(&self, body_row: usize, width: usize) -> Option<usize> {
+        match self.layout {
+            ReviewLayout::Inline => match self.inline_physical_rows().get(body_row) {
+                Some(BodyRow::ExpandControl { gap }) => Some(*gap),
+                _ => None,
+            },
+            ReviewLayout::SideBySide => {
+                let anchors = self.comment_anchors();
+                let mut r = 0usize;
+                for sbs in self.sbs_rows() {
+                    match &sbs {
+                        SbsRow::ExpandControl { gap } => {
+                            if r == body_row {
+                                return Some(*gap);
+                            }
+                            r += 1;
+                        }
+                        SbsRow::Cells { left, right } => {
+                            r += 1;
+                            let sels: Vec<usize> = match (left, right) {
+                                (Some(l), Some(rt)) if l == rt => vec![*l],
+                                (l, rt) => l.iter().chain(rt.iter()).copied().collect(),
+                            };
+                            for sel in sels {
+                                if let Some(anns) = anchors.get(&sel) {
+                                    for ann in anns {
+                                        r += comment_box_height(
+                                            ann,
+                                            self.is_comment_collapsed(ann.id),
+                                            width,
+                                        );
+                                    }
+                                }
+                                if self.draft_anchor() == Some(sel)
+                                    && let Some(draft) = self.comment.as_ref()
+                                {
+                                    r += comment_draft_box_height(
+                                        &super::input_with_caret(&draft.input),
+                                        width,
+                                    );
+                                }
+                            }
+                        }
+                        _ => r += 1,
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    /// The expand action a click at content column `rel_col` on gap `gap`'s
+    /// control triggers. Clicking a labelled zone runs that action; clicking
+    /// elsewhere on the control falls back to a single step in the gap's
+    /// primary direction (down, except a leading gap which only goes up).
+    fn expand_action_at(&self, gap: usize, rel_col: usize) -> Option<ExpandAction> {
+        let control = self.gap_display(gap).control?;
+        let width = self.body_width.get();
+        for seg in gap_control_layout(&control, width) {
+            if let Some(action) = seg.action {
+                let end = seg.start + seg.text.chars().count();
+                if rel_col >= seg.start && rel_col < end {
+                    return Some(action);
+                }
+            }
+        }
+        Some(match control.kind {
+            GapKind::Leading => ExpandAction::Up,
+            _ => ExpandAction::Down,
+        })
+    }
+
+    /// Append the revealed context + expand control for gap `gap` as
+    /// side-by-side rows.
+    fn push_sbs_gap(&self, rows: &mut Vec<SbsRow>, gap: usize) {
+        let disp = self.gap_display(gap);
+        let push = |rows: &mut Vec<SbsRow>, lines: &[RevealLine]| {
+            for l in lines {
+                rows.push(SbsRow::Context {
+                    old_lineno: l.old_lineno,
+                    new_lineno: l.new_lineno,
+                    content: l.content.clone(),
+                });
+            }
+        };
+        push(rows, &disp.top);
+        if disp.control.is_some() {
+            rows.push(SbsRow::ExpandControl { gap });
+        }
+        push(rows, &disp.bottom);
+    }
+
+    /// Side-by-side rows for the current file, with revealed context and expand
+    /// controls interleaved between hunks (the source of truth the SBS renderer
+    /// and row mappings share).
+    fn sbs_rows(&self) -> Vec<SbsRow> {
+        let Some(file) = self.current_file() else {
+            return Vec::new();
+        };
+        let mut rows = Vec::new();
+        let mut sel = 0;
+        for (hi, hunk) in file.hunks.iter().enumerate() {
+            self.push_sbs_gap(&mut rows, hi);
+            push_hunk_sbs_rows(&mut rows, hunk, &mut sel);
+        }
+        self.push_sbs_gap(&mut rows, file.hunks.len());
+        rows
     }
 
     /// Flip the preferred binary-image side (before ⇄ after). No-op visually on
@@ -721,8 +1131,25 @@ impl DiffReviewState {
         let content_width = inline_content_width(body_width);
         let anchors = self.comment_anchors();
         let draft_anchor = self.draft_anchor();
+        // Revealed context rows (and the expand control) for gap `gap`.
+        let push_gap = |rows: &mut Vec<BodyRow>, gap: usize| {
+            let disp = self.gap_display(gap);
+            let push_lines = |rows: &mut Vec<BodyRow>, lines: &[RevealLine]| {
+                for line in lines {
+                    for c in 0..line_wrap_rows(&line.content, content_width) {
+                        rows.push(BodyRow::Context { cont: c > 0 });
+                    }
+                }
+            };
+            push_lines(rows, &disp.top);
+            if disp.control.is_some() {
+                rows.push(BodyRow::ExpandControl { gap });
+            }
+            push_lines(rows, &disp.bottom);
+        };
         let mut sel = 0;
-        for hunk in &file.hunks {
+        for (hi, hunk) in file.hunks.iter().enumerate() {
+            push_gap(&mut rows, hi);
             rows.push(BodyRow::Header);
             for line in &hunk.lines {
                 let h = line_wrap_rows(&line.content, content_width);
@@ -751,6 +1178,7 @@ impl DiffReviewState {
                 sel += 1;
             }
         }
+        push_gap(&mut rows, file.hunks.len());
         rows
     }
 
@@ -793,22 +1221,19 @@ impl DiffReviewState {
                 .position(|r| matches!(r, BodyRow::Line { sel, cont: false } if *sel == idx))
                 .unwrap_or(0);
         }
-        let Some(file) = self.current_file() else {
-            return 0;
-        };
-        let mut row = 0;
-        let mut sel = 0;
-        for hunk in &file.hunks {
-            row += 1; // header
-            for _ in &hunk.lines {
-                if sel == idx {
-                    return row;
-                }
-                row += 1;
-                sel += 1;
+        // Side-by-side: walk the interleaved rows (headers, paired cells,
+        // revealed context, expand controls) and return the first row whose
+        // cell carries `idx` on either side. Comment boxes aren't counted (as
+        // before), so this stays an approximation used only for scroll-follow.
+        let rows = self.sbs_rows();
+        for (row, sbs) in rows.iter().enumerate() {
+            if let SbsRow::Cells { left, right } = sbs
+                && (*left == Some(idx) || *right == Some(idx))
+            {
+                return row;
             }
         }
-        row
+        rows.len()
     }
 
     pub fn toggle_focus(&mut self) {
@@ -859,9 +1284,7 @@ impl DiffReviewState {
         if self.layout == ReviewLayout::Inline {
             return self.inline_physical_rows().len();
         }
-        self.current_file()
-            .map(|f| f.hunks.iter().map(|h| h.lines.len() + 1).sum())
-            .unwrap_or(0)
+        self.sbs_rows().len()
     }
 
     /// Scroll the diff body by a page (lazygit-style PgUp/PgDn). Independent of
@@ -908,18 +1331,28 @@ impl DiffReviewState {
         };
     }
 
-    /// Left-click at a screen position. Clicking a comment box folds or unfolds
-    /// it; clicking a diff line focuses the body and moves the cursor there
-    /// (clearing any selection).
-    pub fn click_at(&mut self, col: u16, row: u16, body: Rect) {
+    /// Left-click at a screen position. Clicking an expand control reveals more
+    /// context; clicking a comment box folds or unfolds it; clicking a diff line
+    /// focuses the body and moves the cursor there (clearing any selection).
+    /// Returns `true` when the click triggered an expansion, so the caller can
+    /// kick the file-content fetch that materialises the revealed lines.
+    pub fn click_at(&mut self, col: u16, row: u16, body: Rect) -> bool {
         let Some(body_row) = self.body_row_at(col, row, body) else {
-            return;
+            return false;
         };
+        if let Some(gap) = self.expand_control_gap_at(body_row, body.width as usize) {
+            let rel_col = col.saturating_sub(body.x) as usize;
+            if let Some(action) = self.expand_action_at(gap, rel_col) {
+                self.expand_gap(gap, action);
+            }
+            return true;
+        }
         if let Some(id) = self.comment_box_at_body_row(body_row, body.width as usize) {
             self.toggle_comment_collapsed(id);
-            return;
+            return false;
         }
         self.place_cursor_at_row(body_row);
+        false
     }
 
     /// Focus the body and move the cursor to the diff line at `body_row`,
@@ -1199,7 +1632,7 @@ impl DiffReviewState {
     /// interleaved boxes are accounted for. `width` is the body content width
     /// (used to size wrapped boxes), matching the value passed to the renderer.
     fn comment_box_at_body_row(&self, body_row: usize, width: usize) -> Option<uuid::Uuid> {
-        let file = self.current_file()?;
+        self.current_file()?;
         let anchors = self.comment_anchors();
         let mut row = 0usize;
         // Test each comment box anchored after `sel`, advancing `row` past it;
@@ -1224,8 +1657,8 @@ impl DiffReviewState {
                 }
             }
             ReviewLayout::SideBySide => {
-                for sbs in side_by_side_rows(file) {
-                    row += 1; // header or paired cells
+                for sbs in self.sbs_rows() {
+                    row += 1; // header, paired cells, revealed context, or control
                     if let SbsRow::Cells { left, right } = sbs {
                         // Context rows have left == right; de-dup so a box isn't
                         // counted twice (mirrors the renderer).
@@ -1578,11 +2011,31 @@ impl App {
                     (state.session_id, state.title.clone(), state.content_hash);
                 self.spawn_review_refresh(sid, title, prev_hash, true);
             }
+            // Expand more context above / below the hunk under the cursor
+            // (GitHub-style). The gap above the cursor's hunk grows upward
+            // toward it; the gap below grows downward from it.
+            KeyCode::Char('{') => {
+                if let Some(hunk) = state.hunk_of_cursor() {
+                    self.record_feature("review.expand_context");
+                    state.expand_gap(hunk, ExpandAction::Up);
+                    // Revealed rows push the cursor's hunk down; keep it visible.
+                    state.follow_cursor();
+                }
+            }
+            KeyCode::Char('}') => {
+                if let Some(hunk) = state.hunk_of_cursor() {
+                    self.record_feature("review.expand_context");
+                    state.expand_gap(hunk + 1, ExpandAction::Down);
+                    state.follow_cursor();
+                }
+            }
             _ => {}
         }
-        // A navigation key or side toggle may have changed the visible binary
-        // image; kick off its lazy fetch if not already loaded.
+        // A navigation key or side toggle may have changed the visible file;
+        // kick off its lazy image / working-tree-content fetches (so expand
+        // controls have concrete lines to reveal), if not already loaded.
         self.ensure_review_image(&state).await;
+        self.ensure_review_file_lines(&state).await;
         self.ui_state.modal = Modal::ReviewDiff(state);
     }
 
@@ -1594,6 +2047,17 @@ impl App {
         self.review_images.borrow_mut().clear();
         self.review_image_gen
             .set(self.review_image_gen.get().wrapping_add(1));
+        self.invalidate_review_file_lines();
+    }
+
+    /// Drop the context-expansion file-content caches: clear the in-flight set
+    /// and bump the fetch generation so any pre-existing fetch is discarded on
+    /// arrival. Called both when a review opens and when its diff is refreshed,
+    /// since a refresh replaces the diff the cached lines were indexed against.
+    pub(super) fn invalidate_review_file_lines(&self) {
+        self.review_file_loads.borrow_mut().clear();
+        self.review_file_gen
+            .set(self.review_file_gen.get().wrapping_add(1));
     }
 
     /// Ensure the binary image for the currently-shown file+side is being (or
@@ -1649,6 +2113,47 @@ impl App {
                     path,
                     side,
                     image,
+                }))
+                .await;
+        });
+    }
+
+    /// Ensure the current file's working-tree content is being (or has been)
+    /// fetched, so context expansion has concrete lines to reveal. Fetched
+    /// through the backend that owns the session (local read or remote GET) and
+    /// reported back via [`StateUpdate::ReviewFileLines`]. Cheap no-op when the
+    /// file can't be expanded, is already loaded, or a fetch is in flight.
+    pub(super) async fn ensure_review_file_lines(&self, state: &DiffReviewState) {
+        if !state.current_file_expandable() {
+            return;
+        }
+        let Some(file) = state.current_file() else {
+            return;
+        };
+        let path = file.display_path().to_string();
+        // Already loaded into the view, or a fetch is already in flight.
+        if state.file_lines.contains_key(&path)
+            || !self.review_file_loads.borrow_mut().insert(path.clone())
+        {
+            return;
+        }
+
+        let backend = self.backend_arc(self.backend_of_session(state.session_id));
+        let sid = state.session_id;
+        let tx = self.event_loop.sender();
+        let generation = self.review_file_gen.get();
+        tokio::spawn(async move {
+            let lines = backend
+                .fetch_diff_blob(sid, DiffSide::New, path.clone())
+                .await
+                .map(|bytes| split_file_lines(&bytes))
+                .map_err(|e| e.to_string());
+            let _ = tx
+                .send(AppEvent::StateUpdate(StateUpdate::ReviewFileLines {
+                    generation,
+                    session_id: sid,
+                    path,
+                    lines,
                 }))
                 .await;
         });
@@ -1802,6 +2307,7 @@ impl App {
             items.push(FooterItem::button("apply", key(KeyCode::Char('a'), none)));
             items.push(FooterItem::button("refresh", key(KeyCode::Char('r'), none)));
             items.push(FooterItem::button("layout", key(KeyCode::Char('t'), none)));
+            items.push(FooterItem::Plain("{ } context"));
             // Offer the image side-toggle only when it does something: a binary
             // image with two sides (a modification).
             if state.can_toggle_image_side() {
@@ -2545,7 +3051,23 @@ fn review_body_lines(
     let mut out: Vec<Line<'static>> = Vec::new();
     let mut idx = 0; // selectable-line index
 
-    for hunk in &file.hunks {
+    // Revealed context + expand control for gap `gap`, mirroring the row order
+    // in `inline_physical_rows` so the two stay in lockstep.
+    let push_gap = |out: &mut Vec<Line<'static>>, gap: usize| {
+        let disp = state.gap_display(gap);
+        for line in &disp.top {
+            out.extend(reveal_line_rows(line, pal, ext, highlight, width));
+        }
+        if let Some(control) = &disp.control {
+            out.push(gap_control_line(control, pal, width));
+        }
+        for line in &disp.bottom {
+            out.extend(reveal_line_rows(line, pal, ext, highlight, width));
+        }
+    };
+
+    for (hi, hunk) in file.hunks.iter().enumerate() {
+        push_gap(&mut out, hi);
         out.push(hunk_header_line(hunk, pal, width));
         for line in &hunk.lines {
             let (line_bg, gutter_bg, emph_bg, sign, sign_fg) = match line.origin {
@@ -2645,7 +3167,24 @@ fn review_body_lines(
             idx += 1;
         }
     }
+    push_gap(&mut out, file.hunks.len());
     out
+}
+
+/// Split raw file bytes into lines (1-based when indexed as `lines[n - 1]`),
+/// dropping a single trailing newline's empty tail so the line count matches
+/// the file's line numbering. Lossy UTF-8, matching how the diff is decoded.
+fn split_file_lines(bytes: &[u8]) -> std::sync::Arc<Vec<String>> {
+    if bytes.is_empty() {
+        // `"".split('\n')` yields one empty element; an empty file has no lines.
+        return std::sync::Arc::new(Vec::new());
+    }
+    let text = String::from_utf8_lossy(bytes);
+    let mut lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+    if text.ends_with('\n') {
+        lines.pop();
+    }
+    std::sync::Arc::new(lines)
 }
 
 /// Right-aligned 4-wide line number, or blanks when absent.
@@ -2654,18 +3193,151 @@ fn lineno_str(n: Option<usize>) -> String {
         .unwrap_or_else(|| "    ".to_string())
 }
 
-/// A full-width hunk-header line.
+/// A full-width hunk-header line, on the subtle context band so it reads as a
+/// divider between hunks.
 fn hunk_header_line(hunk: &Hunk, pal: &ReviewPalette, width: usize) -> Line<'static> {
     let text = format!(
         "@@ -{},{} +{},{} @@ {}",
         hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines, hunk.header
     );
     fit_spans(
-        vec![Span::styled(text, Style::default().fg(pal.hunk_header))],
+        vec![Span::styled(
+            text,
+            Style::default().fg(pal.hunk_header).bg(pal.hunk_header_bg),
+        )],
         width,
-        Color::Reset,
+        pal.hunk_header_bg,
     )
     .into()
+}
+
+/// Render one revealed context line (inline layout): the same fixed gutter as a
+/// normal context diff line (old + new line numbers, blank sign), then the
+/// soft-wrapped content. Wrap count matches [`line_wrap_rows`] so it stays in
+/// lockstep with [`DiffReviewState::inline_physical_rows`].
+fn reveal_line_rows(
+    line: &RevealLine,
+    pal: &ReviewPalette,
+    ext: &str,
+    highlight: bool,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let bg = pal.context_bg;
+    let old = lineno_str(Some(line.old_lineno));
+    let new = lineno_str(Some(line.new_lineno));
+    let mut content_spans = Vec::new();
+    push_segment(
+        &mut content_spans,
+        &line.content,
+        ext,
+        highlight,
+        pal.text,
+        bg,
+    );
+    // Matches the normal line gutter widths: 1 + 11 + 2 = INLINE_GUTTER_COLS.
+    let gutter = |first: bool| -> Vec<Span<'static>> {
+        vec![
+            Span::styled(" ", Style::default().bg(bg)),
+            if first {
+                Span::styled(
+                    format!(" {old} {new} "),
+                    Style::default().fg(pal.gutter_fg).bg(bg),
+                )
+            } else {
+                Span::styled(" ".repeat(11), Style::default().bg(bg))
+            },
+            Span::styled("  ", Style::default().bg(bg)),
+        ]
+    };
+    let content_width = inline_content_width(width);
+    let wrapped = wrap_spans(content_spans, content_width);
+    wrapped
+        .into_iter()
+        .enumerate()
+        .map(|(c, row)| {
+            let mut spans = gutter(c == 0);
+            spans.extend(row);
+            Line::from(fit_spans(spans, width, bg))
+        })
+        .collect()
+}
+
+/// One placed segment of an expand control: its start column, text, and the
+/// action (if any) a click on it triggers.
+struct PlacedSeg {
+    start: usize,
+    text: String,
+    action: Option<ExpandAction>,
+}
+
+/// The labelled segments of a gap's expand control, in left-to-right order.
+/// Directional steps offered depend on the gap kind (leading: up only;
+/// trailing: down only; middle: both), always alongside an "expand all".
+fn gap_control_segments(control: &GapControl) -> Vec<(String, Option<ExpandAction>)> {
+    let step = EXPAND_STEP.min(control.hidden);
+    let hint = (format!("· {} hidden lines ·", control.hidden), None);
+    let down = (format!("⌄ {step}"), Some(ExpandAction::Down));
+    let up = (format!("⌃ {step}"), Some(ExpandAction::Up));
+    let all = ("↕ all".to_string(), Some(ExpandAction::All));
+    match control.kind {
+        GapKind::Leading => vec![hint, up, all],
+        GapKind::Trailing => vec![down, hint, all],
+        GapKind::Middle => vec![down, hint, up, all],
+    }
+}
+
+/// Lay out a gap control's segments centred within `width`, computing each
+/// segment's start column. Shared by the renderer and the click hit-test so
+/// they can never disagree on where the clickable zones are.
+fn gap_control_layout(control: &GapControl, width: usize) -> Vec<PlacedSeg> {
+    const SEP: usize = 3;
+    let segs = gap_control_segments(control);
+    let widths: Vec<usize> = segs.iter().map(|(t, _)| t.chars().count()).collect();
+    let total: usize = widths.iter().sum::<usize>() + SEP * segs.len().saturating_sub(1);
+    let left = width.saturating_sub(total) / 2;
+    let mut placed = Vec::new();
+    let mut col = left;
+    for (i, (text, action)) in segs.into_iter().enumerate() {
+        if i > 0 {
+            col += SEP;
+        }
+        let w = widths[i];
+        placed.push(PlacedSeg {
+            start: col,
+            text,
+            action,
+        });
+        col += w;
+    }
+    placed
+}
+
+/// The rendered line for a gap's expand control: centred segments with the
+/// clickable actions accented.
+fn gap_control_line(control: &GapControl, pal: &ReviewPalette, width: usize) -> Line<'static> {
+    let bg = pal.context_bg;
+    let mut spans = Vec::new();
+    let mut col = 0usize;
+    for seg in gap_control_layout(control, width) {
+        if seg.start > col {
+            spans.push(Span::styled(
+                " ".repeat(seg.start - col),
+                Style::default().bg(bg),
+            ));
+            col = seg.start;
+        }
+        let style = if seg.action.is_some() {
+            Style::default()
+                .fg(pal.hunk_header)
+                .bg(bg)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(pal.gutter_fg).bg(bg)
+        };
+        col += seg.text.chars().count();
+        spans.push(Span::styled(seg.text, style));
+    }
+    fit_spans(spans, width, bg).into()
 }
 
 /// Truncate a styled span list to `width` display columns (cutting the last
@@ -3240,12 +3912,21 @@ enum SbsRow {
         left: Option<usize>,
         right: Option<usize>,
     },
+    /// A revealed context line (display-only, same content on both sides).
+    Context {
+        old_lineno: usize,
+        new_lineno: usize,
+        content: String,
+    },
+    /// A clickable expand control for gap `gap`.
+    ExpandControl {
+        gap: usize,
+    },
 }
 
-/// Pair a file's diff into side-by-side rows. Context lines occupy both halves;
-/// runs of deletions/additions in a change block are zipped left/right, padding
-/// the shorter side with blanks. Indices are selectable-line indices.
-fn side_by_side_rows(file: &FileDiff) -> Vec<SbsRow> {
+/// Append one hunk's side-by-side rows (header + paired cells), advancing the
+/// running selectable-line index `sel`.
+fn push_hunk_sbs_rows(rows: &mut Vec<SbsRow>, hunk: &Hunk, sel: &mut usize) {
     fn flush(rows: &mut Vec<SbsRow>, dels: &mut Vec<usize>, adds: &mut Vec<usize>) {
         for i in 0..dels.len().max(adds.len()) {
             rows.push(SbsRow::Cells {
@@ -3257,29 +3938,39 @@ fn side_by_side_rows(file: &FileDiff) -> Vec<SbsRow> {
         adds.clear();
     }
 
+    rows.push(SbsRow::Header(format!(
+        "@@ -{},{} +{},{} @@ {}",
+        hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines, hunk.header
+    )));
+    let (mut dels, mut adds) = (Vec::new(), Vec::new());
+    for line in &hunk.lines {
+        match line.origin {
+            LineOrigin::Context => {
+                flush(rows, &mut dels, &mut adds);
+                rows.push(SbsRow::Cells {
+                    left: Some(*sel),
+                    right: Some(*sel),
+                });
+            }
+            LineOrigin::Deletion => dels.push(*sel),
+            LineOrigin::Addition => adds.push(*sel),
+        }
+        *sel += 1;
+    }
+    flush(rows, &mut dels, &mut adds);
+}
+
+/// Pair a file's diff into side-by-side rows, with no context expansion.
+/// Context lines occupy both halves; runs of deletions/additions in a change
+/// block are zipped left/right, padding the shorter side with blanks. Indices
+/// are selectable-line indices. (Production uses [`DiffReviewState::sbs_rows`],
+/// which interleaves expansion; this bare form backs the pairing unit tests.)
+#[cfg(test)]
+fn side_by_side_rows(file: &FileDiff) -> Vec<SbsRow> {
     let mut rows = Vec::new();
     let mut sel = 0;
     for hunk in &file.hunks {
-        rows.push(SbsRow::Header(format!(
-            "@@ -{},{} +{},{} @@ {}",
-            hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines, hunk.header
-        )));
-        let (mut dels, mut adds) = (Vec::new(), Vec::new());
-        for line in &hunk.lines {
-            match line.origin {
-                LineOrigin::Context => {
-                    flush(&mut rows, &mut dels, &mut adds);
-                    rows.push(SbsRow::Cells {
-                        left: Some(sel),
-                        right: Some(sel),
-                    });
-                }
-                LineOrigin::Deletion => dels.push(sel),
-                LineOrigin::Addition => adds.push(sel),
-            }
-            sel += 1;
-        }
-        flush(&mut rows, &mut dels, &mut adds);
+        push_hunk_sbs_rows(&mut rows, hunk, &mut sel);
     }
     rows
 }
@@ -3298,9 +3989,9 @@ fn review_body_lines_side_by_side(
     segs: &[WordSegs],
     rounded: bool,
 ) -> Vec<Line<'static>> {
-    let Some(file) = state.current_file() else {
+    if state.current_file().is_none() {
         return Vec::new();
-    };
+    }
     let lines = state.selectable_lines();
     let (sel_lo, sel_hi) = state.selection();
     // Two columns separated by " │ ".
@@ -3341,14 +4032,53 @@ fn review_body_lines_side_by_side(
         }
     };
 
+    // A revealed context cell: line number gutter + plain content on the
+    // context band, no selection or word-diff emphasis.
+    let context_cell = |lineno: usize, content: &str| -> Vec<Span<'static>> {
+        let bg = pal.context_bg;
+        let mut spans = vec![Span::styled(
+            format!("{} ", lineno_str(Some(lineno))),
+            Style::default().fg(pal.gutter_fg).bg(bg),
+        )];
+        push_segment(&mut spans, content, ext, highlight, pal.text, bg);
+        fit_spans(spans, col, bg)
+    };
+
     let anchors = state.comment_anchors();
     let mut out: Vec<Line<'static>> = Vec::new();
-    for row in side_by_side_rows(file) {
+    for row in state.sbs_rows() {
         match row {
-            SbsRow::Header(_) => out.push(Line::from(Span::styled(
-                row_header_text(&row),
-                Style::default().fg(pal.hunk_header),
+            SbsRow::Header(_) => out.push(Line::from(fit_spans(
+                vec![Span::styled(
+                    row_header_text(&row),
+                    Style::default().fg(pal.hunk_header).bg(pal.hunk_header_bg),
+                )],
+                width,
+                pal.hunk_header_bg,
             ))),
+            SbsRow::Context {
+                old_lineno,
+                new_lineno,
+                content,
+            } => {
+                let mut spans = context_cell(old_lineno, &content);
+                spans.push(Span::styled(
+                    " │ ",
+                    Style::default().fg(pal.gutter_fg).bg(pal.context_bg),
+                ));
+                spans.extend(context_cell(new_lineno, &content));
+                out.push(Line::from(spans));
+            }
+            SbsRow::ExpandControl { gap } => {
+                // `sbs_rows()` only emits this row when the control exists and
+                // both derive from the same state, so `None` is unreachable — but
+                // emit a blank line if it ever isn't, to preserve row parity with
+                // the mapping walks rather than silently shifting every row below.
+                match state.gap_display(gap).control {
+                    Some(control) => out.push(gap_control_line(&control, pal, width)),
+                    None => out.push(Line::from("")),
+                }
+            }
             SbsRow::Cells { left, right } => {
                 let mut spans = cell(left, true);
                 spans.push(Span::styled(" │ ", Style::default().fg(pal.gutter_fg)));
@@ -3467,6 +4197,313 @@ diff --git a/b.rs b/b.rs
             diff,
             Vec::new(),
         )
+    }
+
+    /// A single file with two hunks separated by a gap, and starting below
+    /// line 1, so there is a leading gap, a middle gap, and (once the file's
+    /// length is known) a trailing gap to expand.
+    fn state_with_gap_diff() -> DiffReviewState {
+        let diff = parse_unified_diff(
+            "\
+diff --git a/f.rs b/f.rs
+--- a/f.rs
++++ b/f.rs
+@@ -5,3 +5,3 @@
+ a
+-b
++B
+ c
+@@ -20,3 +20,3 @@
+ d
+-e
++E
+ f
+",
+        );
+        DiffReviewState::new(
+            SessionId::new(),
+            "test".to_string(),
+            "main".to_string(),
+            diff,
+            Vec::new(),
+        )
+    }
+
+    /// Load `n` synthetic working-tree lines ("L1".."Ln") for `f.rs`.
+    fn load_gap_file_lines(s: &mut DiffReviewState, n: usize) {
+        let lines: Vec<String> = (1..=n).map(|i| format!("L{i}")).collect();
+        s.set_file_lines("f.rs".to_string(), std::sync::Arc::new(lines));
+    }
+
+    #[test]
+    fn gap_display_empty_until_file_loaded() {
+        let mut s = state_with_gap_diff();
+        // Without loaded content, no revealed lines and no controls.
+        assert_eq!(s.gap_display(1), GapDisplay::default());
+        load_gap_file_lines(&mut s, 30);
+        // Loaded: the middle gap now offers an expand control (nothing revealed
+        // yet, so both blocks are empty).
+        let d = s.gap_display(1);
+        assert!(d.top.is_empty() && d.bottom.is_empty());
+        let control = d.control.expect("control once loaded");
+        assert_eq!(control.kind, GapKind::Middle);
+        // Middle gap spans new lines 8..=19 → 12 hidden.
+        assert_eq!(control.hidden, 12);
+    }
+
+    #[test]
+    fn gap_display_reveals_down_block_with_correct_linenos() {
+        let mut s = state_with_gap_diff();
+        load_gap_file_lines(&mut s, 30);
+        s.set_gap_reveal(1, GapReveal { up: 0, down: 2 });
+        let d = s.gap_display(1);
+        assert_eq!(
+            d.top,
+            vec![
+                RevealLine {
+                    old_lineno: 8,
+                    new_lineno: 8,
+                    content: "L8".to_string()
+                },
+                RevealLine {
+                    old_lineno: 9,
+                    new_lineno: 9,
+                    content: "L9".to_string()
+                },
+            ]
+        );
+        assert!(d.bottom.is_empty());
+        assert_eq!(d.control.unwrap().hidden, 10);
+    }
+
+    #[test]
+    fn gap_display_reveals_both_ends_then_merges() {
+        let mut s = state_with_gap_diff();
+        load_gap_file_lines(&mut s, 30);
+        // Partial from both ends: 2 down (8,9) + 3 up (17,18,19), 7 still hidden.
+        s.set_gap_reveal(1, GapReveal { up: 3, down: 2 });
+        let d = s.gap_display(1);
+        assert_eq!(
+            d.top.iter().map(|l| l.new_lineno).collect::<Vec<_>>(),
+            [8, 9]
+        );
+        assert_eq!(
+            d.bottom.iter().map(|l| l.new_lineno).collect::<Vec<_>>(),
+            [17, 18, 19]
+        );
+        assert_eq!(d.control.unwrap().hidden, 7);
+
+        // Once the two blocks cover the gap, it collapses to one contiguous
+        // block with no control.
+        s.set_gap_reveal(1, GapReveal { up: 6, down: 6 });
+        let d = s.gap_display(1);
+        assert_eq!(d.top.len(), 12);
+        assert_eq!(d.top.first().unwrap().new_lineno, 8);
+        assert_eq!(d.top.last().unwrap().new_lineno, 19);
+        assert!(d.control.is_none() && d.bottom.is_empty());
+    }
+
+    #[test]
+    fn gap_display_leading_and_trailing() {
+        let mut s = state_with_gap_diff();
+        load_gap_file_lines(&mut s, 30);
+        // Leading gap: new lines 1..=4, reveal 2 upward toward the first hunk.
+        s.set_gap_reveal(0, GapReveal { up: 2, down: 0 });
+        let d = s.gap_display(0);
+        assert!(d.top.is_empty());
+        assert_eq!(
+            d.bottom.iter().map(|l| l.new_lineno).collect::<Vec<_>>(),
+            [3, 4]
+        );
+        assert_eq!(d.control.unwrap().kind, GapKind::Leading);
+
+        // Trailing gap: new lines 23..=30. Over-expanding clamps to the file end.
+        s.set_gap_reveal(2, GapReveal { up: 0, down: 100 });
+        let d = s.gap_display(2);
+        assert_eq!(d.top.len(), 8);
+        assert_eq!(d.top.last().unwrap().new_lineno, 30);
+        assert!(d.control.is_none());
+    }
+
+    #[test]
+    fn expand_gap_steps_and_clamps() {
+        let mut s = state_with_gap_diff();
+        load_gap_file_lines(&mut s, 30);
+        // One step down reveals EXPAND_STEP lines, clamped to the 12-line gap.
+        s.expand_gap(1, ExpandAction::Down);
+        assert_eq!(s.gap_display(1).top.len(), 12.min(EXPAND_STEP));
+        // "All" fills the remainder, fully revealing the gap.
+        s.expand_gap(1, ExpandAction::All);
+        let d = s.gap_display(1);
+        assert_eq!(d.top.len(), 12);
+        assert!(d.control.is_none());
+    }
+
+    #[test]
+    fn expansion_does_not_change_selectable_count() {
+        let mut s = state_with_gap_diff();
+        let before = s.selectable_count();
+        load_gap_file_lines(&mut s, 30);
+        s.set_gap_reveal(0, GapReveal { up: 4, down: 0 });
+        s.set_gap_reveal(1, GapReveal { up: 6, down: 6 });
+        s.set_gap_reveal(2, GapReveal { up: 0, down: 8 });
+        // Revealed context is display-only: it never becomes selectable.
+        assert_eq!(s.selectable_count(), before);
+    }
+
+    #[test]
+    fn rendered_inline_rows_match_physical_layout_with_expansion() {
+        let mut s = state_with_gap_diff();
+        load_gap_file_lines(&mut s, 30);
+        s.set_gap_reveal(0, GapReveal { up: 2, down: 0 });
+        s.set_gap_reveal(1, GapReveal { up: 3, down: 2 });
+        let width = 40;
+        s.body_width.set(width);
+        let pal = Theme::truecolor().review_palette();
+        let segs = s.word_segments();
+        let lines = review_body_lines(&s, false, &pal, "rs", true, width, &segs, true);
+        assert_eq!(lines.len(), s.inline_physical_rows().len());
+    }
+
+    #[test]
+    fn sbs_body_row_of_accounts_for_expansion() {
+        let mut s = state_with_gap_diff();
+        load_gap_file_lines(&mut s, 30);
+        s.layout = ReviewLayout::SideBySide;
+        s.set_gap_reveal(1, GapReveal { up: 0, down: 4 });
+        // body_row_of must point at the sbs row whose cell carries the line.
+        let rows = s.sbs_rows();
+        for idx in 0..s.selectable_count() {
+            let expected = rows
+                .iter()
+                .position(|r| matches!(r, SbsRow::Cells { left, right } if *left == Some(idx) || *right == Some(idx)));
+            if let Some(expected) = expected {
+                assert_eq!(s.body_row_of(idx), expected, "line {idx}");
+            }
+        }
+    }
+
+    #[test]
+    fn split_file_lines_handles_trailing_newline_and_empty() {
+        assert_eq!(&**split_file_lines(b"a\nb\n"), &["a", "b"]);
+        assert_eq!(&**split_file_lines(b"a\nb"), &["a", "b"]);
+        assert!(split_file_lines(b"").is_empty());
+        // A lone newline is one empty line, not two.
+        assert_eq!(&**split_file_lines(b"\n"), &[""]);
+        // A blank line in the middle is preserved.
+        assert_eq!(&**split_file_lines(b"a\n\nc\n"), &["a", "", "c"]);
+    }
+
+    #[test]
+    fn expand_action_at_maps_click_zones() {
+        let mut s = state_with_gap_diff();
+        load_gap_file_lines(&mut s, 30);
+        let width = 80;
+        s.body_width.set(width);
+        // Partially reveal the middle gap so its control (down/hint/up/all) shows.
+        s.set_gap_reveal(1, GapReveal { up: 0, down: 2 });
+        let control = s.gap_display(1).control.expect("control present");
+        let zones = gap_control_layout(&control, width);
+        // Clicking a labelled zone runs that exact action.
+        for seg in &zones {
+            if let Some(action) = seg.action {
+                assert_eq!(s.expand_action_at(1, seg.start), Some(action));
+            }
+        }
+        // Clicking blank space (column 0, before the centred segments) falls back
+        // to a step in the gap's primary direction — Down for a middle gap.
+        assert_eq!(s.expand_action_at(1, 0), Some(ExpandAction::Down));
+
+        // A leading gap offers no down step, so its fallback is Up.
+        s.set_gap_reveal(0, GapReveal { up: 1, down: 0 });
+        assert_eq!(s.expand_action_at(0, 0), Some(ExpandAction::Up));
+    }
+
+    #[test]
+    fn expand_control_gap_at_finds_inline_control_row() {
+        let mut s = state_with_gap_diff();
+        load_gap_file_lines(&mut s, 30);
+        let width = 80;
+        s.body_width.set(width);
+        s.set_gap_reveal(1, GapReveal { up: 0, down: 2 });
+        let rows = s.inline_physical_rows();
+        let (row, gap) = rows
+            .iter()
+            .enumerate()
+            .find_map(|(i, r)| match r {
+                BodyRow::ExpandControl { gap } => Some((i, *gap)),
+                _ => None,
+            })
+            .expect("a control row is present");
+        assert_eq!(s.expand_control_gap_at(row, width), Some(gap));
+        // A diff line row is not an expand control.
+        let line_row = rows
+            .iter()
+            .position(|r| matches!(r, BodyRow::Line { .. }))
+            .unwrap();
+        assert_eq!(s.expand_control_gap_at(line_row, width), None);
+    }
+
+    #[test]
+    fn expand_gap_defers_trailing_before_load_and_ignores_empty_gaps() {
+        // a.rs is a single hunk starting at line 1: the leading gap (0) has no
+        // hidden lines, the trailing gap (1) is unknown until the file loads.
+        let mut s = state_with_two_files();
+        // No file content loaded yet.
+        // Leading gap with no hidden lines is a genuine no-op — nothing recorded.
+        s.expand_gap(0, ExpandAction::Up);
+        assert!(!s.expanded.contains_key(&("a.rs".to_string(), 0)));
+        // Trailing gap before load defers the request so it applies on arrival.
+        s.expand_gap(1, ExpandAction::Down);
+        assert_eq!(
+            s.expanded.get(&("a.rs".to_string(), 1)).copied(),
+            Some(GapReveal {
+                up: 0,
+                down: EXPAND_STEP
+            })
+        );
+    }
+
+    #[test]
+    fn sbs_renderer_row_count_matches_walk_with_comments_and_expansion() {
+        // Locks the side-by-side renderer against the row-accounting the click /
+        // comment-box / expand-control mapping walks rely on, with a comment box
+        // and revealed context both interleaved.
+        let mut s = state_with_gap_diff();
+        load_gap_file_lines(&mut s, 30);
+        s.layout = ReviewLayout::SideBySide;
+        s.set_gap_reveal(1, GapReveal { up: 0, down: 3 });
+        // Comment on the addition `B` (new line 6).
+        s.comments
+            .push(Comment::new("f.rs", CommentSide::New, (6, 6), "B", "note"));
+        let width = 80;
+        s.body_width.set(width);
+        let pal = Theme::truecolor().review_palette();
+        let segs = s.word_segments();
+        let lines = review_body_lines_side_by_side(&s, false, &pal, "rs", true, width, &segs, true);
+
+        // Expected: one line per sbs row, plus each anchored comment box after
+        // its Cells row (mirrors comment_box_at_body_row / expand_control_gap_at).
+        let anchors = s.comment_anchors();
+        let mut expected = 0usize;
+        for row in s.sbs_rows() {
+            expected += 1;
+            if let SbsRow::Cells { left, right } = row {
+                let sels: Vec<usize> = match (left, right) {
+                    (Some(l), Some(r)) if l == r => vec![l],
+                    (l, r) => l.into_iter().chain(r).collect(),
+                };
+                for sel in sels {
+                    if let Some(anns) = anchors.get(&sel) {
+                        for ann in anns {
+                            expected +=
+                                comment_box_height(ann, s.is_comment_collapsed(ann.id), width);
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(lines.len(), expected);
     }
 
     #[test]
