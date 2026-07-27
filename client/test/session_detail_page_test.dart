@@ -64,9 +64,9 @@ void main() {
     api.getSessionDetailResponse = sessionDetail(info: info);
     await pump(tester, info);
 
-    expect(find.text('§ review'), findsOneWidget);
-    expect(find.text('§ auto'), findsNothing);
-    expect(find.text('keep alive'), findsOneWidget);
+    expect(find.text('▤ review'), findsOneWidget);
+    expect(find.text('▤ auto'), findsNothing);
+    expect(find.text('✓ keep-alive'), findsOneWidget);
   });
 
   testWidgets('the header omits the chips when unset', (tester) async {
@@ -74,8 +74,41 @@ void main() {
     api.getSessionDetailResponse = sessionDetail(info: info);
     await pump(tester, info);
 
-    expect(find.textContaining('§'), findsNothing);
-    expect(find.text('keep alive'), findsNothing);
+    expect(find.textContaining('▤'), findsNothing);
+    expect(find.text('✓ keep-alive'), findsNothing);
+  });
+
+  /// Build an agent-states snapshot marking [info]'s session with [state], so
+  /// the store's live agent state (not the detail fixture) drives the header.
+  AgentStatesSnapshotDto agentStates(SessionInfo info, AgentState state) =>
+      AgentStatesSnapshotDto(
+        states: [AgentStateEntryDto(sessionId: info.sessionId, state: state)],
+        commanderRunning: true,
+      );
+
+  testWidgets('a waiting agent shows the amber waiting-input hint', (
+    tester,
+  ) async {
+    final info = sessionInfo(status: SessionStatus.running);
+    api.getSessionDetailResponse = sessionDetail(info: info);
+    api.agentStatesResponse = agentStates(info, AgentState.waitingForInput);
+    await pump(tester, info);
+
+    expect(
+      find.textContaining('answer in the Agent terminal'),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('a non-waiting agent omits the waiting-input hint', (
+    tester,
+  ) async {
+    final info = sessionInfo(status: SessionStatus.running);
+    api.getSessionDetailResponse = sessionDetail(info: info);
+    api.agentStatesResponse = agentStates(info, AgentState.working);
+    await pump(tester, info);
+
+    expect(find.textContaining('answer in the Agent terminal'), findsNothing);
   });
 
   testWidgets('the phone detail hides the terminal-snapshot preview', (
@@ -413,7 +446,8 @@ void main() {
     api.getSessionDetailResponse = sessionDetail(info: info);
     await pump(tester, info);
 
-    await tester.tap(find.widgetWithText(OutlinedButton, 'Shell'));
+    // Shell now lives in the lifecycle icon bar rather than as its own button.
+    await tester.tap(find.byTooltip('Shell'));
     await tester.pump();
     // Let the pushed route build (and TerminalBody attach); avoid pumpAndSettle
     // because the terminal's 1s throughput timer never settles.
@@ -428,7 +462,7 @@ void main() {
     api.getSessionDetailResponse = sessionDetail(info: info);
     await pump(tester, info);
 
-    await tester.tap(find.widgetWithText(FilledButton, 'Agent'));
+    await tester.tap(find.widgetWithText(FilledButton, 'Open Agent terminal'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 400));
 

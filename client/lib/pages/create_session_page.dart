@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../services/commander_api.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
+import '../theme/app_colors.dart';
+import '../theme/app_theme.dart';
 import 'projects_page.dart';
 
 /// Form for creating a session. The project is picked from the server's
@@ -166,10 +168,7 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
                 const SizedBox(height: 16),
                 TextFormField(
                   controller: _title,
-                  decoration: const InputDecoration(
-                    labelText: 'Title',
-                    border: OutlineInputBorder(),
-                  ),
+                  decoration: const InputDecoration(labelText: 'Title'),
                   validator: (v) =>
                       (v == null || v.trim().isEmpty) ? 'Required' : null,
                 ),
@@ -232,10 +231,7 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
       initialValue: _selectedProject,
       isExpanded: true,
       itemHeight: null, // allow two-line items (name + path)
-      decoration: const InputDecoration(
-        labelText: 'Project',
-        border: OutlineInputBorder(),
-      ),
+      decoration: const InputDecoration(labelText: 'Project'),
       // The closed field shows just the project name (one line); the open menu
       // adds the repo path so same-named repos are distinguishable.
       selectedItemBuilder: (context) => [
@@ -258,7 +254,7 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
                   p.repoPath,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.bodySmall,
+                  style: AppTheme.mono(size: 11, color: AppColors.textMuted),
                 ),
               ],
             ),
@@ -272,10 +268,7 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
   Widget _programField() {
     if (_loadingOptions) {
       return const InputDecorator(
-        decoration: InputDecoration(
-          labelText: 'Program',
-          border: OutlineInputBorder(),
-        ),
+        decoration: InputDecoration(labelText: 'Program'),
         child: Row(
           children: [
             SizedBox(
@@ -294,19 +287,16 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
       // Fallback: no options → free-text (keeps creation working offline).
       return TextFormField(
         controller: _program,
+        style: AppTheme.mono(size: 13, color: AppColors.text),
         decoration: const InputDecoration(
           labelText: 'Program (optional)',
           hintText: 'claude',
-          border: OutlineInputBorder(),
         ),
       );
     }
     return DropdownButtonFormField<String>(
       initialValue: _selectedProgram,
-      decoration: const InputDecoration(
-        labelText: 'Program',
-        border: OutlineInputBorder(),
-      ),
+      decoration: const InputDecoration(labelText: 'Program'),
       items: [
         for (final p in programs)
           DropdownMenuItem(value: p.command, child: Text(p.label)),
@@ -320,10 +310,7 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
   Widget _sectionField() {
     return DropdownButtonFormField<String?>(
       initialValue: _selectedSection,
-      decoration: const InputDecoration(
-        labelText: 'Section (optional)',
-        border: OutlineInputBorder(),
-      ),
+      decoration: const InputDecoration(labelText: 'Section (optional)'),
       items: [
         const DropdownMenuItem(value: null, child: Text('None')),
         for (final s in _sectionOptions())

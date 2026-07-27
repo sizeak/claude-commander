@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../services/commander_api.dart';
 import '../src/rust/api/mirrors.dart';
+import '../theme/app_colors.dart';
+import '../theme/app_theme.dart';
 
 /// Edits the server's launch-program list (`PUT /api/config/programs`). Each row
 /// is a `{label, command}` pair the create-session form offers as a choice.
@@ -215,6 +217,7 @@ class _ProgramRowTile extends StatelessWidget {
                     const SizedBox(height: 8),
                     TextField(
                       controller: row.command,
+                      style: AppTheme.mono(size: 13, color: AppColors.text),
                       decoration: const InputDecoration(
                         labelText: 'Command',
                         isDense: true,

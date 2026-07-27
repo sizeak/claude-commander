@@ -1,8 +1,12 @@
 import 'dart:async';
 
+import 'package:claude_commander_client/pages/activity_page.dart';
 import 'package:claude_commander_client/pages/adaptive_shell.dart';
+import 'package:claude_commander_client/pages/phone_shell.dart';
+import 'package:claude_commander_client/pages/review_page.dart';
 import 'package:claude_commander_client/pages/session_detail_page.dart';
 import 'package:claude_commander_client/pages/session_list_page.dart';
+import 'package:claude_commander_client/pages/terminal_page.dart';
 import 'package:claude_commander_client/state/commander_store.dart';
 import 'package:claude_commander_client/state/commander_store_scope.dart';
 import 'package:claude_commander_client/state/workspace_store.dart';
@@ -37,38 +41,130 @@ void main() {
     addTearDown(tester.view.resetDevicePixelRatio);
   }
 
-  testWidgets(
-    'wide layout is master-detail; selecting a session updates the pane in '
-    'place without a route push',
-    (tester) async {
-      useSize(tester, const Size(1400, 900));
-      api.listSessionsResponse = [sessionInfo(title: 'Alpha')];
-      api.getSessionDetailResponse = sessionDetail(
-        info: sessionInfo(title: 'Alpha'),
-      );
-      unawaited(store.connect());
-      await tester.pumpWidget(wrap());
-      await tester.pumpAndSettle();
+  /// Bring up the wide shell with a single session ready and connected.
+  Future<void> pumpWide(WidgetTester tester) async {
+    useSize(tester, const Size(1400, 900));
+    api.listSessionsResponse = [sessionInfo(title: 'Alpha')];
+    api.getSessionDetailResponse = sessionDetail(
+      info: sessionInfo(title: 'Alpha'),
+    );
+    unawaited(store.connect());
+    await tester.pumpWidget(wrap());
+    await tester.pumpAndSettle();
+  }
 
-      // Master list is present alongside an empty detail pane.
+  testWidgets('narrow layout is the phone shell', (tester) async {
+    useSize(tester, const Size(500, 900));
+    api.listSessionsResponse = [sessionInfo(title: 'Alpha')];
+    unawaited(store.connect());
+    await tester.pumpWidget(wrap());
+    await tester.pumpAndSettle();
+
+    expect(find.byType(PhoneShell), findsOneWidget);
+    // No persistent workspace pane in the narrow layout.
+    expect(find.text('Select a session'), findsNothing);
+    expect(find.byType(SessionDetailBody), findsNothing);
+  });
+
+  testWidgets(
+    'wide layout is rail + workspace; the empty-state shows until a session '
+    'is selected',
+    (tester) async {
+      await pumpWide(tester);
+
+      // The rail carries the shared list and the empty workspace shows the
+      // placeholder — no route push, no detail body yet.
       expect(find.byType(SessionListBody), findsOneWidget);
       expect(find.text('Select a session'), findsOneWidget);
       expect(find.byType(SessionDetailBody), findsNothing);
-
-      // Selecting a session fills the detail pane in place — no route was pushed.
-      await tester.tap(find.text('Alpha'));
-      await tester.pumpAndSettle();
-
-      expect(find.byType(SessionDetailBody), findsOneWidget);
-      expect(find.text('Select a session'), findsNothing);
-      // The wide layout updates the pane, it does not push the phone detail page.
-      expect(find.byType(SessionDetailPage), findsNothing);
     },
   );
 
   testWidgets(
-    'the wide detail pane shows the terminal-snapshot preview and captures '
-    'pane lines for it',
+    'selecting a session opens its workspace on the Overview tab, in place',
+    (tester) async {
+      await pumpWide(tester);
+
+      await tester.tap(find.text('Alpha'));
+      await tester.pumpAndSettle();
+
+      // Overview body is shown in place; no phone detail route was pushed.
+      expect(find.byType(SessionDetailBody), findsOneWidget);
+      expect(find.byType(SessionDetailPage), findsNothing);
+      expect(find.text('Select a session'), findsNothing);
+      // The underline tab row is present.
+      expect(find.byKey(const ValueKey('ws-tab-detail')), findsOneWidget);
+      expect(find.byKey(const ValueKey('ws-tab-terminal')), findsOneWidget);
+      expect(find.byKey(const ValueKey('ws-tab-shell')), findsOneWidget);
+      expect(find.byKey(const ValueKey('ws-tab-review')), findsOneWidget);
+      expect(find.text('Overview'), findsOneWidget);
+    },
+  );
+
+  testWidgets('the Agent and Shell tabs switch to live terminal bodies in place', (
+    tester,
+  ) async {
+    await pumpWide(tester);
+    await tester.tap(find.text('Alpha'));
+    await tester.pumpAndSettle();
+
+    // Agent tab → an agent-pane attach.
+    await tester.tap(find.byKey(const ValueKey('ws-tab-terminal')));
+    await tester.pump();
+    await tester.pump();
+    expect(find.byType(TerminalBody), findsOneWidget);
+    expect(find.byType(SessionDetailBody), findsNothing);
+
+    // Shell tab → the paired shell attach.
+    await tester.tap(find.byKey(const ValueKey('ws-tab-shell')));
+    await tester.pump();
+    await tester.pump();
+    expect(find.byType(TerminalBody), findsOneWidget);
+  });
+
+  testWidgets('the Changes tab switches to the review body', (tester) async {
+    await pumpWide(tester);
+    api.openReviewResponse = reviewSnapshot(files: const []);
+
+    await tester.tap(find.text('Alpha'));
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const ValueKey('ws-tab-review')));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(ReviewBody), findsOneWidget);
+    expect(find.byType(SessionDetailBody), findsNothing);
+  });
+
+  testWidgets(
+    'the FLEET/ACTIVITY toggle swaps the workspace to the Activity feed while '
+    'the rail stays visible',
+    (tester) async {
+      await pumpWide(tester);
+      // A session is selected first, to prove ACTIVITY overrides the workspace.
+      await tester.tap(find.text('Alpha'));
+      await tester.pumpAndSettle();
+      expect(find.byType(SessionDetailBody), findsOneWidget);
+
+      await tester.tap(find.text('ACTIVITY'));
+      await tester.pumpAndSettle();
+
+      // Workspace is now the Activity feed; the rail (list) is still there.
+      expect(find.byType(ActivityBody), findsOneWidget);
+      expect(find.byType(SessionDetailBody), findsNothing);
+      expect(find.byType(SessionListBody), findsOneWidget);
+
+      // Toggling back to FLEET restores the selected session's workspace.
+      await tester.tap(find.text('FLEET'));
+      await tester.pumpAndSettle();
+      expect(find.byType(ActivityBody), findsNothing);
+      expect(find.byType(SessionDetailBody), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'the wide workspace shows the terminal-snapshot preview and captures pane '
+    'lines for it',
     (tester) async {
       useSize(tester, const Size(1400, 900));
       api.listSessionsResponse = [sessionInfo(title: 'Alpha')];
@@ -83,33 +179,9 @@ void main() {
       await tester.tap(find.text('Alpha'));
       await tester.pumpAndSettle();
 
-      // The wide layout keeps the snapshot card...
       expect(find.text('Terminal snapshot'), findsOneWidget);
       expect(find.text('live pane text'), findsOneWidget);
-      // ...and therefore asks the server to capture pane lines (200 = the
-      // preview's capture depth; symmetric with the phone test's null).
       expect(api.lastCall('getSessionDetail')!.args['lines'], 200);
     },
   );
-
-  testWidgets('narrow layout uses the stacked push flow', (tester) async {
-    useSize(tester, const Size(500, 900));
-    api.listSessionsResponse = [sessionInfo(title: 'Alpha')];
-    api.getSessionDetailResponse = sessionDetail(
-      info: sessionInfo(title: 'Alpha'),
-    );
-    unawaited(store.connect());
-    await tester.pumpWidget(wrap());
-    await tester.pumpAndSettle();
-
-    // The narrow shell is the phone list page — no persistent detail pane.
-    expect(find.byType(SessionListPage), findsOneWidget);
-    expect(find.text('Select a session'), findsNothing);
-    expect(find.byType(SessionDetailPage), findsNothing);
-
-    // Tapping a row pushes the detail route (stacked navigation).
-    await tester.tap(find.text('Alpha'));
-    await tester.pumpAndSettle();
-    expect(find.byType(SessionDetailPage), findsOneWidget);
-  });
 }

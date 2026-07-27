@@ -7,6 +7,7 @@ import 'services/commander_api.dart';
 import 'src/rust/frb_generated.dart';
 import 'state/commander_store_scope.dart';
 import 'state/workspace_store.dart';
+import 'theme/app_theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -50,13 +51,7 @@ class _CommanderAppState extends State<CommanderApp> {
       child: MaterialApp(
         title: 'Claude Commander',
         debugShowCheckedModeBanner: false,
-        theme: ThemeData(
-          colorScheme: ColorScheme.fromSeed(
-            seedColor: Colors.deepPurple,
-            brightness: Brightness.dark,
-          ),
-          useMaterial3: true,
-        ),
+        theme: AppTheme.dark(),
         home: ListenableBuilder(
           listenable: widget.workspace,
           builder: (context, _) => widget.workspace.isEmpty

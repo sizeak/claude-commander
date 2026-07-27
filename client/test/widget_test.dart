@@ -19,8 +19,8 @@ void main() {
       CommanderApp(api: FakeCommanderApi(), workspace: workspace),
     );
 
-    expect(find.text('Add server'), findsWidgets);
-    expect(find.widgetWithText(TextFormField, 'Server URL'), findsOneWidget);
-    expect(find.widgetWithText(FilledButton, 'Add server'), findsOneWidget);
+    expect(find.text('Connect to a server'), findsOneWidget);
+    expect(find.byKey(const Key('urlField')), findsOneWidget);
+    expect(find.widgetWithText(FilledButton, 'Connect'), findsOneWidget);
   });
 }

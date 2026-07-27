@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
+import '../theme/app_colors.dart';
+import '../theme/app_theme.dart';
 
 /// Manages the server's registered projects (git repos). Lists each project's
 /// name + repo path; adds one by its server-side path (`addProject`), removes one
@@ -75,7 +77,10 @@ class _ProjectsPageState extends State<ProjectsPage> {
             child: const Text('Cancel'),
           ),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            style: FilledButton.styleFrom(
+              backgroundColor: AppColors.red,
+              foregroundColor: AppColors.bg,
+            ),
             onPressed: () => Navigator.of(ctx).pop(true),
             child: const Text('Remove'),
           ),
@@ -220,7 +225,7 @@ class _ProjectTileState extends State<_ProjectTile> {
           widget.project.repoPath,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
-          style: Theme.of(context).textTheme.bodySmall,
+          style: AppTheme.mono(size: 11, color: AppColors.textMuted),
         ),
         trailing: IconButton(
           onPressed: widget.onRemove,
@@ -264,8 +269,12 @@ class _ProjectTileState extends State<_ProjectTile> {
             leading: Icon(
               b.isRemote ? Icons.cloud_outlined : Icons.call_split,
               size: 18,
+              color: b.isRemote ? AppColors.textFaint : AppColors.teal,
             ),
-            title: Text(b.name),
+            title: Text(
+              b.name,
+              style: AppTheme.mono(size: 12, color: AppColors.textBright),
+            ),
           ),
       ],
     );

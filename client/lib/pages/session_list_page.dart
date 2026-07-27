@@ -4,7 +4,12 @@ import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
 import '../state/workspace_store.dart';
+import '../theme/app_colors.dart';
+import '../theme/app_theme.dart';
+import '../theme/agent_glyphs.dart';
+import '../util/format.dart';
 import '../util/session_filter.dart';
+import '../widgets/brand_mark.dart';
 import '../widgets/session_chips.dart';
 import 'create_session_page.dart';
 import 'programs_page.dart';
@@ -14,16 +19,53 @@ import 'session_detail_page.dart';
 
 /// Which slice of the sessions the list is showing: everything (grouped by
 /// server → project) or the recently-attached sessions in MRU order.
-enum _SessionView { all, recent }
+enum _SessionView { recent, all }
+
+/// A one-tap "attention" filter layered on top of the search box: the sessions
+/// that need input, the ones actively working, and the ones with an open PR
+/// awaiting review. Mirrors the deck's quick-filter chip row.
+enum _Quick { needsInput, working, review }
+
+/// True when [store]'s session [s] is asking for a human decision — an agent
+/// waiting for input, or a cascade paused mid-stack.
+bool _isNeedsInput(CommanderStore store, SessionInfo s) =>
+    s.status == SessionStatus.cascadePaused ||
+    store.agentStateFor(s.id) == AgentState.waitingForInput;
+
+/// True when [s]'s agent is actively working.
+bool _isWorking(CommanderStore store, SessionInfo s) =>
+    store.agentStateFor(s.id) == AgentState.working;
+
+/// True when [s] carries an open PR — a candidate for review.
+bool _isReview(SessionInfo s) =>
+    s.prNumber != null && s.prState == PrState.open;
+
+bool _matchesQuick(_Quick q, CommanderStore store, SessionInfo s) => switch (q) {
+  _Quick.needsInput => _isNeedsInput(store, s),
+  _Quick.working => _isWorking(store, s),
+  _Quick.review => _isReview(s),
+};
+
+/// Whether a server's base URL points at the local machine (drives the
+/// `local` / `remote` tag in the server node header). Compares the parsed
+/// [Uri.host] so a name like `notlocalhost.example` isn't misread as local.
+bool _isLocalServer(String baseUrl) {
+  final host = Uri.tryParse(baseUrl)?.host.toLowerCase() ?? '';
+  return host == 'localhost' ||
+      host == '127.0.0.1' ||
+      host == '::1' ||
+      host == '[::1]';
+}
 
 /// The aggregated session list — layout-agnostic (no Scaffold, no route). A
-/// pinned header carries a live search box (fuzzy-filtering the list in place)
-/// and an All/Recent toggle; below it the body is either the servers' sessions
-/// grouped by project (All) or a flat, cross-server most-recently-attached list
-/// (Recent). Enumerates the servers from the [WorkspaceStore]; in All mode each
-/// server section re-provides its own [CommanderStoreScope] so per-server
-/// consumers (detail, cascade banner) keep their single-store contract, and its
-/// header is suppressed when only one server is configured.
+/// pinned header carries a live search box (fuzzy-filtering the list in place),
+/// a Recent/All toggle, and a row of quick-filter chips; below it the body is
+/// either the servers' sessions grouped by project (All) or a flat, cross-server
+/// most-recently-attached list (Recent). Enumerates the servers from the
+/// [WorkspaceStore]; in All mode each server section re-provides its own
+/// [CommanderStoreScope] so per-server consumers (detail, cascade banner) keep
+/// their single-store contract, and its header is suppressed when only one
+/// server is configured.
 class SessionListBody extends StatefulWidget {
   /// The id of the session shown in the detail pane, highlighted in the list.
   /// Null in the narrow (push) flow, where there is no persistent selection.
@@ -32,7 +74,17 @@ class SessionListBody extends StatefulWidget {
   /// Invoked when a session row is tapped, with the server that owns it.
   final void Function(CommanderStore store, SessionInfo session) onSelect;
 
-  const SessionListBody({super.key, this.selectedId, required this.onSelect});
+  /// Whether to render the branded "Fleet" header (BrandMark + counts + a
+  /// settings button). The phone [PhoneShell] turns this on; the wide layout's
+  /// rail supplies its own header and footer, so it leaves this off.
+  final bool showFleetHeader;
+
+  const SessionListBody({
+    super.key,
+    this.selectedId,
+    required this.onSelect,
+    this.showFleetHeader = false,
+  });
 
   @override
   State<SessionListBody> createState() => _SessionListBodyState();
@@ -43,6 +95,10 @@ class _SessionListBodyState extends State<SessionListBody> {
   String _query = '';
   _SessionView _view = _SessionView.all;
 
+  /// The active quick filter, or null for none. Tapping the active chip clears
+  /// it, so it round-trips off.
+  _Quick? _quick;
+
   @override
   void dispose() {
     _search.dispose();
@@ -50,6 +106,9 @@ class _SessionListBodyState extends State<SessionListBody> {
   }
 
   void _setQuery(String value) => setState(() => _query = value.trim());
+
+  void _toggleQuick(_Quick q) =>
+      setState(() => _quick = _quick == q ? null : q);
 
   @override
   Widget build(BuildContext context) {
@@ -59,10 +118,37 @@ class _SessionListBodyState extends State<SessionListBody> {
       builder: (context, _) {
         final servers = workspace.servers;
         final multi = servers.length > 1;
+
+        // A single cross-server pass powers the header counts and the chip row.
+        var active = 0, total = 0, needs = 0, working = 0, review = 0;
+        for (final store in servers) {
+          for (final s in store.sessions) {
+            total++;
+            if (s.status.isActive) active++;
+            if (_isNeedsInput(store, s)) needs++;
+            if (_isWorking(store, s)) working++;
+            if (_isReview(s)) review++;
+          }
+        }
+
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            _buildHeader(),
+            if (widget.showFleetHeader)
+              _FleetHeader(
+                workspace: workspace,
+                active: active,
+                total: total,
+                serverCount: servers.length,
+              ),
+            _buildControls(needs: needs, working: working, review: review),
+            // With several servers each group header carries its own connection
+            // dot; a lone server has no group header (nor, in the phone shell,
+            // an AppBar), so surface its connection state here when it isn't
+            // healthy — otherwise a degraded/reconnecting sole server is silent.
+            if (servers.length == 1 &&
+                servers.single.connection.kind != ConnectionStateKind.connected)
+              _ConnectionStrip(connection: servers.single.connection),
             Expanded(
               child: RefreshIndicator(
                 onRefresh: workspace.refreshAll,
@@ -77,24 +163,32 @@ class _SessionListBodyState extends State<SessionListBody> {
     );
   }
 
-  Widget _buildHeader() {
+  /// The search box, the Recent/All segmented toggle with a mode indicator, and
+  /// the quick-filter chip row.
+  Widget _buildControls({
+    required int needs,
+    required int working,
+    required int review,
+  }) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+      padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
       child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           TextField(
             controller: _search,
             onChanged: _setQuery,
             textInputAction: TextInputAction.search,
+            style: const TextStyle(fontSize: 13.5, color: AppColors.text),
             decoration: InputDecoration(
               isDense: true,
-              prefixIcon: const Icon(Icons.search),
-              hintText: 'Search sessions',
-              border: const OutlineInputBorder(),
+              prefixIcon: const Icon(Icons.search, size: 18),
+              prefixIconColor: AppColors.textFaint,
+              hintText: 'Filter by name, branch, program…',
               suffixIcon: _search.text.isEmpty
                   ? null
                   : IconButton(
-                      icon: const Icon(Icons.clear),
+                      icon: const Icon(Icons.clear, size: 18),
                       tooltip: 'Clear',
                       onPressed: () {
                         _search.clear();
@@ -103,34 +197,129 @@ class _SessionListBodyState extends State<SessionListBody> {
                     ),
             ),
           ),
-          const SizedBox(height: 8),
-          SizedBox(
-            width: double.infinity,
-            child: SegmentedButton<_SessionView>(
-              showSelectedIcon: false,
-              segments: const [
-                ButtonSegment(
-                  value: _SessionView.all,
-                  label: Text('All'),
-                  icon: Icon(Icons.list),
-                ),
-                ButtonSegment(
-                  value: _SessionView.recent,
-                  label: Text('Recent'),
-                  icon: Icon(Icons.history),
-                ),
+          const SizedBox(height: 9),
+          _segmented(),
+          _quickChips(needs: needs, working: working, review: review),
+        ],
+      ),
+    );
+  }
+
+  Widget _segmented() {
+    return Row(
+      children: [
+        Expanded(
+          child: Container(
+            decoration: BoxDecoration(
+              color: AppColors.surface,
+              borderRadius: BorderRadius.circular(9),
+              border: Border.all(color: AppColors.border),
+            ),
+            padding: const EdgeInsets.all(3),
+            child: Row(
+              children: [
+                _segment('Recent', _SessionView.recent),
+                _segment('All', _SessionView.all),
               ],
-              selected: {_view},
-              onSelectionChanged: (s) => setState(() => _view = s.first),
             ),
           ),
-        ],
+        ),
+        const SizedBox(width: 9),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+          decoration: BoxDecoration(
+            color: AppColors.surface,
+            borderRadius: BorderRadius.circular(9),
+            border: Border.all(color: AppColors.border),
+          ),
+          child: Text(
+            _view == _SessionView.recent ? '↓ recency' : 'grouped',
+            style: AppTheme.mono(
+              size: 10,
+              weight: FontWeight.w600,
+              color: AppColors.textBright,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _segment(String label, _SessionView view) {
+    final selected = _view == view;
+    return Expanded(
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: () => setState(() => _view = view),
+        child: Container(
+          padding: const EdgeInsets.symmetric(vertical: 6),
+          decoration: selected
+              ? BoxDecoration(
+                  color: AppColors.surfaceSel,
+                  borderRadius: BorderRadius.circular(6),
+                )
+              : null,
+          child: Text(
+            label,
+            textAlign: TextAlign.center,
+            style: AppTheme.mono(
+              size: 11,
+              weight: FontWeight.w600,
+              color: selected ? AppColors.text : AppColors.textMuted,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// The quick-filter chip row. Only chips with a non-zero count show, so a
+  /// filter never dead-ends on an empty set. The needs-input chip is always
+  /// amber-tinted (it's the one that wants attention).
+  Widget _quickChips({
+    required int needs,
+    required int working,
+    required int review,
+  }) {
+    final chips = <Widget>[
+      if (needs > 0)
+        _QuickChip(
+          label: '? needs input · $needs',
+          amber: true,
+          selected: _quick == _Quick.needsInput,
+          onTap: () => _toggleQuick(_Quick.needsInput),
+        ),
+      if (working > 0)
+        _QuickChip(
+          label: 'working · $working',
+          selected: _quick == _Quick.working,
+          onTap: () => _toggleQuick(_Quick.working),
+        ),
+      if (review > 0)
+        _QuickChip(
+          label: 'review · $review',
+          selected: _quick == _Quick.review,
+          onTap: () => _toggleQuick(_Quick.review),
+        ),
+    ];
+    if (chips.isEmpty) return const SizedBox(height: 10);
+    return Padding(
+      padding: const EdgeInsets.only(top: 10, bottom: 2),
+      child: SizedBox(
+        height: 26,
+        child: ListView.separated(
+          scrollDirection: Axis.horizontal,
+          itemCount: chips.length,
+          separatorBuilder: (_, _) => const SizedBox(width: 6),
+          itemBuilder: (_, i) => chips[i],
+        ),
       ),
     );
   }
 
   Widget _buildAll(List<CommanderStore> servers, bool multi) {
     return ListView(
+      padding: const EdgeInsets.only(top: 6, bottom: 12),
       children: [
         for (final store in servers)
           _ServerSection(
@@ -139,6 +328,7 @@ class _SessionListBodyState extends State<SessionListBody> {
             selectedId: widget.selectedId,
             onSelect: widget.onSelect,
             query: _query,
+            quick: _quick,
           ),
       ],
     );
@@ -147,7 +337,8 @@ class _SessionListBodyState extends State<SessionListBody> {
   /// The Recent tab: every server's sessions flattened to (store, session)
   /// pairs, active-and-attached-only, newest-attach first (the TUI's MRU
   /// order). A live query filters that set by fuzzy score, ranking best matches
-  /// first while keeping recency as the stable tie-break.
+  /// first while keeping recency as the stable tie-break; an active quick filter
+  /// narrows it further.
   ///
   /// Two deliberate differences from the TUI's pinned recents block, and they
   /// go together: this tab is uncapped (the TUI caps at `recent_sessions_limit`)
@@ -159,7 +350,9 @@ class _SessionListBodyState extends State<SessionListBody> {
     var pairs = <(CommanderStore, SessionInfo)>[
       for (final store in servers)
         for (final s in store.sessions)
-          if (s.status.isActive) (store, s),
+          if (s.status.isActive &&
+              (_quick == null || _matchesQuick(_quick!, store, s)))
+            (store, s),
     ];
     pairs = mostRecent(pairs, (p) => p.$2.lastAttachedAt);
     if (_query.isNotEmpty) {
@@ -170,9 +363,11 @@ class _SessionListBodyState extends State<SessionListBody> {
       return ListView(children: [_recentEmptyState(context, servers)]);
     }
     return ListView(
+      padding: const EdgeInsets.fromLTRB(12, 2, 12, 12),
       children: [
         for (final (store, session) in pairs)
-          _SessionTile(
+          _RecentTile(
+            store: store,
             session: session,
             selected: session.id == widget.selectedId,
             onTap: () => widget.onSelect(store, session),
@@ -203,13 +398,142 @@ class _SessionListBodyState extends State<SessionListBody> {
         icon: Icons.cloud_off,
         text: store.error.toString(),
         action: ('Retry', store.retry),
-        color: Theme.of(context).colorScheme.error,
+        color: AppColors.red,
       );
     }
-    if (_query.isNotEmpty) {
+    if (_query.isNotEmpty || _quick != null) {
       return const _InlineNote(icon: Icons.search_off, text: 'No matches');
     }
     return const _InlineNote(icon: Icons.history, text: 'No recent sessions');
+  }
+}
+
+/// The branded Fleet header: the [BrandMark], a "Fleet" title, a mono line of
+/// aggregate counts, and a settings button that opens the shared [SettingsMenu].
+/// Shown only in the phone shell (the wide/legacy AppBar carries these instead).
+class _FleetHeader extends StatelessWidget {
+  final WorkspaceStore workspace;
+  final int active;
+  final int total;
+  final int serverCount;
+
+  const _FleetHeader({
+    required this.workspace,
+    required this.active,
+    required this.total,
+    required this.serverCount,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
+      child: Row(
+        children: [
+          const BrandMark(size: 32),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Fleet',
+                  style: TextStyle(
+                    fontSize: 23,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: -0.4,
+                    color: AppColors.text,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '$active active · $total total · $serverCount '
+                  'server${serverCount == 1 ? '' : 's'}',
+                  style: AppTheme.mono(size: 10.5),
+                ),
+              ],
+            ),
+          ),
+          SettingsMenu(
+            workspace: workspace,
+            button: Container(
+              width: 34,
+              height: 34,
+              decoration: BoxDecoration(
+                color: AppColors.surface,
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: AppColors.border),
+              ),
+              child: const Icon(
+                Icons.settings,
+                size: 16,
+                color: AppColors.textMuted,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// A tappable quick-filter pill. Selected fills with its active colour (amber
+/// for the needs-input chip, accent otherwise); an unselected needs-input chip
+/// keeps a faint amber tint, other unselected chips are a neutral surface pill.
+class _QuickChip extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final bool amber;
+  final VoidCallback onTap;
+
+  const _QuickChip({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+    this.amber = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final active = amber ? AppColors.amber : AppColors.accent;
+    final Color bg, borderColor, textColor;
+    if (selected) {
+      bg = active.withValues(alpha: 0.2);
+      borderColor = active.withValues(alpha: 0.7);
+      textColor = amber ? AppColors.amberText : AppColors.accentSoft;
+    } else if (amber) {
+      bg = AppColors.amber.withValues(alpha: 0.14);
+      borderColor = AppColors.amber.withValues(alpha: 0.4);
+      textColor = AppColors.amberText;
+    } else {
+      bg = AppColors.surface;
+      borderColor = AppColors.border;
+      textColor = AppColors.textMuted;
+    }
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(20),
+        child: Container(
+          alignment: Alignment.center,
+          padding: const EdgeInsets.symmetric(horizontal: 11),
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: borderColor),
+          ),
+          child: Text(
+            label,
+            style: AppTheme.mono(
+              size: 10,
+              weight: FontWeight.w600,
+              color: textColor,
+            ),
+          ),
+        ),
+      ),
+    );
   }
 }
 
@@ -226,12 +550,16 @@ class _ServerSection extends StatelessWidget {
   /// group is fuzzy-filtered and emptied groups drop out.
   final String query;
 
+  /// The active quick filter (or null), applied on top of [query].
+  final _Quick? quick;
+
   const _ServerSection({
     required this.store,
     required this.showHeader,
     required this.selectedId,
     required this.onSelect,
     required this.query,
+    required this.quick,
   });
 
   @override
@@ -262,7 +590,7 @@ class _ServerSection extends StatelessWidget {
             icon: Icons.cloud_off,
             text: store.error.toString(),
             action: ('Retry', store.retry),
-            color: Theme.of(context).colorScheme.error,
+            color: AppColors.red,
           ),
         ];
       }
@@ -275,95 +603,60 @@ class _ServerSection extends StatelessWidget {
     }
     final groups = <ProjectSessions>[];
     for (final g in store.sessionsByProject) {
-      final sessions = matchingSessions(g.sessions, query);
+      var sessions = matchingSessions(g.sessions, query);
+      if (quick != null) {
+        sessions = [
+          for (final s in sessions)
+            if (_matchesQuick(quick!, store, s)) s,
+        ];
+      }
       if (sessions.isNotEmpty) {
         groups.add(ProjectSessions(project: g.project, sessions: sessions));
       }
     }
+    final filtering = query.isNotEmpty || quick != null;
     return [
       if (store.cascadePaused != null) const CascadeBanner(),
       if (groups.isEmpty)
         _InlineNote(
-          icon: query.isEmpty ? Icons.inbox_outlined : Icons.search_off,
-          text: query.isEmpty ? 'No sessions' : 'No matches',
+          icon: filtering ? Icons.search_off : Icons.inbox_outlined,
+          text: filtering ? 'No matches' : 'No sessions',
         )
       else
         for (final group in groups) ...[
-          _ProjectHeader(name: group.project.name),
+          _ProjectHeader(name: group.project.name, count: group.sessions.length),
           for (final session in group.sessions)
-            _SessionTile(
-              session: session,
-              selected: session.id == selectedId,
-              onTap: () => onSelect(store, session),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 0, 12, 6),
+              child: _GroupedTile(
+                store: store,
+                session: session,
+                selected: session.id == selectedId,
+                onTap: () => onSelect(store, session),
+              ),
             ),
         ],
     ];
   }
 }
 
-/// The narrow (phone) session list: an app bar with a refresh + settings menu, a
-/// create FAB, and a [SessionListBody] whose taps push the detail route (wrapped
-/// in the owning server's scope so the detail page resolves the right server).
-class SessionListPage extends StatelessWidget {
-  const SessionListPage({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    final workspace = WorkspaceScope.of(context)!;
-    return ListenableBuilder(
-      listenable: workspace,
-      builder: (context, _) {
-        final servers = workspace.servers;
-        // A lone server shows its connection state in the app bar (no header);
-        // with several, each header carries its own dot.
-        final soleConnection = servers.length == 1
-            ? servers.single.connection
-            : null;
-        return Scaffold(
-          appBar: AppBar(
-            title: const Text('Sessions'),
-            bottom: soleConnection == null
-                ? null
-                : connectionBar(context, soleConnection),
-            actions: [
-              IconButton(
-                onPressed: workspace.refreshAll,
-                icon: const Icon(Icons.refresh),
-                tooltip: 'Refresh',
-              ),
-              SettingsMenu(workspace: workspace),
-            ],
-          ),
-          floatingActionButton: FloatingActionButton(
-            onPressed: () => openCreateSession(context, workspace),
-            tooltip: 'New session',
-            child: const Icon(Icons.add),
-          ),
-          body: SessionListBody(
-            onSelect: (store, session) => _openDetail(context, store, session),
-          ),
-        );
-      },
-    );
-  }
-
-  Future<void> _openDetail(
-    BuildContext context,
-    CommanderStore store,
-    SessionInfo session,
-  ) async {
-    await Navigator.of(context).push<bool>(
-      MaterialPageRoute(
-        // Re-provide the owning server's scope so the detail page's
-        // markRead/cascade/terminal/review calls hit the right server.
-        builder: (_) => CommanderStoreScope(
-          store: store,
-          child: SessionDetailPage(session: session),
-        ),
+/// Push a session's detail route, re-providing the owning server's scope so the
+/// detail page's markRead/cascade/terminal/review calls hit the right server.
+/// Shared by the redesigned [PhoneShell] and the wide shell's list body.
+Future<void> openSessionDetail(
+  BuildContext context,
+  CommanderStore store,
+  SessionInfo session,
+) async {
+  await Navigator.of(context).push<bool>(
+    MaterialPageRoute(
+      builder: (_) => CommanderStoreScope(
+        store: store,
+        child: SessionDetailPage(session: session),
       ),
-    );
-    // A lifecycle action bumps the change feed, so the list refreshes itself.
-  }
+    ),
+  );
+  // A lifecycle action bumps the change feed, so the list refreshes itself.
 }
 
 /// Resolve the server to act on for a per-server action (create/projects/
@@ -454,20 +747,26 @@ Future<void> openProjects(
 bool _anyConnected(WorkspaceStore workspace) =>
     workspace.servers.any((s) => s.handle != null);
 
-/// The app-bar overflow menu shared by both shells: manage servers, plus the
-/// per-server projects/programs editors (which prompt for a server when more
-/// than one is configured).
+/// The settings menu shared by both shells: manage servers, plus the per-server
+/// projects/programs editors (which prompt for a server when more than one is
+/// configured). Renders as a plain settings icon by default; pass [button] to
+/// substitute a bespoke trigger (the Fleet header's rounded ⚙ tile).
 class SettingsMenu extends StatelessWidget {
   final WorkspaceStore workspace;
 
-  const SettingsMenu({super.key, required this.workspace});
+  /// An optional custom trigger widget. When null the menu shows the default
+  /// settings icon.
+  final Widget? button;
+
+  const SettingsMenu({super.key, required this.workspace, this.button});
 
   @override
   Widget build(BuildContext context) {
     final enabled = _anyConnected(workspace);
     return PopupMenuButton<String>(
-      icon: const Icon(Icons.settings),
+      icon: button == null ? const Icon(Icons.settings) : null,
       tooltip: 'Settings',
+      position: PopupMenuPosition.under,
       onSelected: (value) {
         switch (value) {
           case 'servers':
@@ -491,42 +790,67 @@ class SettingsMenu extends StatelessWidget {
           child: const Text('Programs'),
         ),
       ],
+      child: button,
     );
   }
 }
 
-/// A thin status bar for the app bar, shown only while connecting or degraded
-/// (a healthy connection needs no chrome). Returns null when connected.
-PreferredSizeWidget? connectionBar(
-  BuildContext context,
-  ConnectionStateDto connection,
-) {
-  final (label, color) = switch (connection.kind) {
-    ConnectionStateKind.connected => (null, null),
-    ConnectionStateKind.connecting => (
-      'Connecting…',
-      Theme.of(context).colorScheme.tertiary,
-    ),
-    ConnectionStateKind.degraded => (
-      connection.reason.isEmpty
-          ? 'Connection degraded'
-          : 'Degraded: ${connection.reason}',
-      Theme.of(context).colorScheme.error,
-    ),
-  };
-  if (label == null) return null;
-  return PreferredSize(
-    preferredSize: const Size.fromHeight(24),
-    child: Container(
-      width: double.infinity,
-      color: color?.withValues(alpha: 0.15),
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-      child: Text(
-        label,
-        style: Theme.of(context).textTheme.labelSmall?.copyWith(color: color),
+/// A slim in-body status strip for the lone-server case, shown while connecting
+/// or degraded (a healthy connection needs no chrome). Rendered by
+/// [SessionListBody] between the controls and the list, so a sole server's
+/// connection state is visible in both the Recent and All views even without an
+/// AppBar or a per-server group header.
+class _ConnectionStrip extends StatelessWidget {
+  final ConnectionStateDto connection;
+  const _ConnectionStrip({required this.connection});
+
+  @override
+  Widget build(BuildContext context) {
+    final (label, color) = switch (connection.kind) {
+      // The call site only renders this strip when kind != connected, so this
+      // arm is for exhaustiveness — the strip never shows for a healthy server.
+      ConnectionStateKind.connected => ('Connected', AppColors.teal),
+      ConnectionStateKind.connecting => ('Connecting…', AppColors.amber),
+      ConnectionStateKind.degraded => (
+        connection.reason.isEmpty
+            ? 'Connection degraded'
+            : 'Degraded: ${connection.reason}',
+        AppColors.red,
       ),
-    ),
-  );
+    };
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(9),
+        border: Border.all(color: color.withValues(alpha: 0.4)),
+      ),
+      child: Row(
+        children: [
+          Container(
+            width: 8,
+            height: 8,
+            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+          ),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AppTheme.mono(
+                size: 10.5,
+                weight: FontWeight.w600,
+                color: color,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 /// A prominent banner shown while a cascade is paused awaiting a decision. It
@@ -578,57 +902,56 @@ class _CascadeBannerState extends State<CascadeBanner> {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Card(
+    return Container(
       margin: const EdgeInsets.fromLTRB(12, 12, 12, 4),
-      color: scheme.tertiaryContainer,
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(
-                  Icons.pause_circle_outline,
-                  color: scheme.onTertiaryContainer,
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    'Cascade paused — awaiting a decision',
-                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                      color: scheme.onTertiaryContainer,
-                    ),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppColors.amber.withValues(alpha: 0.09),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppColors.amber.withValues(alpha: 0.4)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.pause_circle_outline, color: AppColors.amber),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  'Cascade paused — awaiting a decision',
+                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                    color: AppColors.amberText,
                   ),
                 ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Wrap(
-              spacing: 8,
-              children: [
-                FilledButton.icon(
-                  onPressed: _busy ? null : _resume,
-                  icon: const Icon(Icons.play_arrow),
-                  label: const Text('Resume'),
-                ),
-                OutlinedButton.icon(
-                  onPressed: _busy ? null : _abandon,
-                  icon: const Icon(Icons.close),
-                  label: const Text('Abandon'),
-                ),
-              ],
-            ),
-          ],
-        ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            children: [
+              FilledButton.icon(
+                onPressed: _busy ? null : _resume,
+                icon: const Icon(Icons.play_arrow),
+                label: const Text('Resume'),
+              ),
+              OutlinedButton.icon(
+                onPressed: _busy ? null : _abandon,
+                icon: const Icon(Icons.close),
+                label: const Text('Abandon'),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
 }
 
-/// A server-group header: the server name plus a live connection dot. A degraded
-/// server is greyed + dimmed with its failure reason shown (mirrors the TUI), so
+/// A server-group header (the deck's "server node"): a live connection dot, the
+/// server name, and a `N · local/remote` count. A degraded server is greyed +
+/// dimmed with an "unreachable" note in place of the count (mirrors the TUI), so
 /// a down server reads as inert but never vanishes from the list.
 class _ServerHeader extends StatelessWidget {
   final CommanderStore store;
@@ -636,52 +959,70 @@ class _ServerHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
     final conn = store.connection;
-    final (color, note, degraded) = switch (conn.kind) {
-      ConnectionStateKind.connected => (Colors.green, null, false),
-      ConnectionStateKind.connecting => (scheme.tertiary, 'connecting…', false),
+    final (dotColor, note, noteColor, degraded) = switch (conn.kind) {
+      ConnectionStateKind.connected => (AppColors.teal, null, null, false),
+      ConnectionStateKind.connecting => (
+        AppColors.amber,
+        'connecting…',
+        AppColors.amberText,
+        false,
+      ),
       ConnectionStateKind.degraded => (
-        scheme.error,
-        conn.reason.isEmpty ? 'degraded' : conn.reason,
+        AppColors.idle,
+        conn.reason.isEmpty ? 'unreachable' : conn.reason,
+        AppColors.red,
         true,
       ),
     };
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 16, 12, 4),
-      child: Row(
-        children: [
-          Container(
-            width: 10,
-            height: 10,
-            decoration: BoxDecoration(color: color, shape: BoxShape.circle),
-          ),
-          const SizedBox(width: 8),
-          Flexible(
-            child: Text(
-              store.config.name,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                fontWeight: FontWeight.w700,
-                color: degraded ? scheme.onSurfaceVariant : scheme.onSurface,
+    final count = store.sessions.length;
+    final tag = _isLocalServer(store.config.baseUrl) ? 'local' : 'remote';
+    return Opacity(
+      opacity: degraded ? 0.6 : 1,
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(4, 10, 8, 8),
+        decoration: const BoxDecoration(
+          border: Border(bottom: BorderSide(color: AppColors.divider)),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 8,
+              height: 8,
+              decoration: BoxDecoration(
+                color: dotColor,
+                shape: BoxShape.circle,
+                boxShadow: degraded
+                    ? null
+                    : [BoxShadow(color: dotColor, blurRadius: 7)],
               ),
             ),
-          ),
-          if (note != null) ...[
-            const SizedBox(width: 8),
+            const SizedBox(width: 9),
             Flexible(
               child: Text(
-                note,
+                store.config.name,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: Theme.of(
-                  context,
-                ).textTheme.labelSmall?.copyWith(color: color),
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: AppColors.text,
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            const Spacer(),
+            Text(
+              note ?? '$count · $tag',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: AppTheme.mono(
+                size: 10,
+                color: noteColor ?? AppColors.textMuted,
               ),
             ),
           ],
-        ],
+        ),
       ),
     );
   }
@@ -707,9 +1048,13 @@ class _InlineNote extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
       child: Column(
         children: [
-          Icon(icon, color: color ?? Theme.of(context).colorScheme.outline),
+          Icon(icon, color: color ?? AppColors.textFaint),
           const SizedBox(height: 8),
-          Text(text, textAlign: TextAlign.center),
+          Text(
+            text,
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: AppColors.textMuted),
+          ),
           if (action != null) ...[
             const SizedBox(height: 8),
             FilledButton.icon(
@@ -724,21 +1069,20 @@ class _InlineNote extends StatelessWidget {
   }
 }
 
-/// A subtle section header naming the project a run of session tiles belongs to.
+/// A subtle project sub-header (the deck's `GENIO · 3` eyebrow) naming the
+/// project a run of session tiles belongs to and how many it holds.
 class _ProjectHeader extends StatelessWidget {
   final String name;
-  const _ProjectHeader({required this.name});
+  final int count;
+  const _ProjectHeader({required this.name, required this.count});
 
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+      padding: const EdgeInsets.fromLTRB(14, 10, 12, 6),
       child: Text(
-        name,
-        style: Theme.of(context).textTheme.labelLarge?.copyWith(
-          color: Theme.of(context).colorScheme.primary,
-          fontWeight: FontWeight.w600,
-        ),
+        '${name.toUpperCase()} · $count',
+        style: AppTheme.eyebrow(),
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
       ),
@@ -746,11 +1090,17 @@ class _ProjectHeader extends StatelessWidget {
   }
 }
 
-class _SessionTile extends StatelessWidget {
+/// A dense MRU row for the Recent tab: the state glyph, the title, a mono
+/// `state · project · server` subtitle, and a trailing PR badge + relative age.
+/// Divider-ruled rather than carded, matching the deck's flat recents list.
+class _RecentTile extends StatelessWidget {
+  final CommanderStore store;
   final SessionInfo session;
   final bool selected;
   final VoidCallback onTap;
-  const _SessionTile({
+
+  const _RecentTile({
+    required this.store,
     required this.session,
     required this.selected,
     required this.onTap,
@@ -758,58 +1108,151 @@ class _SessionTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
-    return Card(
-      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      color: selected ? scheme.primaryContainer : null,
-      child: ListTile(
-        selected: selected,
+    final descriptor = sessionDescriptor(
+      session,
+      store.agentStateFor(session.id),
+    );
+    final waiting = descriptor.color == AppColors.amber;
+    final subtitle =
+        '${descriptor.label} · ${session.projectName} · ${store.config.name}';
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
         onTap: onTap,
-        title: Row(
-          children: [
-            if (session.unread) ...[
-              Icon(Icons.circle, size: 10, color: scheme.primary),
-              const SizedBox(width: 6),
-            ],
-            Expanded(
-              child: Text(
-                session.title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 9),
+          decoration: BoxDecoration(
+            color: selected ? AppColors.surfaceSel : null,
+            border: const Border(
+              bottom: BorderSide(color: AppColors.divider),
+            ),
+          ),
+          child: Row(
+            children: [
+              SessionGlyph(descriptor),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      session.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: AppColors.text,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: AppTheme.mono(
+                        size: 10,
+                        color: waiting
+                            ? AppColors.amberText
+                            : AppColors.textMuted,
+                      ),
+                    ),
+                  ],
+                ),
               ),
-            ),
-          ],
-        ),
-        subtitle: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              '${session.projectName} · ${session.branch}',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-            // Program lives in the subtitle (a Column that ellipsizes) rather
-            // than ListTile.trailing: a long program string in a narrow tile
-            // (the 340px desktop master column) made an unconstrained trailing
-            // widget throw "Trailing widget consumes the entire tile width".
-            Text(
-              session.program,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.labelSmall,
-            ),
-            const SizedBox(height: 6),
-            Wrap(
-              spacing: 6,
-              runSpacing: 4,
-              children: [
-                statusChip(context, session.status),
-                if (session.prNumber != null)
-                  prChip(context, session.prNumber!, session.prState),
+              if (session.prNumber != null) ...[
+                const SizedBox(width: 8),
+                prChip(context, session.prNumber!, session.prState),
               ],
-            ),
-          ],
+              const SizedBox(width: 8),
+              Text(
+                relativeAge(session.lastAttachedAt ?? session.createdAt),
+                style: AppTheme.mono(size: 10, color: AppColors.textFaint),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// A carded session row for the grouped All view: the state glyph, the title,
+/// and a trailing PR badge (or the state word when there's no PR). Selected rows
+/// tint accent; sessions waiting for input tint amber — both pull the eye to the
+/// row that needs it.
+class _GroupedTile extends StatelessWidget {
+  final CommanderStore store;
+  final SessionInfo session;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _GroupedTile({
+    required this.store,
+    required this.session,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final descriptor = sessionDescriptor(
+      session,
+      store.agentStateFor(session.id),
+    );
+    final waiting = descriptor.color == AppColors.amber;
+    final Color bg, borderColor;
+    if (selected) {
+      bg = AppColors.accent.withValues(alpha: 0.1);
+      borderColor = AppColors.accent.withValues(alpha: 0.5);
+    } else if (waiting) {
+      bg = AppColors.amber.withValues(alpha: 0.09);
+      borderColor = AppColors.amber.withValues(alpha: 0.45);
+    } else {
+      bg = AppColors.surface;
+      borderColor = AppColors.border;
+    }
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: borderColor),
+          ),
+          child: Row(
+            children: [
+              SessionGlyph(descriptor, width: 12),
+              const SizedBox(width: 9),
+              Expanded(
+                child: Text(
+                  session.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: const TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w600,
+                    color: AppColors.text,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              if (session.prNumber != null)
+                prChip(context, session.prNumber!, session.prState)
+              else
+                Text(
+                  descriptor.label,
+                  style: AppTheme.mono(
+                    size: 10,
+                    color: waiting ? AppColors.amberText : AppColors.textMuted,
+                  ),
+                ),
+            ],
+          ),
         ),
       ),
     );
