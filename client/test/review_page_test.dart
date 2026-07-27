@@ -289,6 +289,79 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('the wide layout shows the FILES CHANGED sidebar and switches '
+      'the diff pane on file selection', (tester) async {
+    tester.view.physicalSize = const Size(1400, 1000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    api.openReviewResponse = reviewSnapshot(
+      files: [
+        reviewFile(
+          displayPath: 'lib/first.dart',
+          hunks: [
+            hunk(
+              lines: [line(ReviewLineOrigin.addition, 'first file line', newLineno: 1)],
+            ),
+          ],
+        ),
+        reviewFile(
+          displayPath: 'lib/second.dart',
+          hunks: [
+            hunk(
+              lines: [line(ReviewLineOrigin.addition, 'second file line', newLineno: 1)],
+            ),
+          ],
+        ),
+      ],
+    );
+    await tester.pumpWidget(wrap());
+    await tester.pumpAndSettle();
+
+    // The sidebar eyebrow and both file paths render; the first file's diff is
+    // shown by default (no expand tap needed — the pane is always open).
+    expect(find.text('FILES CHANGED'), findsOneWidget);
+    expect(find.text('lib/first.dart'), findsWidgets);
+    expect(find.text('lib/second.dart'), findsWidgets);
+    expect(find.text('first file line'), findsOneWidget);
+    expect(find.text('second file line'), findsNothing);
+
+    // Selecting the second file swaps the diff pane to its hunks.
+    await tester.tap(find.text('lib/second.dart'));
+    await tester.pumpAndSettle();
+    expect(find.text('second file line'), findsOneWidget);
+    expect(find.text('first file line'), findsNothing);
+  });
+
+  testWidgets('the wide layout surfaces a comment whose file is not among the '
+      'changed files under "Other comments" with a reachable delete', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1400, 1000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    api.openReviewResponse = reviewSnapshot(
+      files: [reviewFile(displayPath: 'lib/first.dart')],
+      // Comment on a file that is no longer in the diff (e.g. reverted): it must
+      // not become unreachable on desktop, or a drifted one blocks apply.
+      comments: [
+        comment(id: 'c-orphan', file: 'lib/gone.dart', text: 'orphaned note'),
+      ],
+    );
+    await tester.pumpWidget(wrap());
+    await tester.pumpAndSettle();
+
+    expect(find.text('OTHER COMMENTS'), findsOneWidget);
+    expect(find.text('orphaned note'), findsOneWidget);
+
+    // Delete stays reachable for the orphaned comment.
+    await tester.tap(find.widgetWithIcon(IconButton, Icons.delete_outline));
+    await tester.pumpAndSettle();
+    expect(api.countOf('deleteComment'), 1);
+    expect(api.lastCall('deleteComment')!.args['commentId'], 'c-orphan');
+  });
+
   testWidgets('a snapshot refresh resets a now-out-of-range line selection', (
     tester,
   ) async {

@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
+import '../theme/app_colors.dart';
+import '../theme/app_theme.dart';
 import '../widgets/session_chips.dart';
 import 'review_page.dart';
 import 'terminal_page.dart';
@@ -260,7 +262,7 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
         'Stops the running program. The worktree is kept and the '
         'conversation resumes on next attach.',
     confirmLabel: 'Kill',
-    confirmColor: Colors.orange,
+    confirmColor: AppColors.amber,
     successMessage: 'Session killed',
     action: () => _store!.killSession(_id),
   );
@@ -269,7 +271,7 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
     title: 'Restart session?',
     message: 'Restarts the program in this session.',
     confirmLabel: 'Restart',
-    confirmColor: Colors.teal,
+    confirmColor: AppColors.teal,
     successMessage: 'Session restarted',
     action: () => _store!.restartSession(_id),
   );
@@ -280,7 +282,7 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
         'Removes the session, its branch, and its worktree. '
         'This cannot be undone.',
     confirmLabel: 'Delete',
-    confirmColor: Colors.red,
+    confirmColor: AppColors.red,
     successMessage: 'Session deleted',
     leaveOnSuccess: true,
     action: () => _store!.deleteSession(_id),
@@ -441,14 +443,18 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
   }
 
   Widget _liveBody(BuildContext context, SessionInfo info) {
+    final waiting =
+        info.status == SessionStatus.running &&
+        _agentState == AgentState.waitingForInput;
     return RefreshIndicator(
       onRefresh: _refresh,
       child: ListView(
         padding: const EdgeInsets.all(16),
         children: [
           _header(context, info),
+          if (waiting) ...[const SizedBox(height: 12), _waitingHint(context)],
           const SizedBox(height: 16),
-          _primaryActions(context),
+          _agentHero(context),
           const SizedBox(height: 12),
           if (_error != null) _errorBanner(context, _error!),
           _detailSection(context),
@@ -472,16 +478,18 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                '${info.projectName} · ${info.branch}',
-                style: Theme.of(context).textTheme.bodyMedium,
+              // Mono meta line: project · branch · program.
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  '${info.projectName} · ${info.branch} · ${info.program}',
+                  style: AppTheme.mono(size: 12, color: AppColors.textMuted),
+                ),
               ),
-              const SizedBox(height: 4),
-              Text(info.program, style: Theme.of(context).textTheme.labelSmall),
               const SizedBox(height: 10),
               Wrap(
                 spacing: 6,
-                runSpacing: 4,
+                runSpacing: 6,
                 children: [
                   statusChip(context, info.status),
                   if (info.status == SessionStatus.running)
@@ -497,6 +505,45 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
         ),
         _manageMenu(context, info),
       ],
+    );
+  }
+
+  /// A slim amber banner shown only while the agent is blocked on a prompt,
+  /// nudging the user into the Agent terminal (the only place the prompt can be
+  /// answered). We don't have the prompt text on the client, so the copy is
+  /// generic.
+  Widget _waitingHint(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+      decoration: BoxDecoration(
+        color: AppColors.amber.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(11),
+        border: Border.all(color: AppColors.amber.withValues(alpha: 0.35)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '?',
+            style: AppTheme.mono(
+              size: 12,
+              weight: FontWeight.w700,
+              color: AppColors.amber,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              'Waiting for input — answer in the Agent terminal.',
+              style: AppTheme.mono(
+                size: 11.5,
+                color: AppColors.amberText,
+                height: 1.4,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 
@@ -547,34 +594,21 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
     );
   }
 
-  /// Primary navigation, on one line: Agent is the dominant action (filled,
-  /// taking two-thirds of the width), Shell the occasional secondary (outlined,
-  /// one-third). Review isn't here — the Changes card below is the diff entry
-  /// point. Both share the same height so they align.
-  Widget _primaryActions(BuildContext context) {
-    const padding = EdgeInsets.symmetric(vertical: 14);
-    return Row(
-      children: [
-        Expanded(
-          flex: 2,
-          child: FilledButton.icon(
-            onPressed: () => widget.onOpenTerminal(AttachKind.agent),
-            icon: const Icon(Icons.terminal),
-            label: const Text('Agent'),
-            style: FilledButton.styleFrom(padding: padding),
-          ),
+  /// The single dominant action: a full-width accent button into the live agent
+  /// terminal. Shell / review / lifecycle are all reachable below, so the agent
+  /// pane — the primary interaction — gets the hero treatment. The Changes card
+  /// below is the diff entry point; Shell lives in the lifecycle bar.
+  Widget _agentHero(BuildContext context) {
+    return SizedBox(
+      width: double.infinity,
+      child: FilledButton.icon(
+        onPressed: () => widget.onOpenTerminal(AttachKind.agent),
+        icon: const Icon(Icons.terminal, size: 18),
+        label: const Text('Open Agent terminal'),
+        style: FilledButton.styleFrom(
+          padding: const EdgeInsets.symmetric(vertical: 15),
         ),
-        const SizedBox(width: 12),
-        Expanded(
-          flex: 1,
-          child: OutlinedButton.icon(
-            onPressed: () => widget.onOpenTerminal(AttachKind.shell),
-            icon: const Icon(Icons.code, size: 18),
-            label: const Text('Shell'),
-            style: OutlinedButton.styleFrom(padding: padding),
-          ),
-        ),
-      ],
+      ),
     );
   }
 
@@ -584,7 +618,6 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
   /// phone layout, which has no review tab.
   Widget _detailSection(BuildContext context) {
     final diffStat = _detail?.diffStat;
-    final outline = Theme.of(context).colorScheme.outline;
     return Semantics(
       button: true,
       child: Card(
@@ -592,7 +625,7 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
         child: InkWell(
           onTap: widget.onOpenReview,
           child: Padding(
-            padding: const EdgeInsets.all(12),
+            padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 12),
             child: Row(
               children: [
                 Expanded(
@@ -605,21 +638,33 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
                             'Changes',
                             style: Theme.of(context).textTheme.titleSmall,
                           ),
-                          const SizedBox(width: 6),
-                          Icon(Icons.rate_review, size: 15, color: outline),
+                          const SizedBox(width: 7),
+                          Icon(
+                            Icons.rate_review_outlined,
+                            size: 14,
+                            color: AppColors.textFaint,
+                          ),
+                          const SizedBox(width: 3),
+                          Text(
+                            'review',
+                            style: AppTheme.mono(
+                              size: 11,
+                              color: AppColors.textFaint,
+                            ),
+                          ),
                         ],
                       ),
-                      const SizedBox(height: 6),
+                      const SizedBox(height: 5),
                       Text(
                         diffStat == null || diffStat.isEmpty
                             ? 'No changes'
                             : diffStat,
-                        style: Theme.of(context).textTheme.bodySmall,
+                        style: AppTheme.mono(color: AppColors.textMuted),
                       ),
                     ],
                   ),
                 ),
-                Icon(Icons.chevron_right, color: outline),
+                const Icon(Icons.chevron_right, color: AppColors.textFaint),
               ],
             ),
           ),
@@ -654,18 +699,19 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
             Container(
               width: double.infinity,
               constraints: const BoxConstraints(maxHeight: 320),
-              padding: const EdgeInsets.all(8),
+              padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(
-                color: Colors.black,
-                borderRadius: BorderRadius.circular(6),
+                color: AppColors.bgTerminal,
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: AppColors.borderSubtle),
               ),
               child: SingleChildScrollView(
                 child: SelectableText(
                   (pane == null || pane.isEmpty) ? '(no output)' : pane,
-                  style: const TextStyle(
-                    fontFamily: 'monospace',
-                    fontSize: 12,
-                    color: Colors.greenAccent,
+                  style: AppTheme.mono(
+                    size: 12,
+                    color: AppColors.terminalFg,
+                    height: 1.5,
                   ),
                 ),
               ),
@@ -676,46 +722,119 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
     );
   }
 
-  /// The session lifecycle controls, as a compact icon action bar: the common
-  /// kill/restart/merge/push on the left, destructive delete pushed to the far
-  /// right and tinted with the error colour. Labels live in tooltips.
+  /// The session lifecycle controls, as a compact labelled icon bar: the common
+  /// shell/kill/restart/cascade/push on the left, destructive delete pushed to
+  /// the far right and tinted red. Shell is pure navigation (always enabled);
+  /// Kill needs a running session; the rest are gated only by the busy flag.
   Widget _lifecycleBar(BuildContext context, SessionInfo info) {
     final running = info.status == SessionStatus.running;
-    final scheme = Theme.of(context).colorScheme;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         const Divider(),
+        const SizedBox(height: 4),
         Row(
           children: [
-            IconButton(
-              onPressed: _busy || !running ? null : _kill,
-              icon: const Icon(Icons.stop),
+            _lifecycleAction(
+              icon: Icons.code,
+              label: 'Shell',
+              tooltip: 'Shell',
+              color: AppColors.textBright,
+              onPressed: () => widget.onOpenTerminal(AttachKind.shell),
+            ),
+            const SizedBox(width: 8),
+            _lifecycleAction(
+              icon: Icons.stop,
+              label: 'Kill',
               tooltip: 'Kill',
+              color: AppColors.amberText,
+              onPressed: _busy || !running ? null : _kill,
             ),
-            IconButton(
-              onPressed: _busy ? null : _restart,
-              icon: const Icon(Icons.restart_alt),
+            const SizedBox(width: 8),
+            _lifecycleAction(
+              icon: Icons.restart_alt,
+              label: 'Restart',
               tooltip: 'Restart',
+              color: AppColors.teal,
+              onPressed: _busy ? null : _restart,
             ),
-            IconButton(
-              onPressed: _busy ? null : _cascadeMerge,
-              icon: const Icon(Icons.merge_type),
+            const SizedBox(width: 8),
+            _lifecycleAction(
+              icon: Icons.merge_type,
+              label: 'Cascade',
               tooltip: 'Cascade merge',
+              color: AppColors.textBright,
+              onPressed: _busy ? null : _cascadeMerge,
             ),
-            IconButton(
-              onPressed: _busy ? null : _pushStack,
-              icon: const Icon(Icons.publish),
+            const SizedBox(width: 8),
+            _lifecycleAction(
+              icon: Icons.publish,
+              label: 'Push',
               tooltip: 'Push stack',
+              color: AppColors.textBright,
+              onPressed: _busy ? null : _pushStack,
             ),
             const Spacer(),
-            IconButton(
-              onPressed: _busy ? null : _delete,
-              icon: const Icon(Icons.delete_outline),
+            _lifecycleAction(
+              icon: Icons.delete_outline,
+              label: 'Delete',
               tooltip: 'Delete',
-              color: scheme.error,
+              color: AppColors.red,
+              onPressed: _busy ? null : _delete,
+              danger: true,
             ),
           ],
+        ),
+      ],
+    );
+  }
+
+  /// One cell of the lifecycle bar: a rounded-square icon button over a small
+  /// mono label. [danger] tints the surface red for the destructive delete.
+  Widget _lifecycleAction({
+    required IconData icon,
+    required String label,
+    required String tooltip,
+    required Color color,
+    required VoidCallback? onPressed,
+    bool danger = false,
+  }) {
+    final enabled = onPressed != null;
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          decoration: BoxDecoration(
+            color: danger
+                ? AppColors.red.withValues(alpha: 0.1)
+                : AppColors.surface,
+            borderRadius: BorderRadius.circular(9),
+            border: Border.all(
+              color: danger
+                  ? AppColors.red.withValues(alpha: 0.3)
+                  : AppColors.border,
+            ),
+          ),
+          child: IconButton(
+            onPressed: onPressed,
+            icon: Icon(icon, size: 18),
+            tooltip: tooltip,
+            color: color,
+            disabledColor: AppColors.textDim,
+            visualDensity: VisualDensity.compact,
+            padding: EdgeInsets.zero,
+            constraints: const BoxConstraints(minWidth: 38, minHeight: 38),
+          ),
+        ),
+        const SizedBox(height: 4),
+        Text(
+          label,
+          style: AppTheme.mono(
+            size: 8.5,
+            color: enabled
+                ? (danger ? AppColors.red : AppColors.textMuted)
+                : AppColors.textDim,
+          ),
         ),
       ],
     );

@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../state/workspace_store.dart';
+import '../theme/app_colors.dart';
+import '../theme/app_theme.dart';
 import 'connection_page.dart';
 
 /// Manage the configured servers: add, edit, or remove. Each row shows a live
@@ -75,12 +77,13 @@ class ServersPage extends StatelessWidget {
                 ListenableBuilder(
                   listenable: store,
                   builder: (context, _) => ListTile(
-                    leading: _dot(context, store.connection),
+                    leading: _dot(store.connection),
                     title: Text(store.config.name),
                     subtitle: Text(
                       store.config.baseUrl,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
+                      style: AppTheme.mono(size: 11, color: AppColors.textMuted),
                     ),
                     onTap: () => _edit(context, store),
                     trailing: IconButton(
@@ -97,18 +100,23 @@ class ServersPage extends StatelessWidget {
     );
   }
 
-  Widget _dot(BuildContext context, ConnectionStateDto conn) {
-    final scheme = Theme.of(context).colorScheme;
+  Widget _dot(ConnectionStateDto conn) {
     final color = switch (conn.kind) {
-      ConnectionStateKind.connected => Colors.green,
-      ConnectionStateKind.connecting => scheme.tertiary,
-      ConnectionStateKind.degraded => scheme.error,
+      ConnectionStateKind.connected => AppColors.teal,
+      ConnectionStateKind.connecting => AppColors.amber,
+      ConnectionStateKind.degraded => AppColors.red,
     };
     return Container(
       width: 12,
       height: 12,
       margin: const EdgeInsets.only(top: 4),
-      decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+      decoration: BoxDecoration(
+        color: color,
+        shape: BoxShape.circle,
+        boxShadow: conn.kind == ConnectionStateKind.connected
+            ? [BoxShadow(color: color.withValues(alpha: 0.6), blurRadius: 8)]
+            : null,
+      ),
     );
   }
 }

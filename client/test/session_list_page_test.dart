@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:claude_commander_client/pages/create_session_page.dart';
 import 'package:claude_commander_client/pages/session_detail_page.dart';
 import 'package:claude_commander_client/pages/session_list_page.dart';
 import 'package:claude_commander_client/server_config.dart';
@@ -27,9 +26,21 @@ void main() {
 
   tearDown(() => workspace.dispose());
 
+  // Host the layout-agnostic [SessionListBody] directly (the phone/wide shells
+  // that embed it are tested separately): a Scaffold + Builder so row taps can
+  // push the detail route via the shared [openSessionDetail] helper.
   Widget wrap() => WorkspaceScope(
     workspace: workspace,
-    child: const MaterialApp(home: SessionListPage()),
+    child: MaterialApp(
+      home: Scaffold(
+        body: Builder(
+          builder: (context) => SessionListBody(
+            onSelect: (store, session) =>
+                openSessionDetail(context, store, session),
+          ),
+        ),
+      ),
+    ),
   );
 
   testWidgets('shows a loading indicator until the snapshot resolves', (
@@ -61,9 +72,10 @@ void main() {
 
     expect(find.text('Alpha'), findsOneWidget);
     expect(find.text('Beta'), findsOneWidget);
-    expect(find.text('running'), findsOneWidget);
-    expect(find.text('stopped'), findsOneWidget);
+    // A session with an open PR shows its PR badge; one without shows its state
+    // word ('stopped') in the trailing slot.
     expect(find.textContaining('PR #7'), findsOneWidget);
+    expect(find.text('stopped'), findsOneWidget);
   });
 
   testWidgets('renders the empty state with no sessions', (tester) async {
@@ -85,7 +97,7 @@ void main() {
     expect(find.widgetWithText(FilledButton, 'Retry'), findsOneWidget);
   });
 
-  testWidgets('shows the connection state in the app bar', (tester) async {
+  testWidgets('surfaces a lone server\'s degraded connection', (tester) async {
     api.listSessionsResponse = const [];
     unawaited(store.connect());
     await tester.pumpWidget(wrap());
@@ -99,6 +111,8 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    // A lone server has no group header, so its connection state shows in the
+    // in-body status strip.
     expect(find.textContaining('Degraded: flaky'), findsOneWidget);
   });
 
@@ -115,34 +129,23 @@ void main() {
     expect(find.byType(SessionDetailPage), findsOneWidget);
   });
 
-  testWidgets('the FAB pushes the create route', (tester) async {
-    api.listSessionsResponse = const [];
-    unawaited(store.connect());
-    await tester.pumpWidget(wrap());
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byType(FloatingActionButton));
-    await tester.pumpAndSettle();
-
-    expect(find.byType(CreateSessionPage), findsOneWidget);
-  });
-
-  testWidgets('an unread session shows the unread indicator', (tester) async {
+  testWidgets('an unread session shows the unread glyph', (tester) async {
     api.listSessionsResponse = [sessionInfo(title: 'Unread one', unread: true)];
     unawaited(store.connect());
     await tester.pumpWidget(wrap());
     await tester.pumpAndSettle();
 
-    expect(find.byIcon(Icons.circle), findsOneWidget);
+    // The unread state renders the ◆ glyph via the shared session descriptor.
+    expect(find.text('◆'), findsOneWidget);
   });
 
-  testWidgets('a read session shows no unread indicator', (tester) async {
+  testWidgets('a read session shows no unread glyph', (tester) async {
     api.listSessionsResponse = [sessionInfo(title: 'Read one')];
     unawaited(store.connect());
     await tester.pumpWidget(wrap());
     await tester.pumpAndSettle();
 
-    expect(find.byIcon(Icons.circle), findsNothing);
+    expect(find.text('◆'), findsNothing);
   });
 
   testWidgets('a paused cascade shows the resume/abandon banner', (
@@ -219,7 +222,11 @@ void main() {
       await tester.pumpWidget(
         WorkspaceScope(
           workspace: ws,
-          child: const MaterialApp(home: SessionListPage()),
+          child: MaterialApp(
+            home: Scaffold(
+              body: SessionListBody(onSelect: (_, _) {}),
+            ),
+          ),
         ),
       );
       await tester.pumpAndSettle();

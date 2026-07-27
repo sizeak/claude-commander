@@ -9,6 +9,39 @@ import '../services/commander_api.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
+import '../theme/app_colors.dart';
+import '../theme/app_theme.dart';
+
+/// The xterm palette, built from the app tokens: the deepest terminal bg, the
+/// soft off-white foreground the deck uses for pane text, and the violet accent
+/// for the cursor/selection. The ANSI ramp is nudged toward the palette's
+/// semantic accents (teal/green/amber/red/violet) so agent output reads in the
+/// same colour language as the rest of the app.
+const _terminalTheme = TerminalTheme(
+  cursor: AppColors.accent,
+  selection: Color(0x407C6CFF), // AppColors.accent @ ~25% alpha
+  foreground: AppColors.terminalFg,
+  background: AppColors.bgTerminal,
+  black: Color(0xFF1C1F28), // AppColors.borderSubtle (darkest ANSI slot)
+  red: AppColors.red,
+  green: AppColors.green,
+  yellow: AppColors.amber,
+  blue: AppColors.accentSoft,
+  magenta: AppColors.accent,
+  cyan: AppColors.teal,
+  white: AppColors.textBright,
+  brightBlack: AppColors.textDim,
+  brightRed: AppColors.red,
+  brightGreen: AppColors.green,
+  brightYellow: AppColors.amberText,
+  brightBlue: AppColors.accentSoft,
+  brightMagenta: AppColors.accentSoft,
+  brightCyan: AppColors.teal,
+  brightWhite: AppColors.text,
+  searchHitBackground: Color(0x66F5B545), // AppColors.amber @ ~40% alpha
+  searchHitBackgroundCurrent: AppColors.amber,
+  searchHitForeground: AppColors.bg,
+);
 
 /// Live attached terminal, layout-agnostic (no Scaffold, no route). Streams raw
 /// PTY bytes from the cdylib WS bridge into an `xterm.dart` [Terminal], forwards
@@ -216,43 +249,71 @@ class _TerminalBodyState extends State<TerminalBody> {
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      children: [
-        _statusBar(context),
-        Expanded(
-          child: TerminalView(
-            _terminal,
-            autofocus: true,
-            backgroundOpacity: 1,
+    return ColoredBox(
+      color: AppColors.bgTerminal,
+      child: Column(
+        children: [
+          _statusBar(context),
+          Expanded(
+            child: TerminalView(
+              _terminal,
+              autofocus: true,
+              backgroundOpacity: 1,
+              theme: _terminalTheme,
+              textStyle: const TerminalStyle(fontFamily: AppFonts.mono),
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            ),
           ),
-        ),
-        if (widget.showModifierBar) _ModifierBar(onSend: _send),
-      ],
+          if (widget.showModifierBar) _ModifierBar(onSend: _send),
+        ],
+      ),
     );
+  }
+
+  /// The dot colour reflects the link state: teal while attached, red once the
+  /// attach has ended (reconnect offered), amber while connecting.
+  Color get _statusColor {
+    if (_ended) return AppColors.red;
+    if (_status.startsWith('attached')) return AppColors.teal;
+    return AppColors.amber;
   }
 
   Widget _statusBar(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.only(left: 12, right: 4, top: 2, bottom: 2),
-      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      padding: const EdgeInsets.only(left: 14, right: 4, top: 4, bottom: 4),
+      decoration: const BoxDecoration(
+        color: AppColors.bgRaised,
+        border: Border(bottom: BorderSide(color: AppColors.borderSubtle)),
+      ),
       child: Row(
         children: [
+          Container(
+            width: 7,
+            height: 7,
+            decoration: BoxDecoration(
+              color: _statusColor,
+              shape: BoxShape.circle,
+            ),
+          ),
+          const SizedBox(width: 8),
           Expanded(
             child: Text(
               _status,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.labelSmall,
+              style: AppTheme.mono(size: 10, color: AppColors.textMuted),
             ),
           ),
           Text(
             '${_fmtRate(_bytesPerSec)} · ${_totalBytes ~/ 1024} KB',
-            style: Theme.of(context).textTheme.labelSmall,
+            style: AppTheme.mono(size: 10, color: AppColors.textFaint),
           ),
           IconButton(
             visualDensity: VisualDensity.compact,
             onPressed: _ended ? _reconnect : null,
             icon: const Icon(Icons.refresh, size: 18),
+            color: AppColors.textMuted,
+            disabledColor: AppColors.textDim,
             tooltip: 'Reconnect',
           ),
         ],
@@ -345,11 +406,15 @@ class _ModifierBar extends StatelessWidget {
   Widget build(BuildContext context) {
     return SafeArea(
       top: false,
-      child: SizedBox(
-        height: 44,
+      child: Container(
+        height: 48,
+        decoration: const BoxDecoration(
+          color: AppColors.bgTerminal,
+          border: Border(top: BorderSide(color: AppColors.borderSubtle)),
+        ),
         child: ListView(
           scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
           children: [
             _key(context, 'Esc', () => onSend(_esc)),
             _key(context, 'Tab', () => onSend(_tab)),
@@ -375,16 +440,35 @@ class _ModifierBar extends StatelessWidget {
     );
   }
 
+  /// A single key pill: a raised mono chip that fires its raw byte sequence on
+  /// tap. Deliberately not a Material button so it matches the deck's flat pills
+  /// and stays compact in the horizontal strip.
   Widget _key(BuildContext context, String label, VoidCallback onTap) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 3),
-      child: OutlinedButton(
-        onPressed: onTap,
-        style: OutlinedButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          minimumSize: const Size(0, 36),
+      child: Material(
+        color: AppColors.surface,
+        borderRadius: BorderRadius.circular(7),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(7),
+          child: Container(
+            alignment: Alignment.center,
+            padding: const EdgeInsets.symmetric(horizontal: 12),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(7),
+              border: Border.all(color: AppColors.border),
+            ),
+            child: Text(
+              label,
+              style: AppTheme.mono(
+                size: 10.5,
+                weight: FontWeight.w600,
+                color: AppColors.textBright,
+              ),
+            ),
+          ),
         ),
-        child: Text(label),
       ),
     );
   }
