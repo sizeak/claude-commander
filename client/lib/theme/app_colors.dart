@@ -70,6 +70,12 @@ abstract final class AppColors {
   static const brandBottom = Color(0xFF3FD6D0);
   static const brandGradient = [brandTop, brandMid, brandBottom];
 
+  /// The slate tile the brand mark sits on (top-left → bottom-right). Also the
+  /// launcher-icon background — see `tool/icon/` and `test/theme/
+  /// launcher_icon_test.dart`, which pins the art to these values.
+  static const brandTileTop = Color(0xFF2B2D3A);
+  static const brandTileBottom = Color(0xFF1B1C26);
+
   // ── Terminal / diff ────────────────────────────────────────────────────
   /// Foreground for terminal + pane-snapshot monospace text (the deck's
   /// `#c8ccd4`), a touch softer than [textBright].

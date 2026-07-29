@@ -132,6 +132,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          # The launcher-icon test reads the SVG masters under client/tool/icon,
+          # and *.svg is LFS-tracked (.gitattributes) — without this the test
+          # sees pointer files. The whole LFS store is ~300 KB of icon art.
+          lfs: true
 
       # The Flutter + host-Rust + Linux-desktop toolchain comes from the slim
       # `clientCi` dev shell in flake.nix (no Android SDK/NDK). tmux + git are
