@@ -126,6 +126,51 @@ jobs:
       - name: Run Tests
         run: nix develop -c cargo test --workspace
 
+  packaging:
+    name: Packaging Install
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: nixbuild/nix-quick-install-action@v30
+        with:
+          nix_conf: |
+            keep-env-derivations = true
+            keep-outputs = true
+
+      - name: Restore Nix Store Cache
+        uses: nix-community/cache-nix-action@v7
+        with:
+          primary-key: nix-packaging-${{ runner.os }}-${{ hashFiles('**/flake.lock', '**/Cargo.lock') }}
+          restore-prefixes-first-match: nix-packaging-${{ runner.os }}-
+
+      - name: Restore Cargo Cache
+        uses: Swatinem/rust-cache@v2
+
+      # Mirrors the Homebrew formula's install step, which is
+      # `cargo install --locked --root <prefix> --path <crate>`. Every other job
+      # builds via `cargo build --workspace` from the repo root, and a workspace
+      # build is perfectly happy with a virtual manifest — so when the server
+      # split (v0.24.0) removed `[package]` from the root `Cargo.toml`, nothing
+      # in CI noticed that the formula's `--path .` had stopped resolving. Brew
+      # installs stayed broken for eight releases. Installing the same way the
+      # formula does is the only check that fails when the packaged crate path
+      # drifts. `--debug` skips the LTO release profile purely for CI time; the
+      # packaged path, not the release profile, is what this job guards (the Nix
+      # Build job already covers an optimised build).
+      - name: Install Like Homebrew Does
+        run: nix develop -c cargo install --locked --debug --root "$RUNNER_TEMP/brew-prefix" --path crates/claude-commander
+
+      # The formula's `test do` block asserts the version appears in the
+      # `--version` output; do the same so the packaged binary is exercised.
+      - name: Verify Installed Binary
+        run: |
+          version=$(nix develop -c cargo metadata --format-version 1 --no-deps \
+            | jq -r '.packages[] | select(.name == "claude-commander") | .version')
+          "$RUNNER_TEMP/brew-prefix/bin/claude-commander" --version | grep -F "$version"
+
   client:
     name: Client Tests
     runs-on: ubuntu-latest
