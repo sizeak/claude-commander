@@ -486,6 +486,7 @@ mod tests {
             comments: vec![],
             reviewed: vec![],
             content_hash: u64::MAX,
+            dropped_comments: vec![],
         };
         let dto: ReviewSnapshotDto = snap.into();
         assert_eq!(dto.content_hash, u64::MAX.to_string());

@@ -18,7 +18,7 @@ use crate::comment::{
 use crate::config::{AppState, Config, ConfigStore, ProgramEntry, StateStore};
 use crate::error::{Result, SessionError};
 use crate::git::{
-    FileDiff, GitBackend, PrCheckResult, compose_review_diff, compute_branch_diff,
+    ComposedDiff, FileDiff, GitBackend, PrCheckResult, compose_review_diff, compute_branch_diff,
     diff_stat_summary, effective_pr_state, enrich_binary_sizes, is_gh_available, list_worktrees_at,
     parse_unified_diff, prefer_remote_branch, read_base_blob, read_worktree_file, ref_exists_cli,
 };
@@ -1071,8 +1071,8 @@ impl CommanderService {
         self.telemetry.feature("review.open");
         let (worktree_path, review_base) = self.review_target(session_id).await?;
         let base = review_base.git_ref(&worktree_path).await;
-        let raw = compose_review_diff(&worktree_path, &base).await?;
-        self.snapshot_from_raw(session_id, &worktree_path, base, raw)
+        let composed = compose_review_diff(&worktree_path, &base).await?;
+        self.snapshot_from_raw(session_id, &worktree_path, base, composed)
             .await
     }
 
@@ -1089,12 +1089,12 @@ impl CommanderService {
     ) -> Result<Option<ReviewSnapshot>> {
         let (worktree_path, review_base) = self.review_target(session_id).await?;
         let base = review_base.git_ref(&worktree_path).await;
-        let raw = compose_review_diff(&worktree_path, &base).await?;
-        if xxhash_rust::xxh3::xxh3_64(raw.as_bytes()) == prev_hash {
+        let composed = compose_review_diff(&worktree_path, &base).await?;
+        if xxhash_rust::xxh3::xxh3_64(composed.raw.as_bytes()) == prev_hash {
             return Ok(None);
         }
         Ok(Some(
-            self.snapshot_from_raw(session_id, &worktree_path, base, raw)
+            self.snapshot_from_raw(session_id, &worktree_path, base, composed)
                 .await?,
         ))
     }
@@ -1111,31 +1111,48 @@ impl CommanderService {
         Ok((session.worktree_path.clone(), ReviewBase::of(session)))
     }
 
-    /// Build a [`ReviewSnapshot`] from an already-composed raw unified diff:
-    /// hash it for staleness detection, parse it, then re-anchor the session's
-    /// comments and prune stale reviewed marks against the parsed diff
+    /// Build a [`ReviewSnapshot`] from an already-composed unified diff: hash it
+    /// for staleness detection, parse it, then drop orphaned comments, re-anchor
+    /// the rest, and prune stale reviewed marks against the parsed diff
     /// (persisting any changes).
     async fn snapshot_from_raw(
         &self,
         session_id: &SessionId,
         worktree_path: &Path,
         base: String,
-        raw: String,
+        composed: ComposedDiff,
     ) -> Result<ReviewSnapshot> {
-        let content_hash = xxhash_rust::xxh3::xxh3_64(raw.as_bytes());
-        let mut diff = parse_unified_diff(&raw);
+        let content_hash = xxhash_rust::xxh3::xxh3_64(composed.raw.as_bytes());
+        let mut diff = parse_unified_diff(&composed.raw);
         // Binary files carry metadata only; fill in the blob sizes the parser
         // can't know. Bytes are lazy-loaded via `fetch_diff_blob`.
         enrich_binary_sizes(&mut diff, worktree_path).await;
 
+        // Deleting per-file state is only sound when the diff can actually prove
+        // the file is gone; a degraded or incomplete composition omits files that
+        // are still under review (see `absence_is_authoritative`).
+        let can_prune = composed.absence_is_authoritative();
+
         let mut comments = self.comments.load(*session_id).await?;
+        // A comment whose file left the diff has nothing left to anchor to and
+        // no row to render on, so it is dropped rather than left blocking Apply
+        // from somewhere the user can't reach.
+        let dropped_comments = if can_prune {
+            crate::comment::prune_orphaned(&mut comments, &diff)
+        } else {
+            Vec::new()
+        };
         reanchor_comments(&mut comments, &diff);
         self.comments.save(*session_id, &comments).await?;
 
         // Reviewed marks pinned to a file's diff content: drop any whose file
-        // changed or left the diff since they were set.
+        // changed or left the diff since they were set. Gated on the same proof
+        // as the comments above — a mark's file "vanishing" from a diff that
+        // simply omits it would silently throw away review progress (a stacked
+        // base that only exists remotely degrades on *every* open, so this is a
+        // persistent state, not a transient one).
         let mut marks = self.reviewed.load(*session_id).await?;
-        if crate::reviewed::prune_invalidated(&mut marks, &diff) {
+        if can_prune && crate::reviewed::prune_invalidated(&mut marks, &diff) {
             self.reviewed.save(*session_id, &marks).await?;
         }
         let reviewed = marks.into_iter().map(|m| m.file).collect();
@@ -1146,6 +1163,7 @@ impl CommanderService {
             comments,
             reviewed,
             content_hash,
+            dropped_comments,
         })
     }
 
@@ -1202,8 +1220,7 @@ impl CommanderService {
     ) -> Result<bool> {
         let (worktree_path, review_base) = self.review_target(session_id).await?;
         let base = review_base.git_ref(&worktree_path).await;
-        let raw = compose_review_diff(&worktree_path, &base).await?;
-        let diff = parse_unified_diff(&raw);
+        let diff = parse_unified_diff(&compose_review_diff(&worktree_path, &base).await?.raw);
         let file = diff
             .files
             .iter()
@@ -1274,16 +1291,29 @@ impl CommanderService {
 
         // Re-anchor against a fresh diff so drift status is current.
         let base = review_base.git_ref(&worktree_path).await;
-        let raw = compose_review_diff(&worktree_path, &base).await?;
-        let parsed = parse_unified_diff(&raw);
+        let composed = compose_review_diff(&worktree_path, &base).await?;
+        let parsed = parse_unified_diff(&composed.raw);
         let mut comments = self.comments.load(*session_id).await?;
         reanchor_comments(&mut comments, &parsed);
         self.comments.save(*session_id, &comments).await?;
+
+        // A comment whose file left the diff since the view was composed takes no
+        // part in Apply: there is no code left to point the agent at, and it must
+        // not block the comments that *are* still live (the bug this replaced).
+        //
+        // Deliberately NOT deleted here. Deletion belongs to `snapshot_from_raw`,
+        // which is the only path that reports what it dropped — orphaning implies
+        // the diff moved, so the next compose is guaranteed to produce a snapshot
+        // (its hash differs) and announce the drop. Deleting here instead would
+        // leave the store already clean, so that notice would never fire and the
+        // user's comment would vanish silently mid-Apply.
+        let skip_orphans = composed.absence_is_authoritative();
 
         // Only not-yet-applied comments participate.
         let staged: Vec<Comment> = comments
             .iter()
             .filter(|a| a.status != CommentStatus::Applied)
+            .filter(|a| !(skip_orphans && crate::comment::is_orphaned(a, &parsed)))
             .cloned()
             .collect();
         if staged.is_empty() {
@@ -3106,6 +3136,319 @@ mod tests {
             .await
             .unwrap();
         (pid, sid)
+    }
+
+    /// Seed a project + session over a real one-commit git repo in `dir`, with
+    /// `changed.txt` modified in the working tree and `reverted.txt` left exactly
+    /// as committed. The session's review base is the initial commit, so the
+    /// composed diff contains `changed.txt` and nothing else.
+    async fn seed_review_repo(
+        svc: &CommanderService,
+        dir: &tempfile::TempDir,
+    ) -> (SessionId, PathBuf) {
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = async |args: &[&str]| {
+            tokio::process::Command::new("git")
+                .current_dir(&repo)
+                .args(args)
+                .output()
+                .await
+                .unwrap()
+        };
+        git(&["init", "-q", "-b", "main"]).await;
+        git(&["config", "user.email", "t@example.com"]).await;
+        git(&["config", "user.name", "T"]).await;
+        git(&["config", "commit.gpgsign", "false"]).await;
+        std::fs::write(repo.join("changed.txt"), "one\n").unwrap();
+        std::fs::write(repo.join("reverted.txt"), "stable\n").unwrap();
+        git(&["add", "."]).await;
+        git(&["commit", "-q", "-m", "base"]).await;
+        let head = git(&["rev-parse", "HEAD"]).await;
+        let base_commit = String::from_utf8_lossy(&head.stdout).trim().to_string();
+
+        // Only `changed.txt` differs from the base.
+        std::fs::write(repo.join("changed.txt"), "two\n").unwrap();
+
+        let project = Project::new("repo", repo.clone(), "main");
+        let pid = project.id;
+        let mut session = WorktreeSession::new(pid, "task", "branch-task", repo.clone(), "claude");
+        session.base_commit = Some(base_commit);
+        // Inactive, so `apply_comments` takes the Deferred path and never talks
+        // to tmux (these tests are about comment pruning, not delivery).
+        session.status = SessionStatus::Stopped;
+        let sid = session.id;
+        svc.store()
+            .mutate(move |state| {
+                state.add_project(project);
+                state.add_session(session);
+            })
+            .await
+            .unwrap();
+        (sid, repo)
+    }
+
+    /// Regression: a comment whose file has left the diff entirely (the change it
+    /// was written against was reverted) used to survive as `Drifted` forever —
+    /// invisible in the review tree (file rows come from the diff, so it had no
+    /// row and no ⚠), unreachable by `d`, and blocking Apply with "review or
+    /// delete them" that the user had no way to obey. It must be dropped from the
+    /// store, reported, and must not block Apply.
+    #[tokio::test]
+    async fn open_review_drops_comment_whose_file_left_the_diff() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (sid, _repo) = seed_review_repo(&svc, &dir).await;
+
+        let orphan = svc
+            .create_comment(
+                &sid,
+                NewComment {
+                    file: "reverted.txt".to_string(),
+                    side: CommentSide::New,
+                    line_range: (1, 1),
+                    snippet: "gone from the diff".to_string(),
+                    comment: "this is unpleasant".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        let live = svc
+            .create_comment(
+                &sid,
+                NewComment {
+                    file: "changed.txt".to_string(),
+                    side: CommentSide::New,
+                    line_range: (1, 1),
+                    snippet: "two".to_string(),
+                    comment: "why two".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let snapshot = svc.open_review(&sid).await.unwrap();
+
+        // The orphan is gone from the snapshot and reported as dropped...
+        let ids: Vec<Uuid> = snapshot.comments.iter().map(|c| c.id).collect();
+        assert_eq!(ids, vec![live], "only the in-diff comment should survive");
+        assert_eq!(
+            snapshot
+                .dropped_comments
+                .iter()
+                .map(|c| c.id)
+                .collect::<Vec<_>>(),
+            vec![orphan],
+            "the dropped comment must be reported, not silently deleted"
+        );
+        // ...and the drop is persisted, so it can't come back to block Apply.
+        let stored = svc.list_comments(&sid).await.unwrap();
+        assert_eq!(stored.iter().map(|c| c.id).collect::<Vec<_>>(), vec![live]);
+
+        // Apply is no longer wedged by the unreachable comment. The session isn't
+        // active, so a clean run defers (writes the brief) rather than blocking.
+        match svc.apply_comments(&sid).await.unwrap() {
+            ApplyOutcome::Deferred { count, .. } => assert_eq!(count, 1),
+            other => panic!("expected Deferred, got {other:?}"),
+        }
+    }
+
+    /// The safety precondition for the drop: a diff that fell back to
+    /// working-tree-vs-HEAD is a *narrower* view than the session's real base
+    /// (committed work is missing from it), so a file's absence there proves
+    /// nothing. Pruning against it would delete live comments.
+    #[tokio::test]
+    async fn degraded_diff_does_not_drop_comments() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (sid, repo) = seed_review_repo(&svc, &dir).await;
+
+        // Commit the change so a HEAD-relative diff is empty, then point the
+        // session at a base branch that cannot resolve (and drop the frozen SHA
+        // fallback, which `git_ref` would otherwise use). Composition degrades to
+        // working-tree-vs-HEAD, in which `changed.txt` no longer appears at all —
+        // exactly the false-orphan trap the guard exists for.
+        let git = async |args: &[&str]| {
+            tokio::process::Command::new("git")
+                .current_dir(&repo)
+                .args(args)
+                .output()
+                .await
+                .unwrap()
+        };
+        git(&["commit", "-qam", "work"]).await;
+        svc.store()
+            .mutate(move |state| {
+                if let Some(s) = state.sessions.get_mut(&sid) {
+                    s.base_branch = Some("no-such-branch".to_string());
+                    s.base_commit = None;
+                }
+            })
+            .await
+            .unwrap();
+
+        let id = svc
+            .create_comment(
+                &sid,
+                NewComment {
+                    file: "changed.txt".to_string(),
+                    side: CommentSide::New,
+                    line_range: (1, 1),
+                    snippet: "two".to_string(),
+                    comment: "still live against the real base".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let snapshot = svc.open_review(&sid).await.unwrap();
+        assert!(
+            snapshot.dropped_comments.is_empty(),
+            "a degraded diff must never drop comments"
+        );
+        assert_eq!(
+            svc.list_comments(&sid)
+                .await
+                .unwrap()
+                .iter()
+                .map(|c| c.id)
+                .collect::<Vec<_>>(),
+            vec![id],
+            "the comment must survive on disk"
+        );
+    }
+
+    /// Reviewed marks are keyed on a file's diff content, so the same proof gates
+    /// them: on a degraded diff every committed file looks absent, and pruning
+    /// would throw away review progress. A stacked base that only exists remotely
+    /// degrades on *every* open, so this would recur until the marks were gone.
+    #[tokio::test]
+    async fn degraded_diff_does_not_prune_reviewed_marks() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (sid, repo) = seed_review_repo(&svc, &dir).await;
+
+        // Mark the file reviewed while the diff is healthy.
+        let marked = svc
+            .toggle_file_reviewed_by_path(&sid, "changed.txt")
+            .await
+            .unwrap();
+        assert!(marked, "expected the file to become marked");
+        assert_eq!(
+            svc.open_review(&sid).await.unwrap().reviewed,
+            ["changed.txt"]
+        );
+
+        // Now degrade: commit the work and point at an unresolvable base, so the
+        // composed diff no longer contains `changed.txt` at all.
+        tokio::process::Command::new("git")
+            .current_dir(&repo)
+            .args(["commit", "-qam", "work"])
+            .output()
+            .await
+            .unwrap();
+        svc.store()
+            .mutate(move |state| {
+                if let Some(s) = state.sessions.get_mut(&sid) {
+                    s.base_branch = Some("no-such-branch".to_string());
+                    s.base_commit = None;
+                }
+            })
+            .await
+            .unwrap();
+
+        let snapshot = svc.open_review(&sid).await.unwrap();
+        assert!(
+            snapshot.diff.files.is_empty(),
+            "precondition: the degraded diff should be empty here"
+        );
+        assert_eq!(
+            snapshot.reviewed,
+            ["changed.txt"],
+            "a degraded diff must not prune reviewed marks"
+        );
+    }
+
+    /// Apply must not silently delete. When a file leaves the diff between the
+    /// last refresh and pressing Apply, the orphaned comment takes no part —
+    /// it neither blocks the live comments nor gets deleted here, because this is
+    /// the one path that cannot report a deletion. The next compose drops it and
+    /// announces it (see `refresh_after_apply`).
+    #[tokio::test]
+    async fn apply_skips_orphaned_comments_without_deleting_them() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (sid, repo) = seed_review_repo(&svc, &dir).await;
+
+        // Both files are in the diff when the comments are written.
+        std::fs::write(repo.join("reverted.txt"), "temporarily changed\n").unwrap();
+        let orphan = svc
+            .create_comment(
+                &sid,
+                NewComment {
+                    file: "reverted.txt".to_string(),
+                    side: CommentSide::New,
+                    line_range: (1, 1),
+                    snippet: "temporarily changed".to_string(),
+                    comment: "about to be reverted".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        let live = svc
+            .create_comment(
+                &sid,
+                NewComment {
+                    file: "changed.txt".to_string(),
+                    side: CommentSide::New,
+                    line_range: (1, 1),
+                    snippet: "two".to_string(),
+                    comment: "why two".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        let snapshot = svc.open_review(&sid).await.unwrap();
+        assert!(
+            snapshot.dropped_comments.is_empty(),
+            "precondition: nothing orphaned yet"
+        );
+
+        // The agent reverts one file after the view was composed.
+        std::fs::write(repo.join("reverted.txt"), "stable\n").unwrap();
+
+        // Apply proceeds with only the live comment...
+        match svc.apply_comments(&sid).await.unwrap() {
+            ApplyOutcome::Deferred { count, .. } => {
+                assert_eq!(count, 1, "only the live comment should be delivered")
+            }
+            other => panic!("expected Deferred, got {other:?}"),
+        }
+        // ...and the orphan is still on disk, so the drop notice can still fire.
+        let stored = svc.list_comments(&sid).await.unwrap();
+        let orphan_stored = stored.iter().find(|c| c.id == orphan).expect(
+            "the orphaned comment must not be deleted by apply — only the reporting \
+             path may delete it",
+        );
+        // Both are still pending: a deferred brief hasn't been delivered, so
+        // nothing is marked Applied yet and a re-apply is possible.
+        assert_ne!(orphan_stored.status, CommentStatus::Applied);
+        assert!(
+            stored
+                .iter()
+                .any(|c| c.id == live && c.status != CommentStatus::Applied)
+        );
+
+        // The next compose is what drops it, with a report.
+        let after = svc.open_review(&sid).await.unwrap();
+        assert_eq!(
+            after
+                .dropped_comments
+                .iter()
+                .map(|c| c.id)
+                .collect::<Vec<_>>(),
+            vec![orphan]
+        );
     }
 
     #[tokio::test]

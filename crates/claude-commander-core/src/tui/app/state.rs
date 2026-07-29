@@ -429,6 +429,7 @@ impl App {
                         reviewed,
                         segments,
                         content_hash,
+                        dropped_comments,
                     } = *prepared;
                     let mut state = DiffReviewState::new(session_id, title, base, diff, comments);
                     state.content_hash = content_hash;
@@ -439,6 +440,9 @@ impl App {
                     self.ensure_review_image(&state).await;
                     self.ensure_review_file_lines(&state).await;
                     self.ui_state.modal = Modal::ReviewDiff(Box::new(state));
+                    if let Some(notice) = crate::comment::dropped_notice(&dropped_comments) {
+                        self.set_review_status(&notice);
+                    }
                 }
             }
             StateUpdate::ReviewOpenFailed { error } => {
@@ -540,6 +544,7 @@ impl App {
                                 reviewed,
                                 segments,
                                 content_hash,
+                                dropped_comments,
                                 ..
                             } = *prepared;
                             state.refresh_diff(
@@ -549,7 +554,12 @@ impl App {
                                 segments,
                                 content_hash,
                             );
-                            if manual {
+                            // The drop notice wins over "Review refreshed": the
+                            // refresh is expected, losing a comment isn't.
+                            if let Some(notice) = crate::comment::dropped_notice(&dropped_comments)
+                            {
+                                self.set_review_status(&notice);
+                            } else if manual {
                                 self.set_review_status("Review refreshed");
                             }
                         }

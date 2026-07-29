@@ -140,6 +140,15 @@ pub struct ReviewSnapshot {
     /// open review view can cheaply tell whether a re-compose actually changed
     /// anything before rebuilding.
     pub content_hash: u64,
+    /// Comments discarded while building this snapshot because the file they
+    /// were written against had left the diff entirely (the change was
+    /// reverted), leaving nothing to anchor them to and no row to render them
+    /// on. Reported so a frontend can tell the user their feedback was dropped
+    /// instead of silently deleting it.
+    ///
+    /// `#[serde(default)]`: an older server omits the field entirely.
+    #[serde(default)]
+    pub dropped_comments: Vec<Comment>,
 }
 
 /// Options for creating a session (request body for `POST /sessions`). Optional

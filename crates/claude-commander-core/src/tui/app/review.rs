@@ -1593,6 +1593,37 @@ impl DiffReviewState {
             .map(|a| a.id)
     }
 
+    /// Status message for an Apply blocked by drifted comments.
+    ///
+    /// Names the files (deduped, at most two) rather than only counting, so a
+    /// blocker is findable — including the residual case the orphan drop can't
+    /// resolve, where the diff's absences aren't authoritative and a drifted
+    /// comment sits on a file the tree isn't showing.
+    fn drift_block_message(&self, drifted: &[uuid::Uuid]) -> String {
+        let mut files: Vec<&str> = Vec::new();
+        for id in drifted {
+            if let Some(a) = self.comments.iter().find(|a| a.id == *id) {
+                let name = a.file.rsplit('/').next().unwrap_or(&a.file);
+                if !files.contains(&name) {
+                    files.push(name);
+                }
+            }
+        }
+        // Match on the deduped *file* count, never the comment count: three
+        // drifted comments in two files is still "in a, b" — an ellipsis there
+        // would point at files that don't exist.
+        let where_ = match files.as_slice() {
+            [] => String::new(),
+            [one] => format!(" in {one}"),
+            [a, b] => format!(" in {a}, {b}"),
+            [a, b, ..] => format!(" in {a}, {b}, …"),
+        };
+        format!(
+            "{} drifted comment(s){where_} block apply — review or delete them",
+            drifted.len()
+        )
+    }
+
     /// Whether selectable line `idx` is covered by a non-applied comment,
     /// and whether any such comment is drifted.
     fn comment_marker(&self, idx: usize) -> Option<bool> {
@@ -1781,6 +1812,7 @@ impl App {
             let comments = snapshot.comments;
             let reviewed = snapshot.reviewed;
             let content_hash = snapshot.content_hash;
+            let dropped_comments = snapshot.dropped_comments;
             // Default: precompute every file's render caches (word-diff segments
             // + syntax highlighting) up front so file switching is instant. The
             // precompute is CPU-bound and synchronous, so keep it off the async
@@ -1808,6 +1840,7 @@ impl App {
                         reviewed,
                         segments,
                         content_hash,
+                        dropped_comments,
                     }),
                 }))
                 .await;
@@ -1827,6 +1860,12 @@ impl App {
             .list_comments(state.session_id)
             .await
             .unwrap_or_default();
+        // No orphan prune here on purpose. The store this just loaded was already
+        // pruned by the open/refresh that composed `state.diff`, so a prune would
+        // be a no-op — except on a diff whose absences aren't authoritative,
+        // where the service deliberately skipped it and this would delete
+        // still-live comments from the view while the store (and Apply gating)
+        // kept them. `state.diff` alone can't tell the two cases apart.
         crate::comment::reanchor_comments(&mut anns, &state.diff);
         // Keep the session-list pending-comment marker in sync without a disk
         // scan: we already have this session's full comment set in hand.
@@ -2202,23 +2241,53 @@ impl App {
         use crate::comment::ApplyOutcome;
         let backend = self.backend_arc(self.backend_of_session(state.session_id));
         match backend.apply_comments(state.session_id).await {
-            Ok(ApplyOutcome::Nothing) => self.set_review_status("No staged comments to apply"),
-            Ok(ApplyOutcome::Blocked { drifted }) => self.set_review_status(&format!(
-                "{} drifted comment(s) block apply — review or delete them",
-                drifted.len()
-            )),
+            Ok(ApplyOutcome::Nothing) => {
+                self.set_review_status("No staged comments to apply");
+                // "Nothing" is exactly what an orphan-only staged set produces
+                // (the filter emptied it), so this needs the refresh most: it is
+                // what turns the silent nothing into "Dropped 1 comment — …".
+                self.refresh_after_apply(state);
+            }
+            Ok(ApplyOutcome::Blocked { drifted }) => {
+                self.set_review_status(&state.drift_block_message(&drifted));
+            }
             Ok(ApplyOutcome::Applied { count, .. }) => {
                 self.reload_review_comments(state).await;
                 self.set_review_status(&format!("Sent {count} comment(s) to the agent"));
+                self.refresh_after_apply(state);
             }
             Ok(ApplyOutcome::Deferred { count, .. }) => {
                 self.reload_review_comments(state).await;
                 self.set_review_status(&format!(
                     "{count} comment(s) queued — agent busy or stopped"
                 ));
+                self.refresh_after_apply(state);
             }
             Err(e) => self.set_review_status(&format!("Apply failed: {e}")),
         }
+    }
+
+    /// Re-compose the review after an apply attempt.
+    ///
+    /// Apply deliberately leaves comments whose file left the diff in the store
+    /// (it can't announce a deletion — see `apply_comments`), so this is what
+    /// reaches the one path that both drops them and says so. A file can only
+    /// have left the diff if the diff moved, so the hash differs and the refresh
+    /// really does produce a snapshot; when nothing moved it short-circuits to
+    /// `None` and, being non-manual, stays silent.
+    ///
+    /// Best-effort, not a guarantee: `spawn_review_refresh` coalesces against an
+    /// in-flight refresh, so a transition-driven one racing this drops it. The
+    /// consequence is only delay — the comment stays on disk and the next
+    /// compose (`r`, an agent turn, or reopening the review) drops it with the
+    /// notice. Nothing is ever deleted without being reported.
+    fn refresh_after_apply(&mut self, state: &DiffReviewState) {
+        self.spawn_review_refresh(
+            state.session_id,
+            state.title.clone(),
+            state.content_hash,
+            false,
+        );
     }
 
     /// Render the full-screen review view. Returns the clickable footer-button
@@ -3730,6 +3799,9 @@ pub struct ReviewPrepared {
     pub(super) reviewed: Vec<String>,
     pub(super) segments: Vec<Vec<WordSegs>>,
     pub(super) content_hash: u64,
+    /// Comments the refresh discarded because their file left the diff, so the
+    /// view can say so rather than having them vanish silently.
+    pub(super) dropped_comments: Vec<Comment>,
 }
 
 /// Token class for intra-line diffing: identifier runs and whitespace runs are
@@ -5280,6 +5352,50 @@ diff --git a/c.rs b/c.rs
         // Applied comments don't count.
         s.comments[0].status = CommentStatus::Applied;
         assert_eq!(s.dir_comment_count("src/git"), 1);
+    }
+
+    /// The Apply-blocked message names the offending files so a blocker is
+    /// findable — including the residual case the orphan drop can't resolve,
+    /// where the file has no row in the tree at all.
+    #[test]
+    fn drift_block_message_names_files_by_file_count_not_comment_count() {
+        let mut s = state_with_two_files();
+        let mut push = |file: &str| {
+            let c = Comment::new(file, CommentSide::New, (1, 1), "x", "note");
+            let id = c.id;
+            s.comments.push(c);
+            id
+        };
+        let a1 = push("src/git/diff.rs");
+        let a2 = push("src/git/diff.rs");
+        let b = push("src/git/backend.rs");
+        let c = push("other/third.rs");
+
+        assert_eq!(
+            s.drift_block_message(&[a1]),
+            "1 drifted comment(s) in diff.rs block apply — review or delete them"
+        );
+        // Two comments in ONE file names one file, not two.
+        assert_eq!(
+            s.drift_block_message(&[a1, a2]),
+            "2 drifted comment(s) in diff.rs block apply — review or delete them"
+        );
+        // Three comments across exactly two files must NOT gain an ellipsis:
+        // it would point at a file that doesn't exist.
+        assert_eq!(
+            s.drift_block_message(&[a1, a2, b]),
+            "3 drifted comment(s) in diff.rs, backend.rs block apply — review or delete them"
+        );
+        // Three distinct files do elide.
+        assert_eq!(
+            s.drift_block_message(&[a1, b, c]),
+            "3 drifted comment(s) in diff.rs, backend.rs, … block apply — review or delete them"
+        );
+        // An id with no matching comment degrades to the bare count.
+        assert_eq!(
+            s.drift_block_message(&[uuid::Uuid::new_v4()]),
+            "1 drifted comment(s) block apply — review or delete them"
+        );
     }
 
     #[test]

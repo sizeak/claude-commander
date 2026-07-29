@@ -200,6 +200,11 @@ foreground-only colouring on 256- and 16-colour terminals.
   re-anchors it by its captured snippet. If it can't be located unambiguously
   the comment is marked `⚠` (drifted) and blocks apply until you review or
   delete it (`d` removes the comment under the cursor).
+- **Reverted files**: if a file leaves the diff altogether — the change you
+  commented on was reverted, so there is nothing left to review — its pending
+  comments are dropped rather than left blocking apply from a file the view can
+  no longer show you. The status bar reports what was dropped. Comments you have
+  already applied are kept regardless.
 
 Comments are stored per session under the data directory (alongside
 `state.json`); the brief handed to the agent is written to a temp file outside
