@@ -19,6 +19,21 @@ use xxhash_rust::xxh3::Xxh3;
 use super::diff::untracked_patch_and_count;
 use crate::error::{GitError, Result};
 
+/// A composed review diff, plus whether it is the diff the caller actually
+/// asked for.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ComposedDiff {
+    /// The raw unified diff (empty means "no changes", never "git failed" —
+    /// [`compose_review_diff`] errors instead of returning an empty diff).
+    pub raw: String,
+    /// `true` when `base` could not be resolved and this is a working-tree-vs-
+    /// `HEAD` diff instead. That is a strictly *narrower* view than requested
+    /// (everything already committed on the branch is missing from it), so a
+    /// file's absence proves nothing — never conclude from a degraded diff that
+    /// a file left the review, or pruning will delete live comments and marks.
+    pub degraded_to_head: bool,
+}
+
 /// Compose the review diff for `worktree`: everything from the merge-base of
 /// `base` and `HEAD` through the working tree (committed + staged + unstaged),
 /// plus untracked files — i.e. the full set of changes a PR against `base`
@@ -26,36 +41,46 @@ use crate::error::{GitError, Result};
 ///
 /// `base` is a commit-ish (branch name, SHA, or `"HEAD"`). When the merge-base
 /// can't be resolved (e.g. a stacked-PR base that only exists remotely), the
-/// diff degrades to working-tree-vs-`HEAD` rather than failing the view.
-pub async fn compose_review_diff(worktree: &Path, base: &str) -> Result<String> {
+/// diff degrades to working-tree-vs-`HEAD` rather than failing the view, and
+/// [`ComposedDiff::degraded_to_head`] says so.
+///
+/// When *both* the base diff and the `HEAD` fallback fail, this errors rather
+/// than returning an empty diff: an empty diff is indistinguishable from "the
+/// session has no changes", and callers prune per-file state (comments,
+/// reviewed marks) against it, so a swallowed git failure would silently delete
+/// the user's review feedback.
+pub async fn compose_review_diff(worktree: &Path, base: &str) -> Result<ComposedDiff> {
     let target = diff_target(worktree, base).await;
 
     // Force standard `a/`/`b/` prefixes so the parser is independent of the
     // user's `diff.mnemonicPrefix` config (which would emit `i/`/`w/`/`c/`).
-    let diff_out = Command::new("git")
-        .current_dir(worktree)
-        .args(["diff", "--src-prefix=a/", "--dst-prefix=b/", &target])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await
-        .map_err(|e| GitError::DiffFailed(e.to_string()))?;
-
-    let mut diff = if diff_out.status.success() {
-        String::from_utf8_lossy(&diff_out.stdout).to_string()
-    } else {
-        // `base`/`target` unresolvable — degrade to working-tree-vs-HEAD.
-        let head = Command::new("git")
+    let git_diff = async |rev: &str| {
+        Command::new("git")
             .current_dir(worktree)
-            .args(["diff", "--src-prefix=a/", "--dst-prefix=b/", "HEAD"])
+            .args(["diff", "--src-prefix=a/", "--dst-prefix=b/", rev])
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
             .await
-            .map_err(|e| GitError::DiffFailed(e.to_string()))?;
-        String::from_utf8_lossy(&head.stdout).to_string()
+            .map_err(|e| GitError::DiffFailed(e.to_string()))
+    };
+
+    let diff_out = git_diff(&target).await?;
+    let (mut diff, degraded_to_head) = if diff_out.status.success() {
+        (String::from_utf8_lossy(&diff_out.stdout).to_string(), false)
+    } else {
+        // `base`/`target` unresolvable — degrade to working-tree-vs-HEAD.
+        let head = git_diff("HEAD").await?;
+        if !head.status.success() {
+            // Not a resolvable-base problem: git itself can't diff this
+            // worktree. Fail loudly rather than reporting "no changes".
+            return Err(GitError::DiffFailed(
+                String::from_utf8_lossy(&head.stderr).trim().to_string(),
+            )
+            .into());
+        }
+        (String::from_utf8_lossy(&head.stdout).to_string(), true)
     };
 
     let (untracked, _) = untracked_patch_and_count(worktree).await;
@@ -66,7 +91,10 @@ pub async fn compose_review_diff(worktree: &Path, base: &str) -> Result<String> 
         diff.push_str(&untracked);
     }
 
-    Ok(diff)
+    Ok(ComposedDiff {
+        raw: diff,
+        degraded_to_head,
+    })
 }
 
 /// Resolve the diff base for a PR target branch, preferring the
@@ -1061,7 +1089,7 @@ index 0000000..2222222
         git(p, &["add", "."]).await;
         git(p, &["commit", "-q", "-m", "B"]).await;
 
-        let diff = compose_review_diff(p, &base).await.unwrap();
+        let diff = compose_review_diff(p, &base).await.unwrap().raw;
         assert!(diff.contains("-v1"), "committed deletion missing:\n{diff}");
         assert!(diff.contains("+v2"), "committed addition missing:\n{diff}");
 
@@ -1090,7 +1118,7 @@ index 0000000..2222222
 
         fs::write(p.join("logo.png"), v2).unwrap();
 
-        let diff = compose_review_diff(p, &base).await.unwrap();
+        let diff = compose_review_diff(p, &base).await.unwrap().raw;
         let parsed = parse_unified_diff(&diff);
         let f = parsed
             .files
@@ -1145,7 +1173,7 @@ index 0000000..2222222
         fs::write(p.join("logo.png"), v2).unwrap();
 
         // git diffs the LFS file as pointer *text*, yet it must surface as binary.
-        let diff = compose_review_diff(p, &base).await.unwrap();
+        let diff = compose_review_diff(p, &base).await.unwrap().raw;
         assert!(
             diff.contains("version https://git-lfs.github.com/spec/"),
             "expected a textual pointer diff from git:\n{diff}"
@@ -1217,7 +1245,7 @@ index 0000000..2222222
         let base = git_capture(p, &["rev-parse", "HEAD"]).await;
         fs::write(p.join("logo.png"), v2).unwrap();
 
-        let raw = compose_review_diff(p, &base).await.unwrap();
+        let raw = compose_review_diff(p, &base).await.unwrap().raw;
         let mut diff = parse_unified_diff(&raw);
         enrich_binary_sizes(&mut diff, p).await;
         let f = diff
@@ -1244,7 +1272,7 @@ index 0000000..2222222
         fs::write(p.join("file.txt"), "v3\n").unwrap();
         fs::write(p.join("untracked.txt"), "u\n").unwrap();
 
-        let diff = compose_review_diff(p, &base).await.unwrap();
+        let diff = compose_review_diff(p, &base).await.unwrap().raw;
         assert!(diff.contains("+v3"), "unstaged change missing:\n{diff}");
         assert!(
             diff.contains("untracked.txt") && diff.contains("+u"),
@@ -1260,7 +1288,7 @@ index 0000000..2222222
         git(p, &["add", "."]).await;
         git(p, &["commit", "-q", "-m", "A"]).await;
 
-        let diff = compose_review_diff(p, "HEAD").await.unwrap();
+        let diff = compose_review_diff(p, "HEAD").await.unwrap().raw;
         assert!(diff.is_empty(), "expected empty diff, got:\n{diff}");
         assert!(parse_unified_diff(&diff).is_empty());
     }
@@ -1276,11 +1304,43 @@ index 0000000..2222222
         // Unstaged change present; base is a branch that does not exist.
         fs::write(p.join("file.txt"), "v2\n").unwrap();
 
-        let diff = compose_review_diff(p, "no-such-branch").await.unwrap();
-        // Falls back to working-tree-vs-HEAD, which still shows the change.
+        let composed = compose_review_diff(p, "no-such-branch").await.unwrap();
+        // Falls back to working-tree-vs-HEAD, which still shows the change...
         assert!(
-            diff.contains("+v2"),
-            "fallback diff missing change:\n{diff}"
+            composed.raw.contains("+v2"),
+            "fallback diff missing change:\n{}",
+            composed.raw
+        );
+        // ...and flags itself as the narrower view, so callers know a file's
+        // absence here does not mean it left the review.
+        assert!(composed.degraded_to_head);
+    }
+
+    #[tokio::test]
+    async fn resolvable_base_is_not_marked_degraded() {
+        let tmp = init_repo().await;
+        let p = tmp.path();
+        fs::write(p.join("file.txt"), "v1\n").unwrap();
+        git(p, &["add", "."]).await;
+        git(p, &["commit", "-q", "-m", "A"]).await;
+        fs::write(p.join("file.txt"), "v2\n").unwrap();
+
+        let composed = compose_review_diff(p, "HEAD").await.unwrap();
+        assert!(composed.raw.contains("+v2"));
+        assert!(!composed.degraded_to_head);
+    }
+
+    /// A git failure must not masquerade as "no changes". Callers prune
+    /// comments and reviewed marks against the composed diff, so returning an
+    /// empty diff here would silently delete the user's review feedback.
+    #[tokio::test]
+    async fn errors_when_not_a_git_worktree_instead_of_reporting_no_changes() {
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        let err = compose_review_diff(tmp.path(), "main").await;
+        assert!(
+            err.is_err(),
+            "expected an error for a non-repo worktree, got: {err:?}"
         );
     }
 
@@ -1340,7 +1400,7 @@ index 0000000..2222222
         assert_ne!(base, tip, "import base must not be the branch tip");
 
         // The committed change is visible against the resolved base.
-        let diff = compose_review_diff(p, &base).await.unwrap();
+        let diff = compose_review_diff(p, &base).await.unwrap().raw;
         assert!(
             diff.contains("-v1") && diff.contains("+v2"),
             "diff against fork point is empty:\n{diff}"
@@ -1389,7 +1449,7 @@ index 0000000..2222222
         );
         assert_ne!(base, tip, "checkout base must not be the branch tip");
 
-        let diff = compose_review_diff(p, &base).await.unwrap();
+        let diff = compose_review_diff(p, &base).await.unwrap().raw;
         assert!(
             diff.contains("-v1") && diff.contains("+v2"),
             "diff against fork point is empty:\n{diff}"

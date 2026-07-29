@@ -111,6 +111,7 @@ impl App {
                         comments,
                         reviewed,
                         content_hash,
+                        dropped_comments,
                     } = snapshot;
                     // The precompute is CPU-bound and synchronous; keep it off
                     // the async pool and hand the diff back with its segments.
@@ -130,6 +131,7 @@ impl App {
                         reviewed,
                         segments,
                         content_hash,
+                        dropped_comments,
                     }))
                 }
                 Ok(None) => None,

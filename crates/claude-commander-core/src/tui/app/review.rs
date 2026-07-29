@@ -1781,6 +1781,7 @@ impl App {
             let comments = snapshot.comments;
             let reviewed = snapshot.reviewed;
             let content_hash = snapshot.content_hash;
+            let dropped_comments = snapshot.dropped_comments;
             // Default: precompute every file's render caches (word-diff segments
             // + syntax highlighting) up front so file switching is instant. The
             // precompute is CPU-bound and synchronous, so keep it off the async
@@ -1808,6 +1809,7 @@ impl App {
                         reviewed,
                         segments,
                         content_hash,
+                        dropped_comments,
                     }),
                 }))
                 .await;
@@ -1827,6 +1829,10 @@ impl App {
             .list_comments(state.session_id)
             .await
             .unwrap_or_default();
+        // Mirror the service's orphan drop (`prune_orphaned`) so the tree's
+        // directory badges and Apply gating can't disagree with what the store
+        // will look like after the next open/refresh persists it.
+        crate::comment::prune_orphaned(&mut anns, &state.diff);
         crate::comment::reanchor_comments(&mut anns, &state.diff);
         // Keep the session-list pending-comment marker in sync without a disk
         // scan: we already have this session's full comment set in hand.
@@ -3730,6 +3736,9 @@ pub struct ReviewPrepared {
     pub(super) reviewed: Vec<String>,
     pub(super) segments: Vec<Vec<WordSegs>>,
     pub(super) content_hash: u64,
+    /// Comments the refresh discarded because their file left the diff, so the
+    /// view can say so rather than having them vanish silently.
+    pub(super) dropped_comments: Vec<Comment>,
 }
 
 /// Token class for intra-line diffing: identifier runs and whitespace runs are
