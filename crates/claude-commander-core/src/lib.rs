@@ -48,8 +48,14 @@ pub use session::{
 };
 pub use tmux::{AttachResult, attach_to_session};
 
-/// Application version
+/// This library's version, i.e. the `claude-commander-core` crate's. Reported
+/// as telemetry's `lib_version` and compared against a remote server's build.
+/// It is *not* the frontend's version — a frontend (the TUI binary, the mobile
+/// client) reports its own; see [`telemetry::FrontendInfo`].
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Application name
-pub const APP_NAME: &str = env!("CARGO_PKG_NAME");
+/// The name of the CLI program these arg definitions describe. A literal, not
+/// `env!("CARGO_PKG_NAME")`: this module compiles inside the library crate, so
+/// the macro would expand to `claude-commander-core` and leak that into
+/// `--version`, `--help`, and the generated commander CLI reference.
+pub const APP_NAME: &str = "claude-commander";

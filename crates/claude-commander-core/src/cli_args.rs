@@ -6,7 +6,7 @@
 //! via [`cli_command`]. The binary (`main.rs`) imports these and owns the
 //! dispatch `match`.
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 
 use crate::{APP_NAME, VERSION};
 
@@ -207,9 +207,66 @@ pub fn cli_command() -> clap::Command {
     Cli::command()
 }
 
+/// The command tree with `version` stamped on, for `--version`.
+///
+/// The derive can only bake in a version known when *this* crate compiles —
+/// i.e. the library's. The binary's version is the one users care about, so the
+/// binary passes its own `CARGO_PKG_VERSION` here and the two can never drift
+/// even if the workspace stops sharing a single version.
+pub fn cli_command_with_version(version: &'static str) -> clap::Command {
+    cli_command().version(version)
+}
+
+/// Parse the process arguments into a [`Cli`], reporting `version` for
+/// `--version`. Errors (including `--help`/`--version`) are printed and exit
+/// the process, matching `Parser::parse`.
+pub fn parse_cli(version: &'static str) -> Cli {
+    parse_cli_from(std::env::args_os(), version).unwrap_or_else(|e| e.exit())
+}
+
+/// [`parse_cli`] over an explicit argument list, so the version plumbing is
+/// testable without spawning the binary.
+pub fn parse_cli_from<I, T>(args: I, version: &'static str) -> clap::error::Result<Cli>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let matches = cli_command_with_version(version).try_get_matches_from(args)?;
+    Cli::from_arg_matches(&matches)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_command_uses_the_binary_program_name() {
+        // The program name shows up in `--help`/`--version` and, via
+        // `commander::generate_cli_reference`, in every documented invocation
+        // the commander session reads. It must be the binary's name, never the
+        // library crate's (`claude-commander-core`).
+        assert_eq!(cli_command().get_name(), "claude-commander");
+    }
+
+    #[test]
+    fn version_flag_reports_the_callers_version() {
+        // End-to-end on the string a user sees: `claude-commander --version`
+        // must print the binary's name and the version the binary injects, not
+        // whatever the library crate happens to be at.
+        let err = cli_command_with_version("9.9.9")
+            .try_get_matches_from(["claude-commander", "--version"])
+            .expect_err("--version short-circuits parsing");
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+        assert_eq!(err.to_string().trim(), "claude-commander 9.9.9");
+    }
+
+    #[test]
+    fn parse_cli_from_stamps_the_version_onto_the_parsed_tree() {
+        let cli = parse_cli_from(["claude-commander", "--debug"], "9.9.9")
+            .expect("`--debug` with no subcommand parses");
+        assert!(cli.debug);
+        assert!(cli.command.is_none());
+    }
 
     #[test]
     fn cli_command_exposes_known_subcommands() {

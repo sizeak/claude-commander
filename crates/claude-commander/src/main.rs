@@ -4,26 +4,27 @@
 
 use std::io::{IsTerminal, Write};
 
-use clap::Parser;
 use color_eyre::eyre::Result;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use claude_commander_core::{
-    VERSION,
-    cli_args::{Cli, Commands, cli_command},
+    cli_args::{Commands, cli_command, parse_cli},
     config::{AppState, Config, ConfigStore, StateStore},
     tmux::{AttachResult, attach_to_session},
     tui::App,
 };
 
+/// This binary's name and version. Everything user-facing (`--version`, the
+/// startup log line, the telemetry frontend) comes from here rather than from
+/// `claude_commander_core::{APP_NAME, VERSION}`, which describe the library.
+const NAME: &str = env!("CARGO_PKG_NAME");
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Identify this binary to the telemetry layer. Required by
 /// `CommanderService`/`App` — they panic if a frontend isn't supplied.
 fn frontend() -> claude_commander_core::telemetry::FrontendInfo {
-    claude_commander_core::telemetry::FrontendInfo::new(
-        env!("CARGO_PKG_NAME"),
-        env!("CARGO_PKG_VERSION"),
-    )
+    claude_commander_core::telemetry::FrontendInfo::new(NAME, VERSION)
 }
 
 /// The remote-backend factory injected into the TUI. Keeps core free of a
@@ -242,7 +243,7 @@ async fn main() -> Result<()> {
     // toward the hard cap before anything else runs.
     raise_fd_limit();
 
-    let cli = Cli::parse();
+    let cli = parse_cli(VERSION);
 
     // Load configuration
     let config = Config::load().unwrap_or_else(|e| {
@@ -678,5 +679,14 @@ mod tests {
         // drift back to the core crate's name (claude-commander-core).
         assert_eq!(frontend.name, "claude-commander");
         assert_eq!(frontend.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn cli_program_name_matches_this_binary() {
+        // `APP_NAME` is a literal in the library (an `env!` there would expand
+        // to `claude-commander-core`), so nothing in core can notice if this
+        // package is renamed. This is the check that would catch it.
+        assert_eq!(claude_commander_core::APP_NAME, NAME);
+        assert_eq!(cli_command().get_name(), NAME);
     }
 }
