@@ -242,7 +242,6 @@ pub async fn compute_diff_for_path(path: &Path) -> Result<DiffInfo> {
     })
 }
 
-/// Render untracked-file patches for the worktree at `path` as a single
 /// An untracked-file patch: the `/dev/null`→file diffs concatenated, the count
 /// of untracked files, and whether every one of them made it in.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -326,15 +325,26 @@ pub(crate) async fn untracked_patch_and_count(path: &Path) -> UntrackedPatch {
         .await;
 
     let mut patch = String::new();
-    // A spawn error means this file's patch is missing from an otherwise
-    // successful composition — exactly the shape that makes a still-present file
-    // look deleted, so track it rather than discarding it with the error.
+    // A file missing from an otherwise successful composition is exactly the
+    // shape that makes a still-present file look deleted, so every way one can
+    // go missing has to be tracked rather than discarded:
+    //
+    // - the spawn failed (EMFILE under the concurrency this cap exists to bound);
+    // - git ran but errored. `--no-index` exits 1 for "files differ", which is
+    //   the expected success here, and 0 when they don't; anything else is a
+    //   real failure (e.g. exit 128 `cannot hash` for a file whose mode denies
+    //   read), and it writes nothing to stdout, so it would slip through
+    //   unnoticed as an empty patch.
     let mut complete = true;
     for output in outputs {
         let Ok(output) = output else {
             complete = false;
             continue;
         };
+        if !matches!(output.status.code(), Some(0 | 1)) {
+            complete = false;
+            continue;
+        }
         let file_diff = String::from_utf8_lossy(&output.stdout);
         if file_diff.is_empty() {
             continue;

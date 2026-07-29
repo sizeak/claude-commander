@@ -1053,6 +1053,9 @@ index 0000000..2222222
     // --- composition (real git repos via TempDir) ---
 
     use std::fs;
+    // Mode bits, for the "git can enumerate it but not read it" case. Unix-only,
+    // like the rest of this module (it shells out to `/dev/null`).
+    use std::os::unix::fs::PermissionsExt;
     use tempfile::TempDir;
 
     async fn git(dir: &Path, args: &[&str]) {
@@ -1355,14 +1358,14 @@ index 0000000..2222222
     #[tokio::test]
     async fn errors_when_not_a_git_worktree_instead_of_reporting_no_changes() {
         let tmp = tempfile::TempDir::new().unwrap();
-        // Stop git walking up out of the temp dir: if the OS temp dir happened to
-        // sit inside a repo, the diff would succeed and this would test nothing.
-        // SAFETY: single-threaded test setup, before any git subprocess is spawned.
-        unsafe { std::env::set_var("GIT_CEILING_DIRECTORIES", tmp.path()) };
+        // A `.git` *file* pointing nowhere makes git fail right here instead of
+        // walking up: without it, an OS temp dir that happened to sit inside a
+        // repo would make the diff succeed and this test pass vacuously. Done
+        // with a file rather than `GIT_CEILING_DIRECTORIES` because `set_var` is
+        // unsound while sibling tests spawn subprocesses on other threads.
+        fs::write(tmp.path().join(".git"), "gitdir: /nonexistent\n").unwrap();
 
         let err = compose_review_diff(tmp.path(), "main").await;
-
-        unsafe { std::env::remove_var("GIT_CEILING_DIRECTORIES") };
         assert!(
             err.is_err(),
             "expected an error for a non-repo worktree, got: {err:?}"
@@ -1390,6 +1393,35 @@ index 0000000..2222222
         ))
         .await;
         assert!(!patch.complete);
+
+        // An untracked file git can enumerate but not read is the nastier case:
+        // `git diff --no-index` spawns fine and exits 128 ("cannot hash") with an
+        // empty stdout, so the file is absent from a patch that otherwise looks
+        // perfectly successful.
+        let unreadable = p.join("unreadable.txt");
+        fs::write(&unreadable, "secret\n").unwrap();
+        let mut perms = fs::metadata(&unreadable).unwrap().permissions();
+        perms.set_mode(0o000);
+        fs::set_permissions(&unreadable, perms).unwrap();
+
+        let patch = crate::git::diff::untracked_patch_and_count(p).await;
+        let complete = patch.complete;
+        let patch_text = patch.patch.clone();
+        // Restore before asserting so a failure can't leave the TempDir
+        // undeletable.
+        let mut perms = fs::metadata(&unreadable).unwrap().permissions();
+        perms.set_mode(0o644);
+        fs::set_permissions(&unreadable, perms).unwrap();
+
+        assert!(
+            !patch_text.contains("unreadable.txt"),
+            "precondition: the unreadable file should be missing from the patch"
+        );
+        assert!(
+            !complete,
+            "a file git failed to diff must mark the patch incomplete, or pruning \
+             will treat it as reverted and delete its comments"
+        );
         assert!(
             !ComposedDiff {
                 untracked_complete: false,
