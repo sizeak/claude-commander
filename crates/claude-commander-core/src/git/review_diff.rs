@@ -29,9 +29,27 @@ pub struct ComposedDiff {
     /// `true` when `base` could not be resolved and this is a working-tree-vs-
     /// `HEAD` diff instead. That is a strictly *narrower* view than requested
     /// (everything already committed on the branch is missing from it), so a
-    /// file's absence proves nothing — never conclude from a degraded diff that
-    /// a file left the review, or pruning will delete live comments and marks.
+    /// file's absence proves nothing.
     pub degraded_to_head: bool,
+    /// `false` when the untracked-file half of the composition was incomplete
+    /// (git couldn't enumerate them, or a per-file diff failed to spawn — seen
+    /// under fd pressure on noisy worktrees), so a file that really is there can
+    /// be missing from `raw`.
+    pub untracked_complete: bool,
+}
+
+impl ComposedDiff {
+    /// Whether a file's *absence* from this diff can be trusted to mean the file
+    /// has genuinely left the review.
+    ///
+    /// Only true for a complete diff against the base the caller asked for. Both
+    /// failure modes — degrading to `HEAD`, and an incomplete untracked half —
+    /// drop files that are still under review, so anything that *deletes* state
+    /// keyed on a file (review comments, reviewed marks) must check this first or
+    /// a transient git hiccup silently destroys the user's review.
+    pub fn absence_is_authoritative(&self) -> bool {
+        !self.degraded_to_head && self.untracked_complete
+    }
 }
 
 /// Compose the review diff for `worktree`: everything from the merge-base of
@@ -83,17 +101,18 @@ pub async fn compose_review_diff(worktree: &Path, base: &str) -> Result<Composed
         (String::from_utf8_lossy(&head.stdout).to_string(), true)
     };
 
-    let (untracked, _) = untracked_patch_and_count(worktree).await;
-    if !untracked.is_empty() {
+    let untracked = untracked_patch_and_count(worktree).await;
+    if !untracked.patch.is_empty() {
         if !diff.is_empty() && !diff.ends_with('\n') {
             diff.push('\n');
         }
-        diff.push_str(&untracked);
+        diff.push_str(&untracked.patch);
     }
 
     Ok(ComposedDiff {
         raw: diff,
         degraded_to_head,
+        untracked_complete: untracked.complete,
     })
 }
 
@@ -1336,11 +1355,47 @@ index 0000000..2222222
     #[tokio::test]
     async fn errors_when_not_a_git_worktree_instead_of_reporting_no_changes() {
         let tmp = tempfile::TempDir::new().unwrap();
+        // Stop git walking up out of the temp dir: if the OS temp dir happened to
+        // sit inside a repo, the diff would succeed and this would test nothing.
+        // SAFETY: single-threaded test setup, before any git subprocess is spawned.
+        unsafe { std::env::set_var("GIT_CEILING_DIRECTORIES", tmp.path()) };
 
         let err = compose_review_diff(tmp.path(), "main").await;
+
+        unsafe { std::env::remove_var("GIT_CEILING_DIRECTORIES") };
         assert!(
             err.is_err(),
             "expected an error for a non-repo worktree, got: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn untracked_failure_makes_absence_non_authoritative() {
+        let tmp = init_repo().await;
+        let p = tmp.path();
+        fs::write(p.join("file.txt"), "v1\n").unwrap();
+        git(p, &["add", "."]).await;
+        git(p, &["commit", "-q", "-m", "A"]).await;
+
+        // A healthy composition can be trusted to prove a file's absence...
+        let composed = compose_review_diff(p, "HEAD").await.unwrap();
+        assert!(composed.untracked_complete);
+        assert!(composed.absence_is_authoritative());
+
+        // ...but an untracked half that couldn't even be enumerated cannot: the
+        // files it would have contributed are missing from `raw` yet present on
+        // disk, which is indistinguishable from "reverted" to a pruning caller.
+        let patch = crate::git::diff::untracked_patch_and_count(Path::new(
+            "/definitely/not/a/worktree/anywhere",
+        ))
+        .await;
+        assert!(!patch.complete);
+        assert!(
+            !ComposedDiff {
+                untracked_complete: false,
+                ..Default::default()
+            }
+            .absence_is_authoritative()
         );
     }
 

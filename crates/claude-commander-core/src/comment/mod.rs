@@ -240,6 +240,15 @@ fn file_for<'a>(ann: &Comment, diff: &'a ParsedDiff) -> Option<&'a FileDiff> {
         .find(|f| f.display_path() == ann.file || f.new_path == ann.file || f.old_path == ann.file)
 }
 
+/// Whether `ann`'s file has left `diff` entirely, so there is no longer any code
+/// under the comment (and no file row in the review tree to reach it through).
+///
+/// Only meaningful for a diff whose absences are authoritative — see
+/// [`ComposedDiff::absence_is_authoritative`](crate::git::ComposedDiff::absence_is_authoritative).
+pub fn is_orphaned(ann: &Comment, diff: &ParsedDiff) -> bool {
+    file_for(ann, diff).is_none()
+}
+
 /// Drop every non-applied comment whose file is no longer in `diff` at all,
 /// returning the dropped comments.
 ///
@@ -259,7 +268,7 @@ fn file_for<'a>(ann: &Comment, diff: &'a ParsedDiff) -> Option<&'a FileDiff> {
 pub fn prune_orphaned(anns: &mut Vec<Comment>, diff: &ParsedDiff) -> Vec<Comment> {
     let mut dropped = Vec::new();
     anns.retain(|ann| {
-        let keep = ann.status == CommentStatus::Applied || file_for(ann, diff).is_some();
+        let keep = ann.status == CommentStatus::Applied || !is_orphaned(ann, diff);
         if !keep {
             dropped.push(ann.clone());
         }
@@ -272,9 +281,10 @@ pub fn prune_orphaned(anns: &mut Vec<Comment>, diff: &ParsedDiff) -> Vec<Comment
 /// become [`CommentStatus::Staged`] with an updated range; unlocatable ones
 /// become [`CommentStatus::Drifted`]. Applied comments are left untouched.
 ///
-/// Comments whose file has left the diff are [`prune_orphaned`]'s business —
-/// they land here as [`CommentStatus::Drifted`] only if that ran first and the
-/// file is genuinely still present.
+/// A comment whose file has left the diff also becomes `Drifted` here (there is
+/// nothing to locate it in). Callers that can prove the absence is real drop
+/// those first via [`prune_orphaned`]; when the diff can't prove it, they stay —
+/// `Drifted` is the safe holding state.
 pub fn reanchor_comments(anns: &mut [Comment], diff: &ParsedDiff) {
     for ann in anns.iter_mut() {
         if ann.status == CommentStatus::Applied {

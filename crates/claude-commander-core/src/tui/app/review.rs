@@ -1593,6 +1593,34 @@ impl DiffReviewState {
             .map(|a| a.id)
     }
 
+    /// Status message for an Apply blocked by drifted comments.
+    ///
+    /// Names the files (deduped, at most two) rather than only counting, so a
+    /// blocker is findable — including the residual case the orphan drop can't
+    /// resolve, where the diff's absences aren't authoritative and a drifted
+    /// comment sits on a file the tree isn't showing.
+    fn drift_block_message(&self, drifted: &[uuid::Uuid]) -> String {
+        let mut files: Vec<&str> = Vec::new();
+        for id in drifted {
+            if let Some(a) = self.comments.iter().find(|a| a.id == *id) {
+                let name = a.file.rsplit('/').next().unwrap_or(&a.file);
+                if !files.contains(&name) {
+                    files.push(name);
+                }
+            }
+        }
+        let where_ = match files.as_slice() {
+            [] => String::new(),
+            [one] => format!(" in {one}"),
+            [a, b] if drifted.len() == 2 => format!(" in {a}, {b}"),
+            [a, b, ..] => format!(" in {a}, {b}, …"),
+        };
+        format!(
+            "{} drifted comment(s){where_} block apply — review or delete them",
+            drifted.len()
+        )
+    }
+
     /// Whether selectable line `idx` is covered by a non-applied comment,
     /// and whether any such comment is drifted.
     fn comment_marker(&self, idx: usize) -> Option<bool> {
@@ -1829,10 +1857,12 @@ impl App {
             .list_comments(state.session_id)
             .await
             .unwrap_or_default();
-        // Mirror the service's orphan drop (`prune_orphaned`) so the tree's
-        // directory badges and Apply gating can't disagree with what the store
-        // will look like after the next open/refresh persists it.
-        crate::comment::prune_orphaned(&mut anns, &state.diff);
+        // No orphan prune here on purpose. The store this just loaded was already
+        // pruned by the open/refresh that composed `state.diff`, so a prune would
+        // be a no-op — except on a diff whose absences aren't authoritative,
+        // where the service deliberately skipped it and this would delete
+        // still-live comments from the view while the store (and Apply gating)
+        // kept them. `state.diff` alone can't tell the two cases apart.
         crate::comment::reanchor_comments(&mut anns, &state.diff);
         // Keep the session-list pending-comment marker in sync without a disk
         // scan: we already have this session's full comment set in hand.
@@ -2209,22 +2239,40 @@ impl App {
         let backend = self.backend_arc(self.backend_of_session(state.session_id));
         match backend.apply_comments(state.session_id).await {
             Ok(ApplyOutcome::Nothing) => self.set_review_status("No staged comments to apply"),
-            Ok(ApplyOutcome::Blocked { drifted }) => self.set_review_status(&format!(
-                "{} drifted comment(s) block apply — review or delete them",
-                drifted.len()
-            )),
+            Ok(ApplyOutcome::Blocked { drifted }) => {
+                self.set_review_status(&state.drift_block_message(&drifted));
+            }
             Ok(ApplyOutcome::Applied { count, .. }) => {
                 self.reload_review_comments(state).await;
                 self.set_review_status(&format!("Sent {count} comment(s) to the agent"));
+                self.refresh_after_apply(state);
             }
             Ok(ApplyOutcome::Deferred { count, .. }) => {
                 self.reload_review_comments(state).await;
                 self.set_review_status(&format!(
                     "{count} comment(s) queued — agent busy or stopped"
                 ));
+                self.refresh_after_apply(state);
             }
             Err(e) => self.set_review_status(&format!("Apply failed: {e}")),
         }
+    }
+
+    /// Re-compose the review after a successful apply.
+    ///
+    /// Apply deliberately leaves comments whose file left the diff in the store
+    /// (it can't announce a deletion — see `apply_comments`), so this is what
+    /// reaches the one path that both drops them and says so. A file can only
+    /// have left the diff if the diff moved, so the hash differs and the refresh
+    /// really does produce a snapshot; when nothing moved it short-circuits to
+    /// `None` and, being non-manual, stays silent.
+    fn refresh_after_apply(&mut self, state: &DiffReviewState) {
+        self.spawn_review_refresh(
+            state.session_id,
+            state.title.clone(),
+            state.content_hash,
+            false,
+        );
     }
 
     /// Render the full-screen review view. Returns the clickable footer-button

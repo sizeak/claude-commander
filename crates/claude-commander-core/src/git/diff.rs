@@ -203,7 +203,13 @@ pub async fn compute_diff_for_path(path: &Path) -> Result<DiffInfo> {
         String::new()
     };
 
-    let (untracked_diff, untracked_count) = untracked_patch_and_count(path).await;
+    let UntrackedPatch {
+        patch: untracked_diff,
+        count: untracked_count,
+        // Stats/preview only: a missing untracked file understates the counts,
+        // which is not worth failing this call over (nothing is pruned here).
+        complete: _,
+    } = untracked_patch_and_count(path).await;
     if !untracked_diff.is_empty() {
         // Ensure a blank-line separator between the tracked and untracked diffs.
         if !diff.is_empty() && !diff.ends_with("\n\n") {
@@ -237,15 +243,40 @@ pub async fn compute_diff_for_path(path: &Path) -> Result<DiffInfo> {
 }
 
 /// Render untracked-file patches for the worktree at `path` as a single
-/// unified-diff string, alongside the count of untracked files.
+/// An untracked-file patch: the `/dev/null`→file diffs concatenated, the count
+/// of untracked files, and whether every one of them made it in.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct UntrackedPatch {
+    pub(crate) patch: String,
+    pub(crate) count: usize,
+    /// `false` when git couldn't be run or a per-file diff failed, so `patch` is
+    /// missing files that do exist. Callers that infer something from a file's
+    /// *absence* (the review diff prunes comments and reviewed marks that way)
+    /// must not trust an incomplete patch — see
+    /// [`ComposedDiff::absence_is_authoritative`](super::ComposedDiff::absence_is_authoritative).
+    pub(crate) complete: bool,
+}
+
+impl UntrackedPatch {
+    /// An empty-but-trustworthy patch: there genuinely are no untracked files.
+    fn none() -> Self {
+        Self {
+            complete: true,
+            ..Default::default()
+        }
+    }
+}
+
+/// Build the untracked-file half of a worktree's diff.
 ///
 /// Each untracked file is diffed against `/dev/null` via `git diff --no-index`
 /// (which exits 1 when files differ — expected), capped at
 /// [`UNTRACKED_DIFF_CONCURRENCY`] concurrent subprocesses to avoid EMFILE on
-/// noisy worktrees. Returns `(String::new(), 0)` when there are none or git
-/// cannot be run. Shared by [`compute_diff_for_path`] and the review-diff
-/// composition in [`super::review_diff`].
-pub(crate) async fn untracked_patch_and_count(path: &Path) -> (String, usize) {
+/// noisy worktrees. A git failure yields an empty patch flagged
+/// [`UntrackedPatch::complete`]`= false` rather than an error, so a stats/preview
+/// caller still gets the tracked half. Shared by [`compute_diff_for_path`] and
+/// the review-diff composition in [`super::review_diff`].
+pub(crate) async fn untracked_patch_and_count(path: &Path) -> UntrackedPatch {
     let ls = match Command::new("git")
         .current_dir(path)
         .args(["ls-files", "--others", "--exclude-standard"])
@@ -256,14 +287,16 @@ pub(crate) async fn untracked_patch_and_count(path: &Path) -> (String, usize) {
         .await
     {
         Ok(out) if out.status.success() => out,
-        _ => return (String::new(), 0),
+        // Can't even enumerate: report incompleteness, since untracked files
+        // may well exist and would look "absent" to a pruning caller.
+        _ => return UntrackedPatch::default(),
     };
 
     let stdout = String::from_utf8_lossy(&ls.stdout);
     let files: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
     let count = files.len();
     if count == 0 {
-        return (String::new(), 0);
+        return UntrackedPatch::none();
     }
 
     let mut diff_futures = Vec::with_capacity(count);
@@ -293,7 +326,15 @@ pub(crate) async fn untracked_patch_and_count(path: &Path) -> (String, usize) {
         .await;
 
     let mut patch = String::new();
-    for output in outputs.into_iter().flatten() {
+    // A spawn error means this file's patch is missing from an otherwise
+    // successful composition — exactly the shape that makes a still-present file
+    // look deleted, so track it rather than discarding it with the error.
+    let mut complete = true;
+    for output in outputs {
+        let Ok(output) = output else {
+            complete = false;
+            continue;
+        };
         let file_diff = String::from_utf8_lossy(&output.stdout);
         if file_diff.is_empty() {
             continue;
@@ -304,7 +345,11 @@ pub(crate) async fn untracked_patch_and_count(path: &Path) -> (String, usize) {
         patch.push_str(&file_diff);
     }
 
-    (patch, count)
+    UntrackedPatch {
+        patch,
+        count,
+        complete,
+    }
 }
 
 /// Parse git diff --stat output to extract statistics
