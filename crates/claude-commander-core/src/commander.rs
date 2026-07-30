@@ -13,8 +13,10 @@
 //! The CLI reference embedded in `CLAUDE.md` arrives as rendered markdown from
 //! the binary that owns the CLI (`claude-commander`'s `cli_args::cli_reference`).
 //! Only binaries define a CLI, so only binaries depend on clap — a third-party
-//! embedder of this library shouldn't have to, and core has no way to name a
-//! program it isn't.
+//! embedder of this library shouldn't have to. Note this applies to the
+//! *generated* half only: the handwritten preamble (`commander_prime.md`) does
+//! name the `claude-commander` CLI, deliberately, since driving it is the whole
+//! point of the commander session.
 
 use std::path::Path;
 
