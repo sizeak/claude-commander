@@ -77,15 +77,20 @@ pub struct FrontendInfo {
 impl FrontendInfo {
     /// Construct a frontend identity. **Panics** (like `expect`) if `name` or
     /// `version` is empty — the consuming application is required to identify
-    /// itself, e.g. `FrontendInfo::new("claude-commander", claude_commander_core::VERSION)`.
+    /// itself, e.g. `FrontendInfo::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))`.
+    ///
+    /// Pass the *frontend's* own package metadata, not
+    /// [`crate::VERSION`]: that constant is this library's
+    /// version, reported separately as `lib_version`, and a frontend that
+    /// forwards it here reports the wrong version for itself.
     pub fn new(name: impl Into<String>, version: impl Into<String>) -> Self {
         let name = name.into();
         let version = version.into();
         assert!(
             !name.trim().is_empty(),
             "telemetry: FrontendInfo name must not be empty — the embedding \
-             application must identify itself, e.g. \
-             FrontendInfo::new(\"claude-commander\", claude_commander_core::VERSION)"
+             application must identify itself with its own package metadata, \
+             e.g. FrontendInfo::new(env!(\"CARGO_PKG_NAME\"), env!(\"CARGO_PKG_VERSION\"))"
         );
         assert!(
             !version.trim().is_empty(),

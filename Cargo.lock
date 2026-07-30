@@ -800,7 +800,6 @@ dependencies = [
  "arboard",
  "async-trait",
  "chrono",
- "clap",
  "claude-commander-protocol",
  "color-eyre",
  "cpal",

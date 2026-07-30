@@ -469,8 +469,7 @@ impl App {
         let Some(be) = self.local_backend() else {
             return;
         };
-        let cmd = crate::cli_args::cli_command();
-        let result = be.ensure_commander(&self.config, &cmd).await;
+        let result = be.ensure_commander(&self.config, &self.cli_reference).await;
 
         match result {
             Ok(name) => {

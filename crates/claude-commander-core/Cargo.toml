@@ -28,8 +28,9 @@ claude-commander-protocol = { path = "../claude-commander-protocol" }
 tokio = { workspace = true }
 futures = "0.3"
 
-# CLI (derive macros - idiomatic Rust)
-clap = { version = "4.6", features = ["derive"] }
+# No clap: defining a CLI is a binary's job, so the clap tree and the CLI
+# reference generated from it live in `claude-commander` (and the server's own
+# `main.rs`). Embedders of this library don't inherit an argument parser.
 
 # TUI
 ratatui = "0.30"

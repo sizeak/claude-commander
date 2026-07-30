@@ -1,18 +1,22 @@
-//! Command-line argument definitions.
+//! Command-line argument definitions for this binary.
 //!
-//! These live in the library (rather than `main.rs`) so that library code —
-//! notably the commander module, which generates a CLI reference for the
-//! commander session's `CLAUDE.md` — can obtain the exact clap command tree
-//! via [`cli_command`]. The binary (`main.rs`) imports these and owns the
-//! dispatch `match`.
+//! These live in the binary crate because a clap derive takes its program name
+//! and version from the package it compiles in: defined here, `--version`
+//! reports `claude-commander <version>` with nothing hardcoded and nothing for
+//! a rename or a version bump to get wrong. (In the library they resolved to
+//! `claude-commander-core`, which also leaked into the generated commander CLI
+//! reference as unrunnable `claude-commander-core <sub>` invocations.)
+//!
+//! Rendering the CLI reference for the commander and conversation `CLAUDE.md`
+//! files lives here too, for the same reason: walking a clap tree means
+//! depending on clap, and only a binary has a CLI to describe. Core is handed
+//! the finished markdown ([`cli_reference`]) and stays clap-free, so embedders
+//! of the library don't inherit a CLI parser they have no use for.
 
 use clap::{CommandFactory, Parser, Subcommand};
 
-use crate::{APP_NAME, VERSION};
-
 #[derive(Parser)]
-#[command(name = APP_NAME)]
-#[command(version = VERSION)]
+#[command(version)]
 #[command(about = "A high-performance terminal UI for managing Claude coding sessions")]
 #[command(long_about = None)]
 pub struct Cli {
@@ -200,16 +204,113 @@ pub enum Commands {
     },
 }
 
-/// The clap command tree for the CLI. Single source of truth shared by the
-/// binary's argument parsing and any library code that needs to introspect
-/// the available subcommands (e.g. commander CLAUDE.md generation).
+/// The clap command tree for the CLI. Single source of truth for this binary's
+/// argument parsing and for the CLI reference generated from it.
 pub fn cli_command() -> clap::Command {
     Cli::command()
+}
+
+/// Markdown documenting this CLI, for the commander and conversation `CLAUDE.md`
+/// files. Regenerated from the live command tree on each write, so the docs an
+/// agent reads can never drift from the commands it can actually run.
+pub fn cli_reference() -> String {
+    generate_cli_reference(&cli_command())
+}
+
+/// Render a markdown CLI reference by walking a clap command tree and emitting
+/// each visible subcommand's long help verbatim, labelled with the tree's
+/// program name. Hidden subcommands (e.g. internal popup helpers) are skipped.
+///
+/// Split from [`cli_reference`] so the walk is testable against a synthetic tree
+/// with a known shape.
+fn generate_cli_reference(cmd: &clap::Command) -> String {
+    let bin = cmd.get_name().to_string();
+    let mut out = String::new();
+    for sub in cmd.get_subcommands() {
+        if sub.is_hide_set() {
+            continue;
+        }
+        out.push_str(&format!("### `{bin} {}`\n\n", sub.get_name()));
+        let help = sub.clone().render_long_help();
+        out.push_str("```\n");
+        out.push_str(help.to_string().trim_end());
+        out.push_str("\n```\n\n");
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn version_flag_reports_this_packages_name_and_version() {
+        // The string a user actually sees. Both halves come from *this*
+        // package's metadata, which only holds while the derive lives in the
+        // binary crate — from the library it read `claude-commander-core`.
+        let err = cli_command()
+            .try_get_matches_from(["claude-commander", "--version"])
+            .expect_err("--version short-circuits parsing");
+        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+        assert_eq!(
+            err.to_string().trim(),
+            format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
+        );
+        // Pin the literal too: `CARGO_PKG_NAME` alone would still match if this
+        // package were renamed, and `claude-commander` is the installed
+        // command name that docs, the Homebrew formula, and the AUR package use.
+        assert_eq!(
+            err.to_string().trim(),
+            format!("claude-commander {}", crate::VERSION)
+        );
+    }
+
+    #[test]
+    fn cli_reference_documents_runnable_invocations() {
+        // The commander session reads this reference as instructions, so a wrong
+        // program name is a documented command that doesn't exist — the second,
+        // quieter symptom of the library-side derive.
+        let reference = cli_reference();
+        assert!(
+            reference.contains("claude-commander list"),
+            "reference must document runnable invocations; got:\n{reference}"
+        );
+        assert!(
+            !reference.contains("claude-commander-core"),
+            "the library crate name must never reach the commander's CLI reference"
+        );
+    }
+
+    /// A miniature clap command tree mirroring the shape of the real CLI:
+    /// a couple of visible subcommands (one with args) plus a hidden one.
+    fn sample_cli() -> clap::Command {
+        clap::Command::new("sample-bin")
+            .subcommand(clap::Command::new("list").about("List all sessions"))
+            .subcommand(
+                clap::Command::new("new")
+                    .about("Create a new session")
+                    .arg(clap::Arg::new("name").help("Session name")),
+            )
+            .subcommand(clap::Command::new("pick-session").hide(true))
+    }
+
+    #[test]
+    fn cli_reference_includes_visible_subcommands() {
+        let reference = generate_cli_reference(&sample_cli());
+        assert!(reference.contains("sample-bin list"));
+        assert!(reference.contains("List all sessions"));
+        assert!(reference.contains("sample-bin new"));
+        assert!(reference.contains("Create a new session"));
+    }
+
+    #[test]
+    fn cli_reference_skips_hidden_subcommands() {
+        let reference = generate_cli_reference(&sample_cli());
+        assert!(
+            !reference.contains("pick-session"),
+            "hidden subcommands must not leak into the CLI reference"
+        );
+    }
 
     #[test]
     fn cli_command_exposes_known_subcommands() {

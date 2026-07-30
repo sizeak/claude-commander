@@ -24,7 +24,6 @@ pub mod agent;
 pub mod api;
 pub mod backend;
 pub mod cli;
-pub mod cli_args;
 pub mod commander;
 pub mod comment;
 pub mod config;
@@ -48,8 +47,8 @@ pub use session::{
 };
 pub use tmux::{AttachResult, attach_to_session};
 
-/// Application version
+/// This library's version, i.e. the `claude-commander-core` crate's. Reported
+/// as telemetry's `lib_version` and compared against a remote server's build.
+/// It is *not* the frontend's version — a frontend (the TUI binary, the mobile
+/// client) reports its own; see [`telemetry::FrontendInfo`].
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// Application name
-pub const APP_NAME: &str = env!("CARGO_PKG_NAME");

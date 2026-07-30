@@ -1665,6 +1665,11 @@ pub struct App {
     /// core never links the remote client crate. Held past construction so the
     /// config hot-reload path can build backends for servers added at runtime.
     remote_factory: RemoteBackendFactory,
+    /// Markdown documenting the CLI, rendered by the binary that defines it and
+    /// injected here — core has no CLI of its own to describe, and no way to
+    /// name the program it's embedded in. Embedded in the commander and
+    /// conversation `CLAUDE.md` files so both document real invocations.
+    cli_reference: String,
     /// Monotonic allocator for remote [`BackendId`]s. Ids are stable for a
     /// backend's lifetime and never reused, so an aborted feed task's in-flight
     /// message can't land on a freshly-added backend that happened to reuse its
@@ -1728,12 +1733,15 @@ pub struct App {
 
 impl App {
     /// Create a new application. `frontend` identifies this binary for
-    /// telemetry and is forwarded to [`CommanderService::new`].
+    /// telemetry and is forwarded to [`CommanderService::new`]; `cli_reference`
+    /// is markdown documenting the binary's own CLI, handed to the commander and
+    /// conversation sessions.
     pub fn new(
         config_store: Arc<ConfigStore>,
         store: Arc<StateStore>,
         frontend: crate::telemetry::FrontendInfo,
         remote_factory: RemoteBackendFactory,
+        cli_reference: String,
     ) -> Self {
         let config = config_store.read().clone();
         // Build the TUI prefs store from the same data dir as the state file
@@ -1779,6 +1787,7 @@ impl App {
             service,
             backends,
             remote_factory,
+            cli_reference,
             next_remote_backend_id,
             program_commit: ProgramCommitQueue::default(),
             tui_prefs,

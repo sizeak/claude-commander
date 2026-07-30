@@ -10,20 +10,26 @@ use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use claude_commander_core::{
-    VERSION,
-    cli_args::{Cli, Commands, cli_command},
     config::{AppState, Config, ConfigStore, StateStore},
     tmux::{AttachResult, attach_to_session},
     tui::App,
 };
 
+use crate::cli_args::{Cli, Commands, cli_reference};
+
+mod cli_args;
+
+/// This binary's name and version. Everything user-facing (`--version`, the
+/// startup log line, the telemetry frontend) comes from this package's
+/// metadata, never from `claude_commander_core::VERSION`, which is the
+/// library's.
+const NAME: &str = env!("CARGO_PKG_NAME");
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// Identify this binary to the telemetry layer. Required by
 /// `CommanderService`/`App` — they panic if a frontend isn't supplied.
 fn frontend() -> claude_commander_core::telemetry::FrontendInfo {
-    claude_commander_core::telemetry::FrontendInfo::new(
-        env!("CARGO_PKG_NAME"),
-        env!("CARGO_PKG_VERSION"),
-    )
+    claude_commander_core::telemetry::FrontendInfo::new(NAME, VERSION)
 }
 
 /// The remote-backend factory injected into the TUI. Keeps core free of a
@@ -263,7 +269,13 @@ async fn main() -> Result<()> {
             let config_store = std::sync::Arc::new(ConfigStore::new(config.clone())?);
             let app_state = AppState::load_or_exit();
             let store = std::sync::Arc::new(StateStore::new(app_state)?);
-            let mut app = App::new(config_store, store, frontend(), remote_backend_factory());
+            let mut app = App::new(
+                config_store,
+                store,
+                frontend(),
+                remote_backend_factory(),
+                cli_reference(),
+            );
             app.run().await?;
         }
 
@@ -591,8 +603,9 @@ async fn main() -> Result<()> {
             // enable gate lives in `ensure_session`, so the disabled case
             // surfaces as a typed error rather than an inline check here.
             let tmux = claude_commander_core::tmux::TmuxExecutor::new();
-            let cmd = cli_command();
-            match claude_commander_core::commander::ensure_session(&config, &tmux, &cmd).await {
+            match claude_commander_core::commander::ensure_session(&config, &tmux, &cli_reference())
+                .await
+            {
                 Ok(name) => {
                     let triggers = claude_commander_core::editor_trigger_bytes(&config.keybindings);
                     // Best-effort revive hook for the Ctrl+Space switcher: the
@@ -678,5 +691,15 @@ mod tests {
         // drift back to the core crate's name (claude-commander-core).
         assert_eq!(frontend.name, "claude-commander");
         assert_eq!(frontend.version, env!("CARGO_PKG_VERSION"));
+    }
+
+    #[test]
+    fn cli_and_telemetry_report_one_identity() {
+        // The CLI tree, the telemetry frontend, and the startup log line all
+        // describe the same program, so they must agree — and on this package,
+        // not on the library crate behind it.
+        assert_eq!(cli_args::cli_command().get_name(), NAME);
+        assert_eq!(frontend().name, NAME);
+        assert_ne!(NAME, "claude-commander-core");
     }
 }
