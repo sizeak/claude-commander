@@ -1315,10 +1315,10 @@ async fn test_commander_session_lifecycle() {
     };
 
     let dir = TempDir::new().unwrap();
-    // Stands in for the tree the binary injects — the real `Cli` lives in the
-    // `claude-commander` crate, out of reach here. This test is about the tmux
-    // session lifecycle; the reference's content is covered by unit tests.
-    let cmd = clap::Command::new("claude-commander").subcommand(clap::Command::new("list"));
+    // Stands in for the markdown the binary renders from its clap tree (out of
+    // reach here). This test covers the tmux session lifecycle; the reference's
+    // content is covered by unit tests in the binary crate.
+    let cli_reference = "### `claude-commander list`\n";
     let live_config = Config {
         commander_enabled: true,
         commander_dir: Some(dir.path().to_path_buf()),
@@ -1328,7 +1328,7 @@ async fn test_commander_session_lifecycle() {
     };
 
     // --- Create + priming files ---
-    let name = commander::ensure_session(&live_config, &tmux, &cmd)
+    let name = commander::ensure_session(&live_config, &tmux, cli_reference)
         .await
         .unwrap();
     assert_eq!(name, COMMANDER_TMUX_NAME);
@@ -1337,7 +1337,7 @@ async fn test_commander_session_lifecycle() {
     assert!(commander::is_running(&tmux).await, "live session runs");
 
     // --- Idempotent reuse: second call must not error or double-create ---
-    commander::ensure_session(&live_config, &tmux, &cmd)
+    commander::ensure_session(&live_config, &tmux, cli_reference)
         .await
         .unwrap();
     assert!(
@@ -1354,7 +1354,7 @@ async fn test_commander_session_lifecycle() {
         commander_program: Some("true".to_string()),
         ..live_config.clone()
     };
-    commander::ensure_session(&dead_config, &tmux, &cmd)
+    commander::ensure_session(&dead_config, &tmux, cli_reference)
         .await
         .unwrap();
 
@@ -1377,7 +1377,7 @@ async fn test_commander_session_lifecycle() {
     );
 
     // ensure_session must KILL the corpse and recreate a live session.
-    commander::ensure_session(&live_config, &tmux, &cmd)
+    commander::ensure_session(&live_config, &tmux, cli_reference)
         .await
         .unwrap();
     assert!(

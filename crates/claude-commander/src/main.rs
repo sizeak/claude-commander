@@ -15,7 +15,7 @@ use claude_commander_core::{
     tui::App,
 };
 
-use crate::cli_args::{Cli, Commands, cli_command};
+use crate::cli_args::{Cli, Commands, cli_reference};
 
 mod cli_args;
 
@@ -274,7 +274,7 @@ async fn main() -> Result<()> {
                 store,
                 frontend(),
                 remote_backend_factory(),
-                cli_command(),
+                cli_reference(),
             );
             app.run().await?;
         }
@@ -603,8 +603,9 @@ async fn main() -> Result<()> {
             // enable gate lives in `ensure_session`, so the disabled case
             // surfaces as a typed error rather than an inline check here.
             let tmux = claude_commander_core::tmux::TmuxExecutor::new();
-            let cmd = cli_command();
-            match claude_commander_core::commander::ensure_session(&config, &tmux, &cmd).await {
+            match claude_commander_core::commander::ensure_session(&config, &tmux, &cli_reference())
+                .await
+            {
                 Ok(name) => {
                     let triggers = claude_commander_core::editor_trigger_bytes(&config.keybindings);
                     // Best-effort revive hook for the Ctrl+Space switcher: the
@@ -697,7 +698,7 @@ mod tests {
         // The CLI tree, the telemetry frontend, and the startup log line all
         // describe the same program, so they must agree — and on this package,
         // not on the library crate behind it.
-        assert_eq!(cli_command().get_name(), NAME);
+        assert_eq!(cli_args::cli_command().get_name(), NAME);
         assert_eq!(frontend().name, NAME);
         assert_ne!(NAME, "claude-commander-core");
     }

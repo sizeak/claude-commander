@@ -469,7 +469,7 @@ impl App {
         let Some(be) = self.local_backend() else {
             return;
         };
-        let result = be.ensure_commander(&self.config, &self.cli_command).await;
+        let result = be.ensure_commander(&self.config, &self.cli_reference).await;
 
         match result {
             Ok(name) => {

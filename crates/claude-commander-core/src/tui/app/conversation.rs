@@ -326,7 +326,7 @@ async fn spawn_session_runtime(
     session: &Arc<tokio::sync::Mutex<Option<ConversationSession>>>,
     view: &Arc<Mutex<ConversationView>>,
     speaker_handle: &SpeakerHandle,
-    cli_command: &clap::Command,
+    cli_reference: &str,
 ) {
     if session.lock().await.is_some() {
         return;
@@ -347,11 +347,7 @@ async fn spawn_session_runtime(
     // assistant and how to inspect live session/project state. Rewritten on
     // each (re)spawn so the embedded CLI reference stays current.
     let prime = CONVERSATION_PRIME.replace("{name}", &conv.name);
-    let claude_md = format!(
-        "{}\n{}",
-        prime.trim_end(),
-        crate::commander::generate_cli_reference(cli_command)
-    );
+    let claude_md = format!("{}\n{}", prime.trim_end(), cli_reference);
     if let Err(e) = tokio::fs::write(dir.join("CLAUDE.md"), claude_md).await {
         warn!(target: "conversation", "failed to write CLAUDE.md: {e}");
     }
@@ -465,7 +461,7 @@ impl App {
             &self.conversation.session,
             &self.conversation.view,
             &self.conversation.speaker,
-            &self.cli_command,
+            &self.cli_reference,
         )
         .await;
     }
@@ -533,8 +529,8 @@ impl App {
         let view = self.conversation.view.clone();
         let conv = self.config.conversation.clone();
         // The lazy-heal path below writes the conversation's CLAUDE.md, so this
-        // off-loop task needs its own copy of the injected CLI tree.
-        let cli_command = self.cli_command.clone();
+        // off-loop task needs its own copy of the injected CLI reference.
+        let cli_reference = self.cli_reference.clone();
         tokio::spawn(async move {
             while let Some(text) = rx_text.recv().await {
                 let text = text.trim().to_string();
@@ -552,7 +548,7 @@ impl App {
                         &session,
                         &view,
                         &speaker,
-                        &cli_command,
+                        &cli_reference,
                     )
                     .await;
                     submit_to_session(&session, &view, &speaker, text).await;
