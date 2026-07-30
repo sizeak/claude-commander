@@ -1,18 +1,22 @@
-//! Command-line argument definitions.
+//! Command-line argument definitions for this binary.
 //!
-//! These live in the library (rather than `main.rs`) so that library code —
-//! notably the commander module, which generates a CLI reference for the
-//! commander session's `CLAUDE.md` — can obtain the exact clap command tree
-//! via [`cli_command`]. The binary (`main.rs`) imports these and owns the
-//! dispatch `match`.
+//! These live in the binary crate because a clap derive takes its program name
+//! and version from the package it compiles in: defined here, `--version`
+//! reports `claude-commander <version>` with nothing hardcoded and nothing for
+//! a rename or a version bump to get wrong. (In the library they resolved to
+//! `claude-commander-core`, which also leaked into the generated commander CLI
+//! reference as unrunnable `claude-commander-core <sub>` invocations.)
+//!
+//! Library code that needs the command tree — `commander`, which generates the
+//! CLI reference for the commander and conversation `CLAUDE.md` files — receives
+//! it as a parameter: [`cli_command`] is handed to `App::new` and to
+//! `commander::ensure_session`. So core documents *this* CLI without having to
+//! assert an identity it cannot know.
 
-use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
-
-use crate::{APP_NAME, VERSION};
+use clap::{CommandFactory, Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = APP_NAME)]
-#[command(version = VERSION)]
+#[command(version)]
 #[command(about = "A high-performance terminal UI for managing Claude coding sessions")]
 #[command(long_about = None)]
 pub struct Cli {
@@ -200,39 +204,12 @@ pub enum Commands {
     },
 }
 
-/// The clap command tree for the CLI. Single source of truth shared by the
-/// binary's argument parsing and any library code that needs to introspect
-/// the available subcommands (e.g. commander CLAUDE.md generation).
+/// The clap command tree for the CLI. Single source of truth shared by this
+/// binary's argument parsing and by the library code that introspects the
+/// available subcommands (commander/conversation `CLAUDE.md` generation), which
+/// is handed the result rather than building its own.
 pub fn cli_command() -> clap::Command {
     Cli::command()
-}
-
-/// The command tree with `version` stamped on, for `--version`.
-///
-/// The derive can only bake in a version known when *this* crate compiles —
-/// i.e. the library's. The binary's version is the one users care about, so the
-/// binary passes its own `CARGO_PKG_VERSION` here and the two can never drift
-/// even if the workspace stops sharing a single version.
-pub fn cli_command_with_version(version: &'static str) -> clap::Command {
-    cli_command().version(version)
-}
-
-/// Parse the process arguments into a [`Cli`], reporting `version` for
-/// `--version`. Errors (including `--help`/`--version`) are printed and exit
-/// the process, matching `Parser::parse`.
-pub fn parse_cli(version: &'static str) -> Cli {
-    parse_cli_from(std::env::args_os(), version).unwrap_or_else(|e| e.exit())
-}
-
-/// [`parse_cli`] over an explicit argument list, so the version plumbing is
-/// testable without spawning the binary.
-pub fn parse_cli_from<I, T>(args: I, version: &'static str) -> clap::error::Result<Cli>
-where
-    I: IntoIterator<Item = T>,
-    T: Into<std::ffi::OsString> + Clone,
-{
-    let matches = cli_command_with_version(version).try_get_matches_from(args)?;
-    Cli::from_arg_matches(&matches)
 }
 
 #[cfg(test)]
@@ -240,32 +217,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn cli_command_uses_the_binary_program_name() {
-        // The program name shows up in `--help`/`--version` and, via
-        // `commander::generate_cli_reference`, in every documented invocation
-        // the commander session reads. It must be the binary's name, never the
-        // library crate's (`claude-commander-core`).
-        assert_eq!(cli_command().get_name(), "claude-commander");
-    }
-
-    #[test]
-    fn version_flag_reports_the_callers_version() {
-        // End-to-end on the string a user sees: `claude-commander --version`
-        // must print the binary's name and the version the binary injects, not
-        // whatever the library crate happens to be at.
-        let err = cli_command_with_version("9.9.9")
+    fn version_flag_reports_this_packages_name_and_version() {
+        // The string a user actually sees. Both halves come from *this*
+        // package's metadata, which only holds while the derive lives in the
+        // binary crate — from the library it read `claude-commander-core`.
+        let err = cli_command()
             .try_get_matches_from(["claude-commander", "--version"])
             .expect_err("--version short-circuits parsing");
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
-        assert_eq!(err.to_string().trim(), "claude-commander 9.9.9");
+        assert_eq!(
+            err.to_string().trim(),
+            format!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"))
+        );
+        // Pin the literal too: `CARGO_PKG_NAME` alone would still match if this
+        // package were renamed, and `claude-commander` is the installed
+        // command name that docs, the Homebrew formula, and the AUR package use.
+        assert_eq!(
+            err.to_string().trim(),
+            format!("claude-commander {}", crate::VERSION)
+        );
     }
 
     #[test]
-    fn parse_cli_from_stamps_the_version_onto_the_parsed_tree() {
-        let cli = parse_cli_from(["claude-commander", "--debug"], "9.9.9")
-            .expect("`--debug` with no subcommand parses");
-        assert!(cli.debug);
-        assert!(cli.command.is_none());
+    fn cli_reference_documents_runnable_invocations() {
+        // `generate_cli_reference` labels each subcommand with the tree's
+        // program name, and the commander session reads the result as
+        // instructions. A wrong name here is a documented command that doesn't
+        // exist — the original symptom of the library-side derive.
+        let reference = claude_commander_core::commander::generate_cli_reference(&cli_command());
+        assert!(
+            reference.contains("claude-commander list"),
+            "reference must document runnable invocations; got:\n{reference}"
+        );
+        assert!(
+            !reference.contains("claude-commander-core"),
+            "the library crate name must never reach the commander's CLI reference"
+        );
     }
 
     #[test]

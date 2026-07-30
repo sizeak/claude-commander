@@ -214,20 +214,18 @@ mod tests {
     }
 
     #[test]
-    fn cli_reference_from_the_real_tree_uses_the_binary_name() {
-        // `sample_cli()` hardcodes the right name, so it can't catch the
-        // program name drifting to the library crate's. This reference is what
-        // the commander session reads to learn how to drive the CLI, so a
-        // `claude-commander-core list` in here is an unrunnable command.
-        let reference = generate_cli_reference(&crate::cli_args::cli_command());
+    fn cli_reference_names_the_program_the_caller_passed() {
+        // The program name must come from the injected tree — core can't know
+        // it, and any identity it supplied itself would be the library crate's
+        // (the original `claude-commander-core list` bug). The binary asserts
+        // the real name against its own package metadata; core's job is only to
+        // never substitute one.
+        let reference = generate_cli_reference(&sample_cli().name("some-other-binary"));
         assert!(
-            reference.contains("claude-commander list"),
-            "reference must document the real binary name; got:\n{reference}"
+            reference.contains("some-other-binary list"),
+            "reference must label subcommands with the caller's program name; got:\n{reference}"
         );
-        assert!(
-            !reference.contains("claude-commander-core"),
-            "the library crate name must never reach the commander's CLI reference"
-        );
+        assert!(!reference.contains("claude-commander"));
     }
 
     #[test]

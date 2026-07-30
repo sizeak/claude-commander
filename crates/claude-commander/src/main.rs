@@ -4,20 +4,25 @@
 
 use std::io::{IsTerminal, Write};
 
+use clap::Parser;
 use color_eyre::eyre::Result;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use claude_commander_core::{
-    cli_args::{Commands, cli_command, parse_cli},
     config::{AppState, Config, ConfigStore, StateStore},
     tmux::{AttachResult, attach_to_session},
     tui::App,
 };
 
+use crate::cli_args::{Cli, Commands, cli_command};
+
+mod cli_args;
+
 /// This binary's name and version. Everything user-facing (`--version`, the
-/// startup log line, the telemetry frontend) comes from here rather than from
-/// `claude_commander_core::{APP_NAME, VERSION}`, which describe the library.
+/// startup log line, the telemetry frontend) comes from this package's
+/// metadata, never from `claude_commander_core::VERSION`, which is the
+/// library's.
 const NAME: &str = env!("CARGO_PKG_NAME");
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -243,7 +248,7 @@ async fn main() -> Result<()> {
     // toward the hard cap before anything else runs.
     raise_fd_limit();
 
-    let cli = parse_cli(VERSION);
+    let cli = Cli::parse();
 
     // Load configuration
     let config = Config::load().unwrap_or_else(|e| {
@@ -264,7 +269,13 @@ async fn main() -> Result<()> {
             let config_store = std::sync::Arc::new(ConfigStore::new(config.clone())?);
             let app_state = AppState::load_or_exit();
             let store = std::sync::Arc::new(StateStore::new(app_state)?);
-            let mut app = App::new(config_store, store, frontend(), remote_backend_factory());
+            let mut app = App::new(
+                config_store,
+                store,
+                frontend(),
+                remote_backend_factory(),
+                cli_command(),
+            );
             app.run().await?;
         }
 
@@ -682,11 +693,12 @@ mod tests {
     }
 
     #[test]
-    fn cli_program_name_matches_this_binary() {
-        // `APP_NAME` is a literal in the library (an `env!` there would expand
-        // to `claude-commander-core`), so nothing in core can notice if this
-        // package is renamed. This is the check that would catch it.
-        assert_eq!(claude_commander_core::APP_NAME, NAME);
+    fn cli_and_telemetry_report_one_identity() {
+        // The CLI tree, the telemetry frontend, and the startup log line all
+        // describe the same program, so they must agree — and on this package,
+        // not on the library crate behind it.
         assert_eq!(cli_command().get_name(), NAME);
+        assert_eq!(frontend().name, NAME);
+        assert_ne!(NAME, "claude-commander-core");
     }
 }

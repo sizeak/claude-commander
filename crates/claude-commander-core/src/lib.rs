@@ -24,7 +24,6 @@ pub mod agent;
 pub mod api;
 pub mod backend;
 pub mod cli;
-pub mod cli_args;
 pub mod commander;
 pub mod comment;
 pub mod config;
@@ -53,9 +52,3 @@ pub use tmux::{AttachResult, attach_to_session};
 /// It is *not* the frontend's version — a frontend (the TUI binary, the mobile
 /// client) reports its own; see [`telemetry::FrontendInfo`].
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// The name of the CLI program these arg definitions describe. A literal, not
-/// `env!("CARGO_PKG_NAME")`: this module compiles inside the library crate, so
-/// the macro would expand to `claude-commander-core` and leak that into
-/// `--version`, `--help`, and the generated commander CLI reference.
-pub const APP_NAME: &str = "claude-commander";

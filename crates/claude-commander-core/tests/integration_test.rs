@@ -9,7 +9,6 @@ use std::sync::Arc;
 use tempfile::TempDir;
 
 use claude_commander_core::SessionStatus;
-use claude_commander_core::cli_args::cli_command;
 use claude_commander_core::commander::{self, COMMANDER_TMUX_NAME};
 use claude_commander_core::config::{AppState, Config, ConfigStore, StateStore};
 use claude_commander_core::git::GitBackend;
@@ -1316,7 +1315,10 @@ async fn test_commander_session_lifecycle() {
     };
 
     let dir = TempDir::new().unwrap();
-    let cmd = cli_command();
+    // Stands in for the tree the binary injects — the real `Cli` lives in the
+    // `claude-commander` crate, out of reach here. This test is about the tmux
+    // session lifecycle; the reference's content is covered by unit tests.
+    let cmd = clap::Command::new("claude-commander").subcommand(clap::Command::new("list"));
     let live_config = Config {
         commander_enabled: true,
         commander_dir: Some(dir.path().to_path_buf()),

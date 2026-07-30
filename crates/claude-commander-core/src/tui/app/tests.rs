@@ -849,6 +849,13 @@ fn make_test_app() -> App {
     make_test_app_with_path().0
 }
 
+/// Stand-in for the CLI tree the binary injects into `App::new`. The real one is
+/// defined in the `claude-commander` crate (so clap derives the program name
+/// from its package); core only ever passes it through.
+fn test_cli_command() -> clap::Command {
+    clap::Command::new("claude-commander").subcommand(clap::Command::new("list"))
+}
+
 #[test]
 fn test_keybinding_rows_are_grouped_under_section_headers() {
     use crate::tui::app::SettingsRowKind;
@@ -2100,6 +2107,7 @@ fn make_test_app_with_path() -> (App, std::path::PathBuf) {
         store,
         crate::telemetry::FrontendInfo::new("test", "0.0.0"),
         crate::backend::no_remote_backends(),
+        test_cli_command(),
     );
     (app, config_path)
 }
@@ -3510,6 +3518,7 @@ fn build_app_with_mock_remotes(servers: Vec<(&str, WorkspaceSnapshot)>) -> App {
         store,
         crate::telemetry::FrontendInfo::new("test", "0.0.0"),
         factory,
+        test_cli_command(),
     )
 }
 
@@ -3793,6 +3802,7 @@ async fn factory_failure_yields_degraded_placeholder() {
         store,
         crate::telemetry::FrontendInfo::new("test", "0.0.0"),
         factory,
+        test_cli_command(),
     );
     // The broken server still occupies a handle, seeded Degraded with the reason.
     let handle = app
