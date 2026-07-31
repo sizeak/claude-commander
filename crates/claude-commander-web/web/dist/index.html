@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"
+    />
+    <meta name="color-scheme" content="dark light" />
+    <title>Claude Commander</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="apple-touch-icon" href="/favicon.svg" />
+    <link rel="stylesheet" href="/vendor/xterm.css" />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <aside id="sidebar">
+        <header id="sidebar-header">
+          <h1>Claude Commander</h1>
+          <div class="header-actions">
+            <button id="new-btn" title="New session">＋</button>
+            <button id="settings-btn" title="Settings">⚙</button>
+            <button id="refresh-btn" title="Refresh now">⟳</button>
+          </div>
+        </header>
+
+        <div class="section-label">
+          <span>Projects &amp; sessions</span>
+          <button id="add-project-btn" class="link-btn" title="Add or scan a project">＋ add</button>
+        </div>
+        <div id="tree"></div>
+
+        <footer id="sidebar-footer">
+          <span id="conn-status" class="conn unknown">connecting…</span>
+        </footer>
+      </aside>
+
+      <main id="main">
+        <header id="toolbar">
+          <button id="menu-btn" title="Show sessions" aria-label="Show sessions">☰</button>
+          <div id="session-title">Select a session</div>
+          <div id="toolbar-actions">
+            <button id="mic-btn" disabled title="Dictate (microphone)" aria-label="Dictate">🎤</button>
+            <button id="kbd-btn" disabled title="Show keyboard" aria-label="Show keyboard">⌨</button>
+            <button id="shell-btn" disabled title="Toggle shell pane (Ctrl+\)">Shell</button>
+            <button id="review-btn" disabled title="Review diff & comments">Review</button>
+            <button id="info-btn" disabled title="Toggle info panel">Info</button>
+            <button id="restart-btn" disabled title="Restart session">Restart</button>
+            <button id="kill-btn" disabled title="Kill session">Kill</button>
+            <button id="delete-btn" disabled title="Delete session" class="danger">Delete</button>
+          </div>
+        </header>
+        <div id="content-area">
+          <div id="terminal-wrap">
+            <div id="terminal"></div>
+            <div id="terminal-placeholder">
+              Pick a session on the left to view its terminal, or create a new one
+              with ＋. Keystrokes you type here are sent live to that session.
+            </div>
+          </div>
+          <aside id="info-panel" class="hidden">
+            <h2>Session info</h2>
+            <dl id="info-list"></dl>
+          </aside>
+        </div>
+        <!-- On-screen special keys (mobile keyboards lack Esc/Tab/arrows/Ctrl). -->
+        <div id="key-bar">
+          <button type="button" data-key="esc">Esc</button>
+          <button type="button" data-key="tab">Tab</button>
+          <button type="button" id="ctrl-key" data-key="ctrl">Ctrl</button>
+          <button type="button" data-key="up" aria-label="Up">↑</button>
+          <button type="button" data-key="down" aria-label="Down">↓</button>
+          <button type="button" data-key="left" aria-label="Left">←</button>
+          <button type="button" data-key="right" aria-label="Right">→</button>
+          <button type="button" data-key="enter" aria-label="Enter">⏎</button>
+        </div>
+      </main>
+    </div>
+    <div id="sidebar-backdrop" class="hidden"></div>
+
+    <!-- New session modal -->
+    <div id="new-modal" class="modal-overlay hidden">
+      <div class="modal">
+        <h2>New session</h2>
+        <form id="new-form">
+          <label>Project
+            <input id="new-project-name" type="text" readonly />
+          </label>
+          <input id="new-project" type="hidden" />
+          <label>Title
+            <input id="new-title" type="text" placeholder="fix-auth" required />
+          </label>
+          <label>Program
+            <input id="new-program" type="text" placeholder="(default)" />
+          </label>
+          <div class="row">
+            <label>Effort
+              <select id="new-effort"></select>
+            </label>
+            <label>Permission mode
+              <select id="new-mode"></select>
+            </label>
+          </div>
+          <label>Section
+            <select id="new-section"></select>
+          </label>
+          <label>Base branch
+            <input id="new-base" type="text" placeholder="(default: origin/main)" />
+          </label>
+          <label>Initial prompt
+            <textarea id="new-prompt" rows="3" placeholder="(optional)"></textarea>
+          </label>
+          <div class="modal-actions">
+            <button type="button" class="ghost" data-close="new-modal">Cancel</button>
+            <button type="submit" class="primary">Create</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Add project modal -->
+    <div id="project-modal" class="modal-overlay hidden">
+      <div class="modal">
+        <h2>Add project</h2>
+        <p class="hint">Register a single git repo by its path, or scan a directory for repos.</p>
+        <label>Path
+          <input id="project-path" type="text" placeholder="/Users/you/code/my-repo" />
+        </label>
+        <div class="modal-actions">
+          <button type="button" class="ghost" data-close="project-modal">Cancel</button>
+          <button type="button" id="scan-dir-btn">Scan directory</button>
+          <button type="button" id="add-path-btn" class="primary">Add repo</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Settings modal (only the server-patchable fields) -->
+    <div id="settings-modal" class="modal-overlay hidden">
+      <div class="modal">
+        <h2>Settings</h2>
+        <form id="settings-form">
+          <label>Branch prefix
+            <input id="set-branch-prefix" type="text" />
+          </label>
+          <label class="checkbox">
+            <input id="set-fetch-before-create" type="checkbox" /> Fetch before create
+          </label>
+          <label class="checkbox">
+            <input id="set-resume-session" type="checkbox" /> Resume session on restart
+          </label>
+          <label class="checkbox">
+            <input id="set-project-pull-enabled" type="checkbox" /> Auto-pull project main
+          </label>
+          <p class="hint">
+            Default program is set via the server's Programs list; editor and
+            worktrees dir are configured on the server host.
+          </p>
+          <div class="modal-actions">
+            <button type="button" class="ghost" data-close="settings-modal">Cancel</button>
+            <button type="submit" class="primary">Save</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Connect modal: shown in direct mode when the server needs a token -->
+    <div id="connect-modal" class="modal-overlay hidden">
+      <div class="modal">
+        <h2>Connect to server</h2>
+        <p class="hint">
+          This server requires a bearer token. Paste the token
+          <code>claude-commander-server</code> printed on startup.
+        </p>
+        <form id="connect-form">
+          <label>Bearer token
+            <input id="connect-token" type="password" autocomplete="off" required />
+          </label>
+          <small id="connect-error" class="conn error hidden"></small>
+          <div class="modal-actions">
+            <button type="submit" class="primary">Connect</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Full-screen review: diff + comments -->
+    <div id="review-view" class="hidden">
+      <header id="review-header">
+        <div id="review-title">Review</div>
+        <div class="review-actions">
+          <span id="review-status"></span>
+          <button id="review-refresh" title="Refresh diff">⟳</button>
+          <button id="review-apply" class="primary">Apply comments</button>
+          <button id="review-close" title="Close review">✕ Close</button>
+        </div>
+      </header>
+      <div id="review-body"></div>
+    </div>
+
+    <script src="/vendor/xterm.js"></script>
+    <script src="/vendor/addon-fit.js"></script>
+    <script src="/app.js"></script>
+  </body>
+</html>
