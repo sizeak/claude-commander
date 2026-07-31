@@ -207,6 +207,48 @@ impl CommanderService {
         self.config_store.mutate(|c| *c = config)
     }
 
+    /// Rename a configured section, migrating every session that refers to it
+    /// (by `current_section` or `section_override`) in the same operation.
+    ///
+    /// Renaming via a plain config write is *not* equivalent: sessions store
+    /// their section by name, so the config write alone strands them — see
+    /// [`crate::session::rename_section`]. Exposed as its own method so no
+    /// caller can perform half of the rename.
+    ///
+    /// Returns `false` (leaving everything untouched) when the rename is a
+    /// no-op or `new` isn't an available name (see
+    /// [`section_name_available`](crate::session::section_name_available)), or
+    /// when `old` isn't a configured section.
+    pub async fn rename_section(&self, old: &str, new: &str) -> Result<bool> {
+        let new = new.trim();
+        if new == old {
+            return Ok(false);
+        }
+        let renamed = self.config_store.mutate(|c| {
+            let Some(idx) = c.sections.iter().position(|s| s.name == old) else {
+                return false;
+            };
+            if !crate::session::section_name_available(new, &c.sections) {
+                return false;
+            }
+            c.sections[idx].name = new.to_string();
+            true
+        })?;
+        if !renamed {
+            return Ok(false);
+        }
+        self.telemetry.feature("section.rename");
+        let (old, new) = (old.to_string(), new.to_string());
+        self.store
+            .mutate(move |state| {
+                for session in state.sessions.values_mut() {
+                    crate::session::rename_section(session, &old, &new);
+                }
+            })
+            .await?;
+        Ok(true)
+    }
+
     /// Replace the configured program list (the new-session picker options) and
     /// persist it. Exposed as its own method — and, for remotes, its own HTTP
     /// endpoint — so the picker list can be edited without opening up the general
@@ -3926,6 +3968,90 @@ mod tests {
             let s = state.get_session(&sid).unwrap();
             assert!(s.section_override.is_none());
         }
+    }
+
+    /// Config with a single predicate-less section, a valid manual-override target.
+    fn config_with_section(name: &str) -> Config {
+        Config {
+            sections: vec![crate::session::SectionConfig {
+                name: name.to_string(),
+                ..Default::default()
+            }],
+            ..Config::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn rename_section_carries_its_sessions_across() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service_with_config(&dir, config_with_section("Parking"));
+        let (_pid, sid) = seed_project_session(&svc).await;
+        svc.set_section(&sid, Some("Parking".to_string()))
+            .await
+            .unwrap();
+        let stamp = {
+            let state = svc.store().read().await;
+            state.get_session(&sid).unwrap().entered_section_at
+        };
+
+        assert!(svc.rename_section("Parking", "Waiting").await.unwrap());
+
+        assert_eq!(
+            svc.read_config()
+                .sections
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["Waiting".to_string()]
+        );
+        let state = svc.store().read().await;
+        let s = state.get_session(&sid).unwrap();
+        assert_eq!(s.current_section.as_deref(), Some("Waiting"));
+        assert_eq!(s.section_override.as_deref(), Some("Waiting"));
+        assert_eq!(s.entered_section_at, stamp, "a relabel is not a move");
+    }
+
+    #[tokio::test]
+    async fn rename_section_rejects_blank_unknown_duplicate_and_reserved_names() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let mut config = config_with_section("Parking");
+        config.sections.push(crate::session::SectionConfig {
+            name: "Drafts".to_string(),
+            ..Default::default()
+        });
+        let svc = service_with_config(&dir, config);
+        let (_pid, sid) = seed_project_session(&svc).await;
+        svc.set_section(&sid, Some("Parking".to_string()))
+            .await
+            .unwrap();
+
+        for (old, new) in [
+            ("Parking", "   "),
+            ("Parking", "Parking"),
+            ("Parking", "Drafts"),
+            ("Parking", crate::session::IN_PROGRESS),
+            ("Nonexistent", "Waiting"),
+        ] {
+            assert!(
+                !svc.rename_section(old, new).await.unwrap(),
+                "{old:?} → {new:?} should be refused"
+            );
+        }
+
+        // Config and the session's placement are both untouched.
+        assert_eq!(
+            svc.read_config()
+                .sections
+                .iter()
+                .map(|s| s.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["Parking".to_string(), "Drafts".to_string()]
+        );
+        let state = svc.store().read().await;
+        assert_eq!(
+            state.get_session(&sid).unwrap().current_section.as_deref(),
+            Some("Parking")
+        );
     }
 
     #[tokio::test]

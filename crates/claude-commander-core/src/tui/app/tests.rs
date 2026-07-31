@@ -2265,6 +2265,202 @@ async fn programs_tab_reorder_up_with_k() {
     );
 }
 
+/// Open the settings modal on the Sections tab, with `sections` configured
+/// through the store (not just the `app.config` mirror) and one session pinned
+/// into the first of them. Returns the session's id.
+async fn app_on_sections_tab_with_pinned_session(
+    app: &mut App,
+    sections: Vec<crate::session::SectionConfig>,
+) -> SessionId {
+    use crate::session::{Project, WorktreeSession};
+    use std::path::PathBuf;
+
+    let mut config = app.service.read_config();
+    let first = sections[0].name.clone();
+    config.sections = sections;
+    app.service.update_config(config).unwrap();
+    app.config = app.service.read_config();
+    app.ui_state.view_mode = ViewMode::SectionGrouped;
+
+    let project = Project::new("proj", PathBuf::from("/tmp/proj"), "main");
+    let session = WorktreeSession::new(
+        project.id,
+        "one",
+        "br-one",
+        PathBuf::from("/tmp/w1"),
+        "claude",
+    );
+    let sid = session.id;
+    app.service
+        .store()
+        .mutate(move |state| {
+            state.add_project(project);
+            state.add_session(session);
+        })
+        .await
+        .unwrap();
+    app.service.set_section(&sid, Some(first)).await.unwrap();
+    app.sync_local_view_from_store_for_test().await;
+    app.refresh_list_items().await;
+
+    // No dedicated opener for the Sections tab; reach it as a user would.
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
+    feed_programs_key(app, crossterm::event::KeyCode::BackTab).await;
+    sid
+}
+
+/// Drive the Sections tab's rename flow: `r`, clear the pre-filled name, type
+/// `new`, Enter.
+async fn rename_selected_section(app: &mut App, old_len: usize, new: &str) {
+    use crossterm::event::KeyCode;
+
+    feed_programs_key(app, KeyCode::Char('r')).await;
+    for _ in 0..old_len {
+        feed_programs_key(app, KeyCode::Backspace).await;
+    }
+    type_programs(app, new).await;
+    feed_programs_key(app, KeyCode::Enter).await;
+}
+
+#[tokio::test]
+async fn renaming_a_section_keeps_its_sessions_under_the_new_header() {
+    let mut app = make_test_app();
+    let sid = app_on_sections_tab_with_pinned_session(
+        &mut app,
+        vec![crate::session::SectionConfig {
+            name: "Beta".to_string(),
+            ..Default::default()
+        }],
+    )
+    .await;
+
+    rename_selected_section(&mut app, "Beta".len(), "Waiting").await;
+
+    assert_eq!(app.config.sections[0].name, "Waiting", "config mirror");
+    {
+        let state = app.service.store().read().await;
+        let s = state.get_session(&sid).unwrap();
+        assert_eq!(s.current_section.as_deref(), Some("Waiting"));
+        assert_eq!(s.section_override.as_deref(), Some("Waiting"));
+    }
+
+    // The session renders under the renamed header, not back in In Progress.
+    let header_at = |name: &str| {
+        app.ui_state.list_items.iter().position(|i| {
+            matches!(i, SessionListItem::SectionHeader { name: n, count, .. }
+                if n == name && *count == 1)
+        })
+    };
+    let waiting = header_at("Waiting").unwrap_or_else(|| {
+        panic!(
+            "expected a 'Waiting' header holding the session, got {:?}",
+            app.ui_state.list_items
+        )
+    });
+    let session_row = app
+        .ui_state
+        .list_items
+        .iter()
+        .position(|i| matches!(i, SessionListItem::Worktree { id, .. } if *id == sid))
+        .expect("the session should still have a row");
+    assert!(session_row > waiting, "session sits under its section");
+    assert!(
+        header_at(crate::session::IN_PROGRESS).is_none(),
+        "In Progress should hold no sessions"
+    );
+}
+
+#[tokio::test]
+async fn renaming_a_collapsed_section_keeps_it_collapsed() {
+    let mut app = make_test_app();
+    app_on_sections_tab_with_pinned_session(
+        &mut app,
+        vec![crate::session::SectionConfig {
+            name: "Beta".to_string(),
+            ..Default::default()
+        }],
+    )
+    .await;
+    app.ui_state.collapsed_sections.insert("Beta".to_string());
+
+    rename_selected_section(&mut app, "Beta".len(), "Waiting").await;
+
+    assert!(!app.ui_state.collapsed_sections.contains("Beta"));
+    assert!(
+        app.ui_state.collapsed_sections.contains("Waiting"),
+        "collapse state follows the rename"
+    );
+}
+
+#[tokio::test]
+async fn renaming_a_section_to_a_duplicate_changes_nothing() {
+    let mut app = make_test_app();
+    let sid = app_on_sections_tab_with_pinned_session(
+        &mut app,
+        vec![
+            crate::session::SectionConfig {
+                name: "Beta".to_string(),
+                ..Default::default()
+            },
+            crate::session::SectionConfig {
+                name: "Gamma".to_string(),
+                ..Default::default()
+            },
+        ],
+    )
+    .await;
+
+    rename_selected_section(&mut app, "Beta".len(), "Gamma").await;
+
+    assert_eq!(
+        app.config
+            .sections
+            .iter()
+            .map(|s| s.name.clone())
+            .collect::<Vec<_>>(),
+        vec!["Beta".to_string(), "Gamma".to_string()]
+    );
+    let state = app.service.store().read().await;
+    assert_eq!(
+        state.get_session(&sid).unwrap().current_section.as_deref(),
+        Some("Beta")
+    );
+}
+
+#[tokio::test]
+async fn creating_a_section_refuses_the_reserved_catchall_name() {
+    use crossterm::event::KeyCode;
+
+    let mut app = make_test_app();
+    app.open_settings_on_programs(crate::backend::LOCAL_BACKEND_ID);
+    feed_programs_key(&mut app, KeyCode::BackTab).await; // Sections tab
+
+    // A section spelled like the catch-all would render as a second header of
+    // the same name, and `assign_section` intercepts the literal before it ever
+    // consults the config — so a session moved there lands in the catch-all,
+    // override-locked. Creating it must be refused, as renaming to it is.
+    feed_programs_key(&mut app, KeyCode::Char('n')).await;
+    type_programs(&mut app, crate::session::IN_PROGRESS).await;
+    feed_programs_key(&mut app, KeyCode::Enter).await;
+
+    assert!(
+        app.config.sections.is_empty(),
+        "got {:?}",
+        app.config
+            .sections
+            .iter()
+            .map(|s| s.name.clone())
+            .collect::<Vec<_>>()
+    );
+
+    // A normal name still goes through.
+    feed_programs_key(&mut app, KeyCode::Char('n')).await;
+    type_programs(&mut app, "Waiting").await;
+    feed_programs_key(&mut app, KeyCode::Enter).await;
+    assert_eq!(app.config.sections.len(), 1);
+    assert_eq!(app.config.sections[0].name, "Waiting");
+}
+
 #[tokio::test]
 async fn open_settings_on_programs_targets_local_and_loads_entries() {
     use crate::tui::app::{Modal, SettingsTab};

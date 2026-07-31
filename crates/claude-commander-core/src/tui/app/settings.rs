@@ -1660,21 +1660,16 @@ impl App {
                 SectionsEditing::RenamingSection { value } => match key.code {
                     KeyCode::Enter => {
                         let new_name = value.value().trim().to_string();
-                        if !new_name.is_empty() && sec.selected_section < self.config.sections.len()
-                        {
-                            let has_dup = self
-                                .config
-                                .sections
-                                .iter()
-                                .enumerate()
-                                .any(|(i, s)| i != sec.selected_section && s.name == new_name);
-                            if !has_dup {
-                                self.config.sections[sec.selected_section].name = new_name;
-                                self.save_sections_config().await;
-                            }
-                        }
+                        let old_name = self
+                            .config
+                            .sections
+                            .get(sec.selected_section)
+                            .map(|s| s.name.clone());
                         sec.editing = None;
                         self.ui_state.modal = Modal::Settings(state);
+                        if let Some(old_name) = old_name {
+                            self.rename_section(&old_name, &new_name).await;
+                        }
                     }
                     KeyCode::Esc => {
                         sec.editing = None;
@@ -1712,16 +1707,14 @@ impl App {
                 SectionsEditing::CreatingSection { value } => match key.code {
                     KeyCode::Enter => {
                         let new_name = value.value().trim().to_string();
-                        if !new_name.is_empty() {
-                            let has_dup = self.config.sections.iter().any(|s| s.name == new_name);
-                            if !has_dup {
-                                self.config.sections.push(crate::session::SectionConfig {
-                                    name: new_name,
-                                    ..Default::default()
-                                });
-                                sec.selected_section = self.config.sections.len() - 1;
-                                self.save_sections_config().await;
-                            }
+                        if crate::session::section_name_available(&new_name, &self.config.sections)
+                        {
+                            self.config.sections.push(crate::session::SectionConfig {
+                                name: new_name,
+                                ..Default::default()
+                            });
+                            sec.selected_section = self.config.sections.len() - 1;
+                            self.save_sections_config().await;
                         }
                         sec.editing = None;
                         self.ui_state.modal = Modal::Settings(state);
@@ -1905,6 +1898,33 @@ impl App {
                     },
                 }
             }
+        }
+    }
+
+    /// Rename a section, keeping its sessions in it.
+    ///
+    /// The rename is a single service operation rather than a config edit
+    /// followed by a save, because sessions store their section by name and
+    /// both halves must move together (see
+    /// [`CommanderService::rename_section`](crate::api::CommanderService::rename_section)).
+    /// The service is the authority on whether the new name is acceptable, so
+    /// the local config mirror is re-read from it rather than assumed.
+    async fn rename_section(&mut self, old: &str, new: &str) {
+        match self.service.rename_section(old, new).await {
+            Ok(true) => {
+                self.config = self.service.read_config();
+                // Collapse state is keyed by name too, so a collapsed section
+                // would silently re-expand under its new name.
+                if self.ui_state.collapsed_sections.remove(old) {
+                    self.ui_state
+                        .collapsed_sections
+                        .insert(new.trim().to_string());
+                }
+                self.refresh_local_view().await;
+                self.refresh_list_items().await;
+            }
+            Ok(false) => {}
+            Err(e) => warn!("Failed to rename section: {}", e),
         }
     }
 
