@@ -42,8 +42,12 @@ fn classify_help_key(key: &crossterm::event::KeyEvent, kb: &crate::config::KeyBi
     match kb.resolve(key) {
         Some(BindableAction::ScrollUp) => HelpKey::ScrollBy(-1),
         Some(BindableAction::ScrollDown) => HelpKey::ScrollBy(1),
-        Some(BindableAction::PageUp) => HelpKey::ScrollBy(-(HELP_PAGE as i16)),
-        Some(BindableAction::PageDown) => HelpKey::ScrollBy(HELP_PAGE as i16),
+        Some(BindableAction::PageUp | BindableAction::ListPageUp) => {
+            HelpKey::ScrollBy(-(HELP_PAGE as i16))
+        }
+        Some(BindableAction::PageDown | BindableAction::ListPageDown) => {
+            HelpKey::ScrollBy(HELP_PAGE as i16)
+        }
         _ => HelpKey::Ignore,
     }
 }
@@ -1282,6 +1286,12 @@ impl App {
             }
             UserCommand::PreviousGroup => {
                 self.ui_state.list_state.previous_group();
+            }
+            UserCommand::ListPageUp | UserCommand::ListPageDown => {
+                let rows = super::selection::list_page_rows(self.ui_state.main_list_height);
+                self.ui_state
+                    .list_state
+                    .page(rows, matches!(cmd, UserCommand::ListPageDown));
             }
             UserCommand::NavigateFirst => {
                 self.ui_state.list_state.select_first();

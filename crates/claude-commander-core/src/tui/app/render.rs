@@ -220,8 +220,10 @@ impl App {
         }
         frame.render_stateful_widget(tree_list, area, &mut main_state);
         // Persist the (possibly ratatui-adjusted) scroll offset for the next
-        // frame and for mouse hit-testing.
+        // frame and for mouse hit-testing, plus the visible row count that
+        // sizes a page jump.
         self.ui_state.main_list_offset = main_state.offset();
+        self.ui_state.main_list_height = area.height;
     }
 
     /// Build a styled tab title line for the pane header.

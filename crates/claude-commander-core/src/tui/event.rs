@@ -368,10 +368,14 @@ pub enum UserCommand {
     ScrollUp,
     /// Scroll preview down
     ScrollDown,
-    /// Page up in preview
+    /// Page up in the right pane (preview / info / shell)
     PageUp,
-    /// Page down in preview
+    /// Page down in the right pane (preview / info / shell)
     PageDown,
+    /// Move the session-list cursor up a screenful
+    ListPageUp,
+    /// Move the session-list cursor down a screenful
+    ListPageDown,
     /// Open quick-switch session search modal
     QuickSwitch,
     /// Generate AI summary for the current session (Info pane only)
@@ -453,6 +457,8 @@ impl UserCommand {
             | UserCommand::ScrollDown
             | UserCommand::PageUp
             | UserCommand::PageDown
+            | UserCommand::ListPageUp
+            | UserCommand::ListPageDown
             | UserCommand::ShrinkLeftPane
             | UserCommand::GrowLeftPane
             | UserCommand::Confirm
@@ -498,6 +504,8 @@ impl From<BindableAction> for UserCommand {
             BindableAction::PreviousGroup => Self::PreviousGroup,
             BindableAction::NavigateFirst => Self::NavigateFirst,
             BindableAction::NavigateLast => Self::NavigateLast,
+            BindableAction::ListPageUp => Self::ListPageUp,
+            BindableAction::ListPageDown => Self::ListPageDown,
             BindableAction::Select => Self::Select,
             BindableAction::SelectShell => Self::SelectShell,
             BindableAction::NewSession => Self::NewSession,
@@ -1003,16 +1011,18 @@ mod tests {
             Some(UserCommand::PageDown)
         ));
 
+        // PgUp/PgDn page the session list; the right pane is paged with
+        // Ctrl-u/Ctrl-d above.
         let pgup = KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE);
         assert!(matches!(
             UserCommand::from_key(pgup, &b),
-            Some(UserCommand::PageUp)
+            Some(UserCommand::ListPageUp)
         ));
 
         let pgdown = KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE);
         assert!(matches!(
             UserCommand::from_key(pgdown, &b),
-            Some(UserCommand::PageDown)
+            Some(UserCommand::ListPageDown)
         ));
     }
 

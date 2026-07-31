@@ -1656,6 +1656,55 @@ fn edit_text_input_inserts_at_cursor_and_reports_change() {
 }
 
 // ---------------------------------------------------------------------------
+// Session-list paging (PgUp/PgDn)
+// ---------------------------------------------------------------------------
+
+/// Build an app whose session list is one project plus `sessions` worktrees,
+/// rendered once at 100x40 so the list's viewport height is recorded.
+fn app_with_rendered_list(sessions: usize) -> App {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    let mut items = vec![make_project()];
+    items.extend(std::iter::repeat_with(make_worktree).take(sessions));
+    app.ui_state.list_state.set_item_count(items.len());
+    app.ui_state.list_items = items;
+    app.ui_state.list_state.select(Some(0));
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    app
+}
+
+#[tokio::test]
+async fn list_page_down_moves_cursor_a_screenful() {
+    let mut app = app_with_rendered_list(200);
+    let page = app.ui_state.main_list_height.saturating_sub(1) as usize;
+    assert!(page > 1, "render must record the list viewport height");
+
+    app.handle_command(UserCommand::ListPageDown).await;
+    assert_eq!(app.ui_state.list_state.selected(), Some(page));
+
+    app.handle_command(UserCommand::ListPageUp).await;
+    assert_eq!(app.ui_state.list_state.selected(), Some(0));
+}
+
+#[tokio::test]
+async fn list_page_down_stops_at_the_last_row() {
+    // Fewer rows than a page: the jump clamps to the end instead of wrapping
+    // back to the top the way `NavigateDown` does.
+    let mut app = app_with_rendered_list(3);
+    let last = app.ui_state.list_items.len() - 1;
+
+    app.handle_command(UserCommand::ListPageDown).await;
+    assert_eq!(app.ui_state.list_state.selected(), Some(last));
+
+    app.handle_command(UserCommand::ListPageDown).await;
+    assert_eq!(app.ui_state.list_state.selected(), Some(last));
+}
+
+// ---------------------------------------------------------------------------
 // View-switch clearing happens in render(), not via terminal.clear()
 // ---------------------------------------------------------------------------
 

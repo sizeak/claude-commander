@@ -545,6 +545,84 @@ fn test_navigation_skips_unselectable_rows() {
 }
 
 #[test]
+fn test_page_moves_by_requested_rows() {
+    let mut state = TreeListState::new();
+    state.set_item_count(20);
+    state.select(Some(2));
+
+    state.page(9, true);
+    assert_eq!(state.selected(), Some(11));
+
+    state.page(9, false);
+    assert_eq!(state.selected(), Some(2));
+}
+
+#[test]
+fn test_page_clamps_at_ends_instead_of_wrapping() {
+    let mut state = TreeListState::new();
+    state.set_item_count(10);
+    state.select(Some(7));
+
+    // Past the end lands on the last row, not back at the top.
+    state.page(9, true);
+    assert_eq!(state.selected(), Some(9));
+    state.page(9, true);
+    assert_eq!(state.selected(), Some(9));
+
+    state.page(9, false);
+    assert_eq!(state.selected(), Some(0));
+    state.page(9, false);
+    assert_eq!(state.selected(), Some(0));
+}
+
+#[test]
+fn test_page_skips_unselectable_landing_row() {
+    let mut state = TreeListState::new();
+    // A page down of 2 from row 0 lands on the header at index 2; take the
+    // next selectable row in the direction of travel.
+    state.set_selectable(vec![true, true, false, true, true]);
+    state.select(Some(0));
+    state.page(2, true);
+    assert_eq!(state.selected(), Some(3));
+
+    // Paging back up onto the same header prefers the row above it.
+    state.page(1, false);
+    assert_eq!(state.selected(), Some(1));
+}
+
+#[test]
+fn test_page_falls_back_when_direction_has_no_selectable_row() {
+    let mut state = TreeListState::new();
+    // Trailing rows are headers/spacers: a page down clamped into them falls
+    // back to the closest selectable row above.
+    state.set_selectable(vec![true, true, false, false]);
+    state.select(Some(0));
+    state.page(3, true);
+    assert_eq!(state.selected(), Some(1));
+}
+
+#[test]
+fn test_page_no_ops_on_empty_or_unselectable_list() {
+    let mut state = TreeListState::new();
+    state.page(5, true);
+    assert_eq!(state.selected(), None);
+
+    state.set_selectable(vec![false, false]);
+    state.page(5, true);
+    assert_eq!(state.selected(), None);
+}
+
+#[test]
+fn test_page_with_zero_rows_moves_one_row() {
+    // Guards the pre-first-render case where no viewport height is known yet.
+    let mut state = TreeListState::new();
+    state.set_item_count(5);
+    state.select(Some(1));
+    state.page(0, true);
+    assert_eq!(state.selected(), Some(2));
+}
+
+#[test]
 fn test_select_nearest_lands_on_row_that_slid_up() {
     // Deleting the row at index 2 shifts the list down to 4 rows; selecting
     // the old index 2 lands on whatever moved into that slot (the next
