@@ -15,5 +15,6 @@ pub use manager::*;
 pub use section::{
     IN_PROGRESS, RenderedSection, SectionAssignment, SectionConfig, apply_assignment,
     assign_section, build_sections, clear_override_and_reassign, place_created_session,
+    rename_section, section_name_available,
 };
 pub use types::*;
