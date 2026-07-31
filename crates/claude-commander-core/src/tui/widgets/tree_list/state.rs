@@ -92,6 +92,29 @@ impl TreeListState {
         }
     }
 
+    /// Move the selection by `rows` rows in one jump, clamping at the ends of
+    /// the list instead of wrapping like [`next`](Self::next) /
+    /// [`previous`](Self::previous) — a page jump that teleported to the far
+    /// end of the list would be disorienting (the same reasoning that keeps
+    /// `list_nav::wheel_step` clamping). A `rows` of 0 moves one row.
+    ///
+    /// Lands on the nearest selectable row at or past the target in the
+    /// direction of travel, falling back to the closest one behind it, so
+    /// header and divider rows are skipped.
+    pub fn page(&mut self, rows: usize, down: bool) {
+        if !self.any_selectable() {
+            return;
+        }
+        let rows = rows.max(1);
+        let current = self.list_state.selected().unwrap_or(0);
+        let target = if down {
+            (current + rows).min(self.item_count - 1)
+        } else {
+            current.saturating_sub(rows)
+        };
+        self.select_nearest_toward(target, down);
+    }
+
     /// Select the next group header (project/section row), wrapping past
     /// the end. No-op when no selectable group start exists.
     pub fn next_group(&mut self) {
@@ -162,10 +185,27 @@ impl TreeListState {
             self.list_state.select(None);
             return;
         }
+        self.select_nearest_toward(idx, true);
+    }
+
+    /// Select the nearest selectable row to `idx`, searching in the direction
+    /// given by `forward` first and falling back to the opposite one.
+    fn select_nearest_toward(&mut self, idx: usize, forward: bool) {
         let count = self.item_count;
-        if let Some(i) = (idx..count).find(|&i| self.is_selectable(i)) {
-            self.list_state.select(Some(i));
-        } else if let Some(i) = (0..count.min(idx)).rev().find(|&i| self.is_selectable(i)) {
+        if count == 0 {
+            return;
+        }
+        let found = if forward {
+            (idx..count)
+                .find(|&i| self.is_selectable(i))
+                .or_else(|| (0..count.min(idx)).rev().find(|&i| self.is_selectable(i)))
+        } else {
+            (0..=idx.min(count - 1))
+                .rev()
+                .find(|&i| self.is_selectable(i))
+                .or_else(|| (idx + 1..count).find(|&i| self.is_selectable(i)))
+        };
+        if let Some(i) = found {
             self.list_state.select(Some(i));
         }
     }

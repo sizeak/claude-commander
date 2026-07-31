@@ -280,6 +280,14 @@ pub(super) fn worktree_list_index(
         .position(|item| matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id))
 }
 
+/// How many rows a page jump moves the session-list cursor, given the visible
+/// row count of the scrolling list: one screenful less a row of overlap, so the
+/// row you were on stays visible at the edge of the new view. Never zero —
+/// before the first render has recorded a height it degrades to a single row.
+pub(super) fn list_page_rows(main_list_height: u16) -> usize {
+    main_list_height.saturating_sub(1).max(1) as usize
+}
+
 /// Pure mapping from absolute mouse coordinates to a list item index.
 ///
 /// Mirrors the layout in `App::render` (see `render.rs`): the content area
@@ -436,6 +444,14 @@ mod tests {
             worktree_count: 1,
             nested: true,
         }
+    }
+
+    #[test]
+    fn list_page_rows_keeps_one_row_of_overlap() {
+        assert_eq!(list_page_rows(20), 19);
+        // A one-row list still moves, and so does a height not yet recorded.
+        assert_eq!(list_page_rows(1), 1);
+        assert_eq!(list_page_rows(0), 1);
     }
 
     #[test]

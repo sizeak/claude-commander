@@ -29,6 +29,8 @@ pub enum BindableAction {
     PreviousGroup,
     NavigateFirst,
     NavigateLast,
+    ListPageUp,
+    ListPageDown,
     Select,
     SelectShell,
     NewSession,
@@ -86,6 +88,8 @@ impl BindableAction {
         Self::PreviousGroup,
         Self::NavigateFirst,
         Self::NavigateLast,
+        Self::ListPageUp,
+        Self::ListPageDown,
         // Sessions
         Self::Select,
         Self::SelectShell,
@@ -150,6 +154,8 @@ impl BindableAction {
             Self::PreviousGroup => "previous_group",
             Self::NavigateFirst => "navigate_first",
             Self::NavigateLast => "navigate_last",
+            Self::ListPageUp => "list_page_up",
+            Self::ListPageDown => "list_page_down",
             Self::Select => "select",
             Self::SelectShell => "select_shell",
             Self::NewSession => "new_session",
@@ -205,6 +211,8 @@ impl BindableAction {
             Self::PreviousGroup => "Jump to previous project/section",
             Self::NavigateFirst => "Jump to first item",
             Self::NavigateLast => "Jump to last item",
+            Self::ListPageUp => "Move up a screenful in the list",
+            Self::ListPageDown => "Move down a screenful in the list",
             Self::Select => "Attach to selected session",
             Self::SelectShell => "Open shell in worktree",
             Self::NewSession => "New worktree session",
@@ -238,8 +246,8 @@ impl BindableAction {
             Self::Quit => "Quit",
             Self::ScrollUp => "Scroll up",
             Self::ScrollDown => "Scroll down",
-            Self::PageUp => "Page up",
-            Self::PageDown => "Page down",
+            Self::PageUp => "Page up in the right pane",
+            Self::PageDown => "Page down in the right pane",
             Self::GenerateSummary => "Generate AI summary",
             Self::ScanDirectory => "Scan directory for repos",
             Self::MoveToSection => "Move session to section…",
@@ -266,6 +274,8 @@ impl BindableAction {
             Self::PreviousGroup => "prev group",
             Self::NavigateFirst => "first",
             Self::NavigateLast => "last",
+            Self::ListPageUp => "list page up",
+            Self::ListPageDown => "list page down",
             Self::Select => "attach",
             Self::SelectShell => "shell",
             Self::NewSession => "new session",
@@ -323,7 +333,9 @@ impl BindableAction {
             | Self::NextGroup
             | Self::PreviousGroup
             | Self::NavigateFirst
-            | Self::NavigateLast => "Navigation",
+            | Self::NavigateLast
+            | Self::ListPageUp
+            | Self::ListPageDown => "Navigation",
             Self::Select
             | Self::SelectShell
             | Self::NewSession
@@ -374,6 +386,8 @@ impl FromStr for BindableAction {
             "previous_group" => Ok(Self::PreviousGroup),
             "navigate_first" => Ok(Self::NavigateFirst),
             "navigate_last" => Ok(Self::NavigateLast),
+            "list_page_up" => Ok(Self::ListPageUp),
+            "list_page_down" => Ok(Self::ListPageDown),
             "select" => Ok(Self::Select),
             "select_shell" => Ok(Self::SelectShell),
             "new_session" => Ok(Self::NewSession),
@@ -698,6 +712,13 @@ impl Default for KeyBindings {
         );
         bindings.insert(BindableAction::NavigateFirst, vec![kb(KeyCode::Home, none)]);
         bindings.insert(BindableAction::NavigateLast, vec![kb(KeyCode::End, none)]);
+        // PgUp/PgDn page the session list; the right pane has its own paging
+        // under `PageUp`/`PageDown` (Ctrl-u/Ctrl-d) further down.
+        bindings.insert(BindableAction::ListPageUp, vec![kb(KeyCode::PageUp, none)]);
+        bindings.insert(
+            BindableAction::ListPageDown,
+            vec![kb(KeyCode::PageDown, none)],
+        );
         bindings.insert(BindableAction::Select, vec![kb(KeyCode::Enter, none)]);
 
         // Session management
@@ -786,14 +807,8 @@ impl Default for KeyBindings {
         // Scrolling
         bindings.insert(BindableAction::ScrollUp, vec![]);
         bindings.insert(BindableAction::ScrollDown, vec![]);
-        bindings.insert(
-            BindableAction::PageUp,
-            vec![kb(KeyCode::Char('u'), ctrl), kb(KeyCode::PageUp, none)],
-        );
-        bindings.insert(
-            BindableAction::PageDown,
-            vec![kb(KeyCode::Char('d'), ctrl), kb(KeyCode::PageDown, none)],
-        );
+        bindings.insert(BindableAction::PageUp, vec![kb(KeyCode::Char('u'), ctrl)]);
+        bindings.insert(BindableAction::PageDown, vec![kb(KeyCode::Char('d'), ctrl)]);
 
         bindings.insert(
             BindableAction::ScanDirectory,

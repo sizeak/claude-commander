@@ -134,6 +134,7 @@ The status bar surfaces the most useful actions for the focused pane as clickabl
 |-----|--------|
 | `j/k` or `↑/↓` or `Ctrl-n/p` | Navigate session list |
 | `]` / `[` | Jump to next / previous project or section header |
+| `PageUp` / `PageDown` | Move the session list up / down a screenful (stops at the ends rather than wrapping) |
 | `Home` / `End` | Jump to first / last item |
 | `Space` | Quick-switch palette (sessions and commands) |
 | `Ctrl-Space` | Quick-switch palette (same shortcut as the in-session switcher) |
@@ -163,7 +164,7 @@ The status bar surfaces the most useful actions for the focused pane as clickabl
 | palette only | Change program (agent) — pick a different program (e.g. `claude`, `codex`, `opencode`) for the selected session and relaunch it with a fresh conversation |
 | `Tab` / `Shift-Tab` | Switch between panes (forward / reverse) |
 | `<` / `>` | Shrink / grow left pane |
-| `Ctrl-u/d` or `PageUp/Down` | Page up/down in preview |
+| `Ctrl-u/d` | Page up/down in the right pane (preview / info / shell) |
 | `1`–`99` | Jump to session by number |
 | `g` | Generate AI summary (Info pane only) |
 | `,` | Open settings |

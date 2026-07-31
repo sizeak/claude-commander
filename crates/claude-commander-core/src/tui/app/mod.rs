@@ -1281,6 +1281,10 @@ pub struct AppUiState {
     /// area. Kept across frames so the main list remembers its scroll position
     /// while the recents panel stays pinned. ratatui updates it each render.
     pub main_list_offset: usize,
+    /// Visible row count of the main (scrolling) list, recorded each render.
+    /// The list body has no border, so one row is one item — this is the page
+    /// size for `ListPageUp`/`ListPageDown`.
+    pub main_list_height: u16,
     /// Preview content
     pub preview_content: String,
     /// Shell pane state
@@ -1428,6 +1432,7 @@ impl Default for AppUiState {
             list_items: Vec::new(),
             recents_len: 0,
             main_list_offset: 0,
+            main_list_height: 0,
             preview_content: String::new(),
             diff_info: Arc::new(DiffInfo::empty()),
             status_message: None, // (message, expiry)
