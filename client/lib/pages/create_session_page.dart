@@ -19,8 +19,9 @@ import 'projects_page.dart';
 /// dropdown replaces the old free-text field; section is optional). If
 /// create-options can't be loaded, the program falls back to a free-text field so
 /// creation still works. `section` isn't a create-session parameter, so a chosen
-/// section is applied with `setSection` right after the session is created. Pops
-/// with the new session id on success.
+/// section is applied with `setSection` right after the session is created. On
+/// success it refreshes the store (so the list behind it already holds the new
+/// session) and pops with the new session id.
 class CreateSessionPage extends StatefulWidget {
   final CommanderStore store;
   const CreateSessionPage({super.key, required this.store});
@@ -137,6 +138,16 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
         }
       }
     }
+    // Step 3: refetch the snapshot before popping, so the list the user lands
+    // back on already contains the session. It otherwise only re-reads state
+    // when the server's change feed ticks — up to a poll interval later — and a
+    // create that in fact succeeded looks lost. Refreshing here rather than
+    // after the pop keeps the spinner up for the refetch (honest: the work
+    // isn't done until the list can show it) and leaves no window where the
+    // page is gone but the list hasn't caught up. `refresh` never throws: a
+    // failure lands in the store's error state, and the change feed still
+    // converges.
+    await widget.store.refresh();
     if (!mounted) return;
     Navigator.of(context).pop(id);
   }

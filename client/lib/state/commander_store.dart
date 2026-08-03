@@ -368,7 +368,13 @@ class CommanderStore extends ChangeNotifier {
       if (!_disposed) notifyListeners();
       if (_refreshQueued && !_disposed) {
         _refreshQueued = false;
-        await _refresh();
+        // Fire-and-forget: the coalesced follow-up must not extend THIS call's
+        // await. Awaiting it chains a fresh refresh onto every tick that landed
+        // mid-fetch, so on a server whose state keeps moving (the poller bumps
+        // its generation every couple of seconds) the chain re-arms faster than
+        // it unwinds and the awaited refresh never returns — stranding
+        // `connect()`/`reconnect()` and any UI spinner waiting on them.
+        unawaited(_refresh());
       }
     }
   }
