@@ -551,12 +551,19 @@ impl DiffReviewState {
             return out;
         };
         let display = file.display_path();
+        let staged = || {
+            self.comments
+                .iter()
+                .filter(|a| a.status != CommentStatus::Applied && a.file == display)
+        };
+        // The overwhelmingly common case, and this runs on every keypress:
+        // anchoring needs the file's whole line list, which is not worth
+        // building to conclude there is nothing to anchor.
+        if self.comment.is_none() && staged().next().is_none() {
+            return out;
+        }
         let lines = self.selectable_lines();
-        for ann in self
-            .comments
-            .iter()
-            .filter(|a| a.status != CommentStatus::Applied && a.file == display)
-        {
+        for ann in staged() {
             if let Some(idx) = self.comment_anchor_index(ann, &lines) {
                 out.push((SelIdx::new(idx), comment_attach_key(ann.id)));
             }
