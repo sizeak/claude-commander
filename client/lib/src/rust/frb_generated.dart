@@ -3,6 +3,7 @@
 
 // ignore_for_file: unused_import, unused_element, unnecessary_import, duplicate_ignore, invalid_use_of_internal_member, annotate_overrides, non_constant_identifier_names, curly_braces_in_flow_control_structures, prefer_const_literals_to_create_immutables, unused_field
 
+import 'api/diff.dart';
 import 'api/mirrors.dart';
 import 'api/registry.dart';
 import 'api/review.dart';
@@ -71,7 +72,7 @@ class RustLib extends BaseEntrypoint<RustLibApi, RustLibApiImpl, RustLibWire> {
   String get codegenVersion => '2.11.1';
 
   @override
-  int get rustContentHash => 1217423493;
+  int get rustContentHash => -2073992048;
 
   static const kDefaultExternalLibraryLoaderConfig =
       ExternalLibraryLoaderConfig(
@@ -164,6 +165,15 @@ abstract class RustLibApi extends BaseApi {
   Future<void> crateApiSimpleDeleteSession({
     required String handle,
     required String id,
+  });
+
+  Future<DiffLayoutDto> crateApiDiffDiffRows({
+    String? raw,
+    required ReviewFileDto fallback,
+    required DiffLayoutMode mode,
+    String? fileText,
+    required List<DiffExpansion> expansions,
+    required int tabWidth,
   });
 
   Future<void> crateApiRegistryDisconnectServer({required String handle});
@@ -933,6 +943,48 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
       );
 
   @override
+  Future<DiffLayoutDto> crateApiDiffDiffRows({
+    String? raw,
+    required ReviewFileDto fallback,
+    required DiffLayoutMode mode,
+    String? fileText,
+    required List<DiffExpansion> expansions,
+    required int tabWidth,
+  }) {
+    return handler.executeNormal(
+      NormalTask(
+        callFfi: (port_) {
+          final serializer = SseSerializer(generalizedFrbRustBinding);
+          sse_encode_opt_String(raw, serializer);
+          sse_encode_box_autoadd_review_file_dto(fallback, serializer);
+          sse_encode_diff_layout_mode(mode, serializer);
+          sse_encode_opt_String(fileText, serializer);
+          sse_encode_list_diff_expansion(expansions, serializer);
+          sse_encode_u_32(tabWidth, serializer);
+          pdeCallFfi(
+            generalizedFrbRustBinding,
+            serializer,
+            funcId: 17,
+            port: port_,
+          );
+        },
+        codec: SseCodec(
+          decodeSuccessData: sse_decode_diff_layout_dto,
+          decodeErrorData: sse_decode_AnyhowException,
+        ),
+        constMeta: kCrateApiDiffDiffRowsConstMeta,
+        argValues: [raw, fallback, mode, fileText, expansions, tabWidth],
+        apiImpl: this,
+      ),
+    );
+  }
+
+  TaskConstMeta get kCrateApiDiffDiffRowsConstMeta => const TaskConstMeta(
+    debugName: "diff_rows",
+    argNames: ["raw", "fallback", "mode", "fileText", "expansions", "tabWidth"],
+  );
+
+  @override
   Future<void> crateApiRegistryDisconnectServer({required String handle}) {
     return handler.executeNormal(
       NormalTask(
@@ -942,7 +994,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 17,
+            funcId: 18,
             port: port_,
           );
         },
@@ -978,7 +1030,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 18,
+            funcId: 19,
             port: port_,
           );
         },
@@ -1014,7 +1066,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 19,
+            funcId: 20,
             port: port_,
           );
         },
@@ -1045,7 +1097,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 20,
+            funcId: 21,
             port: port_,
           );
         },
@@ -1077,7 +1129,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 21,
+            funcId: 22,
             port: port_,
           );
         },
@@ -1106,7 +1158,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 22,
+            funcId: 23,
             port: port_,
           );
         },
@@ -1138,7 +1190,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 23,
+            funcId: 24,
             port: port_,
           );
         },
@@ -1174,7 +1226,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 24,
+            funcId: 25,
             port: port_,
           );
         },
@@ -1208,7 +1260,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 25,
+            funcId: 26,
             port: port_,
           );
         },
@@ -1242,7 +1294,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 26,
+            funcId: 27,
             port: port_,
           );
         },
@@ -1276,7 +1328,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 27,
+            funcId: 28,
             port: port_,
           );
         },
@@ -1308,7 +1360,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 28,
+            funcId: 29,
             port: port_,
           );
         },
@@ -1342,7 +1394,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 29,
+            funcId: 30,
             port: port_,
           );
         },
@@ -1374,7 +1426,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 30,
+            funcId: 31,
             port: port_,
           );
         },
@@ -1409,7 +1461,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 31,
+            funcId: 32,
             port: port_,
           );
         },
@@ -1444,7 +1496,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 32,
+            funcId: 33,
             port: port_,
           );
         },
@@ -1478,7 +1530,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 33,
+            funcId: 34,
             port: port_,
           );
         },
@@ -1513,7 +1565,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 34,
+            funcId: 35,
             port: port_,
           );
         },
@@ -1550,7 +1602,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 35,
+            funcId: 36,
             port: port_,
           );
         },
@@ -1581,7 +1633,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 36,
+            funcId: 37,
             port: port_,
           );
         },
@@ -1616,7 +1668,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 37,
+            funcId: 38,
             port: port_,
           );
         },
@@ -1651,7 +1703,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 38,
+            funcId: 39,
             port: port_,
           );
         },
@@ -1688,7 +1740,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 39,
+            funcId: 40,
             port: port_,
           );
         },
@@ -1723,7 +1775,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 40,
+            funcId: 41,
             port: port_,
           );
         },
@@ -1759,7 +1811,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 41,
+            funcId: 42,
             port: port_,
           );
         },
@@ -1789,7 +1841,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 42,
+            funcId: 43,
             port: port_,
           );
         },
@@ -1823,7 +1875,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 43,
+            funcId: 44,
             port: port_,
           );
         },
@@ -1858,7 +1910,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 44,
+            funcId: 45,
             port: port_,
           );
         },
@@ -1895,7 +1947,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 45,
+            funcId: 46,
             port: port_,
           );
         },
@@ -1930,7 +1982,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 46,
+            funcId: 47,
             port: port_,
           );
         },
@@ -1963,7 +2015,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
           pdeCallFfi(
             generalizedFrbRustBinding,
             serializer,
-            funcId: 47,
+            funcId: 48,
             port: port_,
           );
         },
@@ -2116,6 +2168,18 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ReviewFileDto dco_decode_box_autoadd_review_file_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_review_file_dto(raw);
+  }
+
+  @protected
+  ReviewLineOrigin dco_decode_box_autoadd_review_line_origin(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return dco_decode_review_line_origin(raw);
+  }
+
+  @protected
   ReviewSnapshotDto dco_decode_box_autoadd_review_snapshot_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return dco_decode_review_snapshot_dto(raw);
@@ -2202,6 +2266,103 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  DiffCellDto dco_decode_diff_cell_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 7)
+      throw Exception('unexpected arr length: expect 7 but see ${arr.length}');
+    return DiffCellDto(
+      present: dco_decode_bool(arr[0]),
+      origin: dco_decode_opt_box_autoadd_review_line_origin(arr[1]),
+      oldLineno: dco_decode_opt_box_autoadd_u_32(arr[2]),
+      newLineno: dco_decode_opt_box_autoadd_u_32(arr[3]),
+      sel: dco_decode_opt_box_autoadd_u_32(arr[4]),
+      spans: dco_decode_list_diff_span_dto(arr[5]),
+      text: dco_decode_String(arr[6]),
+    );
+  }
+
+  @protected
+  DiffExpandAction dco_decode_diff_expand_action(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return DiffExpandAction.values[raw as int];
+  }
+
+  @protected
+  DiffExpansion dco_decode_diff_expansion(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 2)
+      throw Exception('unexpected arr length: expect 2 but see ${arr.length}');
+    return DiffExpansion(
+      gap: dco_decode_u_32(arr[0]),
+      action: dco_decode_diff_expand_action(arr[1]),
+    );
+  }
+
+  @protected
+  DiffLayoutDto dco_decode_diff_layout_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return DiffLayoutDto(
+      rows: dco_decode_list_diff_row_dto(arr[0]),
+      selectable: dco_decode_u_32(arr[1]),
+      hasHiddenContext: dco_decode_bool(arr[2]),
+    );
+  }
+
+  @protected
+  DiffLayoutMode dco_decode_diff_layout_mode(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return DiffLayoutMode.values[raw as int];
+  }
+
+  @protected
+  DiffRole dco_decode_diff_role(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return DiffRole.values[raw as int];
+  }
+
+  @protected
+  DiffRowDto dco_decode_diff_row_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 8)
+      throw Exception('unexpected arr length: expect 8 but see ${arr.length}');
+    return DiffRowDto(
+      kind: dco_decode_diff_row_kind(arr[0]),
+      fullWidth: dco_decode_bool(arr[1]),
+      left: dco_decode_diff_cell_dto(arr[2]),
+      right: dco_decode_diff_cell_dto(arr[3]),
+      gap: dco_decode_opt_box_autoadd_u_32(arr[4]),
+      hidden: dco_decode_u_32(arr[5]),
+      canExpandUp: dco_decode_bool(arr[6]),
+      canExpandDown: dco_decode_bool(arr[7]),
+    );
+  }
+
+  @protected
+  DiffRowKind dco_decode_diff_row_kind(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return DiffRowKind.values[raw as int];
+  }
+
+  @protected
+  DiffSpanDto dco_decode_diff_span_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    final arr = raw as List<dynamic>;
+    if (arr.length != 3)
+      throw Exception('unexpected arr length: expect 3 but see ${arr.length}');
+    return DiffSpanDto(
+      text: dco_decode_String(arr[0]),
+      role: dco_decode_diff_role(arr[1]),
+      emphasis: dco_decode_bool(arr[2]),
+    );
+  }
+
+  @protected
   DiffStatDto dco_decode_diff_stat_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
@@ -2250,6 +2411,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   List<CommentDto> dco_decode_list_comment_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return (raw as List<dynamic>).map(dco_decode_comment_dto).toList();
+  }
+
+  @protected
+  List<DiffExpansion> dco_decode_list_diff_expansion(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_diff_expansion).toList();
+  }
+
+  @protected
+  List<DiffRowDto> dco_decode_list_diff_row_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_diff_row_dto).toList();
+  }
+
+  @protected
+  List<DiffSpanDto> dco_decode_list_diff_span_dto(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return (raw as List<dynamic>).map(dco_decode_diff_span_dto).toList();
   }
 
   @protected
@@ -2384,6 +2563,12 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ReviewDecision? dco_decode_opt_box_autoadd_review_decision(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     return raw == null ? null : dco_decode_box_autoadd_review_decision(raw);
+  }
+
+  @protected
+  ReviewLineOrigin? dco_decode_opt_box_autoadd_review_line_origin(dynamic raw) {
+    // Codec=Dco (DartCObject based), see doc to use other codecs
+    return raw == null ? null : dco_decode_box_autoadd_review_line_origin(raw);
   }
 
   @protected
@@ -2588,14 +2773,15 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   ReviewSnapshotDto dco_decode_review_snapshot_dto(dynamic raw) {
     // Codec=Dco (DartCObject based), see doc to use other codecs
     final arr = raw as List<dynamic>;
-    if (arr.length != 5)
-      throw Exception('unexpected arr length: expect 5 but see ${arr.length}');
+    if (arr.length != 6)
+      throw Exception('unexpected arr length: expect 6 but see ${arr.length}');
     return ReviewSnapshotDto(
       base: dco_decode_String(arr[0]),
       contentHash: dco_decode_String(arr[1]),
       files: dco_decode_list_review_file_dto(arr[2]),
       comments: dco_decode_list_comment_dto(arr[3]),
       reviewed: dco_decode_list_String(arr[4]),
+      raw: dco_decode_opt_String(arr[5]),
     );
   }
 
@@ -2903,6 +3089,22 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  ReviewFileDto sse_decode_box_autoadd_review_file_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_review_file_dto(deserializer));
+  }
+
+  @protected
+  ReviewLineOrigin sse_decode_box_autoadd_review_line_origin(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    return (sse_decode_review_line_origin(deserializer));
+  }
+
+  @protected
   ReviewSnapshotDto sse_decode_box_autoadd_review_snapshot_dto(
     SseDeserializer deserializer,
   ) {
@@ -2996,6 +3198,110 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  DiffCellDto sse_decode_diff_cell_dto(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_present = sse_decode_bool(deserializer);
+    var var_origin = sse_decode_opt_box_autoadd_review_line_origin(
+      deserializer,
+    );
+    var var_oldLineno = sse_decode_opt_box_autoadd_u_32(deserializer);
+    var var_newLineno = sse_decode_opt_box_autoadd_u_32(deserializer);
+    var var_sel = sse_decode_opt_box_autoadd_u_32(deserializer);
+    var var_spans = sse_decode_list_diff_span_dto(deserializer);
+    var var_text = sse_decode_String(deserializer);
+    return DiffCellDto(
+      present: var_present,
+      origin: var_origin,
+      oldLineno: var_oldLineno,
+      newLineno: var_newLineno,
+      sel: var_sel,
+      spans: var_spans,
+      text: var_text,
+    );
+  }
+
+  @protected
+  DiffExpandAction sse_decode_diff_expand_action(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return DiffExpandAction.values[inner];
+  }
+
+  @protected
+  DiffExpansion sse_decode_diff_expansion(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_gap = sse_decode_u_32(deserializer);
+    var var_action = sse_decode_diff_expand_action(deserializer);
+    return DiffExpansion(gap: var_gap, action: var_action);
+  }
+
+  @protected
+  DiffLayoutDto sse_decode_diff_layout_dto(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_rows = sse_decode_list_diff_row_dto(deserializer);
+    var var_selectable = sse_decode_u_32(deserializer);
+    var var_hasHiddenContext = sse_decode_bool(deserializer);
+    return DiffLayoutDto(
+      rows: var_rows,
+      selectable: var_selectable,
+      hasHiddenContext: var_hasHiddenContext,
+    );
+  }
+
+  @protected
+  DiffLayoutMode sse_decode_diff_layout_mode(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return DiffLayoutMode.values[inner];
+  }
+
+  @protected
+  DiffRole sse_decode_diff_role(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return DiffRole.values[inner];
+  }
+
+  @protected
+  DiffRowDto sse_decode_diff_row_dto(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_kind = sse_decode_diff_row_kind(deserializer);
+    var var_fullWidth = sse_decode_bool(deserializer);
+    var var_left = sse_decode_diff_cell_dto(deserializer);
+    var var_right = sse_decode_diff_cell_dto(deserializer);
+    var var_gap = sse_decode_opt_box_autoadd_u_32(deserializer);
+    var var_hidden = sse_decode_u_32(deserializer);
+    var var_canExpandUp = sse_decode_bool(deserializer);
+    var var_canExpandDown = sse_decode_bool(deserializer);
+    return DiffRowDto(
+      kind: var_kind,
+      fullWidth: var_fullWidth,
+      left: var_left,
+      right: var_right,
+      gap: var_gap,
+      hidden: var_hidden,
+      canExpandUp: var_canExpandUp,
+      canExpandDown: var_canExpandDown,
+    );
+  }
+
+  @protected
+  DiffRowKind sse_decode_diff_row_kind(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var inner = sse_decode_i_32(deserializer);
+    return DiffRowKind.values[inner];
+  }
+
+  @protected
+  DiffSpanDto sse_decode_diff_span_dto(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    var var_text = sse_decode_String(deserializer);
+    var var_role = sse_decode_diff_role(deserializer);
+    var var_emphasis = sse_decode_bool(deserializer);
+    return DiffSpanDto(text: var_text, role: var_role, emphasis: var_emphasis);
+  }
+
+  @protected
   DiffStatDto sse_decode_diff_stat_dto(SseDeserializer deserializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     var var_filesChanged = sse_decode_u_32(deserializer);
@@ -3066,6 +3372,46 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var ans_ = <CommentDto>[];
     for (var idx_ = 0; idx_ < len_; ++idx_) {
       ans_.add(sse_decode_comment_dto(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<DiffExpansion> sse_decode_list_diff_expansion(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <DiffExpansion>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_diff_expansion(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<DiffRowDto> sse_decode_list_diff_row_dto(SseDeserializer deserializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <DiffRowDto>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_diff_row_dto(deserializer));
+    }
+    return ans_;
+  }
+
+  @protected
+  List<DiffSpanDto> sse_decode_list_diff_span_dto(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    var len_ = sse_decode_i_32(deserializer);
+    var ans_ = <DiffSpanDto>[];
+    for (var idx_ = 0; idx_ < len_; ++idx_) {
+      ans_.add(sse_decode_diff_span_dto(deserializer));
     }
     return ans_;
   }
@@ -3305,6 +3651,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
 
     if (sse_decode_bool(deserializer)) {
       return (sse_decode_box_autoadd_review_decision(deserializer));
+    } else {
+      return null;
+    }
+  }
+
+  @protected
+  ReviewLineOrigin? sse_decode_opt_box_autoadd_review_line_origin(
+    SseDeserializer deserializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    if (sse_decode_bool(deserializer)) {
+      return (sse_decode_box_autoadd_review_line_origin(deserializer));
     } else {
       return null;
     }
@@ -3556,12 +3915,14 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     var var_files = sse_decode_list_review_file_dto(deserializer);
     var var_comments = sse_decode_list_comment_dto(deserializer);
     var var_reviewed = sse_decode_list_String(deserializer);
+    var var_raw = sse_decode_opt_String(deserializer);
     return ReviewSnapshotDto(
       base: var_base,
       contentHash: var_contentHash,
       files: var_files,
       comments: var_comments,
       reviewed: var_reviewed,
+      raw: var_raw,
     );
   }
 
@@ -3928,6 +4289,24 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_box_autoadd_review_file_dto(
+    ReviewFileDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_review_file_dto(self, serializer);
+  }
+
+  @protected
+  void sse_encode_box_autoadd_review_line_origin(
+    ReviewLineOrigin self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_review_line_origin(self, serializer);
+  }
+
+  @protected
   void sse_encode_box_autoadd_review_snapshot_dto(
     ReviewSnapshotDto self,
     SseSerializer serializer,
@@ -4009,6 +4388,87 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
   }
 
   @protected
+  void sse_encode_diff_cell_dto(DiffCellDto self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_bool(self.present, serializer);
+    sse_encode_opt_box_autoadd_review_line_origin(self.origin, serializer);
+    sse_encode_opt_box_autoadd_u_32(self.oldLineno, serializer);
+    sse_encode_opt_box_autoadd_u_32(self.newLineno, serializer);
+    sse_encode_opt_box_autoadd_u_32(self.sel, serializer);
+    sse_encode_list_diff_span_dto(self.spans, serializer);
+    sse_encode_String(self.text, serializer);
+  }
+
+  @protected
+  void sse_encode_diff_expand_action(
+    DiffExpandAction self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_diff_expansion(DiffExpansion self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_u_32(self.gap, serializer);
+    sse_encode_diff_expand_action(self.action, serializer);
+  }
+
+  @protected
+  void sse_encode_diff_layout_dto(
+    DiffLayoutDto self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_list_diff_row_dto(self.rows, serializer);
+    sse_encode_u_32(self.selectable, serializer);
+    sse_encode_bool(self.hasHiddenContext, serializer);
+  }
+
+  @protected
+  void sse_encode_diff_layout_mode(
+    DiffLayoutMode self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_diff_role(DiffRole self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_diff_row_dto(DiffRowDto self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_diff_row_kind(self.kind, serializer);
+    sse_encode_bool(self.fullWidth, serializer);
+    sse_encode_diff_cell_dto(self.left, serializer);
+    sse_encode_diff_cell_dto(self.right, serializer);
+    sse_encode_opt_box_autoadd_u_32(self.gap, serializer);
+    sse_encode_u_32(self.hidden, serializer);
+    sse_encode_bool(self.canExpandUp, serializer);
+    sse_encode_bool(self.canExpandDown, serializer);
+  }
+
+  @protected
+  void sse_encode_diff_row_kind(DiffRowKind self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.index, serializer);
+  }
+
+  @protected
+  void sse_encode_diff_span_dto(DiffSpanDto self, SseSerializer serializer) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_String(self.text, serializer);
+    sse_encode_diff_role(self.role, serializer);
+    sse_encode_bool(self.emphasis, serializer);
+  }
+
+  @protected
   void sse_encode_diff_stat_dto(DiffStatDto self, SseSerializer serializer) {
     // Codec=Sse (Serialization based), see doc to use other codecs
     sse_encode_u_32(self.filesChanged, serializer);
@@ -4070,6 +4530,42 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_i_32(self.length, serializer);
     for (final item in self) {
       sse_encode_comment_dto(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_diff_expansion(
+    List<DiffExpansion> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_diff_expansion(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_diff_row_dto(
+    List<DiffRowDto> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_diff_row_dto(item, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_list_diff_span_dto(
+    List<DiffSpanDto> self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+    sse_encode_i_32(self.length, serializer);
+    for (final item in self) {
+      sse_encode_diff_span_dto(item, serializer);
     }
   }
 
@@ -4299,6 +4795,19 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_bool(self != null, serializer);
     if (self != null) {
       sse_encode_box_autoadd_review_decision(self, serializer);
+    }
+  }
+
+  @protected
+  void sse_encode_opt_box_autoadd_review_line_origin(
+    ReviewLineOrigin? self,
+    SseSerializer serializer,
+  ) {
+    // Codec=Sse (Serialization based), see doc to use other codecs
+
+    sse_encode_bool(self != null, serializer);
+    if (self != null) {
+      sse_encode_box_autoadd_review_line_origin(self, serializer);
     }
   }
 
@@ -4536,6 +5045,7 @@ class RustLibApiImpl extends RustLibApiImplPlatform implements RustLibApi {
     sse_encode_list_review_file_dto(self.files, serializer);
     sse_encode_list_comment_dto(self.comments, serializer);
     sse_encode_list_String(self.reviewed, serializer);
+    sse_encode_opt_String(self.raw, serializer);
   }
 
   @protected

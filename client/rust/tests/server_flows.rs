@@ -177,8 +177,7 @@ fn list_create_detail_kill_round_trip() {
         "created session {id} should appear in list_sessions"
     );
 
-    let detail =
-        simple::get_session_detail(fx.handle.clone(), id.clone(), Some(50)).unwrap();
+    let detail = simple::get_session_detail(fx.handle.clone(), id.clone(), Some(50)).unwrap();
     assert!(detail.is_some(), "detail should resolve the full id");
     assert_eq!(detail.unwrap().info.id, id);
 
@@ -213,8 +212,7 @@ fn join_existing_by_prefix() {
     // `SessionId`'s Display is the 8-char prefix a client sees in the UI.
     let prefix = sid.to_string();
 
-    let detail =
-        simple::get_session_detail(fx.handle.clone(), prefix.clone(), Some(20)).unwrap();
+    let detail = simple::get_session_detail(fx.handle.clone(), prefix.clone(), Some(20)).unwrap();
     let detail = detail.expect("an 8-char prefix should resolve the existing session");
     assert!(
         detail.info.id.starts_with(&prefix),
@@ -261,7 +259,9 @@ fn agent_states_snapshot_round_trips() {
     // (0xc03adecc…) is filtered out by the DTO conversion.
     let sentinel = Uuid::from_u128(0xc0_3a_de_cc_00_00_00_00_00_00_00_00_00_00_00_00);
     assert!(
-        snap.states.iter().all(|e| *e.session_id.as_uuid() != sentinel),
+        snap.states
+            .iter()
+            .all(|e| *e.session_id.as_uuid() != sentinel),
         "the commander sentinel must never appear in the flattened states"
     );
 
@@ -400,12 +400,9 @@ fn projects_add_list_branches_and_scan() {
         .iter()
         .find(|p| p.repo_path == fx.repo_path.to_string_lossy())
         .expect("original project present");
-    let branches = simple::list_branches(
-        fx.handle.clone(),
-        original.id.as_uuid().to_string(),
-        false,
-    )
-    .expect("list_branches");
+    let branches =
+        simple::list_branches(fx.handle.clone(), original.id.as_uuid().to_string(), false)
+            .expect("list_branches");
     assert!(
         !branches.is_empty(),
         "a committed repo must have at least one branch"
@@ -515,12 +512,9 @@ fn review_round_trip() {
     );
 
     // -- toggle the file's reviewed mark on --
-    let reviewed = review::toggle_file_reviewed(
-        fx.handle.clone(),
-        id.clone(),
-        "newfile.txt".to_string(),
-    )
-    .expect("toggle_file_reviewed");
+    let reviewed =
+        review::toggle_file_reviewed(fx.handle.clone(), id.clone(), "newfile.txt".to_string())
+            .expect("toggle_file_reviewed");
     assert!(
         reviewed,
         "toggling an un-reviewed file should mark it reviewed"

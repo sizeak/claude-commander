@@ -4428,6 +4428,7 @@ dependencies = [
  "claude-commander-core",
  "claude-commander-protocol",
  "claude-commander-test-support",
+ "diffgrid",
  "flutter_rust_bridge",
  "serde_json",
  "tempfile",
