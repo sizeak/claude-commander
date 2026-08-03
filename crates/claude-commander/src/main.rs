@@ -377,13 +377,13 @@ async fn main() -> Result<()> {
                 claude_commander_core::api::CommanderService::for_cli(config, frontend())?;
 
             let info = match service.find_session_exact(&session).await? {
-                claude_commander_core::cli::SessionLookup::Found(i) => i,
-                claude_commander_core::cli::SessionLookup::NotFound => {
+                claude_commander_core::session::SessionLookup::Found(i) => i,
+                claude_commander_core::session::SessionLookup::NotFound => {
                     eprintln!("Session not found: {}", session);
                     eprintln!("Use 'claude-commander list' to see available sessions.");
                     std::process::exit(1);
                 }
-                claude_commander_core::cli::SessionLookup::Ambiguous(n) => {
+                claude_commander_core::session::SessionLookup::Ambiguous(n) => {
                     eprintln!(
                         "\"{}\" matches {} sessions. Use the exact title or full ID to delete.",
                         session, n
@@ -428,13 +428,13 @@ async fn main() -> Result<()> {
                 claude_commander_core::api::CommanderService::for_cli(config, frontend())?;
 
             let info = match service.find_session_exact(&session).await? {
-                claude_commander_core::cli::SessionLookup::Found(i) => i,
-                claude_commander_core::cli::SessionLookup::NotFound => {
+                claude_commander_core::session::SessionLookup::Found(i) => i,
+                claude_commander_core::session::SessionLookup::NotFound => {
                     eprintln!("Session not found: {}", session);
                     eprintln!("Use 'claude-commander list' to see available sessions.");
                     std::process::exit(1);
                 }
-                claude_commander_core::cli::SessionLookup::Ambiguous(n) => {
+                claude_commander_core::session::SessionLookup::Ambiguous(n) => {
                     eprintln!(
                         "\"{}\" matches {} sessions. Use the exact title or full ID.",
                         session, n
@@ -506,7 +506,7 @@ async fn main() -> Result<()> {
             let project_path = match (project, path, remote.as_deref()) {
                 (Some(name), _, _) => {
                     let snapshot = backend.workspace_snapshot().await?;
-                    claude_commander_core::cli::resolve_project_path(&snapshot.projects, &name)?
+                    claude_commander_core::session::resolve_project_path(&snapshot.projects, &name)?
                 }
                 (None, Some(p), _) => p,
                 (None, None, None) => std::env::current_dir().unwrap_or_default(),
@@ -572,7 +572,7 @@ async fn main() -> Result<()> {
                 None => {
                     let app_state = AppState::load_or_exit();
 
-                    match claude_commander_core::cli::find_session(&app_state, &session) {
+                    match claude_commander_core::session::find_session(&app_state, &session) {
                         Some(s) => {
                             let tmux_name = s.tmux_session_name.clone();
                             // Give the Ctrl+Space switcher revive-on-switch; a service

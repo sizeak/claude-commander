@@ -15,7 +15,7 @@ use claude_commander_core::api::{
     ChangeProgram, CreateSessionOpts, PreviewData, PreviewTarget, RenameSession, SessionInfo,
     SetSection,
 };
-use claude_commander_core::cli::SessionLookup;
+use claude_commander_core::session::SessionLookup;
 use serde::Deserialize;
 use serde_json::json;
 
