@@ -1,6 +1,8 @@
 //! Hierarchical tree list widget
 //!
-//! Displays projects and their worktree sessions in an indented list.
+//! Displays projects and their worktree sessions in an indented list (the list
+//! view modes). Shares the status-glyph and PR-colour helpers with the board
+//! widget via `crate::tui::widgets::{status_glyph, pr_colors}`.
 
 use ratatui::{
     style::{Color, Modifier, Style},
@@ -11,8 +13,8 @@ use std::collections::{HashMap, HashSet};
 
 use crate::session::{AgentState, ProjectId, SessionId, SessionListItem, SessionStatus};
 use crate::tui::theme::Theme;
+use crate::tui::widgets::status_glyph;
 
-pub(crate) mod pr_colors;
 mod render;
 mod state;
 
@@ -28,17 +30,6 @@ const NUMBER_WIDTH: usize = 6;
 /// Extra indent prepended for stacked-child worktrees (3 display columns),
 /// so they sit one level deeper than the stack base they sit under.
 const STACK_INDENT: &str = "   ";
-
-/// Braille spinner frames for the Creating status indicator
-const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-
-/// Marker shown on a session row that has pending review comments. Matches the
-/// review view's comment marker.
-const COMMENT_MARKER: char = '*';
-
-/// Marker shown on a session row the user has kept alive (opted out of
-/// auto-hibernation) — an anchor: the session stays put and won't hibernate.
-const KEEP_ALIVE_MARKER: char = '⚓';
 
 /// Tree list widget for displaying hierarchical sessions
 pub struct TreeList<'a> {
@@ -163,55 +154,6 @@ impl<'a> TreeList<'a> {
         self
     }
 
-    /// Pick the single status glyph and colour for a worktree row.
-    ///
-    /// Priority (first wins):
-    /// 1. Creating / Merging / Pushing → animated spinner
-    /// 2. CascadePaused        → `⏸` with warning accent
-    /// 3. Agent `Working`      → animated spinner
-    /// 4. Agent `WaitingForInput` → `?` glyph
-    /// 5. `unread`             → `◆` diamond
-    /// 6. Running (idle/unknown, no unread) → `●` filled circle
-    /// 7. Stopped              → `○` open circle
-    fn session_status_glyph(
-        &self,
-        status: SessionStatus,
-        agent_state: Option<AgentState>,
-        unread: bool,
-    ) -> Option<(String, Color)> {
-        if matches!(
-            status,
-            SessionStatus::Creating | SessionStatus::Merging | SessionStatus::Pushing
-        ) {
-            let step = self.tick as usize / 3;
-            let frame = SPINNER_FRAMES[step % SPINNER_FRAMES.len()];
-            return Some((frame.to_string(), self.theme.status_creating));
-        }
-        if status == SessionStatus::CascadePaused {
-            return Some(("⏸".to_string(), self.theme.agent_waiting));
-        }
-        if status == SessionStatus::Running {
-            match agent_state {
-                Some(AgentState::Working) => {
-                    let step = self.tick as usize / 3;
-                    let frame = SPINNER_FRAMES[step % SPINNER_FRAMES.len()];
-                    let color = self.theme.agent_working.color_for_tick(step as u64);
-                    return Some((frame.to_string(), color));
-                }
-                Some(AgentState::WaitingForInput) => {
-                    return Some(("?".to_string(), self.theme.agent_waiting));
-                }
-                _ => {}
-            }
-            if unread {
-                return Some(("◆".to_string(), self.theme.unread_indicator));
-            }
-            return Some(("●".to_string(), self.theme.status_running));
-        }
-        // Stopped
-        Some(("○".to_string(), self.theme.status_stopped))
-    }
-
     /// Supply the precomputed number/colour map used to render recent-session
     /// rows (see [`worktree_display_info`]). The recents panel renders only its
     /// own slice of the list, so it can't derive numbers from the worktree rows
@@ -239,18 +181,14 @@ pub fn list_has_mixed_programs(items: &[SessionListItem]) -> bool {
             | SessionListItem::RecentSession { program, .. } => program,
             _ => continue,
         };
+        let p = status_glyph::program_name(program);
         match first {
-            None => first = Some(program_name(program)),
-            Some(p) if p != program_name(program) => return true,
+            None => first = Some(p),
+            Some(f) if f != p => return true,
             _ => {}
         }
     }
     false
-}
-
-/// The base program name, excluding any arguments (e.g. "claude --mode auto" -> "claude").
-pub(super) fn program_name(program: &str) -> &str {
-    program.split_whitespace().next().unwrap_or(program)
 }
 
 /// Precompute each worktree's displayed number and session colour by walking

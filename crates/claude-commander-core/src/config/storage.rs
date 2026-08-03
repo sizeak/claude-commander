@@ -11,7 +11,6 @@ use crate::error::{ConfigError, Result};
 use crate::session::{Project, ProjectId, SessionId, WorktreeSession};
 
 use super::Config;
-use super::view_mode::ViewMode;
 
 /// A pending GitHub PR base-branch retarget, produced when deleting a session
 /// that has PR-stacked children. The async delete path runs `gh pr edit` for
@@ -71,10 +70,6 @@ pub struct AppState {
     #[serde(default)]
     pub last_selected_session: Option<SessionId>,
 
-    /// Persisted left pane width (percentage of terminal width)
-    #[serde(default)]
-    pub left_pane_pct: Option<u16>,
-
     /// Session where an in-flight cascade-merge hit a conflict and paused.
     /// While set, `CascadeResume` (or `CascadeAbandon`) is available; cleared
     /// once resume succeeds or the user abandons. Pairs with the affected
@@ -92,12 +87,6 @@ pub struct AppState {
     /// write this file after any gate would have flipped.
     #[serde(default)]
     pub version: String,
-
-    /// Legacy: the live session-list view now persists in `tui.json`
-    /// (`TuiPrefs`); this field is only read once to migrate that value across
-    /// on first launch after the split. `None` means no persisted choice.
-    #[serde(default)]
-    pub view_mode: Option<ViewMode>,
 
     /// Anonymous, resettable install identifier for usage telemetry. Lazily
     /// generated on first run (a random UUID) and persisted so events from the
@@ -962,45 +951,23 @@ mod tests {
     }
 
     #[test]
-    fn test_view_mode_roundtrip() {
-        use super::super::ViewMode;
+    fn test_load_tolerates_removed_view_mode_and_left_pane_pct_keys() {
+        // The board redesign removed the persisted `view_mode` and
+        // `left_pane_pct` fields. State files written by an older build still
+        // carry those keys; since `AppState` has no `deny_unknown_fields`,
+        // serde must ignore them rather than failing the whole load — which
+        // would drop the user's entire project list. The legacy
+        // `SectionGroupedWithStacks` view_mode value must also be tolerated.
         let temp_dir = TempDir::new().unwrap();
         let state_path = temp_dir.path().join("state.json");
-
-        let mut state = AppState::new();
-        state.view_mode = Some(ViewMode::SectionStacks);
-        state.save_to(&state_path).unwrap();
-
-        let loaded = AppState::load_from(&state_path).unwrap();
-        assert_eq!(loaded.view_mode, Some(ViewMode::SectionStacks));
-    }
-
-    #[test]
-    fn test_view_mode_legacy_section_grouped_with_stacks_alias_loads_as_section_stacks() {
-        // Earlier on this branch the variant was called
-        // `SectionGroupedWithStacks`. Any state.json written by that build
-        // must still parse — otherwise main.rs's `load().unwrap_or_else(|_|
-        // AppState::new())` drops the user's whole project list. Keep this
-        // alias as long as those files might exist in the wild.
-        use super::super::ViewMode;
-        let temp_dir = TempDir::new().unwrap();
-        let state_path = temp_dir.path().join("state.json");
-        std::fs::write(&state_path, r#"{"view_mode": "SectionGroupedWithStacks"}"#).unwrap();
-        let loaded = AppState::load_from(&state_path).unwrap();
-        assert_eq!(loaded.view_mode, Some(ViewMode::SectionStacks));
-    }
-
-    #[test]
-    fn test_view_mode_missing_field_loads_as_none() {
-        // Older state files written before this field existed should
-        // deserialize cleanly and present no preference, so the app can
-        // fall back to a section-aware default.
-        let temp_dir = TempDir::new().unwrap();
-        let state_path = temp_dir.path().join("state.json");
-        std::fs::write(&state_path, "{}").unwrap();
+        std::fs::write(
+            &state_path,
+            r#"{"seen_help": true, "left_pane_pct": 42, "view_mode": "SectionGroupedWithStacks"}"#,
+        )
+        .unwrap();
 
         let loaded = AppState::load_from(&state_path).unwrap();
-        assert!(loaded.view_mode.is_none());
+        assert!(loaded.seen_help);
     }
 
     #[test]
@@ -1193,38 +1160,6 @@ mod tests {
     fn test_remove_nonexistent_project_returns_none() {
         let mut state = AppState::new();
         assert!(state.remove_project(&ProjectId::new()).is_none());
-    }
-
-    #[test]
-    fn test_left_pane_pct_roundtrip() {
-        let temp_dir = TempDir::new().unwrap();
-        let state_path = temp_dir.path().join("state.json");
-
-        let mut state = AppState::new();
-        state.left_pane_pct = Some(42);
-        state.save_to(&state_path).unwrap();
-
-        let loaded = AppState::load_from(&state_path).unwrap();
-        assert_eq!(loaded.left_pane_pct, Some(42));
-    }
-
-    #[test]
-    fn test_left_pane_pct_defaults_to_none() {
-        let state = AppState::new();
-        assert_eq!(state.left_pane_pct, None);
-    }
-
-    #[test]
-    fn test_left_pane_pct_missing_from_json_defaults_to_none() {
-        let temp_dir = TempDir::new().unwrap();
-        let state_path = temp_dir.path().join("state.json");
-
-        // Write JSON without left_pane_pct field
-        std::fs::write(&state_path, r#"{"seen_help": true, "version": "0.1.0"}"#).unwrap();
-
-        let loaded = AppState::load_from(&state_path).unwrap();
-        assert_eq!(loaded.left_pane_pct, None);
-        assert!(loaded.seen_help);
     }
 
     #[test]

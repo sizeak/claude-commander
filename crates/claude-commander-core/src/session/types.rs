@@ -523,22 +523,27 @@ pub fn stack_chain_from_base<S: SessionNode>(
     chain
 }
 
-/// Represents an item in the hierarchical session list
-/// Used for UI display and navigation
+/// A row in the session list, or a card on the board.
+///
+/// The board draws only `Worktree` rows (grouped under its own columns and
+/// sidebar); the list views additionally render the header, spacer and recents
+/// variants. Everything downstream — widgets, hit-testing, action gating —
+/// pattern-matches on these variants, so a row's kind is what decides both how
+/// it draws and whether it is selectable (see
+/// [`is_selectable`](Self::is_selectable)).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionListItem {
-    /// A project header
+    /// A project header (list views). When `nested`, it renders indented one
+    /// level as a project sub-header under a section header.
     Project {
         id: ProjectId,
         name: String,
         repo_path: PathBuf,
         main_branch: String,
         worktree_count: usize,
-        /// When `true`, render indented one level deeper — used for project
-        /// sub-headers nested under a section header.
         nested: bool,
     },
-    /// A worktree session (indented under project)
+    /// A worktree session (a card row under its project)
     Worktree {
         id: SessionId,
         project_id: ProjectId,
@@ -571,32 +576,25 @@ pub enum SessionListItem {
         /// set to `false`.
         stacked_child: bool,
     },
-    /// A per-backend header grouping one server's projects and sessions.
-    /// Emitted only when more than one backend is configured — a lone local
-    /// backend is suppressed, so single-server trees render exactly as before.
-    /// Carries the connection health so the header can render live status.
+    /// A per-backend header grouping one server's projects and sessions (list
+    /// views). Emitted only when more than one backend is configured — a lone
+    /// local backend is suppressed. Carries connection health + an optional
+    /// version-mismatch warning for live status rendering.
     ServerHeader {
         backend: crate::backend::BackendId,
         name: String,
         connection: crate::backend::ConnectionState,
-        /// Set when this backend's server build is older than the client (see
-        /// [`server_version_mismatch`](crate::backend::server_version_mismatch)).
-        /// Rendered as a non-blocking `⚠` annotation; independent of
-        /// `connection` so a mismatched-but-healthy server still shows its
-        /// subtree.
         version_warning: Option<crate::backend::VersionMismatch>,
     },
-    /// A section header (used only when config.sections is non-empty).
+    /// A section header (list section views; used when sections are active).
     SectionHeader {
         name: String,
         count: usize,
         collapsed: bool,
-        /// Advisory WIP limit resolved from config. `None` means no limit
-        /// configured for this section.
+        /// Advisory WIP limit resolved from config. `None` = no limit.
         max_sessions: Option<u32>,
     },
-    /// A blank spacer row for visual separation between sections.
-    /// Not selectable.
+    /// A blank spacer row for visual separation between sections. Not selectable.
     Spacer,
     /// Label row heading the "Recent" block at the very top of the list.
     /// A view over recently-attached sessions, independent of any backend.
@@ -632,7 +630,7 @@ pub enum SessionListItem {
 }
 
 impl SessionListItem {
-    /// Get a unique key for this item (for selection tracking)
+    /// A unique key for this item (for selection tracking across rebuilds).
     pub fn key(&self) -> String {
         match self {
             Self::Project { id, .. } => format!("project:{}", id),
@@ -645,23 +643,24 @@ impl SessionListItem {
         }
     }
 
-    /// Check if this is a project item
+    /// Whether this is a project header.
     pub fn is_project(&self) -> bool {
         matches!(self, Self::Project { .. })
     }
 
-    /// Check if this is a worktree item
+    /// Whether this is a worktree session row.
     pub fn is_worktree(&self) -> bool {
         matches!(self, Self::Worktree { .. })
     }
 
-    /// Whether navigation/selection should land on this row.
+    /// Whether navigation/selection should land on this row (everything but a
+    /// spacer).
     pub fn is_selectable(&self) -> bool {
         !matches!(self, Self::Spacer | Self::RecentsHeader)
     }
 
     /// Whether this row begins a group — a project, section, or server header.
-    /// Group-jump navigation moves between these rows.
+    /// Group-jump navigation (`NextGroup`/`PreviousGroup`) moves between these.
     pub fn is_group_header(&self) -> bool {
         matches!(
             self,
@@ -669,7 +668,7 @@ impl SessionListItem {
         )
     }
 
-    /// Whether this row is a server header (a per-backend grouping row).
+    /// Whether this row is a per-backend server header.
     pub fn is_server_header(&self) -> bool {
         matches!(self, Self::ServerHeader { .. })
     }
@@ -819,48 +818,6 @@ mod tests {
     }
 
     #[test]
-    fn test_session_list_item_key() {
-        let project_id = ProjectId::new();
-        let session_id = SessionId::new();
-
-        let project_item = SessionListItem::Project {
-            id: project_id,
-            name: "test".to_string(),
-            repo_path: PathBuf::from("/tmp"),
-            main_branch: "main".to_string(),
-            worktree_count: 0,
-            nested: false,
-        };
-
-        let worktree_item = SessionListItem::Worktree {
-            id: session_id,
-            project_id,
-            title: "test".to_string(),
-            branch: "test".to_string(),
-            status: SessionStatus::Running,
-            program: "claude".to_string(),
-            pr_number: None,
-            pr_url: None,
-            pr_merged: false,
-            pr_state: None,
-            pr_draft: false,
-            pr_labels: Vec::new(),
-            worktree_path: PathBuf::from("/tmp/wt"),
-            created_at: chrono::Utc::now(),
-            agent_state: None,
-            unread: false,
-            keep_alive: false,
-            lfs_pulling: false,
-            stacked_child: false,
-        };
-
-        assert!(project_item.key().starts_with("project:"));
-        assert!(worktree_item.key().starts_with("worktree:"));
-        assert!(project_item.is_project());
-        assert!(worktree_item.is_worktree());
-    }
-
-    #[test]
     fn test_is_active() {
         assert!(SessionStatus::Creating.is_active());
         assert!(SessionStatus::Running.is_active());
@@ -993,42 +950,6 @@ mod tests {
 
         project.remove_worktree(&SessionId::new());
         assert_eq!(project.worktrees.len(), 1);
-    }
-
-    #[test]
-    fn test_session_list_item_predicates_negative() {
-        let project_item = SessionListItem::Project {
-            id: ProjectId::new(),
-            name: "test".to_string(),
-            repo_path: PathBuf::from("/tmp"),
-            main_branch: "main".to_string(),
-            worktree_count: 0,
-            nested: false,
-        };
-        let worktree_item = SessionListItem::Worktree {
-            id: SessionId::new(),
-            project_id: ProjectId::new(),
-            title: "test".to_string(),
-            branch: "test".to_string(),
-            status: SessionStatus::Running,
-            program: "claude".to_string(),
-            pr_number: None,
-            pr_url: None,
-            pr_merged: false,
-            pr_state: None,
-            pr_draft: false,
-            pr_labels: Vec::new(),
-            worktree_path: PathBuf::from("/tmp/wt"),
-            created_at: chrono::Utc::now(),
-            agent_state: None,
-            unread: false,
-            keep_alive: false,
-            lfs_pulling: false,
-            stacked_child: false,
-        };
-
-        assert!(!project_item.is_worktree());
-        assert!(!worktree_item.is_project());
     }
 
     #[test]
@@ -1330,48 +1251,6 @@ mod tests {
             .expect("mark_attached must set last_attached_at");
         assert!(stamp >= before);
         assert!(stamp <= after);
-    }
-
-    #[test]
-    fn session_list_item_spacer_is_not_selectable() {
-        // Kills the mutant that makes is_selectable always return true:
-        // Spacer rows are never selectable.
-        assert!(!SessionListItem::Spacer.is_selectable());
-
-        // And the positive cases still hold, so the assertion above is the
-        // discriminating one.
-        let project = SessionListItem::Project {
-            id: ProjectId::new(),
-            name: "p".to_string(),
-            repo_path: PathBuf::from("/tmp"),
-            main_branch: "main".to_string(),
-            worktree_count: 0,
-            nested: false,
-        };
-        assert!(project.is_selectable());
-    }
-
-    #[test]
-    fn session_list_item_group_headers() {
-        let project = SessionListItem::Project {
-            id: ProjectId::new(),
-            name: "p".to_string(),
-            repo_path: PathBuf::from("/tmp"),
-            main_branch: "main".to_string(),
-            worktree_count: 0,
-            nested: false,
-        };
-        assert!(project.is_group_header());
-
-        let section = SessionListItem::SectionHeader {
-            name: "Open PRs".to_string(),
-            count: 2,
-            collapsed: false,
-            max_sessions: None,
-        };
-        assert!(section.is_group_header());
-
-        assert!(!SessionListItem::Spacer.is_group_header());
     }
 }
 

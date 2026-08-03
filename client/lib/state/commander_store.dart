@@ -48,7 +48,9 @@ class CommanderStore extends ChangeNotifier {
   /// can detect it has been superseded — release the handle it just acquired and
   /// bail rather than leaking it and orphaning its feeds. Closes the
   /// connect-vs-connect race (e.g. a double-tapped retry, or an edit while a
-  /// slow connect is still parked).
+  /// slow connect is still parked). [reconnect] checks it for the same reason
+  /// before adopting its config, so a superseded reconnect can't roll the store
+  /// back to an older edit than the one on disk.
   int _connectEpoch = 0;
 
   WorkspaceSnapshotDto? _workspace;
@@ -179,10 +181,14 @@ class CommanderStore extends ChangeNotifier {
   Future<void> reconnect(ServerConfig next) async {
     // Supersede any in-flight connect immediately (before our own awaits) so it
     // releases its handle when it resumes instead of racing this reconnect.
-    _connectEpoch++;
-    await _teardownSubs();
+    final epoch = ++_connectEpoch;
+    // Claim the old handle synchronously too, for the same reason: a reconnect
+    // that starts while this one is tearing down must see no handle to release
+    // (this one owns it) and must not have the handle it later acquires nulled
+    // out from under it here.
     final old = _handle;
     _handle = null;
+    await _teardownSubs();
     if (old != null) {
       // Detach any open terminal before releasing the handle so the persistent
       // pane doesn't outlive its server.
@@ -193,6 +199,13 @@ class CommanderStore extends ChangeNotifier {
         // Best-effort: a failed disconnect must not block the new connection.
       }
     }
+    // Releasing the old handle involves network calls (terminal detach,
+    // disconnect), so a second server edit can land while we are parked in them.
+    // If it did, it owns `_config` and the live connection now: adopting `next`
+    // here would roll the config back to this (older) edit while the persisted
+    // list holds the newer one, and our `connect()` would supersede its. The old
+    // handle is already released above, so bailing leaks nothing.
+    if (_disposed || epoch != _connectEpoch) return;
     _config = next;
     _workspace = null;
     _agentStates.clear();
@@ -366,11 +379,17 @@ class CommanderStore extends ChangeNotifier {
     }
   }
 
+  /// Cancel and forget both feeds. Claims the fields synchronously before the
+  /// first await for the same reason [reconnect] claims the handle: a cancel that
+  /// parks here must not resume to read — and cancel — a NEWER connect's feeds,
+  /// nor null out the fields that reference them.
   Future<void> _teardownSubs() async {
-    await _changeSub?.cancel();
-    await _connectionSub?.cancel();
+    final change = _changeSub;
+    final connection = _connectionSub;
     _changeSub = null;
     _connectionSub = null;
+    await change?.cancel();
+    await connection?.cancel();
   }
 
   @override

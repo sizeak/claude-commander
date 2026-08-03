@@ -34,6 +34,11 @@ class FakeCommanderApi implements CommanderApi {
   /// When set, `connectServer` awaits this before returning — lets a test hold a
   /// connect in flight (e.g. to dispose the store mid-connect).
   Completer<void>? connectGate;
+
+  /// When set, `disconnectServer` awaits this before returning — lets a test park
+  /// a `reconnect` inside its teardown window (old handle released, new config
+  /// not yet adopted) and run a second reconnect past it.
+  Completer<void>? disconnectGate;
   Object? workspaceSnapshotError;
   bool healthResponse = true;
   bool healthTmuxResponse = true;
@@ -194,6 +199,7 @@ class FakeCommanderApi implements CommanderApi {
   @override
   Future<void> disconnectServer({required String handle}) async {
     _record('disconnectServer', {'handle': handle});
+    if (disconnectGate != null) await disconnectGate!.future;
   }
 
   @override

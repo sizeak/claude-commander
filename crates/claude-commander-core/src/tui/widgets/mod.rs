@@ -1,14 +1,16 @@
 //! TUI widgets
 //!
 //! Custom ratatui widgets for the application:
-//! - `TreeList` - Hierarchical session list
-//! - `Preview` - Pane content preview
-//! - `InfoView` - Session info, PR details, AI summary
+//! - `board` - Kanban board navigation state, layout geometry, and widget
+//! - `InfoView` - Session info, PR details, AI summary (Info modal)
+//! - `tree_list` - full-width session-list widget for the list views
+//! - `status_glyph` / `pr_colors` - row-rendering helpers shared by both
 
+pub mod board;
 mod info_view;
-mod preview;
-mod tree_list;
+pub(crate) mod pr_colors;
+pub mod status_glyph;
+pub mod tree_list;
 
 pub use info_view::*;
-pub use preview::*;
-pub use tree_list::*;
+pub use tree_list::{TreeList, TreeListState, list_has_mixed_programs, worktree_display_info};

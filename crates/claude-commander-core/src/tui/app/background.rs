@@ -13,57 +13,42 @@
 use super::*;
 
 impl App {
-    /// Spawn a background task to fetch preview/diff/shell data.
-    ///
-    /// The task runs in parallel with the main event loop so that
-    /// keyboard input is never blocked by I/O. Results arrive as
-    /// `StateUpdate::PreviewReady` events. The fetch goes through the backend
-    /// trait, so a remote backend serves the same preview over the wire.
-    pub(super) fn spawn_preview_update(&mut self) {
-        // Skip if a fetch is already in flight (with 5s safety timeout)
-        if let Some(spawned_at) = self.ui_state.preview_update_spawned_at {
-            if spawned_at.elapsed() < Duration::from_secs(5) {
-                return;
-            }
-            debug!("Preview update stale (>5s), spawning new one");
+    /// Whether the Info modal is open. Diff and enriched-PR fetches are gated on
+    /// this so no per-tick tmux/git traffic runs while the board is showing —
+    /// they run only while `Modal::Info` is up.
+    fn is_info_open(&self) -> bool {
+        matches!(self.ui_state.modal, Modal::Info { .. })
+    }
+
+    /// Spawn a background diff fetch for the selected session, feeding the Info
+    /// modal. Guarded by a 5s in-flight window and gated on the Info modal being
+    /// open (so nothing runs per-tick while the board is showing). The fetch
+    /// goes through the backend trait, so a remote session's diff arrives over
+    /// the wire. Results arrive as [`StateUpdate::SessionDiffReady`].
+    pub(super) fn spawn_diff_fetch(&mut self) {
+        if !self.is_info_open() {
+            return;
         }
-
-        // Preview reads from whichever backend owns the selection.
-        let sel_session = self.ui_state.selected_session_id;
-        let sel_project = self.ui_state.selected_project_id;
-        let backend_id = sel_session
-            .map(|r| r.backend)
-            .or_else(|| sel_project.map(|(b, _)| b))
-            .unwrap_or(LOCAL_BACKEND_ID);
-        let session_id = sel_session.map(|r| r.id);
-        let project_id = sel_project.map(|(_, p)| p);
-        let backend = self.backend_arc(backend_id);
+        // Skip if a fetch is already in flight (with 5s safety timeout).
+        if let Some(spawned_at) = self.ui_state.diff_fetch_spawned_at
+            && spawned_at.elapsed() < Duration::from_secs(5)
+        {
+            return;
+        }
+        let Some(sref) = self.ui_state.selected_session_id else {
+            return;
+        };
+        let session_id = sref.id;
+        let backend = self.backend_arc(sref.backend);
         let tx = self.event_loop.sender();
-
-        self.ui_state.preview_update_spawned_at = Some(Instant::now());
-
-        debug!(
-            "Spawning preview update for session={:?} project={:?}",
-            session_id, project_id
-        );
+        self.ui_state.diff_fetch_spawned_at = Some(Instant::now());
 
         tokio::spawn(async move {
-            let (preview_content, diff_info, shell_content) =
-                fetch_preview_data(&backend, session_id, project_id).await;
-
-            debug!(
-                "Preview fetch complete, sending PreviewReady (preview_len={} diff_lines={})",
-                preview_content.len(),
-                diff_info.line_count
-            );
-
+            let diff_info = fetch_session_diff(&backend, session_id).await;
             let _ = tx
-                .send(AppEvent::StateUpdate(StateUpdate::PreviewReady {
+                .send(AppEvent::StateUpdate(StateUpdate::SessionDiffReady {
                     session_id,
-                    project_id,
-                    preview_content,
                     diff_info,
-                    shell_content,
                 }))
                 .await;
         });
@@ -149,13 +134,15 @@ impl App {
         });
     }
 
-    /// Spawn background fetches for info pane data (enriched PR + AI summary).
+    /// Spawn background fetches for Info modal data (enriched PR + AI summary).
     ///
-    /// Only called from user-initiated actions (pane switch, selection change).
-    /// Not called from background ticks to avoid unnecessary regeneration.
+    /// Gated on the Info modal being open (a no-op otherwise) and guarded
+    /// against double-spawns: `update_selection` calls this every tick (via
+    /// `refresh_list_items`), so without the in-flight guard an open Info modal
+    /// would re-spawn a duplicate `gh` fetch each tick until the first resolves.
     pub(super) fn spawn_info_fetch(&mut self) {
-        // Only relevant when the Info pane is active
-        if self.ui_state.right_pane_view != RightPaneView::Info {
+        // Only relevant when the Info modal is open; a no-op otherwise.
+        if !self.is_info_open() {
             return;
         }
 
@@ -164,36 +151,38 @@ impl App {
         };
         let session_id = sref.id;
 
-        // Find the session's PR number and project repo path
-        let session_info = self.ui_state.list_items.iter().find_map(|item| {
-            if let SessionListItem::Worktree { id, pr_number, .. } = item {
-                if *id == session_id {
-                    Some(*pr_number)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        });
+        // Read the session's PR number from its backend snapshot (always
+        // populated), not the board — the board is only built in board view.
+        let pr_number = match self.session(sref) {
+            Some(session) => session.pr_number,
+            None => return,
+        };
 
-        let Some(pr_number) = session_info.flatten() else {
+        let Some(pr_number) = pr_number else {
             // No PR for this session — skip enriched PR fetch
             return;
         };
 
-        // Spawn enriched PR fetch if not already cached for this session
+        // Spawn enriched PR fetch if not already cached for this session and no
+        // fetch is already in flight (with a 5s safety timeout, mirroring
+        // `spawn_diff_fetch`).
         let needs_enriched = self
             .ui_state
             .enriched_pr
             .as_ref()
             .is_none_or(|(sid, _)| *sid != session_id);
+        let in_flight = self
+            .ui_state
+            .enriched_pr_fetch_spawned_at
+            .is_some_and(|spawned_at| spawned_at.elapsed() < Duration::from_secs(5));
 
         let backend_kind = self
             .backend(sref.backend)
             .map(|h| h.backend.descriptor().kind)
             .unwrap_or(crate::backend::BackendKind::Local);
-        if should_fetch_enriched_pr(needs_enriched, self.ui_state.gh_available, backend_kind) {
+        if should_fetch_enriched_pr(needs_enriched, self.ui_state.gh_available, backend_kind)
+            && !in_flight
+        {
             // Resolve the project's repo path from the cached snapshot rather
             // than the store — the backend seam owns the state.
             let snapshot = &self.view_for(sref.backend).snapshot;
@@ -204,6 +193,7 @@ impl App {
                 .and_then(|s| snapshot.projects.iter().find(|p| p.id == s.project_id))
                 .map(|p| p.repo_path.clone());
             let tx = self.event_loop.sender();
+            self.ui_state.enriched_pr_fetch_spawned_at = Some(Instant::now());
 
             tokio::spawn(async move {
                 let info = if let Some(repo_path) = repo_path {
@@ -306,9 +296,9 @@ impl App {
 }
 
 /// Reconstruct a [`DiffInfo`] from a preview's raw diff text and structured
-/// counts. The TUI's diff pane + info-pane stat line render from this, so a
-/// remote backend's [`PreviewData`](crate::api::PreviewData) drives them
-/// identically.
+/// counts. The Info modal's diffstat renders from this, so a remote backend's
+/// [`PreviewData`](crate::api::PreviewData) drives it identically to a local
+/// one.
 fn diff_info_from_preview(diff_text: String, stats: Option<crate::api::DiffStat>) -> Arc<DiffInfo> {
     let line_count = diff_text.lines().count();
     Arc::new(DiffInfo {
@@ -322,77 +312,25 @@ fn diff_info_from_preview(diff_text: String, stats: Option<crate::api::DiffStat>
     })
 }
 
-/// Fetch preview/diff/shell data for the currently selected session or project
-/// through the backend trait. Runs outside the main event loop so it never
-/// blocks keyboard input. Mirrors the placeholder strings the old direct-manager
-/// path produced (so the rendered output is unchanged).
-pub(super) async fn fetch_preview_data(
+/// Fetch the working-tree diff for a session (Info modal) through the backend
+/// trait — a remote session's diff arrives over the wire. Runs outside the
+/// main event loop so it never blocks keyboard input.
+pub(super) async fn fetch_session_diff(
     backend: &Arc<dyn crate::backend::CommanderBackend>,
-    session_id: Option<SessionId>,
-    project_id: Option<ProjectId>,
-) -> (String, Arc<DiffInfo>, String) {
-    let no_shell = || "No shell session. Press 's' to open one.".to_string();
-    if let Some(sid) = session_id {
-        match backend
-            .preview(crate::api::PreviewTarget::Session {
-                id: sid,
-                lines: None,
-            })
-            .await
-        {
-            Ok(p) => {
-                let crate::api::PreviewData {
-                    pane,
-                    diff_text,
-                    stats,
-                    shell,
-                    ..
-                } = p;
-                (
-                    pane.unwrap_or_else(|| "Unable to capture content".to_string()),
-                    diff_info_from_preview(diff_text, stats),
-                    shell.unwrap_or_else(no_shell),
-                )
-            }
-            Err(e) => {
-                debug!("fetch_preview_data: session preview error: {e}");
-                (
-                    "Unable to capture content".to_string(),
-                    Arc::new(DiffInfo::empty()),
-                    no_shell(),
-                )
-            }
+    session_id: SessionId,
+) -> Arc<DiffInfo> {
+    match backend
+        .preview(crate::api::PreviewTarget::Session {
+            id: session_id,
+            lines: None,
+        })
+        .await
+    {
+        Ok(p) => diff_info_from_preview(p.diff_text, p.stats),
+        Err(e) => {
+            debug!("fetch_session_diff: preview error: {e}");
+            Arc::new(DiffInfo::empty())
         }
-    } else if let Some(pid) = project_id {
-        match backend
-            .preview(crate::api::PreviewTarget::Project(pid))
-            .await
-        {
-            Ok(p) => {
-                let crate::api::PreviewData {
-                    diff_text,
-                    stats,
-                    shell,
-                    ..
-                } = p;
-                (
-                    String::new(),
-                    diff_info_from_preview(diff_text, stats),
-                    shell.unwrap_or_else(no_shell),
-                )
-            }
-            Err(e) => {
-                debug!("fetch_preview_data: project preview error: {e}");
-                (String::new(), Arc::new(DiffInfo::empty()), no_shell())
-            }
-        }
-    } else {
-        debug!("fetch_preview_data: no selection");
-        (
-            "Select a session to see preview".to_string(),
-            Arc::new(DiffInfo::empty()),
-            String::new(),
-        )
     }
 }
 
