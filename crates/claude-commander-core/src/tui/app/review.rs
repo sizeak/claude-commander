@@ -4,18 +4,47 @@
 //! via `CommanderService::open_review`. The view is hosted as a maximised
 //! modal (`Modal::ReviewDiff`); all diff composition, parsing, and comment
 //! logic lives in the library.
+//!
+//! # What is here, and what is `diffgrid`'s
+//!
+//! Everything about *laying a diff out* — logical rows, gap expansion, the
+//! side-by-side pairing, soft wrapping, role-tagged spans and hit-testing —
+//! belongs to [`diffgrid`] and is reached through
+//! [`FileLayout`](diffgrid::layout::FileLayout) and [`Grid`](diffgrid::wrap::Grid).
+//! What stays here is the *session* half: which file is shown, where the cursor
+//! is, which comments are staged and where their boxes go, what is marked
+//! reviewed, and the mapping from `diffgrid`'s semantic roles onto the theme
+//! (`ReviewPalette`) and onto `syntect` (`SyntectHighlighter`).
+//!
+//! Comment boxes reach the layout as **attached blocks**: the state tells
+//! `diffgrid` only an anchor line and an opaque key, and answers a height
+//! callback at render width. That is what keeps every row↔line mapping — cursor,
+//! scroll, click — in step with what is drawn, in both layouts, without this
+//! module walking rows itself.
 
 use super::*;
 use crossterm::event::KeyEvent;
 
 use crate::api::{DiffSide, NewComment};
 use crate::comment::{Comment, CommentSide, CommentStatus};
-use crate::git::{DiffLine, FileDiff, FileStatus, Hunk, LineOrigin, ParsedDiff};
-use crate::tui::syntax_highlight::{highlight_line, warm_highlight_cache};
+use crate::git::{DiffLine, FileDiff, FileStatus, LineOrigin, ParsedDiff};
+use crate::tui::syntax_highlight::{SyntectHighlighter, warm_highlight_cache};
 use crate::tui::theme::{ColorMode, ReviewPalette};
+use diffgrid::layout::{
+    Attach, AttachKey, ExpandAction, FileLayout, FileSource, LayoutMode, LayoutOptions, RowKind,
+};
+use diffgrid::style::{
+    GutterSides, GutterSpec, Highlighter, Palette, Role, RowContext, SpanStyle, cell_spans,
+    gutter_cols, is_full_width, row_spans,
+};
+use diffgrid::wrap::{Grid, Hit, WrapOptions, fit_spans, wrap_row};
+use diffgrid::{GapIdx, LineNo, RowIdx, SelIdx, SelRange, Side};
 use rayon::prelude::*;
-use std::cell::{Cell, Ref, RefCell};
+use std::borrow::Cow;
+use std::cell::{Cell, RefCell};
 use tui_input::Input;
+use unicode_segmentation::UnicodeSegmentation as _;
+use unicode_width::UnicodeWidthStr as _;
 
 /// Gutter / badge / box marker for a staged comment. An asterisk is the
 /// conventional note/comment marker and stays crisp at one cell.
@@ -23,10 +52,19 @@ const COMMENT_MARKER: char = '*';
 /// Marker for a drifted comment (its snippet could no longer be located).
 const DRIFT_MARKER: char = '⚠';
 
-/// Rough viewport height used to keep the cursor visible while scrolling. The
-/// renderer doesn't report its height back to the state, so we approximate
-/// (same pragmatic approach as the checkout-branch list).
-const BODY_VIEWPORT: usize = 20;
+/// Fallback viewport height for cursor-follow before the first render has
+/// reported the real one. Every scroll decision takes the height as an argument
+/// (`diffgrid` has no viewport constant), so this is only ever the value used for
+/// keypresses that arrive before a frame has been drawn.
+const DEFAULT_BODY_HEIGHT: usize = 20;
+
+/// Fallback body width, used for the same window as [`DEFAULT_BODY_HEIGHT`].
+const DEFAULT_BODY_WIDTH: usize = 120;
+
+/// Columns a tab expands to in diff content. `diffgrid` expands tabs at render
+/// (a tab's width depends on the column it starts at, so it cannot be resolved
+/// earlier) and the review view has no reason to differ from the editor default.
+const TAB_WIDTH: usize = 4;
 
 /// Which column has keyboard focus inside the review view.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,190 +141,46 @@ pub enum ReviewLayout {
     SideBySide,
 }
 
-/// Columns the inline gutter occupies before the code content, summing to 14:
-/// left edge bar (1), comment marker (1), old lineno (4), gap (1), new lineno
-/// (4), gap (1), sign (1), and a gap (1) after the sign so code doesn't butt
-/// against the +/-. Long content soft-wraps within [`inline_content_width`].
-const INLINE_GUTTER_COLS: usize = 14;
+/// Columns kept clear at the right edge when soft-wrapping, so wrapped text
+/// doesn't butt directly against the body border (the background fill still
+/// extends to the edge; only the wrap point is pulled in).
+const WRAP_RIGHT_MARGIN: usize = 2;
 
-/// A small right margin kept clear when soft-wrapping, so wrapped text doesn't
-/// butt directly against the body border (the background fill still extends to
-/// the edge; only the wrap point is pulled in).
-const INLINE_WRAP_RIGHT_MARGIN: usize = 2;
+/// Columns between the two halves of the side-by-side layout: `│` with a space
+/// either side.
+const SBS_SEPARATOR: usize = 3;
 
-/// Columns available for code content on an inline row — i.e. the soft-wrap
-/// width: the body width minus the fixed gutter and a small right margin. Used
-/// by both the renderer and the row-layout mapping so they wrap identically.
-fn inline_content_width(body_width: usize) -> usize {
-    body_width.saturating_sub(INLINE_GUTTER_COLS + INLINE_WRAP_RIGHT_MARGIN)
+/// The inline gutter: an edge bar, the comment-marker slot, both four-column
+/// line numbers, and the `+`/`-` sign with a space after it so code doesn't butt
+/// against it — 14 columns, derived by [`GutterSpec::cols`] rather than written
+/// down anywhere.
+fn inline_gutter() -> GutterSpec {
+    GutterSpec::default()
 }
 
-/// One physical (rendered) row of the inline body. Long diff lines soft-wrap to
-/// several `Line { cont: true }` rows, and comment boxes interleave as `Comment`
-/// rows, so this is the single source of truth that the renderer and every
-/// row↔line mapping (cursor, scroll, click) derive from — keeping them in lock
-/// step regardless of wrapping or interleaved boxes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum BodyRow {
-    /// A hunk header (`@@ … @@`).
-    Header,
-    /// A diff line (`sel` = selectable-line index); `cont` is true for the
-    /// soft-wrap continuation rows after the first.
-    Line { sel: usize, cont: bool },
-    /// A row belonging to an interleaved comment box.
-    Comment { id: uuid::Uuid },
-    /// A row belonging to the in-progress comment edit box.
-    Draft,
-    /// A revealed context line (GitHub-style expand); display-only, so it is
-    /// never selectable. `cont` marks soft-wrap continuation rows.
-    Context { cont: bool },
-    /// A clickable "expand more context" control for the gap `gap`
-    /// (`0..=hunks.len()`; see [`DiffReviewState::gap_display`]).
-    ExpandControl { gap: usize },
+/// One side-by-side half's gutter: a four-column line number and a space. No
+/// edge, marker or sign — the two halves already say which side they are.
+fn sbs_gutter() -> GutterSpec {
+    // Field assignment rather than a struct literal: `GutterSpec` is
+    // `#[non_exhaustive]`, which is the point — a field added upstream keeps its
+    // default here instead of failing to compile.
+    let mut spec = GutterSpec::default().with_sides(GutterSides::One);
+    spec.edge = false;
+    spec.marker = false;
+    spec.sign = false;
+    spec.pad = 0;
+    spec
 }
 
-/// Lines revealed per single expand step (GitHub reveals a fixed chunk); a gap
-/// with no more than this many hidden lines reveals fully in one step.
-const EXPAND_STEP: usize = 20;
+/// The key an in-progress comment draft is attached to the layout under.
+///
+/// `u128::MAX` cannot collide with a comment's own key, which is a UUID: every
+/// UUID has fixed version and variant bits, so the all-ones value is not one.
+const DRAFT_ATTACH_KEY: AttachKey = AttachKey::new(u128::MAX);
 
-/// How much of a between/around-hunk gap the user has revealed as display-only
-/// context. `down` grows downward from the hunk *above* the gap; `up` grows
-/// upward from the hunk *below* it. Leading gaps use only `up`, the trailing gap
-/// only `down`; once `up + down` reaches the gap size it is fully revealed.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct GapReveal {
-    up: usize,
-    down: usize,
-}
-
-/// Where a gap sits relative to the hunks, which determines the expand
-/// directions offered (leading: up only; trailing: down only; middle: both).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GapKind {
-    Leading,
-    Middle,
-    Trailing,
-}
-
-/// A single revealed context line (display-only), carrying the real file line
-/// numbers on each side so its gutter matches the surrounding diff.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct RevealLine {
-    old_lineno: usize,
-    new_lineno: usize,
-    content: String,
-}
-
-/// The clickable expand affordance shown in a partially-revealed gap.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct GapControl {
-    gap: usize,
-    kind: GapKind,
-    /// Lines still hidden in this gap.
-    hidden: usize,
-}
-
-/// What to render for one gap, in top-to-bottom order: a revealed block just
-/// below the hunk above (`top`), then the expand control (if lines remain
-/// hidden), then a revealed block just above the hunk below (`bottom`). A fully
-/// revealed gap puts every line in `top` with no control.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct GapDisplay {
-    top: Vec<RevealLine>,
-    control: Option<GapControl>,
-    bottom: Vec<RevealLine>,
-}
-
-/// New/old line bounds of a gap and the constant new−old offset through it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct GapBounds {
-    /// First hidden new-side line number (inclusive).
-    first: usize,
-    /// Last hidden new-side line number (inclusive).
-    last: usize,
-    /// `new_lineno - old_lineno` for any line in this unchanged gap.
-    delta: i64,
-    kind: GapKind,
-}
-
-impl GapBounds {
-    fn size(&self) -> usize {
-        (self.last + 1).saturating_sub(self.first)
-    }
-    fn old_of(&self, new_lineno: usize) -> usize {
-        (new_lineno as i64 - self.delta).max(0) as usize
-    }
-}
-
-/// A direction (or "all") the user asked a gap to expand in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ExpandAction {
-    /// Reveal more lines just below the hunk above the gap.
-    Down,
-    /// Reveal more lines just above the hunk below the gap.
-    Up,
-    /// Reveal the whole gap.
-    All,
-}
-
-/// Greedy word-wrap of `text` into rows at most `width` columns wide, returning
-/// each row's length in characters. Breaks at whitespace; a single word longer
-/// than `width` is hard-split. Every character is preserved (no collapsing) and
-/// the lengths sum to `text.chars().count()`, so a styled span stream can be
-/// re-sliced by these lengths without losing any content or styling. Always
-/// returns at least one row.
-fn wrap_row_lens(text: &str, width: usize) -> Vec<usize> {
-    let total = text.chars().count();
-    if width == 0 || total == 0 {
-        return vec![total];
-    }
-    // Runs of whitespace / non-whitespace, as (length, is_whitespace).
-    let mut tokens: Vec<(usize, bool)> = Vec::new();
-    for ch in text.chars() {
-        let ws = ch.is_whitespace();
-        match tokens.last_mut() {
-            Some((len, last_ws)) if *last_ws == ws => *len += 1,
-            _ => tokens.push((1, ws)),
-        }
-    }
-
-    let mut lens = Vec::new();
-    let mut row = 0usize; // chars on the current row
-    for &(mut remaining, is_ws) in &tokens {
-        while remaining > 0 {
-            if row == width {
-                lens.push(row);
-                row = 0;
-            }
-            let space = width - row;
-            if remaining <= space {
-                row += remaining;
-                remaining = 0;
-            } else if row > 0 && !is_ws && remaining <= width {
-                // A whole word that doesn't fit here but fits on its own row:
-                // wrap to a fresh row rather than splitting it.
-                lens.push(row);
-                row = 0;
-            } else {
-                // Fills the row exactly (over-long word or whitespace run).
-                row += space;
-                remaining -= space;
-                lens.push(row);
-                row = 0;
-            }
-        }
-    }
-    if row > 0 || lens.is_empty() {
-        lens.push(row);
-    }
-    lens
-}
-
-/// Number of physical rows a diff line's `content` occupies when word-wrapped
-/// into `content_width`-wide rows. Defers to [`wrap_row_lens`] so it matches the
-/// renderer exactly (guarded by a test).
-fn line_wrap_rows(content: &str, content_width: usize) -> usize {
-    wrap_row_lens(content, content_width).len()
+/// The layout key for a saved comment's inline box.
+fn comment_attach_key(id: uuid::Uuid) -> AttachKey {
+    AttachKey::new(id.as_u128())
 }
 
 /// A review image's load state, cached on `App` keyed by (display path, side).
@@ -317,6 +211,110 @@ fn side_path(file: &FileDiff, side: DiffSide) -> &str {
     match side {
         DiffSide::Old => &file.old_path,
         DiffSide::New => &file.new_path,
+    }
+}
+
+/// Working-tree file content, keyed by display path, as `diffgrid`'s source for
+/// revealed context.
+///
+/// Populated lazily by [`App::ensure_review_file_lines`] once a fetch completes;
+/// until then a file simply reports no content, so no context is revealed and no
+/// expand controls are offered — exactly what
+/// [`FileSource::has_content`] is for.
+#[derive(Debug, Clone, Default)]
+struct FileLines(HashMap<String, std::sync::Arc<Vec<String>>>);
+
+impl FileLines {
+    /// Whether `path`'s content has already been fetched.
+    fn is_loaded(&self, path: &str) -> bool {
+        self.0.contains_key(path)
+    }
+}
+
+impl FileSource for FileLines {
+    fn line_count(&self, path: &str) -> Option<usize> {
+        self.0.get(path).map(|l| l.len())
+    }
+
+    fn line(&self, path: &str, lineno: LineNo) -> Option<Cow<'_, str>> {
+        self.0
+            .get(path)?
+            .get(lineno.index())
+            .map(|s| Cow::Borrowed(s.as_str()))
+    }
+}
+
+/// One file's `diffgrid` state: the word-diffed model, its logical layout, and
+/// the expansions the user has asked for.
+///
+/// Held per display path rather than rebuilt on demand because a [`FileLayout`]
+/// is where revealed context lives, and that has to survive navigating away and
+/// back — which is how the old `(path, gap)` reveal map behaved.
+#[derive(Debug, Clone)]
+struct FileView {
+    /// The diff as `diffgrid` models it, with intra-line word diffs already
+    /// applied. Owned (`'static`), so this struct is not self-referential.
+    file: diffgrid::FileDiff<'static>,
+    layout: FileLayout,
+    /// The expand actions the user has applied, in order.
+    ///
+    /// Kept because a [`FileLayout`]'s revealed state is write-only from
+    /// outside — there is no setter and no getter — so replaying the *requests*
+    /// is the only way to reproduce it after a rebuild. Rebuilds happen when the
+    /// layout mode changes (inline ⇄ side-by-side bake different row structures)
+    /// and when the file's content finally arrives, and both must keep what the
+    /// user revealed.
+    expands: Vec<(GapIdx, ExpandAction)>,
+    /// The line count the layout was last built against, so an arriving file
+    /// triggers exactly one rebuild.
+    source_len: Option<usize>,
+    /// Digest of the attached blocks, so they are only re-spliced when the
+    /// comment set or the draft anchor actually changes. `None` forces a
+    /// re-splice after a rebuild dropped them.
+    attach_sig: Option<u64>,
+}
+
+impl FileView {
+    /// A view over `file`, laid out against whatever content `source` can
+    /// currently supply.
+    fn new(file: diffgrid::FileDiff<'static>, source: &FileLines, mode: LayoutMode) -> Self {
+        let mut view = Self {
+            layout: FileLayout::build(&file, source, &LayoutOptions::new(mode)),
+            file,
+            expands: Vec::new(),
+            source_len: None,
+            attach_sig: None,
+        };
+        view.source_len = view.source_line_count(source);
+        view
+    }
+
+    /// The `FileSource` key for this file: the new-side path, per the trait's
+    /// new-side-only contract.
+    fn source_line_count(&self, source: &FileLines) -> Option<usize> {
+        source.line_count(self.file.side_path(Side::New))
+    }
+
+    /// Whether the layout no longer matches the mode or the content it was
+    /// built against.
+    fn is_stale(&self, source: &FileLines, mode: LayoutMode) -> bool {
+        self.layout.mode() != mode || self.source_len != self.source_line_count(source)
+    }
+
+    /// Rebuild the layout and replay every expansion onto it.
+    fn rebuild(&mut self, source: &FileLines, mode: LayoutMode) {
+        self.layout = FileLayout::build(&self.file, source, &LayoutOptions::new(mode));
+        for (gap, action) in self.expands.clone() {
+            self.layout.expand(&self.file, source, gap, action);
+        }
+        self.source_len = self.source_line_count(source);
+        self.attach_sig = None;
+    }
+
+    /// Apply an expand action, recording it so a later rebuild keeps it.
+    fn expand(&mut self, source: &FileLines, gap: GapIdx, action: ExpandAction) {
+        self.expands.push((gap, action));
+        self.layout.expand(&self.file, source, gap, action);
     }
 }
 
@@ -372,23 +370,24 @@ pub struct DiffReviewState {
     tree_scroll: u16,
     /// Comment ids whose inline box is collapsed (absent = expanded).
     collapsed_comments: HashSet<uuid::Uuid>,
-    /// Memoized word-diff segments, one slot per file in `diff.files` order
-    /// (`None` until first computed). The LCS pass is O(file) and would
-    /// otherwise re-run on every render frame; slots are filled lazily by
-    /// [`Self::word_segments`] or eagerly by [`Self::prime_segments`] when the
-    /// open-review background task precomputes them all up front.
-    seg_cache: RefCell<Vec<Option<Vec<WordSegs>>>>,
-    /// Body content width (pane inner width) from the most recent render, so the
-    /// keypress-time cursor/scroll math wraps lines the same way the renderer
-    /// does. Interior-mutable: the renderer holds `&self`.
-    body_width: Cell<usize>,
-    /// How much context each gap has been expanded to reveal, keyed by
-    /// (display path, gap index). Absent = collapsed. Cleared on `refresh_diff`.
-    expanded: HashMap<(String, usize), GapReveal>,
-    /// Lazily-fetched working-tree lines (1-based) per display path, for
-    /// expansion. Populated by [`App::ensure_review_file_lines`] once a fetch
-    /// completes; cleared on `refresh_diff`.
-    file_lines: HashMap<String, std::sync::Arc<Vec<String>>>,
+    /// One [`FileView`] per display path, built on first use (or handed over
+    /// wholesale by the open-review precompute, see [`Self::prime_views`]).
+    ///
+    /// Interior-mutable because the renderer holds `&self` and both the word
+    /// diff and the layout are memoized here. Keyed by path rather than by
+    /// index so a refresh that reorders files keeps each file's revealed
+    /// context.
+    views: RefCell<HashMap<String, FileView>>,
+    /// Body pane inner `(width, height)` from the most recent render.
+    ///
+    /// The height is not decoration: every scroll decision takes the viewport
+    /// as an argument, because `diffgrid` deliberately has no viewport constant
+    /// — the fixed `BODY_VIEWPORT = 20` this replaces made cursor-follow wrong
+    /// on every terminal that was not about 22 rows tall.
+    body: Cell<(usize, usize)>,
+    /// Lazily-fetched working-tree lines per display path, the source revealed
+    /// context is read from. Cleared on `refresh_diff`.
+    file_lines: FileLines,
 }
 
 /// A node in the file tree: either a directory (with children) or a file leaf
@@ -430,9 +429,6 @@ impl DiffReviewState {
         let file_tree = build_file_tree(&diff.files);
         // Body starts on the first file in tree order so it shows something.
         let selected_file = first_file_index(&file_tree).unwrap_or(0);
-        // One memo slot per file (at least one, so `selected_file` always
-        // indexes a slot even for an empty diff).
-        let seg_slots = diff.files.len().max(1);
         Self {
             session_id,
             title,
@@ -454,53 +450,213 @@ impl DiffReviewState {
             tree_cursor: 0,
             tree_scroll: 0,
             collapsed_comments: HashSet::new(),
-            seg_cache: RefCell::new(vec![None; seg_slots]),
-            // A reasonable default until the first render reports the real width
-            // (keypress math before any render is then close enough to self-heal).
-            body_width: Cell::new(120),
-            expanded: HashMap::new(),
-            file_lines: HashMap::new(),
+            views: RefCell::new(HashMap::new()),
+            // Reasonable defaults until the first render reports the real pane
+            // size (keypress math before any render then self-heals).
+            body: Cell::new((DEFAULT_BODY_WIDTH, DEFAULT_BODY_HEIGHT)),
+            file_lines: FileLines::default(),
         }
     }
 
-    /// Word-diff segments for the current file, memoized per file. The slot is
-    /// filled on first access (or already populated by [`Self::prime_segments`]),
-    /// so scrolling within a file reuses the cached LCS result rather than
-    /// recomputing it each frame.
-    fn word_segments(&self) -> Ref<'_, Vec<WordSegs>> {
-        let idx = self.selected_file;
-        let needs = self
-            .seg_cache
-            .borrow()
-            .get(idx)
-            .map(|slot| slot.is_none())
-            .unwrap_or(true);
-        if needs {
-            let segs = self
-                .current_file()
-                .map(word_diff_segments)
-                .unwrap_or_default();
-            if let Some(slot) = self.seg_cache.borrow_mut().get_mut(idx) {
-                *slot = Some(segs);
+    /// Install fully word-diffed `diffgrid` models (one per file in `diff.files`
+    /// order). Called once after the open-review background task builds them
+    /// off-thread, so the first navigation to each file is instant. Uses
+    /// interior mutability so it can run on the freshly built (immutable) state
+    /// before it's boxed into the modal.
+    pub(super) fn prime_views(&self, models: Vec<diffgrid::FileDiff<'static>>) {
+        let mode = self.layout_mode();
+        let mut views = self.views.borrow_mut();
+        for (i, file) in models.into_iter().enumerate() {
+            let Some(path) = self.diff.files.get(i).map(FileDiff::display_path) else {
+                continue;
+            };
+            views.insert(
+                path.to_string(),
+                FileView::new(file, &self.file_lines, mode),
+            );
+        }
+    }
+
+    /// The `diffgrid` layout mode for the view's current layout choice.
+    fn layout_mode(&self) -> LayoutMode {
+        match self.layout {
+            ReviewLayout::Inline => LayoutMode::Inline,
+            ReviewLayout::SideBySide => LayoutMode::SideBySide,
+        }
+    }
+
+    /// Ensure the current file has a [`FileView`], rebuilt for the layout mode
+    /// and re-read against the file source if either has changed since it was
+    /// built, then run `f` over it.
+    ///
+    /// `None` only when there is no current file. `f` must not re-enter
+    /// `views` — every accessor below goes through this one borrow.
+    fn with_view<R>(&self, f: impl FnOnce(&FileView) -> R) -> Option<R> {
+        let path = self.current_file()?.display_path().to_string();
+        let mode = self.layout_mode();
+        {
+            let mut views = self.views.borrow_mut();
+            match views.get_mut(&path) {
+                Some(v) if v.is_stale(&self.file_lines, mode) => v.rebuild(&self.file_lines, mode),
+                Some(_) => {}
+                None => {
+                    let model = word_diffed(self.current_file()?);
+                    views.insert(path.clone(), FileView::new(model, &self.file_lines, mode));
+                }
+            }
+            self.sync_attachments(views.get_mut(&path)?);
+        }
+        Some(f(self.views.borrow().get(&path)?))
+    }
+
+    /// Same as [`Self::with_view`], for the calls that mutate the layout.
+    fn with_view_mut<R>(&mut self, f: impl FnOnce(&mut FileView, &FileLines) -> R) -> Option<R> {
+        self.with_view(|_| ())?;
+        let path = self.current_file()?.display_path().to_string();
+        let mut views = self.views.borrow_mut();
+        let view = views.get_mut(&path)?;
+        Some(f(view, &self.file_lines))
+    }
+
+    /// Re-splice the layout's attached blocks when the comment set or the draft
+    /// anchor has moved.
+    ///
+    /// Guarded by a digest because attaching is O(rows) per block: without it a
+    /// file with a dozen comments would re-splice a dozen times on every frame.
+    fn sync_attachments(&self, view: &mut FileView) {
+        let wanted = self.wanted_attachments();
+        let sig = attachment_signature(&wanted);
+        if view.attach_sig == Some(sig) {
+            return;
+        }
+        view.attach_sig = Some(sig);
+        // No bulk setter, so clear and re-attach: several blocks sharing one
+        // anchor stack in attachment order, which is the order they must be
+        // drawn in (saved comments first, then the draft).
+        let existing: Vec<AttachKey> = view.layout.attachments().map(|(_, k)| k).collect();
+        for key in existing {
+            view.layout.detach(key);
+        }
+        for (sel, key) in wanted {
+            view.layout.attach(Attach::Below(sel), key);
+        }
+    }
+
+    /// The blocks that should be attached to the current file, in draw order:
+    /// each saved comment below the last line of its range, then the
+    /// in-progress draft below the last line of its selection.
+    fn wanted_attachments(&self) -> Vec<(SelIdx, AttachKey)> {
+        let mut out: Vec<(SelIdx, AttachKey)> = Vec::new();
+        let Some(file) = self.current_file() else {
+            return out;
+        };
+        let display = file.display_path();
+        let lines = self.selectable_lines();
+        for ann in self
+            .comments
+            .iter()
+            .filter(|a| a.status != CommentStatus::Applied && a.file == display)
+        {
+            if let Some(idx) = self.comment_anchor_index(ann, &lines) {
+                out.push((SelIdx::new(idx), comment_attach_key(ann.id)));
             }
         }
-        Ref::map(self.seg_cache.borrow(), |c| {
-            c.get(idx).and_then(|s| s.as_ref()).unwrap_or(empty_segs())
+        if let Some(anchor) = self.draft_anchor() {
+            out.push((SelIdx::new(anchor), DRAFT_ATTACH_KEY));
+        }
+        out
+    }
+
+    /// Height of the attached block `key` at `width` display columns — the
+    /// callback [`Grid::build`] resolves attachments through. `0` hides a block
+    /// whose comment has gone away without detaching it.
+    fn attached_height(&self, key: AttachKey, width: usize) -> usize {
+        if key == DRAFT_ATTACH_KEY {
+            return self.comment.as_ref().map_or(0, |d| {
+                comment_draft_box_height(&super::input_with_caret(&d.input), width)
+            });
+        }
+        self.comment_by_key(key).map_or(0, |ann| {
+            comment_box_height(ann, self.is_comment_collapsed(ann.id), width)
         })
     }
 
-    /// Install fully-precomputed word-diff segments (one entry per file in
-    /// `diff.files` order). Called once after the open-review background task
-    /// builds every file's segments off-thread, so the first navigation to each
-    /// file is instant. Uses interior mutability so it can run on the freshly
-    /// built (immutable) state before it's boxed into the modal.
-    pub(super) fn prime_segments(&self, segments: Vec<Vec<WordSegs>>) {
-        let mut cache = self.seg_cache.borrow_mut();
-        for (i, segs) in segments.into_iter().enumerate() {
-            if let Some(slot) = cache.get_mut(i) {
-                *slot = Some(segs);
-            }
+    /// The staged comment an attachment key refers to.
+    fn comment_by_key(&self, key: AttachKey) -> Option<&Comment> {
+        self.comments
+            .iter()
+            .find(|a| comment_attach_key(a.id) == key)
+    }
+
+    /// Body pane inner width from the last render.
+    fn body_width(&self) -> usize {
+        self.body.get().0
+    }
+
+    /// Body pane inner height from the last render — the viewport every scroll
+    /// decision is made against.
+    fn body_height(&self) -> usize {
+        self.body.get().1
+    }
+
+    /// The wrap options the body is laid out with at the current pane size.
+    fn wrap_options(&self) -> WrapOptions {
+        WrapOptions::new(self.body_width())
+            .with_right_margin(WRAP_RIGHT_MARGIN)
+            .with_separator(SBS_SEPARATOR)
+    }
+
+    /// The span-emission context for the current file.
+    ///
+    /// `markers` is passed in rather than built here because [`RowContext`]
+    /// borrows it, so it has to outlive the context — and only the caller has a
+    /// stack frame long enough.
+    fn row_context<'s>(
+        &'s self,
+        highlighter: Option<&'s dyn Highlighter>,
+        language: Option<&'s str>,
+        markers: &'s dyn Fn(SelIdx) -> Option<char>,
+        focused: bool,
+    ) -> RowContext<'s> {
+        let gutter = match self.layout {
+            ReviewLayout::Inline => inline_gutter(),
+            ReviewLayout::SideBySide => sbs_gutter(),
+        };
+        let (lo, hi) = self.selection();
+        let mut ctx = RowContext::new(&self.file_lines)
+            .with_gutter(gutter)
+            .with_tab_width(TAB_WIDTH)
+            .with_width(self.body_width())
+            .with_markers(markers)
+            // Selection is only shown while the body has focus, so the file
+            // list's own cursor is the only highlighted thing when it is active.
+            .with_selection(focused.then(|| SelRange::new(SelIdx::new(lo), SelIdx::new(hi))));
+        if let Some(h) = highlighter {
+            ctx = ctx.with_highlighter(h, language);
         }
+        ctx
+    }
+
+    /// Run `f` over the current file's model, layout and a freshly wrapped
+    /// [`Grid`] at the current pane size.
+    ///
+    /// The grid is rebuilt per call rather than cached: it is a pure function of
+    /// the layout, the width and the attached blocks' heights, and the draft box
+    /// changes height on every keystroke without the layout's generation moving,
+    /// so a cached grid would need invalidating on exactly the events that make
+    /// caching worthless.
+    fn with_grid<R>(&self, f: impl FnOnce(&FileView, &Grid) -> R) -> Option<R> {
+        let markers = |_: SelIdx| None;
+        let opts = self.wrap_options();
+        self.with_view(|view| {
+            // No highlighter: `Grid::build` measures widths off the model, and
+            // highlighting changes colours, never widths.
+            let ctx = self.row_context(None, None, &markers, false);
+            let grid = Grid::build(&view.file, &view.layout, &ctx, &opts, |key, width| {
+                self.attached_height(key, width)
+            });
+            f(view, &grid)
+        })
     }
 
     /// Replace the displayed diff with a freshly composed one (the working
@@ -509,13 +665,13 @@ impl DiffReviewState {
     /// cursor and scroll clamp into the new content, collapsed directories and
     /// reviewed marks are kept, and any in-progress visual selection is dropped
     /// (line indices may have moved). Render caches are reset and re-primed from
-    /// the precomputed `segments`.
+    /// the precomputed `models`.
     pub(super) fn refresh_diff(
         &mut self,
         diff: ParsedDiff,
         comments: Vec<Comment>,
         reviewed: HashSet<String>,
-        segments: Vec<Vec<WordSegs>>,
+        models: Vec<diffgrid::FileDiff<'static>>,
         content_hash: u64,
     ) {
         let prev_path = self.current_file().map(|f| f.display_path().to_string());
@@ -524,14 +680,12 @@ impl DiffReviewState {
         self.reviewed = reviewed;
         self.content_hash = content_hash;
         self.file_tree = build_file_tree(&self.diff.files);
-        // Reset and re-prime the per-file segment cache for the new file set.
-        let seg_slots = self.diff.files.len().max(1);
-        self.seg_cache = RefCell::new(vec![None; seg_slots]);
-        self.prime_segments(segments);
-        // Hunk boundaries (and gap indices) may have moved, so drop all
-        // expansion state and re-fetch file content lazily on next expand.
-        self.expanded.clear();
-        self.file_lines.clear();
+        // Hunk boundaries (and gap indices) may have moved, so every file's
+        // layout and revealed context is dropped and its content re-fetched
+        // lazily on the next expand.
+        self.views.borrow_mut().clear();
+        self.file_lines.0.clear();
+        self.prime_views(models);
         self.visual_anchor = None;
         // Re-locate the file that was on screen by its path; fall back to the
         // first file when it left the diff.
@@ -610,14 +764,15 @@ impl DiffReviewState {
         self.follow_tree_cursor(len);
     }
 
-    /// Keep the tree cursor within the (approximate) file-pane viewport.
+    /// Keep the tree cursor within the file pane's viewport, which shares its
+    /// height with the diff body beside it.
     fn follow_tree_cursor(&mut self, _len: usize) {
         let row = self.tree_cursor as u16;
-        let bottom = self.tree_scroll + BODY_VIEWPORT as u16;
+        let height = self.body_height().max(1) as u16;
         if row < self.tree_scroll {
             self.tree_scroll = row;
-        } else if row >= bottom {
-            self.tree_scroll = row.saturating_sub(BODY_VIEWPORT as u16 - 1);
+        } else if row >= self.tree_scroll + height {
+            self.tree_scroll = row.saturating_sub(height - 1);
         }
     }
 
@@ -644,169 +799,17 @@ impl DiffReviewState {
         self.diff.files.get(self.selected_file)
     }
 
-    /// Loaded working-tree lines for the current file, if fetched. `None` while
-    /// loading, on failure, or before a fetch was kicked — in which case no
-    /// context is revealed and no expand controls appear.
-    fn current_file_lines(&self) -> Option<&std::sync::Arc<Vec<String>>> {
-        let path = self.current_file()?.display_path();
-        self.file_lines.get(path)
-    }
-
     /// Whether the current file could reveal more context (used to decide
     /// whether a background file-content fetch is worthwhile). True for a
-    /// non-binary, modified/renamed file with at least one hunk.
+    /// non-binary file with at least one hunk that exists on both sides.
     fn current_file_expandable(&self) -> bool {
-        self.current_file().is_some_and(|f| {
-            f.binary.is_none()
-                && !f.hunks.is_empty()
-                && matches!(f.status, FileStatus::Modified | FileStatus::Renamed)
-        })
+        self.with_view(|v| v.file.is_expandable()).unwrap_or(false)
     }
 
-    /// New/old line bounds of gap `gap` (`0` = before the first hunk,
-    /// `hunks.len()` = after the last), or `None` when there are no hidden
-    /// lines there. The trailing gap needs the file's line count (`file_len`,
-    /// from the loaded working tree), so it yields `None` until that is known.
-    fn gap_bounds(
-        &self,
-        file: &FileDiff,
-        gap: usize,
-        file_len: Option<usize>,
-    ) -> Option<GapBounds> {
-        let hunks = &file.hunks;
-        // New/old line just past a hunk (1-based first line below it).
-        let below = |h: &Hunk| (h.new_start + h.new_lines, h.old_start + h.old_lines);
-        let (first, last, delta, kind) = if gap == 0 {
-            // Leading gap: file start up to just above the first hunk.
-            let h = hunks.first()?;
-            let delta = h.new_start as i64 - h.old_start as i64;
-            (1, h.new_start.checked_sub(1)?, delta, GapKind::Leading)
-        } else if gap == hunks.len() {
-            // Trailing gap: just below the last hunk to end of file.
-            let h = hunks.last()?;
-            let (new_below, old_below) = below(h);
-            let last = file_len?;
-            (
-                new_below,
-                last,
-                new_below as i64 - old_below as i64,
-                GapKind::Trailing,
-            )
-        } else {
-            // Middle gap between hunk[gap-1] and hunk[gap].
-            let prev = hunks.get(gap - 1)?;
-            let next = hunks.get(gap)?;
-            let (new_below, old_below) = below(prev);
-            (
-                new_below,
-                next.new_start.checked_sub(1)?,
-                new_below as i64 - old_below as i64,
-                GapKind::Middle,
-            )
-        };
-        // Line numbers are 1-based, so a valid gap has `first >= 1`; this also
-        // rejects the degenerate `@@ -1,N +0,0 @@` (whole-file deletion) case.
-        (first >= 1 && last >= first).then_some(GapBounds {
-            first,
-            last,
-            delta,
-            kind,
-        })
-    }
-
-    /// Build the display for gap `gap`: the revealed context blocks plus any
-    /// expand control. Empty (nothing to show) until the file's content is
-    /// loaded, so every revealed line has concrete text to render/wrap.
-    fn gap_display(&self, gap: usize) -> GapDisplay {
-        let Some(file) = self.current_file() else {
-            return GapDisplay::default();
-        };
-        let Some(lines) = self.current_file_lines() else {
-            return GapDisplay::default();
-        };
-        let Some(bounds) = self.gap_bounds(file, gap, Some(lines.len())) else {
-            return GapDisplay::default();
-        };
-        let size = bounds.size();
-        let rev = self
-            .expanded
-            .get(&(file.display_path().to_string(), gap))
-            .copied()
-            .unwrap_or_default();
-        let down = rev.down.min(size);
-        let up = rev.up.min(size - down);
-
-        let make = |new_lineno: usize| RevealLine {
-            new_lineno,
-            old_lineno: bounds.old_of(new_lineno),
-            content: lines
-                .get(new_lineno.saturating_sub(1))
-                .cloned()
-                .unwrap_or_default(),
-        };
-
-        // Fully revealed: one contiguous block, no control.
-        if down + up >= size {
-            return GapDisplay {
-                top: (bounds.first..=bounds.last).map(make).collect(),
-                control: None,
-                bottom: Vec::new(),
-            };
-        }
-        let top = (bounds.first..bounds.first + down).map(make).collect();
-        let bottom = ((bounds.last + 1 - up)..=bounds.last).map(make).collect();
-        GapDisplay {
-            top,
-            control: Some(GapControl {
-                gap,
-                kind: bounds.kind,
-                hidden: size - down - up,
-            }),
-            bottom,
-        }
-    }
-
-    /// Apply an expand action to gap `gap`, growing its revealed counters
-    /// (clamped to the gap size). No-op when the gap has no hidden lines. The
-    /// caller kicks the file-content fetch so the revealed lines can render.
+    /// Apply an expand action to gap `gap` of the current file. The caller kicks
+    /// the file-content fetch so the revealed lines have text to render.
     fn expand_gap(&mut self, gap: usize, action: ExpandAction) {
-        let Some(file) = self.current_file() else {
-            return;
-        };
-        let file_len = self.current_file_lines().map(|l| l.len());
-        let Some(bounds) = self.gap_bounds(file, gap, file_len) else {
-            // `None` is either the trailing gap whose size isn't known until the
-            // file loads — defer the request so it applies on arrival — or a gap
-            // with no hidden lines at all, which is a genuine no-op (don't record
-            // a phantom reveal for a first hunk at line 1, adjacent hunks, etc.).
-            if gap == file.hunks.len() && file_len.is_none() {
-                let entry = self
-                    .expanded
-                    .entry((file.display_path().to_string(), gap))
-                    .or_default();
-                match action {
-                    ExpandAction::Up => entry.up += EXPAND_STEP,
-                    ExpandAction::Down | ExpandAction::All => entry.down += EXPAND_STEP,
-                }
-            }
-            return;
-        };
-        let size = bounds.size();
-        let key = (file.display_path().to_string(), gap);
-        let entry = self.expanded.entry(key).or_default();
-        match action {
-            ExpandAction::Down => {
-                let room = size - entry.up.min(size);
-                entry.down = (entry.down + EXPAND_STEP).min(room);
-            }
-            ExpandAction::Up => {
-                let room = size - entry.down.min(size);
-                entry.up = (entry.up + EXPAND_STEP).min(room);
-            }
-            ExpandAction::All => {
-                entry.up = size - entry.down.min(size);
-            }
-        }
+        self.with_view_mut(|view, source| view.expand(source, GapIdx::new(gap), action));
     }
 
     /// The hunk index containing selectable line `cursor`, or `None` when the
@@ -824,131 +827,9 @@ impl DiffReviewState {
         file.hunks.len().checked_sub(1)
     }
 
-    /// Set (not increment) a gap's revealed content — used by tests and by the
-    /// physical-row parity checks to place the view in a known expanded state.
-    #[cfg(test)]
-    fn set_gap_reveal(&mut self, gap: usize, reveal: GapReveal) {
-        if let Some(file) = self.current_file() {
-            self.expanded
-                .insert((file.display_path().to_string(), gap), reveal);
-        }
-    }
-
     /// Install loaded working-tree lines for `path` (test/handler entry point).
     pub(super) fn set_file_lines(&mut self, path: String, lines: std::sync::Arc<Vec<String>>) {
-        self.file_lines.insert(path, lines);
-    }
-
-    /// The gap whose expand control sits at physical body row `body_row`, or
-    /// `None`. Handles both layouts; the side-by-side walk accounts for the
-    /// comment boxes interleaved after cell rows (which shift later rows down).
-    fn expand_control_gap_at(&self, body_row: usize, width: usize) -> Option<usize> {
-        match self.layout {
-            ReviewLayout::Inline => match self.inline_physical_rows().get(body_row) {
-                Some(BodyRow::ExpandControl { gap }) => Some(*gap),
-                _ => None,
-            },
-            ReviewLayout::SideBySide => {
-                let anchors = self.comment_anchors();
-                let mut r = 0usize;
-                for sbs in self.sbs_rows() {
-                    match &sbs {
-                        SbsRow::ExpandControl { gap } => {
-                            if r == body_row {
-                                return Some(*gap);
-                            }
-                            r += 1;
-                        }
-                        SbsRow::Cells { left, right } => {
-                            r += 1;
-                            let sels: Vec<usize> = match (left, right) {
-                                (Some(l), Some(rt)) if l == rt => vec![*l],
-                                (l, rt) => l.iter().chain(rt.iter()).copied().collect(),
-                            };
-                            for sel in sels {
-                                if let Some(anns) = anchors.get(&sel) {
-                                    for ann in anns {
-                                        r += comment_box_height(
-                                            ann,
-                                            self.is_comment_collapsed(ann.id),
-                                            width,
-                                        );
-                                    }
-                                }
-                                if self.draft_anchor() == Some(sel)
-                                    && let Some(draft) = self.comment.as_ref()
-                                {
-                                    r += comment_draft_box_height(
-                                        &super::input_with_caret(&draft.input),
-                                        width,
-                                    );
-                                }
-                            }
-                        }
-                        _ => r += 1,
-                    }
-                }
-                None
-            }
-        }
-    }
-
-    /// The expand action a click at content column `rel_col` on gap `gap`'s
-    /// control triggers. Clicking a labelled zone runs that action; clicking
-    /// elsewhere on the control falls back to a single step in the gap's
-    /// primary direction (down, except a leading gap which only goes up).
-    fn expand_action_at(&self, gap: usize, rel_col: usize) -> Option<ExpandAction> {
-        let control = self.gap_display(gap).control?;
-        let width = self.body_width.get();
-        for seg in gap_control_layout(&control, width) {
-            if let Some(action) = seg.action {
-                let end = seg.start + seg.text.chars().count();
-                if rel_col >= seg.start && rel_col < end {
-                    return Some(action);
-                }
-            }
-        }
-        Some(match control.kind {
-            GapKind::Leading => ExpandAction::Up,
-            _ => ExpandAction::Down,
-        })
-    }
-
-    /// Append the revealed context + expand control for gap `gap` as
-    /// side-by-side rows.
-    fn push_sbs_gap(&self, rows: &mut Vec<SbsRow>, gap: usize) {
-        let disp = self.gap_display(gap);
-        let push = |rows: &mut Vec<SbsRow>, lines: &[RevealLine]| {
-            for l in lines {
-                rows.push(SbsRow::Context {
-                    old_lineno: l.old_lineno,
-                    new_lineno: l.new_lineno,
-                    content: l.content.clone(),
-                });
-            }
-        };
-        push(rows, &disp.top);
-        if disp.control.is_some() {
-            rows.push(SbsRow::ExpandControl { gap });
-        }
-        push(rows, &disp.bottom);
-    }
-
-    /// Side-by-side rows for the current file, with revealed context and expand
-    /// controls interleaved between hunks (the source of truth the SBS renderer
-    /// and row mappings share).
-    fn sbs_rows(&self) -> Vec<SbsRow> {
-        let Some(file) = self.current_file() else {
-            return Vec::new();
-        };
-        let mut rows = Vec::new();
-        let mut sel = 0;
-        for (hi, hunk) in file.hunks.iter().enumerate() {
-            self.push_sbs_gap(&mut rows, hi);
-            push_hunk_sbs_rows(&mut rows, hunk, &mut sel);
-        }
-        self.push_sbs_gap(&mut rows, file.hunks.len());
-        rows
+        self.file_lines.0.insert(path, lines);
     }
 
     /// Flip the preferred binary-image side (before ⇄ after). No-op visually on
@@ -1105,81 +986,23 @@ impl DiffReviewState {
         self.follow_cursor();
     }
 
-    /// Adjust `scroll` so the cursor's body row stays within the viewport.
+    /// Adjust `scroll` so the cursor's row stays within the viewport.
+    ///
+    /// The viewport height is the pane's real height, reported by the last
+    /// render. It used to be a `BODY_VIEWPORT = 20` constant, which put the
+    /// cursor off-screen on every terminal that was not about 22 rows tall.
     fn follow_cursor(&mut self) {
-        let row = self.body_row_of(self.cursor) as u16;
-        let top = self.scroll;
-        let bottom = self.scroll + BODY_VIEWPORT as u16;
-        if row < top {
-            self.scroll = row;
-        } else if row >= bottom {
-            self.scroll = row.saturating_sub(BODY_VIEWPORT as u16 - 1);
+        let cursor = SelIdx::new(self.cursor);
+        let (current, height) = (self.scroll as usize, self.body_height());
+        let scrolled = self
+            .with_grid(|_, grid| {
+                grid.row_of(cursor)
+                    .map(|y| grid.scroll_to(y, current, height))
+            })
+            .flatten();
+        if let Some(scroll) = scrolled {
+            self.scroll = scroll as u16;
         }
-    }
-
-    /// The inline body's physical rows, in render order: a hunk header, then
-    /// each diff line (one row, plus continuation rows when its content
-    /// soft-wraps past `content_width = body_width - INLINE_GUTTER_COLS`), then
-    /// any comment boxes anchored to that line. The single layout used by the
-    /// inline renderer and by every row↔line mapping below.
-    fn inline_physical_rows(&self) -> Vec<BodyRow> {
-        let mut rows = Vec::new();
-        let Some(file) = self.current_file() else {
-            return rows;
-        };
-        let body_width = self.body_width.get();
-        let content_width = inline_content_width(body_width);
-        let anchors = self.comment_anchors();
-        let draft_anchor = self.draft_anchor();
-        // Revealed context rows (and the expand control) for gap `gap`.
-        let push_gap = |rows: &mut Vec<BodyRow>, gap: usize| {
-            let disp = self.gap_display(gap);
-            let push_lines = |rows: &mut Vec<BodyRow>, lines: &[RevealLine]| {
-                for line in lines {
-                    for c in 0..line_wrap_rows(&line.content, content_width) {
-                        rows.push(BodyRow::Context { cont: c > 0 });
-                    }
-                }
-            };
-            push_lines(rows, &disp.top);
-            if disp.control.is_some() {
-                rows.push(BodyRow::ExpandControl { gap });
-            }
-            push_lines(rows, &disp.bottom);
-        };
-        let mut sel = 0;
-        for (hi, hunk) in file.hunks.iter().enumerate() {
-            push_gap(&mut rows, hi);
-            rows.push(BodyRow::Header);
-            for line in &hunk.lines {
-                let h = line_wrap_rows(&line.content, content_width);
-                for c in 0..h {
-                    rows.push(BodyRow::Line { sel, cont: c > 0 });
-                }
-                if let Some(anns) = anchors.get(&sel) {
-                    for ann in anns {
-                        let bh =
-                            comment_box_height(ann, self.is_comment_collapsed(ann.id), body_width);
-                        for _ in 0..bh {
-                            rows.push(BodyRow::Comment { id: ann.id });
-                        }
-                    }
-                }
-                if draft_anchor == Some(sel)
-                    && let Some(draft) = self.comment.as_ref()
-                {
-                    for _ in 0..comment_draft_box_height(
-                        &super::input_with_caret(&draft.input),
-                        body_width,
-                    ) {
-                        rows.push(BodyRow::Draft);
-                    }
-                }
-                sel += 1;
-            }
-        }
-        push_gap(&mut rows, file.hunks.len());
-        rows
     }
 
     /// The selectable-line index the in-progress comment edit box anchors to
@@ -1196,44 +1019,32 @@ impl DiffReviewState {
         if self.layout != ReviewLayout::Inline || self.comment.is_none() {
             return;
         }
-        let rows = self.inline_physical_rows();
-        let first = rows.iter().position(|r| matches!(r, BodyRow::Draft));
-        let last = rows.iter().rposition(|r| matches!(r, BodyRow::Draft));
-        if let (Some(first), Some(last)) = (first, last) {
-            let bottom = self.scroll as usize + BODY_VIEWPORT;
-            if last >= bottom {
-                self.scroll = (last + 1).saturating_sub(BODY_VIEWPORT) as u16;
-            }
-            if (first as u16) < self.scroll {
-                self.scroll = first as u16;
-            }
+        // The draft is an attached block, so the grid already knows where it
+        // starts and how tall it currently is at this width.
+        let span = self
+            .with_grid(|view, grid| {
+                let row = view
+                    .layout
+                    .rows()
+                    .find(|r| r.attach_key() == Some(DRAFT_ATTACH_KEY))?;
+                let first = grid.row_of_logical(row.index())?.get();
+                Some((
+                    first,
+                    first + grid.height_of_logical(row.index()).max(1) - 1,
+                ))
+            })
+            .flatten();
+        let Some((first, last)) = span else {
+            return;
+        };
+        let height = self.body_height();
+        let bottom = self.scroll as usize + height;
+        if last >= bottom {
+            self.scroll = (last + 1).saturating_sub(height) as u16;
         }
-    }
-
-    /// Physical body row of selectable line `idx`'s first (non-continuation)
-    /// row. In side-by-side the row structure differs, so a simpler linear walk
-    /// is used (it never wraps).
-    fn body_row_of(&self, idx: usize) -> usize {
-        if self.layout == ReviewLayout::Inline {
-            return self
-                .inline_physical_rows()
-                .iter()
-                .position(|r| matches!(r, BodyRow::Line { sel, cont: false } if *sel == idx))
-                .unwrap_or(0);
+        if (first as u16) < self.scroll {
+            self.scroll = first as u16;
         }
-        // Side-by-side: walk the interleaved rows (headers, paired cells,
-        // revealed context, expand controls) and return the first row whose
-        // cell carries `idx` on either side. Comment boxes aren't counted (as
-        // before), so this stays an approximation used only for scroll-follow.
-        let rows = self.sbs_rows();
-        for (row, sbs) in rows.iter().enumerate() {
-            if let SbsRow::Cells { left, right } = sbs
-                && (*left == Some(idx) || *right == Some(idx))
-            {
-                return row;
-            }
-        }
-        rows.len()
     }
 
     pub fn toggle_focus(&mut self) {
@@ -1278,20 +1089,18 @@ impl DiffReviewState {
         true
     }
 
-    /// Total physical body rows for the current file (hunk headers, diff lines
-    /// incl. soft-wrap continuations, and interleaved comment boxes).
+    /// Total physical body rows for the current file: every logical row the
+    /// layout produced, counting soft-wrap continuations and each row of an
+    /// attached comment box.
     fn total_body_rows(&self) -> usize {
-        if self.layout == ReviewLayout::Inline {
-            return self.inline_physical_rows().len();
-        }
-        self.sbs_rows().len()
+        self.with_grid(|_, grid| grid.row_count()).unwrap_or(0)
     }
 
     /// Scroll the diff body by a page (lazygit-style PgUp/PgDn). Independent of
     /// focus, so paging the diff works while the file list is focused.
     fn page_body(&mut self, down: bool) {
         let max = self.total_body_rows().saturating_sub(1) as u16;
-        let page = BODY_VIEWPORT as u16;
+        let page = self.body_height() as u16;
         self.scroll = if down {
             (self.scroll + page).min(max)
         } else {
@@ -1300,14 +1109,21 @@ impl DiffReviewState {
     }
 
     /// Selectable-line index at body row `body_row` (`None` for a header,
-    /// comment-box, or out-of-range row). A click on a soft-wrap continuation
-    /// row maps to its diff line. Inline only — the inverse of
-    /// [`Self::body_row_of`]; callers gate side-by-side out.
+    /// comment-box, revealed-context or out-of-range row). A click on a
+    /// soft-wrap continuation row maps to its diff line.
+    ///
+    /// Column-independent, so in side-by-side it reports whichever half the row
+    /// carries; [`Self::hit_at`] is the column-aware form the mouse uses.
     fn selectable_at_body_row(&self, body_row: usize) -> Option<usize> {
-        match self.inline_physical_rows().get(body_row) {
-            Some(BodyRow::Line { sel, .. }) => Some(*sel),
-            _ => None,
-        }
+        self.with_grid(|view, grid| {
+            let row = grid.row(RowIdx::new(body_row))?;
+            let logical = view.layout.row(row.logical())?;
+            (logical.kind() == RowKind::Line)
+                .then(|| logical.sel())
+                .flatten()
+                .map(SelIdx::get)
+        })
+        .flatten()
     }
 
     /// Scroll the body by one row (free of the cursor), for mouse wheel.
@@ -1331,33 +1147,53 @@ impl DiffReviewState {
         };
     }
 
+    /// What sits under a screen position inside the body pane.
+    ///
+    /// The single mouse→content mapping: `diffgrid` resolves the column as well
+    /// as the row, so an expand control's clickable zones, a comment box's
+    /// interior and a diff line's gutter all come back distinguished, from the
+    /// same layout the renderer drew.
+    fn hit_at(&self, col: u16, row: u16, body: Rect) -> Option<Hit> {
+        let body_row = self.body_row_at(col, row, body)?;
+        let x = col.saturating_sub(body.x) as usize;
+        self.with_grid(|_, grid| grid.hit(x, RowIdx::new(body_row)))
+    }
+
     /// Left-click at a screen position. Clicking an expand control reveals more
     /// context; clicking a comment box folds or unfolds it; clicking a diff line
     /// focuses the body and moves the cursor there (clearing any selection).
     /// Returns `true` when the click triggered an expansion, so the caller can
     /// kick the file-content fetch that materialises the revealed lines.
     pub fn click_at(&mut self, col: u16, row: u16, body: Rect) -> bool {
-        let Some(body_row) = self.body_row_at(col, row, body) else {
+        let Some(hit) = self.hit_at(col, row, body) else {
             return false;
         };
-        if let Some(gap) = self.expand_control_gap_at(body_row, body.width as usize) {
-            let rel_col = col.saturating_sub(body.x) as usize;
-            if let Some(action) = self.expand_action_at(gap, rel_col) {
-                self.expand_gap(gap, action);
+        match hit {
+            Hit::ExpandControl { gap, action } => {
+                if let Some(action) = action {
+                    self.expand_gap(gap.get(), action);
+                }
+                true
             }
-            return true;
+            // The draft box is not a fold target — it is being typed into.
+            Hit::Attached { key, .. } if key != DRAFT_ATTACH_KEY => {
+                if let Some(id) = self.comment_by_key(key).map(|a| a.id) {
+                    self.toggle_comment_collapsed(id);
+                }
+                false
+            }
+            _ => {
+                let body_row = self.body_row_at(col, row, body).unwrap_or_default();
+                self.place_cursor_at_row(body_row);
+                false
+            }
         }
-        if let Some(id) = self.comment_box_at_body_row(body_row, body.width as usize) {
-            self.toggle_comment_collapsed(id);
-            return false;
-        }
-        self.place_cursor_at_row(body_row);
-        false
     }
 
     /// Focus the body and move the cursor to the diff line at `body_row`,
-    /// clearing any active selection. Inline only: in side-by-side the row
-    /// structure differs, so this just focuses the body.
+    /// clearing any active selection. Inline only: in side-by-side a row holds
+    /// two lines and which one was meant depends on the column, so this just
+    /// focuses the body there.
     fn place_cursor_at_row(&mut self, body_row: usize) {
         self.focus = ReviewFocus::Body;
         self.visual_anchor = None;
@@ -1624,25 +1460,32 @@ impl DiffReviewState {
         )
     }
 
-    /// Whether selectable line `idx` is covered by a non-applied comment,
-    /// and whether any such comment is drifted.
-    fn comment_marker(&self, idx: usize) -> Option<bool> {
-        let file = self.current_file()?;
+    /// Selectable-line indices covered by a non-applied comment, mapped to
+    /// whether any such comment has drifted.
+    ///
+    /// Built once per frame rather than probed per row: the gutter asks for
+    /// every line, and the underlying test is O(comments) with an O(lines)
+    /// setup, so per-row lookups made rendering quadratic in the file.
+    fn comment_markers(&self) -> HashMap<usize, bool> {
+        let mut out = HashMap::new();
+        let Some(file) = self.current_file() else {
+            return out;
+        };
         let display = file.display_path();
         let lines = self.selectable_lines();
-        let mut drifted = false;
-        let mut found = false;
         for a in self
             .comments
             .iter()
             .filter(|a| a.status != CommentStatus::Applied && a.file == display)
         {
-            if self.comment_touches_index(a, idx, &lines) {
-                found = true;
-                drifted |= a.status == CommentStatus::Drifted;
+            let drifted = a.status == CommentStatus::Drifted;
+            for idx in 0..lines.len() {
+                if self.comment_touches_index(a, idx, &lines) {
+                    *out.entry(idx).or_insert(false) |= drifted;
+                }
             }
         }
-        found.then_some(drifted)
+        out
     }
 
     /// Whether comment `id`'s inline box is collapsed.
@@ -1657,68 +1500,6 @@ impl DiffReviewState {
         }
     }
 
-    /// If body row `body_row` falls within a rendered comment box, the id of
-    /// that comment. Walks the body in the same row order as the renderer
-    /// (hunk header, diff line, then any comment boxes anchored to it), so the
-    /// interleaved boxes are accounted for. `width` is the body content width
-    /// (used to size wrapped boxes), matching the value passed to the renderer.
-    fn comment_box_at_body_row(&self, body_row: usize, width: usize) -> Option<uuid::Uuid> {
-        self.current_file()?;
-        let anchors = self.comment_anchors();
-        let mut row = 0usize;
-        // Test each comment box anchored after `sel`, advancing `row` past it;
-        // returns the comment id when `body_row` lands inside the box.
-        let box_hit = |row: &mut usize, sel: usize| -> Option<uuid::Uuid> {
-            for ann in anchors.get(&sel)?.iter() {
-                let h = comment_box_height(ann, self.is_comment_collapsed(ann.id), width);
-                if (*row..*row + h).contains(&body_row) {
-                    return Some(ann.id);
-                }
-                *row += h;
-            }
-            None
-        };
-
-        match self.layout {
-            ReviewLayout::Inline => {
-                // Inline shares the renderer's exact physical layout (wrapping
-                // and boxes), so a direct row lookup is correct.
-                if let Some(BodyRow::Comment { id }) = self.inline_physical_rows().get(body_row) {
-                    return Some(*id);
-                }
-            }
-            ReviewLayout::SideBySide => {
-                for sbs in self.sbs_rows() {
-                    row += 1; // header, paired cells, revealed context, or control
-                    if let SbsRow::Cells { left, right } = sbs {
-                        // Context rows have left == right; de-dup so a box isn't
-                        // counted twice (mirrors the renderer).
-                        let sels: Vec<usize> = match (left, right) {
-                            (Some(l), Some(r)) if l == r => vec![l],
-                            (l, r) => l.into_iter().chain(r).collect(),
-                        };
-                        for sel in sels {
-                            if let Some(id) = box_hit(&mut row, sel) {
-                                return Some(id);
-                            }
-                            // Advance past the in-progress edit box (not a
-                            // toggle target) so boxes below it stay aligned.
-                            if self.draft_anchor() == Some(sel)
-                                && let Some(draft) = self.comment.as_ref()
-                            {
-                                row += comment_draft_box_height(
-                                    &super::input_with_caret(&draft.input),
-                                    width,
-                                );
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        None
-    }
-
     /// Toggle the inline box (expanded/collapsed) of the comment covering
     /// the cursor line, if any.
     fn toggle_comment_fold(&mut self) {
@@ -1727,29 +1508,6 @@ impl DiffReviewState {
         {
             self.collapsed_comments.insert(id);
         }
-    }
-
-    /// Map each selectable-line index to the comments whose box should be
-    /// drawn just after it — anchored to the last line of the comment's
-    /// range on its side.
-    fn comment_anchors(&self) -> std::collections::HashMap<usize, Vec<&Comment>> {
-        let mut map: std::collections::HashMap<usize, Vec<&Comment>> =
-            std::collections::HashMap::new();
-        let Some(file) = self.current_file() else {
-            return map;
-        };
-        let display = file.display_path();
-        let lines = self.selectable_lines();
-        for ann in self
-            .comments
-            .iter()
-            .filter(|a| a.status != CommentStatus::Applied && a.file == display)
-        {
-            if let Some(idx) = self.comment_anchor_index(ann, &lines) {
-                map.entry(idx).or_default().push(ann);
-            }
-        }
-        map
     }
 }
 
@@ -1785,7 +1543,6 @@ impl App {
 
         let precompute = self.config.precompute_review_caches;
         let highlight = self.theme.mode == ColorMode::TrueColor;
-        let text_fg = self.theme.review_palette().text;
         let backend = self.backend_for(sref);
         let tx = self.event_loop.sender();
         tokio::spawn(async move {
@@ -1813,16 +1570,16 @@ impl App {
             let reviewed = snapshot.reviewed;
             let content_hash = snapshot.content_hash;
             let dropped_comments = snapshot.dropped_comments;
-            // Default: precompute every file's render caches (word-diff segments
-            // + syntax highlighting) up front so file switching is instant. The
+            // Default: precompute every file's render caches (the word diff plus
+            // syntax highlighting) up front so file switching is instant. The
             // precompute is CPU-bound and synchronous, so keep it off the async
-            // worker pool; hand the diff back out with its segments rather than
-            // cloning it. Opt-out (`precompute` off): send no segments so each
+            // worker pool; hand the diff back out with its models rather than
+            // cloning it. Opt-out (`precompute` off): send no models so each
             // file's caches build lazily on first navigation.
-            let (diff, segments) = if precompute {
+            let (diff, models) = if precompute {
                 tokio::task::spawn_blocking(move || {
-                    let segments = precompute_review_caches(&snapshot.diff, highlight, text_fg);
-                    (snapshot.diff, segments)
+                    let models = precompute_review_caches(&snapshot.diff, highlight);
+                    (snapshot.diff, models)
                 })
                 .await
                 .expect("review precompute task panicked")
@@ -1838,7 +1595,7 @@ impl App {
                         diff,
                         comments,
                         reviewed,
-                        segments,
+                        models,
                         content_hash,
                         dropped_comments,
                     }),
@@ -2171,7 +1928,7 @@ impl App {
         };
         let path = file.display_path().to_string();
         // Already loaded into the view, or a fetch is already in flight.
-        if state.file_lines.contains_key(&path)
+        if state.file_lines.is_loaded(&path)
             || !self.review_file_loads.borrow_mut().insert(path.clone())
         {
             return;
@@ -2665,26 +2422,27 @@ impl App {
         }
 
         // Syntax highlighting emits RGB foregrounds, so only apply it on
-        // true-color terminals; otherwise fall back to the palette text colour.
-        let highlight = self.theme.mode == ColorMode::TrueColor;
+        // true-color terminals; below that the palette's text colour carries the
+        // whole line, which is what an absent highlighter already means.
+        let highlighter = (self.theme.mode == ColorMode::TrueColor).then_some(SyntectHighlighter);
         let ext = state
             .current_file()
             .map(|f| file_extension(f.display_path()).to_string())
             .unwrap_or_default();
-        let width = area.width.saturating_sub(2) as usize;
-        // Record the content width so keypress-time cursor/scroll math wraps
-        // lines exactly as we render them here.
-        state.body_width.set(width);
-        let segs = state.word_segments();
-        let rounded = self.config.rounded_borders;
-        let lines = match state.layout {
-            ReviewLayout::Inline => {
-                review_body_lines(state, focused, &pal, &ext, highlight, width, &segs, rounded)
-            }
-            ReviewLayout::SideBySide => review_body_lines_side_by_side(
-                state, focused, &pal, &ext, highlight, width, &segs, rounded,
-            ),
-        };
+        let inner = block.inner(area);
+        // Record the pane's inner size so keypress-time cursor/scroll math wraps
+        // and scrolls exactly as we render here.
+        state
+            .body
+            .set((inner.width as usize, inner.height as usize));
+        let lines = review_body_lines(
+            state,
+            focused,
+            &pal,
+            &ext,
+            highlighter.as_ref().map(|h| h as &dyn Highlighter),
+            self.config.rounded_borders,
+        );
 
         frame.render_widget(
             Paragraph::new(lines).block(block).scroll((state.scroll, 0)),
@@ -3087,7 +2845,9 @@ fn apply_reviewed_bg(
     for span in &mut spans {
         span.style = span.style.bg(pal.reviewed_bg);
     }
-    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    // Display columns, not chars: a path with a CJK or emoji component is wider
+    // than its character count, and padding by that count overruns the pane.
+    let used: usize = spans.iter().map(|s| s.content.width()).sum();
     if width > used {
         spans.push(Span::styled(
             " ".repeat(width - used),
@@ -3097,147 +2857,199 @@ fn apply_reviewed_bg(
     spans
 }
 
-/// Build the inline-rendered body for the current file: hunk headers plus each
-/// diff line with a coloured gutter, full-width add/remove background fill,
-/// word-level intra-line highlight, and an comment marker. Selected lines
-/// (cursor or visual range) are reversed when the body is focused.
-#[allow(clippy::too_many_arguments)]
+/// Build the rendered body for the current file, in whichever layout is active.
+///
+/// The row structure is entirely `diffgrid`'s: it decides what rows exist (hunk
+/// headers, diff lines, revealed context, expand controls, attached comment
+/// boxes), how they wrap, and what each run of text *is*. This function does the
+/// two things only the host can: it draws the comment boxes it attached, and it
+/// turns semantic roles into `ratatui` styles through the theme's palette.
 fn review_body_lines(
     state: &DiffReviewState,
     focused: bool,
     pal: &ReviewPalette,
     ext: &str,
-    highlight: bool,
-    width: usize,
-    segs: &[WordSegs],
+    highlighter: Option<&dyn Highlighter>,
     rounded: bool,
 ) -> Vec<Line<'static>> {
-    let Some(file) = state.current_file() else {
-        return Vec::new();
+    let width = state.body_width();
+    // One pass over the comments per frame rather than one per rendered row:
+    // the marker lookup is called for every line's gutter.
+    let markers = state.comment_markers();
+    let marker_at = |sel: SelIdx| match markers.get(&sel.get()) {
+        Some(true) => Some(DRIFT_MARKER),
+        Some(false) => Some(COMMENT_MARKER),
+        None => None,
     };
+    let language = (!ext.is_empty()).then_some(ext);
+    let ctx = state.row_context(highlighter, language, &marker_at, focused);
     let (sel_lo, sel_hi) = state.selection();
-    let anchors = state.comment_anchors();
-    let mut out: Vec<Line<'static>> = Vec::new();
-    let mut idx = 0; // selectable-line index
-
-    // Revealed context + expand control for gap `gap`, mirroring the row order
-    // in `inline_physical_rows` so the two stay in lockstep.
-    let push_gap = |out: &mut Vec<Line<'static>>, gap: usize| {
-        let disp = state.gap_display(gap);
-        for line in &disp.top {
-            out.extend(reveal_line_rows(line, pal, ext, highlight, width));
-        }
-        if let Some(control) = &disp.control {
-            out.push(gap_control_line(control, pal, width));
-        }
-        for line in &disp.bottom {
-            out.extend(reveal_line_rows(line, pal, ext, highlight, width));
-        }
+    let selected = |sel: Option<SelIdx>| {
+        focused && sel.is_some_and(|s| s.get() >= sel_lo && s.get() <= sel_hi)
     };
 
-    for (hi, hunk) in file.hunks.iter().enumerate() {
-        push_gap(&mut out, hi);
-        out.push(hunk_header_line(hunk, pal, width));
-        for line in &hunk.lines {
-            let (line_bg, gutter_bg, emph_bg, sign, sign_fg) = match line.origin {
-                LineOrigin::Addition => (
-                    pal.add_bg,
-                    pal.add_gutter_bg,
-                    pal.add_emph_bg,
-                    '+',
-                    pal.add_fg,
-                ),
-                LineOrigin::Deletion => (
-                    pal.del_bg,
-                    pal.del_gutter_bg,
-                    pal.del_emph_bg,
-                    '-',
-                    pal.del_fg,
-                ),
-                LineOrigin::Context => {
-                    (Color::Reset, Color::Reset, Color::Reset, ' ', pal.gutter_fg)
-                }
-            };
-            let ann = match state.comment_marker(idx) {
-                Some(true) => DRIFT_MARKER,
-                Some(false) => COMMENT_MARKER,
-                None => ' ',
-            };
-            let old = lineno_str(line.old_lineno);
-            let new = lineno_str(line.new_lineno);
-
-            // Code content as its own span list, so it can soft-wrap independent
-            // of the fixed-width gutter.
-            let mut content_spans = Vec::new();
-            for (text, emph) in &segs[idx] {
-                let bg = if *emph { emph_bg } else { line_bg };
-                push_segment(&mut content_spans, text, ext, highlight, pal.text, bg);
-            }
-
-            // First row carries the line numbers + sign; wrap continuations get a
-            // blank gutter of the same width so the coloured fill stays aligned.
-            let gutter = |first: bool| -> Vec<Span<'static>> {
-                vec![
-                    Span::styled(" ", Style::default().bg(emph_bg)),
-                    if first {
-                        Span::styled(
-                            format!("{ann}{old} {new} "),
-                            Style::default().fg(pal.gutter_fg).bg(gutter_bg),
-                        )
-                    } else {
-                        Span::styled(" ".repeat(11), Style::default().bg(gutter_bg))
-                    },
-                    // Sign + a space so the code doesn't butt against the +/-.
-                    if first {
-                        Span::styled(format!("{sign} "), Style::default().fg(sign_fg).bg(line_bg))
-                    } else {
-                        Span::styled("  ", Style::default().bg(line_bg))
-                    },
-                ]
-            };
-
-            let content_width = inline_content_width(width);
-            let wrapped = wrap_spans(content_spans, content_width);
-            let selected = focused && idx >= sel_lo && idx <= sel_hi;
-            for (c, content_row) in wrapped.into_iter().enumerate() {
-                let mut spans = gutter(c == 0);
-                spans.extend(content_row);
-                let mut spans = fit_spans(spans, width, line_bg);
-                if selected {
-                    spans = select_spans(spans, pal);
-                }
-                out.push(Line::from(spans));
-            }
-
-            // Inline comment box(es) anchored to this line.
-            if let Some(anns) = anchors.get(&idx) {
-                for ann in anns {
-                    out.extend(comment_box_lines(
-                        ann,
-                        state.is_comment_collapsed(ann.id),
+    state
+        .with_view(|view| {
+            let mut out: Vec<Line<'static>> = Vec::new();
+            for row in view.layout.rows() {
+                let kind = row.kind();
+                // An attached block is the host's own: `diffgrid` only ever asked
+                // how tall it was.
+                if kind == RowKind::Attached {
+                    out.extend(attached_block_lines(
+                        state,
+                        row.attach_key(),
                         width,
                         pal,
                         rounded,
                     ));
+                    continue;
+                }
+                let role = row_role(kind, row.origin());
+                if state.layout == ReviewLayout::SideBySide && !is_full_width(kind) {
+                    out.push(sbs_row_line(view, &ctx, pal, row.index(), state, focused));
+                    continue;
+                }
+                let spans = row_spans(&view.file, &view.layout, row.index(), &ctx);
+                let pad = SpanStyle::new(role).with_selected(selected(row.sel()));
+                // Only the kinds `Grid::build` wraps may wrap here. A hunk
+                // header or an expand control is one physical row however long
+                // its text is, and emitting two would put every mapping below it
+                // one row out.
+                if is_full_width(kind) {
+                    out.push(to_line(fit_spans(spans, width, pad), pal));
+                    continue;
+                }
+                let gutter = gutter_cols(kind, &ctx.gutter);
+                let content_width = state.wrap_options().content_width(gutter);
+                for physical in wrap_row(spans, gutter, content_width) {
+                    out.push(to_line(fit_spans(physical, width, pad), pal));
                 }
             }
-            // The in-progress edit box renders where the saved comment will.
-            if state.draft_anchor() == Some(idx)
-                && let Some(draft) = state.comment.as_ref()
-            {
-                out.extend(comment_draft_box_lines(
-                    &super::input_with_caret(&draft.input),
-                    &draft_loc_label(state, draft.range),
-                    width,
-                    pal,
-                    rounded,
-                ));
-            }
-            idx += 1;
+            out
+        })
+        .unwrap_or_default()
+}
+
+/// One side-by-side row: the two halves, separated by a `│` rule.
+///
+/// Neither half soft-wraps — two columns wrapping independently would stop
+/// lining up, and the pairing is the point of the layout — so each is fitted to
+/// its half's width.
+fn sbs_row_line(
+    view: &FileView,
+    ctx: &RowContext<'_>,
+    pal: &ReviewPalette,
+    row: diffgrid::LogicalIdx,
+    state: &DiffReviewState,
+    focused: bool,
+) -> Line<'static> {
+    let half = state.wrap_options().half_width();
+    let (sel_lo, sel_hi) = state.selection();
+    let logical = view.layout.row(row);
+    let kind = logical.map(|r| r.kind()).unwrap_or(RowKind::Line);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for side in [Side::Old, Side::New] {
+        if side == Side::New {
+            // The rule takes the row's own band so a revealed-context row reads
+            // as one continuous stripe across both halves.
+            let ink = pal.ink(&SpanStyle::new(row_role(kind, None)));
+            let bg = if kind == RowKind::ExpandedContext {
+                ink.bg
+            } else {
+                Color::Reset
+            };
+            spans.push(Span::styled(
+                " │ ",
+                Style::default().fg(pal.gutter_fg).bg(bg),
+            ));
         }
+        let cell = logical.and_then(|r| r.cell(side));
+        let Some(cell) = cell else {
+            // The blank half of an unbalanced change block: a diagonal hatch, so
+            // the eye reads "nothing here" rather than "not drawn yet".
+            spans.push(Span::styled(
+                "╱".repeat(half),
+                Style::default().fg(pal.gap_fg),
+            ));
+            continue;
+        };
+        let role = row_role(kind, cell.origin);
+        let selected = focused
+            && cell
+                .sel
+                .is_some_and(|s| s.get() >= sel_lo && s.get() <= sel_hi);
+        let cell = cell_spans(&view.file, &view.layout, row, side, ctx);
+        let pad = SpanStyle::new(role).with_selected(selected);
+        spans.extend(to_spans(fit_spans(cell, half, pad), pal));
     }
-    push_gap(&mut out, file.hunks.len());
-    out
+    Line::from(spans)
+}
+
+/// The body role a row of `kind` wears, so its padding extends the row's own
+/// tint to the edge of the pane rather than punching a hole in it.
+fn row_role(kind: RowKind, origin: Option<diffgrid::LineOrigin>) -> Role {
+    match kind {
+        RowKind::HunkHeader => Role::HunkHeader,
+        RowKind::ExpandedContext => Role::ExpandedContext,
+        RowKind::ExpandControl => Role::ExpandControl,
+        RowKind::AlignmentGap => Role::AlignmentGap,
+        _ => match origin {
+            Some(diffgrid::LineOrigin::Addition) => Role::Addition,
+            Some(diffgrid::LineOrigin::Deletion) => Role::Deletion,
+            _ => Role::Context,
+        },
+    }
+}
+
+/// The host-drawn rows of an attached block: a saved comment's inline box, or
+/// the in-progress draft's edit box.
+fn attached_block_lines(
+    state: &DiffReviewState,
+    key: Option<AttachKey>,
+    width: usize,
+    pal: &ReviewPalette,
+    rounded: bool,
+) -> Vec<Line<'static>> {
+    let Some(key) = key else {
+        return Vec::new();
+    };
+    if key == DRAFT_ATTACH_KEY {
+        let Some(draft) = state.comment.as_ref() else {
+            return Vec::new();
+        };
+        return comment_draft_box_lines(
+            &super::input_with_caret(&draft.input),
+            &draft_loc_label(state, draft.range),
+            width,
+            pal,
+            rounded,
+        );
+    }
+    state
+        .comment_by_key(key)
+        .map(|ann| comment_box_lines(ann, state.is_comment_collapsed(ann.id), width, pal, rounded))
+        .unwrap_or_default()
+}
+
+/// Resolve `diffgrid` spans into `ratatui` ones through the theme palette.
+fn to_spans(spans: Vec<diffgrid::style::Span<'_>>, pal: &ReviewPalette) -> Vec<Span<'static>> {
+    spans
+        .into_iter()
+        .map(|s| {
+            let ink = pal.ink(&s.style);
+            let mut style = Style::default().fg(ink.fg).bg(ink.bg);
+            if ink.bold {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            Span::styled(s.text.into_owned(), style)
+        })
+        .collect()
+}
+
+/// [`to_spans`], as one rendered line.
+fn to_line(spans: Vec<diffgrid::style::Span<'_>>, pal: &ReviewPalette) -> Line<'static> {
+    Line::from(to_spans(spans, pal))
 }
 
 /// Split raw file bytes into lines (1-based when indexed as `lines[n - 1]`),
@@ -3256,228 +3068,6 @@ fn split_file_lines(bytes: &[u8]) -> std::sync::Arc<Vec<String>> {
     std::sync::Arc::new(lines)
 }
 
-/// Right-aligned 4-wide line number, or blanks when absent.
-fn lineno_str(n: Option<usize>) -> String {
-    n.map(|n| format!("{n:>4}"))
-        .unwrap_or_else(|| "    ".to_string())
-}
-
-/// A full-width hunk-header line, on the subtle context band so it reads as a
-/// divider between hunks.
-fn hunk_header_line(hunk: &Hunk, pal: &ReviewPalette, width: usize) -> Line<'static> {
-    let text = format!(
-        "@@ -{},{} +{},{} @@ {}",
-        hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines, hunk.header
-    );
-    fit_spans(
-        vec![Span::styled(
-            text,
-            Style::default().fg(pal.hunk_header).bg(pal.hunk_header_bg),
-        )],
-        width,
-        pal.hunk_header_bg,
-    )
-    .into()
-}
-
-/// Render one revealed context line (inline layout): the same fixed gutter as a
-/// normal context diff line (old + new line numbers, blank sign), then the
-/// soft-wrapped content. Wrap count matches [`line_wrap_rows`] so it stays in
-/// lockstep with [`DiffReviewState::inline_physical_rows`].
-fn reveal_line_rows(
-    line: &RevealLine,
-    pal: &ReviewPalette,
-    ext: &str,
-    highlight: bool,
-    width: usize,
-) -> Vec<Line<'static>> {
-    let bg = pal.context_bg;
-    let old = lineno_str(Some(line.old_lineno));
-    let new = lineno_str(Some(line.new_lineno));
-    let mut content_spans = Vec::new();
-    push_segment(
-        &mut content_spans,
-        &line.content,
-        ext,
-        highlight,
-        pal.text,
-        bg,
-    );
-    // Matches the normal line gutter widths: 1 + 11 + 2 = INLINE_GUTTER_COLS.
-    let gutter = |first: bool| -> Vec<Span<'static>> {
-        vec![
-            Span::styled(" ", Style::default().bg(bg)),
-            if first {
-                Span::styled(
-                    format!(" {old} {new} "),
-                    Style::default().fg(pal.gutter_fg).bg(bg),
-                )
-            } else {
-                Span::styled(" ".repeat(11), Style::default().bg(bg))
-            },
-            Span::styled("  ", Style::default().bg(bg)),
-        ]
-    };
-    let content_width = inline_content_width(width);
-    let wrapped = wrap_spans(content_spans, content_width);
-    wrapped
-        .into_iter()
-        .enumerate()
-        .map(|(c, row)| {
-            let mut spans = gutter(c == 0);
-            spans.extend(row);
-            Line::from(fit_spans(spans, width, bg))
-        })
-        .collect()
-}
-
-/// One placed segment of an expand control: its start column, text, and the
-/// action (if any) a click on it triggers.
-struct PlacedSeg {
-    start: usize,
-    text: String,
-    action: Option<ExpandAction>,
-}
-
-/// The labelled segments of a gap's expand control, in left-to-right order.
-/// Directional steps offered depend on the gap kind (leading: up only;
-/// trailing: down only; middle: both), always alongside an "expand all".
-fn gap_control_segments(control: &GapControl) -> Vec<(String, Option<ExpandAction>)> {
-    let step = EXPAND_STEP.min(control.hidden);
-    let hint = (format!("· {} hidden lines ·", control.hidden), None);
-    let down = (format!("⌄ {step}"), Some(ExpandAction::Down));
-    let up = (format!("⌃ {step}"), Some(ExpandAction::Up));
-    let all = ("↕ all".to_string(), Some(ExpandAction::All));
-    match control.kind {
-        GapKind::Leading => vec![hint, up, all],
-        GapKind::Trailing => vec![down, hint, all],
-        GapKind::Middle => vec![down, hint, up, all],
-    }
-}
-
-/// Lay out a gap control's segments centred within `width`, computing each
-/// segment's start column. Shared by the renderer and the click hit-test so
-/// they can never disagree on where the clickable zones are.
-fn gap_control_layout(control: &GapControl, width: usize) -> Vec<PlacedSeg> {
-    const SEP: usize = 3;
-    let segs = gap_control_segments(control);
-    let widths: Vec<usize> = segs.iter().map(|(t, _)| t.chars().count()).collect();
-    let total: usize = widths.iter().sum::<usize>() + SEP * segs.len().saturating_sub(1);
-    let left = width.saturating_sub(total) / 2;
-    let mut placed = Vec::new();
-    let mut col = left;
-    for (i, (text, action)) in segs.into_iter().enumerate() {
-        if i > 0 {
-            col += SEP;
-        }
-        let w = widths[i];
-        placed.push(PlacedSeg {
-            start: col,
-            text,
-            action,
-        });
-        col += w;
-    }
-    placed
-}
-
-/// The rendered line for a gap's expand control: centred segments with the
-/// clickable actions accented.
-fn gap_control_line(control: &GapControl, pal: &ReviewPalette, width: usize) -> Line<'static> {
-    let bg = pal.context_bg;
-    let mut spans = Vec::new();
-    let mut col = 0usize;
-    for seg in gap_control_layout(control, width) {
-        if seg.start > col {
-            spans.push(Span::styled(
-                " ".repeat(seg.start - col),
-                Style::default().bg(bg),
-            ));
-            col = seg.start;
-        }
-        let style = if seg.action.is_some() {
-            Style::default()
-                .fg(pal.hunk_header)
-                .bg(bg)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(pal.gutter_fg).bg(bg)
-        };
-        col += seg.text.chars().count();
-        spans.push(Span::styled(seg.text, style));
-    }
-    fit_spans(spans, width, bg).into()
-}
-
-/// Truncate a styled span list to `width` display columns (cutting the last
-/// span), or right-pad it with a `pad_bg`-filled space span so the row's
-/// background fills the full width.
-fn fit_spans(spans: Vec<Span<'static>>, width: usize, pad_bg: Color) -> Vec<Span<'static>> {
-    let mut out = Vec::new();
-    let mut used = 0usize;
-    for span in spans {
-        if used >= width {
-            break;
-        }
-        let len = span.content.chars().count();
-        if used + len <= width {
-            used += len;
-            out.push(span);
-        } else {
-            let take = width - used;
-            let truncated: String = span.content.chars().take(take).collect();
-            out.push(Span::styled(truncated, span.style));
-            used = width;
-            break;
-        }
-    }
-    if used < width {
-        out.push(Span::styled(
-            " ".repeat(width - used),
-            Style::default().bg(pad_bg),
-        ));
-    }
-    out
-}
-
-/// Word-wrap styled content `spans` into rows of at most `width` display
-/// columns. The break points come from [`wrap_row_lens`] (whitespace-aware,
-/// hard-splitting only over-long words), and the span stream is re-sliced by
-/// those row lengths — so styling is preserved across a break, even when it
-/// falls inside a span. Always returns at least one row.
-fn wrap_spans(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> {
-    let text: String = spans.iter().flat_map(|s| s.content.chars()).collect();
-    let lens = wrap_row_lens(&text, width);
-    if lens.len() <= 1 {
-        return vec![spans];
-    }
-    let mut rows: Vec<Vec<Span<'static>>> = Vec::with_capacity(lens.len());
-    let mut row: Vec<Span<'static>> = Vec::new();
-    let mut row_idx = 0;
-    let mut row_remaining = lens[0];
-    for span in spans {
-        let style = span.style;
-        let mut buf = String::new();
-        for ch in span.content.chars() {
-            while row_remaining == 0 {
-                if !buf.is_empty() {
-                    row.push(Span::styled(std::mem::take(&mut buf), style));
-                }
-                rows.push(std::mem::take(&mut row));
-                row_idx += 1;
-                row_remaining = lens.get(row_idx).copied().unwrap_or(usize::MAX);
-            }
-            buf.push(ch);
-            row_remaining -= 1;
-        }
-        if !buf.is_empty() {
-            row.push(Span::styled(buf, style));
-        }
-    }
-    rows.push(row);
-    rows
-}
-
 /// File extension (no dot) of a path's final component, or `""` if none.
 fn file_extension(path: &str) -> &str {
     path.rsplit('/')
@@ -3485,29 +3075,6 @@ fn file_extension(path: &str) -> &str {
         .and_then(|name| name.rsplit_once('.'))
         .map(|(_, ext)| ext)
         .unwrap_or("")
-}
-
-/// Push a content segment as spans onto `out`, syntax-highlighting it (per the
-/// file `ext`) when `highlight` is set, else a single `fg`-coloured span. Every
-/// span gets background `bg`.
-fn push_segment(
-    out: &mut Vec<Span<'static>>,
-    text: &str,
-    ext: &str,
-    highlight: bool,
-    fg: Color,
-    bg: Color,
-) {
-    if highlight {
-        for (token, color) in highlight_line(text, ext, fg) {
-            out.push(Span::styled(token, Style::default().fg(color).bg(bg)));
-        }
-    } else {
-        out.push(Span::styled(
-            text.to_string(),
-            Style::default().fg(fg).bg(bg),
-        ));
-    }
 }
 
 /// Render an comment as an inline box, visually distinct from the diff.
@@ -3593,10 +3160,9 @@ fn comment_box_lines(
     let text_width = inner.saturating_sub(2);
     for paragraph in ann.comment.split('\n') {
         for chunk in wrap_text(paragraph, text_width) {
-            let body: String = chunk.chars().take(text_width).collect();
             out.push(Line::from(vec![
                 Span::styled(format!("{INDENT}│"), border),
-                Span::raw(format!(" {body:<text_width$} ")),
+                Span::raw(format!(" {} ", clip_pad(&chunk, text_width))),
                 Span::styled("│".to_string(), border),
             ]));
         }
@@ -3669,10 +3235,9 @@ fn comment_draft_box_lines(
     )));
     let text_width = inner.saturating_sub(2);
     for chunk in wrap_text(display, text_width) {
-        let body: String = chunk.chars().take(text_width).collect();
         out.push(Line::from(vec![
             Span::styled(format!("{INDENT}│"), border),
-            Span::raw(format!(" {body:<text_width$} ")),
+            Span::raw(format!(" {} ", clip_pad(&chunk, text_width))),
             Span::styled("│".to_string(), border),
         ]));
     }
@@ -3684,19 +3249,47 @@ fn comment_draft_box_lines(
 }
 
 /// Build a horizontal-rule string: `head` followed by `─` padding to exactly
-/// `width` chars (truncated if `head` is already too long).
+/// `width` display columns (truncated if `head` is already too wide).
 fn hrule(head: &str, width: usize) -> String {
     let head = format!("─ {head}");
-    let len = head.chars().count();
+    let len = head.width();
     if len >= width {
-        head.chars().take(width).collect()
+        clip(&head, width)
     } else {
         format!("{head}{}", "─".repeat(width - len))
     }
 }
 
-/// Word-wrap `s` to `width` columns (falls back to hard cuts via the caller's
-/// truncation for over-long words). Always returns at least one line.
+/// Truncate `s` to at most `width` display columns, never inside a grapheme.
+///
+/// `chars().take(n)` is wrong twice over: it counts characters rather than
+/// columns, so a CJK line overruns by half its length, and it can cut a
+/// combining sequence in two.
+fn clip(s: &str, width: usize) -> String {
+    let mut used = 0usize;
+    let mut out = String::new();
+    for g in s.graphemes(true) {
+        let w = g.width();
+        if used + w > width {
+            break;
+        }
+        used += w;
+        out.push_str(g);
+    }
+    out
+}
+
+/// `s` clipped to `width` display columns and right-padded with spaces to
+/// exactly that width.
+fn clip_pad(s: &str, width: usize) -> String {
+    let mut out = clip(s, width);
+    let used = out.width();
+    out.extend(std::iter::repeat_n(' ', width.saturating_sub(used)));
+    out
+}
+
+/// Word-wrap `s` to `width` display columns (falls back to hard cuts via the
+/// caller's truncation for over-long words). Always returns at least one line.
 fn wrap_text(s: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![s.to_string()];
@@ -3706,7 +3299,7 @@ fn wrap_text(s: &str, width: usize) -> Vec<String> {
     for word in s.split_whitespace() {
         if cur.is_empty() {
             cur = word.to_string();
-        } else if cur.chars().count() + 1 + word.chars().count() <= width {
+        } else if cur.width() + 1 + word.width() <= width {
             cur.push(' ');
             cur.push_str(word);
         } else {
@@ -3725,6 +3318,10 @@ fn wrap_text(s: &str, width: usize) -> Vec<String> {
 
 /// Apply the theme's selection highlight to every span (background, and
 /// foreground when the theme sets one), matching the session list.
+///
+/// The file-list pane only: inside the diff body, selection is a flag on a
+/// [`SpanStyle`] that the palette resolves, so the two never disagree about
+/// precedence.
 fn select_spans(spans: Vec<Span<'static>>, pal: &ReviewPalette) -> Vec<Span<'static>> {
     spans
         .into_iter()
@@ -3738,31 +3335,20 @@ fn select_spans(spans: Vec<Span<'static>>, pal: &ReviewPalette) -> Vec<Span<'sta
         .collect()
 }
 
-/// A line split into runs of text, each tagged changed (`true`) or unchanged
-/// (`false`) by the word-level diff.
-pub(crate) type WordSegs = Vec<(String, bool)>;
-
-/// Shared empty segment list, returned by [`DiffReviewState::word_segments`]
-/// when the current file index is out of range (only possible for an empty
-/// diff) so the `Ref::map` closure always has something to borrow.
-fn empty_segs() -> &'static Vec<WordSegs> {
-    static EMPTY: std::sync::OnceLock<Vec<WordSegs>> = std::sync::OnceLock::new();
-    EMPTY.get_or_init(Vec::new)
-}
-
-/// Precompute every file's word-diff segments and (on true-color terminals) warm
-/// the shared syntax-highlight cache for every content line. This is the heavy,
-/// per-file work the review body would otherwise do lazily on first navigation —
-/// the LCS pass per file plus a fresh syntect highlighter per line. It's pure
-/// (reads the parsed diff, writes only the process-global highlight cache) so the
-/// open-review flow runs it on a blocking worker thread while a spinner shows,
-/// making the first view of each file instant. Returns the per-file segments in
-/// `diff.files` order, ready for [`DiffReviewState::prime_segments`].
+/// Precompute every file's render caches: the intra-line word diff, and (on
+/// true-color terminals) a warm syntax-highlight cache for every content line.
+///
+/// This is the heavy per-file work the review body would otherwise do lazily on
+/// first navigation — `diffgrid`'s word diff per file plus a fresh `syntect`
+/// highlighter per line. It is pure (reads the parsed diff, writes only the
+/// process-global highlight cache), so the open-review flow runs it on a
+/// blocking worker thread while a spinner shows, making the first view of each
+/// file instant. Returns the word-diffed models in `diff.files` order, ready for
+/// [`DiffReviewState::prime_views`].
 pub(crate) fn precompute_review_caches(
     diff: &ParsedDiff,
     highlight: bool,
-    text_fg: Color,
-) -> Vec<Vec<WordSegs>> {
+) -> Vec<diffgrid::FileDiff<'static>> {
     if highlight {
         // Warm every content line across all files in one parallel pass. The
         // flattened line list spreads a single large file across cores too, not
@@ -3778,11 +3364,90 @@ pub(crate) fn precompute_review_caches(
                     .flat_map(move |hunk| hunk.lines.iter().map(move |l| (ext, l.content.as_str())))
             })
             .collect();
-        warm_highlight_cache(&lines, text_fg);
+        warm_highlight_cache(&lines);
     }
     // `par_iter().collect()` preserves order, so the result still lines up with
-    // `diff.files` for `prime_segments`.
-    diff.files.par_iter().map(word_diff_segments).collect()
+    // `diff.files` for `prime_views`.
+    diff.files.par_iter().map(word_diffed).collect()
+}
+
+/// Options for the intra-line word diff.
+///
+/// `join_gap` is off: absorbing a lone unchanged character between two changed
+/// runs is a `diffgrid` refinement this view has never shown, and turning it on
+/// here would be a rendering change smuggled in with a refactor. The threshold
+/// is the same `0.5` that used to be a constant in this file.
+fn intraline_options() -> diffgrid::enrich::IntralineOptions {
+    diffgrid::enrich::IntralineOptions::default().with_join_gap(0)
+}
+
+/// Convert one wire [`FileDiff`] into `diffgrid`'s model and word-diff it.
+///
+/// Owned (`'static`) throughout: the wire model is owned `String`s, and a
+/// borrowing model would make [`FileView`] self-referential.
+fn word_diffed(file: &FileDiff) -> diffgrid::FileDiff<'static> {
+    let mut out = to_diffgrid(file);
+    diffgrid::enrich::word_diff(&mut out, &intraline_options());
+    out
+}
+
+/// Map a wire [`FileDiff`] onto `diffgrid`'s model.
+///
+/// A binary file is marked binary, which drops its hunks: an LFS-tracked image
+/// keeps pointer-text hunks on the wire (so the reviewed-mark hash stays
+/// content-sensitive) but the body renders the image, never a diff, so the
+/// layout for it is deliberately empty.
+fn to_diffgrid(file: &FileDiff) -> diffgrid::FileDiff<'static> {
+    let status = match file.status {
+        FileStatus::Added => diffgrid::FileStatus::Added,
+        FileStatus::Deleted => diffgrid::FileStatus::Deleted,
+        FileStatus::Modified => diffgrid::FileStatus::Modified,
+        FileStatus::Renamed => diffgrid::FileStatus::Renamed,
+    };
+    let hunks = file
+        .hunks
+        .iter()
+        .map(|h| {
+            diffgrid::Hunk::new(
+                h.old_start,
+                h.old_lines,
+                h.new_start,
+                h.new_lines,
+                h.lines
+                    .iter()
+                    .map(|l| {
+                        diffgrid::DiffLine::new(
+                            match l.origin {
+                                LineOrigin::Context => diffgrid::LineOrigin::Context,
+                                LineOrigin::Addition => diffgrid::LineOrigin::Addition,
+                                LineOrigin::Deletion => diffgrid::LineOrigin::Deletion,
+                            },
+                            l.old_lineno.and_then(LineNo::new),
+                            l.new_lineno.and_then(LineNo::new),
+                            l.content.clone(),
+                        )
+                    })
+                    .collect(),
+            )
+            .with_section(h.header.clone())
+        })
+        .collect();
+    let out = diffgrid::FileDiff::new(file.old_path.clone(), file.new_path.clone(), status, hunks);
+    match file.binary.is_some() {
+        true => out.with_binary(diffgrid::BinaryInfo::absent()),
+        false => out,
+    }
+}
+
+/// A stable digest of the blocks that should be attached to a layout, so a
+/// re-splice only happens when the comment set or the draft anchor moves.
+fn attachment_signature(attachments: &[(SelIdx, AttachKey)]) -> u64 {
+    let mut h = xxhash_rust::xxh3::Xxh3::new();
+    for (sel, key) in attachments {
+        h.update(&(sel.get() as u64).to_le_bytes());
+        h.update(&key.get().to_le_bytes());
+    }
+    h.digest()
 }
 
 /// Review payload prepared off the render thread: the parsed diff plus its warmed
@@ -3797,409 +3462,14 @@ pub struct ReviewPrepared {
     pub(super) diff: ParsedDiff,
     pub(super) comments: Vec<Comment>,
     pub(super) reviewed: Vec<String>,
-    pub(super) segments: Vec<Vec<WordSegs>>,
+    /// Every file's word-diffed `diffgrid` model, in `diff.files` order. Empty
+    /// when the precompute is turned off, in which case each file's model is
+    /// built on first navigation to it.
+    pub(super) models: Vec<diffgrid::FileDiff<'static>>,
     pub(super) content_hash: u64,
     /// Comments the refresh discarded because their file left the diff, so the
     /// view can say so rather than having them vanish silently.
     pub(super) dropped_comments: Vec<Comment>,
-}
-
-/// Token class for intra-line diffing: identifier runs and whitespace runs are
-/// each coalesced into a single token; every other character stands alone.
-#[derive(PartialEq, Eq)]
-enum TokClass {
-    Word,
-    Space,
-    Other,
-}
-
-fn tok_class(c: char) -> TokClass {
-    if c.is_alphanumeric() || c == '_' {
-        TokClass::Word
-    } else if c.is_whitespace() {
-        TokClass::Space
-    } else {
-        TokClass::Other
-    }
-}
-
-/// Split a line into tokens: maximal identifier/whitespace runs plus
-/// single-character punctuation. The concatenation of the tokens is `s`.
-fn tokenize(s: &str) -> Vec<&str> {
-    let mut toks = Vec::new();
-    let mut iter = s.char_indices().peekable();
-    while let Some((start, c)) = iter.next() {
-        let class = tok_class(c);
-        let mut end = start + c.len_utf8();
-        // `Other` chars never coalesce; word/space runs absorb their kind.
-        if class != TokClass::Other {
-            while let Some(&(j, nc)) = iter.peek() {
-                if tok_class(nc) == class {
-                    end = j + nc.len_utf8();
-                    iter.next();
-                } else {
-                    break;
-                }
-            }
-        }
-        toks.push(&s[start..end]);
-    }
-    toks
-}
-
-/// LCS over two token sequences. Returns, for each side, a `keep` flag per
-/// token: `true` where the token is part of the longest common subsequence
-/// (unchanged), `false` where it was inserted/deleted (changed).
-fn lcs_keep(a: &[&str], b: &[&str]) -> (Vec<bool>, Vec<bool>) {
-    let (n, m) = (a.len(), b.len());
-    // dp[i][j] = LCS length of a[i..] and b[j..].
-    let mut dp = vec![vec![0usize; m + 1]; n + 1];
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            dp[i][j] = if a[i] == b[j] {
-                dp[i + 1][j + 1] + 1
-            } else {
-                dp[i + 1][j].max(dp[i][j + 1])
-            };
-        }
-    }
-    let mut a_keep = vec![false; n];
-    let mut b_keep = vec![false; m];
-    let (mut i, mut j) = (0, 0);
-    while i < n && j < m {
-        if a[i] == b[j] {
-            a_keep[i] = true;
-            b_keep[j] = true;
-            i += 1;
-            j += 1;
-        } else if dp[i + 1][j] >= dp[i][j + 1] {
-            i += 1;
-        } else {
-            j += 1;
-        }
-    }
-    (a_keep, b_keep)
-}
-
-/// Coalesce tokens into runs of equal changed/unchanged flag.
-fn coalesce(toks: &[&str], keep: &[bool]) -> WordSegs {
-    let mut segs: WordSegs = Vec::new();
-    for (tok, kept) in toks.iter().zip(keep) {
-        let changed = !kept;
-        match segs.last_mut() {
-            Some(last) if last.1 == changed => last.0.push_str(tok),
-            _ => segs.push((tok.to_string(), changed)),
-        }
-    }
-    if segs.is_empty() {
-        segs.push((String::new(), false));
-    }
-    segs
-}
-
-/// Minimum fraction of the longer line that the two paired lines must share
-/// for intra-line emphasis to be shown. Below this they're treated as a
-/// wholesale replacement (solid line colour, no word highlight), matching how
-/// GitHub suppresses highlighting of coincidental punctuation matches between
-/// unrelated lines.
-const WORD_DIFF_SIMILARITY: f32 = 0.5;
-
-/// Split a changed (old, new) line pair into segments tagged changed/unchanged,
-/// using a token-level diff (identifier/whitespace runs + single punctuation,
-/// matched by longest common subsequence). This emphasises only the genuinely
-/// different tokens, even when changes are separated by unchanged text.
-///
-/// When the two lines share too little to read as an edit of one another
-/// (positionally paired but unrelated lines from a multi-line replace block),
-/// the LCS matches only incidental punctuation, leaving noisy unchanged islands
-/// in a sea of highlight. In that case emphasis is suppressed entirely and each
-/// line is returned as a single unchanged span — solid red/green, like GitHub.
-fn word_diff(old: &str, new: &str) -> (WordSegs, WordSegs) {
-    let o = tokenize(old);
-    let n = tokenize(new);
-    let (o_keep, n_keep) = lcs_keep(&o, &n);
-
-    // Characters shared by the LCS (matched tokens are byte-identical on both
-    // sides, so counting one side suffices) over the longer line's length.
-    let shared: usize = o
-        .iter()
-        .zip(&o_keep)
-        .filter(|(_, keep)| **keep)
-        .map(|(tok, _)| tok.chars().count())
-        .sum();
-    let longest = old.chars().count().max(new.chars().count());
-    if longest == 0 || (shared as f32) / (longest as f32) < WORD_DIFF_SIMILARITY {
-        return (
-            vec![(old.to_string(), false)],
-            vec![(new.to_string(), false)],
-        );
-    }
-
-    (coalesce(&o, &o_keep), coalesce(&n, &n_keep))
-}
-
-/// Compute per-selectable-line segment lists for the current file, applying a
-/// word-level diff to paired deletion/addition lines within each change block.
-/// Unpaired lines (and context) become a single unchanged segment.
-fn word_diff_segments(file: &FileDiff) -> Vec<WordSegs> {
-    fn flush(
-        segs: &mut [WordSegs],
-        dels: &mut Vec<(usize, String)>,
-        adds: &mut Vec<(usize, String)>,
-    ) {
-        for i in 0..dels.len().min(adds.len()) {
-            let (di, dtext) = &dels[i];
-            let (ai, atext) = &adds[i];
-            let (dsegs, asegs) = word_diff(dtext, atext);
-            segs[*di] = dsegs;
-            segs[*ai] = asegs;
-        }
-        dels.clear();
-        adds.clear();
-    }
-
-    let mut segs: Vec<WordSegs> = Vec::new();
-    for hunk in &file.hunks {
-        let (mut dels, mut adds) = (Vec::new(), Vec::new());
-        for line in &hunk.lines {
-            let idx = segs.len();
-            segs.push(vec![(line.content.clone(), false)]);
-            match line.origin {
-                LineOrigin::Context => flush(&mut segs, &mut dels, &mut adds),
-                LineOrigin::Deletion => dels.push((idx, line.content.clone())),
-                LineOrigin::Addition => adds.push((idx, line.content.clone())),
-            }
-        }
-        flush(&mut segs, &mut dels, &mut adds);
-    }
-    segs
-}
-
-/// A row in the side-by-side layout.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum SbsRow {
-    Header(String),
-    /// Old-side and new-side selectable indices (`None` = blank half).
-    Cells {
-        left: Option<usize>,
-        right: Option<usize>,
-    },
-    /// A revealed context line (display-only, same content on both sides).
-    Context {
-        old_lineno: usize,
-        new_lineno: usize,
-        content: String,
-    },
-    /// A clickable expand control for gap `gap`.
-    ExpandControl {
-        gap: usize,
-    },
-}
-
-/// Append one hunk's side-by-side rows (header + paired cells), advancing the
-/// running selectable-line index `sel`.
-fn push_hunk_sbs_rows(rows: &mut Vec<SbsRow>, hunk: &Hunk, sel: &mut usize) {
-    fn flush(rows: &mut Vec<SbsRow>, dels: &mut Vec<usize>, adds: &mut Vec<usize>) {
-        for i in 0..dels.len().max(adds.len()) {
-            rows.push(SbsRow::Cells {
-                left: dels.get(i).copied(),
-                right: adds.get(i).copied(),
-            });
-        }
-        dels.clear();
-        adds.clear();
-    }
-
-    rows.push(SbsRow::Header(format!(
-        "@@ -{},{} +{},{} @@ {}",
-        hunk.old_start, hunk.old_lines, hunk.new_start, hunk.new_lines, hunk.header
-    )));
-    let (mut dels, mut adds) = (Vec::new(), Vec::new());
-    for line in &hunk.lines {
-        match line.origin {
-            LineOrigin::Context => {
-                flush(rows, &mut dels, &mut adds);
-                rows.push(SbsRow::Cells {
-                    left: Some(*sel),
-                    right: Some(*sel),
-                });
-            }
-            LineOrigin::Deletion => dels.push(*sel),
-            LineOrigin::Addition => adds.push(*sel),
-        }
-        *sel += 1;
-    }
-    flush(rows, &mut dels, &mut adds);
-}
-
-/// Pair a file's diff into side-by-side rows, with no context expansion.
-/// Context lines occupy both halves; runs of deletions/additions in a change
-/// block are zipped left/right, padding the shorter side with blanks. Indices
-/// are selectable-line indices. (Production uses [`DiffReviewState::sbs_rows`],
-/// which interleaves expansion; this bare form backs the pairing unit tests.)
-#[cfg(test)]
-fn side_by_side_rows(file: &FileDiff) -> Vec<SbsRow> {
-    let mut rows = Vec::new();
-    let mut sel = 0;
-    for hunk in &file.hunks {
-        push_hunk_sbs_rows(&mut rows, hunk, &mut sel);
-    }
-    rows
-}
-
-/// Render the side-by-side body for the current file: old | new columns with
-/// per-side line-number gutter, add/remove fills, word-level highlight, and a
-/// diagonal-hatch fill for alignment gaps.
-#[allow(clippy::too_many_arguments)]
-fn review_body_lines_side_by_side(
-    state: &DiffReviewState,
-    focused: bool,
-    pal: &ReviewPalette,
-    ext: &str,
-    highlight: bool,
-    width: usize,
-    segs: &[WordSegs],
-    rounded: bool,
-) -> Vec<Line<'static>> {
-    if state.current_file().is_none() {
-        return Vec::new();
-    }
-    let lines = state.selectable_lines();
-    let (sel_lo, sel_hi) = state.selection();
-    // Two columns separated by " │ ".
-    let col = width.saturating_sub(3) / 2;
-
-    let cell = |idx: Option<usize>, is_old: bool| -> Vec<Span<'static>> {
-        let Some(i) = idx else {
-            // Alignment gap: diagonal hatch fill.
-            return vec![Span::styled(
-                "╱".repeat(col),
-                Style::default().fg(pal.gap_fg),
-            )];
-        };
-        let line = lines[i];
-        let (line_bg, gutter_bg, emph_bg) = match line.origin {
-            LineOrigin::Addition => (pal.add_bg, pal.add_gutter_bg, pal.add_emph_bg),
-            LineOrigin::Deletion => (pal.del_bg, pal.del_gutter_bg, pal.del_emph_bg),
-            LineOrigin::Context => (Color::Reset, Color::Reset, Color::Reset),
-        };
-        let no = if is_old {
-            line.old_lineno
-        } else {
-            line.new_lineno
-        };
-        let mut spans = vec![Span::styled(
-            format!("{} ", lineno_str(no)),
-            Style::default().fg(pal.gutter_fg).bg(gutter_bg),
-        )];
-        for (text, emph) in &segs[i] {
-            let bg = if *emph { emph_bg } else { line_bg };
-            push_segment(&mut spans, text, ext, highlight, pal.text, bg);
-        }
-        let spans = fit_spans(spans, col, line_bg);
-        if focused && i >= sel_lo && i <= sel_hi {
-            select_spans(spans, pal)
-        } else {
-            spans
-        }
-    };
-
-    // A revealed context cell: line number gutter + plain content on the
-    // context band, no selection or word-diff emphasis.
-    let context_cell = |lineno: usize, content: &str| -> Vec<Span<'static>> {
-        let bg = pal.context_bg;
-        let mut spans = vec![Span::styled(
-            format!("{} ", lineno_str(Some(lineno))),
-            Style::default().fg(pal.gutter_fg).bg(bg),
-        )];
-        push_segment(&mut spans, content, ext, highlight, pal.text, bg);
-        fit_spans(spans, col, bg)
-    };
-
-    let anchors = state.comment_anchors();
-    let mut out: Vec<Line<'static>> = Vec::new();
-    for row in state.sbs_rows() {
-        match row {
-            SbsRow::Header(_) => out.push(Line::from(fit_spans(
-                vec![Span::styled(
-                    row_header_text(&row),
-                    Style::default().fg(pal.hunk_header).bg(pal.hunk_header_bg),
-                )],
-                width,
-                pal.hunk_header_bg,
-            ))),
-            SbsRow::Context {
-                old_lineno,
-                new_lineno,
-                content,
-            } => {
-                let mut spans = context_cell(old_lineno, &content);
-                spans.push(Span::styled(
-                    " │ ",
-                    Style::default().fg(pal.gutter_fg).bg(pal.context_bg),
-                ));
-                spans.extend(context_cell(new_lineno, &content));
-                out.push(Line::from(spans));
-            }
-            SbsRow::ExpandControl { gap } => {
-                // `sbs_rows()` only emits this row when the control exists and
-                // both derive from the same state, so `None` is unreachable — but
-                // emit a blank line if it ever isn't, to preserve row parity with
-                // the mapping walks rather than silently shifting every row below.
-                match state.gap_display(gap).control {
-                    Some(control) => out.push(gap_control_line(&control, pal, width)),
-                    None => out.push(Line::from("")),
-                }
-            }
-            SbsRow::Cells { left, right } => {
-                let mut spans = cell(left, true);
-                spans.push(Span::styled(" │ ", Style::default().fg(pal.gutter_fg)));
-                spans.extend(cell(right, false));
-                out.push(Line::from(spans));
-
-                // Inline comment box(es) anchored to either side's line.
-                // Context rows have left == right, so de-duplicate.
-                let sels: Vec<usize> = match (left, right) {
-                    (Some(l), Some(r)) if l == r => vec![l],
-                    (l, r) => l.into_iter().chain(r).collect(),
-                };
-                for sel in sels {
-                    if let Some(anns) = anchors.get(&sel) {
-                        for ann in anns {
-                            out.extend(comment_box_lines(
-                                ann,
-                                state.is_comment_collapsed(ann.id),
-                                width,
-                                pal,
-                                rounded,
-                            ));
-                        }
-                    }
-                    // The in-progress edit box renders where the comment will.
-                    if state.draft_anchor() == Some(sel)
-                        && let Some(draft) = state.comment.as_ref()
-                    {
-                        out.extend(comment_draft_box_lines(
-                            &super::input_with_caret(&draft.input),
-                            &draft_loc_label(state, draft.range),
-                            width,
-                            pal,
-                            rounded,
-                        ));
-                    }
-                }
-            }
-        }
-    }
-    out
-}
-
-/// The header text for a [`SbsRow::Header`] (empty for non-header rows).
-fn row_header_text(row: &SbsRow) -> String {
-    match row {
-        SbsRow::Header(h) => h.clone(),
-        _ => String::new(),
-    }
 }
 
 #[cfg(test)]
@@ -4307,152 +3577,95 @@ diff --git a/f.rs b/f.rs
         s.set_file_lines("f.rs".to_string(), std::sync::Arc::new(lines));
     }
 
-    #[test]
-    fn gap_display_empty_until_file_loaded() {
-        let mut s = state_with_gap_diff();
-        // Without loaded content, no revealed lines and no controls.
-        assert_eq!(s.gap_display(1), GapDisplay::default());
-        load_gap_file_lines(&mut s, 30);
-        // Loaded: the middle gap now offers an expand control (nothing revealed
-        // yet, so both blocks are empty).
-        let d = s.gap_display(1);
-        assert!(d.top.is_empty() && d.bottom.is_empty());
-        let control = d.control.expect("control once loaded");
-        assert_eq!(control.kind, GapKind::Middle);
-        // Middle gap spans new lines 8..=19 → 12 hidden.
-        assert_eq!(control.hidden, 12);
+    /// Render the body at a given pane size, as the renderer does.
+    fn render_body(s: &DiffReviewState, width: usize, height: usize) -> Vec<Line<'static>> {
+        s.body.set((width, height));
+        let pal = Theme::truecolor().review_palette();
+        review_body_lines(s, false, &pal, "rs", None, true)
     }
 
+    /// The first body row showing gap `gap`'s expand control, if it has one.
+    fn control_row(s: &DiffReviewState, gap: usize) -> Option<usize> {
+        s.with_grid(|_, grid| {
+            (0..grid.row_count()).find(|y| {
+                matches!(grid.hit(0, RowIdx::new(*y)),
+                    Hit::ExpandControl { gap: g, .. } if g.get() == gap)
+            })
+        })
+        .flatten()
+    }
+
+    /// Expand controls are `diffgrid`'s, but *whether it has the file* is this
+    /// view's: content arrives asynchronously, and until it does the layout must
+    /// offer no affordance it cannot honour.
     #[test]
-    fn gap_display_reveals_down_block_with_correct_linenos() {
+    fn expand_controls_appear_only_once_content_arrives() {
         let mut s = state_with_gap_diff();
+        // The diff shape says a fetch is worth making...
+        assert!(s.current_file_expandable());
+        // ...but until it lands there is nothing to reveal, so no affordance is
+        // drawn that could not be honoured.
+        assert_eq!(control_row(&s, 1), None);
+
         load_gap_file_lines(&mut s, 30);
-        s.set_gap_reveal(1, GapReveal { up: 0, down: 2 });
-        let d = s.gap_display(1);
-        assert_eq!(
-            d.top,
-            vec![
-                RevealLine {
-                    old_lineno: 8,
-                    new_lineno: 8,
-                    content: "L8".to_string()
-                },
-                RevealLine {
-                    old_lineno: 9,
-                    new_lineno: 9,
-                    content: "L9".to_string()
-                },
-            ]
+        assert!(
+            control_row(&s, 1).is_some(),
+            "the middle gap should offer a control once the file is loaded"
         );
-        assert!(d.bottom.is_empty());
-        assert_eq!(d.control.unwrap().hidden, 10);
     }
 
-    #[test]
-    fn gap_display_reveals_both_ends_then_merges() {
-        let mut s = state_with_gap_diff();
-        load_gap_file_lines(&mut s, 30);
-        // Partial from both ends: 2 down (8,9) + 3 up (17,18,19), 7 still hidden.
-        s.set_gap_reveal(1, GapReveal { up: 3, down: 2 });
-        let d = s.gap_display(1);
-        assert_eq!(
-            d.top.iter().map(|l| l.new_lineno).collect::<Vec<_>>(),
-            [8, 9]
-        );
-        assert_eq!(
-            d.bottom.iter().map(|l| l.new_lineno).collect::<Vec<_>>(),
-            [17, 18, 19]
-        );
-        assert_eq!(d.control.unwrap().hidden, 7);
-
-        // Once the two blocks cover the gap, it collapses to one contiguous
-        // block with no control.
-        s.set_gap_reveal(1, GapReveal { up: 6, down: 6 });
-        let d = s.gap_display(1);
-        assert_eq!(d.top.len(), 12);
-        assert_eq!(d.top.first().unwrap().new_lineno, 8);
-        assert_eq!(d.top.last().unwrap().new_lineno, 19);
-        assert!(d.control.is_none() && d.bottom.is_empty());
-    }
-
-    #[test]
-    fn gap_display_leading_and_trailing() {
-        let mut s = state_with_gap_diff();
-        load_gap_file_lines(&mut s, 30);
-        // Leading gap: new lines 1..=4, reveal 2 upward toward the first hunk.
-        s.set_gap_reveal(0, GapReveal { up: 2, down: 0 });
-        let d = s.gap_display(0);
-        assert!(d.top.is_empty());
-        assert_eq!(
-            d.bottom.iter().map(|l| l.new_lineno).collect::<Vec<_>>(),
-            [3, 4]
-        );
-        assert_eq!(d.control.unwrap().kind, GapKind::Leading);
-
-        // Trailing gap: new lines 23..=30. Over-expanding clamps to the file end.
-        s.set_gap_reveal(2, GapReveal { up: 0, down: 100 });
-        let d = s.gap_display(2);
-        assert_eq!(d.top.len(), 8);
-        assert_eq!(d.top.last().unwrap().new_lineno, 30);
-        assert!(d.control.is_none());
-    }
-
-    #[test]
-    fn expand_gap_steps_and_clamps() {
-        let mut s = state_with_gap_diff();
-        load_gap_file_lines(&mut s, 30);
-        // One step down reveals EXPAND_STEP lines, clamped to the 12-line gap.
-        s.expand_gap(1, ExpandAction::Down);
-        assert_eq!(s.gap_display(1).top.len(), 12.min(EXPAND_STEP));
-        // "All" fills the remainder, fully revealing the gap.
-        s.expand_gap(1, ExpandAction::All);
-        let d = s.gap_display(1);
-        assert_eq!(d.top.len(), 12);
-        assert!(d.control.is_none());
-    }
-
+    /// Revealed context is display-only: it must never shift the selectable-line
+    /// indices the cursor and every comment anchor are expressed in.
     #[test]
     fn expansion_does_not_change_selectable_count() {
         let mut s = state_with_gap_diff();
         let before = s.selectable_count();
         load_gap_file_lines(&mut s, 30);
-        s.set_gap_reveal(0, GapReveal { up: 4, down: 0 });
-        s.set_gap_reveal(1, GapReveal { up: 6, down: 6 });
-        s.set_gap_reveal(2, GapReveal { up: 0, down: 8 });
-        // Revealed context is display-only: it never becomes selectable.
+        s.expand_gap(0, ExpandAction::All);
+        s.expand_gap(1, ExpandAction::All);
+        s.expand_gap(2, ExpandAction::All);
         assert_eq!(s.selectable_count(), before);
+        // ...and the body really did grow, or the assertion above proves nothing.
+        assert!(s.total_body_rows() > before);
     }
 
+    /// A layout mode is baked into a `FileLayout`, so switching rebuilds it. The
+    /// view replays the expansions it recorded, because otherwise pressing `t`
+    /// would silently collapse everything the user had revealed.
     #[test]
-    fn rendered_inline_rows_match_physical_layout_with_expansion() {
+    fn expansion_survives_a_layout_toggle_and_a_file_round_trip() {
         let mut s = state_with_gap_diff();
         load_gap_file_lines(&mut s, 30);
-        s.set_gap_reveal(0, GapReveal { up: 2, down: 0 });
-        s.set_gap_reveal(1, GapReveal { up: 3, down: 2 });
-        let width = 40;
-        s.body_width.set(width);
-        let pal = Theme::truecolor().review_palette();
-        let segs = s.word_segments();
-        let lines = review_body_lines(&s, false, &pal, "rs", true, width, &segs, true);
-        assert_eq!(lines.len(), s.inline_physical_rows().len());
+        s.expand_gap(1, ExpandAction::All);
+        let revealed = s.total_body_rows();
+
+        s.toggle_layout();
+        s.toggle_layout();
+        assert_eq!(
+            s.total_body_rows(),
+            revealed,
+            "toggling layout lost context"
+        );
+        assert_eq!(
+            control_row(&s, 1),
+            None,
+            "the gap should still be fully open"
+        );
     }
 
+    /// Content arrives after the layout was first built, and the expansion asked
+    /// for before it landed has to take effect when it does — otherwise the
+    /// first click on a cold file looks broken.
     #[test]
-    fn sbs_body_row_of_accounts_for_expansion() {
+    fn an_expand_requested_before_load_lands_when_content_arrives() {
         let mut s = state_with_gap_diff();
+        let collapsed = s.total_body_rows();
+        s.expand_gap(1, ExpandAction::All);
+        assert_eq!(s.total_body_rows(), collapsed, "nothing to reveal yet");
+
         load_gap_file_lines(&mut s, 30);
-        s.layout = ReviewLayout::SideBySide;
-        s.set_gap_reveal(1, GapReveal { up: 0, down: 4 });
-        // body_row_of must point at the sbs row whose cell carries the line.
-        let rows = s.sbs_rows();
-        for idx in 0..s.selectable_count() {
-            let expected = rows
-                .iter()
-                .position(|r| matches!(r, SbsRow::Cells { left, right } if *left == Some(idx) || *right == Some(idx)));
-            if let Some(expected) = expected {
-                assert_eq!(s.body_row_of(idx), expected, "line {idx}");
-            }
-        }
+        assert!(s.total_body_rows() > collapsed);
+        assert_eq!(control_row(&s, 1), None);
     }
 
     #[test]
@@ -4466,116 +3679,119 @@ diff --git a/f.rs b/f.rs
         assert_eq!(&**split_file_lines(b"a\n\nc\n"), &["a", "", "c"]);
     }
 
+    /// A click on an expand control reveals context, and reports that it did so
+    /// (the caller uses that to kick the content fetch).
     #[test]
-    fn expand_action_at_maps_click_zones() {
+    fn clicking_an_expand_control_reveals_context() {
         let mut s = state_with_gap_diff();
         load_gap_file_lines(&mut s, 30);
-        let width = 80;
-        s.body_width.set(width);
-        // Partially reveal the middle gap so its control (down/hint/up/all) shows.
-        s.set_gap_reveal(1, GapReveal { up: 0, down: 2 });
-        let control = s.gap_display(1).control.expect("control present");
-        let zones = gap_control_layout(&control, width);
-        // Clicking a labelled zone runs that exact action.
-        for seg in &zones {
-            if let Some(action) = seg.action {
-                assert_eq!(s.expand_action_at(1, seg.start), Some(action));
-            }
-        }
-        // Clicking blank space (column 0, before the centred segments) falls back
-        // to a step in the gap's primary direction — Down for a middle gap.
-        assert_eq!(s.expand_action_at(1, 0), Some(ExpandAction::Down));
-
-        // A leading gap offers no down step, so its fallback is Up.
-        s.set_gap_reveal(0, GapReveal { up: 1, down: 0 });
-        assert_eq!(s.expand_action_at(0, 0), Some(ExpandAction::Up));
+        s.body.set((80, 20));
+        let before = s.total_body_rows();
+        let row = control_row(&s, 1).expect("middle gap has a control");
+        let body = Rect {
+            x: 0,
+            y: 0,
+            width: 80,
+            height: 40,
+        };
+        assert!(s.click_at(0, row as u16, body), "click should expand");
+        assert!(s.total_body_rows() > before);
     }
 
+    /// The one invariant the whole view rests on: the number of lines the
+    /// renderer emits equals the number of rows every cursor, scroll and click
+    /// mapping is computed against. Checked in both layouts, with a comment box
+    /// and revealed context interleaved, at several widths.
     #[test]
-    fn expand_control_gap_at_finds_inline_control_row() {
-        let mut s = state_with_gap_diff();
-        load_gap_file_lines(&mut s, 30);
-        let width = 80;
-        s.body_width.set(width);
-        s.set_gap_reveal(1, GapReveal { up: 0, down: 2 });
-        let rows = s.inline_physical_rows();
-        let (row, gap) = rows
-            .iter()
-            .enumerate()
-            .find_map(|(i, r)| match r {
-                BodyRow::ExpandControl { gap } => Some((i, *gap)),
-                _ => None,
-            })
-            .expect("a control row is present");
-        assert_eq!(s.expand_control_gap_at(row, width), Some(gap));
-        // A diff line row is not an expand control.
-        let line_row = rows
-            .iter()
-            .position(|r| matches!(r, BodyRow::Line { .. }))
-            .unwrap();
-        assert_eq!(s.expand_control_gap_at(line_row, width), None);
-    }
-
-    #[test]
-    fn expand_gap_defers_trailing_before_load_and_ignores_empty_gaps() {
-        // a.rs is a single hunk starting at line 1: the leading gap (0) has no
-        // hidden lines, the trailing gap (1) is unknown until the file loads.
-        let mut s = state_with_two_files();
-        // No file content loaded yet.
-        // Leading gap with no hidden lines is a genuine no-op — nothing recorded.
-        s.expand_gap(0, ExpandAction::Up);
-        assert!(!s.expanded.contains_key(&("a.rs".to_string(), 0)));
-        // Trailing gap before load defers the request so it applies on arrival.
-        s.expand_gap(1, ExpandAction::Down);
-        assert_eq!(
-            s.expanded.get(&("a.rs".to_string(), 1)).copied(),
-            Some(GapReveal {
-                up: 0,
-                down: EXPAND_STEP
-            })
-        );
-    }
-
-    #[test]
-    fn sbs_renderer_row_count_matches_walk_with_comments_and_expansion() {
-        // Locks the side-by-side renderer against the row-accounting the click /
-        // comment-box / expand-control mapping walks rely on, with a comment box
-        // and revealed context both interleaved.
-        let mut s = state_with_gap_diff();
-        load_gap_file_lines(&mut s, 30);
-        s.layout = ReviewLayout::SideBySide;
-        s.set_gap_reveal(1, GapReveal { up: 0, down: 3 });
-        // Comment on the addition `B` (new line 6).
-        s.comments
-            .push(Comment::new("f.rs", CommentSide::New, (6, 6), "B", "note"));
-        let width = 80;
-        s.body_width.set(width);
-        let pal = Theme::truecolor().review_palette();
-        let segs = s.word_segments();
-        let lines = review_body_lines_side_by_side(&s, false, &pal, "rs", true, width, &segs, true);
-
-        // Expected: one line per sbs row, plus each anchored comment box after
-        // its Cells row (mirrors comment_box_at_body_row / expand_control_gap_at).
-        let anchors = s.comment_anchors();
-        let mut expected = 0usize;
-        for row in s.sbs_rows() {
-            expected += 1;
-            if let SbsRow::Cells { left, right } = row {
-                let sels: Vec<usize> = match (left, right) {
-                    (Some(l), Some(r)) if l == r => vec![l],
-                    (l, r) => l.into_iter().chain(r).collect(),
+    fn rendered_rows_match_the_grid_in_both_layouts() {
+        for layout in [ReviewLayout::Inline, ReviewLayout::SideBySide] {
+            let mut s = state_with_gap_diff();
+            load_gap_file_lines(&mut s, 30);
+            s.layout = layout;
+            s.expand_gap(1, ExpandAction::Down);
+            s.comments
+                .push(Comment::new("f.rs", CommentSide::New, (6, 6), "B", "note"));
+            for width in [40, 80, 120] {
+                let lines = render_body(&s, width, 20);
+                assert_eq!(
+                    lines.len(),
+                    s.total_body_rows(),
+                    "{layout:?} at width {width}"
+                );
+                // Every rendered line fills the pane, or a row's tint stops
+                // short of the edge. Side by side may leave the odd column
+                // over on a data row, since two equal halves and the rule
+                // between them need not sum to the pane's width.
+                let floor = match layout {
+                    ReviewLayout::Inline => width,
+                    ReviewLayout::SideBySide => s.wrap_options().half_width() * 2 + SBS_SEPARATOR,
                 };
-                for sel in sels {
-                    if let Some(anns) = anchors.get(&sel) {
-                        for ann in anns {
-                            expected +=
-                                comment_box_height(ann, s.is_comment_collapsed(ann.id), width);
-                        }
-                    }
+                for (i, line) in lines.iter().enumerate() {
+                    let w = line.width();
+                    assert!(
+                        (floor..=width).contains(&w),
+                        "{layout:?} row {i} at width {width} is {w} wide"
+                    );
                 }
             }
         }
-        assert_eq!(lines.len(), expected);
+    }
+
+    /// A hunk header is one physical row however long its section heading is —
+    /// `Grid` counts it as one — so the renderer must truncate it rather than
+    /// soft-wrap it, or every mapping below it lands one row out.
+    #[test]
+    fn a_long_hunk_header_stays_one_row() {
+        let diff = parse_unified_diff(
+            "\
+diff --git a/x.rs b/x.rs
+--- a/x.rs
++++ b/x.rs
+@@ -1 +1 @@ fn a_very_long_enclosing_function_name_that_will_not_fit_in_a_narrow_pane()
+-a
++b
+",
+        );
+        let s = DiffReviewState::new(
+            SessionId::new(),
+            "test".to_string(),
+            "main".to_string(),
+            diff,
+            Vec::new(),
+        );
+        // header + deletion + addition, at a width the header cannot fit in.
+        assert_eq!(s.total_body_rows(), 3);
+        assert_eq!(render_body(&s, 30, 20).len(), 3);
+    }
+
+    /// Cursor-follow uses the pane's real height. With a fixed viewport constant
+    /// this was wrong on every terminal that was not about 22 rows tall — the
+    /// cursor would scroll off the bottom of a tall pane, or the view would jump
+    /// on a short one.
+    #[test]
+    fn cursor_follow_uses_the_real_viewport_height() {
+        let mut s = state_with_gap_diff();
+        load_gap_file_lines(&mut s, 30);
+        s.expand_gap(1, ExpandAction::All);
+        s.focus = ReviewFocus::Body;
+        let last = s.selectable_count() - 1;
+
+        // A tall pane holds the whole file, so following the cursor to the last
+        // line need not scroll at all.
+        s.body.set((80, 60));
+        s.cursor = last;
+        s.follow_cursor();
+        assert_eq!(s.scroll, 0, "a pane taller than the file should not scroll");
+
+        // A short one must scroll until the cursor's row is the bottom row.
+        s.body.set((80, 5));
+        s.scroll = 0;
+        s.follow_cursor();
+        let row = s
+            .with_grid(|_, grid| grid.row_of(SelIdx::new(last)).map(|r| r.get()))
+            .flatten()
+            .expect("cursor line has a row");
+        assert_eq!(s.scroll as usize, row + 1 - 5);
     }
 
     #[test]
@@ -5409,9 +4625,11 @@ diff --git a/c.rs b/c.rs
             "let y = 3;",
             "note",
         ));
-        let anchors = s.comment_anchors();
-        assert_eq!(anchors.get(&1).map(|v| v.len()), Some(1));
-        assert!(!anchors.contains_key(&0));
+        // The box attaches below selectable line 1, not line 0.
+        assert_eq!(
+            s.wanted_attachments(),
+            vec![(SelIdx::new(1), comment_attach_key(s.comments[0].id))]
+        );
     }
 
     #[test]
@@ -5429,11 +4647,13 @@ diff --git a/c.rs b/c.rs
         s.focus = ReviewFocus::Body;
 
         // The box anchors to the last selectable line rather than being dropped.
-        let anchors = s.comment_anchors();
-        assert_eq!(anchors.get(&2).map(|v| v.len()), Some(1));
+        assert_eq!(
+            s.wanted_attachments(),
+            vec![(SelIdx::new(2), comment_attach_key(s.comments[0].id))]
+        );
 
         // The last line carries a drift-flagged gutter marker...
-        assert_eq!(s.comment_marker(2), Some(true));
+        assert_eq!(s.comment_markers().get(&2), Some(&true));
 
         // ...and the cursor there resolves to the comment so `d` can delete it.
         s.cursor = 2;
@@ -5533,6 +4753,26 @@ diff --git a/c.rs b/c.rs
         }
     }
 
+    /// A comment box is drawn with its own borders, so its interior has to be
+    /// measured in display columns. A CJK or emoji comment counts fewer
+    /// characters than it occupies, and padding by that count pushed the closing
+    /// `│` past the right edge of the box.
+    #[test]
+    fn comment_box_borders_line_up_for_wide_characters() {
+        let pal = Theme::truecolor().review_palette();
+        for text in ["日本語のコメントです", "emoji 🎉 comment", "plain ascii"] {
+            let ann = Comment::new("a.rs", CommentSide::New, (2, 2), "snip", text);
+            for width in [24usize, 40, 80] {
+                let lines = comment_box_lines(&ann, false, width, &pal, true);
+                let widths: Vec<usize> = lines.iter().map(Line::width).collect();
+                assert!(
+                    widths.iter().all(|w| *w == widths[0]),
+                    "box edges ragged for {text:?} at width {width}: {widths:?}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn comment_draft_box_height_matches_rendered() {
         let pal = Theme::truecolor().review_palette();
@@ -5556,31 +4796,32 @@ diff --git a/c.rs b/c.rs
 
     #[test]
     fn draft_box_renders_inline_at_its_anchor() {
-        // Opening a comment box must add rows to the inline body, anchored after
-        // the selected line — and the renderer and layout model must still agree.
+        // Opening a comment box must add rows to the body, attached below the
+        // selected line — and the renderer and the grid must still agree.
         let mut s = state_with_two_files();
-        s.body_width.set(80);
+        s.body.set((80, 20));
         s.focus = ReviewFocus::Body;
         s.cursor = 1; // the inserted line
+        let before = s.total_body_rows();
         assert!(s.begin_comment());
+        assert!(s.total_body_rows() > before, "draft box should occupy rows");
 
-        let rows = s.inline_physical_rows();
-        let draft_rows: Vec<usize> = rows
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| matches!(r, BodyRow::Draft))
-            .map(|(i, _)| i)
-            .collect();
-        assert!(!draft_rows.is_empty(), "draft box should occupy body rows");
-        // The draft rows sit immediately after selectable line 1's row.
-        let line_row = s.body_row_of(1);
-        assert_eq!(draft_rows[0], line_row + 1);
+        // The draft's rows sit immediately after selectable line 1's row.
+        let (line_row, draft_row) = s
+            .with_grid(|view, grid| {
+                let line = grid.row_of(SelIdx::new(1))?.get();
+                let block = view
+                    .layout
+                    .rows()
+                    .find(|r| r.attach_key() == Some(DRAFT_ATTACH_KEY))?;
+                Some((line, grid.row_of_logical(block.index())?.get()))
+            })
+            .flatten()
+            .expect("both the line and its draft box have rows");
+        assert_eq!(draft_row, line_row + 1);
 
-        // Renderer row count matches the layout model (cursor/scroll/click).
-        let pal = Theme::truecolor().review_palette();
-        let segs = s.word_segments();
-        let lines = review_body_lines(&s, true, &pal, "rs", true, 80, &segs, true);
-        assert_eq!(lines.len(), rows.len());
+        // Renderer row count matches the grid (cursor/scroll/click).
+        assert_eq!(render_body(&s, 80, 20).len(), s.total_body_rows());
     }
 
     #[test]
@@ -5660,161 +4901,100 @@ diff --git a/c.rs b/c.rs
         assert_eq!(file_extension("dir.with.dot/Justfile"), "");
     }
 
+    /// The word diff itself is `diffgrid`'s and tested there. What is this
+    /// view's is the *options* it runs with: gap joining stays off, so a lone
+    /// surviving character between two rewritten runs is not swept into the
+    /// emphasis, which is what this view has always rendered.
     #[test]
-    fn word_diff_marks_only_the_changed_span() {
-        let (old, new) = word_diff("let y = 2;", "let y = 3;");
-        assert_eq!(
-            old,
-            vec![
-                ("let y = ".to_string(), false),
-                ("2".to_string(), true),
-                (";".to_string(), false),
-            ]
-        );
-        assert_eq!(
-            new,
-            vec![
-                ("let y = ".to_string(), false),
-                ("3".to_string(), true),
-                (";".to_string(), false),
-            ]
+    fn word_diff_options_keep_gap_joining_off() {
+        let opts = intraline_options();
+        assert_eq!(opts.join_gap, 0);
+        let (old, _) = diffgrid::enrich::word_diff_pair("a, b", "x, y", &opts)
+            .expect("a similar-enough pair is marked up");
+        // The `,` between the two changed runs stays unemphasised.
+        assert!(
+            old.iter()
+                .any(|seg| !seg.emphasis && seg.text.contains(',')),
+            "gap joining must not absorb the separator: {old:?}"
         );
     }
 
+    /// The wire model and `diffgrid`'s must agree about what is on each line, or
+    /// a comment anchored through one lands on the wrong line in the other.
     #[test]
-    fn word_diff_identical_lines_have_no_change() {
-        let (old, new) = word_diff("same", "same");
-        assert_eq!(old, vec![("same".to_string(), false)]);
-        assert_eq!(new, vec![("same".to_string(), false)]);
+    fn diffgrid_model_mirrors_the_wire_model() {
+        let s = state_with_two_files();
+        let file = &s.diff.files[0];
+        let model = word_diffed(file);
+        assert_eq!(model.display_path(), file.display_path());
+        assert_eq!(model.selectable_count(), file.hunks[0].lines.len());
+        for (i, line) in file.hunks[0].lines.iter().enumerate() {
+            let got = model.line(SelIdx::new(i)).expect("line present");
+            assert_eq!(got.content, line.content, "line {i}");
+            assert_eq!(got.old_lineno.map(LineNo::get), line.old_lineno);
+            assert_eq!(got.new_lineno.map(LineNo::get), line.new_lineno);
+        }
     }
 
+    /// A binary file's model carries no hunks, so the layout for it is empty —
+    /// the body renders the image instead — while the wire model keeps the
+    /// git-LFS pointer text its reviewed-mark hash is computed over.
     #[test]
-    fn word_diff_highlights_only_changed_tokens() {
-        // Two separated changes on one line (`1`→`9` and `2`→`8`). A
-        // char-level common-prefix/suffix heuristic collapses everything
-        // between the first and last change into one big emphasised span
-        // (highlighting the unchanged `; bar = ` middle). A token-level diff
-        // must emphasise *only* the changed numbers.
-        let (old, new) = word_diff("foo = 1; bar = 2;", "foo = 9; bar = 8;");
-
-        let old_changed: Vec<&str> = old
-            .iter()
-            .filter(|(_, e)| *e)
-            .map(|(t, _)| t.as_str())
-            .collect();
-        assert_eq!(old_changed, vec!["1", "2"]);
-
-        let new_changed: Vec<&str> = new
-            .iter()
-            .filter(|(_, e)| *e)
-            .map(|(t, _)| t.as_str())
-            .collect();
-        assert_eq!(new_changed, vec!["9", "8"]);
-
-        // The shared `; bar = ` between the two changes stays unchanged.
-        assert!(old.iter().any(|(t, e)| !e && t.contains("bar")));
-        assert!(new.iter().any(|(t, e)| !e && t.contains("bar")));
-    }
-
-    #[test]
-    fn word_diff_suppresses_emphasis_for_dissimilar_lines() {
-        // Two positionally-paired but unrelated lines share only incidental
-        // punctuation. Highlighting those coincidental matches leaves dark
-        // islands in a sea of emphasis (the GitHub "semantic cleanup" case),
-        // so below a similarity threshold there should be no intra-line
-        // emphasis at all — the whole line is one unchanged span.
-        let (old, new) = word_diff(
-            "const result = await remuxBlobRecord(mockRemuxer, inputBlobRecord)",
-            "beforeEach(() => {",
-        );
-        assert!(old.iter().all(|(_, e)| !e), "old: {old:?}");
-        assert!(new.iter().all(|(_, e)| !e), "new: {new:?}");
-        assert_eq!(
-            old.iter().map(|(t, _)| t.as_str()).collect::<String>(),
-            "const result = await remuxBlobRecord(mockRemuxer, inputBlobRecord)"
-        );
-        assert_eq!(
-            new.iter().map(|(t, _)| t.as_str()).collect::<String>(),
-            "beforeEach(() => {"
-        );
-    }
-
-    #[test]
-    fn word_diff_segments_pairs_replace_block() {
+    fn a_binary_file_lays_out_as_nothing() {
         let diff = parse_unified_diff(
             "\
-diff --git a/x.rs b/x.rs
---- a/x.rs
-+++ b/x.rs
-@@ -1,2 +1,2 @@
- fn f() {
--let y = 2;
-+let y = 3;
+diff --git a/logo.png b/logo.png
+index 1111111..2222222 100644
+Binary files a/logo.png and b/logo.png differ
 ",
         );
-        let segs = word_diff_segments(&diff.files[0]);
-        // selectable index 0 = context (unchanged), 1 = deletion, 2 = addition.
-        assert_eq!(segs[0], vec![("fn f() {".to_string(), false)]);
-        assert!(segs[1].iter().any(|(t, emph)| *emph && t == "2"));
-        assert!(segs[2].iter().any(|(t, emph)| *emph && t == "3"));
+        let model = word_diffed(&diff.files[0]);
+        assert!(model.is_binary());
+        assert!(!model.is_expandable());
+        assert_eq!(model.selectable_count(), 0);
     }
 
     #[test]
-    fn word_segments_cache_matches_fresh_and_invalidates_on_file_switch() {
-        let mut s = state_with_two_files();
-        s.selected_file = 0;
-        // Cached result must equal a fresh computation for the current file...
-        let fresh0 = word_diff_segments(&s.diff.files[0]);
-        assert_eq!(*s.word_segments(), fresh0);
-        // ...and a second call (warm cache) returns the same data.
-        assert_eq!(*s.word_segments(), fresh0);
-        // Switching the body file invalidates the memo (keyed on selected_file).
-        s.selected_file = 1;
-        let fresh1 = word_diff_segments(&s.diff.files[1]);
-        assert_eq!(*s.word_segments(), fresh1);
-        assert_ne!(fresh0, fresh1, "the two files must differ for a real test");
-    }
-
-    #[test]
-    fn precompute_matches_per_file_word_diff_segments() {
+    fn precompute_matches_the_lazy_path() {
         let s = state_with_two_files();
         // Highlighting on exercises the cache-warming branch too (the returned
-        // segments must be identical regardless).
-        let pre = precompute_review_caches(&s.diff, true, Color::Reset);
+        // models must be identical regardless).
+        let pre = precompute_review_caches(&s.diff, true);
         assert_eq!(pre.len(), s.diff.files.len());
         for (i, file) in s.diff.files.iter().enumerate() {
-            assert_eq!(pre[i], word_diff_segments(file), "file {i} segments differ");
+            assert_eq!(pre[i], word_diffed(file), "file {i} differs");
         }
     }
 
+    /// Priming installs the precomputed models rather than recomputing them.
     #[test]
-    fn primed_segments_are_returned_without_recompute() {
+    fn primed_models_are_used_without_recompute() {
         let mut s = state_with_two_files();
-        // Prime with sentinel data distinct from any real computation: if
-        // word_segments recomputed, it would not match these.
-        let sentinel: Vec<Vec<WordSegs>> = (0..s.diff.files.len())
-            .map(|i| vec![vec![(format!("PRIMED-{i}"), false)]])
+        // A sentinel no real computation would produce: if the view recomputed,
+        // it would not lay this out.
+        let sentinel: Vec<diffgrid::FileDiff<'static>> = (0..s.diff.files.len())
+            .map(|i| {
+                diffgrid::FileDiff::new(
+                    s.diff.files[i].display_path().to_string(),
+                    s.diff.files[i].display_path().to_string(),
+                    diffgrid::FileStatus::Modified,
+                    Vec::new(),
+                )
+            })
             .collect();
-        s.prime_segments(sentinel.clone());
-        s.selected_file = 0;
-        assert_eq!(*s.word_segments(), sentinel[0]);
-        s.selected_file = 1;
-        assert_eq!(*s.word_segments(), sentinel[1]);
-    }
-
-    #[test]
-    fn priming_with_real_precompute_matches_lazy_path() {
-        let mut s = state_with_two_files();
-        let pre = precompute_review_caches(&s.diff, false, Color::Reset);
-        s.prime_segments(pre);
+        s.prime_views(sentinel);
         for i in 0..s.diff.files.len() {
             s.selected_file = i;
-            assert_eq!(*s.word_segments(), word_diff_segments(&s.diff.files[i]));
+            assert_eq!(
+                s.with_view(|v| v.file.selectable_count()),
+                Some(0),
+                "file {i} was recomputed instead of using the primed model"
+            );
         }
     }
 
     #[test]
-    fn word_segments_on_empty_diff_is_empty_without_panic() {
+    fn an_empty_diff_lays_out_without_panicking() {
         let s = DiffReviewState::new(
             SessionId::new(),
             "test".to_string(),
@@ -5822,7 +5002,8 @@ diff --git a/x.rs b/x.rs
             parse_unified_diff(""),
             Vec::new(),
         );
-        assert!(s.word_segments().is_empty());
+        assert_eq!(s.total_body_rows(), 0);
+        assert!(render_body(&s, 80, 20).is_empty());
     }
 
     fn state_with_long_line() -> DiffReviewState {
@@ -5846,139 +5027,43 @@ diff --git a/x.rs b/x.rs
         )
     }
 
+    /// Soft wrapping is `diffgrid`'s, but the *width* it wraps into is this
+    /// view's: a gutter spec, a right margin and a pane width. Getting that
+    /// arithmetic wrong drifts every row mapping once a line wraps.
     #[test]
-    fn wrap_row_lens_breaks_at_whole_words() {
-        // "hello world foo" at width 8 → "hello " / "world " / "foo".
-        assert_eq!(wrap_row_lens("hello world foo", 8), vec![6, 6, 3]);
-    }
-
-    #[test]
-    fn wrap_row_lens_hard_splits_overlong_words() {
-        // No whitespace to break on, so fall back to filling each row.
-        assert_eq!(wrap_row_lens("abcdefghij", 4), vec![4, 4, 2]);
-    }
-
-    #[test]
-    fn wrap_spans_word_wraps_and_preserves_text() {
-        // Break falls inside the second span; styling and all characters are
-        // preserved, and it wraps at the space (whole words).
-        let rows = wrap_spans(
-            vec![
-                Span::raw("hello ".to_string()),
-                Span::raw("world foo".to_string()),
-            ],
-            8,
-        );
-        let texts: Vec<String> = rows
-            .iter()
-            .map(|r| r.iter().map(|s| s.content.as_ref()).collect())
-            .collect();
-        assert_eq!(texts, vec!["hello ", "world ", "foo"]);
-    }
-
-    #[test]
-    fn line_wrap_rows_matches_wrap_spans_count() {
-        for text in ["", "x", "abc", "hello world foo", "abcdefghij", "a b c d e"] {
-            let spans = vec![Span::raw(text.to_string())];
-            assert_eq!(
-                wrap_spans(spans, 4).len(),
-                line_wrap_rows(text, 4),
-                "text {text:?}"
-            );
-        }
-        // Degenerate zero width is one (clipped) row, not an infinite wrap.
-        assert_eq!(line_wrap_rows("0123456789", 0), 1);
-        assert_eq!(
-            wrap_spans(vec![Span::raw("0123456789".to_string())], 0).len(),
-            1
-        );
-    }
-
-    #[test]
-    fn long_line_wraps_and_mappings_stay_consistent() {
+    fn a_wrapped_line_keeps_its_row_mappings_consistent() {
         let s = state_with_long_line();
-        // Body width chosen so the content (wrap) width is exactly 8 columns.
-        s.body_width
-            .set(INLINE_GUTTER_COLS + INLINE_WRAP_RIGHT_MARGIN + 8);
-        assert_eq!(inline_content_width(s.body_width.get()), 8);
-        let rows = s.inline_physical_rows();
-        // header + ctx(1 row) + long(16 cols → 2 rows).
-        assert_eq!(
-            rows,
-            vec![
-                BodyRow::Header,
-                BodyRow::Line {
-                    sel: 0,
-                    cont: false
-                },
-                BodyRow::Line {
-                    sel: 1,
-                    cont: false
-                },
-                BodyRow::Line { sel: 1, cont: true },
-            ]
-        );
+        // Body width chosen so the content (wrap) width is exactly 8 columns,
+        // making the 16-column addition take two rows.
+        let width = inline_gutter().cols() + WRAP_RIGHT_MARGIN + 8;
+        s.body.set((width, 20));
+        assert_eq!(s.wrap_options().content_width(inline_gutter().cols()), 8);
+
+        // header + ctx (1 row) + the long addition (2 rows).
         assert_eq!(s.total_body_rows(), 4);
-        // First (non-continuation) physical row of the wrapped line.
-        assert_eq!(s.body_row_of(1), 2);
-        // A click anywhere on the wrapped line — including its continuation
-        // row — selects that diff line; the header row selects nothing.
+        assert_eq!(render_body(&s, width, 20).len(), 4);
+        // The cursor lands on the line's *first* row...
+        assert_eq!(
+            s.with_grid(|_, g| g.row_of(SelIdx::new(1)).map(|r| r.get()))
+                .flatten(),
+            Some(2)
+        );
+        // ...and a click anywhere on it — continuation row included — selects
+        // that diff line, while the header row selects nothing.
         assert_eq!(s.selectable_at_body_row(2), Some(1));
         assert_eq!(s.selectable_at_body_row(3), Some(1));
         assert_eq!(s.selectable_at_body_row(0), None);
     }
 
+    /// The two gutters are the view's own geometry, and every row's content
+    /// column is measured from them.
     #[test]
-    fn rendered_inline_rows_match_physical_layout() {
-        // The renderer and the row↔line mapping must produce the same number of
-        // physical rows, or cursor/scroll/click drift once a line wraps.
-        let s = state_with_long_line();
-        let width = INLINE_GUTTER_COLS + INLINE_WRAP_RIGHT_MARGIN + 8;
-        s.body_width.set(width);
-        let pal = Theme::truecolor().review_palette();
-        let segs = s.word_segments();
-        let lines = review_body_lines(&s, false, &pal, "rs", true, width, &segs, true);
-        assert_eq!(lines.len(), s.inline_physical_rows().len());
-    }
-
-    #[test]
-    fn side_by_side_pairs_change_blocks() {
-        let s = state_with_two_files();
-        let rows = side_by_side_rows(s.current_file().unwrap());
-        assert!(matches!(rows[0], SbsRow::Header(_)));
-        // context(0,0), then the lone addition paired with a blank left,
-        // then context(2,2).
-        assert_eq!(
-            &rows[1..],
-            &[
-                SbsRow::Cells {
-                    left: Some(0),
-                    right: Some(0)
-                },
-                SbsRow::Cells {
-                    left: None,
-                    right: Some(1)
-                },
-                SbsRow::Cells {
-                    left: Some(2),
-                    right: Some(2)
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn side_by_side_zips_deletion_and_addition() {
-        let mut s = state_with_two_files();
-        s.selected_file = 1; // b.rs: -b / +B
-        let rows = side_by_side_rows(s.current_file().unwrap());
-        assert_eq!(
-            rows[1],
-            SbsRow::Cells {
-                left: Some(0),
-                right: Some(1)
-            }
-        );
+    fn gutters_are_the_widths_the_body_is_laid_out_against() {
+        // Edge, marker, two four-column numbers each followed by a space, the
+        // sign, and one column of padding.
+        assert_eq!(inline_gutter().cols(), 14);
+        // One four-column number and a space; the halves say which side they are.
+        assert_eq!(sbs_gutter().cols(), 5);
     }
 
     #[test]

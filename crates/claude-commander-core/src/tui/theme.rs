@@ -3,6 +3,7 @@
 //! Centralized theme system for consistent styling across the UI.
 //! Supports multiple color depths for terminal compatibility.
 
+use diffgrid::style::{Appearance, Ink, Palette, Rgb, Role};
 use ratatui::style::{Color, Style};
 
 use crate::config::theme::{AgentWorkingStyle, ThemeOverrides};
@@ -143,6 +144,15 @@ pub struct Theme {
     /// Colour capability this theme was built for. Drives capability-aware
     /// palettes (e.g. the review diff view) so RGB fills degrade gracefully.
     pub mode: ColorMode,
+
+    /// Whether this theme is drawn on a light or a dark terminal background.
+    ///
+    /// The terminal never tells us, and asking it (`OSC 11`) is deliberately out
+    /// of scope, so this is a flag a preset declares about itself. It matters
+    /// because a derived *fill* has to be scaled toward the surface it sits on:
+    /// scaling a green toward black on a light terminal gives a muddy near-black
+    /// band, which is what [`fill_color`] used to do unconditionally.
+    pub appearance: Appearance,
 }
 
 impl Default for Theme {
@@ -210,6 +220,103 @@ pub struct ReviewPalette {
     /// than [`Self::context_bg`] so a header reads as a quiet divider distinct
     /// from the revealed-context band.
     pub hunk_header_bg: Color,
+    /// Colour capability, carried so [`Palette::syntax`] can degrade a
+    /// truecolor highlight rather than emitting an RGB escape a 16-colour
+    /// terminal will render as something arbitrary.
+    pub mode: ColorMode,
+}
+
+/// The review view's [`diffgrid`] palette: semantic [`Role`] in, `ratatui`
+/// colours out.
+///
+/// This is the *whole* of what the review view has to write to render a diff.
+/// The colours themselves still come from the user's theme preset, already
+/// degraded for the terminal's capability by [`Theme::review_palette`]; this
+/// impl only says which of them a given role wears.
+impl Palette for ReviewPalette {
+    type Color = Color;
+
+    fn role(&self, role: Role) -> Ink<Color> {
+        use diffgrid::LineOrigin;
+        let ink = |fg, bg| Ink::new(fg, bg, false);
+        match role {
+            Role::Context => ink(self.text, Color::Reset),
+            Role::Addition => ink(self.text, self.add_bg),
+            Role::Deletion => ink(self.text, self.del_bg),
+            Role::Gutter(LineOrigin::Context) => ink(self.gutter_fg, Color::Reset),
+            Role::Gutter(LineOrigin::Addition) => ink(self.gutter_fg, self.add_gutter_bg),
+            Role::Gutter(LineOrigin::Deletion) => ink(self.gutter_fg, self.del_gutter_bg),
+            Role::HunkHeader => ink(self.hunk_header, self.hunk_header_bg),
+            // Revealed context and its expand control share the band, so the
+            // extra file lines read as one region distinct from the diff's own
+            // ±3 context.
+            Role::ExpandedContext | Role::ExpandControl => ink(self.gutter_fg, self.context_bg),
+            Role::AlignmentGap => ink(self.gap_fg, Color::Reset),
+            Role::Padding => ink(self.text, Color::Reset),
+            // `Role` is `#[non_exhaustive]`: an unrecognised role renders as
+            // plain text rather than failing to build the day one is added.
+            _ => ink(self.text, Color::Reset),
+        }
+    }
+
+    fn emphasis_bg(&self, role: Role) -> Color {
+        match role {
+            Role::Addition => self.add_emph_bg,
+            Role::Deletion => self.del_emph_bg,
+            // Only a changed line can carry word-diff emphasis; anything else
+            // keeps its own fill rather than borrowing a colour it never wears.
+            other => self.role(other).bg,
+        }
+    }
+
+    fn selection_bg(&self) -> Color {
+        self.selection_bg
+    }
+
+    fn syntax(&self, rgb: Rgb) -> Color {
+        match self.mode {
+            ColorMode::TrueColor => Color::Rgb(rgb.r, rgb.g, rgb.b),
+            // Below truecolor the review view passes no highlighter at all, so
+            // this is unreachable in practice — but a palette that answered
+            // with an RGB escape anyway would be a trap for the next caller.
+            _ => self.text,
+        }
+    }
+
+    /// Two deviations from the default precedence, both pre-existing behaviour:
+    ///
+    /// * a theme that sets `selection_fg` overrides the foreground on a
+    ///   selected row, syntax highlight included — the session list does the
+    ///   same, and a cursor row that keeps per-token colours does not read as
+    ///   selected;
+    /// * an expand control's *actionable* segments (which
+    ///   [`diffgrid::style::expand_control_spans`] marks bold) take the hunk-header
+    ///   accent, so "click me" is visibly distinct from the "n hidden lines" hint.
+    fn ink(&self, style: &diffgrid::style::SpanStyle) -> Ink<Color> {
+        let base = self.role(style.role);
+        let bg = if style.selected {
+            self.selection_bg
+        } else if style.emphasis {
+            self.emphasis_bg(style.role)
+        } else {
+            base.bg
+        };
+        let mut fg = match style.syntax_fg {
+            Some(rgb) => self.syntax(rgb),
+            None => base.fg,
+        };
+        if style.role == Role::ExpandControl && style.bold {
+            fg = self.hunk_header;
+        }
+        if let Some(sel_fg) = self.selection_fg.filter(|_| style.selected) {
+            fg = sel_fg;
+        }
+        Ink {
+            fg,
+            bg,
+            bold: style.bold || base.bold,
+        }
+    }
 }
 
 impl Theme {
@@ -219,15 +326,16 @@ impl Theme {
         let del = self.diff_removed;
         // Line fills: dimmed theme colours on true-color; fixed indexed darks
         // on 256-colour; none (foreground-only) on 16-colour.
+        let fill = |base, strength| fill_color(base, strength, self.appearance);
         let (add_bg, del_bg, add_emph_bg, del_emph_bg, add_gutter_bg, del_gutter_bg) =
             match self.mode {
                 ColorMode::TrueColor => (
-                    fill_color(add, 0.26),
-                    fill_color(del, 0.26),
-                    fill_color(add, 0.40),
-                    fill_color(del, 0.40),
-                    fill_color(add, 0.34),
-                    fill_color(del, 0.34),
+                    fill(add, 0.26),
+                    fill(del, 0.26),
+                    fill(add, 0.40),
+                    fill(del, 0.40),
+                    fill(add, 0.34),
+                    fill(del, 0.34),
                 ),
                 ColorMode::Indexed => (
                     Color::Indexed(22),
@@ -249,7 +357,7 @@ impl Theme {
         // A subtle green band reads as "done", complementing the green ✓ check.
         // No band on 16-colour terminals — the dim + check carry it there.
         let reviewed_bg = match self.mode {
-            ColorMode::TrueColor => fill_color(add, 0.18),
+            ColorMode::TrueColor => fill(add, 0.18),
             ColorMode::Indexed => Color::Indexed(22),
             ColorMode::Basic => Color::Reset,
         };
@@ -282,6 +390,7 @@ impl Theme {
             reviewed_bg,
             context_bg,
             hunk_header_bg,
+            mode: self.mode,
         }
     }
 }
@@ -300,6 +409,7 @@ impl Theme {
     pub fn basic() -> Self {
         Self {
             mode: ColorMode::Basic,
+            appearance: Appearance::Dark,
             border_focused: Color::Cyan,
             border_unfocused: Color::DarkGray,
 
@@ -367,6 +477,7 @@ impl Theme {
     pub fn indexed() -> Self {
         Self {
             mode: ColorMode::Indexed,
+            appearance: Appearance::Dark,
             border_focused: Color::Indexed(117), // Pastel sky blue
             border_unfocused: Color::Indexed(243),
 
@@ -432,6 +543,7 @@ impl Theme {
     pub fn truecolor() -> Self {
         Self {
             mode: ColorMode::TrueColor,
+            appearance: Appearance::Dark,
             border_focused: Color::Rgb(137, 180, 250), // Pastel sky blue
             border_unfocused: Color::Rgb(88, 91, 112),
 
@@ -497,6 +609,7 @@ impl Theme {
     pub fn monokai_dimmed() -> Self {
         Self {
             mode: ColorMode::TrueColor,
+            appearance: Appearance::Dark,
             border_focused: Color::Rgb(181, 165, 106), // Muted gold/yellow #b5a56a
             border_unfocused: Color::Rgb(85, 85, 85),  // Dark gray #555555
 
@@ -561,6 +674,7 @@ impl Theme {
     pub fn zedokai() -> Self {
         Self {
             mode: ColorMode::TrueColor,
+            appearance: Appearance::Dark,
             border_focused: Color::Rgb(249, 38, 114), // Vivid pink #f92672
             border_unfocused: Color::Rgb(73, 72, 62), // Dark gray #49483e
 
@@ -625,6 +739,7 @@ impl Theme {
     pub fn rose_pine() -> Self {
         Self {
             mode: ColorMode::TrueColor,
+            appearance: Appearance::Dark,
             border_focused: Color::Rgb(235, 111, 146), // Rose/pink #eb6f92
             border_unfocused: Color::Rgb(57, 53, 82),  // Muted overlay #393552
 
@@ -810,16 +925,36 @@ impl Theme {
     }
 }
 
-/// Build a dark, saturated line fill from a base colour for the review diff
-/// view. Amplifies saturation first (so dimmed pastel theme colours read as
-/// rich green/red rather than washed-out grey), then scales toward black to the
-/// target `brightness`.
-pub fn fill_color(base: Color, brightness: f32) -> Color {
+/// Build a saturated line fill from a base colour for the review diff view.
+///
+/// Amplifies saturation first (so dimmed pastel theme colours read as rich
+/// green/red rather than washed-out grey), then scales the result *toward the
+/// surface* by `strength`: `0.0` is the surface itself, `1.0` the saturated
+/// colour at full strength.
+///
+/// Which surface is the whole point. Scaling toward black is right on a dark
+/// terminal and wrong on a light one, where it produces a near-black band under
+/// dark text — legible only by accident. `appearance` picks the end to scale
+/// toward, so the same `strength` means "a fifth of the way from the background
+/// to this colour" on both.
+pub fn fill_color(base: Color, strength: f32, appearance: Appearance) -> Color {
     const SAT: f32 = 1.75;
     let (r, g, b) = color_to_approx_rgb(base);
     let (r, g, b) = (r as f32, g as f32, b as f32);
     let mean = (r + g + b) / 3.0;
-    let ch = |c: f32| (((mean + (c - mean) * SAT).clamp(0.0, 255.0)) * brightness) as u8;
+    // The surface the fill is blended against: black behind light text, white
+    // behind dark text.
+    let surface = match appearance {
+        Appearance::Dark => 0.0,
+        Appearance::Light => 255.0,
+        // `Appearance` is `#[non_exhaustive]`; an unknown value keeps today's
+        // behaviour rather than failing to build.
+        _ => 0.0,
+    };
+    let ch = |c: f32| {
+        let saturated = (mean + (c - mean) * SAT).clamp(0.0, 255.0);
+        (surface + (saturated - surface) * strength) as u8
+    };
     Color::Rgb(ch(r), ch(g), ch(b))
 }
 
@@ -1080,6 +1215,103 @@ mod tests {
         };
         let themed = base.with_overrides(&overrides);
         assert_eq!(themed.selection_fg, Some(Color::Rgb(1, 2, 3)));
+    }
+
+    /// A fill has to be blended toward the surface it will sit on. Scaling a
+    /// green toward black on a light terminal produced a near-black band under
+    /// dark text — legible only by accident — which is the bug this flag fixes.
+    #[test]
+    fn fill_scales_toward_the_terminal_background() {
+        let green = Color::Rgb(0, 200, 0);
+        let Color::Rgb(_, dg, _) = fill_color(green, 0.26, Appearance::Dark) else {
+            panic!("fill_color always returns Rgb");
+        };
+        let Color::Rgb(lr, lg, lb) = fill_color(green, 0.26, Appearance::Light) else {
+            panic!("fill_color always returns Rgb");
+        };
+        // Dark: mostly black, a hint of the colour.
+        assert!(dg < 100, "dark fill should sit near black, got {dg}");
+        // Light: mostly white, a hint of the colour — and still recognisably
+        // green, i.e. the green channel stays ahead of the other two.
+        assert!(lr > 180 && lb > 180, "light fill should sit near white");
+        assert!(
+            lg > lr && lg > lb,
+            "light green fill should still read green"
+        );
+    }
+
+    /// `0.0` is the surface itself and `1.0` the saturated colour, on both.
+    #[test]
+    fn fill_endpoints_are_the_surface_and_the_colour() {
+        let red = Color::Rgb(200, 0, 0);
+        assert_eq!(fill_color(red, 0.0, Appearance::Dark), Color::Rgb(0, 0, 0));
+        assert_eq!(
+            fill_color(red, 0.0, Appearance::Light),
+            Color::Rgb(255, 255, 255)
+        );
+        assert_eq!(
+            fill_color(red, 1.0, Appearance::Dark),
+            fill_color(red, 1.0, Appearance::Light),
+            "at full strength the surface no longer contributes"
+        );
+    }
+
+    /// The role → colour mapping the review view renders every row through.
+    #[test]
+    fn review_palette_maps_roles_to_theme_colours() {
+        use diffgrid::LineOrigin;
+        use diffgrid::style::SpanStyle;
+
+        let pal = Theme::truecolor().review_palette();
+        assert_eq!(pal.role(Role::Addition).bg, pal.add_bg);
+        assert_eq!(pal.role(Role::Deletion).bg, pal.del_bg);
+        assert_eq!(pal.role(Role::Context).bg, Color::Reset);
+        assert_eq!(
+            pal.role(Role::Gutter(LineOrigin::Addition)).bg,
+            pal.add_gutter_bg
+        );
+        assert_eq!(pal.role(Role::HunkHeader).fg, pal.hunk_header);
+        assert_eq!(pal.role(Role::ExpandedContext).bg, pal.context_bg);
+        assert_eq!(pal.emphasis_bg(Role::Deletion), pal.del_emph_bg);
+        // Word-diff emphasis strengthens the row's own fill...
+        let emph = pal.ink(&SpanStyle::new(Role::Addition).with_emphasis(true));
+        assert_eq!(emph.bg, pal.add_emph_bg);
+        // ...and selection beats it outright, taking the theme's selection
+        // foreground with it so a cursor row reads as selected.
+        let selected = pal.ink(
+            &SpanStyle::new(Role::Addition)
+                .with_emphasis(true)
+                .with_selected(true),
+        );
+        assert_eq!(selected.bg, pal.selection_bg);
+        assert_eq!(selected.fg, pal.selection_fg.unwrap_or(pal.text));
+    }
+
+    /// A clickable expand segment is accented; the "n hidden lines" hint is not.
+    #[test]
+    fn review_palette_accents_actionable_expand_segments() {
+        use diffgrid::style::SpanStyle;
+
+        let pal = Theme::truecolor().review_palette();
+        let hint = pal.ink(&SpanStyle::new(Role::ExpandControl));
+        let action = pal.ink(&SpanStyle::new(Role::ExpandControl).with_bold(true));
+        assert_eq!(hint.fg, pal.gutter_fg);
+        assert_eq!(action.fg, pal.hunk_header);
+        assert!(action.bold);
+        assert_eq!(action.bg, pal.context_bg);
+    }
+
+    /// Below truecolor the view passes no highlighter, and the palette must not
+    /// answer with an RGB escape a 16-colour terminal cannot honour.
+    #[test]
+    fn review_palette_degrades_syntax_colour_below_truecolor() {
+        let rgb = Rgb::new(10, 20, 30);
+        assert_eq!(
+            Theme::truecolor().review_palette().syntax(rgb),
+            Color::Rgb(10, 20, 30)
+        );
+        let basic = Theme::basic().review_palette();
+        assert_eq!(basic.syntax(rgb), basic.text);
     }
 
     #[test]

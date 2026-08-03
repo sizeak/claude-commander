@@ -97,7 +97,6 @@ impl App {
         let backend = self.backend_arc(self.backend_of_session(session_id));
         let tx = self.event_loop.sender();
         let highlight = self.theme.mode == crate::tui::theme::ColorMode::TrueColor;
-        let text_fg = self.theme.review_palette().text;
 
         tokio::spawn(async move {
             let refreshed = match backend
@@ -114,11 +113,10 @@ impl App {
                         dropped_comments,
                     } = snapshot;
                     // The precompute is CPU-bound and synchronous; keep it off
-                    // the async pool and hand the diff back with its segments.
-                    let (diff, segments) = tokio::task::spawn_blocking(move || {
-                        let segments =
-                            super::review::precompute_review_caches(&diff, highlight, text_fg);
-                        (diff, segments)
+                    // the async pool and hand the diff back with its models.
+                    let (diff, models) = tokio::task::spawn_blocking(move || {
+                        let models = super::review::precompute_review_caches(&diff, highlight);
+                        (diff, models)
                     })
                     .await
                     .expect("review refresh precompute task panicked");
@@ -129,7 +127,7 @@ impl App {
                         diff,
                         comments,
                         reviewed,
-                        segments,
+                        models,
                         content_hash,
                         dropped_comments,
                     }))

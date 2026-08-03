@@ -838,6 +838,7 @@ dependencies = [
  "tracing-subscriber",
  "tui-input",
  "two-face",
+ "unicode-segmentation",
  "unicode-width",
  "url",
  "uuid",

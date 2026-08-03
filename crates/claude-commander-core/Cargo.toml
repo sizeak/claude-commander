@@ -101,6 +101,9 @@ regex = "1.12"
 # it directly costs nothing — and any width math outside `diffgrid` must use it
 # rather than `chars().count()`, which is not a column count.
 unicode-width = "0.2"
+# Grapheme-safe slicing, for the same reason: `chars().take(n)` can cut a
+# combining sequence in half. Already in the tree via `diffgrid`.
+unicode-segmentation = "1.13"
 
 # Async utilities
 async-trait = "0.1"
