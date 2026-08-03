@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:uuid/uuid.dart';
 
+import '../chrome/chrome.dart';
 import '../server_config.dart';
 import '../services/commander_api.dart';
 import '../theme/tokens.dart';
@@ -177,121 +178,123 @@ class _ConnectionPageState extends State<ConnectionPage> {
     final editing = widget.existing != null;
     final canPop = Navigator.of(context).canPop();
     final t = CommanderTokens.of(context);
-    return Scaffold(
-      body: SafeArea(
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 460),
-            child: Form(
-              key: _formKey,
-              child: ListView(
-                padding: const EdgeInsets.fromLTRB(26, 20, 26, 26),
-                children: [
-                  Row(
-                    children: [
-                      const BrandMark(size: 44),
-                      const Spacer(),
-                      if (canPop)
-                        IconButton(
-                          onPressed: () => Navigator.of(context).pop(),
-                          icon: const Icon(Icons.close),
-                          tooltip: 'Close',
-                        ),
-                    ],
-                  ),
-                  const SizedBox(height: 28),
-                  Text(
-                    'CLAUDE COMMANDER',
-                    style: t.meta(
-                      size: 11,
-                      weight: FontWeight.w600,
-                      color: t.textMuted,
-                      letterSpacing: 2,
-                    ),
-                  ),
-                  const SizedBox(height: 6),
-                  Text(
-                    editing ? 'Edit server' : 'Connect to a server',
-                    style: TextStyle(
-                      fontFamily: t.sans,
-                      fontSize: 26,
-                      fontWeight: FontWeight.w600,
-                      letterSpacing: -0.3,
-                      color: t.text,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  _field(
-                    key: const Key('nameField'),
-                    controller: _nameController,
-                    label: 'NAME',
-                    hint: 'laptop (defaults to the host)',
-                    autocorrect: false,
-                  ),
-                  _field(
-                    key: const Key('urlField'),
-                    controller: _urlController,
-                    label: 'SERVER URL',
-                    hint: 'http://100.x.y.z:7878',
-                    helper: 'Reach a 127.0.0.1 server via SSH tunnel or Tailscale',
-                    keyboardType: TextInputType.url,
-                    autocorrect: false,
-                    validator: (v) {
-                      final t = v?.trim() ?? '';
-                      if (t.isEmpty) return 'Required';
-                      final uri = Uri.tryParse(t);
-                      if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
-                        return 'Enter a full URL (scheme://host:port)';
-                      }
-                      return null;
-                    },
-                  ),
-                  _field(
-                    key: const Key('tokenField'),
-                    controller: _tokenController,
-                    label: 'ACCESS TOKEN',
-                    hint: 'The server prints this on first run',
-                    obscureText: true,
-                    autocorrect: false,
-                    enableSuggestions: false,
-                    validator: (v) =>
-                        (v?.trim().isEmpty ?? true) ? 'Required' : null,
-                  ),
-                  if (_healthOk != null) ...[
-                    const SizedBox(height: 16),
-                    _healthBanner(_healthOk!),
-                  ],
-                  const SizedBox(height: 20),
-                  OutlinedButton.icon(
-                    onPressed: _busy ? null : _test,
-                    icon: const Icon(Icons.wifi_tethering, size: 18),
-                    label: const Text('Test connection'),
-                  ),
-                  const SizedBox(height: 12),
-                  FilledButton(
-                    onPressed: _busy ? null : _save,
-                    child: _busy
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : Text(editing ? 'Save' : 'Connect'),
-                  ),
-                  const SizedBox(height: 14),
-                  Center(
-                    child: Text(
-                      'TOKEN STORED IN KEYCHAIN',
-                      style: t.meta(
-                        size: 10.5,
-                        weight: FontWeight.w500,
-                        color: t.textFaint,
-                        letterSpacing: 0.6,
+    // Full-bleed: no title, so no app bar. This is the cold-start screen with no
+    // servers yet, and it carries its own heading + close button in the body.
+    return ChromePage(
+      code: '47-L',
+      insets: ChromeInsets.safeArea,
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 460),
+          child: Form(
+            key: _formKey,
+            child: ListView(
+              padding: const EdgeInsets.fromLTRB(26, 20, 26, 26),
+              children: [
+                Row(
+                  children: [
+                    const BrandMark(size: 44),
+                    const Spacer(),
+                    if (canPop)
+                      IconButton(
+                        onPressed: () => Navigator.of(context).pop(),
+                        icon: const Icon(Icons.close),
+                        tooltip: 'Close',
                       ),
+                  ],
+                ),
+                const SizedBox(height: 28),
+                Text(
+                  'CLAUDE COMMANDER',
+                  style: t.meta(
+                    size: 11,
+                    weight: FontWeight.w600,
+                    color: t.textMuted,
+                    letterSpacing: 2,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  editing ? 'Edit server' : 'Connect to a server',
+                  style: TextStyle(
+                    fontFamily: t.sans,
+                    fontSize: 26,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: -0.3,
+                    color: t.text,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                _field(
+                  key: const Key('nameField'),
+                  controller: _nameController,
+                  label: 'NAME',
+                  hint: 'laptop (defaults to the host)',
+                  autocorrect: false,
+                ),
+                _field(
+                  key: const Key('urlField'),
+                  controller: _urlController,
+                  label: 'SERVER URL',
+                  hint: 'http://100.x.y.z:7878',
+                  helper: 'Reach a 127.0.0.1 server via SSH tunnel or Tailscale',
+                  keyboardType: TextInputType.url,
+                  autocorrect: false,
+                  validator: (v) {
+                    final t = v?.trim() ?? '';
+                    if (t.isEmpty) return 'Required';
+                    final uri = Uri.tryParse(t);
+                    if (uri == null || !uri.hasScheme || uri.host.isEmpty) {
+                      return 'Enter a full URL (scheme://host:port)';
+                    }
+                    return null;
+                  },
+                ),
+                _field(
+                  key: const Key('tokenField'),
+                  controller: _tokenController,
+                  label: 'ACCESS TOKEN',
+                  hint: 'The server prints this on first run',
+                  obscureText: true,
+                  autocorrect: false,
+                  enableSuggestions: false,
+                  validator: (v) =>
+                      (v?.trim().isEmpty ?? true) ? 'Required' : null,
+                ),
+                if (_healthOk != null) ...[
+                  const SizedBox(height: 16),
+                  _healthBanner(_healthOk!),
+                ],
+                const SizedBox(height: 20),
+                OutlinedButton.icon(
+                  onPressed: _busy ? null : _test,
+                  icon: const Icon(Icons.wifi_tethering, size: 18),
+                  label: const Text('Test connection'),
+                ),
+                const SizedBox(height: 12),
+                FilledButton(
+                  onPressed: _busy ? null : _save,
+                  child: _busy
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : Text(editing ? 'Save' : 'Connect'),
+                ),
+                const SizedBox(height: 14),
+                Center(
+                  child: Text(
+                    'TOKEN STORED IN KEYCHAIN',
+                    style: t.meta(
+                      size: 10.5,
+                      weight: FontWeight.w500,
+                      color: t.textFaint,
+                      letterSpacing: 0.6,
                     ),
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
         ),

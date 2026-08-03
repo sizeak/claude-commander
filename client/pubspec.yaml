@@ -112,6 +112,11 @@ flutter:
     - family: JetBrainsMono
       fonts:
         - asset: assets/fonts/JetBrainsMono-VF.ttf
+    # The LCARS theme's display face — condensed, uppercase-led. Only ever used
+    # for chrome: terminal output stays JetBrainsMono in every theme.
+    - family: Antonio
+      fonts:
+        - asset: assets/fonts/Antonio-VF.ttf
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

@@ -1,0 +1,592 @@
+import 'package:flutter/material.dart';
+
+import '../../theme/tokens.dart';
+import '../chrome.dart';
+import '../chrome_forms.dart';
+import 'elbow.dart';
+
+/// The LCARS chrome: a black canvas, an elbow rail down the left holding
+/// navigation and actions, and a content column capped by a short bar.
+///
+/// **There is no app bar and no floating action button.** The rail's top elbow
+/// *is* the back button, and the primary action is a coloured rail block. That is
+/// the whole reason page frames had to become declarative — a page that built its
+/// own `AppBar` could not be rendered this way.
+///
+/// A real [Scaffold] still sits underneath, so `ScaffoldMessenger`, bottom sheets
+/// and dialogs work exactly as they do in Mission Control.
+class LcarsChrome extends Chrome {
+  const LcarsChrome();
+
+  @override
+  Widget buildPage(BuildContext context, ChromePageSpec spec) {
+    final t = CommanderTokens.of(context);
+    return Scaffold(
+      backgroundColor: t.canvas,
+      resizeToAvoidBottomInset: spec.insets != ChromeInsets.pan,
+      body: applyChromeInsets(
+        // LCARS draws to the edges, so it always needs the status-bar inset held
+        // off — even on a page Mission Control would have let its app bar cover.
+        spec.insets == ChromeInsets.standard
+            ? ChromeInsets.safeArea
+            : spec.insets,
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _rail(context, spec, t),
+            const SizedBox(width: 5),
+            Expanded(child: _content(context, spec, t)),
+            const SizedBox(width: 10),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// The left rail. Reads top to bottom: identity/back, then actions, then inert
+  /// filler that absorbs the slack, then the primary action, then a closing
+  /// elbow. The two rounded corners are the first and last blocks only, so the
+  /// column reads as one bracket.
+  Widget _rail(BuildContext context, ChromePageSpec spec, CommanderTokens t) {
+    final back = shouldShowBack(context, spec);
+    final blocks = <Widget>[
+      ChromeElbow(
+        color: back ? t.primary : t.nav,
+        corner: ElbowCorner.topLeft,
+        height: back ? 62 : 74,
+        // With no back affordance the top block carries the screen's LCARS
+        // identifier instead ("47-A"), as the deck's root screens do.
+        label: back ? '‹ BACK' : spec.code,
+        labelAlignment: Alignment.bottomRight,
+        labelSize: 12,
+        labelWeight: FontWeight.w700,
+        onTap: back ? () => Navigator.of(context).maybePop() : null,
+      ),
+      for (final action in spec.actions)
+        ChromeElbow(
+          color: _kindColor(action.kind, t),
+          labelColor: _kindLabelColor(action.kind, t),
+          height: 26,
+          label: t.caseLabel(action.label),
+          onTap: () => _invoke(context, action),
+        ),
+      // Two-tone inert filler, brightest first — the deck's rails always step
+      // down through a thin bright band into a large dark one.
+      ChromeElbow(color: t.borderSubtle, height: 16),
+      Expanded(child: ChromeElbow(color: t.divider)),
+    ];
+
+    final primary = spec.primaryAction;
+    if (primary != null) {
+      blocks.add(
+        ChromeElbow(
+          color: t.info,
+          height: 34,
+          label: t.caseLabel(primary.label),
+          onTap: () => _invoke(context, primary),
+        ),
+      );
+    }
+    blocks.add(
+      ChromeElbow(
+        color: t.nav,
+        corner: ElbowCorner.bottomLeft,
+        height: 44,
+        labelAlignment: Alignment.topRight,
+      ),
+    );
+
+    return SizedBox(
+      width: t.railWidth,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          for (var i = 0; i < blocks.length; i++) ...[
+            if (i > 0) const SizedBox(height: 5),
+            blocks[i],
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// A block's fill for a given emphasis. Shared by the rail, the button bar and
+  /// the footer, so an action reads the same wherever the chrome puts it.
+  Color _kindColor(ChromeActionKind kind, CommanderTokens t) => switch (kind) {
+    ChromeActionKind.primary => t.primary,
+    ChromeActionKind.destructive => t.danger,
+    // An unemphasised block is the dark inert fill with lilac text, so the rail
+    // does not read as a wall of saturated colour.
+    ChromeActionKind.normal => t.borderSubtle,
+  };
+
+  /// Text on a [_kindColor] fill: near-black on a saturated block, lilac on the
+  /// dark inert one.
+  Color _kindLabelColor(ChromeActionKind kind, CommanderTokens t) =>
+      kind == ChromeActionKind.normal ? t.nav : t.canvas;
+
+  void _invoke(BuildContext context, ChromeAction action) {
+    switch (action) {
+      case ChromeButtonAction(:final onPressed):
+        onPressed?.call();
+      case ChromeMenuAction(:final items):
+        // A rail block opens a sheet rather than a dropdown: there is no app bar
+        // to hang a menu under, and a sheet is the better touch target anyway.
+        showModalBottomSheet<void>(
+          context: context,
+          builder: (sheetContext) {
+            final t = CommanderTokens.of(sheetContext);
+            return SafeArea(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final item in items)
+                    ListTile(
+                      enabled: item.enabled,
+                      title: Text(
+                        t.caseLabel(item.label),
+                        style: TextStyle(
+                          fontFamily: t.sans,
+                          letterSpacing: 0.6,
+                          color: item.enabled ? t.text : t.textFaint,
+                        ),
+                      ),
+                      onTap: () {
+                        Navigator.of(sheetContext).pop();
+                        item.onSelected?.call();
+                      },
+                    ),
+                ],
+              ),
+            );
+          },
+        );
+    }
+  }
+
+  /// The content column: an elbow cap, then the title block, then the body.
+  Widget _content(
+    BuildContext context,
+    ChromePageSpec spec,
+    CommanderTokens t,
+  ) {
+    final title = spec.title;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ChromeElbowCap(color: shouldShowBack(context, spec) ? t.primary : t.nav),
+        if (title != null) ...[
+          const SizedBox(height: 7),
+          MediaQuery.withClampedTextScaling(
+            maxScaleFactor: 1.5,
+            child: Text(
+              title.toUpperCase(),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: t.display(size: 22),
+            ),
+          ),
+          if (spec.subtitle != null)
+            Text(
+              spec.subtitle!.toUpperCase(),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontFamily: t.sans,
+                fontSize: 11,
+                fontWeight: FontWeight.w500,
+                letterSpacing: 1.1,
+                color: t.nav,
+              ),
+            ),
+          const SizedBox(height: 9),
+        ] else
+          const SizedBox(height: 12),
+        Expanded(child: spec.body),
+      ],
+    );
+  }
+
+  // ── Form elements ──────────────────────────────────────────────────────────
+
+  /// Deck P2: a solid tone-coloured block carrying the row number, butted against
+  /// a panel with a 2px top border of the same colour and a tone-tinted near-black
+  /// fill. Only the outer corners of a run are rounded, so a group of rows reads
+  /// as one bracketed cluster.
+  @override
+  Widget buildListRow(BuildContext context, ChromeListRowSpec spec) {
+    final t = CommanderTokens.of(context);
+    final tone = t.toneStyle(spec.tone);
+    final r = Radius.circular(t.pillRadius);
+    // A run is bracketed by its ends, so `only` is both of them at once.
+    final opensRun =
+        spec.position == ChromeRowPosition.first ||
+        spec.position == ChromeRowPosition.only;
+    final closesRun =
+        spec.position == ChromeRowPosition.last ||
+        spec.position == ChromeRowPosition.only;
+    final rounded = BorderRadius.only(
+      topLeft: opensRun ? r : Radius.zero,
+      bottomLeft: closesRun ? r : Radius.zero,
+    );
+
+    // The row grows with its text, so only the number block needs the scaler
+    // clamped — and ChromeElbow already does that.
+    Widget row = IntrinsicHeight(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(
+            width: _rowNumberWidth,
+            child: ClipRRect(
+              borderRadius: rounded,
+              // Top-right, not centre-right: the deck aligns the number with the
+              // title's cap height rather than the row's middle.
+              child: ChromeElbow(
+                color: tone.accent,
+                label: spec.number,
+                labelAlignment: Alignment.topRight,
+              ),
+            ),
+          ),
+          const SizedBox(width: _seam),
+          Expanded(child: _rowPanel(t, spec, tone)),
+        ],
+      ),
+    );
+
+    if (spec.dimmed) row = Opacity(opacity: 0.6, child: row);
+    final onTap = spec.onTap;
+    if (onTap == null) return row;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Semantics(button: true, child: row),
+    );
+  }
+
+  /// The body half of a [buildListRow]: title, then a metadata line pairing the
+  /// accent-coloured subtitle with muted trailing text.
+  Widget _rowPanel(CommanderTokens t, ChromeListRowSpec spec, ToneStyle tone) {
+    final subtitle = spec.subtitle;
+    final trailing = spec.trailingWidget;
+    final trailingText = spec.trailing;
+    return Container(
+      decoration: BoxDecoration(
+        color: tone.tintedSurface,
+        border: Border(
+          top: BorderSide(color: tone.accent, width: t.panelTopBorder),
+        ),
+      ),
+      padding: const EdgeInsets.fromLTRB(9, 5, 9, 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisAlignment: MainAxisAlignment.center,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Text(
+            t.caseLabel(spec.title),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontFamily: t.sans,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.7,
+              height: 1.15,
+              // Selection brightens the title to amber rather than adding a
+              // border or a fill — LCARS has no selected-row outline.
+              color: spec.selected ? t.primary : t.text,
+            ),
+          ),
+          if (subtitle != null || trailing != null || trailingText != null)
+            Row(
+              children: [
+                Expanded(
+                  child: subtitle == null
+                      ? const SizedBox.shrink()
+                      : Text(
+                          t.caseLabel(subtitle),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: _caption(t, tone.accent),
+                        ),
+                ),
+                if (trailing != null)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 6),
+                    child: trailing,
+                  )
+                else if (trailingText != null)
+                  Padding(
+                    padding: const EdgeInsets.only(left: 6),
+                    child: Text(
+                      t.caseLabel(trailingText),
+                      style: _caption(t, t.textMuted),
+                    ),
+                  ),
+              ],
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// Deck P1's `HOST` / `PAIRING TOKEN` boxes: a hard-cornered near-black block
+  /// whose entire decoration is a 2px coloured top border. No radius at all —
+  /// `t.cardRadius` is 0 here, and rounding one would read as Mission Control.
+  @override
+  Widget buildPanel(BuildContext context, ChromePanelSpec spec) {
+    final t = CommanderTokens.of(context);
+    final tone = spec.tone;
+    final toneStyle = tone == null ? null : t.toneStyle(tone);
+    final eyebrow = spec.eyebrow;
+    final child = eyebrow == null
+        ? spec.child
+        : Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                t.caseLabel(eyebrow),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: _caption(
+                  t,
+                  t.nav,
+                  letterSpacing: 1.1,
+                  weight: FontWeight.w600,
+                ),
+              ),
+              const SizedBox(height: 4),
+              spec.child,
+            ],
+          );
+
+    final panel = Container(
+      decoration: BoxDecoration(
+        color: toneStyle?.tintedSurface ?? t.surface,
+        border: Border(
+          top: BorderSide(
+            color: spec.accent ?? toneStyle?.accent ?? t.nav,
+            width: t.panelTopBorder,
+          ),
+        ),
+      ),
+      padding: spec.padding,
+      child: child,
+    );
+
+    final onTap = spec.onTap;
+    if (onTap == null) return panel;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: Semantics(button: true, child: panel),
+    );
+  }
+
+  /// Deck P1's `ENGAGE / SCAN QR` pair: one contiguous run of blocks separated by
+  /// a hairline seam, pill-ended on the outside only, so the bar reads as a single
+  /// segmented control rather than a row of buttons.
+  @override
+  Widget buildButtonBar(BuildContext context, ChromeButtonBarSpec spec) {
+    final t = CommanderTokens.of(context);
+    final buttons = spec.buttons;
+    return Row(
+      children: [
+        for (var i = 0; i < buttons.length; i++) ...[
+          if (i > 0) const SizedBox(width: _seam),
+          _barBlock(t, buttons[i], _runEnds(i, buttons.length, t.pillRadius)),
+        ],
+      ],
+    );
+  }
+
+  Widget _barBlock(
+    CommanderTokens t,
+    ChromeBarButton button,
+    BorderRadius radius,
+  ) {
+    // An elbow's single rounded corner is the wrong shape for a bar end, which is
+    // a pill, so the radius comes from a clip around the primitive rather than
+    // from ElbowCorner. The icon is ignored: LCARS bars are lettered, never
+    // glyphed.
+    final block = ClipRRect(
+      borderRadius: radius,
+      child: ChromeElbow(
+        color: _kindColor(button.kind, t),
+        labelColor: _kindLabelColor(button.kind, t),
+        height: _barHeight,
+        label: t.caseLabel(button.label),
+        labelAlignment: Alignment.center,
+        labelSize: 13,
+        labelWeight: FontWeight.w700,
+        onTap: button.onPressed,
+      ),
+    );
+    return button.expand ? Expanded(child: block) : block;
+  }
+
+  /// Deck P2/P3's `FLEET / + / ACTIVITY`: three contiguous blocks meeting the
+  /// bottom of the screen, with the outer bottom corners rounded. The centre
+  /// action is a block in the run, not a floating button — LCARS has no FAB.
+  @override
+  Widget buildFooterNav(BuildContext context, ChromeFooterNavSpec spec) {
+    final t = CommanderTokens.of(context);
+    final centre = spec.centreAction;
+    final count = spec.items.length + (centre == null ? 0 : 1);
+    // Where the centre action lands in the run. `count` — i.e. never — when there
+    // is no centre action, which also makes the item index below fall through
+    // unshifted.
+    final centreSlot = centre == null ? count : spec.items.length ~/ 2;
+
+    final blocks = <Widget>[];
+    for (var i = 0; i < count; i++) {
+      // Bottom corners only: the footer sits against the edge of the screen.
+      final ends = _runEnds(i, count, t.pillRadius, bottom: true);
+      blocks.add(
+        i == centreSlot
+            ? _navCentre(t, centre!, ends)
+            : Expanded(
+                child: _navBlock(
+                  t,
+                  spec.items[i < centreSlot ? i : i - 1],
+                  ends,
+                ),
+              ),
+      );
+    }
+
+    return Row(
+      children: [
+        for (var i = 0; i < blocks.length; i++) ...[
+          if (i > 0) const SizedBox(width: _seam),
+          blocks[i],
+        ],
+      ],
+    );
+  }
+
+  /// One footer destination. [ChromeNavItem.glyph] is deliberately unused — the
+  /// deck's LCARS footer is lettered, and a glyph above the label would not fit
+  /// the block's height.
+  Widget _navBlock(
+    CommanderTokens t,
+    ChromeNavItem item,
+    BorderRadius radius,
+  ) => ClipRRect(
+    borderRadius: radius,
+    child: ChromeElbow(
+      color: item.selected ? t.primary : t.borderSubtle,
+      labelColor: item.selected ? t.canvas : t.nav,
+      height: _footerHeight,
+      label: t.caseLabel(item.label),
+      labelAlignment: Alignment.center,
+      labelSize: 13,
+      labelWeight: FontWeight.w700,
+      onTap: item.onTap,
+    ),
+  );
+
+  Widget _navCentre(
+    CommanderTokens t,
+    ChromeButtonAction centre,
+    BorderRadius radius,
+  ) => SizedBox(
+    width: _footerCentreWidth,
+    // The block's own semantic label would be '+', which tells a screen-reader
+    // user nothing, so the action's real label wraps it.
+    child: Semantics(
+      label: centre.label,
+      child: ClipRRect(
+        borderRadius: radius,
+        child: ChromeElbow(
+          color: t.attention,
+          height: _footerHeight,
+          label: '+',
+          labelAlignment: Alignment.center,
+          labelSize: 18,
+          labelWeight: FontWeight.w700,
+          onTap: centre.onPressed,
+        ),
+      ),
+    ),
+  );
+
+  @override
+  Widget buildEyebrow(BuildContext context, String label) {
+    final t = CommanderTokens.of(context);
+    return Text(
+      t.caseLabel(label),
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+      style: _caption(t, t.info, letterSpacing: 1.4),
+    );
+  }
+}
+
+// ── Local geometry ───────────────────────────────────────────────────────────
+// Private to LCARS: these are transcribed from the deck's frames, and nothing
+// outside this chrome should depend on them.
+
+/// The gap between blocks in a contiguous horizontal run. Tighter than the rail's
+/// vertical 5px, matching the deck's `gap:4px` on bars and row pairs — the seam is
+/// meant to read as a join, not a separation.
+const _seam = 4.0;
+
+/// The list row's leading number block (deck P2's node headers: `width:38px`).
+const _rowNumberWidth = 38.0;
+
+/// Bar block height. The deck's `padding:11px 0` on 13px type comes to ~37px;
+/// rounded down, and comfortably clear of ChromeElbow's clamped 1.3× scaler.
+const _barHeight = 36.0;
+
+/// Footer block height. The deck's is ~33px, but the 18px '+' overflows that at
+/// the clamped 1.3× text scaler, so the run is 5px taller than the frame — which
+/// also drags the nav closer to a usable touch target.
+const _footerHeight = 38.0;
+
+/// The footer's centre action block (deck P2/P3: `width:46px`).
+const _footerCentreWidth = 46.0;
+
+/// The recurring 11px condensed caption: row subtitles and trailing metadata,
+/// panel eyebrows, section eyebrows.
+///
+/// Antonio rather than [CommanderTokens.mono] — this is chrome, and only real
+/// agent output stays monospace.
+TextStyle _caption(
+  CommanderTokens t,
+  Color color, {
+  double letterSpacing = 0,
+  FontWeight weight = FontWeight.w500,
+}) => TextStyle(
+  fontFamily: t.sans,
+  fontSize: 11,
+  fontWeight: weight,
+  letterSpacing: letterSpacing,
+  color: color,
+);
+
+/// Rounds the outer ends of a horizontal run of [count] blocks: block [i] gets a
+/// [radius] corner on its left when it is first and on its right when it is last,
+/// so a run of any length reads as one bracketed unit.
+///
+/// [bottom] rounds only the bottom pair, which is how the deck's footer meets the
+/// edge of the screen.
+BorderRadius _runEnds(
+  int i,
+  int count,
+  double radius, {
+  bool bottom = false,
+}) {
+  final r = Radius.circular(radius);
+  final start = i == 0 ? r : Radius.zero;
+  final end = i == count - 1 ? r : Radius.zero;
+  return BorderRadius.only(
+    topLeft: bottom ? Radius.zero : start,
+    bottomLeft: start,
+    topRight: bottom ? Radius.zero : end,
+    bottomRight: end,
+  );
+}

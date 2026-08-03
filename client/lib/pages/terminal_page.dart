@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:uuid/uuid.dart';
 import 'package:xterm/xterm.dart';
 
+import '../chrome/chrome.dart';
 import '../services/clipboard_image_reader.dart';
 import '../services/commander_api.dart';
 import '../services/image_picker_service.dart';
@@ -602,7 +603,7 @@ class _TerminalBodyState extends State<TerminalBody> {
   }
 }
 
-/// The phone (stacked-navigation) terminal screen: a Scaffold titled by the
+/// The phone (stacked-navigation) terminal screen: a [ChromePage] titled by the
 /// session, wrapping a [TerminalBody] with the on-screen modifier bar enabled.
 class TerminalPage extends StatelessWidget {
   final CommanderApi api;
@@ -630,30 +631,19 @@ class TerminalPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isShell = kind == AttachKind.shell;
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(
-          isShell ? '${session.title} · shell' : session.title,
-          overflow: TextOverflow.ellipsis,
-        ),
-      ),
+    return ChromePage(
+      code: '47-T',
+      title: isShell ? '${session.title} · shell' : session.title,
       // The keyboard must not shrink the body: [TerminalBody] insets its own
       // chrome and pans the pane instead, so the remote PTY never sees a resize.
-      resizeToAvoidBottomInset: false,
-      body: SafeArea(
-        // Keep reserving the bottom system chrome even while the keyboard covers
-        // it. Without this, SafeArea's bottom padding collapses to zero when the
-        // keyboard appears and the pane's row count would move with it — the
-        // resize [TerminalBody] exists to avoid.
-        maintainBottomViewPadding: true,
-        child: TerminalBody(
-          api: api,
-          handle: handle,
-          session: session,
-          kind: kind,
-          imagePicker: imagePicker,
-          clipboardImages: clipboardImages,
-        ),
+      insets: ChromeInsets.pan,
+      body: TerminalBody(
+        api: api,
+        handle: handle,
+        session: session,
+        kind: kind,
+        imagePicker: imagePicker,
+        clipboardImages: clipboardImages,
       ),
     );
   }

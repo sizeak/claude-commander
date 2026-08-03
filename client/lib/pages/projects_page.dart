@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../chrome/chrome.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../theme/tokens.dart';
@@ -121,21 +122,20 @@ class _ProjectsPageState extends State<ProjectsPage> {
       listenable: _store,
       builder: (context, _) {
         final projects = _store.projects;
-        return Scaffold(
-          appBar: AppBar(
-            title: const Text('Projects'),
-            actions: [
-              IconButton(
-                onPressed: _busy ? null : _scan,
-                icon: const Icon(Icons.travel_explore),
-                tooltip: 'Scan directory',
-              ),
-            ],
-          ),
-          floatingActionButton: FloatingActionButton(
+        return ChromePage(
+          title: 'Projects',
+          code: '47-P',
+          actions: [
+            ChromeButtonAction(
+              icon: Icons.travel_explore,
+              label: 'Scan directory',
+              onPressed: _busy ? null : _scan,
+            ),
+          ],
+          primaryAction: ChromeButtonAction(
+            icon: Icons.add,
+            label: 'Add project',
             onPressed: _busy ? null : _addProject,
-            tooltip: 'Add project',
-            child: const Icon(Icons.add),
           ),
           body: projects.isEmpty
               ? _emptyState()

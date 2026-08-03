@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../chrome/chrome.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../state/workspace_store.dart';
@@ -60,12 +61,13 @@ class ServersPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final t = CommanderTokens.of(context);
-    return Scaffold(
-      appBar: AppBar(title: const Text('Servers')),
-      floatingActionButton: FloatingActionButton(
+    return ChromePage(
+      title: 'Servers',
+      code: '47-S',
+      primaryAction: ChromeButtonAction(
+        icon: Icons.add,
+        label: 'Add server',
         onPressed: () => _add(context),
-        tooltip: 'Add server',
-        child: const Icon(Icons.add),
       ),
       body: ListenableBuilder(
         listenable: workspace,

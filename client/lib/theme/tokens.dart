@@ -81,6 +81,15 @@ class ToneStyle {
   );
 }
 
+/// Which family of chrome — page frames, rails, list-row shapes, button bars — a
+/// theme renders.
+///
+/// Lives here rather than in a second `ThemeExtension` because `ThemeId` already
+/// holds its own [CommanderTokens], so tokens cannot hold a `ThemeId` back
+/// without a circular import. A plain enum breaks the cycle with no extra
+/// plumbing, and `Chrome.of` maps it to the implementation.
+enum ChromeKind { missionControl, lcars }
+
 /// Set true by `main()` so a missing [CommanderTokens] extension is loud in the
 /// running app but silent under `flutter_test`.
 ///
@@ -186,6 +195,9 @@ class CommanderTokens extends ThemeExtension<CommanderTokens> {
   /// Whether chrome uppercases and letterspaces its labels (LCARS does).
   final bool uppercaseLabels;
 
+  /// Which chrome implementation renders this theme's structure.
+  final ChromeKind chrome;
+
   // ── Geometry ───────────────────────────────────────────────────────────
   final double cardRadius;
 
@@ -244,6 +256,7 @@ class CommanderTokens extends ThemeExtension<CommanderTokens> {
     required this.sans,
     required this.mono,
     required this.uppercaseLabels,
+    required this.chrome,
     required this.cardRadius,
     required this.controlRadius,
     required this.pillRadius,
@@ -346,6 +359,7 @@ class CommanderTokens extends ThemeExtension<CommanderTokens> {
     String? sans,
     String? mono,
     bool? uppercaseLabels,
+    ChromeKind? chrome,
     double? cardRadius,
     double? controlRadius,
     double? pillRadius,
@@ -386,6 +400,7 @@ class CommanderTokens extends ThemeExtension<CommanderTokens> {
     sans: sans ?? this.sans,
     mono: mono ?? this.mono,
     uppercaseLabels: uppercaseLabels ?? this.uppercaseLabels,
+    chrome: chrome ?? this.chrome,
     cardRadius: cardRadius ?? this.cardRadius,
     controlRadius: controlRadius ?? this.controlRadius,
     pillRadius: pillRadius ?? this.pillRadius,
@@ -436,6 +451,8 @@ class CommanderTokens extends ThemeExtension<CommanderTokens> {
       sans: t < 0.5 ? sans : other.sans,
       mono: t < 0.5 ? mono : other.mono,
       uppercaseLabels: t < 0.5 ? uppercaseLabels : other.uppercaseLabels,
+      // Structure cannot be interpolated, so it swaps at the midpoint.
+      chrome: t < 0.5 ? chrome : other.chrome,
       cardRadius: lerpDouble(cardRadius, other.cardRadius, t)!,
       controlRadius: lerpDouble(controlRadius, other.controlRadius, t)!,
       pillRadius: lerpDouble(pillRadius, other.pillRadius, t)!,
@@ -490,6 +507,7 @@ const missionControlTokens = CommanderTokens(
   sans: 'SpaceGrotesk',
   mono: 'JetBrainsMono',
   uppercaseLabels: false,
+  chrome: ChromeKind.missionControl,
   cardRadius: 13,
   controlRadius: 12,
   pillRadius: 20,
@@ -593,6 +611,7 @@ const lcarsTokens = CommanderTokens(
   sans: 'Antonio',
   mono: 'JetBrainsMono',
   uppercaseLabels: true,
+  chrome: ChromeKind.lcars,
   cardRadius: 0,
   controlRadius: 0,
   pillRadius: 11,

@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 
+import '../chrome/chrome.dart';
 import '../services/commander_api.dart';
 import '../src/rust/api/mirrors.dart';
 import '../src/rust/api/review.dart' as rust;
@@ -633,7 +634,7 @@ class _ReviewBodyState extends State<ReviewBody> {
   }
 }
 
-/// The phone (stacked-navigation) review screen: a Scaffold titled by the
+/// The phone (stacked-navigation) review screen: a page frame titled by the
 /// session, wrapping a [ReviewBody] whose own action bar carries refresh + apply.
 class ReviewPage extends StatelessWidget {
   final CommanderApi api;
@@ -649,13 +650,11 @@ class ReviewPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(
-          'Review · ${session.title}',
-          overflow: TextOverflow.ellipsis,
-        ),
-      ),
+    // No chrome actions: refresh + apply live in ReviewBody's own action bar so
+    // they follow it into the wide shell's detail pane, which has no frame.
+    return ChromePage(
+      code: '47-R',
+      title: 'Review · ${session.title}',
       body: ReviewBody(api: api, handle: handle, session: session),
     );
   }

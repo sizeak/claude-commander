@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../chrome/chrome.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
@@ -863,7 +864,7 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
   }
 }
 
-/// The phone (stacked-navigation) detail screen: a Scaffold titled by the
+/// The phone (stacked-navigation) detail screen: a [ChromePage] titled by the
 /// session, wrapping a [SessionDetailBody] whose terminal/review actions push
 /// routes and whose delete/dismiss pop back to the list.
 class SessionDetailPage extends StatelessWidget {
@@ -914,10 +915,9 @@ class SessionDetailPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final store = CommanderStoreScope.of(context)!;
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(session.title, overflow: TextOverflow.ellipsis),
-      ),
+    return ChromePage(
+      code: '47-D',
+      title: session.title,
       body: SessionDetailBody(
         session: session,
         onOpenTerminal: (kind) => _openTerminal(context, store, kind),

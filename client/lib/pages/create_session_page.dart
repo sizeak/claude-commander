@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../chrome/chrome.dart';
 import '../services/commander_api.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
@@ -153,8 +154,9 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(title: const Text('New session')),
+    return ChromePage(
+      title: 'New session',
+      code: '47-N',
       // Rebuild with the store so a still-loading workspace fills the picker in
       // as soon as its snapshot lands, rather than stranding on the empty state.
       body: ListenableBuilder(
