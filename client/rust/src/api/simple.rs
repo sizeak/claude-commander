@@ -268,6 +268,25 @@ pub fn image_max_bytes() -> u32 {
     claude_commander_protocol::paste::MAX_IMAGE_BYTES as u32
 }
 
+/// How long a silent client can be away before the server is *guaranteed* to
+/// have torn its terminal attach down, in milliseconds.
+///
+/// The mobile UI needs this on resume: a frozen background process can't answer
+/// the server's heartbeat pings, so an absence longer than this means the attach
+/// is certainly gone and must be re-opened, while a shorter one proves nothing —
+/// leaving a live socket alone there is what keeps a scrolled tmux copy-mode view
+/// in place. Sourced from the shared wire contract rather than a hardcoded Dart
+/// threshold, which would drift silently the moment the heartbeat is retuned.
+///
+/// `u32` milliseconds (not a `Duration`) so this crosses the bridge as a plain
+/// Dart `int`; the const assert makes the range a build-time precondition rather
+/// than a comment.
+pub fn attach_dead_after_millis() -> u32 {
+    const MILLIS: u128 = claude_commander_protocol::ws::attach_dead_after().as_millis();
+    const _: () = assert!(MILLIS <= u32::MAX as u128);
+    MILLIS as u32
+}
+
 // -- Projects --
 
 /// Register a project (git repo) by server-side path; returns the new project's

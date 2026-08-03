@@ -37,7 +37,7 @@ flutter_rust_bridge::frb_generated_boilerplate!(
     default_rust_auto_opaque = RustAutoOpaqueMoi,
 );
 pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_VERSION: &str = "2.11.1";
-pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = 1048556362;
+pub(crate) const FLUTTER_RUST_BRIDGE_CODEGEN_CONTENT_HASH: i32 = -2083181267;
 
 // Section: executor
 
@@ -150,6 +150,39 @@ fn wire__crate__api__review__apply_comments_impl(
                         Ok(output_ok)
                     })(),
                 )
+            }
+        },
+    )
+}
+fn wire__crate__api__simple__attach_dead_after_millis_impl(
+    port_: flutter_rust_bridge::for_generated::MessagePort,
+    ptr_: flutter_rust_bridge::for_generated::PlatformGeneralizedUint8ListPtr,
+    rust_vec_len_: i32,
+    data_len_: i32,
+) {
+    FLUTTER_RUST_BRIDGE_HANDLER.wrap_normal::<flutter_rust_bridge::for_generated::SseCodec, _, _>(
+        flutter_rust_bridge::for_generated::TaskInfo {
+            debug_name: "attach_dead_after_millis",
+            port: Some(port_),
+            mode: flutter_rust_bridge::for_generated::FfiCallMode::Normal,
+        },
+        move || {
+            let message = unsafe {
+                flutter_rust_bridge::for_generated::Dart2RustMessageSse::from_wire(
+                    ptr_,
+                    rust_vec_len_,
+                    data_len_,
+                )
+            };
+            let mut deserializer =
+                flutter_rust_bridge::for_generated::SseDeserializer::new(message);
+            deserializer.end();
+            move |context| {
+                transform_result_sse::<_, ()>((move || {
+                    let output_ok =
+                        Result::<_, ()>::Ok(crate::api::simple::attach_dead_after_millis())?;
+                    Ok(output_ok)
+                })())
             }
         },
     )
@@ -3066,61 +3099,67 @@ fn pde_ffi_dispatcher_primary_impl(
         1 => wire__crate__api__simple__add_project_impl(port, ptr, rust_vec_len, data_len),
         2 => wire__crate__api__simple__agent_states_impl(port, ptr, rust_vec_len, data_len),
         3 => wire__crate__api__review__apply_comments_impl(port, ptr, rust_vec_len, data_len),
-        4 => wire__crate__api__terminal__attach_terminal_impl(port, ptr, rust_vec_len, data_len),
-        5 => wire__crate__api__simple__branch_diff_impl(port, ptr, rust_vec_len, data_len),
-        6 => wire__crate__api__simple__cascade_abandon_impl(port, ptr, rust_vec_len, data_len),
-        7 => wire__crate__api__simple__cascade_merge_impl(port, ptr, rust_vec_len, data_len),
-        8 => wire__crate__api__simple__cascade_resume_impl(port, ptr, rust_vec_len, data_len),
-        9 => wire__crate__api__terminal__change_feed_impl(port, ptr, rust_vec_len, data_len),
-        10 => wire__crate__api__registry__connect_server_impl(port, ptr, rust_vec_len, data_len),
-        11 => wire__crate__api__terminal__connection_feed_impl(port, ptr, rust_vec_len, data_len),
-        12 => wire__crate__api__review__create_comment_impl(port, ptr, rust_vec_len, data_len),
-        13 => wire__crate__api__simple__create_options_impl(port, ptr, rust_vec_len, data_len),
-        14 => wire__crate__api__simple__create_session_impl(port, ptr, rust_vec_len, data_len),
-        15 => wire__crate__api__review__delete_comment_impl(port, ptr, rust_vec_len, data_len),
-        16 => wire__crate__api__simple__delete_session_impl(port, ptr, rust_vec_len, data_len),
-        17 => wire__crate__api__registry__disconnect_server_impl(port, ptr, rust_vec_len, data_len),
-        18 => wire__crate__api__review__fetch_blob_impl(port, ptr, rust_vec_len, data_len),
-        19 => wire__crate__api__simple__get_session_detail_impl(port, ptr, rust_vec_len, data_len),
-        20 => wire__crate__api__simple__health_impl(port, ptr, rust_vec_len, data_len),
-        21 => wire__crate__api__simple__health_tmux_impl(port, ptr, rust_vec_len, data_len),
-        22 => wire__crate__api__simple__image_max_bytes_impl(port, ptr, rust_vec_len, data_len),
-        23 => wire__crate__api__simple__init_app_impl(port, ptr, rust_vec_len, data_len),
-        24 => wire__crate__api__simple__kill_session_impl(port, ptr, rust_vec_len, data_len),
-        25 => wire__crate__api__simple__list_branches_impl(port, ptr, rust_vec_len, data_len),
-        26 => wire__crate__api__review__list_comments_impl(port, ptr, rust_vec_len, data_len),
-        27 => wire__crate__api__simple__list_sessions_impl(port, ptr, rust_vec_len, data_len),
-        28 => wire__crate__api__simple__mark_read_impl(port, ptr, rust_vec_len, data_len),
-        29 => wire__crate__api__simple__mark_unread_impl(port, ptr, rust_vec_len, data_len),
-        30 => wire__crate__api__review__open_review_impl(port, ptr, rust_vec_len, data_len),
-        31 => wire__crate__api__simple__paste_image_impl(port, ptr, rust_vec_len, data_len),
-        32 => wire__crate__api__simple__pending_comment_sessions_impl(
+        4 => wire__crate__api__simple__attach_dead_after_millis_impl(
             port,
             ptr,
             rust_vec_len,
             data_len,
         ),
-        33 => wire__crate__api__simple__project_preview_impl(port, ptr, rust_vec_len, data_len),
-        34 => wire__crate__api__simple__push_stack_impl(port, ptr, rust_vec_len, data_len),
-        35 => wire__crate__api__review__refresh_review_impl(port, ptr, rust_vec_len, data_len),
-        36 => wire__crate__api__simple__remove_project_impl(port, ptr, rust_vec_len, data_len),
-        37 => wire__crate__api__simple__rename_session_impl(port, ptr, rust_vec_len, data_len),
-        38 => wire__crate__api__simple__request_pr_refresh_impl(port, ptr, rust_vec_len, data_len),
-        39 => wire__crate__api__simple__restart_session_impl(port, ptr, rust_vec_len, data_len),
-        40 => wire__crate__api__simple__scan_directory_impl(port, ptr, rust_vec_len, data_len),
-        41 => wire__crate__api__simple__session_preview_impl(port, ptr, rust_vec_len, data_len),
-        42 => wire__crate__api__simple__set_programs_impl(port, ptr, rust_vec_len, data_len),
-        43 => wire__crate__api__simple__set_section_impl(port, ptr, rust_vec_len, data_len),
-        44 => wire__crate__api__terminal__terminal_detach_impl(port, ptr, rust_vec_len, data_len),
-        45 => wire__crate__api__terminal__terminal_resize_impl(port, ptr, rust_vec_len, data_len),
-        46 => {
+        5 => wire__crate__api__terminal__attach_terminal_impl(port, ptr, rust_vec_len, data_len),
+        6 => wire__crate__api__simple__branch_diff_impl(port, ptr, rust_vec_len, data_len),
+        7 => wire__crate__api__simple__cascade_abandon_impl(port, ptr, rust_vec_len, data_len),
+        8 => wire__crate__api__simple__cascade_merge_impl(port, ptr, rust_vec_len, data_len),
+        9 => wire__crate__api__simple__cascade_resume_impl(port, ptr, rust_vec_len, data_len),
+        10 => wire__crate__api__terminal__change_feed_impl(port, ptr, rust_vec_len, data_len),
+        11 => wire__crate__api__registry__connect_server_impl(port, ptr, rust_vec_len, data_len),
+        12 => wire__crate__api__terminal__connection_feed_impl(port, ptr, rust_vec_len, data_len),
+        13 => wire__crate__api__review__create_comment_impl(port, ptr, rust_vec_len, data_len),
+        14 => wire__crate__api__simple__create_options_impl(port, ptr, rust_vec_len, data_len),
+        15 => wire__crate__api__simple__create_session_impl(port, ptr, rust_vec_len, data_len),
+        16 => wire__crate__api__review__delete_comment_impl(port, ptr, rust_vec_len, data_len),
+        17 => wire__crate__api__simple__delete_session_impl(port, ptr, rust_vec_len, data_len),
+        18 => wire__crate__api__registry__disconnect_server_impl(port, ptr, rust_vec_len, data_len),
+        19 => wire__crate__api__review__fetch_blob_impl(port, ptr, rust_vec_len, data_len),
+        20 => wire__crate__api__simple__get_session_detail_impl(port, ptr, rust_vec_len, data_len),
+        21 => wire__crate__api__simple__health_impl(port, ptr, rust_vec_len, data_len),
+        22 => wire__crate__api__simple__health_tmux_impl(port, ptr, rust_vec_len, data_len),
+        23 => wire__crate__api__simple__image_max_bytes_impl(port, ptr, rust_vec_len, data_len),
+        24 => wire__crate__api__simple__init_app_impl(port, ptr, rust_vec_len, data_len),
+        25 => wire__crate__api__simple__kill_session_impl(port, ptr, rust_vec_len, data_len),
+        26 => wire__crate__api__simple__list_branches_impl(port, ptr, rust_vec_len, data_len),
+        27 => wire__crate__api__review__list_comments_impl(port, ptr, rust_vec_len, data_len),
+        28 => wire__crate__api__simple__list_sessions_impl(port, ptr, rust_vec_len, data_len),
+        29 => wire__crate__api__simple__mark_read_impl(port, ptr, rust_vec_len, data_len),
+        30 => wire__crate__api__simple__mark_unread_impl(port, ptr, rust_vec_len, data_len),
+        31 => wire__crate__api__review__open_review_impl(port, ptr, rust_vec_len, data_len),
+        32 => wire__crate__api__simple__paste_image_impl(port, ptr, rust_vec_len, data_len),
+        33 => wire__crate__api__simple__pending_comment_sessions_impl(
+            port,
+            ptr,
+            rust_vec_len,
+            data_len,
+        ),
+        34 => wire__crate__api__simple__project_preview_impl(port, ptr, rust_vec_len, data_len),
+        35 => wire__crate__api__simple__push_stack_impl(port, ptr, rust_vec_len, data_len),
+        36 => wire__crate__api__review__refresh_review_impl(port, ptr, rust_vec_len, data_len),
+        37 => wire__crate__api__simple__remove_project_impl(port, ptr, rust_vec_len, data_len),
+        38 => wire__crate__api__simple__rename_session_impl(port, ptr, rust_vec_len, data_len),
+        39 => wire__crate__api__simple__request_pr_refresh_impl(port, ptr, rust_vec_len, data_len),
+        40 => wire__crate__api__simple__restart_session_impl(port, ptr, rust_vec_len, data_len),
+        41 => wire__crate__api__simple__scan_directory_impl(port, ptr, rust_vec_len, data_len),
+        42 => wire__crate__api__simple__session_preview_impl(port, ptr, rust_vec_len, data_len),
+        43 => wire__crate__api__simple__set_programs_impl(port, ptr, rust_vec_len, data_len),
+        44 => wire__crate__api__simple__set_section_impl(port, ptr, rust_vec_len, data_len),
+        45 => wire__crate__api__terminal__terminal_detach_impl(port, ptr, rust_vec_len, data_len),
+        46 => wire__crate__api__terminal__terminal_resize_impl(port, ptr, rust_vec_len, data_len),
+        47 => {
             wire__crate__api__terminal__terminal_send_input_impl(port, ptr, rust_vec_len, data_len)
         }
-        47 => {
+        48 => {
             wire__crate__api__review__toggle_file_reviewed_impl(port, ptr, rust_vec_len, data_len)
         }
-        48 => wire__crate__api__simple__toggle_keep_alive_impl(port, ptr, rust_vec_len, data_len),
-        49 => wire__crate__api__simple__workspace_snapshot_impl(port, ptr, rust_vec_len, data_len),
+        49 => wire__crate__api__simple__toggle_keep_alive_impl(port, ptr, rust_vec_len, data_len),
+        50 => wire__crate__api__simple__workspace_snapshot_impl(port, ptr, rust_vec_len, data_len),
         _ => unreachable!(),
     }
 }

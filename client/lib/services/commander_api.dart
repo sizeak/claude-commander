@@ -133,6 +133,13 @@ abstract class CommanderApi {
   /// whole thing into memory first.
   Future<int> imageMaxBytes();
 
+  /// How long a silent client can be away before the server has certainly torn
+  /// its terminal attach down, from the shared wire contract. A backgrounded app
+  /// can't answer the server's heartbeat pings, so the terminal uses this on
+  /// resume to tell "definitely dead, re-attach" from "might still be live,
+  /// leave it alone".
+  Future<Duration> attachDeadAfter();
+
   Future<String> addProject({required String handle, required String path});
 
   Future<void> removeProject({required String handle, required String id});
@@ -426,6 +433,13 @@ class RustCommanderApi implements CommanderApi {
 
   @override
   Future<int> imageMaxBytes() => simple.imageMaxBytes();
+
+  /// The bridge carries plain milliseconds (a `u32`, so Dart sees an `int` rather
+  /// than a `BigInt`); rewrap it as a [Duration] here so no call site has to
+  /// remember the unit.
+  @override
+  Future<Duration> attachDeadAfter() async =>
+      Duration(milliseconds: await simple.attachDeadAfterMillis());
 
   @override
   Future<String> addProject({required String handle, required String path}) =>

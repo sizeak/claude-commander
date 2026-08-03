@@ -59,6 +59,12 @@ const _terminalTheme = TerminalTheme(
 /// handle. Resize is driven by `xterm`'s [Terminal.onResize], which fires from
 /// the widget's actual laid-out size — so the pane's real cols/rows reach the
 /// server, not a fixed 80x24.
+///
+/// The attach is also re-opened when the app returns to the foreground, because a
+/// backgrounded process cannot keep the attach alive: the server pings every
+/// attached socket and kills the attach once too many pings go unanswered, and a
+/// frozen Android process answers none of them. See [_onResumed] for why the
+/// resume only re-attaches when the attach is *known* dead rather than always.
 class TerminalBody extends StatefulWidget {
   final CommanderApi api;
 
@@ -79,6 +85,11 @@ class TerminalBody extends StatefulWidget {
   final ImagePickerService? imagePicker;
   final ClipboardImageReader? clipboardImages;
 
+  /// Wall clock for the how-long-were-we-away measurement, injectable so a widget
+  /// test can cross the heartbeat deadline without waiting a real minute; `null`
+  /// means [DateTime.now].
+  final DateTime Function()? clock;
+
   const TerminalBody({
     super.key,
     required this.api,
@@ -88,13 +99,15 @@ class TerminalBody extends StatefulWidget {
     this.showModifierBar = true,
     this.imagePicker,
     this.clipboardImages,
+    this.clock,
   });
 
   @override
   State<TerminalBody> createState() => _TerminalBodyState();
 }
 
-class _TerminalBodyState extends State<TerminalBody> {
+class _TerminalBodyState extends State<TerminalBody>
+    with WidgetsBindingObserver {
   late final Terminal _terminal;
 
   /// Owned rather than left to `TerminalView` to create, so the Ctrl+V
@@ -145,6 +158,22 @@ class _TerminalBodyState extends State<TerminalBody> {
   /// type into a pane the user isn't looking at.
   bool get _canAttachImage => widget.kind == AttachKind.agent;
 
+  /// Wall clock, not a [Stopwatch]: on Android a device in deep sleep stops
+  /// advancing the monotonic clock a stopwatch reads, while the server's
+  /// heartbeat teardown happens in real time — so a monotonic measure would
+  /// under-report exactly the long absences this exists to catch.
+  late final DateTime Function() _now = widget.clock ?? DateTime.now;
+
+  /// How long a *silent* client can be away before the server has certainly
+  /// killed the attach, from the shared wire contract. Null until the bridge
+  /// answers (or if it fails), and treated as "don't guess": without it, a resume
+  /// only re-attaches something already reported dead.
+  Duration? _deadAfter;
+
+  /// When the app last dropped out of the foreground, or null while it is in
+  /// front.
+  DateTime? _leftForegroundAt;
+
   // Throughput meter: bytes this second, refreshed on a 1s tick.
   int _totalBytes = 0;
   int _windowBytes = 0;
@@ -180,6 +209,9 @@ class _TerminalBodyState extends State<TerminalBody> {
 
     _connect();
 
+    WidgetsBinding.instance.addObserver(this);
+    unawaited(_loadDeadAfter());
+
     _meter = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
       setState(() {
@@ -187,6 +219,75 @@ class _TerminalBodyState extends State<TerminalBody> {
         _windowBytes = 0;
       });
     });
+  }
+
+  /// Cache the heartbeat deadline. No [setState]: nothing renders from it.
+  Future<void> _loadDeadAfter() async {
+    try {
+      final deadAfter = await widget.api.attachDeadAfter();
+      if (mounted) _deadAfter = deadAfter;
+    } catch (_) {
+      // Leave it null. A resume then only re-attaches an attach we were *told*
+      // had ended — never one we merely suspect, since without the contract's
+      // deadline we'd be guessing at the cost of the user's scrollback position.
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.paused:
+        // `paused` is the marker, not `inactive`: it is the earliest point at
+        // which Android may freeze the process and stop our heartbeat pongs. It
+        // is only an upper bound on when they actually stop (see [_onResumed]).
+        // `inactive` would be worse: it also fires for a pulled-down notification
+        // shade or a permission dialog, where the app keeps answering pings and
+        // the attach is fine, so starting the clock there would re-attach healthy
+        // sockets. `??=` keeps the earliest of a repeated pause.
+        _leftForegroundAt ??= _now();
+      case AppLifecycleState.resumed:
+        _onResumed();
+      // `hidden`/`inactive` are transient steps on the way to and from `paused`,
+      // and `detached` means we're being torn down.
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.detached:
+        break;
+    }
+  }
+
+  /// Back in the foreground: re-open the attach when it is dead, or long enough
+  /// gone that it almost certainly is.
+  ///
+  /// Two triggers. Either the attach already reported detached/error (possibly
+  /// delivered while we were away), which is certain; or we were away longer than
+  /// the server's heartbeat tolerance, which no *silent* attach survives. The
+  /// second is what a half-open socket needs: when the network path vanishes
+  /// without a TCP FIN, no detach frame ever arrives and the UI would otherwise
+  /// sit on a frozen pane that still claims to be attached.
+  ///
+  /// The second trigger is a heuristic, not a proof, because `paused` is not the
+  /// same event as *frozen*: Android does not stop the cdylib's tokio threads at
+  /// `paused`, so they keep answering pings until the cached-app freezer actually
+  /// hits — which can lag by minutes, or never come (a paused-but-visible app in
+  /// legacy split-screen, some OEM/charging configurations). Such a resume
+  /// re-attaches a live socket and costs a scrolled copy-mode position. There is
+  /// no client-observable freeze signal to do better with, and the alternative
+  /// failure — coming back to a permanently dead pane — is the bug being fixed.
+  ///
+  /// A shorter absence deliberately changes nothing: the attach is probably still
+  /// live, and re-attaching spawns a fresh `tmux attach-session` child, so a glance
+  /// at a notification must not cost the user their place in the scrollback.
+  void _onResumed() {
+    final leftAt = _leftForegroundAt;
+    _leftForegroundAt = null;
+    if (_ended) {
+      _connect();
+      return;
+    }
+    final deadAfter = _deadAfter;
+    if (leftAt == null || deadAfter == null) return;
+    if (_now().difference(leftAt) > deadAfter) _connect();
   }
 
   @override
@@ -200,8 +301,21 @@ class _TerminalBodyState extends State<TerminalBody> {
 
   /// Open (or re-open) the WS attach with a fresh attach id. A re-attach replays
   /// tmux's pane, so output simply continues appending.
+  ///
+  /// The outgoing attach is detached explicitly, because cancelling `_sub` alone
+  /// does not stop it: its cdylib registry entry keeps the pump's control sender
+  /// alive, so the pump's `rx.recv()` never ends, and the pump otherwise only
+  /// learns Dart is gone by failing to push an Output frame — which never comes on
+  /// an idle pane, and *never* on the half-open socket the reconnect button exists
+  /// to escape. That left a zombie pump holding the WS open and still answering
+  /// the server's pings, so the server kept its `tmux attach-session` child alive.
+  /// Both callers can now run against a live attach (the always-enabled button, a
+  /// resume past the deadline), so this is no longer a dead-attach-only path.
   void _connect() {
     _sub?.cancel();
+    // A documented no-op for an id that was never attached, which covers both the
+    // initial call from `initState` and an already-ended attach.
+    unawaited(widget.api.terminalDetach(attachId: _attachId));
     _attachId = const Uuid().v4();
     _store?.setActiveTerminalAttach(_attachId);
     setState(() {
@@ -465,6 +579,7 @@ class _TerminalBodyState extends State<TerminalBody> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _meter?.cancel();
     unawaited(widget.api.terminalDetach(attachId: _attachId));
     // Guarded clear: if the wide pane already swapped in another attach (agent↔
@@ -613,12 +728,16 @@ class _TerminalBodyState extends State<TerminalBody> {
               disabledColor: AppColors.textDim,
               tooltip: 'Attach image',
             ),
+          // Never gated on [_ended]. A half-open socket — the network path gone
+          // without a TCP FIN, so no detach frame ever arrives — leaves the UI
+          // reading "attached" over a frozen pane, and that is precisely when the
+          // user needs this button. Disabling it there turns a recoverable stall
+          // into a dead end.
           IconButton(
             visualDensity: VisualDensity.compact,
-            onPressed: _ended ? _reconnect : null,
+            onPressed: _reconnect,
             icon: const Icon(Icons.refresh, size: 18),
             color: AppColors.textMuted,
-            disabledColor: AppColors.textDim,
             tooltip: 'Reconnect',
           ),
         ],
@@ -642,6 +761,10 @@ class TerminalPage extends StatelessWidget {
   final ImagePickerService? imagePicker;
   final ClipboardImageReader? clipboardImages;
 
+  /// Forwarded to [TerminalBody] so a test can drive the foreground-reconnect
+  /// deadline; `null` means [DateTime.now].
+  final DateTime Function()? clock;
+
   const TerminalPage({
     super.key,
     required this.api,
@@ -650,6 +773,7 @@ class TerminalPage extends StatelessWidget {
     this.kind = AttachKind.agent,
     this.imagePicker,
     this.clipboardImages,
+    this.clock,
   });
 
   @override
@@ -678,6 +802,7 @@ class TerminalPage extends StatelessWidget {
           kind: kind,
           imagePicker: imagePicker,
           clipboardImages: clipboardImages,
+          clock: clock,
         ),
       ),
     );
