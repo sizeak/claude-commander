@@ -217,6 +217,22 @@ Future<void> pasteImage({
 Future<int> imageMaxBytes() =>
     RustLib.instance.api.crateApiSimpleImageMaxBytes();
 
+/// How long a silent client can be away before the server is *guaranteed* to
+/// have torn its terminal attach down, in milliseconds.
+///
+/// The mobile UI needs this on resume: a frozen background process can't answer
+/// the server's heartbeat pings, so an absence longer than this means the attach
+/// is certainly gone and must be re-opened, while a shorter one proves nothing —
+/// leaving a live socket alone there is what keeps a scrolled tmux copy-mode view
+/// in place. Sourced from the shared wire contract rather than a hardcoded Dart
+/// threshold, which would drift silently the moment the heartbeat is retuned.
+///
+/// `u32` milliseconds (not a `Duration`) so this crosses the bridge as a plain
+/// Dart `int`; the const assert makes the range a build-time precondition rather
+/// than a comment.
+Future<int> attachDeadAfterMillis() =>
+    RustLib.instance.api.crateApiSimpleAttachDeadAfterMillis();
+
 /// Register a project (git repo) by server-side path; returns the new project's
 /// full-id string.
 Future<String> addProject({required String handle, required String path}) =>

@@ -86,6 +86,10 @@ class FakeCommanderApi implements CommanderApi {
   /// so size-limit tests exercise realistic numbers.
   int imageMaxBytesResponse = 10 * 1024 * 1024;
 
+  /// Matches `claude_commander_protocol::ws::attach_dead_after()` so
+  /// foreground-reconnect tests reason about the real heartbeat deadline.
+  Duration attachDeadAfterResponse = const Duration(seconds: 60);
+
   /// When set, [pasteImage] throws this instead of succeeding — for the upload
   /// failure path (a rejected image, a dead server).
   Object? pasteImageError;
@@ -442,6 +446,12 @@ class FakeCommanderApi implements CommanderApi {
   Future<int> imageMaxBytes() async {
     _record('imageMaxBytes', {});
     return imageMaxBytesResponse;
+  }
+
+  @override
+  Future<Duration> attachDeadAfter() async {
+    _record('attachDeadAfter', {});
+    return attachDeadAfterResponse;
   }
 
   @override
