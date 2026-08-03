@@ -9,7 +9,7 @@
 
 use serde::Serialize;
 
-use crate::config::{Config, ViewMode};
+use crate::config::Config;
 
 /// Coarse description of the host environment. Strictly an allowlist — we never
 /// iterate `std::env::vars()`, only read the specific variables below.
@@ -58,8 +58,6 @@ impl EnvFingerprint {
 pub struct ConfigSnapshot {
     /// Theme preset name (`monokai-dimmed`, `rose-pine`, …) or `None` for auto.
     pub theme_preset: Option<String>,
-    /// Active session-list view mode.
-    pub view_mode: Option<String>,
     /// Bare program name only (e.g. `claude`) — flags and any path stripped.
     pub default_program: String,
     pub commander_enabled: bool,
@@ -73,10 +71,9 @@ pub struct ConfigSnapshot {
 }
 
 impl ConfigSnapshot {
-    pub fn from_config(config: &Config, view_mode: Option<ViewMode>) -> Self {
+    pub fn from_config(config: &Config) -> Self {
         Self {
             theme_preset: config.theme.preset.clone(),
-            view_mode: view_mode.map(view_mode_name).map(str::to_string),
             default_program: program_basename(&config.default_session_program()),
             commander_enabled: config.commander_enabled,
             conversation_enabled: config.conversation.enabled,
@@ -86,16 +83,6 @@ impl ConfigSnapshot {
             rounded_borders: config.rounded_borders,
             sections_configured: !config.sections.is_empty(),
         }
-    }
-}
-
-/// Stable identifier for a [`ViewMode`], independent of display labels (which
-/// may change). Used as the logged value.
-fn view_mode_name(mode: ViewMode) -> &'static str {
-    match mode {
-        ViewMode::ProjectGrouped => "ProjectGrouped",
-        ViewMode::SectionGrouped => "SectionGrouped",
-        ViewMode::SectionStacks => "SectionStacks",
     }
 }
 
@@ -176,9 +163,8 @@ mod tests {
         // A path that must never appear in the snapshot.
         config.worktrees_dir = Some(std::path::PathBuf::from("/home/alice/secret-worktrees"));
 
-        let snap = ConfigSnapshot::from_config(&config, Some(ViewMode::SectionStacks));
+        let snap = ConfigSnapshot::from_config(&config);
         assert_eq!(snap.theme_preset.as_deref(), Some("rose-pine"));
-        assert_eq!(snap.view_mode.as_deref(), Some("SectionStacks"));
         assert_eq!(snap.default_program, "claude");
         assert!(snap.commander_enabled);
         assert!(snap.conversation_enabled);

@@ -444,7 +444,6 @@ mod tests {
                     label: "Different".to_string(),
                     command: "different".to_string(),
                 }];
-                c.dim_unfocused_preview = false;
                 c.leader_key = "f1".to_string();
             })
             .unwrap();

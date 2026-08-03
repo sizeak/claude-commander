@@ -1,4 +1,4 @@
-//! Rendering: main layout, session list, preview/info/shell panes, status bar.
+//! Rendering: top bar, full-screen kanban board, status bar.
 
 use super::*;
 use crate::tui::hotkey::ActionButton;
@@ -33,24 +33,67 @@ impl App {
         }
     }
 
+    /// Per-project (border, session-title) colours, keyed by project id and
+    /// assigned by the board's name-sorted project order (same determinism the
+    /// old tree list used). Fed to [`BoardWidget::project_colors`].
+    pub(super) fn project_color_map(&self) -> HashMap<ProjectId, (Color, Color)> {
+        self.ui_state
+            .board
+            .projects
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.project_id, self.theme.project_color(i)))
+            .collect()
+    }
+
+    /// Recompute the per-project colour cache from the current board order and
+    /// theme. Shared by `refresh_list_items` (board order can change) and
+    /// `reload_theme` (the palette can change), so the cache never lags behind
+    /// either input.
+    pub(super) fn rebuild_project_colors(&mut self) {
+        self.ui_state.project_colors = self.project_color_map();
+    }
+
+    /// Rebuild the active theme from the current config's preset + overrides,
+    /// then refresh the derived project-colour cache. Call after any mutation
+    /// of `self.config.theme` (settings apply, config hot-reload): the cache is
+    /// otherwise only rebuilt in `refresh_list_items`, so card border/title
+    /// colours would show the old theme until an unrelated tick refreshed them.
+    pub(super) fn reload_theme(&mut self) {
+        let base = self
+            .config
+            .theme
+            .preset
+            .as_deref()
+            .and_then(Theme::from_preset)
+            .unwrap_or_default();
+        self.theme = base.with_overrides(&self.config.theme);
+        self.rebuild_project_colors();
+    }
+
     /// Render the UI
     pub(super) fn render(&mut self, frame: &mut Frame) {
         let size = frame.area();
         self.ui_state.terminal_size = size;
 
-        // Force a full repaint on view switch to clear stale styled cells.
-        // This is done with the `Clear` widget (a pure in-memory cell reset)
-        // rather than `Terminal::clear()`, which since ratatui 0.30 reads the
-        // cursor position from stdin — a blocking read that races our
-        // background input reader and times out (RenderError), killing the
-        // event loop. See `event_loop.rs`.
-        if std::mem::take(&mut self.ui_state.clear_right_pane) {
+        // A full-screen modal (review / conversation) draws over the whole
+        // frame. When we leave one, its cells would otherwise linger under the
+        // board, so force a full in-memory repaint on the transition. We use the
+        // `Clear` widget (a pure cell reset) rather than `Terminal::clear()`,
+        // which since ratatui 0.30 reads the cursor from stdin — a blocking read
+        // that races the background input reader and kills the loop.
+        let is_fullscreen = matches!(
+            self.ui_state.modal,
+            Modal::ReviewDiff(_) | Modal::Conversation { .. }
+        );
+        let leaving_fullscreen = self.ui_state.prev_fullscreen && !is_fullscreen;
+        self.ui_state.prev_fullscreen = is_fullscreen;
+        if std::mem::take(&mut self.ui_state.force_clear) || leaving_fullscreen {
             frame.render_widget(Clear, size);
         }
 
         // The review-diff view is a full-screen takeover: it owns the whole
-        // frame (including the bottom row, where it draws its own status bar)
-        // rather than overlaying the normal UI, so there's only one status bar.
+        // frame (including the bottom row, where it draws its own status bar).
         if matches!(self.ui_state.modal, Modal::ReviewDiff(_)) {
             self.ui_state.review_body_rect = Some(super::review::review_body_inner_rect(size));
             self.ui_state.review_file_list_rect =
@@ -70,50 +113,96 @@ impl App {
             return;
         }
 
-        // Content area with margin on top, left, right, and space for status bar at bottom
-        let content_area = Rect {
-            x: size.x + 1,
-            y: size.y + 1,
-            width: size.width.saturating_sub(2),
-            height: size.height.saturating_sub(3), // 1 top margin + 1 bottom margin + 1 status bar
+        // Content area = everything above the 1-row status bar.
+        let content = Rect {
+            x: size.x,
+            y: size.y,
+            width: size.width,
+            height: size.height.saturating_sub(1),
         };
 
-        // Main layout: session list on left, right pane fills rest
-        let main_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(self.ui_state.left_pane_pct),
-                Constraint::Percentage(100 - self.ui_state.left_pane_pct),
-            ])
-            .split(content_area);
-
-        // Render session list
-        self.render_session_list(frame, main_chunks[0]);
-
-        // Render either preview, diff, or shell based on current view
-        // Defensive: if a project is selected and view is Preview, render Shell instead
-        let view = if self.is_project_selected()
-            && self.ui_state.right_pane_view == RightPaneView::Preview
-        {
-            RightPaneView::Shell
+        if self.ui_state.view_mode.is_board() {
+            // Board: 1-line top bar, then the board.
+            let top_bar = Rect {
+                height: 1,
+                ..content
+            };
+            let board_area = Rect {
+                y: content.y.saturating_add(1),
+                height: content.height.saturating_sub(1),
+                ..content
+            };
+            self.render_top_bar(frame, top_bar);
+            self.render_board(frame, board_area);
+            self.render_modal(frame, board_area);
         } else {
-            self.ui_state.right_pane_view
-        };
-        match view {
-            RightPaneView::Preview => self.render_preview(frame, main_chunks[1]),
-            RightPaneView::Info => self.render_info(frame, main_chunks[1]),
-            RightPaneView::Shell => self.render_shell(frame, main_chunks[1]),
+            // List view: the full-width tree-list (its own heading bar).
+            self.render_session_list(frame, content);
+            self.render_modal(frame, content);
         }
-
-        // Render modal if open
-        self.render_modal(frame, content_area);
 
         // Render status bar at the very bottom of the screen. It returns the
         // clickable action-button regions it drew, recorded for hit-testing.
         self.ui_state.action_buttons = self.render_status_bar(frame, size);
     }
 
-    /// Render the session list
+    /// Render the 1-line top bar: app title on the left, session/project counts
+    /// on the right, styled like the status bar.
+    fn render_top_bar(&self, frame: &mut Frame, area: Rect) {
+        if area.height == 0 {
+            return;
+        }
+        let style = self.theme.status_bar();
+
+        let sessions = self.ui_state.board.worktree_count();
+        let projects = self.ui_state.board.projects.len();
+
+        let title_text = " Claude Commander";
+        // When a project filter is active, name it and how to clear it; the
+        // session count then reflects the filtered card count.
+        let counts_text = match self.ui_state.board_filter.and_then(|pid| {
+            self.ui_state
+                .board
+                .projects
+                .iter()
+                .find(|p| p.project_id == pid)
+                .map(|p| p.name.clone())
+        }) {
+            Some(name) => format!(
+                "filtered: {name} (Esc to clear) \u{00b7} {sessions} session{} ",
+                if sessions == 1 { "" } else { "s" },
+            ),
+            None => format!(
+                "{sessions} session{} \u{00b7} {projects} project{} ",
+                if sessions == 1 { "" } else { "s" },
+                if projects == 1 { "" } else { "s" },
+            ),
+        };
+
+        // Render the title and the right-aligned counts as a single Line/
+        // Paragraph. Drawing them as two overlapping Paragraphs stripped the
+        // title's accent fg, because ratatui's `Paragraph::render` calls
+        // `buf.set_style(area, style)` first — so the second (counts) paragraph
+        // reset the title cells to the plain status-bar style. One paragraph
+        // fills the bar background once, then paints each span's own style.
+        let pad = (area.width as usize)
+            .saturating_sub(title_text.chars().count() + counts_text.chars().count());
+        let line = Line::from(vec![
+            Span::styled(
+                title_text,
+                style
+                    .fg(self.theme.text_accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" ".repeat(pad), style),
+            Span::styled(counts_text, style),
+        ]);
+        frame.render_widget(Paragraph::new(line).style(style), area);
+    }
+
+    /// Render the full-width tree-list (list view modes): a 1-line heading bar
+    /// naming the active view, then the indented session tree. No right pane —
+    /// session detail is the `i` Info modal.
     pub(super) fn render_session_list(&mut self, frame: &mut Frame, area: Rect) {
         // Split into a 1-line heading bar and the body below
         let chunks = Layout::default()
@@ -121,8 +210,6 @@ impl App {
             .constraints([Constraint::Length(1), Constraint::Min(0)])
             .split(area);
 
-        // Full-width heading bar with dark grey background. The label reflects
-        // the active view so the user can see at a glance which mode is on.
         let heading_style = self.theme.status_bar();
         let heading = Paragraph::new(Line::styled(
             self.ui_state.view_mode.heading_label(),
@@ -176,10 +263,13 @@ impl App {
                 .show_program_override(show_program)
                 .comment_sessions(self.ui_state.sessions_with_comments.clone())
                 .recent_display_info(display_info);
+            // Record the recents-panel rect for mouse hit-testing.
+            self.ui_state.recents_rect = Some(sub[0]);
             frame.render_stateful_widget(recents_tree, sub[0], &mut rec_state);
 
             self.render_main_list(frame, sub[1], recents_len, global_sel);
         } else {
+            self.ui_state.recents_rect = None;
             self.render_main_list(frame, body, 0, global_sel);
         }
     }
@@ -196,6 +286,9 @@ impl App {
         offset: usize,
         global_sel: Option<usize>,
     ) {
+        // Record the main-list rect (and the recents offset) for mouse
+        // hit-testing (cleared in board view).
+        self.ui_state.list_rect = Some(area);
         let blocked: std::collections::HashMap<ProjectId, &str> = self
             .ui_state
             .project_pull_blocked
@@ -226,85 +319,86 @@ impl App {
         self.ui_state.main_list_height = area.height;
     }
 
-    /// Build a styled tab title line for the pane header.
-    ///
-    /// `tabs` is the list of tab labels, `active` is the index of the currently
-    /// selected tab. The active tab is rendered bold in the accent color; inactive
-    /// tabs use the secondary text color. Tabs are separated by ` · `.
-    pub(super) fn build_pane_tabs(&self, tabs: &[&str], active: usize) -> Line<'static> {
-        let active_style = Style::default()
-            .fg(self.theme.text_accent)
-            .add_modifier(Modifier::BOLD);
-        let inactive_style = Style::default().fg(self.theme.text_secondary);
-        let sep_style = Style::default().fg(self.theme.text_secondary);
+    /// Render the full-screen kanban board (or an empty-board hint), recording
+    /// the hit regions and column rectangles for mouse handling.
+    fn render_board(&mut self, frame: &mut Frame, area: Rect) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
 
-        let mut spans: Vec<Span<'static>> = Vec::new();
-        spans.push(Span::raw(" "));
-        for (i, tab) in tabs.iter().enumerate() {
-            if i > 0 {
-                spans.push(Span::styled(" · ", sep_style));
-            }
-            let style = if i == active {
-                active_style
-            } else {
-                inactive_style
+        // No list rows are drawn in board view; drop any list hit-test rects
+        // recorded by a previous list-view frame so a stale click can't map.
+        self.ui_state.list_rect = None;
+        self.ui_state.recents_rect = None;
+
+        // Zero projects: nothing to lay out. Show a centred hint pointing at the
+        // add-project key (resolved from the live binding, with a fallback when
+        // it is unbound). With more than one server configured the board renders
+        // anyway — its sidebar headings carry per-server connection health,
+        // which must stay visible even before any projects exist.
+        if self.ui_state.board.projects.is_empty() && self.ui_state.board.servers.len() <= 1 {
+            let key = self
+                .config
+                .keybindings
+                .keys_for(BindableAction::NewProject)
+                .first()
+                .map(|k| k.to_string());
+            let hint = match key {
+                Some(k) => format!("Press {k} to add a project"),
+                None => "Add a project to get started".to_string(),
             };
-            spans.push(Span::styled(tab.to_string(), style));
+            let para = Paragraph::new(Line::from(Span::styled(
+                hint,
+                Style::default().fg(self.theme.text_secondary),
+            )))
+            .alignment(Alignment::Center);
+            let mid = Rect {
+                x: area.x,
+                y: area.y + area.height / 2,
+                width: area.width,
+                height: 1,
+            };
+            frame.render_widget(para, mid);
+            self.ui_state.board_hit_regions.clear();
+            self.ui_state.board_button_regions.clear();
+            self.ui_state.board_heading_regions.clear();
+            self.ui_state.board_column_rects = None;
+            return;
         }
-        spans.push(Span::raw(" "));
-        Line::from(spans)
+
+        let selected = self.ui_state.board_state.selected();
+
+        let widget = BoardWidget::new(&self.ui_state.board, &self.theme)
+            .tick(self.ui_state.tick_count)
+            .review_labels(&self.config.pr_review_labels)
+            .invert_pr_label_color(self.config.invert_pr_label_color)
+            .show_session_program(self.config.show_session_program)
+            .mixed_programs(self.ui_state.has_mixed_programs)
+            .comment_sessions(&self.ui_state.sessions_with_comments)
+            .pull_blocked_projects(&self.ui_state.project_pull_blocked)
+            .project_colors(&self.ui_state.project_colors)
+            .session_numbers(&self.ui_state.session_numbers)
+            .selected(selected)
+            .rounded(self.config.rounded_borders);
+
+        let out = widget.render(area, frame.buffer_mut(), &mut self.ui_state.board_state);
+        self.ui_state.board_hit_regions = out.hit_regions;
+        self.ui_state.board_button_regions = out.button_regions;
+        self.ui_state.board_heading_regions = out.heading_regions;
+        self.ui_state.board_column_rects = Some(out.rects);
     }
 
-    /// Build a standard right-pane block with tabs, border styling, and focus state.
-    fn pane_block(&self, tabs: &[&str], active_tab: usize) -> Block<'static> {
-        let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
-        let title = self.build_pane_tabs(tabs, active_tab);
-        Block::default()
-            .title(title)
-            .borders(Borders::ALL)
-            .border_type(self.border_type())
-            .border_style(if is_focused {
-                self.theme.border_focused()
-            } else {
-                self.theme.border_unfocused()
-            })
-    }
+    /// Build the Info-modal content for the selected session.
+    ///
+    /// Extracted from the old right-pane `render_info`; consumed by the Info
+    /// modal (`Modal::Info`), which reuses the `InfoView` widget.
+    pub(super) fn build_session_info_content(&self) -> InfoContent<'_> {
+        let Some(sref) = self.ui_state.selected_session_id else {
+            return InfoContent::Empty;
+        };
+        let session_id = sref.id;
 
-    /// Return `Some(opacity)` when the right pane is unfocused and dim is enabled,
-    /// `None` otherwise. Used by preview and shell panes.
-    fn pane_dim_opacity(&self) -> Option<f32> {
-        let is_focused = matches!(self.ui_state.focused_pane, FocusedPane::RightPane);
-        if !is_focused && self.config.dim_unfocused_preview {
-            Some(self.config.dim_unfocused_opacity)
-        } else {
-            None
-        }
-    }
-
-    /// Render the preview pane
-    pub(super) fn render_preview(&mut self, frame: &mut Frame, area: Rect) {
-        let dim_opacity = self.pane_dim_opacity();
-        let block = self.pane_block(&["Preview", "Info", "Shell"], 0);
-
-        // Update preview state with visible area
-        let inner_height = area.height.saturating_sub(2);
-        self.ui_state
-            .preview_state
-            .set_content(&self.ui_state.preview_content, inner_height);
-
-        let preview = Preview::new(&self.ui_state.preview_content)
-            .block(block)
-            .scroll(self.ui_state.preview_state.scroll_offset)
-            .dim_opacity(dim_opacity);
-
-        frame.render_widget(preview, area);
-    }
-
-    /// Render the info pane (session metadata, PR details, AI summary)
-    pub(super) fn render_info(&mut self, frame: &mut Frame, area: Rect) {
-        let on_project = self.is_project_selected();
-
-        // Compute display string for the generate-summary hotkey (None = AI disabled)
+        // Compute display string for the generate-summary hotkey (None = AI off)
         let summary_key_hint = if self.config.ai_summary_enabled {
             self.config
                 .keybindings
@@ -315,173 +409,49 @@ impl App {
             None
         };
 
-        let block = if on_project {
-            self.pane_block(&["Shell", "Info"], 1)
+        // Read session fields from the owning backend's snapshot (always
+        // populated), not the board — the board is only built in board view.
+        let Some(session) = self.session(sref) else {
+            return InfoContent::Empty;
+        };
+        let title = session.title.clone();
+        let branch = session.branch.clone();
+        let status = session.status;
+        let program = session.program.clone();
+        let pr_number = session.pr_number;
+        let pr_url = session.pr_url.clone();
+        let pr_merged = session.pr_merged;
+        let worktree_path = session.worktree_path.clone();
+        let created_at = session.created_at.format("%Y-%m-%d %H:%M UTC").to_string();
+
+        let enriched_pr = self
+            .ui_state
+            .enriched_pr
+            .as_ref()
+            .and_then(|(sid, pr)| if *sid == session_id { Some(pr) } else { None });
+
+        let ai_summary = if self.config.ai_summary_enabled {
+            self.ui_state.ai_summaries.get(&session_id)
         } else {
-            self.pane_block(&["Preview", "Info", "Shell"], 1)
+            None
         };
 
-        // Build the info content based on current selection
-        let content = if let Some(session_id) = self.ui_state.selected_session_id.map(|r| r.id) {
-            // Find the session data from list_items (includes all needed fields)
-            let session_data = self.ui_state.list_items.iter().find_map(|item| {
-                if let SessionListItem::Worktree {
-                    id,
-                    title,
-                    branch,
-                    status,
-                    program,
-                    pr_number,
-                    pr_url,
-                    pr_merged,
-                    worktree_path,
-                    created_at,
-                    ..
-                } = item
-                {
-                    if *id == session_id {
-                        Some((
-                            title.clone(),
-                            branch.clone(),
-                            *status,
-                            program.clone(),
-                            *pr_number,
-                            pr_url.clone(),
-                            *pr_merged,
-                            worktree_path.display().to_string(),
-                            created_at.format("%Y-%m-%d %H:%M UTC").to_string(),
-                        ))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            });
-
-            if let Some((
-                title,
-                branch,
-                status,
-                program,
-                pr_number,
-                pr_url,
-                pr_merged,
-                worktree_path,
-                created_at,
-            )) = session_data
-            {
-                let enriched_pr = self
-                    .ui_state
-                    .enriched_pr
-                    .as_ref()
-                    .and_then(|(sid, pr)| if *sid == session_id { Some(pr) } else { None });
-
-                let ai_summary = if self.config.ai_summary_enabled {
-                    self.ui_state.ai_summaries.get(&session_id)
-                } else {
-                    None
-                };
-
-                InfoContent::Session(InfoSessionData {
-                    title,
-                    branch,
-                    created_at,
-                    status,
-                    program,
-                    worktree_path,
-                    diff_info: &self.ui_state.diff_info,
-                    pr_number,
-                    pr_url,
-                    pr_merged,
-                    enriched_pr,
-                    ai_summary,
-                    summary_key_hint,
-                    stack_chain: &self.ui_state.stack_chain,
-                })
-            } else {
-                InfoContent::Empty
-            }
-        } else if let Some((_backend, project_id)) = self.ui_state.selected_project_id {
-            let project_data = self.ui_state.list_items.iter().find_map(|item| {
-                if let SessionListItem::Project {
-                    id,
-                    name,
-                    repo_path,
-                    main_branch,
-                    ..
-                } = item
-                {
-                    if *id == project_id {
-                        Some((
-                            name.clone(),
-                            repo_path.display().to_string(),
-                            main_branch.clone(),
-                        ))
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            });
-
-            if let Some((name, repo_path, main_branch)) = project_data {
-                let pull_blocked = self
-                    .ui_state
-                    .project_pull_blocked
-                    .get(&project_id)
-                    .map(|r| r.as_str().to_string());
-                InfoContent::Project(InfoProjectData {
-                    name,
-                    repo_path,
-                    main_branch,
-                    pull_blocked,
-                })
-            } else {
-                InfoContent::Empty
-            }
-        } else {
-            InfoContent::Empty
-        };
-
-        // Build lines once, use for both scroll metrics and rendering
-        let info_view = InfoView::new(content, &self.theme);
-        let lines = info_view.build_lines();
-        let inner_height = area.height.saturating_sub(2);
-        self.ui_state
-            .info_state
-            .set_metrics(lines.len(), inner_height);
-
-        let info_view = info_view
-            .with_prebuilt_lines(lines)
-            .block(block)
-            .scroll(self.ui_state.info_state.scroll_offset);
-
-        frame.render_widget(info_view, area);
-    }
-
-    /// Render the shell pane
-    pub(super) fn render_shell(&mut self, frame: &mut Frame, area: Rect) {
-        let dim_opacity = self.pane_dim_opacity();
-
-        let block = if self.is_project_selected() {
-            self.pane_block(&["Shell", "Info"], 0)
-        } else {
-            self.pane_block(&["Preview", "Info", "Shell"], 2)
-        };
-
-        let inner_height = area.height.saturating_sub(2);
-        self.ui_state
-            .shell_state
-            .set_content(&self.ui_state.shell_content, inner_height);
-
-        let preview = Preview::new(&self.ui_state.shell_content)
-            .block(block)
-            .scroll(self.ui_state.shell_state.scroll_offset)
-            .dim_opacity(dim_opacity);
-
-        frame.render_widget(preview, area);
+        InfoContent::Session(InfoSessionData {
+            title,
+            branch,
+            created_at,
+            status,
+            program,
+            worktree_path,
+            diff_info: &self.ui_state.diff_info,
+            pr_number,
+            pr_url,
+            pr_merged,
+            enriched_pr,
+            ai_summary,
+            summary_key_hint,
+            stack_chain: &self.ui_state.stack_chain,
+        })
     }
 
     /// Render status bar. Returns the clickable action-button regions drawn in
@@ -521,12 +491,13 @@ impl App {
 
         let restart_needed = self.service.restart_required();
 
-        let session_count = self
-            .ui_state
-            .list_items
+        // Count sessions across every backend's snapshot so the bar is correct
+        // in the list views too (the board is only built in board view).
+        let session_count: usize = self
+            .backends
             .iter()
-            .filter(|i| i.is_worktree())
-            .count();
+            .map(|h| h.view.snapshot.sessions.len())
+            .sum();
 
         let sessions_span = Span::styled(
             format!(" Sessions: {session_count}"),
@@ -609,27 +580,21 @@ impl App {
     }
 
     /// The ordered, context-aware set of actions surfaced as buttons in the
-    /// status bar, filtered to those currently invokable. Buttons swap with the
-    /// focused pane so they sit near the UI they act on.
+    /// status bar, filtered to those currently invokable.
     fn status_bar_actions(&self) -> Vec<BindableAction> {
         use BindableAction::*;
-        let actions: &[BindableAction] = match self.ui_state.focused_pane {
-            FocusedPane::SessionList => &[
-                NewSession,
-                NewStackedSession,
-                DeleteSession,
-                OpenReviewDiff,
-                OpenInEditor,
-                NewProject,
-            ],
-            FocusedPane::RightPane => &[TogglePane, ShrinkLeftPane, GrowLeftPane, GenerateSummary],
-        };
-        actions
+        const ACTIONS: &[BindableAction] = &[
+            NewSession,
+            NewStackedSession,
+            DeleteSession,
+            OpenReviewDiff,
+            OpenInfo,
+            OpenInEditor,
+            NewProject,
+        ];
+        ACTIONS
             .iter()
             .copied()
-            // GenerateSummary is also config-gated (AI summaries can be off);
-            // `is_command_available` already covers the Info-pane requirement.
-            .filter(|&a| a != GenerateSummary || self.config.ai_summary_enabled)
             .filter(|&a| self.ui_state.is_command_available(a))
             .collect()
     }

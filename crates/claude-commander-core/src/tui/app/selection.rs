@@ -2,18 +2,6 @@
 
 use super::*;
 
-/// The identifying bits copied out of the selected list row, so the item's
-/// immutable borrow of `list_items` ends before we resolve the owning backend
-/// and mutate the selection fields.
-enum SelKind {
-    Project(ProjectId),
-    Worktree(SessionId, ProjectId),
-    /// A header row: clears both selections.
-    Clear,
-    /// A spacer: leaves the selection untouched.
-    Keep,
-}
-
 impl App {
     /// The backend that owns session `id`, by scanning cached snapshots. Session
     /// ids are globally unique (UUIDs), so at most one backend matches; defaults
@@ -57,186 +45,339 @@ impl App {
             .unwrap_or(crate::backend::BackendCapabilities::LOCAL)
     }
 
-    /// Update selection tracking based on list position
-    pub(super) fn update_selection(&mut self) {
-        let old_session = self.ui_state.selected_session_id;
-        let was_on_project = old_session.is_none() && self.ui_state.selected_project_id.is_some();
+    /// Move the selection down one row (board row / list item).
+    pub(super) fn nav_down(&mut self) {
+        if self.ui_state.view_mode.is_board() {
+            self.ui_state.board_state.next_row();
+        } else {
+            self.ui_state.list_state.next();
+        }
+    }
 
-        let selected =
+    /// Move the selection up one row.
+    pub(super) fn nav_up(&mut self) {
+        if self.ui_state.view_mode.is_board() {
+            self.ui_state.board_state.previous_row();
+        } else {
+            self.ui_state.list_state.previous();
+        }
+    }
+
+    /// Move right: board switches column; a list view is one-dimensional (no-op).
+    pub(super) fn nav_right(&mut self) {
+        if self.ui_state.view_mode.is_board() {
+            self.ui_state.board_state.next_column();
+        }
+    }
+
+    /// Move left: board switches column; a list view is one-dimensional (no-op).
+    pub(super) fn nav_left(&mut self) {
+        if self.ui_state.view_mode.is_board() {
+            self.ui_state.board_state.previous_column();
+        }
+    }
+
+    /// Next group: board switches column; list jumps to the next group header.
+    pub(super) fn nav_next_group(&mut self) {
+        if self.ui_state.view_mode.is_board() {
+            self.ui_state.board_state.next_column();
+        } else {
+            self.ui_state.list_state.next_group();
+        }
+    }
+
+    /// Previous group: board switches column; list jumps to the previous header.
+    pub(super) fn nav_previous_group(&mut self) {
+        if self.ui_state.view_mode.is_board() {
+            self.ui_state.board_state.previous_column();
+        } else {
+            self.ui_state.list_state.previous_group();
+        }
+    }
+
+    /// Move a screenful up or down: the board steps within the current column
+    /// by the number of cards that column had visible on the last frame; a list
+    /// view steps by its visible row count. Both keep one row of overlap.
+    pub(super) fn nav_page(&mut self, down: bool) {
+        if self.ui_state.view_mode.is_board() {
+            let Some(col) = self.ui_state.board_state.selected_column() else {
+                return;
+            };
+            let visible = self
+                .ui_state
+                .board_hit_regions
+                .iter()
+                .filter(|r| r.pos.col == col)
+                .count();
+            self.ui_state
+                .board_state
+                .page(page_rows(visible as u16), down);
+        } else {
+            let rows = page_rows(self.ui_state.main_list_height);
+            self.ui_state.list_state.page(rows, down);
+        }
+    }
+
+    /// Jump to the first row (board column top / list top).
+    pub(super) fn nav_first(&mut self) {
+        if self.ui_state.view_mode.is_board() {
+            self.ui_state.board_state.select_first();
+        } else {
+            self.ui_state.list_state.select_first();
+        }
+    }
+
+    /// Jump to the last row (board column bottom / list bottom).
+    pub(super) fn nav_last(&mut self) {
+        if self.ui_state.view_mode.is_board() {
+            self.ui_state.board_state.select_last();
+        } else {
+            self.ui_state.list_state.select_last();
+        }
+    }
+
+    /// Update the tracked session/project selection from the active view's cursor.
+    ///
+    /// On the board a sidebar row yields a project only; a card row yields both
+    /// session and project; a landed-but-empty column (or no selection) clears
+    /// both. This preserves every action gate — `RemoveProject` (project, no
+    /// session) and project-shell attach both fall out of the sidebar case
+    /// unchanged.
+    pub(super) fn update_selection(&mut self) {
+        // Read the raw (session, project) ids from whichever view is active.
+        let (session, project) = if self.ui_state.view_mode.is_board() {
+            match self.ui_state.board_state.selected() {
+                Some(pos) => self.ui_state.board.ids_at(pos),
+                None => (None, None),
+            }
+        } else {
             self.ui_state
                 .list_state
                 .selected()
                 .and_then(|idx| self.ui_state.list_items.get(idx))
                 .map(|item| match item {
-                    SessionListItem::Project { id, .. } => SelKind::Project(*id),
                     SessionListItem::Worktree { id, project_id, .. } => {
-                        SelKind::Worktree(*id, *project_id)
+                        (Some(*id), Some(*project_id))
                     }
+                    SessionListItem::Project { id, .. } => (None, Some(*id)),
                     // A recent-session row resolves to the same session as its
                     // real row below; the backend is re-derived from the id.
                     SessionListItem::RecentSession {
                         session,
                         project_id,
                         ..
-                    } => SelKind::Worktree(session.id, *project_id),
-                    SessionListItem::SectionHeader { .. }
-                    | SessionListItem::ServerHeader { .. } => SelKind::Clear,
-                    SessionListItem::Spacer | SessionListItem::RecentsHeader => SelKind::Keep,
-                });
-
-        match selected {
-            Some(SelKind::Project(id)) => {
-                let backend = self.backend_of_project(id);
-                self.ui_state.selected_project_id = Some((backend, id));
+                    } => (Some(session.id), Some(*project_id)),
+                    // Section/server headers, spacers and the recents header
+                    // select nothing.
+                    _ => (None, None),
+                })
+                .unwrap_or((None, None))
+        };
+        // Backend-qualify the selection so actions route to the owning machine,
+        // and cache connection/capabilities for the sync `is_command_available`.
+        match (session, project) {
+            (Some(sid), pid) => {
+                let backend = self.backend_of_session(sid);
+                self.ui_state.selected_session_id = Some(SessionRef::new(backend, sid));
+                self.ui_state.selected_project_id = pid.map(|p| (backend, p));
+                self.ui_state.selected_backend_connected = self.backend_is_connected(backend);
+                self.ui_state.selected_backend_capabilities = self.backend_capabilities(backend);
+            }
+            (None, Some(pid)) => {
+                let backend = self.backend_of_project(pid);
                 self.ui_state.selected_session_id = None;
+                self.ui_state.selected_project_id = Some((backend, pid));
                 self.ui_state.selected_backend_connected = self.backend_is_connected(backend);
                 self.ui_state.selected_backend_capabilities = self.backend_capabilities(backend);
             }
-            Some(SelKind::Worktree(id, project_id)) => {
-                let backend = self.backend_of_session(id);
-                self.ui_state.selected_session_id = Some(SessionRef::new(backend, id));
-                self.ui_state.selected_project_id = Some((backend, project_id));
-                self.ui_state.selected_backend_connected = self.backend_is_connected(backend);
-                self.ui_state.selected_backend_capabilities = self.backend_capabilities(backend);
-            }
-            Some(SelKind::Clear) => {
+            (None, None) => {
                 self.ui_state.selected_session_id = None;
                 self.ui_state.selected_project_id = None;
                 self.ui_state.selected_backend_connected = true;
                 self.ui_state.selected_backend_capabilities =
                     crate::backend::BackendCapabilities::LOCAL;
             }
-            Some(SelKind::Keep) | None => {}
         }
 
-        let now_on_project = self.ui_state.selected_session_id.is_none()
-            && self.ui_state.selected_project_id.is_some();
-
-        // Auto-switch pane when transitioning between project and session
-        if now_on_project && !was_on_project {
-            // Transitioning to a project: Preview → Shell
-            if self.ui_state.right_pane_view == RightPaneView::Preview {
-                self.ui_state.right_pane_view = RightPaneView::Shell;
-                self.ui_state.clear_right_pane = true;
-            }
-        } else if !now_on_project && was_on_project {
-            // Transitioning to a session: Shell → Preview
-            if self.ui_state.right_pane_view == RightPaneView::Shell {
-                self.ui_state.right_pane_view = RightPaneView::Preview;
-                self.ui_state.clear_right_pane = true;
-            }
-        }
-
-        // Fetch info pane data if applicable
+        // Fetch info-modal data if applicable (gated on the Info modal being
+        // open — `spawn_info_fetch` is a no-op otherwise).
         self.spawn_info_fetch();
     }
 
-    /// Get mutable reference to the active pane's scroll state
-    pub(super) fn active_pane_state(&mut self) -> &mut PreviewState {
-        match self.ui_state.right_pane_view {
-            RightPaneView::Preview => &mut self.ui_state.preview_state,
-            RightPaneView::Info => &mut self.ui_state.info_state,
-            RightPaneView::Shell => &mut self.ui_state.shell_state,
-        }
+    /// Map a mouse `(col, row)` to a sidebar server heading's backend, if the
+    /// click landed on one. Headings aren't selectable rows — a hit opens that
+    /// server's Settings → Programs tab directly.
+    pub(super) fn board_heading_at(&self, col: u16, row: u16) -> Option<crate::backend::BackendId> {
+        self.ui_state
+            .board_heading_regions
+            .iter()
+            .find(|(rect, _)| {
+                col >= rect.x
+                    && col < rect.x + rect.width
+                    && row >= rect.y
+                    && row < rect.y + rect.height
+            })
+            .map(|(_, backend)| *backend)
     }
 
-    /// Map a mouse `(col, row)` in absolute terminal coordinates to a row in
-    /// the session list. Returns `None` if the position is outside the list
-    /// area or maps past the last rendered item.
-    pub(super) fn list_index_at(&self, col: u16, row: u16) -> Option<usize> {
-        list_index_at(
-            col,
-            row,
-            self.ui_state.terminal_size,
-            self.ui_state.left_pane_pct,
-            self.ui_state.recents_len,
-            self.ui_state.main_list_offset,
-            self.ui_state.list_items.len(),
-        )
+    /// Map a mouse `(col, row)` in absolute terminal coordinates to the board
+    /// position of the row under it, using the hit regions recorded on the last
+    /// render frame. Returns `None` when the click is not on any row.
+    pub(super) fn board_pos_at(&self, col: u16, row: u16) -> Option<BoardPos> {
+        self.ui_state
+            .board_hit_regions
+            .iter()
+            .find(|r| {
+                col >= r.rect.x
+                    && col < r.rect.x + r.rect.width
+                    && row >= r.rect.y
+                    && row < r.rect.y + r.rect.height
+            })
+            .map(|r| r.pos)
     }
 
-    /// Scroll the pane under the given mouse column position
-    pub(super) fn scroll_pane_at(&mut self, col: u16, direction: ScrollDirection) {
-        let size = self.ui_state.terminal_size;
-        if size.width == 0 || size.height == 0 {
+    /// Map a mouse `(col, row)` to a card action button, using the button hit
+    /// regions from the last render frame. Checked *before* [`board_pos_at`] in
+    /// click handling so a click on a button wins over the row region it sits
+    /// within. Returns the card's board position and which button was hit.
+    pub(super) fn board_button_at(
+        &self,
+        col: u16,
+        row: u16,
+    ) -> Option<(BoardPos, crate::tui::widgets::board::CardButton)> {
+        self.ui_state
+            .board_button_regions
+            .iter()
+            .find(|r| {
+                col >= r.rect.x
+                    && col < r.rect.x + r.rect.width
+                    && row >= r.rect.y
+                    && row < r.rect.y + r.rect.height
+            })
+            .map(|r| (r.pos, r.button))
+    }
+
+    /// Move the selection within the board column under the mouse `x`, mirroring
+    /// the old left-pane wheel: one notch = one row up/down in that column.
+    pub(super) fn scroll_pane_at(&mut self, x: u16, direction: ScrollDirection) {
+        // List views: the wheel steps the single full-width list selection.
+        if !self.ui_state.view_mode.is_board() {
+            match direction {
+                ScrollDirection::Up => self.nav_up(),
+                ScrollDirection::Down => self.nav_down(),
+            }
             return;
         }
-
-        // Recompute the same content_area as render()
-        let content_area = Rect {
-            x: size.x + 1,
-            y: size.y + 1,
-            width: size.width.saturating_sub(2),
-            height: size.height.saturating_sub(3),
+        let Some(addr_col) = self
+            .ui_state
+            .board_column_rects
+            .as_ref()
+            .and_then(|rects| crate::tui::widgets::board::layout::column_at_x(rects, x))
+        else {
+            return;
         };
-
-        let main_chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([
-                Constraint::Percentage(self.ui_state.left_pane_pct),
-                Constraint::Percentage(100 - self.ui_state.left_pane_pct),
-            ])
-            .split(content_area);
-
-        let lines_per_tick: u16 = 3;
-
-        if col < main_chunks[0].right() {
-            // Left pane: scroll the session list selection
-            match direction {
-                ScrollDirection::Up => self.ui_state.list_state.previous(),
-                ScrollDirection::Down => self.ui_state.list_state.next(),
-            }
-            self.update_selection();
-        } else {
-            // Right pane: scroll content
-            match direction {
-                ScrollDirection::Up => self.active_pane_state().scroll_up(lines_per_tick),
-                ScrollDirection::Down => self.active_pane_state().scroll_down(lines_per_tick),
-            }
+        // Land in the hovered column (keeping the row where valid), then step.
+        let row = self
+            .ui_state
+            .board_state
+            .selected()
+            .map(|p| p.row)
+            .unwrap_or(0);
+        self.ui_state
+            .board_state
+            .select_nearest(BoardPos { col: addr_col, row });
+        match direction {
+            ScrollDirection::Up => self.ui_state.board_state.previous_row(),
+            ScrollDirection::Down => self.ui_state.board_state.next_row(),
         }
+        self.update_selection();
     }
 
-    /// Jump the selection to the session with the given 1-based number,
-    /// update the selection state, and refresh the preview pane.
-    /// Does nothing if the number is out of range.
-    /// Numbering matches `TreeList::to_list_items` — the Nth `Worktree` variant.
+    /// Jump the selection to the session with the given 1-based number and
+    /// refresh dependent state. Does nothing if the number is out of range.
+    /// Numbering is column-major — the Nth `Worktree` row (see
+    /// [`Board::pos_of_session_number`]).
     pub(super) fn jump_to_session_number(&mut self, number: usize) {
-        if let Some(idx) = session_number_to_list_index(&self.ui_state.list_items, number) {
-            self.ui_state.list_state.list_state.select(Some(idx));
-            self.update_selection();
-            self.ui_state.preview_update_spawned_at = None;
-            self.spawn_preview_update();
-        }
-    }
-
-    /// Check if a project (not a session) is currently selected
-    pub(super) fn is_project_selected(&self) -> bool {
-        self.ui_state.selected_session_id.is_none() && self.ui_state.selected_project_id.is_some()
-    }
-
-    /// Move the tree cursor to the `Worktree` row for `session_id` and sync
-    /// selection state. No-op (returns `false`) if the session has no row in
-    /// the current `list_items` — e.g. it was deleted. Callers that want the
-    /// preview pane to repaint immediately should follow with
-    /// `spawn_preview_update()`.
-    pub(super) fn select_session_in_tree(&mut self, session_id: SessionId) -> bool {
-        match worktree_list_index(&self.ui_state.list_items, session_id) {
-            Some(idx) => {
-                self.ui_state.list_state.select(Some(idx));
+        if self.ui_state.view_mode.is_board() {
+            if let Some(pos) = self.ui_state.board.pos_of_session_number(number) {
+                self.ui_state.board_state.select(Some(pos));
                 self.update_selection();
-                true
+                self.ui_state.diff_fetch_spawned_at = None;
+                self.spawn_diff_fetch();
             }
-            None => false,
+        } else if let Some(idx) = session_number_to_list_index(&self.ui_state.list_items, number) {
+            self.ui_state.list_state.select(Some(idx));
+            self.update_selection();
+            self.ui_state.diff_fetch_spawned_at = None;
+            self.spawn_diff_fetch();
         }
     }
 
-    /// Resolve a tmux session name (primary or paired shell) to its session
-    /// and focus it in the tree, repainting the preview pane. Used on the way
-    /// out of an attach so the tree lands on the session the user just left —
-    /// which, after the in-session switcher, may differ from the one they
-    /// entered. Prefers the attached `backend`'s view before scanning the rest,
-    /// since tmux session names can collide across machines. No-op if the
-    /// session no longer exists.
+    /// The section a new session should land in, given the current cursor.
+    ///
+    /// On the board it is the selected column's name (`None` for the sidebar).
+    /// In the section list views it is the section header at or above the
+    /// cursor (other list views render no headers, so `None`). The implicit
+    /// "In Progress" catch-all stamps no override — sessions land there by
+    /// default anyway.
+    pub(super) fn target_section(&self) -> Option<String> {
+        if self.ui_state.view_mode.is_board() {
+            let pos = self.ui_state.board_state.selected()?;
+            if pos.col == 0 {
+                return None;
+            }
+            let column = self.ui_state.board.columns.get(pos.col - 1)?;
+            (column.name != crate::session::IN_PROGRESS).then(|| column.name.clone())
+        } else {
+            let idx = self.ui_state.list_state.selected()?;
+            section_at(&self.ui_state.list_items, idx)
+        }
+    }
+
+    /// Move the board cursor to the card row for `session_id` and sync
+    /// selection state. No-op (returns `false`) if the session has no row on the
+    /// board — e.g. it was deleted.
+    pub(super) fn select_session_in_tree(&mut self, session_id: SessionId) -> bool {
+        if self.ui_state.view_mode.is_board() {
+            match self.ui_state.board.position_of(session_id) {
+                Some(pos) => {
+                    self.ui_state.board_state.select(Some(pos));
+                    self.update_selection();
+                    true
+                }
+                None => false,
+            }
+        } else {
+            match worktree_list_index(&self.ui_state.list_items, session_id) {
+                Some(idx) => {
+                    self.ui_state.list_state.select(Some(idx));
+                    self.update_selection();
+                    true
+                }
+                None => false,
+            }
+        }
+    }
+
+    /// Move the board cursor to the sidebar row for `project_id` and sync
+    /// selection state. No-op if the project has no sidebar entry. Used after
+    /// adding a project (which has no sessions yet, so it appears only in the
+    /// sidebar, never as a card).
+    pub(super) fn select_project_in_sidebar(&mut self, project_id: ProjectId) {
+        if let Some(row) = self.ui_state.board.sidebar_row_of(project_id) {
+            self.ui_state
+                .board_state
+                .select(Some(BoardPos { col: 0, row }));
+            self.update_selection();
+        }
+    }
+
+    /// Resolve a tmux session name (primary or paired shell) to its session and
+    /// focus it on the board. Used on the way out of an attach so the board
+    /// lands on the session the user just left — which, after the in-session
+    /// switcher, may differ from the one they entered. Prefers the attached
+    /// `backend`'s view before scanning the rest, since tmux session names can
+    /// collide across machines. No-op if the session no longer exists.
     pub(super) async fn focus_session_in_tree(&mut self, backend: BackendId, tmux_name: &str) {
         // A shell pane's tmux session is named `<primary>-sh`; match either.
         let primary = tmux_name.strip_suffix("-sh").unwrap_or(tmux_name);
@@ -263,14 +404,32 @@ impl App {
         if let Some(id) = session_id
             && self.select_session_in_tree(id)
         {
-            self.ui_state.preview_update_spawned_at = None;
-            self.spawn_preview_update();
+            self.ui_state.diff_fetch_spawned_at = None;
+            self.spawn_diff_fetch();
         }
     }
 }
 
-/// Find the flat `list_items` index of the `Worktree` row for `session_id`,
-/// or `None` if no such row is present.
+/// The list index of the `number`-th (1-based) `Worktree` row, counting only
+/// worktree rows (headers/spacers don't advance the count). Column-major
+/// numbering matches the board's `pos_of_session_number`.
+pub(super) fn session_number_to_list_index(
+    items: &[SessionListItem],
+    number: usize,
+) -> Option<usize> {
+    let mut count = 0usize;
+    for (idx, item) in items.iter().enumerate() {
+        if matches!(item, SessionListItem::Worktree { .. }) {
+            count += 1;
+            if count == number {
+                return Some(idx);
+            }
+        }
+    }
+    None
+}
+
+/// The list index of the `Worktree` row for `session_id`, if present.
 pub(super) fn worktree_list_index(
     items: &[SessionListItem],
     session_id: SessionId,
@@ -280,88 +439,13 @@ pub(super) fn worktree_list_index(
         .position(|item| matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id))
 }
 
-/// How many rows a page jump moves the session-list cursor, given the visible
-/// row count of the scrolling list: one screenful less a row of overlap, so the
-/// row you were on stays visible at the edge of the new view. Never zero —
-/// before the first render has recorded a height it degrades to a single row.
-pub(super) fn list_page_rows(main_list_height: u16) -> usize {
-    main_list_height.saturating_sub(1).max(1) as usize
-}
-
-/// Pure mapping from absolute mouse coordinates to a list item index.
-///
-/// Mirrors the layout in `App::render` (see `render.rs`): the content area
-/// inset by 1 on each side and 3 on the bottom (for status bar), split
-/// horizontally by `left_pane_pct`, then the left column is split vertically
-/// into a 1-row heading and the list below it.
-///
-/// When `recents_len > 0` (and there is a scrolling list beneath it), the body
-/// is further split into a fixed recents panel of `recents_len` rows (offset 0)
-/// and the scrolling main list below it, whose top row is item
-/// `recents_len + main_offset`. With no recents panel the body is a single list
-/// whose top row is item `main_offset`.
-pub(super) fn list_index_at(
-    col: u16,
-    row: u16,
-    terminal_size: Rect,
-    left_pane_pct: u16,
-    recents_len: usize,
-    main_offset: usize,
-    item_count: usize,
-) -> Option<usize> {
-    if terminal_size.width == 0 || terminal_size.height == 0 {
-        return None;
-    }
-
-    let content_area = Rect {
-        x: terminal_size.x + 1,
-        y: terminal_size.y + 1,
-        width: terminal_size.width.saturating_sub(2),
-        height: terminal_size.height.saturating_sub(3),
-    };
-
-    let main_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(left_pane_pct),
-            Constraint::Percentage(100 - left_pane_pct),
-        ])
-        .split(content_area);
-    let left = main_chunks[0];
-
-    // Left pane: 1-line heading then the body. The body starts at `left.y + 1`
-    // and runs to `left.bottom()`.
-    let list_y = left.y.checked_add(1)?;
-    if col < left.x || col >= left.right() {
-        return None;
-    }
-    if row < list_y || row >= left.bottom() {
-        return None;
-    }
-
-    // The recents panel is shown only when it doesn't consume the whole list
-    // (matching `render_session_list`); its height is capped to leave the main
-    // list at least one row.
-    let show_panel = recents_len > 0 && recents_len < item_count;
-    let body_h = left.bottom().saturating_sub(list_y);
-    let rec_h = if show_panel {
-        (recents_len as u16).min(body_h.saturating_sub(1))
-    } else {
-        0
-    };
-    let main_y = list_y.checked_add(rec_h)?;
-
-    if show_panel && row < main_y {
-        // Click landed in the pinned recents panel (rendered at offset 0).
-        let idx = (row - list_y) as usize;
-        return (idx < recents_len).then_some(idx);
-    }
-
-    // Click landed in the scrolling main list.
-    let visible = (row - main_y) as usize;
-    let base = if show_panel { recents_len } else { 0 };
-    let idx = base.checked_add(main_offset)?.checked_add(visible)?;
-    (idx < item_count).then_some(idx)
+/// How many rows a page jump moves the cursor, given the visible row count of
+/// the scrolling area (list rows, or cards in the current board column): one
+/// screenful less a row of overlap, so the row you were on stays visible at the
+/// edge of the new view. Never zero — before the first render has recorded a
+/// height it degrades to a single row.
+pub(super) fn page_rows(visible: u16) -> usize {
+    visible.saturating_sub(1).max(1) as usize
 }
 
 /// Name of the section containing the list row at `idx` — the nearest
@@ -380,51 +464,9 @@ pub(super) fn section_at(items: &[SessionListItem], idx: usize) -> Option<String
         .filter(|name| name != crate::session::IN_PROGRESS)
 }
 
-/// Map a 1-based session number to its index in the flat list_items vec.
-/// Returns None if the number is out of range.
-pub(super) fn session_number_to_list_index(
-    items: &[SessionListItem],
-    number: usize,
-) -> Option<usize> {
-    let mut count = 0usize;
-    for (idx, item) in items.iter().enumerate() {
-        if matches!(item, SessionListItem::Worktree { .. }) {
-            count += 1;
-            if count == number {
-                return Some(idx);
-            }
-        }
-    }
-    None
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A typical 80x24 terminal split 30/70 with the standard 1-cell margins
-    /// — used as a fixture for the `list_index_at` tests below.
-    fn term() -> Rect {
-        Rect::new(0, 0, 80, 24)
-    }
-
-    /// Returns the rendered list rect for the 80x24 / 30% fixture so tests
-    /// can compute valid click positions without duplicating layout math.
-    fn list_rect() -> Rect {
-        let size = term();
-        let content_area = Rect {
-            x: size.x + 1,
-            y: size.y + 1,
-            width: size.width.saturating_sub(2),
-            height: size.height.saturating_sub(3),
-        };
-        let chunks = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
-            .split(content_area);
-        let left = chunks[0];
-        Rect::new(left.x, left.y + 1, left.width, left.height - 1)
-    }
 
     fn header(name: &str) -> SessionListItem {
         SessionListItem::SectionHeader {
@@ -447,11 +489,11 @@ mod tests {
     }
 
     #[test]
-    fn list_page_rows_keeps_one_row_of_overlap() {
-        assert_eq!(list_page_rows(20), 19);
+    fn page_rows_keeps_one_row_of_overlap() {
+        assert_eq!(page_rows(20), 19);
         // A one-row list still moves, and so does a height not yet recorded.
-        assert_eq!(list_page_rows(1), 1);
-        assert_eq!(list_page_rows(0), 1);
+        assert_eq!(page_rows(1), 1);
+        assert_eq!(page_rows(0), 1);
     }
 
     #[test]
@@ -493,94 +535,5 @@ mod tests {
     fn section_at_out_of_bounds_is_none() {
         let items = vec![header("Self Review")];
         assert_eq!(section_at(&items, 5), None);
-    }
-
-    #[test]
-    fn list_index_at_first_row_with_no_offset_is_zero() {
-        let lr = list_rect();
-        assert_eq!(list_index_at(lr.x, lr.y, term(), 30, 0, 0, 10), Some(0));
-    }
-
-    #[test]
-    fn list_index_at_adds_scroll_offset() {
-        let lr = list_rect();
-        // Second visible row, list scrolled by 5 → item index 6
-        assert_eq!(list_index_at(lr.x, lr.y + 1, term(), 30, 0, 5, 20), Some(6));
-    }
-
-    #[test]
-    fn list_index_at_returns_none_on_heading_row() {
-        // The heading row sits at `list_rect().y - 1` (the first row of the
-        // left pane, before the list). A click there must not select a row.
-        let lr = list_rect();
-        assert_eq!(list_index_at(lr.x, lr.y - 1, term(), 30, 0, 0, 10), None);
-    }
-
-    #[test]
-    fn list_index_at_returns_none_beyond_item_count() {
-        let lr = list_rect();
-        // Click far enough down that the item index exceeds item_count.
-        assert_eq!(list_index_at(lr.x, lr.y, term(), 30, 0, 0, 0), None);
-        assert_eq!(list_index_at(lr.x, lr.y + 5, term(), 30, 0, 0, 3), None);
-    }
-
-    #[test]
-    fn list_index_at_returns_none_outside_left_pane() {
-        let lr = list_rect();
-        // Click in the right pane — should map to nothing in the list.
-        let right_col = lr.right() + 1;
-        assert_eq!(list_index_at(right_col, lr.y, term(), 30, 0, 0, 10), None);
-    }
-
-    #[test]
-    fn list_index_at_returns_none_below_content_area() {
-        let lr = list_rect();
-        // Click on the status-bar row at the bottom of the terminal.
-        let below = term().bottom() - 1;
-        assert!(below >= lr.bottom());
-        assert_eq!(list_index_at(lr.x, below, term(), 30, 0, 0, 100), None);
-    }
-
-    #[test]
-    fn list_index_at_zero_size_terminal_returns_none() {
-        let size = Rect::new(0, 0, 0, 0);
-        assert_eq!(list_index_at(0, 0, size, 30, 0, 0, 10), None);
-    }
-
-    #[test]
-    fn list_index_at_maps_pinned_recents_panel_rows_directly() {
-        // A 3-row recents block (header + 1 recent + divider) pins the top of
-        // the body; those rows map straight to indices 0,1,2 regardless of the
-        // main list's scroll offset.
-        let lr = list_rect();
-        let recents_len = 3;
-        let item_count = 20;
-        let main_offset = 5;
-        assert_eq!(
-            list_index_at(lr.x, lr.y, term(), 30, recents_len, main_offset, item_count),
-            Some(0)
-        );
-        assert_eq!(
-            list_index_at(
-                lr.x,
-                lr.y + 2,
-                term(),
-                30,
-                recents_len,
-                main_offset,
-                item_count
-            ),
-            Some(2)
-        );
-    }
-
-    #[test]
-    fn list_index_at_maps_main_list_below_pinned_panel_with_offset() {
-        // The first row below a 3-row recents panel is the main list's scrolled
-        // top: recents_len(3) + main_offset(5) = index 8.
-        let lr = list_rect();
-        assert_eq!(list_index_at(lr.x, lr.y + 3, term(), 30, 3, 5, 20), Some(8));
-        // Next row down is index 9.
-        assert_eq!(list_index_at(lr.x, lr.y + 4, term(), 30, 3, 5, 20), Some(9));
     }
 }

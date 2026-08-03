@@ -57,21 +57,29 @@ claude-commander config --init
 claude-commander --config /path/to/config.toml
 ```
 
-## Session List
+## Views and the Board
 
-The left pane shows projects and their worktree sessions in a tree view. Projects are sorted alphabetically. Sessions within a project are sorted newest first (by creation time).
+The session list has four views, cycled with `v`: three full-width **list** views (grouped by project, by section, or by section with PR stacks) and the full-screen kanban **board** (see [Views](../README.md#views)). The project list is the default; `v` rotates project → sections → stacks → board → project, skipping the section views when no `[[sections]]` are configured, and the chosen view is remembered across restarts. No view has a side panel — `i` opens a session's Info modal, `Enter`/`s` its shell, and `r` its review diff.
 
-Each session row shows the title and, in `[brackets]`, the branch name — but only when the branch differs from what the title would sanitize to. A session titled "Feature Auth" with branch `feature-auth` (or `prefix/feature-auth` when `branch_prefix` is set) renders as just `Feature Auth`; the bracket reappears only when the branch carries new information, e.g. you renamed it to `feature-auth-v2` outside the app.
+The board is described below. Each column is a section, and every session is its own card bordered in its project's colour. The leftmost column is a project sidebar listing every project (sorted alphabetically) with its session count.
+
+Within a column, cards are ordered by how likely each session is to need you: a **needs-you** band on top (waiting for input, a paused cascade, or unread output), an **active** band in the middle (working, idle, or a transient create/merge/push), and **stopped** sessions at the bottom. Within a band, newer sessions float above older ones, so recent work is easy to find. The banding is coarse on purpose — a session cycling between working and idle stays in the active band rather than jumping around. A PR stack stays contiguous and sorts by its most-attention-needing member. Empty columns are hidden by default (`hide_empty_sections` in [Configuration](configuration.md)); set it to false to always show every section column.
+
+A card's border title is the session's number and title — the project name is never rendered on the card (project identity lives in the border colour and the sidebar legend). The card's single interior line carries the status glyph and a word describing it (`working…`, `waiting`, `idle`, …), any row markers (`*` pending comments, `⚓` keep-alive, `⇣ LFS`), the PR pill or, in `[brackets]`, the branch name, and — right aligned — three clickable action buttons: `[>_]` opens the session shell, `[±]` opens the review diff, and `[i]` opens the info panel. A single click on a button selects that card and fires the action; clicking elsewhere on a card selects it and double-clicking attaches.
+
+**Selecting** a project in the sidebar (`Enter`, or double-click) **filters** the board to only that project's cards; the sidebar keeps listing every project, and the top bar names the active filter. Selecting the same project again — or **`Esc`** — clears the filter; selecting a different project refilters; moving into the columns keeps the active filter so you can browse and act on that project's cards. Merely moving the cursor over the sidebar does not filter. Jumping to a session through the quick-switch palette clears the filter when needed, so a jump to a session in another project always lands.
+
+The branch name in `[brackets]` appears only when the branch differs from what the title would sanitize to. A session titled "Feature Auth" with branch `feature-auth` (or `prefix/feature-auth` when `branch_prefix` is set) shows no bracket; it reappears only when the branch carries new information, e.g. you renamed it to `feature-auth-v2` outside the app.
 
 ### PR Stacks
 
-When a session's PR targets another session's branch (rather than `main`), the two form a stack. Stacked children render one indent deeper and sit directly beneath the session they're stacked on, in bottom-to-top stack order. The stack base keeps its normal position in the root session list sorted by creation time.
+When a session's PR targets another session's branch (rather than `main`), the two form a stack. Each stack member is its own card, rendered contiguously in stack order: the base card first, with stacked children drawn as their own cards nested (indented) one level deeper beneath it in bottom-to-top stack order.
 
 Press `t` on any session in a stack to create a new session on top of that stack — regardless of which member you have selected, the new branch is forked from the topmost session. When you launch Claude in the new session it is told to use `gh pr create --base <parent-branch>` so the PR targets the right place automatically.
 
 Stacks are detected from the PR's `baseRefName` returned by the `gh` CLI, so they stay accurate across GitHub's auto-retargeting when a stack member is merged.
 
-Stack grouping (children indented under their base) is active in the project-grouped view and in the **Section Stacks** view — the default when [Session List Sections](configuration.md#session-list-sections) is configured — which keeps each stack together as a unit inside the section chosen by its base (the stack root), so a draft or early-stage session stacked on top never drags the whole stack out of the base's section. In the plain **Sections** view, sessions are ordered by their section instead and stacked children render at the normal indent — the `t` hotkey and `stack_parent_session_id` still work, but a base and its child may land in different sections depending on their PR state. Cycle between the three views with `v`.
+How a stack renders depends on the view (cycle with `v`). In the **project-grouped** and **Section Stacks** list views (the latter is the default when [Session List Sections](configuration.md#session-list-sections) is configured), children are nested under their base and the whole stack stays together under the section chosen by its base (the stack root), so a draft or early-stage session stacked on top never drags the whole stack out of the base's section. In the plain **Sections** list view, sessions are ordered by their section instead and stacked children render at the normal indent — the `t` hotkey and `stack_parent_session_id` still work, but a base and its child may land in different sections depending on their PR state. On the **board** a stack occupies exactly one column and moves between columns as a unit; the column is chosen by the stack's newest leaf (its section assignment, including any manual `m` move), so a base and its children never split across columns.
 
 #### Cascade merge main through a stack
 
@@ -89,9 +97,9 @@ Pre-flight is the same as cascade merge: no live agent may be `Working` or `Wait
 
 ## AI Summary
 
-The Info pane can display an AI-generated summary of branch changes, powered
-by the Claude CLI. Press `g` (configurable) while viewing the Info pane to
-generate a summary. Summaries are cached per-session — once generated, they
+The Info modal (`i`) can display an AI-generated summary of branch changes,
+powered by the Claude CLI. Press `g` (configurable) while the Info modal is
+open to generate a summary. Summaries are cached per-session — once generated, they
 display instantly when you revisit the session. Press `g` again to regenerate
 after making changes.
 
@@ -113,8 +121,8 @@ working tree.
 
 While attached to a Claude session you can jump straight to its review diff
 with **`Alt-r`**, and **`Alt-r`** again from inside the diff switches back to
-the session — the same direct toggle the shell pane has with `Ctrl-\`, without
-detaching to the session list. `Alt-r` is used rather than `Ctrl-r` so a
+the session — the same direct toggle the shell session has with `Ctrl-\`, without
+detaching to the board. `Alt-r` is used rather than `Ctrl-r` so a
 shell's `Ctrl-r` reverse-history-search is never shadowed; the toggle is wired
 up for Claude sessions only.
 
@@ -178,7 +186,7 @@ foreground-only colouring on 256- and 16-colour terminals.
   Comments are *staged* — they persist across restarts until applied, and
   show as `*` in the gutter and a coloured `*N` count on the file (and its
   parent directories) in the tree. A session with pending comments is also
-  flagged with a `*` in the main session list. Each comment also renders as
+  flagged with a `*` on the board. Each comment also renders as
   an inline box beneath its line; press `z` (or click the box) to fold it
   down to a single-line header or expand it again.
 - **Apply**: press `a` to hand all staged comments to the session's agent.
