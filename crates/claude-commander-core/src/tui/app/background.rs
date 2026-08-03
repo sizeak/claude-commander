@@ -81,7 +81,7 @@ impl App {
 
         let backend = self.backend_arc(self.backend_of_session(session_id));
         let tx = self.event_loop.sender();
-        let highlight = self.theme.mode == crate::tui::theme::ColorMode::TrueColor;
+        let highlight = self.theme.mode == crate::term_caps::ColorMode::TrueColor;
         let text_fg = self.theme.review_palette().text;
 
         tokio::spawn(async move {

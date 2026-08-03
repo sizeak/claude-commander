@@ -6,6 +6,7 @@
 use ratatui::style::{Color, Style};
 
 use crate::config::theme::{AgentWorkingStyle, ThemeOverrides};
+use crate::term_caps::ColorMode;
 
 /// All recognised preset names, in display order.
 pub const PRESET_NAMES: &[&str] = &[
@@ -17,52 +18,6 @@ pub const PRESET_NAMES: &[&str] = &[
     "zedokai",
     "rose-pine",
 ];
-
-/// Terminal color capability
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ColorMode {
-    /// Basic 16 ANSI colors (maximum compatibility)
-    Basic,
-    /// 256 color palette
-    #[default]
-    Indexed,
-    /// True color (24-bit RGB)
-    TrueColor,
-}
-
-impl ColorMode {
-    /// Detect the best color mode for the current terminal
-    pub fn detect() -> Self {
-        // Check COLORTERM first (most reliable for true color)
-        if let Ok(colorterm) = std::env::var("COLORTERM")
-            && (colorterm == "truecolor" || colorterm == "24bit")
-        {
-            return Self::TrueColor;
-        }
-
-        // Check TERM for 256 color support
-        if let Ok(term) = std::env::var("TERM")
-            && (term.contains("256color") || term.contains("kitty") || term.contains("alacritty"))
-        {
-            // These terminals typically support true color even without COLORTERM
-            if term.contains("kitty") || term.contains("alacritty") {
-                return Self::TrueColor;
-            }
-            return Self::Indexed;
-        }
-
-        Self::Basic
-    }
-
-    /// Stable lowercase identifier, used as the telemetry `color_mode` value.
-    pub fn name(self) -> &'static str {
-        match self {
-            ColorMode::Basic => "basic",
-            ColorMode::Indexed => "indexed",
-            ColorMode::TrueColor => "truecolor",
-        }
-    }
-}
 
 /// Theme configuration for the TUI
 #[derive(Clone)]
@@ -298,6 +253,7 @@ impl Theme {
 
     /// Basic 16-color theme (maximum compatibility)
     pub fn basic() -> Self {
+        let (status_bar_bg, status_bar_fg) = ColorMode::Basic.status_bar_colors();
         Self {
             mode: ColorMode::Basic,
             border_focused: Color::Cyan,
@@ -358,13 +314,14 @@ impl Theme {
             palette_command_bg: Color::DarkGray,
             palette_command_fg: Color::White,
 
-            status_bar_bg: Color::Blue,
-            status_bar_fg: Color::White,
+            status_bar_bg,
+            status_bar_fg,
         }
     }
 
     /// 256-color theme (good balance of compatibility and aesthetics)
     pub fn indexed() -> Self {
+        let (status_bar_bg, status_bar_fg) = ColorMode::Indexed.status_bar_colors();
         Self {
             mode: ColorMode::Indexed,
             border_focused: Color::Indexed(117), // Pastel sky blue
@@ -423,13 +380,14 @@ impl Theme {
             palette_command_bg: Color::Indexed(23), // Deep muted turquoise
             palette_command_fg: Color::Indexed(252), // Near-white
 
-            status_bar_bg: Color::Indexed(236),
-            status_bar_fg: Color::Indexed(252),
+            status_bar_bg,
+            status_bar_fg,
         }
     }
 
     /// True color theme (richest visual experience)
     pub fn truecolor() -> Self {
+        let (status_bar_bg, status_bar_fg) = ColorMode::TrueColor.status_bar_colors();
         Self {
             mode: ColorMode::TrueColor,
             border_focused: Color::Rgb(137, 180, 250), // Pastel sky blue
@@ -488,8 +446,8 @@ impl Theme {
             palette_command_bg: Color::Rgb(60, 88, 92), // Deep muted turquoise-teal
             palette_command_fg: Color::Rgb(205, 214, 244), // Near-white lavender
 
-            status_bar_bg: Color::Rgb(49, 50, 68),
-            status_bar_fg: Color::Rgb(205, 214, 244),
+            status_bar_bg,
+            status_bar_fg,
         }
     }
 
@@ -799,15 +757,6 @@ impl Theme {
             .bg(self.status_bar_bg)
             .fg(self.status_bar_fg)
     }
-
-    /// Return a tmux-compatible `status-style` string matching this theme's status bar colors
-    pub fn tmux_status_style(&self) -> String {
-        format!(
-            "bg={},fg={}",
-            color_to_tmux(self.status_bar_bg),
-            color_to_tmux(self.status_bar_fg),
-        )
-    }
 }
 
 /// Build a dark, saturated line fill from a base colour for the review diff
@@ -911,30 +860,6 @@ fn indexed_to_rgb(n: u8) -> (u8, u8, u8) {
             let v = 8 + 10 * (n - 232);
             (v, v, v)
         }
-    }
-}
-
-/// Convert a ratatui `Color` to a tmux-compatible color string
-pub fn color_to_tmux(color: Color) -> String {
-    match color {
-        Color::Rgb(r, g, b) => format!("#{:02x}{:02x}{:02x}", r, g, b),
-        Color::Indexed(n) => format!("colour{}", n),
-        Color::Black => "black".into(),
-        Color::Red => "red".into(),
-        Color::Green => "green".into(),
-        Color::Yellow => "yellow".into(),
-        Color::Blue => "blue".into(),
-        Color::Magenta => "magenta".into(),
-        Color::Cyan => "cyan".into(),
-        Color::White | Color::Gray => "white".into(),
-        Color::DarkGray => "brightblack".into(),
-        Color::LightRed => "brightred".into(),
-        Color::LightGreen => "brightgreen".into(),
-        Color::LightYellow => "brightyellow".into(),
-        Color::LightBlue => "brightblue".into(),
-        Color::LightMagenta => "brightmagenta".into(),
-        Color::LightCyan => "brightcyan".into(),
-        Color::Reset => "default".into(),
     }
 }
 
@@ -1083,27 +1008,6 @@ mod tests {
     }
 
     #[test]
-    fn test_color_to_tmux_rgb() {
-        assert_eq!(color_to_tmux(Color::Rgb(49, 50, 68)), "#313244");
-        assert_eq!(color_to_tmux(Color::Rgb(0, 0, 0)), "#000000");
-        assert_eq!(color_to_tmux(Color::Rgb(255, 255, 255)), "#ffffff");
-    }
-
-    #[test]
-    fn test_color_to_tmux_indexed() {
-        assert_eq!(color_to_tmux(Color::Indexed(236)), "colour236");
-        assert_eq!(color_to_tmux(Color::Indexed(0)), "colour0");
-    }
-
-    #[test]
-    fn test_color_to_tmux_named() {
-        assert_eq!(color_to_tmux(Color::Blue), "blue");
-        assert_eq!(color_to_tmux(Color::White), "white");
-        assert_eq!(color_to_tmux(Color::DarkGray), "brightblack");
-        assert_eq!(color_to_tmux(Color::Reset), "default");
-    }
-
-    #[test]
     fn test_dim_color_rgb() {
         // 50% opacity halves each channel
         assert_eq!(
@@ -1177,16 +1081,20 @@ mod tests {
         assert_eq!(indexed_to_rgb(196), (255, 0, 0));
     }
 
+    /// The capability-tier presets must take their status-bar colours from
+    /// [`ColorMode::status_bar_colors`], which is what core formats into the
+    /// tmux `status-style` string. Re-hardcoding a pair here would silently
+    /// desync the TUI's status bar from the tmux one, so assert they agree.
     #[test]
-    fn test_tmux_status_style_per_theme() {
-        assert_eq!(Theme::basic().tmux_status_style(), "bg=blue,fg=white");
-        assert_eq!(
-            Theme::indexed().tmux_status_style(),
-            "bg=colour236,fg=colour252"
-        );
-        assert_eq!(
-            Theme::truecolor().tmux_status_style(),
-            "bg=#313244,fg=#cdd6f4"
-        );
+    fn test_tier_presets_take_status_bar_colors_from_color_mode() {
+        for (theme, mode) in [
+            (Theme::basic(), ColorMode::Basic),
+            (Theme::indexed(), ColorMode::Indexed),
+            (Theme::truecolor(), ColorMode::TrueColor),
+        ] {
+            let (bg, fg) = mode.status_bar_colors();
+            assert_eq!(theme.status_bar_bg, bg, "status_bar_bg for {mode:?}");
+            assert_eq!(theme.status_bar_fg, fg, "status_bar_fg for {mode:?}");
+        }
     }
 }

@@ -36,6 +36,7 @@ pub mod picker;
 pub mod reviewed;
 pub mod session;
 pub mod telemetry;
+pub mod term_caps;
 pub mod tmux;
 pub mod tui;
 

@@ -29,8 +29,8 @@ use crate::session::{
     program_with_agent_flags,
 };
 use crate::telemetry::{ConfigSnapshot, EnvFingerprint, FrontendInfo, Telemetry};
+use crate::term_caps::ColorMode;
 use crate::tmux::{AgentStateDetector, StatusBarInfo, TmuxExecutor};
-use crate::tui::theme::Theme;
 
 /// High-level service that wraps `SessionManager`, state stores, and agent
 /// detection into a single entry point. Both the CLI and TUI route through
@@ -112,7 +112,7 @@ impl CommanderService {
         let manager = SessionManager::new(
             config_store.clone(),
             store.clone(),
-            Theme::default().tmux_status_style(),
+            ColorMode::detect().tmux_status_style(),
         );
         // Comments and reviewed marks live beside state.json under the same
         // data dir the `StateStore` resolved — *not* a freshly recomputed
@@ -2557,7 +2557,7 @@ fn init_telemetry(
     let install_id = ensure_install_id(store);
     let telemetry = Telemetry::init(&config.telemetry, frontend, &install_id);
     if telemetry.is_active() {
-        let env = EnvFingerprint::collect(Some(crate::tui::theme::ColorMode::detect().name()));
+        let env = EnvFingerprint::collect(Some(ColorMode::detect().name()));
         let snapshot = ConfigSnapshot::from_config(&config);
         telemetry.session_start(&env, &snapshot);
     }
