@@ -877,6 +877,13 @@ impl Theme {
             self.agent_working = style;
         }
 
+        // Not a colour: the surface derived fills are blended against. Every
+        // preset declares itself dark, so this is the only way a light-terminal
+        // user gets fills scaled toward white — see `fill_color`.
+        if let Some(appearance) = overrides.appearance {
+            self.appearance = appearance.into();
+        }
+
         // project_colors is intentionally not overridable — paired-tuple
         // arrays are ergonomically poor in TOML and the feature has minimal
         // user demand.
@@ -1237,6 +1244,41 @@ mod tests {
         assert!(
             lg > lr && lg > lb,
             "light green fill should still read green"
+        );
+    }
+
+    /// The light-surface blend has to be reachable from config, not just from
+    /// `fill_color`'s argument: every preset declares itself dark, so without
+    /// this override no user on a light terminal ever gets it.
+    #[test]
+    fn light_appearance_override_makes_review_fills_blend_toward_white() {
+        use crate::config::theme::AppearanceValue;
+
+        let overrides = ThemeOverrides {
+            appearance: Some(AppearanceValue::Light),
+            ..Default::default()
+        };
+        let light = Theme::truecolor().with_overrides(&overrides);
+        assert_eq!(light.appearance, Appearance::Light);
+
+        let Color::Rgb(r, g, b) = light.review_palette().add_bg else {
+            panic!("true-colour add fill is Rgb");
+        };
+        assert!(
+            r > 150 && g > 150 && b > 150,
+            "light-terminal add fill should sit near white, got ({r}, {g}, {b})"
+        );
+
+        // And the default — no override — is still the dark blend, so nothing
+        // changes for existing users.
+        let dark = Theme::truecolor().with_overrides(&ThemeOverrides::default());
+        assert_eq!(dark.appearance, Appearance::Dark);
+        let Color::Rgb(dr, dg, db) = dark.review_palette().add_bg else {
+            panic!("true-colour add fill is Rgb");
+        };
+        assert!(
+            dr < 100 && dg < 150 && db < 100,
+            "default add fill should stay near black, got ({dr}, {dg}, {db})"
         );
     }
 

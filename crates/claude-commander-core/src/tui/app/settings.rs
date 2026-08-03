@@ -320,6 +320,13 @@ impl App {
                         o.preset.clone().unwrap_or_else(|| "(auto)".into()),
                         "preset",
                     ),
+                    SettingsRow::text(
+                        "Appearance",
+                        o.appearance
+                            .map(|a| a.as_str().to_string())
+                            .unwrap_or_else(|| "(preset)".into()),
+                        "appearance",
+                    ),
                     theme_row!("Border Focused", border_focused),
                     theme_row!("Border Unfocused", border_unfocused),
                     theme_row!("Selection BG", selection_bg),
@@ -1147,7 +1154,7 @@ impl App {
                 _ => {}
             },
             SettingsTab::Theme => {
-                use crate::config::theme::ColorValue;
+                use crate::config::theme::{AppearanceValue, ColorValue};
 
                 if field_key == "preset" {
                     self.config.theme.preset = if value.is_empty() || value == "(auto)" {
@@ -1155,6 +1162,19 @@ impl App {
                     } else {
                         Some(value.to_string())
                     };
+                } else if field_key == "appearance" {
+                    // Clearing it (or typing the placeholder) falls back to
+                    // whatever the preset declares; anything unparseable is
+                    // ignored rather than silently flipping the surface.
+                    self.config.theme.appearance =
+                        if value.is_empty() || value == "(preset)" || value == "(auto)" {
+                            None
+                        } else if let Some(a) = AppearanceValue::parse(value) {
+                            Some(a)
+                        } else {
+                            warn!("Unknown theme appearance: {value:?} (expected dark or light)");
+                            self.config.theme.appearance
+                        };
                 } else {
                     // Try to parse the value as a ColorValue via TOML
                     let toml_input = if value.starts_with('#')
@@ -1517,6 +1537,21 @@ impl App {
                                 // Open an inline option picker for theme presets
                                 use crate::tui::theme::PRESET_NAMES;
                                 let options: Vec<PickerOption> = PRESET_NAMES
+                                    .iter()
+                                    .map(|s| PickerOption::plain(*s))
+                                    .collect();
+                                let current_value = state.rows[state.selected_row].text_value();
+                                let selected = options
+                                    .iter()
+                                    .position(|o| o.value == current_value)
+                                    .unwrap_or(0);
+                                state.editing =
+                                    Some(SettingsEditing::OptionPicker { options, selected });
+                            } else if state.tab == SettingsTab::Theme && field_key == "appearance" {
+                                // Two named values plus "inherit the preset" —
+                                // a picker rather than free text, so there is
+                                // nothing to mistype.
+                                let options: Vec<PickerOption> = ["(preset)", "dark", "light"]
                                     .iter()
                                     .map(|s| PickerOption::plain(*s))
                                     .collect();
