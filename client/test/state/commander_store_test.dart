@@ -101,6 +101,39 @@ void main() {
     expect(notifications, greaterThan(0));
   });
 
+  test('refresh() does not wait on the follow-up a mid-flight tick queued', () async {
+    final store = build();
+    addTearDown(store.dispose);
+    await store.connect();
+
+    // A poller tick lands while our fetch is in flight, so a follow-up refresh
+    // is coalesced onto it — and that follow-up then parks on a slow server.
+    final gate = Completer<void>();
+    addTearDown(() {
+      if (!gate.isCompleted) gate.complete();
+    });
+    var armed = false;
+    api.onWorkspaceSnapshot = () {
+      if (armed) return;
+      armed = true;
+      api.emitChange(); // queues a follow-up refresh
+      api.workspaceSnapshotGate = gate; // which will park
+    };
+
+    final before = api.countOf('workspaceSnapshot');
+    var done = false;
+    unawaited(store.refresh().then((_) => done = true));
+    await pumpEventQueue();
+
+    // The caller's refresh completed on its own fetch. Chaining the queued
+    // follow-up onto it instead re-arms the await on every tick — on a busy
+    // server that never unwinds, stranding connect()/reconnect() and every UI
+    // spinner waiting on them (e.g. the Edit server form's Save).
+    expect(done, isTrue);
+    // The follow-up did still fire — it's parked on the gate, not skipped.
+    expect(api.countOf('workspaceSnapshot'), before + 2);
+  });
+
   test('a connection-feed event updates connection and notifies', () async {
     final store = build();
     addTearDown(store.dispose);

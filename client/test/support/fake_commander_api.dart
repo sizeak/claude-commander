@@ -201,11 +201,24 @@ class FakeCommanderApi implements CommanderApi {
     return healthTmuxResponse;
   }
 
+  /// When set, `workspaceSnapshot` awaits this before returning — lets a test
+  /// hold a refresh in flight (e.g. a slow server mid-fetch). Checked before
+  /// [onWorkspaceSnapshot] runs, so a hook can arm the gate for the *next* fetch
+  /// without parking its own.
+  Completer<void>? workspaceSnapshotGate;
+
+  /// Called on every [workspaceSnapshot] — the seam for a test that needs
+  /// something to happen *while* a refresh is in flight (e.g. [emitChange],
+  /// modelling a poller tick landing mid-fetch).
+  void Function()? onWorkspaceSnapshot;
+
   @override
   Future<WorkspaceSnapshotDto> workspaceSnapshot({
     required String handle,
   }) async {
     _record('workspaceSnapshot', {'handle': handle});
+    if (workspaceSnapshotGate != null) await workspaceSnapshotGate!.future;
+    onWorkspaceSnapshot?.call();
     if (workspaceSnapshotError != null) throw workspaceSnapshotError!;
     return workspaceSnapshotResponse;
   }
