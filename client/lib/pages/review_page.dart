@@ -15,17 +15,21 @@ import '../widgets/session_chips.dart';
 import 'adaptive_shell.dart' show kWideBreakpoint;
 
 /// Review/diff + comments view for a session, layout-agnostic (no Scaffold, no
-/// route). Fetches the review snapshot (parsed unified diff, comments, reviewed
-/// marks), lets the user browse files and hunks, select a line range and attach a
-/// comment, then apply the staged comments back to the agent. Mirrors the TUI
-/// review view, scoped to a first cut: binary files render as a placeholder,
-/// reviewed marks are read-only.
+/// route). Fetches the review snapshot, lets the user browse files, select a
+/// line range and attach a comment, then apply the staged comments back to the
+/// agent.
+///
+/// The diff itself is laid out by `diffgrid` in the cdylib — the same engine the
+/// TUI renders through — so word-diff emphasis, side-by-side and expandable
+/// context are the same decisions in both frontends; see [DiffView]. Binary
+/// files still render as an image or a placeholder rather than a diff.
 ///
 /// Its own top action bar carries the diff summary + refresh + apply (rather than
 /// a Scaffold app bar / FAB) so it drops cleanly into either the narrow
 /// [ReviewPage] route or the wide shell's detail pane. Wide layouts (≥
-/// [kWideBreakpoint]) render the deck's FILES CHANGED sidebar + diff pane split;
-/// narrow layouts keep the expandable file-card flow.
+/// [kWideBreakpoint]) render the FILES CHANGED tree + diff pane split, and are
+/// the only place side by side is offered — a phone has room for one code
+/// column, so narrow layouts keep the unified, expandable file-card flow.
 class ReviewBody extends StatefulWidget {
   final CommanderApi api;
   final String handle;

@@ -77,10 +77,7 @@ abstract final class AppTheme {
         fillColor: AppColors.surface,
         hintStyle: const TextStyle(color: AppColors.textFaint),
         labelStyle: const TextStyle(color: AppColors.textMuted),
-        contentPadding: const EdgeInsets.symmetric(
-          horizontal: 14,
-          vertical: 13,
-        ),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
         border: _inputBorder(AppColors.border),
         enabledBorder: _inputBorder(AppColors.border),
         focusedBorder: _inputBorder(AppColors.accent),

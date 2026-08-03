@@ -44,15 +44,13 @@ void main() {
       expect(await store.load(), isEmpty);
     });
 
-    test(
-      'a corrupt metadata blob falls back to empty (never bricks startup)',
-      () async {
-        final store = KeyedServerListStore(
-          InMemorySecretKeyStore({'servers_v1': 'not json {['}),
-        );
-        expect(await store.load(), isEmpty);
-      },
-    );
+    test('a corrupt metadata blob falls back to empty (never bricks startup)',
+        () async {
+      final store = KeyedServerListStore(
+        InMemorySecretKeyStore({'servers_v1': 'not json {['}),
+      );
+      expect(await store.load(), isEmpty);
+    });
   });
 
   group('KeyedServerListStore round-trip', () {
@@ -93,28 +91,13 @@ void main() {
       final secrets = InMemorySecretKeyStore();
       final store = KeyedServerListStore(secrets);
       await store.save(const [
-        ServerConfig(
-          id: 'id-a',
-          name: 'a',
-          baseUrl: 'http://a',
-          token: 'tok-a',
-        ),
-        ServerConfig(
-          id: 'id-b',
-          name: 'b',
-          baseUrl: 'http://b',
-          token: 'tok-b',
-        ),
+        ServerConfig(id: 'id-a', name: 'a', baseUrl: 'http://a', token: 'tok-a'),
+        ServerConfig(id: 'id-b', name: 'b', baseUrl: 'http://b', token: 'tok-b'),
       ]);
 
       // Drop server b.
       await store.save(const [
-        ServerConfig(
-          id: 'id-a',
-          name: 'a',
-          baseUrl: 'http://a',
-          token: 'tok-a',
-        ),
+        ServerConfig(id: 'id-a', name: 'a', baseUrl: 'http://a', token: 'tok-a'),
       ]);
 
       expect(await secrets.read('token:id-a'), 'tok-a');

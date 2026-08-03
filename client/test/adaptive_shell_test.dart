@@ -101,27 +101,26 @@ void main() {
     },
   );
 
-  testWidgets(
-    'the Agent and Shell tabs switch to live terminal bodies in place',
-    (tester) async {
-      await pumpWide(tester);
-      await tester.tap(find.text('Alpha'));
-      await tester.pumpAndSettle();
+  testWidgets('the Agent and Shell tabs switch to live terminal bodies in place', (
+    tester,
+  ) async {
+    await pumpWide(tester);
+    await tester.tap(find.text('Alpha'));
+    await tester.pumpAndSettle();
 
-      // Agent tab → an agent-pane attach.
-      await tester.tap(find.byKey(const ValueKey('ws-tab-terminal')));
-      await tester.pump();
-      await tester.pump();
-      expect(find.byType(TerminalBody), findsOneWidget);
-      expect(find.byType(SessionDetailBody), findsNothing);
+    // Agent tab → an agent-pane attach.
+    await tester.tap(find.byKey(const ValueKey('ws-tab-terminal')));
+    await tester.pump();
+    await tester.pump();
+    expect(find.byType(TerminalBody), findsOneWidget);
+    expect(find.byType(SessionDetailBody), findsNothing);
 
-      // Shell tab → the paired shell attach.
-      await tester.tap(find.byKey(const ValueKey('ws-tab-shell')));
-      await tester.pump();
-      await tester.pump();
-      expect(find.byType(TerminalBody), findsOneWidget);
-    },
-  );
+    // Shell tab → the paired shell attach.
+    await tester.tap(find.byKey(const ValueKey('ws-tab-shell')));
+    await tester.pump();
+    await tester.pump();
+    expect(find.byType(TerminalBody), findsOneWidget);
+  });
 
   testWidgets('the Changes tab switches to the review body', (tester) async {
     await pumpWide(tester);

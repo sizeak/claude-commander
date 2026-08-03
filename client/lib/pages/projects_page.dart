@@ -28,11 +28,13 @@ class _ProjectsPageState extends State<ProjectsPage> {
   CommanderStore get _store => widget.store;
 
   /// Prompt for a server-side path; returns the trimmed value or null on cancel.
-  Future<String?> _promptPath({required String title, required String label}) =>
-      showDialog<String>(
-        context: context,
-        builder: (_) => _PathPromptDialog(title: title, label: label),
-      );
+  Future<String?> _promptPath({
+    required String title,
+    required String label,
+  }) => showDialog<String>(
+    context: context,
+    builder: (_) => _PathPromptDialog(title: title, label: label),
+  );
 
   Future<void> _addProject() async {
     final path = await _promptPath(

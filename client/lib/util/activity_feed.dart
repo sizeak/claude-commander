@@ -161,10 +161,7 @@ List<ActivityEvent> filterActivity(
     case ActivityFilter.all:
       return events;
     case ActivityFilter.needsYou:
-      return [
-        for (final e in events)
-          if (e.actionable) e,
-      ];
+      return [for (final e in events) if (e.actionable) e];
     case ActivityFilter.prs:
       return [
         for (final e in events)
@@ -206,11 +203,7 @@ ActivityEvent? _stateEvent(
       );
 
   if (s.status == SessionStatus.cascadePaused) {
-    return make(
-      ActivityKind.paused,
-      'cascade paused · awaiting decision',
-      true,
-    );
+    return make(ActivityKind.paused, 'cascade paused · awaiting decision', true);
   }
   // The agent sub-state only carries meaning while running (mirrors
   // `sessionDescriptor`).
@@ -248,10 +241,7 @@ ActivityEvent? _prEvent(SessionInfo s, String serverId, String serverName) {
   );
 
   if (s.prMerged || s.prState == PrState.merged) {
-    return make(
-      ActivityKind.prMerged,
-      num == null ? 'PR merged' : 'PR #$num merged',
-    );
+    return make(ActivityKind.prMerged, num == null ? 'PR merged' : 'PR #$num merged');
   }
   // "Ready for review": an open, non-draft PR still awaiting a first review.
   if (num != null &&

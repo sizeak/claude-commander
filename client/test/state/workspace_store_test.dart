@@ -8,12 +8,8 @@ import 'package:flutter_test/flutter_test.dart';
 import '../support/fake_commander_api.dart';
 import '../support/fixtures.dart';
 
-ServerConfig _cfg(String id, String name) => ServerConfig(
-  id: id,
-  name: name,
-  baseUrl: 'http://$name:7878',
-  token: 't-$id',
-);
+ServerConfig _cfg(String id, String name) =>
+    ServerConfig(id: id, name: name, baseUrl: 'http://$name:7878', token: 't-$id');
 
 void main() {
   // A workspace whose per-server stores are each backed by their own fake, so
@@ -97,8 +93,7 @@ void main() {
     final ws = WorkspaceStore(
       api: FakeCommanderApi(),
       listStore: InMemoryServerListStore([a, b]),
-      storeFactory: (cfg) =>
-          CommanderStore(api: localFakes[cfg.id]!, config: cfg),
+      storeFactory: (cfg) => CommanderStore(api: localFakes[cfg.id]!, config: cfg),
     );
 
     await ws.loadAndConnectAll();
@@ -112,53 +107,46 @@ void main() {
     expect(ws.serverById('id-a')!.sessions.single.projectName, 'A');
   });
 
-  test(
-    'disposing a store mid-connect releases the handle and wires no feeds',
-    () async {
-      final a = _cfg('id-a', 'laptop');
-      final fake = FakeCommanderApi()..connectGate = Completer<void>();
-      final ws = WorkspaceStore(
-        api: FakeCommanderApi(),
-        listStore: InMemoryServerListStore([a]),
-        storeFactory: (cfg) => CommanderStore(api: fake, config: cfg),
-      );
+  test('disposing a store mid-connect releases the handle and wires no feeds',
+      () async {
+    final a = _cfg('id-a', 'laptop');
+    final fake = FakeCommanderApi()..connectGate = Completer<void>();
+    final ws = WorkspaceStore(
+      api: FakeCommanderApi(),
+      listStore: InMemoryServerListStore([a]),
+      storeFactory: (cfg) => CommanderStore(api: fake, config: cfg),
+    );
 
-      await ws.loadAndConnectAll(); // connect starts, parks on the gate
-      await Future<void>.delayed(Duration.zero);
-      await ws.removeServer('id-a'); // dispose while connect is in flight
-      fake.connectGate!.complete(); // connect resumes on the disposed store
-      await Future<void>.delayed(Duration.zero);
-      await Future<void>.delayed(Duration.zero);
+    await ws.loadAndConnectAll(); // connect starts, parks on the gate
+    await Future<void>.delayed(Duration.zero);
+    await ws.removeServer('id-a'); // dispose while connect is in flight
+    fake.connectGate!.complete(); // connect resumes on the disposed store
+    await Future<void>.delayed(Duration.zero);
+    await Future<void>.delayed(Duration.zero);
 
-      // The freshly-acquired handle is released, and no feed was ever subscribed.
-      expect(fake.countOf('connectServer'), 1);
-      expect(fake.countOf('disconnectServer'), 1);
-      expect(fake.countOf('changeFeed'), 0);
-    },
-  );
+    // The freshly-acquired handle is released, and no feed was ever subscribed.
+    expect(fake.countOf('connectServer'), 1);
+    expect(fake.countOf('disconnectServer'), 1);
+    expect(fake.countOf('changeFeed'), 0);
+  });
 
-  test(
-    'a server that fails to connect stays visible without sinking others',
-    () async {
-      final a = _cfg('id-a', 'laptop');
-      final b = _cfg('id-b', 'codespace');
-      final ws = build([a, b]);
-      fakes[a.id]!.workspaceSnapshotError = StateError('unreachable');
-      fakes[b.id]!.listSessionsResponse = [
-        sessionInfo(
-          id: '22222222-2222-2222-2222-222222222222',
-          projectName: 'B',
-        ),
-      ];
+  test('a server that fails to connect stays visible without sinking others',
+      () async {
+    final a = _cfg('id-a', 'laptop');
+    final b = _cfg('id-b', 'codespace');
+    final ws = build([a, b]);
+    fakes[a.id]!.workspaceSnapshotError = StateError('unreachable');
+    fakes[b.id]!.listSessionsResponse = [
+      sessionInfo(id: '22222222-2222-2222-2222-222222222222', projectName: 'B'),
+    ];
 
-      await ws.addServer(a);
-      await ws.addServer(b);
+    await ws.addServer(a);
+    await ws.addServer(b);
 
-      // Both servers are present; the failed one carries an error, the healthy one
-      // still has its sessions.
-      expect(ws.servers, hasLength(2));
-      expect(ws.serverById('id-a')!.error, isNotNull);
-      expect(ws.serverById('id-b')!.sessions, hasLength(1));
-    },
-  );
+    // Both servers are present; the failed one carries an error, the healthy one
+    // still has its sessions.
+    expect(ws.servers, hasLength(2));
+    expect(ws.serverById('id-a')!.error, isNotNull);
+    expect(ws.serverById('id-b')!.sessions, hasLength(1));
+  });
 }

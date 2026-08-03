@@ -35,8 +35,7 @@ Future<CommanderStore> connectedStore(
 }
 
 /// A distinct UUID per small integer, so tests can mint several sessions.
-String id(int n) =>
-    '${n.toString().padLeft(8, '0')}-2222-3333-4444-555555555555';
+String id(int n) => '${n.toString().padLeft(8, '0')}-2222-3333-4444-555555555555';
 
 void main() {
   test('empty stores yield an empty feed', () async {
@@ -60,7 +59,10 @@ void main() {
     );
     final store = await connectedStore(
       [working, waiting],
-      states: {id(1): AgentState.waitingForInput, id(2): AgentState.working},
+      states: {
+        id(1): AgentState.waitingForInput,
+        id(2): AgentState.working,
+      },
     );
 
     final feed = buildActivityFeed([store]);
@@ -152,9 +154,8 @@ void main() {
     expect(kinds, contains(ActivityKind.prMerged));
     expect(kinds, contains(ActivityKind.prReady));
 
-    final mergedEvent = buildActivityFeed([
-      store,
-    ]).firstWhere((e) => e.kind == ActivityKind.prMerged);
+    final mergedEvent =
+        buildActivityFeed([store]).firstWhere((e) => e.kind == ActivityKind.prMerged);
     expect(mergedEvent.description, 'PR #42 merged');
   });
 

@@ -35,7 +35,9 @@ void main() {
   }
 
   Future<void> pumpPage(WidgetTester tester, CommanderStore store) async {
-    await tester.pumpWidget(MaterialApp(home: CreateSessionPage(store: store)));
+    await tester.pumpWidget(
+      MaterialApp(home: CreateSessionPage(store: store)),
+    );
     await tester.pumpAndSettle(); // let create-options load
   }
 

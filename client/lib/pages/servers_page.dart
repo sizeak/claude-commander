@@ -16,8 +16,10 @@ class ServersPage extends StatelessWidget {
 
   Future<void> _add(BuildContext context) => Navigator.of(context).push(
     MaterialPageRoute(
-      builder: (_) =>
-          ConnectionPage(api: workspace.api, onSubmit: workspace.addServer),
+      builder: (_) => ConnectionPage(
+        api: workspace.api,
+        onSubmit: workspace.addServer,
+      ),
     ),
   );
 
@@ -32,10 +34,7 @@ class ServersPage extends StatelessWidget {
         ),
       );
 
-  Future<void> _confirmRemove(
-    BuildContext context,
-    CommanderStore store,
-  ) async {
+  Future<void> _confirmRemove(BuildContext context, CommanderStore store) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -84,10 +83,7 @@ class ServersPage extends StatelessWidget {
                       store.config.baseUrl,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: AppTheme.mono(
-                        size: 11,
-                        color: AppColors.textMuted,
-                      ),
+                      style: AppTheme.mono(size: 11, color: AppColors.textMuted),
                     ),
                     onTap: () => _edit(context, store),
                     trailing: IconButton(

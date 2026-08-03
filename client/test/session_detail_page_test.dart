@@ -94,7 +94,10 @@ void main() {
     api.agentStatesResponse = agentStates(info, AgentState.waitingForInput);
     await pump(tester, info);
 
-    expect(find.textContaining('answer in the Agent terminal'), findsOneWidget);
+    expect(
+      find.textContaining('answer in the Agent terminal'),
+      findsOneWidget,
+    );
   });
 
   testWidgets('a non-waiting agent omits the waiting-input hint', (

@@ -95,9 +95,9 @@ class _ProgramsPageState extends State<ProgramsPage> {
     try {
       await widget.api.setPrograms(handle: widget.handle, programs: programs);
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('Programs saved')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Programs saved')),
+      );
       Navigator.of(context).pop();
     } catch (e) {
       if (!mounted) return;

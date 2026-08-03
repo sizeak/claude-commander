@@ -223,7 +223,9 @@ void main() {
         WorkspaceScope(
           workspace: ws,
           child: MaterialApp(
-            home: Scaffold(body: SessionListBody(onSelect: (_, _) {})),
+            home: Scaffold(
+              body: SessionListBody(onSelect: (_, _) {}),
+            ),
           ),
         ),
       );

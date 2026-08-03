@@ -17,8 +17,9 @@ class CommanderStoreScope extends InheritedWidget {
     required super.child,
   });
 
-  static CommanderStore? of(BuildContext context) =>
-      context.dependOnInheritedWidgetOfExactType<CommanderStoreScope>()?.store;
+  static CommanderStore? of(BuildContext context) => context
+      .dependOnInheritedWidgetOfExactType<CommanderStoreScope>()
+      ?.store;
 
   @override
   bool updateShouldNotify(CommanderStoreScope oldWidget) =>
@@ -39,8 +40,9 @@ class WorkspaceScope extends InheritedWidget {
     required super.child,
   });
 
-  static WorkspaceStore? of(BuildContext context) =>
-      context.dependOnInheritedWidgetOfExactType<WorkspaceScope>()?.workspace;
+  static WorkspaceStore? of(BuildContext context) => context
+      .dependOnInheritedWidgetOfExactType<WorkspaceScope>()
+      ?.workspace;
 
   @override
   bool updateShouldNotify(WorkspaceScope oldWidget) =>
