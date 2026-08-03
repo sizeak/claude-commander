@@ -7,6 +7,7 @@ import '../services/commander_api.dart';
 import '../src/rust/api/diff.dart';
 import '../src/rust/api/mirrors.dart';
 import '../src/rust/api/review.dart' as rust;
+import '../util/file_tree.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_theme.dart';
 import '../widgets/diff_view.dart';
@@ -62,6 +63,10 @@ class _ReviewBodyState extends State<ReviewBody> {
   /// Two-column diff, offered only in the wide layout: side by side needs room
   /// for two full code columns, and a phone has room for one.
   bool _sideBySide = false;
+
+  /// Directory paths the user has collapsed in the files tree. Keyed by the
+  /// node's full path, so a collapse survives a refresh that reorders files.
+  final Set<String> _collapsedDirs = {};
 
   String get _id => widget.session.id;
 
@@ -490,24 +495,45 @@ class _ReviewBodyState extends State<ReviewBody> {
           Expanded(
             child: ListView(
               padding: const EdgeInsets.symmetric(horizontal: 10),
-              children: [
-                for (var i = 0; i < snap.files.length; i++)
-                  _FileRow(
-                    file: snap.files[i],
-                    selected: i == sel,
-                    reviewed: _reviewed.contains(snap.files[i].displayPath),
-                    onSelect: () => setState(() => _selectedFile = i),
-                    onToggleReviewed:
-                        (_busy || _toggling.contains(snap.files[i].displayPath))
-                        ? null
-                        : () => _toggleReviewed(snap.files[i].displayPath),
-                  ),
-              ],
+              children: _fileTreeRows(snap, sel),
             ),
           ),
         ],
       ),
     );
+  }
+
+  /// The sidebar's rows: a compressed directory tree over the changed paths, so
+  /// a change spanning several directories reads as structure rather than as a
+  /// column of near-identical full paths.
+  List<Widget> _fileTreeRows(rust.ReviewSnapshotDto snap, int sel) {
+    final tree = buildFileTree([for (final f in snap.files) f.displayPath]);
+    return [
+      for (final row in flattenFileTree(tree, _collapsedDirs))
+        switch (row) {
+          FileTreeDirRow() => _DirRow(
+            row: row,
+            onToggle: () => setState(() {
+              // `remove` reports whether it was there, so this is one lookup.
+              if (!_collapsedDirs.remove(row.path)) {
+                _collapsedDirs.add(row.path);
+              }
+            }),
+          ),
+          FileTreeFileRow() => _FileRow(
+            file: snap.files[row.index],
+            name: row.name,
+            depth: row.depth,
+            selected: row.index == sel,
+            reviewed: _reviewed.contains(snap.files[row.index].displayPath),
+            onSelect: () => setState(() => _selectedFile = row.index),
+            onToggleReviewed:
+                (_busy || _toggling.contains(snap.files[row.index].displayPath))
+                ? null
+                : () => _toggleReviewed(snap.files[row.index].displayPath),
+          ),
+        },
+    ];
   }
 
   Widget _diffPane(
@@ -726,11 +752,60 @@ Widget _statusDot(rust.ReviewFileStatus status) => Container(
   ),
 );
 
-/// One row in the wide FILES CHANGED sidebar: a status swatch, the mono path,
-/// per-file +/− counts, and a reviewed toggle. Tapping the row selects the file
-/// for the diff pane; the trailing check toggles its reviewed mark.
+/// A directory row in the FILES CHANGED tree. Tapping it collapses or expands
+/// its subtree; a compressed chain shows as one `a/b/c` label.
+class _DirRow extends StatelessWidget {
+  final FileTreeDirRow row;
+  final VoidCallback onToggle;
+
+  const _DirRow({required this.row, required this.onToggle});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(left: row.depth * 12.0, bottom: 2),
+      child: InkWell(
+        onTap: onToggle,
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 5),
+          child: Row(
+            children: [
+              Icon(
+                row.collapsed
+                    ? Icons.keyboard_arrow_right
+                    : Icons.keyboard_arrow_down,
+                size: 14,
+                color: AppColors.textFaint,
+              ),
+              const SizedBox(width: 3),
+              Expanded(
+                child: Text(
+                  row.name,
+                  overflow: TextOverflow.ellipsis,
+                  style: AppTheme.mono(color: AppColors.textMuted),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// One file row in the wide FILES CHANGED tree: a status swatch, the file's own
+/// segment (the directories above it already say where it lives), per-file +/−
+/// counts, and a reviewed toggle. Tapping the row selects the file for the diff
+/// pane; the trailing check toggles its reviewed mark.
 class _FileRow extends StatelessWidget {
   final rust.ReviewFileDto file;
+
+  /// The leaf segment to label the row with.
+  final String name;
+
+  /// Tree depth, for the indent.
+  final int depth;
   final bool selected;
   final bool reviewed;
   final VoidCallback onSelect;
@@ -738,6 +813,8 @@ class _FileRow extends StatelessWidget {
 
   const _FileRow({
     required this.file,
+    required this.name,
+    required this.depth,
     required this.selected,
     required this.reviewed,
     required this.onSelect,
@@ -747,7 +824,7 @@ class _FileRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 4),
+      padding: EdgeInsets.only(left: depth * 12.0, bottom: 4),
       child: Material(
         color: selected ? AppColors.surface : Colors.transparent,
         shape: RoundedRectangleBorder(
@@ -766,11 +843,16 @@ class _FileRow extends StatelessWidget {
                 _statusDot(file.status),
                 const SizedBox(width: 8),
                 Expanded(
-                  child: Text(
-                    file.displayPath,
-                    overflow: TextOverflow.ellipsis,
-                    style: AppTheme.mono(
-                      color: selected ? AppColors.text : AppColors.textBright,
+                  // The full path is still one hover away, since the tree only
+                  // shows the leaf.
+                  child: Tooltip(
+                    message: file.displayPath,
+                    child: Text(
+                      name,
+                      overflow: TextOverflow.ellipsis,
+                      style: AppTheme.mono(
+                        color: selected ? AppColors.text : AppColors.textBright,
+                      ),
                     ),
                   ),
                 ),

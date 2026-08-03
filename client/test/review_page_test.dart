@@ -331,19 +331,28 @@ void main() {
     await tester.pumpWidget(wrap());
     await tester.pumpAndSettle();
 
-    // The sidebar eyebrow and both file paths render; the first file's diff is
-    // shown by default (no expand tap needed — the pane is always open).
+    // The sidebar is a compressed tree: the shared `lib` directory is one row,
+    // and each file shows its own leaf rather than repeating the path. The
+    // first file's diff is shown by default (the pane is always open).
     expect(find.text('FILES CHANGED'), findsOneWidget);
-    expect(find.text('lib/first.dart'), findsWidgets);
-    expect(find.text('lib/second.dart'), findsWidgets);
+    expect(find.text('lib'), findsOneWidget);
+    expect(find.text('first.dart'), findsOneWidget);
+    expect(find.text('second.dart'), findsOneWidget);
     expect(find.text('first file line'), findsOneWidget);
     expect(find.text('second file line'), findsNothing);
 
     // Selecting the second file swaps the diff pane to its hunks.
-    await tester.tap(find.text('lib/second.dart'));
+    await tester.tap(find.text('second.dart'));
     await tester.pumpAndSettle();
     expect(find.text('second file line'), findsOneWidget);
     expect(find.text('first file line'), findsNothing);
+
+    // Collapsing the directory hides its files without disturbing the pane.
+    await tester.tap(find.text('lib'));
+    await tester.pumpAndSettle();
+    expect(find.text('first.dart'), findsNothing);
+    expect(find.text('second.dart'), findsNothing);
+    expect(find.text('second file line'), findsOneWidget);
   });
 
   testWidgets('the wide layout surfaces a comment whose file is not among the '
