@@ -21,6 +21,13 @@ void main() {
     token: 'other-token',
   );
 
+  const thirdConfig = ServerConfig(
+    id: 'other-server',
+    name: 'other renamed',
+    baseUrl: 'http://third.test:7777',
+    token: 'third-token',
+  );
+
   const id = '11111111-2222-3333-4444-555555555555';
 
   AgentStatesSnapshotDto statesWith(AgentState state) => AgentStatesSnapshotDto(
@@ -150,6 +157,44 @@ void main() {
     expect(disconnectIdx, lessThan(connectIdxs[1]));
     // The new handle's feeds are live; the old one's are gone.
     expect(api.lastCall('changeFeed')!.args['handle'], 'handle-2');
+  });
+
+  test('a superseded reconnect does not roll its config back over a newer edit', () async {
+    api.connectServerResponse = 'handle-1';
+    final store = build();
+    addTearDown(store.dispose);
+    await store.connect();
+
+    // Edit #1 (the real flow: WorkspaceStore.updateServer applies the config,
+    // persists, then reconnects). Its reconnect parks while releasing handle-1.
+    final gate = Completer<void>();
+    api.disconnectGate = gate;
+    store.applyConfig(otherConfig);
+    final first = store.reconnect(otherConfig);
+    await pumpEventQueue();
+
+    // The form dismissed at the persist commit point, so the user saves edit #2
+    // while reconnect #1 is still in flight. It runs to completion.
+    api.disconnectGate = null;
+    api.connectServerResponse = 'handle-3';
+    store.applyConfig(thirdConfig);
+    await store.reconnect(thirdConfig);
+
+    // Reconnect #1 now resumes on a stale epoch. It must not assign its own
+    // (older) config, nor supersede the live connection with a third connect.
+    gate.complete();
+    await first;
+    await pumpEventQueue();
+
+    // The persisted list holds edit #2, so the store must too — otherwise the UI
+    // and the keychain disagree until the next launch.
+    expect(store.config.baseUrl, thirdConfig.baseUrl);
+    expect(store.config.token, thirdConfig.token);
+    expect(store.config.name, thirdConfig.name);
+    // Still live on edit #2's connection — a bail must not leave a dead store.
+    expect(store.handle, 'handle-3');
+    expect(api.countOf('connectServer'), 2);
+    expect(api.countOf('changeFeed'), 2);
   });
 
   test('dispose() releases the handle', () async {
