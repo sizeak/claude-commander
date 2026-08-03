@@ -39,6 +39,15 @@ ansi-to-tui = "8"
 # Text-input buffer (cursor/editing) for the review comment box.
 tui-input = "0.15"
 
+# Diff view-model and layout engine: unified-diff parsing, logical rows,
+# gap expansion, role-tagged spans, soft wrapping and hit-testing. The review
+# view and `git::review_diff`'s parser both delegate to it.
+#
+# TODO: this MUST become a git dependency before this branch is pushed. An
+# absolute `path` outside the repository breaks CI and every other worktree —
+# nothing but this machine can resolve it.
+diffgrid = { path = "/home/si/Projects/diffgrid" }
+
 # Git (pure Rust)
 gix = { version = "0.85", default-features = false, features = [
     "sha1",
@@ -88,6 +97,10 @@ directories = "6.0"
 url = "2.5"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 regex = "1.12"
+# Display-column measurement. Already in the tree via `ratatui-core`, so taking
+# it directly costs nothing — and any width math outside `diffgrid` must use it
+# rather than `chars().count()`, which is not a column count.
+unicode-width = "0.2"
 
 # Async utilities
 async-trait = "0.1"
