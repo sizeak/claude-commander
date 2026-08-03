@@ -1091,6 +1091,15 @@ class _LaidOutDiffState extends State<_LaidOutDiff> {
   String? _text;
   bool _fetchingText = false;
 
+  /// Bumped whenever the widget switches to a different file (or the same file
+  /// after a refresh). Both async paths capture it before their first `await`
+  /// and drop their result if it has moved on — otherwise a text fetch or a
+  /// layout started for file A can land after the switch and be applied to
+  /// file B, giving it A's [FileSource] (wrong trailing-gap size, wrong
+  /// revealed lines) and permanently overwriting B's own result if B's landed
+  /// first.
+  int _generation = 0;
+
   @override
   void initState() {
     super.initState();
@@ -1109,6 +1118,7 @@ class _LaidOutDiffState extends State<_LaidOutDiff> {
       _expansions.clear();
       _text = null;
       _fetchingText = false;
+      _generation++;
       _layOut();
     } else if (old.sideBySide != widget.sideBySide) {
       // Presentation only: expansions are expressed in gap indices, which the
@@ -1118,6 +1128,7 @@ class _LaidOutDiffState extends State<_LaidOutDiff> {
   }
 
   Future<void> _layOut() async {
+    final gen = _generation;
     try {
       final layout = await widget.api.diffRows(
         raw: widget.raw,
@@ -1128,14 +1139,14 @@ class _LaidOutDiffState extends State<_LaidOutDiff> {
         fileText: _text,
         expansions: List.of(_expansions),
       );
-      if (!mounted) return;
+      if (!mounted || gen != _generation) return;
       setState(() {
         _layout = layout;
         _error = null;
       });
       if (layout.hasHiddenContext && _text == null) _fetchText();
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || gen != _generation) return;
       setState(() => _error = e.toString());
     }
   }
@@ -1146,9 +1157,13 @@ class _LaidOutDiffState extends State<_LaidOutDiff> {
   Future<void> _fetchText() async {
     if (_fetchingText) return;
     _fetchingText = true;
+    final gen = _generation;
     try {
       final text = await widget.onLoadText(widget.file.displayPath);
-      if (!mounted) return;
+      // The file may have been switched while this was in flight. Applying
+      // A's text to B would give B the wrong `FileSource` — and clobber B's
+      // own text if it arrived first.
+      if (!mounted || gen != _generation) return;
       _text = text;
       await _layOut();
     } catch (_) {

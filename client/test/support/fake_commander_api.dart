@@ -80,6 +80,15 @@ class FakeCommanderApi implements CommanderApi {
   bool toggleFileReviewedResponse = true;
   Uint8List fetchBlobResponse = Uint8List(0);
 
+  /// Per-path blob bodies, taking precedence over [fetchBlobResponse]. Lets a
+  /// test tell two files' contents apart.
+  final Map<String, Uint8List> fetchBlobResponses = {};
+
+  /// Per-path gates: when a path has one, `fetchBlob` awaits it before
+  /// returning, so a test can hold one file's fetch in flight while another
+  /// completes.
+  final Map<String, Completer<void>> fetchBlobGates = {};
+
   /// Overrides the synthesized layout `diffRows` returns, for a test that needs
   /// rows the fake layout does not produce (side by side, gaps, emphasis).
   DiffLayoutDto? diffRowsResponse;
@@ -547,7 +556,9 @@ class FakeCommanderApi implements CommanderApi {
     required String path,
   }) async {
     _record('fetchBlob', {'side': side, 'path': path});
-    return fetchBlobResponse;
+    final gate = fetchBlobGates[path];
+    if (gate != null) await gate.future;
+    return fetchBlobResponses[path] ?? fetchBlobResponse;
   }
 
   @override
@@ -562,6 +573,7 @@ class FakeCommanderApi implements CommanderApi {
       'file': file.displayPath,
       'mode': mode,
       'hasText': fileText != null,
+      'text': fileText,
       'expansions': expansions.length,
     });
     return diffRowsResponse ?? fakeDiffLayout(file);

@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:claude_commander_client/pages/review_page.dart';
 import 'package:claude_commander_client/src/rust/api/diff.dart';
@@ -438,6 +440,66 @@ void main() {
     expect(fetch.args['path'], 'lib/foo.dart');
     // ...and the layout is rebuilt with the text, so the controls can render.
     expect(api.lastCall('diffRows')!.args['hasText'], isTrue);
+  });
+
+  testWidgets('a file text fetch that lands after the file was switched is '
+      'dropped instead of poisoning the new file', (tester) async {
+    // The diff pane keeps one state object and is handed a different file when
+    // the sidebar selection changes, so an in-flight fetch for the old file
+    // outlives the switch. Applied to the new file it would supply the wrong
+    // `FileSource` — wrong trailing-gap size, wrong revealed lines — and
+    // permanently overwrite the new file's own text if that arrived first.
+    tester.view.physicalSize = const Size(1400, 1000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    // Every file reports hidden context, so each one triggers a text fetch.
+    api.diffRowsResponse = const DiffLayoutDto(
+      rows: [],
+      selectable: 0,
+      hasHiddenContext: true,
+    );
+    api.fetchBlobResponses['lib/first.dart'] = Uint8List.fromList(
+      utf8.encode('FIRST TEXT'),
+    );
+    api.fetchBlobResponses['lib/second.dart'] = Uint8List.fromList(
+      utf8.encode('SECOND TEXT'),
+    );
+    // Hold the first file's fetch open across the switch.
+    final firstFetch = Completer<void>();
+    api.fetchBlobGates['lib/first.dart'] = firstFetch;
+
+    api.openReviewResponse = reviewSnapshot(
+      files: [
+        reviewFile(displayPath: 'lib/first.dart'),
+        reviewFile(displayPath: 'lib/second.dart'),
+      ],
+    );
+    await tester.pumpWidget(wrap());
+    await tester.pumpAndSettle();
+
+    // The first file's fetch is in flight and cannot have completed.
+    expect(api.lastCall('fetchBlob')!.args['path'], 'lib/first.dart');
+    expect(api.lastCall('diffRows')!.args['text'], isNull);
+
+    // Switch to the second file, whose own fetch completes normally.
+    await tester.tap(find.text('second.dart'));
+    await tester.pumpAndSettle();
+    expect(api.lastCall('diffRows')!.args['file'], 'lib/second.dart');
+    expect(api.lastCall('diffRows')!.args['text'], 'SECOND TEXT');
+    final layoutsBefore = api.countOf('diffRows');
+
+    // Now the stale fetch lands. It must be dropped: no re-layout, and the
+    // second file keeps its own text.
+    firstFetch.complete();
+    await tester.pumpAndSettle();
+
+    expect(
+      api.countOf('diffRows'),
+      layoutsBefore,
+      reason: 'a stale fetch must not trigger a re-layout of the new file',
+    );
+    expect(api.lastCall('diffRows')!.args['text'], 'SECOND TEXT');
   });
 
   testWidgets('a snapshot refresh resets a now-out-of-range line selection', (
