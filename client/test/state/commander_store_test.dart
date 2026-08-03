@@ -206,10 +206,11 @@ void main() {
     final first = store.reconnect(otherConfig);
     await pumpEventQueue();
 
-    // The edit form's close button isn't gated on its busy flag, so the user can
-    // dismiss the still-saving form, reopen Edit server, and save edit #2 while
-    // reconnect #1 is parked (easy when the old server is dead and its
-    // disconnect hangs on a network timeout). Edit #2 runs to completion.
+    // updateServer completes at the persist commit point and leaves the
+    // reconnect unawaited, so the Edit server form dismisses immediately: the
+    // user can reopen it and save edit #2 while reconnect #1 is still parked
+    // (easy when the old server is wedged and its disconnect sits on a 30s
+    // timeout). Edit #2 runs to completion.
     api.disconnectGate = null;
     api.connectServerResponse = 'handle-3';
     store.applyConfig(thirdConfig);
