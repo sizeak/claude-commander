@@ -110,7 +110,7 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/sessions/{id}/paste-image",
             post(paste::paste_image).route_layer(DefaultBodyLimit::max(
-                claude_commander_core::paste_image::MAX_IMAGE_BYTES,
+                claude_commander_protocol::paste::MAX_IMAGE_BYTES,
             )),
         )
         // -- projects --

@@ -23,7 +23,7 @@ use crate::state::AppState;
 /// `{ "path": "<absolute path written on the server>" }`.
 ///
 /// The route carries its own body-size limit (see the router) matching
-/// [`claude_commander_core::paste_image::MAX_IMAGE_BYTES`]; the service also
+/// [`claude_commander_protocol::paste::MAX_IMAGE_BYTES`]; the service also
 /// re-checks the length so the limit holds regardless of how the handler is
 /// mounted.
 pub async fn paste_image(
