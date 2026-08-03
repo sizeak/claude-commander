@@ -107,6 +107,13 @@ class WorkspaceStore extends ChangeNotifier {
   /// Update an existing server in place (URL/token/name edit): apply the config
   /// synchronously, persist, then reconnect its store (releasing the old handle
   /// first). A no-op add if the id isn't known.
+  ///
+  /// Completes at the *persist* commit point, which is what "saved" means here —
+  /// the reconnect runs in the background. It is several network round trips
+  /// against a server that may be slow, wedged, or down (30s per request), and
+  /// awaiting it left the Edit server form spinning long after the edit had
+  /// taken effect. The servers list reports reconnection progress through its
+  /// live connection dot instead.
   Future<void> updateServer(ServerConfig config) async {
     final store = serverById(config.id);
     if (store == null) return addServer(config);
@@ -116,7 +123,7 @@ class WorkspaceStore extends ChangeNotifier {
     store.applyConfig(config);
     await _persist();
     if (!_disposed) notifyListeners();
-    await store.reconnect(config);
+    unawaited(store.reconnect(config));
   }
 
   /// Remove a server: drop it from the list, persist, and dispose its store
