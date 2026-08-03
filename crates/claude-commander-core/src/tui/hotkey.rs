@@ -261,15 +261,6 @@ mod tests {
 
     #[test]
     fn segment_append_for_non_char_keys() {
-        let tab = bound(BindableAction::TogglePane, KeyCode::Tab, KeyModifiers::NONE);
-        assert_eq!(
-            segment_label("view", &tab, BindableAction::TogglePane),
-            HotkeyLabel::Append {
-                label: "view".to_string(),
-                key: "Tab".to_string(),
-            }
-        );
-
         let enter = bound(BindableAction::Select, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(
             segment_label("attach", &enter, BindableAction::Select),

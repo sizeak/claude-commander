@@ -232,21 +232,13 @@ pub struct Config {
     /// so an omitted field resolves to `Config::default()`'s `false`.)
     pub show_session_program: bool,
 
-    /// Whether to hide empty section headers in the session list.
+    /// Whether to hide empty section columns on the board.
     ///
-    /// Enabled by default. When true, sections with no sessions (including
-    /// "In Progress") are not rendered. This is a UI-only change; backend
-    /// section assignment is unaffected.
+    /// Enabled by default. When true, a section with no cards (including the
+    /// implicit "In Progress" catch-all) is dropped from the board's columns;
+    /// the sidebar and backend section assignment are unaffected.
     #[serde(default = "default_true")]
     pub hide_empty_sections: bool,
-
-    /// Dim the right pane (preview/diff/shell) when the session list is focused
-    pub dim_unfocused_preview: bool,
-
-    /// How much to dim unfocused pane colors (0.0 = fully dimmed/black, 1.0 = no dimming).
-    /// Uses a foreground color override instead of terminal DIM modifier for cross-terminal
-    /// compatibility. Only takes effect when `dim_unfocused_preview` is true.
-    pub dim_unfocused_opacity: f32,
 
     /// Leader key for quick-switch modal (e.g. " " for Space, "ctrl+k", "f1")
     pub leader_key: String,
@@ -254,7 +246,7 @@ pub struct Config {
     /// Debounce delay in ms when typing multi-digit session numbers
     pub session_number_debounce_ms: u64,
 
-    /// Enable AI-generated branch summaries in the Info pane
+    /// Enable AI-generated branch summaries in the Info modal
     pub ai_summary_enabled: bool,
 
     /// Claude model to use for AI summaries (Haiku recommended for cost efficiency)
@@ -285,9 +277,13 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub precompute_review_caches: bool,
 
-    /// Section definitions for grouping sessions in the TUI list.
-    /// First-match-wins in declared order; unmatched sessions fall into a
-    /// built-in "Other" catch-all.
+    /// Raw configured section definitions for grouping sessions on the board.
+    /// First-match-wins in declared order; unmatched sessions fall into the
+    /// implicit "In Progress" catch-all. This is the *raw* list the settings
+    /// editor and serde operate on — an empty list means "no sections
+    /// configured". Consumers that drive the board/assignment should call
+    /// [`Config::effective_sections`] instead, which substitutes the baked-in
+    /// defaults when this is empty.
     #[serde(default)]
     pub sections: Vec<crate::session::SectionConfig>,
 
@@ -536,8 +532,6 @@ impl Default for Config {
             invert_pr_label_color: false,
             show_session_program: false,
             hide_empty_sections: true,
-            dim_unfocused_preview: true,
-            dim_unfocused_opacity: 0.4,
             leader_key: " ".to_string(),
             session_number_debounce_ms: 250,
             ai_summary_enabled: true,
@@ -762,6 +756,15 @@ impl Config {
         } else {
             Ok(Self::data_dir()?.join("commander"))
         }
+    }
+
+    /// The sections that actually drive board columns and section assignment:
+    /// the configured [`sections`](Self::sections) when non-empty, otherwise the
+    /// baked-in defaults. The convenience chokepoint over the free
+    /// [`crate::session::effective_sections`] so callers can't accidentally
+    /// bypass the defaults by reading the raw field.
+    pub fn effective_sections(&self) -> std::borrow::Cow<'_, [crate::session::SectionConfig]> {
+        crate::session::effective_sections(&self.sections)
     }
 
     /// Program (with flags) to launch for the commander session, falling back

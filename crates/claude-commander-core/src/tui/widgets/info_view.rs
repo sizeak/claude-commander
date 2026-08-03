@@ -1,13 +1,16 @@
-//! Info pane widget
+//! Info modal widget
 //!
-//! Displays session metadata, PR details, and AI-generated summaries.
+//! Displays session metadata, PR details, and AI-generated summaries. The right
+//! pane that used to host this widget was removed with the board rewire; it is
+//! now reconstructed on demand by the Info modal (via
+//! `App::build_session_info_content`).
 
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Paragraph, Widget, Wrap},
+    widgets::{Paragraph, Widget, Wrap},
 };
 
 use crate::git::{AiSummary, ChecksStatus, DiffInfo, EnrichedPrInfo, PrState};
@@ -15,7 +18,7 @@ use crate::session::SessionStatus;
 use crate::tui::app::StackChainEntry;
 use crate::tui::theme::Theme;
 
-/// Data required to render the Info pane for a session.
+/// Data required to render the Info modal for a session.
 pub struct InfoSessionData<'a> {
     pub title: String,
     pub branch: String,
@@ -35,28 +38,23 @@ pub struct InfoSessionData<'a> {
     pub stack_chain: &'a [StackChainEntry],
 }
 
-/// Data required to render the Info pane for a project.
-pub struct InfoProjectData {
-    pub name: String,
-    pub repo_path: String,
-    pub main_branch: String,
-    /// When set, the background project-branch pull is currently held back
-    /// for this project. Displayed as a "Pull: " line in the Info pane.
-    pub pull_blocked: Option<String>,
-}
-
-/// Info pane content — either session or project data.
+/// Info modal content — session data, or an empty placeholder.
+///
+/// A single, short-lived value built once per Info-modal frame and consumed
+/// immediately — never stored in a collection — so the size gap between the
+/// `Session` and `Empty` variants doesn't matter; boxing would only add a
+/// per-frame heap allocation.
+#[allow(clippy::large_enum_variant)]
 pub enum InfoContent<'a> {
     Session(InfoSessionData<'a>),
-    Project(InfoProjectData),
     Empty,
 }
 
-/// Info view widget for the right pane.
+/// Info view widget. The caller draws any surrounding block and passes the
+/// inner area; this widget renders scrolled content only.
 pub struct InfoView<'a> {
     content: InfoContent<'a>,
     theme: &'a Theme,
-    block: Option<Block<'a>>,
     scroll: u16,
     /// Pre-built lines to render, bypassing `build_lines()` during `Widget::render`.
     prebuilt_lines: Option<Vec<Line<'static>>>,
@@ -67,15 +65,9 @@ impl<'a> InfoView<'a> {
         Self {
             content,
             theme,
-            block: None,
             scroll: 0,
             prebuilt_lines: None,
         }
-    }
-
-    pub fn block(mut self, block: Block<'a>) -> Self {
-        self.block = Some(block);
-        self
     }
 
     pub fn scroll(mut self, scroll: u16) -> Self {
@@ -93,7 +85,6 @@ impl<'a> InfoView<'a> {
     pub fn build_lines(&self) -> Vec<Line<'static>> {
         match &self.content {
             InfoContent::Session(data) => self.build_session_lines(data),
-            InfoContent::Project(data) => self.build_project_lines(data),
             InfoContent::Empty => vec![Line::from(Span::styled(
                 "Select a session to see info",
                 self.secondary_style(),
@@ -371,36 +362,6 @@ impl<'a> InfoView<'a> {
         }
     }
 
-    fn build_project_lines(&self, data: &InfoProjectData) -> Vec<Line<'static>> {
-        let label = self.label_style();
-        let value = self.value_style();
-
-        let mut lines = vec![
-            Line::from(vec![
-                Span::styled(" Project: ", label),
-                Span::styled(data.name.clone(), value),
-            ]),
-            Line::from(vec![
-                Span::styled(" Path:    ", label),
-                Span::styled(data.repo_path.clone(), value),
-            ]),
-            Line::from(vec![
-                Span::styled(" Branch:  ", label),
-                Span::styled(data.main_branch.clone(), value),
-            ]),
-        ];
-        if let Some(reason) = &data.pull_blocked {
-            lines.push(Line::from(vec![
-                Span::styled(" Pull:    ", label),
-                Span::styled(
-                    format!("⚠ blocked — {reason}"),
-                    Style::default().fg(self.theme.agent_waiting),
-                ),
-            ]));
-        }
-        lines
-    }
-
     fn label_style(&self) -> Style {
         Style::default()
             .fg(self.theme.text_accent)
@@ -418,11 +379,7 @@ impl<'a> InfoView<'a> {
 
 impl<'a> Widget for InfoView<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        let inner_height = if self.block.is_some() {
-            area.height.saturating_sub(2) as usize
-        } else {
-            area.height as usize
-        };
+        let visible_height = area.height as usize;
 
         let all_lines = match self.prebuilt_lines {
             Some(lines) => lines,
@@ -432,23 +389,14 @@ impl<'a> Widget for InfoView<'a> {
         let visible: Vec<Line<'static>> = all_lines
             .into_iter()
             .skip(self.scroll as usize)
-            .take(inner_height)
+            .take(visible_height)
             .collect();
 
-        let paragraph = Paragraph::new(visible).wrap(Wrap { trim: false });
-
-        let paragraph = if let Some(block) = self.block {
-            paragraph.block(block)
-        } else {
-            paragraph
-        };
-
-        paragraph.render(area, buf);
+        Paragraph::new(visible)
+            .wrap(Wrap { trim: false })
+            .render(area, buf);
     }
 }
-
-/// Info view state (reuses PreviewState for scrolling).
-pub type InfoViewState = super::PreviewState;
 
 /// Try to parse a GitHub hex color string (e.g. "d73a4a") into a ratatui Color.
 fn parse_hex_color(hex: &str) -> Option<ratatui::style::Color> {
@@ -560,34 +508,6 @@ mod tests {
         let view = InfoView::new(InfoContent::Session(data), &theme);
         let lines = view.build_lines();
         assert!(lines.len() > 15);
-    }
-
-    #[test]
-    fn test_info_view_project() {
-        let theme = test_theme();
-        let data = InfoProjectData {
-            name: "my-project".into(),
-            repo_path: "/home/user/projects/my-project".into(),
-            main_branch: "main".into(),
-            pull_blocked: None,
-        };
-        let view = InfoView::new(InfoContent::Project(data), &theme);
-        let lines = view.build_lines();
-        assert_eq!(lines.len(), 3);
-    }
-
-    #[test]
-    fn test_info_view_project_pull_blocked() {
-        let theme = test_theme();
-        let data = InfoProjectData {
-            name: "my-project".into(),
-            repo_path: "/home/user/projects/my-project".into(),
-            main_branch: "main".into(),
-            pull_blocked: Some("Working tree dirty".into()),
-        };
-        let view = InfoView::new(InfoContent::Project(data), &theme);
-        let lines = view.build_lines();
-        assert_eq!(lines.len(), 4);
     }
 
     #[test]

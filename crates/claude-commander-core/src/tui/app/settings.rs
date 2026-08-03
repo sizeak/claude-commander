@@ -122,16 +122,6 @@ impl App {
                     ),
                     SettingsRow::header("Appearance"),
                     SettingsRow::toggle(
-                        "Dim Unfocused Preview",
-                        c.dim_unfocused_preview,
-                        "dim_unfocused_preview",
-                    ),
-                    SettingsRow::text(
-                        "Dim Opacity",
-                        format!("{:.2}", c.dim_unfocused_opacity),
-                        "dim_unfocused_opacity",
-                    ),
-                    SettingsRow::toggle(
                         "Invert PR Label Color",
                         c.invert_pr_label_color,
                         "invert_pr_label_color",
@@ -1034,11 +1024,6 @@ impl App {
                     }
                     Err(_) => {}
                 },
-                "dim_unfocused_opacity" => {
-                    if let Ok(v) = value.parse::<f32>() {
-                        self.config.dim_unfocused_opacity = v.clamp(0.0, 1.0);
-                    }
-                }
                 "session_number_debounce_ms" => {
                     if let Ok(v) = value.parse::<u64>() {
                         self.config.session_number_debounce_ms = v;
@@ -1208,15 +1193,9 @@ impl App {
                     }
                 }
 
-                // Rebuild theme from updated overrides
-                let base = self
-                    .config
-                    .theme
-                    .preset
-                    .as_deref()
-                    .and_then(Theme::from_preset)
-                    .unwrap_or_default();
-                self.theme = base.with_overrides(&self.config.theme);
+                // Rebuild theme from updated overrides (also refreshes the
+                // project-colour cache so card borders repaint immediately).
+                self.reload_theme();
             }
             SettingsTab::Keybindings => {
                 use crate::config::keybindings::{BindableAction, KeyBinding};
@@ -1291,7 +1270,6 @@ impl App {
             "hibernate_enabled" => self.config.hibernate_enabled = value,
             "nix_develop" => self.config.nix_develop = value,
             "project_pull_enabled" => self.config.project_pull_enabled = value,
-            "dim_unfocused_preview" => self.config.dim_unfocused_preview = value,
             "invert_pr_label_color" => self.config.invert_pr_label_color = value,
             "show_session_program" => self.config.show_session_program = value,
             "hide_empty_sections" => self.config.hide_empty_sections = value,
@@ -1937,16 +1915,11 @@ impl App {
         self.reconcile_section_assignments().await;
     }
 
-    /// The backend whose programs the `EditServerPrograms` command/cog targets:
-    /// the selected server header, else the selected session/project's backend,
-    /// else local.
+    /// The backend whose programs the `EditServerPrograms` command targets:
+    /// the selected session/project's backend, else local. (Sidebar server
+    /// headings aren't selectable — a heading click passes its backend to
+    /// `open_settings_on_programs` directly instead of routing through here.)
     pub(super) fn selected_backend_id(&self) -> crate::backend::BackendId {
-        if let Some(idx) = self.ui_state.list_state.selected()
-            && let Some(SessionListItem::ServerHeader { backend, .. }) =
-                self.ui_state.list_items.get(idx)
-        {
-            return *backend;
-        }
         if let Some(sref) = self.ui_state.selected_session_id {
             return sref.backend;
         }

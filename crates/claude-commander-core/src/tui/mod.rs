@@ -20,6 +20,3 @@ mod widgets;
 pub use app::*;
 pub use event::*;
 pub use theme::Theme;
-
-#[cfg(test)]
-mod render_tests;
