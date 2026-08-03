@@ -514,6 +514,37 @@ class LcarsChrome extends Chrome {
     ),
   );
 
+  /// The phone shell: body above a footer of contiguous blocks.
+  ///
+  /// No `FloatingActionButton` and no `BottomAppBar` — the deck's LCARS footer is
+  /// three butted blocks (FLEET / + / ACTIVITY) whose outer bottom corners round
+  /// into the rail, so the centre action is simply the middle block rather than
+  /// something overlapping the bar.
+  @override
+  Widget buildShell(BuildContext context, ChromeShellSpec spec) {
+    final t = CommanderTokens.of(context);
+    return Scaffold(
+      backgroundColor: t.canvas,
+      body: SafeArea(
+        child: Column(
+          children: [
+            Expanded(child: spec.body),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 6, 10, 0),
+              child: buildFooterNav(
+                context,
+                ChromeFooterNavSpec(
+                  items: spec.items,
+                  centreAction: spec.centreAction,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget buildEyebrow(BuildContext context, String label) {
     final t = CommanderTokens.of(context);

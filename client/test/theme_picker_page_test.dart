@@ -31,7 +31,7 @@ void main() {
   );
 
   /// Every `Color` painted anywhere inside [id]'s preview.
-  Set<Color> previewColors(WidgetTester tester, ThemeId id) {
+  Set<Color> previewColors(ThemeId id) {
     final preview = find.byWidgetPredicate(
       (w) => w is ThemePreview && w.id == id,
     );
@@ -113,13 +113,13 @@ void main() {
     // Mission Control is active, so this is the deliberate exception to the
     // "every colour from CommanderTokens.of(context)" rule: the LCARS preview
     // must be painted in LCARS' colours while the app around it is not.
-    final lcars = previewColors(tester, ThemeId.lcars);
+    final lcars = previewColors(ThemeId.lcars);
     expect(lcars, contains(lcarsTokens.primary));
     expect(lcars, contains(lcarsTokens.nav));
     expect(lcars, contains(lcarsTokens.canvas));
     expect(lcars, isNot(contains(missionControlTokens.primary)));
 
-    final mc = previewColors(tester, ThemeId.missionControl);
+    final mc = previewColors(ThemeId.missionControl);
     expect(mc, contains(missionControlTokens.canvas));
     expect(mc, contains(missionControlTokens.surface));
     expect(mc, isNot(contains(lcarsTokens.primary)));
@@ -129,7 +129,7 @@ void main() {
     await tester.tap(find.text('LCARS'));
     await tester.pumpAndSettle();
     expect(
-      previewColors(tester, ThemeId.missionControl),
+      previewColors(ThemeId.missionControl),
       contains(missionControlTokens.canvas),
     );
   });

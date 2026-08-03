@@ -184,6 +184,31 @@ class ChromeFooterNavSpec {
   const ChromeFooterNavSpec({required this.items, this.centreAction});
 }
 
+/// The phone shell's whole frame: a body over a footer navigation bar.
+///
+/// The chrome owns the `Scaffold` here for the same reason it does for a page —
+/// and for one concrete reason besides. Mission Control docks its centre action
+/// as a `FloatingActionButton` overlapping the bar's top edge, which only
+/// hit-tests correctly when the `Scaffold` positions it via
+/// `floatingActionButtonLocation`. Returning the bar alone and letting the shell
+/// stack a FAB on top produces a button that paints but cannot be tapped, since
+/// Flutter does not hit-test outside a render box's bounds.
+@immutable
+class ChromeShellSpec {
+  final Widget body;
+  final List<ChromeNavItem> items;
+
+  /// The prominent centre action (new session). Mission Control docks it as a
+  /// FAB between the tabs; LCARS makes it the middle footer block.
+  final ChromeButtonAction? centreAction;
+
+  const ChromeShellSpec({
+    required this.body,
+    required this.items,
+    this.centreAction,
+  });
+}
+
 /// The form-element half of the chrome contract.
 ///
 /// Split from [Chrome] into its own interface purely to keep the files readable.
@@ -193,6 +218,7 @@ abstract interface class ChromeForms {
   Widget buildPanel(BuildContext context, ChromePanelSpec spec);
   Widget buildButtonBar(BuildContext context, ChromeButtonBarSpec spec);
   Widget buildFooterNav(BuildContext context, ChromeFooterNavSpec spec);
+  Widget buildShell(BuildContext context, ChromeShellSpec spec);
 
   /// A section eyebrow ("SERVERS", "FILES CHANGED").
   Widget buildEyebrow(BuildContext context, String label);
@@ -236,6 +262,16 @@ class ChromeFooterNav extends StatelessWidget {
   @override
   Widget build(BuildContext context) =>
       Chrome.of(context).buildFooterNav(context, spec);
+}
+
+/// The phone shell's frame, `Scaffold` included. See [ChromeShellSpec].
+class ChromeShell extends StatelessWidget {
+  final ChromeShellSpec spec;
+  const ChromeShell(this.spec, {super.key});
+
+  @override
+  Widget build(BuildContext context) =>
+      Chrome.of(context).buildShell(context, spec);
 }
 
 class ChromeEyebrow extends StatelessWidget {

@@ -81,10 +81,7 @@ void main() {
   ) async {
     api.listSessionsResponse = [
       sessionInfo(title: 'Alpha'),
-      sessionInfo(
-        id: '99999999-2222-3333-4444-555555555555',
-        title: 'Beta',
-      ),
+      sessionInfo(id: '99999999-2222-3333-4444-555555555555', title: 'Beta'),
     ];
     // Both stores are local to this test rather than reusing the one from
     // setUp: `WorkspaceStore.dispose()` disposes its children, so a store held

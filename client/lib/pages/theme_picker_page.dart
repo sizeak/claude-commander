@@ -94,7 +94,9 @@ class _ThemeCard extends StatelessWidget {
     final t = CommanderTokens.of(context);
     return ChromePanel(
       ChromePanelSpec(
-        accent: selected ? t.primary : t.borderSubtle,
+        // Null leaves the panel on each theme's own neutral border rather than
+        // picking one here; only the selected card claims the accent.
+        accent: selected ? t.primary : null,
         padding: const EdgeInsets.all(10),
         onTap: onTap,
         child: Column(
@@ -181,8 +183,8 @@ class _Badge extends StatelessWidget {
 ///
 /// It paints an abstraction rather than embedding a real page: a shrunken copy
 /// of the session list would need a store, a snapshot and a live connection,
-/// and a screenshot would silently go stale the moment a token changed. Bars and
-/// blocks drawn from the tokens cannot drift from the theme they describe.
+/// and a screenshot would go stale the moment a token changed. Bars and blocks
+/// drawn from the tokens cannot drift from the theme they describe.
 class ThemePreview extends StatelessWidget {
   final ThemeId id;
 

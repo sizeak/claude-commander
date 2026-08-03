@@ -14,6 +14,7 @@ import 'create_session_page.dart';
 import 'programs_page.dart';
 import 'projects_page.dart';
 import 'servers_page.dart';
+import 'settings_page.dart';
 import 'session_detail_page.dart';
 
 /// Which slice of the sessions the list is showing: everything (grouped by
@@ -773,54 +774,42 @@ Future<void> openProjects(
   ).push(MaterialPageRoute(builder: (_) => ProjectsPage(store: store)));
 }
 
-/// True when at least one server has a live handle (per-server actions need one).
-bool _anyConnected(WorkspaceStore workspace) =>
-    workspace.servers.any((s) => s.handle != null);
+/// Opens the [SettingsPage].
+void openSettings(BuildContext context) => Navigator.of(
+  context,
+).push(MaterialPageRoute(builder: (_) => const SettingsPage()));
 
-/// The settings menu shared by both shells: manage servers, plus the per-server
-/// projects/programs editors (which prompt for a server when more than one is
-/// configured). Renders as a plain settings icon by default; pass [button] to
-/// substitute a bespoke trigger (the Fleet header's rounded ⚙ tile).
+/// The settings entry point shared by both shells.
+///
+/// Was a `PopupMenuButton` listing Servers / Projects / Programs. It is now a
+/// single button opening the [SettingsPage], which carries those three plus the
+/// theme picker — a popup could not host the Appearance section the design calls
+/// for, and it would have kept growing with every new preference.
+///
+/// Renders a plain settings icon by default; pass [button] to substitute a
+/// bespoke trigger (the Fleet header's rounded tile).
 class SettingsMenu extends StatelessWidget {
   final WorkspaceStore workspace;
 
-  /// An optional custom trigger widget. When null the menu shows the default
-  /// settings icon.
+  /// An optional custom trigger widget. When null the default settings icon is
+  /// shown.
   final Widget? button;
 
   const SettingsMenu({super.key, required this.workspace, this.button});
 
   @override
   Widget build(BuildContext context) {
-    final enabled = _anyConnected(workspace);
-    return PopupMenuButton<String>(
-      icon: button == null ? const Icon(Icons.settings) : null,
-      tooltip: 'Settings',
-      position: PopupMenuPosition.under,
-      onSelected: (value) {
-        switch (value) {
-          case 'servers':
-            openServers(context, workspace);
-          case 'projects':
-            openProjects(context, workspace);
-          case 'programs':
-            openPrograms(context, workspace);
-        }
-      },
-      itemBuilder: (context) => [
-        const PopupMenuItem(value: 'servers', child: Text('Servers')),
-        PopupMenuItem(
-          value: 'projects',
-          enabled: enabled,
-          child: const Text('Projects'),
-        ),
-        PopupMenuItem(
-          value: 'programs',
-          enabled: enabled,
-          child: const Text('Programs'),
-        ),
-      ],
-      child: button,
+    final trigger = button;
+    if (trigger == null) {
+      return IconButton(
+        icon: const Icon(Icons.settings),
+        tooltip: 'Settings',
+        onPressed: () => openSettings(context),
+      );
+    }
+    return InkWell(
+      onTap: () => openSettings(context),
+      child: Semantics(button: true, label: 'Settings', child: trigger),
     );
   }
 }

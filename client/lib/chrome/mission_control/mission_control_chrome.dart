@@ -472,11 +472,10 @@ class MissionControlChrome extends Chrome {
         ),
       ),
     );
-    if (centre == null) return bar;
-    return Stack(
-      clipBehavior: Clip.none,
-      children: [bar, _dockedFab(context, centre, t)],
-    );
+    // Returns the bar alone. `centreAction` only reserves the notch here; the
+    // FAB itself is docked by [buildShell] via the Scaffold, which is the only
+    // way its overlapping half is tappable.
+    return bar;
   }
 
   /// The centre action as a docked FAB.
@@ -489,30 +488,42 @@ class MissionControlChrome extends Chrome {
   /// Docking it from the page's `Scaffold` is the only way to get both, which
   /// would mean the footer joining [ChromePageSpec] rather than being a body
   /// widget.
-  Widget _dockedFab(
-    BuildContext context,
-    ChromeButtonAction centre,
-    CommanderTokens t,
-  ) => Positioned(
-    top: -28,
-    left: 0,
-    right: 0,
-    child: Center(
-      child: FloatingActionButton(
-        onPressed: centre.onPressed,
-        backgroundColor: t.primary,
-        foregroundColor: t.canvas,
-        elevation: 6,
-        shape: RoundedRectangleBorder(
-          // Left as a literal for the reason `phone_shell.dart` gave: LCARS has
-          // no FAB at all, so there is no radius to parameterise.
-          borderRadius: BorderRadius.circular(16),
-        ),
-        tooltip: centre.label,
-        child: Icon(centre.icon, size: 26),
+  /// `phone_shell.dart`'s frame: the body over a `BottomAppBar`, with the centre
+  /// action docked as a `FloatingActionButton`.
+  ///
+  /// The FAB is handed to the `Scaffold` rather than stacked on the bar, because
+  /// `floatingActionButtonLocation` is what makes its overlapping top half
+  /// *tappable* — a negatively-positioned child of the bar would paint in the
+  /// right place but never receive the tap, since Flutter does not hit-test
+  /// outside a render box's bounds.
+  @override
+  Widget buildShell(BuildContext context, ChromeShellSpec spec) {
+    final t = CommanderTokens.of(context);
+    final centre = spec.centreAction;
+    return Scaffold(
+      body: SafeArea(bottom: false, child: spec.body),
+      floatingActionButton: centre == null
+          ? null
+          : FloatingActionButton(
+              onPressed: centre.onPressed,
+              backgroundColor: t.primary,
+              foregroundColor: t.canvas,
+              elevation: 6,
+              shape: RoundedRectangleBorder(
+                // Left as a literal: LCARS has no FAB at all, so there is no
+                // radius worth parameterising.
+                borderRadius: BorderRadius.circular(16),
+              ),
+              tooltip: centre.label,
+              child: Icon(centre.icon, size: 26),
+            ),
+      floatingActionButtonLocation: FloatingActionButtonLocation.centerDocked,
+      bottomNavigationBar: buildFooterNav(
+        context,
+        ChromeFooterNavSpec(items: spec.items, centreAction: centre),
       ),
-    ),
-  );
+    );
+  }
 
   /// `phone_shell.dart`'s `_NavTab`: the deck's glyph over a mono uppercase
   /// label, tinted with the nav accent when active and muted otherwise.
