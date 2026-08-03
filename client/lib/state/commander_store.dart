@@ -373,11 +373,17 @@ class CommanderStore extends ChangeNotifier {
     }
   }
 
+  /// Cancel and forget both feeds. Claims the fields synchronously before the
+  /// first await for the same reason [reconnect] claims the handle: a cancel that
+  /// parks here must not resume to read — and cancel — a NEWER connect's feeds,
+  /// nor null out the fields that reference them.
   Future<void> _teardownSubs() async {
-    await _changeSub?.cancel();
-    await _connectionSub?.cancel();
+    final change = _changeSub;
+    final connection = _connectionSub;
     _changeSub = null;
     _connectionSub = null;
+    await change?.cancel();
+    await connection?.cancel();
   }
 
   @override

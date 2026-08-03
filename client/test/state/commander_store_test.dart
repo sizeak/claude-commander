@@ -173,8 +173,10 @@ void main() {
     final first = store.reconnect(otherConfig);
     await pumpEventQueue();
 
-    // The form dismissed at the persist commit point, so the user saves edit #2
-    // while reconnect #1 is still in flight. It runs to completion.
+    // The edit form's close button isn't gated on its busy flag, so the user can
+    // dismiss the still-saving form, reopen Edit server, and save edit #2 while
+    // reconnect #1 is parked (easy when the old server is dead and its
+    // disconnect hangs on a network timeout). Edit #2 runs to completion.
     api.disconnectGate = null;
     api.connectServerResponse = 'handle-3';
     store.applyConfig(thirdConfig);
@@ -195,6 +197,8 @@ void main() {
     expect(store.handle, 'handle-3');
     expect(api.countOf('connectServer'), 2);
     expect(api.countOf('changeFeed'), 2);
+    // Reconnect #1 released handle-1 before bailing: no leak, no double-release.
+    expect(api.countOf('disconnectServer'), 1);
   });
 
   test('dispose() releases the handle', () async {
