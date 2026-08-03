@@ -15,8 +15,28 @@ void main() {
 
   setUp(() => api = FakeCommanderApi());
 
-  Widget wrap() => MaterialApp(
-    home: TerminalPage(api: api, handle: testHandle, session: sessionInfo()),
+  // `viewInsets` models the soft keyboard: the platform reports the height it
+  // covers. `viewPadding` is the (keyboard-invariant) system chrome inset.
+  Widget wrap({
+    EdgeInsets viewInsets = EdgeInsets.zero,
+    EdgeInsets viewPadding = const EdgeInsets.only(bottom: 24),
+  }) => MaterialApp(
+    home: Builder(
+      builder: (context) => MediaQuery(
+        data: MediaQuery.of(context).copyWith(
+          viewInsets: viewInsets,
+          viewPadding: viewPadding,
+          // Flutter collapses `padding` to zero on any edge the keyboard
+          // covers; mirror that so SafeArea behaves as it does on device.
+          padding: viewInsets.bottom > 0 ? EdgeInsets.zero : viewPadding,
+        ),
+        child: TerminalPage(
+          api: api,
+          handle: testHandle,
+          session: sessionInfo(),
+        ),
+      ),
+    ),
   );
 
   TerminalEvent output(List<int> bytes) => TerminalEvent(
@@ -136,6 +156,107 @@ void main() {
     await tester.pump();
 
     expect(api.attachTerminalCount, 2);
+  });
+
+  // Resizing the remote pane when the soft keyboard appears is destructive:
+  // tmux does not compensate a scrolled copy-mode view for the lines the shrink
+  // pushes into the history, so the text on screen slides forward by a viewport
+  // height and never comes back. The page pans instead of resizing, so the PTY
+  // never learns the keyboard exists.
+  testWidgets('the soft keyboard appearing does not resize the remote pane', (
+    tester,
+  ) async {
+    await tester.pumpWidget(wrap());
+    await tester.pump(); // subscribe
+    await tester.pump(); // let the layout-driven onResize settle
+
+    final resizesBefore = api.countOf('terminalResize');
+    final rowsBefore = readTerminal(tester).viewHeight;
+
+    // The keyboard slides in. Flutter animates the inset, so step through it
+    // rather than jumping straight to the final height.
+    for (final inset in [80.0, 180.0, 260.0, 320.0]) {
+      await tester.pumpWidget(wrap(viewInsets: EdgeInsets.only(bottom: inset)));
+      await tester.pump();
+    }
+
+    expect(
+      readTerminal(tester).viewHeight,
+      rowsBefore,
+      reason: 'the pane must keep its rows while the keyboard covers it',
+    );
+    expect(
+      api.countOf('terminalResize'),
+      resizesBefore,
+      reason: 'no resize may be sent to the server for a keyboard show',
+    );
+
+    // ...and dismissing it is equally silent.
+    await tester.pumpWidget(wrap());
+    await tester.pump();
+
+    expect(readTerminal(tester).viewHeight, rowsBefore);
+    expect(api.countOf('terminalResize'), resizesBefore);
+  });
+
+  testWidgets('the keyboard pans the pane up so the newest rows stay visible', (
+    tester,
+  ) async {
+    await tester.pumpWidget(wrap());
+    await tester.pump();
+    await tester.pump();
+
+    final before = tester.getRect(find.byType(TerminalView));
+
+    await tester.pumpWidget(
+      wrap(viewInsets: const EdgeInsets.only(bottom: 320)),
+    );
+    await tester.pump();
+
+    final after = tester.getRect(find.byType(TerminalView));
+
+    // Same height (that's what keeps the PTY's rows stable)...
+    expect(after.height, before.height);
+    // ...but slid up, so its bottom rows — the prompt and newest output — sit
+    // above the keyboard rather than behind it.
+    expect(after.top, lessThan(before.top));
+    expect(after.bottom, lessThan(before.bottom));
+    // The modifier bar is the only chrome between the pane and the keyboard.
+    // The test surface is 800x600, so the keyboard's top edge is at y=280; the
+    // bar lands at 256, the 24px short of it being the maintained viewPadding.
+    final bar = tester.getRect(find.byType(ListView));
+    expect(after.bottom, lessThanOrEqualTo(bar.top));
+    expect(bar.bottom, lessThanOrEqualTo(600 - 320));
+  });
+
+  // Regression: the pinned height must not be computed from space that the
+  // keyboard has already taken. A landscape phone's keyboard can be taller than
+  // the whole pane, and an earlier version of this fix collapsed to a zero-height
+  // pane there — which made the pinned height track the keyboard again (so the
+  // resize, and the copy-mode jump, came back) and overflowed the layout.
+  testWidgets('a keyboard taller than the pane still does not resize it', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(800, 360);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(wrap());
+    await tester.pump();
+    await tester.pump();
+
+    final resizesBefore = api.countOf('terminalResize');
+    final rowsBefore = readTerminal(tester).viewHeight;
+
+    // 250px of keyboard against a ~250px pane: more than the Column can give up.
+    await tester.pumpWidget(
+      wrap(viewInsets: const EdgeInsets.only(bottom: 250)),
+    );
+    await tester.pump();
+
+    expect(readTerminal(tester).viewHeight, rowsBefore);
+    expect(api.countOf('terminalResize'), resizesBefore);
+    expect(tester.takeException(), isNull, reason: 'no layout overflow');
   });
 
   testWidgets('defaults to an agent-pane attach', (tester) async {
