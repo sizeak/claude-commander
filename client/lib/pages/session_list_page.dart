@@ -1145,7 +1145,7 @@ class _RecentTile extends StatelessWidget {
       session,
       store.agentStateFor(session.id),
     );
-    final waiting = descriptor.color == AppColors.amber;
+    final waiting = descriptor.wantsAttention;
     final subtitle =
         '${descriptor.label} · ${session.projectName} · ${store.config.name}';
     return Material(
@@ -1233,7 +1233,7 @@ class _GroupedTile extends StatelessWidget {
       session,
       store.agentStateFor(session.id),
     );
-    final waiting = descriptor.color == AppColors.amber;
+    final waiting = descriptor.wantsAttention;
     final Color bg, borderColor;
     if (selected) {
       bg = AppColors.accent.withValues(alpha: 0.1);
