@@ -105,8 +105,7 @@ class CommanderStore extends ChangeNotifier {
     ];
   }
 
-  List<OperationStatusDto> get operations =>
-      _workspace?.operations ?? const [];
+  List<OperationStatusDto> get operations => _workspace?.operations ?? const [];
 
   List<SessionId> get pendingCommentSessions =>
       _workspace?.pendingCommentSessions ?? const [];
@@ -262,8 +261,7 @@ class CommanderStore extends ChangeNotifier {
       _api.cascadeResume(handle: _requireHandle);
 
   /// Abandon a paused cascade, leaving the stack where it stopped.
-  Future<void> cascadeAbandon() =>
-      _api.cascadeAbandon(handle: _requireHandle);
+  Future<void> cascadeAbandon() => _api.cascadeAbandon(handle: _requireHandle);
 
   /// Register a new project by its server-side repo path; returns its new id.
   Future<String> addProject(String path) =>
@@ -278,12 +276,14 @@ class CommanderStore extends ChangeNotifier {
       _api.scanDirectory(handle: _requireHandle, path: path);
 
   /// List a project's branches (local, plus remotes when [fetch] is set).
-  Future<List<BranchInfo>> listBranches(String projectId, {bool fetch = false}) =>
-      _api.listBranches(
-        handle: _requireHandle,
-        projectId: projectId,
-        fetch: fetch,
-      );
+  Future<List<BranchInfo>> listBranches(
+    String projectId, {
+    bool fetch = false,
+  }) => _api.listBranches(
+    handle: _requireHandle,
+    projectId: projectId,
+    fetch: fetch,
+  );
 
   /// Fetch a single session's detail (pane snapshot / diff stat) — data the
   /// snapshot doesn't carry, so the detail page fetches it on demand.

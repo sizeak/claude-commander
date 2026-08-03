@@ -132,11 +132,7 @@ class _TerminalBodyState extends State<TerminalBody> {
     };
     _terminal.onResize = (cols, rows, pixelWidth, pixelHeight) {
       unawaited(
-        widget.api.terminalResize(
-          attachId: _attachId,
-          cols: cols,
-          rows: rows,
-        ),
+        widget.api.terminalResize(attachId: _attachId, cols: cols, rows: rows),
       );
     };
 

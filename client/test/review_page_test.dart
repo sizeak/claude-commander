@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:claude_commander_client/pages/review_page.dart';
+import 'package:claude_commander_client/src/rust/api/diff.dart';
 import 'package:claude_commander_client/src/rust/api/review.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -301,7 +302,13 @@ void main() {
           displayPath: 'lib/first.dart',
           hunks: [
             hunk(
-              lines: [line(ReviewLineOrigin.addition, 'first file line', newLineno: 1)],
+              lines: [
+                line(
+                  ReviewLineOrigin.addition,
+                  'first file line',
+                  newLineno: 1,
+                ),
+              ],
             ),
           ],
         ),
@@ -309,7 +316,13 @@ void main() {
           displayPath: 'lib/second.dart',
           hunks: [
             hunk(
-              lines: [line(ReviewLineOrigin.addition, 'second file line', newLineno: 1)],
+              lines: [
+                line(
+                  ReviewLineOrigin.addition,
+                  'second file line',
+                  newLineno: 1,
+                ),
+              ],
             ),
           ],
         ),
@@ -360,6 +373,62 @@ void main() {
     await tester.pumpAndSettle();
     expect(api.countOf('deleteComment'), 1);
     expect(api.lastCall('deleteComment')!.args['commentId'], 'c-orphan');
+  });
+
+  testWidgets('the wide layout can switch the diff to side by side', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(1400, 1000);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    api.openReviewResponse = reviewSnapshot(
+      files: [
+        reviewFile(
+          displayPath: 'lib/foo.dart',
+          hunks: [
+            hunk(
+              lines: [line(ReviewLineOrigin.addition, 'a line', newLineno: 1)],
+            ),
+          ],
+        ),
+      ],
+    );
+    await tester.pumpWidget(wrap());
+    await tester.pumpAndSettle();
+
+    // Unified until asked otherwise — the layout mode is a property of the
+    // request, so the toggle has to reach the cdylib, not just repaint.
+    expect(api.lastCall('diffRows')!.args['mode'], DiffLayoutMode.inline);
+    await tester.tap(find.text('split'));
+    await tester.pumpAndSettle();
+    expect(api.lastCall('diffRows')!.args['mode'], DiffLayoutMode.sideBySide);
+  });
+
+  testWidgets('a diff with hidden context fetches the file text so the expand '
+      'controls can appear', (tester) async {
+    // Expansion reveals lines the diff never carried, so they can only come from
+    // the working-tree file — and the fetch is deferred until the layout says
+    // there is something hidden, so a fully-shown file costs no round trip.
+    api.diffRowsResponse = const DiffLayoutDto(
+      rows: [],
+      selectable: 0,
+      hasHiddenContext: true,
+    );
+    api.openReviewResponse = reviewSnapshot(
+      files: [reviewFile(displayPath: 'lib/foo.dart')],
+    );
+    await tester.pumpWidget(wrap());
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('lib/foo.dart'));
+    await tester.pumpAndSettle();
+
+    final fetch = api.lastCall('fetchBlob');
+    expect(fetch, isNotNull);
+    expect(fetch!.args['side'], 'new');
+    expect(fetch.args['path'], 'lib/foo.dart');
+    // ...and the layout is rebuilt with the text, so the controls can render.
+    expect(api.lastCall('diffRows')!.args['hasText'], isTrue);
   });
 
   testWidgets('a snapshot refresh resets a now-out-of-range line selection', (

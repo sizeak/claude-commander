@@ -132,7 +132,9 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
       } catch (e) {
         if (mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Session created; setting section failed: $e')),
+            SnackBar(
+              content: Text('Session created; setting section failed: $e'),
+            ),
           );
         }
       }

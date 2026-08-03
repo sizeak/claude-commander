@@ -40,11 +40,12 @@ bool _isWorking(CommanderStore store, SessionInfo s) =>
 bool _isReview(SessionInfo s) =>
     s.prNumber != null && s.prState == PrState.open;
 
-bool _matchesQuick(_Quick q, CommanderStore store, SessionInfo s) => switch (q) {
-  _Quick.needsInput => _isNeedsInput(store, s),
-  _Quick.working => _isWorking(store, s),
-  _Quick.review => _isReview(s),
-};
+bool _matchesQuick(_Quick q, CommanderStore store, SessionInfo s) =>
+    switch (q) {
+      _Quick.needsInput => _isNeedsInput(store, s),
+      _Quick.working => _isWorking(store, s),
+      _Quick.review => _isReview(s),
+    };
 
 /// Whether a server's base URL points at the local machine (drives the
 /// `local` / `remote` tag in the server node header). Compares the parsed
@@ -624,7 +625,10 @@ class _ServerSection extends StatelessWidget {
         )
       else
         for (final group in groups) ...[
-          _ProjectHeader(name: group.project.name, count: group.sessions.length),
+          _ProjectHeader(
+            name: group.project.name,
+            count: group.sessions.length,
+          ),
           for (final session in group.sessions)
             Padding(
               padding: const EdgeInsets.fromLTRB(14, 0, 12, 6),
@@ -920,9 +924,9 @@ class _CascadeBannerState extends State<CascadeBanner> {
               Expanded(
                 child: Text(
                   'Cascade paused — awaiting a decision',
-                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                    color: AppColors.amberText,
-                  ),
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleSmall?.copyWith(color: AppColors.amberText),
                 ),
               ),
             ],
@@ -1123,9 +1127,7 @@ class _RecentTile extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 9),
           decoration: BoxDecoration(
             color: selected ? AppColors.surfaceSel : null,
-            border: const Border(
-              bottom: BorderSide(color: AppColors.divider),
-            ),
+            border: const Border(bottom: BorderSide(color: AppColors.divider)),
           ),
           child: Row(
             children: [

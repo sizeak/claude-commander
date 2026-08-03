@@ -108,7 +108,9 @@ class _ConnectionPageState extends State<ConnectionPage> {
     try {
       final problem = await _probe(_config);
       if (!mounted) return;
-      setState(() => _healthOk = problem == null ? '/health ok · tmux healthy' : null);
+      setState(
+        () => _healthOk = problem == null ? '/health ok · tmux healthy' : null,
+      );
       _snack(
         problem ?? 'Connected — auth OK, tmux healthy',
         error: problem != null,
@@ -226,7 +228,8 @@ class _ConnectionPageState extends State<ConnectionPage> {
                     controller: _urlController,
                     label: 'SERVER URL',
                     hint: 'http://100.x.y.z:7878',
-                    helper: 'Reach a 127.0.0.1 server via SSH tunnel or Tailscale',
+                    helper:
+                        'Reach a 127.0.0.1 server via SSH tunnel or Tailscale',
                     keyboardType: TextInputType.url,
                     autocorrect: false,
                     validator: (v) {
@@ -336,7 +339,10 @@ class _ConnectionPageState extends State<ConnectionPage> {
               hintText: hint,
               hintStyle: AppTheme.mono(size: 13, color: AppColors.textFaint),
               helperText: helper,
-              helperStyle: AppTheme.mono(size: 10.5, color: AppColors.textFaint),
+              helperStyle: AppTheme.mono(
+                size: 10.5,
+                color: AppColors.textFaint,
+              ),
               helperMaxLines: 2,
             ),
             obscureText: obscureText,
@@ -370,7 +376,10 @@ class _ConnectionPageState extends State<ConnectionPage> {
               color: AppColors.teal,
               shape: BoxShape.circle,
               boxShadow: [
-                BoxShadow(color: AppColors.teal.withValues(alpha: 0.6), blurRadius: 8),
+                BoxShadow(
+                  color: AppColors.teal.withValues(alpha: 0.6),
+                  blurRadius: 8,
+                ),
               ],
             ),
           ),

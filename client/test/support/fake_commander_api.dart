@@ -2,10 +2,13 @@ import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:claude_commander_client/services/commander_api.dart';
+import 'package:claude_commander_client/src/rust/api/diff.dart';
 import 'package:claude_commander_client/src/rust/api/mirrors.dart';
 import 'package:claude_commander_client/src/rust/api/review.dart';
 import 'package:claude_commander_client/src/rust/api/simple.dart'
     show ScanResultDto;
+
+import 'fake_diff_layout.dart';
 
 /// One recorded call: the method name plus its positional arg values, so tests
 /// can assert both that a method fired and what it was passed.
@@ -76,6 +79,10 @@ class FakeCommanderApi implements CommanderApi {
   bool toggleKeepAliveResponse = false;
   bool toggleFileReviewedResponse = true;
   Uint8List fetchBlobResponse = Uint8List(0);
+
+  /// Overrides the synthesized layout `diffRows` returns, for a test that needs
+  /// rows the fake layout does not produce (side by side, gaps, emphasis).
+  DiffLayoutDto? diffRowsResponse;
 
   /// The session whose cascade is paused, surfaced in the workspace snapshot.
   /// Null (the default) means no cascade is paused.
@@ -544,6 +551,23 @@ class FakeCommanderApi implements CommanderApi {
   }
 
   @override
+  Future<DiffLayoutDto> diffRows({
+    required String? raw,
+    required ReviewFileDto file,
+    required DiffLayoutMode mode,
+    String? fileText,
+    List<DiffExpansion> expansions = const [],
+  }) async {
+    _record('diffRows', {
+      'file': file.displayPath,
+      'mode': mode,
+      'hasText': fileText != null,
+      'expansions': expansions.length,
+    });
+    return diffRowsResponse ?? fakeDiffLayout(file);
+  }
+
+  @override
   Stream<TerminalEvent> attachTerminal({
     required String handle,
     required String attachId,
@@ -577,7 +601,11 @@ class FakeCommanderApi implements CommanderApi {
     required int cols,
     required int rows,
   }) async {
-    _record('terminalResize', {'attachId': attachId, 'cols': cols, 'rows': rows});
+    _record('terminalResize', {
+      'attachId': attachId,
+      'cols': cols,
+      'rows': rows,
+    });
   }
 
   @override

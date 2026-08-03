@@ -1,11 +1,15 @@
 import 'dart:typed_data';
 
+import '../src/rust/api/diff.dart' as diff;
+import '../src/rust/api/diff.dart'
+    show DiffExpansion, DiffLayoutDto, DiffLayoutMode;
 import '../src/rust/api/mirrors.dart';
 import '../src/rust/api/registry.dart' as registry;
 import '../src/rust/api/review.dart' as review;
 // The DTO types unprefixed, so the abstract signatures read cleanly; the
 // prefixed alias above carries the forwarded functions.
-import '../src/rust/api/review.dart' show ApplyResult, ReviewSnapshotDto;
+import '../src/rust/api/review.dart'
+    show ApplyResult, ReviewFileDto, ReviewSnapshotDto;
 import '../src/rust/api/simple.dart' as simple;
 import '../src/rust/api/simple.dart' show ScanResultDto;
 import '../src/rust/api/terminal.dart' as terminal;
@@ -184,6 +188,19 @@ abstract class CommanderApi {
     required String sessionId,
     required String side,
     required String path,
+  });
+
+  /// Lay one file of a review diff out into rows of styled runs.
+  ///
+  /// Pure computation in the cdylib — no server involved, hence no `handle` —
+  /// but it goes through this seam like everything else so widget tests can
+  /// substitute a layout without loading the native library.
+  Future<DiffLayoutDto> diffRows({
+    required String? raw,
+    required ReviewFileDto file,
+    required DiffLayoutMode mode,
+    String? fileText,
+    List<DiffExpansion> expansions,
   });
 
   /// Open a live terminal attach. [attachId] is a caller-supplied per-attach id
@@ -475,6 +492,23 @@ class RustCommanderApi implements CommanderApi {
     sessionId: sessionId,
     side: side,
     path: path,
+  );
+
+  @override
+  Future<DiffLayoutDto> diffRows({
+    required String? raw,
+    required ReviewFileDto file,
+    required DiffLayoutMode mode,
+    String? fileText,
+    List<DiffExpansion> expansions = const [],
+  }) => diff.diffRows(
+    raw: raw,
+    fallback: file,
+    mode: mode,
+    fileText: fileText,
+    expansions: expansions,
+    // Four columns, matching the TUI's default tab width.
+    tabWidth: 4,
   );
 
   @override
