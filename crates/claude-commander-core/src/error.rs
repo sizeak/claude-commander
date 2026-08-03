@@ -95,6 +95,24 @@ pub enum SessionError {
     InvalidImage(String),
 }
 
+/// A pasted-image rejection from the shared wire contract
+/// ([`claude_commander_protocol::paste::validate`]) is an invalid-image error.
+/// The contract owns the *rules* (accept allow-list, size cap) and their user-
+/// facing wording; core owns how that surfaces in its own hierarchy — and the
+/// server maps [`SessionError::InvalidImage`] to a 400, so the message reaches
+/// the client verbatim.
+impl From<claude_commander_protocol::paste::ImageRejection> for SessionError {
+    fn from(e: claude_commander_protocol::paste::ImageRejection) -> Self {
+        SessionError::InvalidImage(e.to_string())
+    }
+}
+
+impl From<claude_commander_protocol::paste::ImageRejection> for Error {
+    fn from(e: claude_commander_protocol::paste::ImageRejection) -> Self {
+        Error::Session(SessionError::InvalidImage(e.to_string()))
+    }
+}
+
 /// Tmux integration errors
 #[derive(Error, Debug)]
 pub enum TmuxError {

@@ -117,6 +117,22 @@ abstract class CommanderApi {
 
   Future<bool> toggleKeepAlive({required String handle, required String id});
 
+  /// Upload an image to a session's agent pane. The server writes it to a temp
+  /// file and types the path into the pane without pressing Enter, so it shows
+  /// up in the terminal view through the normal attach stream — no success
+  /// feedback needed. Throws if the bytes aren't an allow-listed image or exceed
+  /// [imageMaxBytes]; the message is safe to show the user.
+  Future<void> pasteImage({
+    required String handle,
+    required String id,
+    required Uint8List bytes,
+  });
+
+  /// The pasted-image size cap in bytes, from the shared wire contract. Lets the
+  /// UI refuse an oversized pick from its file length instead of reading the
+  /// whole thing into memory first.
+  Future<int> imageMaxBytes();
+
   Future<String> addProject({required String handle, required String path});
 
   Future<void> removeProject({required String handle, required String id});
@@ -400,6 +416,16 @@ class RustCommanderApi implements CommanderApi {
   @override
   Future<bool> toggleKeepAlive({required String handle, required String id}) =>
       simple.toggleKeepAlive(handle: handle, id: id);
+
+  @override
+  Future<void> pasteImage({
+    required String handle,
+    required String id,
+    required Uint8List bytes,
+  }) => simple.pasteImage(handle: handle, id: id, bytes: bytes);
+
+  @override
+  Future<int> imageMaxBytes() => simple.imageMaxBytes();
 
   @override
   Future<String> addProject({required String handle, required String path}) =>

@@ -693,7 +693,6 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "clap",
  "claude-commander-protocol",
  "color-eyre",
  "crossterm",

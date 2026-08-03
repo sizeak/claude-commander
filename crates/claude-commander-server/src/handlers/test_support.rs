@@ -41,6 +41,11 @@ pub fn test_state(dir: &TempDir) -> AppState {
     let tmux_tmpdir = dir.path().join("tmux");
     std::fs::create_dir_all(&tmux_tmpdir).expect("create isolated tmux socket dir");
     config.tmux_tmpdir = Some(tmux_tmpdir);
+    // Same reasoning for pasted images: the paste-image handler tests only
+    // exercise the reject paths (which never write), but pinning the base dir
+    // keeps the fixture safe if one ever reaches the store — whose prune
+    // *deletes* files — instead of the real OS temp dir.
+    config.paste_images_dir = Some(dir.path().join("paste"));
     let config_store = Arc::new(ConfigStore::with_path(
         config,
         dir.path().join("config.toml"),

@@ -507,7 +507,7 @@ impl CommanderService {
     pub async fn paste_image(&self, query: &str, bytes: &[u8]) -> Result<PathBuf> {
         // Validate the bytes up front so junk/oversized input is a clean 400
         // regardless of whether the session exists (and before any disk write).
-        crate::paste_image::validate(bytes)?;
+        claude_commander_protocol::paste::validate(bytes)?;
 
         let tmux_name = self
             .resolve_tmux_session(query)
