@@ -1,8 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../state/commander_store_scope.dart';
-import '../theme/app_colors.dart';
-import '../theme/app_theme.dart';
+import '../theme/tokens.dart';
 import 'activity_page.dart';
 import 'session_list_page.dart';
 
@@ -31,6 +30,7 @@ class _PhoneShellState extends State<PhoneShell> {
   @override
   Widget build(BuildContext context) {
     final workspace = WorkspaceScope.of(context)!;
+    final t = CommanderTokens.of(context);
     return Scaffold(
       body: SafeArea(
         bottom: false,
@@ -48,10 +48,13 @@ class _PhoneShellState extends State<PhoneShell> {
       ),
       floatingActionButton: FloatingActionButton(
         onPressed: () => openCreateSession(context, workspace),
-        backgroundColor: AppColors.accent,
-        foregroundColor: AppColors.bg,
+        backgroundColor: t.primary,
+        foregroundColor: t.canvas,
         elevation: 6,
         shape: RoundedRectangleBorder(
+          // Left as a literal: LCARS has no FAB at all — its footer is three
+          // contiguous blocks (FLEET / + / ACTIVITY) that replace this whole
+          // widget in the chrome layer, so there is no radius to parameterise.
           borderRadius: BorderRadius.circular(16),
         ),
         tooltip: 'New session',
@@ -59,7 +62,7 @@ class _PhoneShellState extends State<PhoneShell> {
       ),
       floatingActionButtonLocation: FloatingActionButtonLocation.centerDocked,
       bottomNavigationBar: BottomAppBar(
-        color: AppColors.bgRaised,
+        color: t.canvasRaised,
         height: 62,
         padding: EdgeInsets.zero,
         child: SafeArea(
@@ -108,7 +111,8 @@ class _NavTab extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = selected ? AppColors.accent : AppColors.textFaint;
+    final t = CommanderTokens.of(context);
+    final color = selected ? t.nav : t.textFaint;
     return InkWell(
       onTap: onTap,
       child: Column(
@@ -119,7 +123,7 @@ class _NavTab extends StatelessWidget {
           const SizedBox(height: 4),
           Text(
             label,
-            style: AppTheme.mono(size: 9, weight: FontWeight.w600, color: color),
+            style: t.meta(size: 9, weight: FontWeight.w600, color: color),
           ),
         ],
       ),

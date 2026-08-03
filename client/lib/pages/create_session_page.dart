@@ -3,8 +3,7 @@ import 'package:flutter/material.dart';
 import '../services/commander_api.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
-import '../theme/app_colors.dart';
-import '../theme/app_theme.dart';
+import '../theme/tokens.dart';
 import 'projects_page.dart';
 
 /// Form for creating a session. The project is picked from the server's
@@ -235,6 +234,7 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
   }
 
   Widget _projectField(List<ProjectInfoDto> projects) {
+    final t = CommanderTokens.of(context);
     return DropdownButtonFormField<String>(
       // Re-key on the selection so the field adopts the reconciled value when a
       // project is picked or the selected one disappears from the live list.
@@ -265,7 +265,7 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
                   p.repoPath,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: AppTheme.mono(size: 11, color: AppColors.textMuted),
+                  style: t.meta(size: 11, color: t.textMuted),
                 ),
               ],
             ),
@@ -296,9 +296,10 @@ class _CreateSessionPageState extends State<CreateSessionPage> {
     final programs = _options?.programs ?? const <ProgramInfo>[];
     if (programs.isEmpty) {
       // Fallback: no options → free-text (keeps creation working offline).
+      final t = CommanderTokens.of(context);
       return TextFormField(
         controller: _program,
-        style: AppTheme.mono(size: 13, color: AppColors.text),
+        style: t.meta(size: 13, color: t.text),
         decoration: const InputDecoration(
           labelText: 'Program (optional)',
           hintText: 'claude',

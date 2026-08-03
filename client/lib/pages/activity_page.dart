@@ -3,8 +3,7 @@ import 'package:flutter/material.dart';
 import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
 import '../state/workspace_store.dart';
-import '../theme/app_colors.dart';
-import '../theme/app_theme.dart';
+import '../theme/tokens.dart';
 import '../util/activity_feed.dart';
 import '../util/format.dart';
 import 'terminal_page.dart';
@@ -12,7 +11,8 @@ import 'terminal_page.dart';
 /// The cross-server Activity timeline — layout-agnostic (no Scaffold, no route),
 /// so it embeds in both the phone bottom-nav and the wide workspace pane. A
 /// vertical rail runs down the left with a coloured node per event; actionable
-/// "needs you" events float to the top as amber cards with an Answer button.
+/// "needs you" events float to the top as attention-tinted cards with an Answer
+/// button.
 ///
 /// Reads the [WorkspaceStore] from the enclosing [WorkspaceScope] and rebuilds
 /// off its change broadcast (it re-emits every child store's ticks), deriving the
@@ -72,7 +72,7 @@ class _ActivityBodyState extends State<ActivityBody> {
           const SizedBox(height: 2),
           Text(
             'across $serverCount server${serverCount == 1 ? '' : 's'} · live',
-            style: AppTheme.mono(),
+            style: CommanderTokens.of(context).meta(),
           ),
         ],
       ),
@@ -93,7 +93,7 @@ class _ActivityBodyState extends State<ActivityBody> {
           ),
           _FilterChip(
             label: 'Needs you · $needsYou',
-            color: AppColors.amberText,
+            color: CommanderTokens.of(context).attentionOn,
             selected: _filter == ActivityFilter.needsYou,
             onTap: () => setState(() => _filter = ActivityFilter.needsYou),
           ),
@@ -120,14 +120,15 @@ class _ActivityBodyState extends State<ActivityBody> {
         children: [_emptyState(servers)],
       );
     }
+    final t = CommanderTokens.of(context);
     return ListView(
       physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.fromLTRB(26, 20, 20, 24),
       children: [
         Container(
-          decoration: const BoxDecoration(
+          decoration: BoxDecoration(
             border: Border(
-              left: BorderSide(color: AppColors.borderSubtle, width: 2),
+              left: BorderSide(color: t.borderSubtle, width: 2),
             ),
           ),
           child: Column(
@@ -185,19 +186,22 @@ class _ActivityBodyState extends State<ActivityBody> {
   }
 }
 
-/// The palette node colour for an event kind, matching the deck's timeline dots.
-Color _nodeColor(ActivityKind kind) => switch (kind) {
-  ActivityKind.needsYou => AppColors.amber,
-  ActivityKind.paused => AppColors.amber,
-  ActivityKind.working => AppColors.teal,
-  ActivityKind.prReady => AppColors.green,
-  ActivityKind.prMerged => AppColors.accentSoft,
-  ActivityKind.pushed => AppColors.accentSoft,
-  ActivityKind.finishedUnread => AppColors.accentSoft,
-};
+/// The node colour for an event kind, matching the deck's timeline dots.
+Color _nodeColor(BuildContext context, ActivityKind kind) {
+  final t = CommanderTokens.of(context);
+  return switch (kind) {
+    ActivityKind.needsYou => t.attention,
+    ActivityKind.paused => t.held,
+    ActivityKind.working => t.working,
+    ActivityKind.prReady => t.success,
+    ActivityKind.prMerged => t.info,
+    ActivityKind.pushed => t.info,
+    ActivityKind.finishedUnread => t.info,
+  };
+}
 
 /// One row on the timeline: a coloured node sitting on the rail, then either an
-/// amber "NEEDS YOU" card (actionable events) or a compact event row.
+/// attention-tinted "NEEDS YOU" card (actionable events) or a compact event row.
 class _TimelineItem extends StatelessWidget {
   final ActivityEvent event;
   final VoidCallback onTap;
@@ -207,7 +211,7 @@ class _TimelineItem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final actionable = event.actionable;
-    final color = _nodeColor(event.kind);
+    final color = _nodeColor(context, event.kind);
     // Node radius + its vertical offset differ between the card and a plain row
     // so the dot lands on the title baseline in both.
     final radius = actionable ? 7.0 : 4.5;
@@ -241,6 +245,7 @@ class _TimelineItem extends StatelessWidget {
   );
 
   Widget _needsYouCard(BuildContext context) {
+    final t = CommanderTokens.of(context);
     return Material(
       color: Colors.transparent,
       child: InkWell(
@@ -249,9 +254,9 @@ class _TimelineItem extends StatelessWidget {
         child: Container(
           padding: const EdgeInsets.fromLTRB(14, 11, 12, 11),
           decoration: BoxDecoration(
-            color: AppColors.amber.withValues(alpha: 0.09),
+            color: t.attention.withValues(alpha: 0.09),
             borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: AppColors.amber.withValues(alpha: 0.4)),
+            border: Border.all(color: t.attention.withValues(alpha: 0.4)),
           ),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -266,10 +271,10 @@ class _TimelineItem extends StatelessWidget {
                           event.kind == ActivityKind.paused
                               ? 'PAUSED'
                               : 'NEEDS YOU',
-                          style: AppTheme.mono(
+                          style: t.meta(
                             size: 9,
                             weight: FontWeight.w700,
-                            color: AppColors.amberText,
+                            color: t.attentionOn,
                             letterSpacing: 0.8,
                           ),
                         ),
@@ -279,10 +284,10 @@ class _TimelineItem extends StatelessWidget {
                             event.title,
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontSize: 14,
                               fontWeight: FontWeight.w600,
-                              color: AppColors.text,
+                              color: t.text,
                             ),
                           ),
                         ),
@@ -293,7 +298,7 @@ class _TimelineItem extends StatelessWidget {
                       '${event.description} · ${event.serverName} / ${event.location}',
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
-                      style: AppTheme.mono(size: 10.5),
+                      style: t.meta(size: 10.5),
                     ),
                   ],
                 ),
@@ -305,10 +310,10 @@ class _TimelineItem extends StatelessWidget {
                   if (event.at != null)
                     Text(
                       relativeAge(event.at!),
-                      style: AppTheme.mono(size: 10, color: AppColors.textFaint),
+                      style: t.meta(size: 10, color: t.textFaint),
                     ),
                   const SizedBox(height: 8),
-                  if (event.sessionId != null) _answerButton(),
+                  if (event.sessionId != null) _answerButton(context),
                 ],
               ),
             ],
@@ -318,23 +323,27 @@ class _TimelineItem extends StatelessWidget {
     );
   }
 
-  Widget _answerButton() => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-    decoration: BoxDecoration(
-      color: AppColors.accent,
-      borderRadius: BorderRadius.circular(9),
-    ),
-    child: const Text(
-      'Answer ›',
-      style: TextStyle(
-        fontSize: 12,
-        fontWeight: FontWeight.w700,
-        color: AppColors.bg,
+  Widget _answerButton(BuildContext context) {
+    final t = CommanderTokens.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+      decoration: BoxDecoration(
+        color: t.primary,
+        borderRadius: BorderRadius.circular(9),
       ),
-    ),
-  );
+      child: Text(
+        'Answer ›',
+        style: TextStyle(
+          fontSize: 12,
+          fontWeight: FontWeight.w700,
+          color: t.canvas,
+        ),
+      ),
+    );
+  }
 
   Widget _eventRow(BuildContext context) {
+    final t = CommanderTokens.of(context);
     final trailing = event.at == null
         ? event.location
         : '${relativeAge(event.at!)} · ${event.location}';
@@ -356,10 +365,10 @@ class _TimelineItem extends StatelessWidget {
                       event.title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.w600,
-                        color: AppColors.text,
+                        color: t.text,
                       ),
                     ),
                     const SizedBox(height: 2),
@@ -367,7 +376,7 @@ class _TimelineItem extends StatelessWidget {
                       event.description,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: AppTheme.mono(size: 10.5),
+                      style: t.meta(size: 10.5),
                     ),
                   ],
                 ),
@@ -377,7 +386,7 @@ class _TimelineItem extends StatelessWidget {
                 padding: const EdgeInsets.only(top: 1),
                 child: Text(
                   trailing,
-                  style: AppTheme.mono(size: 10, color: AppColors.textFaint),
+                  style: t.meta(size: 10, color: t.textFaint),
                 ),
               ),
             ],
@@ -388,7 +397,7 @@ class _TimelineItem extends StatelessWidget {
   }
 }
 
-/// A pill toggle for the filter row. Selected fills [AppColors.surfaceSel];
+/// A pill toggle for the filter row. Selected fills the selected-surface token;
 /// unselected is a bordered surface pill with muted (or [color]-tinted) text.
 class _FilterChip extends StatelessWidget {
   final String label;
@@ -405,6 +414,7 @@ class _FilterChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     return Padding(
       padding: const EdgeInsets.only(right: 7),
       child: Material(
@@ -415,20 +425,18 @@ class _FilterChip extends StatelessWidget {
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 7),
             decoration: BoxDecoration(
-              color: selected ? AppColors.surfaceSel : AppColors.surface,
+              color: selected ? t.surfaceSelected : t.surface,
               borderRadius: BorderRadius.circular(20),
               border: Border.all(
-                color: selected ? AppColors.surfaceSel : AppColors.border,
+                color: selected ? t.surfaceSelected : t.border,
               ),
             ),
             child: Text(
               label,
-              style: AppTheme.mono(
+              style: t.meta(
                 size: 10.5,
                 weight: FontWeight.w600,
-                color: selected
-                    ? AppColors.text
-                    : (color ?? AppColors.textMuted),
+                color: selected ? t.text : (color ?? t.textMuted),
               ),
             ),
           ),
@@ -446,16 +454,17 @@ class _InlineNote extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 48),
       child: Column(
         children: [
-          Icon(icon, color: AppColors.textFaint),
+          Icon(icon, color: t.textFaint),
           const SizedBox(height: 10),
           Text(
             text,
             textAlign: TextAlign.center,
-            style: const TextStyle(color: AppColors.textMuted),
+            style: TextStyle(color: t.textMuted),
           ),
         ],
       ),

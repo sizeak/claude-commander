@@ -4,9 +4,8 @@ import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
 import '../state/workspace_store.dart';
-import '../theme/app_colors.dart';
-import '../theme/app_theme.dart';
 import '../theme/agent_glyphs.dart';
+import '../theme/tokens.dart';
 import '../util/format.dart';
 import '../util/session_filter.dart';
 import '../widgets/brand_mark.dart';
@@ -195,6 +194,7 @@ class _SessionListBodyState extends State<SessionListBody> {
     required int working,
     required int review,
   }) {
+    final t = CommanderTokens.of(context);
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
       child: Column(
@@ -204,11 +204,11 @@ class _SessionListBodyState extends State<SessionListBody> {
             controller: _search,
             onChanged: _setQuery,
             textInputAction: TextInputAction.search,
-            style: const TextStyle(fontSize: 13.5, color: AppColors.text),
+            style: TextStyle(fontSize: 13.5, color: t.text),
             decoration: InputDecoration(
               isDense: true,
               prefixIcon: const Icon(Icons.search, size: 18),
-              prefixIconColor: AppColors.textFaint,
+              prefixIconColor: t.textFaint,
               hintText: 'Filter by name, branch, program…',
               suffixIcon: _search.text.isEmpty
                   ? null
@@ -231,14 +231,15 @@ class _SessionListBodyState extends State<SessionListBody> {
   }
 
   Widget _segmented() {
+    final t = CommanderTokens.of(context);
     return Row(
       children: [
         Expanded(
           child: Container(
             decoration: BoxDecoration(
-              color: AppColors.surface,
+              color: t.surface,
               borderRadius: BorderRadius.circular(9),
-              border: Border.all(color: AppColors.border),
+              border: Border.all(color: t.border),
             ),
             padding: const EdgeInsets.all(3),
             child: Row(
@@ -253,16 +254,16 @@ class _SessionListBodyState extends State<SessionListBody> {
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
           decoration: BoxDecoration(
-            color: AppColors.surface,
+            color: t.surface,
             borderRadius: BorderRadius.circular(9),
-            border: Border.all(color: AppColors.border),
+            border: Border.all(color: t.border),
           ),
           child: Text(
             _view == _SessionView.recent ? '↓ recency' : 'grouped',
-            style: AppTheme.mono(
+            style: t.meta(
               size: 10,
               weight: FontWeight.w600,
-              color: AppColors.textBright,
+              color: t.textBright,
             ),
           ),
         ),
@@ -271,6 +272,7 @@ class _SessionListBodyState extends State<SessionListBody> {
   }
 
   Widget _segment(String label, _SessionView view) {
+    final t = CommanderTokens.of(context);
     final selected = _view == view;
     return Expanded(
       child: GestureDetector(
@@ -280,17 +282,17 @@ class _SessionListBodyState extends State<SessionListBody> {
           padding: const EdgeInsets.symmetric(vertical: 6),
           decoration: selected
               ? BoxDecoration(
-                  color: AppColors.surfaceSel,
+                  color: t.surfaceSelected,
                   borderRadius: BorderRadius.circular(6),
                 )
               : null,
           child: Text(
             label,
             textAlign: TextAlign.center,
-            style: AppTheme.mono(
+            style: t.meta(
               size: 11,
               weight: FontWeight.w600,
-              color: selected ? AppColors.text : AppColors.textMuted,
+              color: selected ? t.text : t.textMuted,
             ),
           ),
         ),
@@ -299,8 +301,8 @@ class _SessionListBodyState extends State<SessionListBody> {
   }
 
   /// The quick-filter chip row. Only chips with a non-zero count show, so a
-  /// filter never dead-ends on an empty set. The needs-input chip is always
-  /// amber-tinted (it's the one that wants attention).
+  /// filter never dead-ends on an empty set. The needs-input chip always takes
+  /// the attention tint (it's the one that wants attention).
   Widget _quickChips({
     required int needs,
     required int working,
@@ -429,7 +431,7 @@ class _SessionListBodyState extends State<SessionListBody> {
         icon: Icons.cloud_off,
         text: store.error.toString(),
         action: ('Retry', store.retry),
-        color: AppColors.red,
+        color: CommanderTokens.of(context).danger,
       );
     }
     if (_query.isNotEmpty || _quick != null) {
@@ -457,6 +459,7 @@ class _FleetHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
       child: Row(
@@ -467,20 +470,20 @@ class _FleetHeader extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
+                Text(
                   'Fleet',
                   style: TextStyle(
                     fontSize: 23,
                     fontWeight: FontWeight.w700,
                     letterSpacing: -0.4,
-                    color: AppColors.text,
+                    color: t.text,
                   ),
                 ),
                 const SizedBox(height: 2),
                 Text(
                   '$active active · $total total · $serverCount '
                   'server${serverCount == 1 ? '' : 's'}',
-                  style: AppTheme.mono(size: 10.5),
+                  style: t.meta(size: 10.5),
                 ),
               ],
             ),
@@ -491,15 +494,11 @@ class _FleetHeader extends StatelessWidget {
               width: 34,
               height: 34,
               decoration: BoxDecoration(
-                color: AppColors.surface,
+                color: t.surface,
                 borderRadius: BorderRadius.circular(10),
-                border: Border.all(color: AppColors.border),
+                border: Border.all(color: t.border),
               ),
-              child: const Icon(
-                Icons.settings,
-                size: 16,
-                color: AppColors.textMuted,
-              ),
+              child: Icon(Icons.settings, size: 16, color: t.textMuted),
             ),
           ),
         ],
@@ -508,9 +507,10 @@ class _FleetHeader extends StatelessWidget {
   }
 }
 
-/// A tappable quick-filter pill. Selected fills with its active colour (amber
-/// for the needs-input chip, accent otherwise); an unselected needs-input chip
-/// keeps a faint amber tint, other unselected chips are a neutral surface pill.
+/// A tappable quick-filter pill. Selected fills with its active colour (the
+/// attention tint for the needs-input chip, the primary accent otherwise); an
+/// unselected needs-input chip keeps a faint attention tint, other unselected
+/// chips are a neutral surface pill.
 class _QuickChip extends StatelessWidget {
   final String label;
   final bool selected;
@@ -526,20 +526,21 @@ class _QuickChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final active = amber ? AppColors.amber : AppColors.accent;
+    final t = CommanderTokens.of(context);
+    final active = amber ? t.attention : t.primary;
     final Color bg, borderColor, textColor;
     if (selected) {
       bg = active.withValues(alpha: 0.2);
       borderColor = active.withValues(alpha: 0.7);
-      textColor = amber ? AppColors.amberText : AppColors.accentSoft;
+      textColor = amber ? t.attentionOn : t.primarySoft;
     } else if (amber) {
-      bg = AppColors.amber.withValues(alpha: 0.14);
-      borderColor = AppColors.amber.withValues(alpha: 0.4);
-      textColor = AppColors.amberText;
+      bg = t.attention.withValues(alpha: 0.14);
+      borderColor = t.attention.withValues(alpha: 0.4);
+      textColor = t.attentionOn;
     } else {
-      bg = AppColors.surface;
-      borderColor = AppColors.border;
-      textColor = AppColors.textMuted;
+      bg = t.surface;
+      borderColor = t.border;
+      textColor = t.textMuted;
     }
     return Material(
       color: Colors.transparent,
@@ -556,11 +557,7 @@ class _QuickChip extends StatelessWidget {
           ),
           child: Text(
             label,
-            style: AppTheme.mono(
-              size: 10,
-              weight: FontWeight.w600,
-              color: textColor,
-            ),
+            style: t.meta(size: 10, weight: FontWeight.w600, color: textColor),
           ),
         ),
       ),
@@ -621,7 +618,7 @@ class _ServerSection extends StatelessWidget {
             icon: Icons.cloud_off,
             text: store.error.toString(),
             action: ('Retry', store.retry),
-            color: AppColors.red,
+            color: CommanderTokens.of(context).danger,
           ),
         ];
       }
@@ -839,16 +836,17 @@ class _ConnectionStrip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     final (label, color) = switch (connection.kind) {
       // The call site only renders this strip when kind != connected, so this
       // arm is for exhaustiveness — the strip never shows for a healthy server.
-      ConnectionStateKind.connected => ('Connected', AppColors.teal),
-      ConnectionStateKind.connecting => ('Connecting…', AppColors.amber),
+      ConnectionStateKind.connected => ('Connected', t.working),
+      ConnectionStateKind.connecting => ('Connecting…', t.attention),
       ConnectionStateKind.degraded => (
         connection.reason.isEmpty
             ? 'Connection degraded'
             : 'Degraded: ${connection.reason}',
-        AppColors.red,
+        t.danger,
       ),
     };
     return Container(
@@ -873,11 +871,7 @@ class _ConnectionStrip extends StatelessWidget {
               label,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: AppTheme.mono(
-                size: 10.5,
-                weight: FontWeight.w600,
-                color: color,
-              ),
+              style: t.meta(size: 10.5, weight: FontWeight.w600, color: color),
             ),
           ),
         ],
@@ -935,26 +929,27 @@ class _CascadeBannerState extends State<CascadeBanner> {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     return Container(
       margin: const EdgeInsets.fromLTRB(12, 12, 12, 4),
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: AppColors.amber.withValues(alpha: 0.09),
+        color: t.held.withValues(alpha: 0.09),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: AppColors.amber.withValues(alpha: 0.4)),
+        border: Border.all(color: t.held.withValues(alpha: 0.4)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              const Icon(Icons.pause_circle_outline, color: AppColors.amber),
+              Icon(Icons.pause_circle_outline, color: t.held),
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
                   'Cascade paused — awaiting a decision',
                   style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                    color: AppColors.amberText,
+                    color: t.attentionOn,
                   ),
                 ),
               ),
@@ -992,19 +987,20 @@ class _ServerHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     final conn = store.connection;
     final (dotColor, note, noteColor, degraded) = switch (conn.kind) {
-      ConnectionStateKind.connected => (AppColors.teal, null, null, false),
+      ConnectionStateKind.connected => (t.working, null, null, false),
       ConnectionStateKind.connecting => (
-        AppColors.amber,
+        t.attention,
         'connecting…',
-        AppColors.amberText,
+        t.attentionOn,
         false,
       ),
       ConnectionStateKind.degraded => (
-        AppColors.idle,
+        t.idle,
         conn.reason.isEmpty ? 'unreachable' : conn.reason,
-        AppColors.red,
+        t.danger,
         true,
       ),
     };
@@ -1014,8 +1010,8 @@ class _ServerHeader extends StatelessWidget {
       opacity: degraded ? 0.6 : 1,
       child: Container(
         padding: const EdgeInsets.fromLTRB(4, 10, 8, 8),
-        decoration: const BoxDecoration(
-          border: Border(bottom: BorderSide(color: AppColors.divider)),
+        decoration: BoxDecoration(
+          border: Border(bottom: BorderSide(color: t.divider)),
         ),
         child: Row(
           children: [
@@ -1036,10 +1032,10 @@ class _ServerHeader extends StatelessWidget {
                 store.config.name,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(
+                style: TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w600,
-                  color: AppColors.text,
+                  color: t.text,
                 ),
               ),
             ),
@@ -1049,10 +1045,7 @@ class _ServerHeader extends StatelessWidget {
               note ?? '$count · $tag',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: AppTheme.mono(
-                size: 10,
-                color: noteColor ?? AppColors.textMuted,
-              ),
+              style: t.meta(size: 10, color: noteColor ?? t.textMuted),
             ),
           ],
         ),
@@ -1077,16 +1070,17 @@ class _InlineNote extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
       child: Column(
         children: [
-          Icon(icon, color: color ?? AppColors.textFaint),
+          Icon(icon, color: color ?? t.textFaint),
           const SizedBox(height: 8),
           Text(
             text,
             textAlign: TextAlign.center,
-            style: const TextStyle(color: AppColors.textMuted),
+            style: TextStyle(color: t.textMuted),
           ),
           if (action != null) ...[
             const SizedBox(height: 8),
@@ -1111,11 +1105,12 @@ class _ProjectHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 10, 12, 6),
       child: Text(
         '${name.toUpperCase()} · $count',
-        style: AppTheme.eyebrow(),
+        style: t.eyebrow(),
         maxLines: 1,
         overflow: TextOverflow.ellipsis,
       ),
@@ -1141,6 +1136,7 @@ class _RecentTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     final descriptor = sessionDescriptor(
       session,
       store.agentStateFor(session.id),
@@ -1155,10 +1151,8 @@ class _RecentTile extends StatelessWidget {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 9),
           decoration: BoxDecoration(
-            color: selected ? AppColors.surfaceSel : null,
-            border: const Border(
-              bottom: BorderSide(color: AppColors.divider),
-            ),
+            color: selected ? t.surfaceSelected : null,
+            border: Border(bottom: BorderSide(color: t.divider)),
           ),
           child: Row(
             children: [
@@ -1172,10 +1166,10 @@ class _RecentTile extends StatelessWidget {
                       session.title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 13,
                         fontWeight: FontWeight.w600,
-                        color: AppColors.text,
+                        color: t.text,
                       ),
                     ),
                     const SizedBox(height: 2),
@@ -1183,11 +1177,9 @@ class _RecentTile extends StatelessWidget {
                       subtitle,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: AppTheme.mono(
+                      style: t.meta(
                         size: 10,
-                        color: waiting
-                            ? AppColors.amberText
-                            : AppColors.textMuted,
+                        color: waiting ? t.attentionOn : t.textMuted,
                       ),
                     ),
                   ],
@@ -1200,7 +1192,7 @@ class _RecentTile extends StatelessWidget {
               const SizedBox(width: 8),
               Text(
                 relativeAge(session.lastAttachedAt ?? session.createdAt),
-                style: AppTheme.mono(size: 10, color: AppColors.textFaint),
+                style: t.meta(size: 10, color: t.textFaint),
               ),
             ],
           ),
@@ -1212,8 +1204,8 @@ class _RecentTile extends StatelessWidget {
 
 /// A carded session row for the grouped All view: the state glyph, the title,
 /// and a trailing PR badge (or the state word when there's no PR). Selected rows
-/// tint accent; sessions waiting for input tint amber — both pull the eye to the
-/// row that needs it.
+/// tint with the primary accent; rows that want attention take the attention
+/// tint — both pull the eye to the row that needs it.
 class _GroupedTile extends StatelessWidget {
   final CommanderStore store;
   final SessionInfo session;
@@ -1229,6 +1221,7 @@ class _GroupedTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     final descriptor = sessionDescriptor(
       session,
       store.agentStateFor(session.id),
@@ -1236,14 +1229,14 @@ class _GroupedTile extends StatelessWidget {
     final waiting = descriptor.wantsAttention;
     final Color bg, borderColor;
     if (selected) {
-      bg = AppColors.accent.withValues(alpha: 0.1);
-      borderColor = AppColors.accent.withValues(alpha: 0.5);
+      bg = t.primary.withValues(alpha: 0.1);
+      borderColor = t.primary.withValues(alpha: 0.5);
     } else if (waiting) {
-      bg = AppColors.amber.withValues(alpha: 0.09);
-      borderColor = AppColors.amber.withValues(alpha: 0.45);
+      bg = t.attention.withValues(alpha: 0.09);
+      borderColor = t.attention.withValues(alpha: 0.45);
     } else {
-      bg = AppColors.surface;
-      borderColor = AppColors.border;
+      bg = t.surface;
+      borderColor = t.border;
     }
     return Material(
       color: Colors.transparent,
@@ -1266,10 +1259,10 @@ class _GroupedTile extends StatelessWidget {
                   session.title,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 12.5,
                     fontWeight: FontWeight.w600,
-                    color: AppColors.text,
+                    color: t.text,
                   ),
                 ),
               ),
@@ -1279,9 +1272,9 @@ class _GroupedTile extends StatelessWidget {
               else
                 Text(
                   descriptor.label,
-                  style: AppTheme.mono(
+                  style: t.meta(
                     size: 10,
-                    color: waiting ? AppColors.amberText : AppColors.textMuted,
+                    color: waiting ? t.attentionOn : t.textMuted,
                   ),
                 ),
             ],

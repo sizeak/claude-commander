@@ -5,9 +5,8 @@ import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
 import '../state/workspace_store.dart';
-import '../theme/app_colors.dart';
-import '../theme/app_theme.dart';
 import '../theme/agent_glyphs.dart';
+import '../theme/tokens.dart';
 import '../util/session_filter.dart';
 import '../widgets/brand_mark.dart';
 import '../widgets/session_chips.dart';
@@ -89,6 +88,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
     return ListenableBuilder(
       listenable: workspace,
       builder: (context, _) {
+        final t = CommanderTokens.of(context);
         // Drop a selection whose server was removed.
         var store = _selectedStore;
         if (store != null && !workspace.servers.contains(store)) {
@@ -131,7 +131,7 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                     onSelect: _select,
                   ),
                 ),
-                const VerticalDivider(width: 1, color: AppColors.borderSubtle),
+                VerticalDivider(width: 1, color: t.borderSubtle),
                 Expanded(child: _workspace(context, workspace, store, resolved)),
               ],
             ),
@@ -197,11 +197,11 @@ class _Rail extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      color: AppColors.bg,
+      color: CommanderTokens.of(context).canvas,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _header(),
+          _header(context),
           Expanded(
             child: SessionListBody(selectedId: selectedId, onSelect: onSelect),
           ),
@@ -211,7 +211,8 @@ class _Rail extends StatelessWidget {
     );
   }
 
-  Widget _header() {
+  Widget _header(BuildContext context) {
+    final t = CommanderTokens.of(context);
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 18, 16, 12),
       child: Row(
@@ -222,20 +223,20 @@ class _Rail extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
+                Text(
                   'Fleet',
                   style: TextStyle(
                     fontSize: 19,
                     fontWeight: FontWeight.w700,
                     letterSpacing: -0.4,
-                    color: AppColors.text,
+                    color: t.text,
                   ),
                 ),
                 const SizedBox(height: 1),
                 Text(
                   '$active active · $total total · $serverCount '
                   'server${serverCount == 1 ? '' : 's'}',
-                  style: AppTheme.mono(size: 10),
+                  style: t.meta(size: 10),
                 ),
               ],
             ),
@@ -248,8 +249,10 @@ class _Rail extends StatelessWidget {
   Widget _footer(BuildContext context) {
     return Container(
       padding: const EdgeInsets.fromLTRB(14, 10, 14, 10),
-      decoration: const BoxDecoration(
-        border: Border(top: BorderSide(color: AppColors.borderSubtle)),
+      decoration: BoxDecoration(
+        border: Border(
+          top: BorderSide(color: CommanderTokens.of(context).borderSubtle),
+        ),
       ),
       child: Row(
         children: [
@@ -301,7 +304,8 @@ class _ModeToggle extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = selected ? AppColors.accent : AppColors.textFaint;
+    final t = CommanderTokens.of(context);
+    final color = selected ? t.nav : t.textFaint;
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(6),
@@ -314,7 +318,7 @@ class _ModeToggle extends StatelessWidget {
             const SizedBox(width: 6),
             Text(
               label,
-              style: AppTheme.mono(size: 10, weight: FontWeight.w600, color: color),
+              style: t.meta(size: 10, weight: FontWeight.w600, color: color),
             ),
           ],
         ),
@@ -324,7 +328,7 @@ class _ModeToggle extends StatelessWidget {
 }
 
 /// A rounded-square rail footer icon button (settings ⚙, new-session +). The
-/// accent variant fills violet for the primary new-session action.
+/// accent variant fills with the primary role for the new-session action.
 class _RailIconButton extends StatelessWidget {
   final IconData icon;
   final bool accent;
@@ -340,6 +344,7 @@ class _RailIconButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     final button = InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(9),
@@ -347,15 +352,11 @@ class _RailIconButton extends StatelessWidget {
         width: 32,
         height: 32,
         decoration: BoxDecoration(
-          color: accent ? AppColors.accent : AppColors.surface,
+          color: accent ? t.primary : t.surface,
           borderRadius: BorderRadius.circular(9),
-          border: accent ? null : Border.all(color: AppColors.border),
+          border: accent ? null : Border.all(color: t.border),
         ),
-        child: Icon(
-          icon,
-          size: 17,
-          color: accent ? AppColors.bg : AppColors.textMuted,
-        ),
+        child: Icon(icon, size: 17, color: accent ? t.canvas : t.textMuted),
       ),
     );
     return tooltip == null ? button : Tooltip(message: tooltip!, child: button);
@@ -368,8 +369,9 @@ class _EmptyDetail extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     return Container(
-      color: AppColors.bg,
+      color: t.canvas,
       alignment: Alignment.center,
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -383,7 +385,7 @@ class _EmptyDetail extends StatelessWidget {
           const SizedBox(height: 6),
           Text(
             'Pick a session from the fleet to open its workspace.',
-            style: AppTheme.mono(size: 11, color: AppColors.textFaint),
+            style: t.meta(size: 11, color: t.textFaint),
           ),
         ],
       ),
@@ -442,7 +444,7 @@ class _DetailPaneState extends State<_DetailPane> {
   @override
   Widget build(BuildContext context) {
     return Container(
-      color: AppColors.bg,
+      color: CommanderTokens.of(context).canvas,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
@@ -455,6 +457,7 @@ class _DetailPaneState extends State<_DetailPane> {
   }
 
   Widget _header(BuildContext context) {
+    final t = CommanderTokens.of(context);
     final session = widget.session;
     final store = CommanderStoreScope.of(context);
     final descriptor = sessionDescriptor(
@@ -470,8 +473,8 @@ class _DetailPaneState extends State<_DetailPane> {
     ].join(' · ');
     return Container(
       padding: const EdgeInsets.fromLTRB(20, 14, 12, 12),
-      decoration: const BoxDecoration(
-        border: Border(bottom: BorderSide(color: AppColors.divider)),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: t.divider)),
       ),
       child: Row(
         children: [
@@ -488,11 +491,11 @@ class _DetailPaneState extends State<_DetailPane> {
                         session.title,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 17,
                           fontWeight: FontWeight.w700,
                           letterSpacing: -0.2,
-                          color: AppColors.text,
+                          color: t.text,
                         ),
                       ),
                     ),
@@ -507,7 +510,7 @@ class _DetailPaneState extends State<_DetailPane> {
                   meta,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: AppTheme.mono(size: 11),
+                  style: t.meta(size: 11),
                 ),
               ],
             ),
@@ -526,20 +529,22 @@ class _DetailPaneState extends State<_DetailPane> {
   /// The deck's underline tab row: each tab is a mono label; the active one is
   /// bright with a 2px accent underline.
   Widget _tabs(BuildContext context) {
+    final t = CommanderTokens.of(context);
     return Container(
       padding: const EdgeInsets.fromLTRB(20, 10, 20, 0),
-      decoration: const BoxDecoration(
-        border: Border(bottom: BorderSide(color: AppColors.divider)),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: t.divider)),
       ),
       child: Row(
         children: [
-          for (final tab in _DetailTab.values) _tabItem(tab),
+          for (final tab in _DetailTab.values) _tabItem(context, tab),
         ],
       ),
     );
   }
 
-  Widget _tabItem(_DetailTab tab) {
+  Widget _tabItem(BuildContext context, _DetailTab tab) {
+    final t = CommanderTokens.of(context);
     final selected = _tab == tab;
     return Padding(
       padding: const EdgeInsets.only(right: 22),
@@ -551,17 +556,17 @@ class _DetailPaneState extends State<_DetailPane> {
           decoration: BoxDecoration(
             border: Border(
               bottom: BorderSide(
-                color: selected ? AppColors.accent : Colors.transparent,
+                color: selected ? t.nav : Colors.transparent,
                 width: 2,
               ),
             ),
           ),
           child: Text(
             tab.label,
-            style: AppTheme.mono(
+            style: t.meta(
               size: 12,
               weight: FontWeight.w600,
-              color: selected ? AppColors.text : AppColors.textMuted,
+              color: selected ? t.text : t.textMuted,
             ),
           ),
         ),

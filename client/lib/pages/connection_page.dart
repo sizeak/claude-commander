@@ -3,8 +3,7 @@ import 'package:uuid/uuid.dart';
 
 import '../server_config.dart';
 import '../services/commander_api.dart';
-import '../theme/app_colors.dart';
-import '../theme/app_theme.dart';
+import '../theme/tokens.dart';
 import '../widgets/brand_mark.dart';
 
 /// Add / edit a server: enter a display name, URL, and bearer token, optionally
@@ -177,6 +176,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
   Widget build(BuildContext context) {
     final editing = widget.existing != null;
     final canPop = Navigator.of(context).canPop();
+    final t = CommanderTokens.of(context);
     return Scaffold(
       body: SafeArea(
         child: Center(
@@ -202,22 +202,22 @@ class _ConnectionPageState extends State<ConnectionPage> {
                   const SizedBox(height: 28),
                   Text(
                     'CLAUDE COMMANDER',
-                    style: AppTheme.mono(
+                    style: t.meta(
                       size: 11,
                       weight: FontWeight.w600,
-                      color: AppColors.textMuted,
+                      color: t.textMuted,
                       letterSpacing: 2,
                     ),
                   ),
                   const SizedBox(height: 6),
                   Text(
                     editing ? 'Edit server' : 'Connect to a server',
-                    style: const TextStyle(
-                      fontFamily: AppFonts.sans,
+                    style: TextStyle(
+                      fontFamily: t.sans,
                       fontSize: 26,
                       fontWeight: FontWeight.w600,
                       letterSpacing: -0.3,
-                      color: AppColors.text,
+                      color: t.text,
                     ),
                   ),
                   const SizedBox(height: 8),
@@ -282,10 +282,10 @@ class _ConnectionPageState extends State<ConnectionPage> {
                   Center(
                     child: Text(
                       'TOKEN STORED IN KEYCHAIN',
-                      style: AppTheme.mono(
+                      style: t.meta(
                         size: 10.5,
                         weight: FontWeight.w500,
-                        color: AppColors.textFaint,
+                        color: t.textFaint,
                         letterSpacing: 0.6,
                       ),
                     ),
@@ -314,6 +314,7 @@ class _ConnectionPageState extends State<ConnectionPage> {
     TextInputType? keyboardType,
     String? Function(String?)? validator,
   }) {
+    final t = CommanderTokens.of(context);
     return Padding(
       padding: const EdgeInsets.only(top: 16),
       child: Column(
@@ -323,27 +324,27 @@ class _ConnectionPageState extends State<ConnectionPage> {
             padding: const EdgeInsets.only(bottom: 7),
             child: Text(
               label,
-              style: AppTheme.mono(
+              style: t.meta(
                 size: 11,
                 weight: FontWeight.w500,
-                color: AppColors.textMuted,
+                color: t.textMuted,
               ),
             ),
           ),
           TextFormField(
             key: key,
             controller: controller,
-            style: AppTheme.mono(
+            style: t.meta(
               size: 13,
               weight: FontWeight.w500,
-              color: AppColors.text,
+              color: t.text,
               letterSpacing: obscureText ? 1.5 : null,
             ),
             decoration: InputDecoration(
               hintText: hint,
-              hintStyle: AppTheme.mono(size: 13, color: AppColors.textFaint),
+              hintStyle: t.meta(size: 13, color: t.textFaint),
               helperText: helper,
-              helperStyle: AppTheme.mono(size: 10.5, color: AppColors.textFaint),
+              helperStyle: t.meta(size: 10.5, color: t.textFaint),
               helperMaxLines: 2,
             ),
             obscureText: obscureText,
@@ -361,12 +362,13 @@ class _ConnectionPageState extends State<ConnectionPage> {
   }
 
   Widget _healthBanner(String text) {
+    final t = CommanderTokens.of(context);
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
-        color: AppColors.teal.withValues(alpha: 0.08),
+        color: t.working.withValues(alpha: 0.08),
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: AppColors.teal.withValues(alpha: 0.25)),
+        border: Border.all(color: t.working.withValues(alpha: 0.25)),
       ),
       child: Row(
         children: [
@@ -374,10 +376,10 @@ class _ConnectionPageState extends State<ConnectionPage> {
             width: 8,
             height: 8,
             decoration: BoxDecoration(
-              color: AppColors.teal,
+              color: t.working,
               shape: BoxShape.circle,
               boxShadow: [
-                BoxShadow(color: AppColors.teal.withValues(alpha: 0.6), blurRadius: 8),
+                BoxShadow(color: t.working.withValues(alpha: 0.6), blurRadius: 8),
               ],
             ),
           ),
@@ -385,10 +387,10 @@ class _ConnectionPageState extends State<ConnectionPage> {
           Expanded(
             child: Text(
               text,
-              style: AppTheme.mono(
+              style: t.meta(
                 size: 12,
                 weight: FontWeight.w500,
-                color: AppColors.teal,
+                color: t.working,
               ),
             ),
           ),

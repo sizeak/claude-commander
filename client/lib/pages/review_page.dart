@@ -5,8 +5,7 @@ import 'package:flutter/material.dart';
 import '../services/commander_api.dart';
 import '../src/rust/api/mirrors.dart';
 import '../src/rust/api/review.dart' as rust;
-import '../theme/app_colors.dart';
-import '../theme/app_theme.dart';
+import '../theme/tokens.dart';
 import '../widgets/session_chips.dart';
 import 'adaptive_shell.dart' show kWideBreakpoint;
 
@@ -272,10 +271,11 @@ class _ReviewBodyState extends State<ReviewBody> {
     rust.ReviewSnapshotDto? snap,
     int stagedCount,
   ) {
+    final t = CommanderTokens.of(context);
     return Container(
-      decoration: const BoxDecoration(
-        color: AppColors.bg,
-        border: Border(bottom: BorderSide(color: AppColors.divider)),
+      decoration: BoxDecoration(
+        color: t.canvas,
+        border: Border(bottom: BorderSide(color: t.divider)),
       ),
       padding: const EdgeInsets.only(left: 16, right: 6, top: 8, bottom: 8),
       child: Row(
@@ -298,7 +298,7 @@ class _ReviewBodyState extends State<ReviewBody> {
             ),
           IconButton(
             visualDensity: VisualDensity.compact,
-            color: AppColors.textMuted,
+            color: t.textMuted,
             onPressed: (_busy || _loading) ? null : _refresh,
             icon: const Icon(Icons.refresh),
             tooltip: 'Refresh diff',
@@ -310,23 +310,24 @@ class _ReviewBodyState extends State<ReviewBody> {
 
   /// The coloured `+adds −dels · N files` strip, summed across the snapshot.
   Widget _diffSummary(rust.ReviewSnapshotDto? snap) {
+    final t = CommanderTokens.of(context);
     final files = snap?.files ?? const <rust.ReviewFileDto>[];
     if (files.isEmpty) {
-      return Text('No changes', style: AppTheme.mono(color: AppColors.textFaint));
+      return Text('No changes', style: t.meta(color: t.textFaint));
     }
     final added = files.fold<int>(0, (n, f) => n + f.added);
     final removed = files.fold<int>(0, (n, f) => n + f.removed);
     final count = files.length;
     return Row(
       children: [
-        Text('+$added', style: AppTheme.mono(color: AppColors.green)),
+        Text('+$added', style: t.meta(color: t.success)),
         const SizedBox(width: 8),
-        Text('−$removed', style: AppTheme.mono(color: AppColors.red)),
+        Text('−$removed', style: t.meta(color: t.danger)),
         Flexible(
           child: Text(
             ' · $count file${count == 1 ? '' : 's'}',
             overflow: TextOverflow.ellipsis,
-            style: AppTheme.mono(color: AppColors.textMuted),
+            style: t.meta(color: t.textMuted),
           ),
         ),
       ],
@@ -344,6 +345,7 @@ class _ReviewBodyState extends State<ReviewBody> {
       return const Center(child: Text('No review data'));
     }
     if (snap.files.isEmpty && snap.comments.isEmpty) {
+      final t = CommanderTokens.of(context);
       return RefreshIndicator(
         onRefresh: _open,
         child: ListView(
@@ -353,7 +355,7 @@ class _ReviewBodyState extends State<ReviewBody> {
               child: Text(
                 'No changes against ${snap.base}.',
                 textAlign: TextAlign.center,
-                style: AppTheme.mono(color: AppColors.textFaint, height: 1.5),
+                style: t.meta(color: t.textFaint, height: 1.5),
               ),
             ),
           ],
@@ -372,23 +374,21 @@ class _ReviewBodyState extends State<ReviewBody> {
 
   /// The phone flow: comments, then the expandable per-file cards.
   Widget _narrowBody(BuildContext context, rust.ReviewSnapshotDto snap) {
+    final t = CommanderTokens.of(context);
     return RefreshIndicator(
       onRefresh: _open,
       child: ListView(
         padding: const EdgeInsets.all(12),
         children: [
-          Text(
-            'Base: ${snap.base}',
-            style: AppTheme.mono(color: AppColors.textFaint),
-          ),
+          Text('Base: ${snap.base}', style: t.meta(color: t.textFaint)),
           const SizedBox(height: 10),
           if (snap.comments.isNotEmpty) ...[
-            Text('Comments', style: AppTheme.eyebrow()),
+            Text('Comments', style: t.eyebrow()),
             const SizedBox(height: 8),
             ...snap.comments.map((c) => _commentCard(context, c)),
             const SizedBox(height: 18),
           ],
-          Text('Files changed', style: AppTheme.eyebrow()),
+          Text('Files changed', style: t.eyebrow()),
           const SizedBox(height: 8),
           ...snap.files.map(
             (f) => _FileCard(
@@ -418,7 +418,7 @@ class _ReviewBodyState extends State<ReviewBody> {
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _filesSidebar(context, snap, sel),
-        const VerticalDivider(width: 1, color: AppColors.divider),
+        VerticalDivider(width: 1, color: CommanderTokens.of(context).divider),
         Expanded(child: _diffPane(context, snap, file)),
       ],
     );
@@ -429,15 +429,16 @@ class _ReviewBodyState extends State<ReviewBody> {
     rust.ReviewSnapshotDto snap,
     int sel,
   ) {
+    final t = CommanderTokens.of(context);
     return Container(
       width: 250,
-      color: AppColors.bg,
+      color: t.canvas,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
-            child: Text('FILES CHANGED', style: AppTheme.eyebrow()),
+            child: Text('FILES CHANGED', style: t.eyebrow()),
           ),
           Expanded(
             child: ListView(
@@ -468,6 +469,7 @@ class _ReviewBodyState extends State<ReviewBody> {
     rust.ReviewSnapshotDto snap,
     rust.ReviewFileDto file,
   ) {
+    final t = CommanderTokens.of(context);
     // Only this file's comments belong above its diff; any comment whose file
     // isn't among the changed files would otherwise be unreachable on desktop,
     // so collect those into an "Other comments" section.
@@ -483,8 +485,8 @@ class _ReviewBodyState extends State<ReviewBody> {
       children: [
         // File header: path + per-file stats + the (single-mode) view label.
         Container(
-          decoration: const BoxDecoration(
-            border: Border(bottom: BorderSide(color: AppColors.divider)),
+          decoration: BoxDecoration(
+            border: Border(bottom: BorderSide(color: t.divider)),
           ),
           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 11),
           child: Row(
@@ -493,31 +495,31 @@ class _ReviewBodyState extends State<ReviewBody> {
                 child: Text(
                   file.displayPath,
                   overflow: TextOverflow.ellipsis,
-                  style: AppTheme.mono(
+                  style: t.meta(
                     size: 12,
                     weight: FontWeight.w600,
-                    color: AppColors.text,
+                    color: t.text,
                   ),
                 ),
               ),
               const SizedBox(width: 10),
-              Text('+${file.added}', style: AppTheme.mono(color: AppColors.green)),
+              Text('+${file.added}', style: t.meta(color: t.success)),
               const SizedBox(width: 6),
-              Text('−${file.removed}', style: AppTheme.mono(color: AppColors.red)),
+              Text('−${file.removed}', style: t.meta(color: t.danger)),
               const Spacer(),
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
                 decoration: BoxDecoration(
-                  color: AppColors.surface,
+                  color: t.surface,
                   borderRadius: BorderRadius.circular(7),
-                  border: Border.all(color: AppColors.border),
+                  border: Border.all(color: t.border),
                 ),
                 child: Text(
                   'unified',
-                  style: AppTheme.mono(
+                  style: t.meta(
                     size: 10,
                     weight: FontWeight.w600,
-                    color: AppColors.textMuted,
+                    color: t.textMuted,
                   ),
                 ),
               ),
@@ -530,7 +532,7 @@ class _ReviewBodyState extends State<ReviewBody> {
               if (otherComments.isNotEmpty) ...[
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
-                  child: Text('OTHER COMMENTS', style: AppTheme.eyebrow()),
+                  child: Text('OTHER COMMENTS', style: t.eyebrow()),
                 ),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -545,7 +547,7 @@ class _ReviewBodyState extends State<ReviewBody> {
               if (fileComments.isNotEmpty) ...[
                 Padding(
                   padding: const EdgeInsets.fromLTRB(16, 14, 16, 8),
-                  child: Text('COMMENTS', style: AppTheme.eyebrow()),
+                  child: Text('COMMENTS', style: t.eyebrow()),
                 ),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 12),
@@ -573,6 +575,7 @@ class _ReviewBodyState extends State<ReviewBody> {
   }
 
   Widget _commentCard(BuildContext context, rust.CommentDto c) {
+    final t = CommanderTokens.of(context);
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       child: ListTile(
@@ -583,13 +586,13 @@ class _ReviewBodyState extends State<ReviewBody> {
             '${c.file} · ${c.side == rust.ReviewCommentSide.old ? "old" : "new"} '
             'L${c.lineStart}'
             '${c.lineEnd != c.lineStart ? "-${c.lineEnd}" : ""}',
-            style: AppTheme.mono(color: AppColors.textFaint),
+            style: t.meta(color: t.textFaint),
           ),
         ),
         leading: _commentStatusChip(context, c.status),
         trailing: IconButton(
           onPressed: _busy ? null : () => _deleteComment(c.id),
-          icon: const Icon(Icons.delete_outline, color: AppColors.textMuted),
+          icon: Icon(Icons.delete_outline, color: t.textMuted),
           tooltip: 'Delete comment',
         ),
         isThreeLine: false,
@@ -598,10 +601,11 @@ class _ReviewBodyState extends State<ReviewBody> {
   }
 
   Widget _commentStatusChip(BuildContext context, rust.ReviewCommentStatus s) {
+    final t = CommanderTokens.of(context);
     final (label, color) = switch (s) {
-      rust.ReviewCommentStatus.staged => ('staged', AppColors.accentSoft),
-      rust.ReviewCommentStatus.drifted => ('drifted', AppColors.amber),
-      rust.ReviewCommentStatus.applied => ('applied', AppColors.green),
+      rust.ReviewCommentStatus.staged => ('staged', t.info),
+      rust.ReviewCommentStatus.drifted => ('drifted', t.attention),
+      rust.ReviewCommentStatus.applied => ('applied', t.success),
     };
     return AppChip(label: label, color: color);
   }
@@ -613,7 +617,7 @@ class _ReviewBodyState extends State<ReviewBody> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.warning_amber, color: AppColors.red),
+            Icon(Icons.warning_amber, color: CommanderTokens.of(context).danger),
             const SizedBox(height: 12),
             Text(
               error,
@@ -657,14 +661,18 @@ class ReviewPage extends StatelessWidget {
   }
 }
 
-/// The colour that codes a file's change status — a green add, red delete, teal
-/// modify, violet rename — shared by the status dot and the status chip.
-Color _statusColor(rust.ReviewFileStatus status) => switch (status) {
-  rust.ReviewFileStatus.added => AppColors.green,
-  rust.ReviewFileStatus.deleted => AppColors.red,
-  rust.ReviewFileStatus.modified => AppColors.teal,
-  rust.ReviewFileStatus.renamed => AppColors.accentSoft,
-};
+/// The colour that codes a file's change status — success for an add, danger for
+/// a delete, working for a modify, info for a rename — shared by the status dot
+/// and the status chip.
+Color _statusColor(BuildContext context, rust.ReviewFileStatus status) {
+  final t = CommanderTokens.of(context);
+  return switch (status) {
+    rust.ReviewFileStatus.added => t.success,
+    rust.ReviewFileStatus.deleted => t.danger,
+    rust.ReviewFileStatus.modified => t.working,
+    rust.ReviewFileStatus.renamed => t.info,
+  };
+}
 
 String _statusLabel(rust.ReviewFileStatus status) => switch (status) {
   rust.ReviewFileStatus.added => 'added',
@@ -674,14 +682,15 @@ String _statusLabel(rust.ReviewFileStatus status) => switch (status) {
 };
 
 /// A small square status swatch (the deck's rounded-1px chip in a file row).
-Widget _statusDot(rust.ReviewFileStatus status) => Container(
-  width: 7,
-  height: 7,
-  decoration: BoxDecoration(
-    color: _statusColor(status),
-    borderRadius: BorderRadius.circular(2),
-  ),
-);
+Widget _statusDot(BuildContext context, rust.ReviewFileStatus status) =>
+    Container(
+      width: 7,
+      height: 7,
+      decoration: BoxDecoration(
+        color: _statusColor(context, status),
+        borderRadius: BorderRadius.circular(2),
+      ),
+    );
 
 /// One row in the wide FILES CHANGED sidebar: a status swatch, the mono path,
 /// per-file +/− counts, and a reviewed toggle. Tapping the row selects the file
@@ -703,15 +712,14 @@ class _FileRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     return Padding(
       padding: const EdgeInsets.only(bottom: 4),
       child: Material(
-        color: selected ? AppColors.surface : Colors.transparent,
+        color: selected ? t.surface : Colors.transparent,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(8),
-          side: BorderSide(
-            color: selected ? AppColors.border : Colors.transparent,
-          ),
+          side: BorderSide(color: selected ? t.border : Colors.transparent),
         ),
         child: InkWell(
           onTap: onSelect,
@@ -720,23 +728,21 @@ class _FileRow extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 8),
             child: Row(
               children: [
-                _statusDot(file.status),
+                _statusDot(context, file.status),
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
                     file.displayPath,
                     overflow: TextOverflow.ellipsis,
-                    style: AppTheme.mono(
-                      color: selected ? AppColors.text : AppColors.textBright,
-                    ),
+                    style: t.meta(color: selected ? t.text : t.textBright),
                   ),
                 ),
                 const SizedBox(width: 8),
                 if (file.added > 0)
-                  Text('+${file.added}', style: AppTheme.mono(color: AppColors.green)),
+                  Text('+${file.added}', style: t.meta(color: t.success)),
                 if (file.removed > 0) ...[
                   const SizedBox(width: 5),
-                  Text('−${file.removed}', style: AppTheme.mono(color: AppColors.red)),
+                  Text('−${file.removed}', style: t.meta(color: t.danger)),
                 ],
                 const SizedBox(width: 4),
                 InkWell(
@@ -749,7 +755,7 @@ class _FileRow extends StatelessWidget {
                           ? Icons.check_circle
                           : Icons.radio_button_unchecked,
                       size: 16,
-                      color: reviewed ? AppColors.green : AppColors.idle,
+                      color: reviewed ? t.success : t.idle,
                     ),
                   ),
                 ),
@@ -787,6 +793,7 @@ class _FileCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       clipBehavior: Clip.antiAlias,
@@ -801,7 +808,7 @@ class _FileCard extends StatelessWidget {
         ),
         title: Text(
           file.displayPath,
-          style: AppTheme.mono(size: 13, color: AppColors.text),
+          style: t.meta(size: 13, color: t.text),
           overflow: TextOverflow.ellipsis,
         ),
         subtitle: Padding(
@@ -810,12 +817,12 @@ class _FileCard extends StatelessWidget {
             children: [
               AppChip(
                 label: _statusLabel(file.status),
-                color: _statusColor(file.status),
+                color: _statusColor(context, file.status),
               ),
               const SizedBox(width: 8),
-              Text('+${file.added}', style: AppTheme.mono(color: AppColors.green)),
+              Text('+${file.added}', style: t.meta(color: t.success)),
               const SizedBox(width: 6),
-              Text('−${file.removed}', style: AppTheme.mono(color: AppColors.red)),
+              Text('−${file.removed}', style: t.meta(color: t.danger)),
             ],
           ),
         ),
@@ -854,6 +861,7 @@ class _FileDiffBody extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     if (file.isBinary) {
       return Padding(
         padding: const EdgeInsets.all(16),
@@ -868,7 +876,7 @@ class _FileDiffBody extends StatelessWidget {
                 file.binaryMime != null
                     ? 'Binary file (${file.binaryMime})'
                     : 'Binary file',
-                style: AppTheme.mono(color: AppColors.textFaint),
+                style: t.meta(color: t.textFaint),
               ),
       );
     }
@@ -1000,6 +1008,7 @@ class _HunkViewState extends State<_HunkView> {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     final hunk = widget.hunk;
     final hasSelection = _anchor != null && _focus != null;
     return Column(
@@ -1008,7 +1017,7 @@ class _HunkViewState extends State<_HunkView> {
         // Muted `@@ ... @@` hunk header, gutter-aligned with the diff rows.
         Container(
           width: double.infinity,
-          color: AppColors.diffGutterBg,
+          color: t.diffGutterBg,
           child: Row(
             children: [
               const SizedBox(width: 46),
@@ -1022,7 +1031,7 @@ class _HunkViewState extends State<_HunkView> {
                     '@@ -${hunk.oldStart},${hunk.oldLines} '
                     '+${hunk.newStart},${hunk.newLines} @@'
                     '${hunk.header.isNotEmpty ? " ${hunk.header}" : ""}',
-                    style: AppTheme.mono(color: AppColors.textDim, height: 1.6),
+                    style: t.meta(color: t.textDim, height: 1.6),
                   ),
                 ),
               ),
@@ -1071,22 +1080,19 @@ class _DiffLineRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     final (bg, marker, fg) = switch (line.origin) {
       rust.ReviewLineOrigin.addition => (
-        AppColors.green.withValues(alpha: 0.09),
+        t.success.withValues(alpha: 0.09),
         '+',
-        AppColors.green,
+        t.success,
       ),
       rust.ReviewLineOrigin.deletion => (
-        AppColors.red.withValues(alpha: 0.09),
+        t.danger.withValues(alpha: 0.09),
         '-',
-        AppColors.red,
+        t.danger,
       ),
-      rust.ReviewLineOrigin.context => (
-        Colors.transparent,
-        ' ',
-        AppColors.textBright,
-      ),
+      rust.ReviewLineOrigin.context => (Colors.transparent, ' ', t.textBright),
     };
     // Unified view: a single number per row (new side, or old for deletions).
     final lineNo = line.newLineno ?? line.oldLineno;
@@ -1096,10 +1102,10 @@ class _DiffLineRow extends StatelessWidget {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _gutter(lineNo),
+          _gutter(context, lineNo),
           Expanded(
             child: Container(
-              color: selected ? AppColors.amber.withValues(alpha: 0.22) : bg,
+              color: selected ? t.attention.withValues(alpha: 0.22) : bg,
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 1),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -1108,13 +1114,13 @@ class _DiffLineRow extends StatelessWidget {
                     width: 10,
                     child: Text(
                       marker,
-                      style: AppTheme.mono(size: 12, color: fg, height: 1.6),
+                      style: t.meta(size: 12, color: fg, height: 1.6),
                     ),
                   ),
                   Expanded(
                     child: Text(
                       line.content,
-                      style: AppTheme.mono(size: 12, color: fg, height: 1.6),
+                      style: t.meta(size: 12, color: fg, height: 1.6),
                     ),
                   ),
                 ],
@@ -1126,15 +1132,16 @@ class _DiffLineRow extends StatelessWidget {
     );
   }
 
-  Widget _gutter(int? n) {
+  Widget _gutter(BuildContext context, int? n) {
+    final t = CommanderTokens.of(context);
     return Container(
       width: 46,
-      color: AppColors.diffGutterBg,
+      color: t.diffGutterBg,
       padding: const EdgeInsets.only(right: 12, top: 1, bottom: 1),
       alignment: Alignment.topRight,
       child: Text(
         n?.toString() ?? '',
-        style: AppTheme.mono(size: 11, color: AppColors.diffGutter, height: 1.6),
+        style: t.meta(size: 11, color: t.diffGutter, height: 1.6),
       ),
     );
   }
@@ -1167,6 +1174,7 @@ class _CommentDialogState extends State<_CommentDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     final range = widget.lineEnd != widget.lineStart
         ? 'L${widget.lineStart}-${widget.lineEnd}'
         : 'L${widget.lineStart}';
@@ -1176,10 +1184,7 @@ class _CommentDialogState extends State<_CommentDialog> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            '${widget.file} · $range',
-            style: AppTheme.mono(color: AppColors.textFaint),
-          ),
+          Text('${widget.file} · $range', style: t.meta(color: t.textFaint)),
           const SizedBox(height: 12),
           TextField(
             controller: _controller,
@@ -1253,13 +1258,14 @@ class _BinaryImageViewState extends State<_BinaryImageView> {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     if (_bytes != null) {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
             '${widget.mime} · ${widget.side} side',
-            style: AppTheme.mono(color: AppColors.textFaint),
+            style: t.meta(color: t.textFaint),
           ),
           const SizedBox(height: 8),
           ConstrainedBox(
@@ -1285,7 +1291,7 @@ class _BinaryImageViewState extends State<_BinaryImageView> {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         if (_error != null) ...[
-          Text('Failed: $_error', style: const TextStyle(color: AppColors.red)),
+          Text('Failed: $_error', style: TextStyle(color: t.danger)),
           const SizedBox(height: 8),
         ],
         OutlinedButton.icon(

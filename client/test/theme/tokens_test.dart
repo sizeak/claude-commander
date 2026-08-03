@@ -119,6 +119,27 @@ void main() {
       expect(t.searchHitBackgroundCurrent, McRef.amber);
       expect(t.searchHitForeground, McRef.bg);
     });
+
+    test('the same tokens yield the identical instance', () {
+      // Not a micro-optimisation. xterm's render object guards on
+      // `value == _theme`, and TerminalTheme overrides neither `==` nor
+      // `hashCode` — so a fresh instance per build rebuilds the 256-colour
+      // palette and clears the entire glyph cache. The terminal's status bar
+      // rebuilds ~1 Hz for its throughput readout, so losing this memo means
+      // re-shaping every visible line once a second on the live terminal.
+      expect(
+        identical(terminalThemeFor(mc), terminalThemeFor(mc)),
+        isTrue,
+        reason: 'must be memoised or xterm drops its text-shaping cache',
+      );
+    });
+
+    test('different tokens yield different instances', () {
+      expect(terminalThemeFor(mc).cursor, McRef.accent);
+      expect(terminalThemeFor(lcars).cursor, lcars.primary);
+      // And the memo does not leak the previous theme back.
+      expect(terminalThemeFor(mc).cursor, McRef.accent);
+    });
   });
 
   group('tone resolution', () {

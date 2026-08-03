@@ -3,8 +3,7 @@ import 'package:flutter/material.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../state/workspace_store.dart';
-import '../theme/app_colors.dart';
-import '../theme/app_theme.dart';
+import '../theme/tokens.dart';
 import 'connection_page.dart';
 
 /// Manage the configured servers: add, edit, or remove. Each row shows a live
@@ -60,6 +59,7 @@ class ServersPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     return Scaffold(
       appBar: AppBar(title: const Text('Servers')),
       floatingActionButton: FloatingActionButton(
@@ -77,13 +77,13 @@ class ServersPage extends StatelessWidget {
                 ListenableBuilder(
                   listenable: store,
                   builder: (context, _) => ListTile(
-                    leading: _dot(store.connection),
+                    leading: _dot(context, store.connection),
                     title: Text(store.config.name),
                     subtitle: Text(
                       store.config.baseUrl,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: AppTheme.mono(size: 11, color: AppColors.textMuted),
+                      style: t.meta(size: 11, color: t.textMuted),
                     ),
                     onTap: () => _edit(context, store),
                     trailing: IconButton(
@@ -100,11 +100,12 @@ class ServersPage extends StatelessWidget {
     );
   }
 
-  Widget _dot(ConnectionStateDto conn) {
+  Widget _dot(BuildContext context, ConnectionStateDto conn) {
+    final t = CommanderTokens.of(context);
     final color = switch (conn.kind) {
-      ConnectionStateKind.connected => AppColors.teal,
-      ConnectionStateKind.connecting => AppColors.amber,
-      ConnectionStateKind.degraded => AppColors.red,
+      ConnectionStateKind.connected => t.working,
+      ConnectionStateKind.connecting => t.attention,
+      ConnectionStateKind.degraded => t.danger,
     };
     return Container(
       width: 12,

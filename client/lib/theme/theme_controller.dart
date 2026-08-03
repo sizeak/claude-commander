@@ -1,4 +1,4 @@
-import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 
 import '../services/pref_store.dart';
 import 'tokens.dart';
@@ -70,4 +70,27 @@ class ThemeController extends ChangeNotifier {
     notifyListeners();
     await _store.write(prefKey, id.wire);
   }
+}
+
+/// Exposes the [ThemeController] to the widget tree, placed above the
+/// `MaterialApp` so pushed routes (the Settings screen and its theme picker) can
+/// reach it. Reading the *tokens* does not go through here — that is
+/// `CommanderTokens.of(context)`, resolved from the theme extension. This scope
+/// is only for the code that needs to *change* the theme.
+class ThemeScope extends InheritedWidget {
+  final ThemeController? controller;
+
+  const ThemeScope({
+    super.key,
+    required this.controller,
+    required super.child,
+  });
+
+  static ThemeController? of(BuildContext context) => context
+      .dependOnInheritedWidgetOfExactType<ThemeScope>()
+      ?.controller;
+
+  @override
+  bool updateShouldNotify(ThemeScope oldWidget) =>
+      controller != oldWidget.controller;
 }
