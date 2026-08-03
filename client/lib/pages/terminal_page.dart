@@ -132,11 +132,7 @@ class _TerminalBodyState extends State<TerminalBody> {
     };
     _terminal.onResize = (cols, rows, pixelWidth, pixelHeight) {
       unawaited(
-        widget.api.terminalResize(
-          attachId: _attachId,
-          cols: cols,
-          rows: rows,
-        ),
+        widget.api.terminalResize(attachId: _attachId, cols: cols, rows: rows),
       );
     };
 
@@ -249,22 +245,62 @@ class _TerminalBodyState extends State<TerminalBody> {
 
   @override
   Widget build(BuildContext context) {
+    // How much of us the soft keyboard covers. Zero when there is no keyboard —
+    // and also zero when an ancestor Scaffold already consumed the inset by
+    // shrinking us (`resizeToAvoidBottomInset: true`), which makes the panning
+    // below a no-op. That is the case in the wide shell, which therefore still
+    // resizes the pane on a soft keyboard — a known limitation, and a
+    // touch-device-only one, since a desktop has no soft keyboard.
+    final obscured = MediaQuery.viewInsetsOf(context).bottom;
+
     return ColoredBox(
       color: AppColors.bgTerminal,
       child: Column(
         children: [
+          // Fixed: the status line stays put while the pane pans beneath it.
           _statusBar(context),
           Expanded(
-            child: TerminalView(
-              _terminal,
-              autofocus: true,
-              backgroundOpacity: 1,
-              theme: _terminalTheme,
-              textStyle: const TerminalStyle(fontFamily: AppFonts.mono),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+            // Pan, don't resize. `xterm` derives the PTY's cols/rows from the
+            // view's laid-out size, so letting the keyboard shrink the view
+            // would resize the remote pane — and tmux answers a resize by
+            // sliding a scrolled copy-mode view forward by a viewport height (it
+            // doesn't compensate for the lines the shrink pushes into the
+            // history), losing the user's place for good.
+            //
+            // So the pannable stack always fills this box — its height is a
+            // function of the body alone, which the page holds constant — and we
+            // translate it up instead. The pane's geometry is therefore constant
+            // *by construction*: no keyboard-dependent arithmetic to get wrong,
+            // and nothing to overflow when the keyboard is taller than the space
+            // we have (landscape), where the worst case is simply that the pane
+            // slides out of view rather than being resized.
+            child: ClipRect(
+              child: Transform.translate(
+                offset: Offset(0, -obscured),
+                child: Column(
+                  children: [
+                    Expanded(
+                      child: TerminalView(
+                        _terminal,
+                        autofocus: true,
+                        backgroundOpacity: 1,
+                        theme: _terminalTheme,
+                        textStyle: const TerminalStyle(
+                          fontFamily: AppFonts.mono,
+                        ),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 14,
+                          vertical: 8,
+                        ),
+                      ),
+                    ),
+                    // Rides up with the pane, landing just above the keyboard.
+                    if (widget.showModifierBar) _ModifierBar(onSend: _send),
+                  ],
+                ),
+              ),
             ),
           ),
-          if (widget.showModifierBar) _ModifierBar(onSend: _send),
         ],
       ),
     );
@@ -350,7 +386,15 @@ class TerminalPage extends StatelessWidget {
           overflow: TextOverflow.ellipsis,
         ),
       ),
+      // The keyboard must not shrink the body: [TerminalBody] insets its own
+      // chrome and pans the pane instead, so the remote PTY never sees a resize.
+      resizeToAvoidBottomInset: false,
       body: SafeArea(
+        // Keep reserving the bottom system chrome even while the keyboard covers
+        // it. Without this, SafeArea's bottom padding collapses to zero when the
+        // keyboard appears and the pane's row count would move with it — the
+        // resize [TerminalBody] exists to avoid.
+        maintainBottomViewPadding: true,
         child: TerminalBody(
           api: api,
           handle: handle,
@@ -404,38 +448,37 @@ class _ModifierBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return SafeArea(
-      top: false,
-      child: Container(
-        height: 48,
-        decoration: const BoxDecoration(
-          color: AppColors.bgTerminal,
-          border: Border(top: BorderSide(color: AppColors.borderSubtle)),
-        ),
-        child: ListView(
-          scrollDirection: Axis.horizontal,
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-          children: [
-            _key(context, 'Esc', () => onSend(_esc)),
-            _key(context, 'Tab', () => onSend(_tab)),
-            _key(context, '^C', () => onSend(_ctrlC)),
-            _key(context, '^D', () => onSend(_ctrlD)),
-            _key(context, '^Z', () => onSend(_ctrlZ)),
-            _key(context, '^L', () => onSend(_ctrlL)),
-            _key(context, '^R', () => onSend(_ctrlR)),
-            _key(context, '^A', () => onSend(_ctrlA)),
-            _key(context, '^E', () => onSend(_ctrlE)),
-            _key(context, '^U', () => onSend(_ctrlU)),
-            _key(context, '↑', () => onSend(_up)),
-            _key(context, '↓', () => onSend(_down)),
-            _key(context, '←', () => onSend(_left)),
-            _key(context, '→', () => onSend(_right)),
-            _key(context, 'Home', () => onSend(_home)),
-            _key(context, 'End', () => onSend(_end)),
-            _key(context, 'PgUp', () => onSend(_pgUp)),
-            _key(context, 'PgDn', () => onSend(_pgDn)),
-          ],
-        ),
+    // No SafeArea here: [TerminalBody] already insets the bottom chrome, and a
+    // bar whose height changed with the keyboard would change the pane's rows.
+    return Container(
+      height: 48,
+      decoration: const BoxDecoration(
+        color: AppColors.bgTerminal,
+        border: Border(top: BorderSide(color: AppColors.borderSubtle)),
+      ),
+      child: ListView(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+        children: [
+          _key(context, 'Esc', () => onSend(_esc)),
+          _key(context, 'Tab', () => onSend(_tab)),
+          _key(context, '^C', () => onSend(_ctrlC)),
+          _key(context, '^D', () => onSend(_ctrlD)),
+          _key(context, '^Z', () => onSend(_ctrlZ)),
+          _key(context, '^L', () => onSend(_ctrlL)),
+          _key(context, '^R', () => onSend(_ctrlR)),
+          _key(context, '^A', () => onSend(_ctrlA)),
+          _key(context, '^E', () => onSend(_ctrlE)),
+          _key(context, '^U', () => onSend(_ctrlU)),
+          _key(context, '↑', () => onSend(_up)),
+          _key(context, '↓', () => onSend(_down)),
+          _key(context, '←', () => onSend(_left)),
+          _key(context, '→', () => onSend(_right)),
+          _key(context, 'Home', () => onSend(_home)),
+          _key(context, 'End', () => onSend(_end)),
+          _key(context, 'PgUp', () => onSend(_pgUp)),
+          _key(context, 'PgDn', () => onSend(_pgDn)),
+        ],
       ),
     );
   }
