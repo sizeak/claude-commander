@@ -1,13 +1,17 @@
-import 'dart:typed_data';
+import 'dart:async';
+import 'dart:convert';
 
 import 'package:claude_commander_client/pages/terminal_page.dart';
 import 'package:claude_commander_client/services/commander_api.dart';
+import 'package:claude_commander_client/services/image_picker_service.dart';
 import 'package:claude_commander_client/src/rust/api/mirrors.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:xterm/xterm.dart';
 
 import 'support/fake_commander_api.dart';
+import 'support/fake_image_sources.dart';
 import 'support/fixtures.dart';
 
 void main() {
@@ -280,5 +284,336 @@ void main() {
     await tester.pump();
 
     expect(api.lastCall('attachTerminal')!.args['kind'], AttachKind.shell);
+  });
+
+  group('image attach', () {
+    late FakeImagePicker picker;
+    late FakeClipboardImageReader clipboard;
+
+    setUp(() {
+      picker = FakeImagePicker();
+      clipboard = FakeClipboardImageReader();
+    });
+
+    Widget wrapWithSources({AttachKind kind = AttachKind.agent}) => MaterialApp(
+      home: TerminalPage(
+        api: api,
+        handle: testHandle,
+        session: sessionInfo(),
+        kind: kind,
+        imagePicker: picker,
+        clipboardImages: clipboard,
+      ),
+    );
+
+    Finder attachButton() =>
+        find.widgetWithIcon(IconButton, Icons.image_outlined);
+
+    testWidgets('an agent attach offers the attach-image action', (
+      tester,
+    ) async {
+      await tester.pumpWidget(wrapWithSources());
+      await tester.pump();
+
+      expect(attachButton(), findsOneWidget);
+    });
+
+    /// The server injects the path into the *agent* pane, so on a shell attach
+    /// the action would type somewhere the user isn't looking.
+    testWidgets('a shell attach hides the attach-image action', (tester) async {
+      await tester.pumpWidget(wrapWithSources(kind: AttachKind.shell));
+      await tester.pump();
+
+      expect(attachButton(), findsNothing);
+    });
+
+    testWidgets('picking from the library uploads the picked bytes', (
+      tester,
+    ) async {
+      picker.file = FakeImagePicker.fileOf(tinyPng);
+      await tester.pumpWidget(wrapWithSources());
+      await tester.pump();
+
+      await tester.tap(attachButton());
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Choose file'));
+      await tester.pumpAndSettle();
+
+      expect(picker.picked, [ImagePickSource.gallery]);
+      expect(api.lastPastedImage, tinyPng);
+      expect(api.lastCall('pasteImage')!.args['id'], sessionInfo().id);
+    });
+
+    testWidgets('a cancelled pick uploads nothing', (tester) async {
+      picker.file = null; // user backed out of the picker
+      await tester.pumpWidget(wrapWithSources());
+      await tester.pump();
+
+      await tester.tap(attachButton());
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Choose file'));
+      await tester.pumpAndSettle();
+
+      expect(api.lastCall('pasteImage'), isNull);
+    });
+
+    /// Refused from the file's reported length, so a huge phone photo is never
+    /// read into memory or sent.
+    testWidgets('an oversized pick is refused before reading or uploading', (
+      tester,
+    ) async {
+      api.imageMaxBytesResponse = 10 * 1024 * 1024;
+      picker.file = FakeImagePicker.fileOf(
+        tinyPng,
+        reportedLength: 20 * 1024 * 1024,
+      );
+      await tester.pumpWidget(wrapWithSources());
+      await tester.pump();
+
+      await tester.tap(attachButton());
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Choose file'));
+      await tester.pumpAndSettle();
+
+      expect(api.lastCall('pasteImage'), isNull);
+      expect(find.textContaining('the limit is'), findsOneWidget);
+    });
+
+    testWidgets('camera is offered only where the platform supports it', (
+      tester,
+    ) async {
+      picker = FakeImagePicker(supportsCamera: true);
+      await tester.pumpWidget(wrapWithSources());
+      await tester.pump();
+
+      await tester.tap(attachButton());
+      await tester.pumpAndSettle();
+
+      expect(find.text('Take photo'), findsOneWidget);
+      expect(find.text('Photo library'), findsOneWidget);
+      expect(find.text('Choose file'), findsNothing);
+    });
+
+    testWidgets('the clipboard option uploads a clipboard image', (
+      tester,
+    ) async {
+      clipboard.image = tinyPng;
+      await tester.pumpWidget(wrapWithSources());
+      await tester.pump();
+
+      await tester.tap(attachButton());
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Paste from clipboard'));
+      await tester.pumpAndSettle();
+
+      expect(api.lastPastedImage, tinyPng);
+    });
+
+    testWidgets('the clipboard option reports an empty clipboard', (
+      tester,
+    ) async {
+      clipboard.image = null;
+      await tester.pumpWidget(wrapWithSources());
+      await tester.pump();
+
+      await tester.tap(attachButton());
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Paste from clipboard'));
+      await tester.pumpAndSettle();
+
+      expect(api.lastCall('pasteImage'), isNull);
+      expect(find.text('No image on the clipboard'), findsOneWidget);
+    });
+
+    testWidgets('a failed upload surfaces the error', (tester) async {
+      clipboard.image = tinyPng;
+      api.pasteImageError = Exception('not a recognised image');
+      await tester.pumpWidget(wrapWithSources());
+      await tester.pump();
+
+      await tester.tap(attachButton());
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Paste from clipboard'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('not a recognised image'), findsOneWidget);
+    });
+
+    group('Ctrl+V', () {
+      Future<void> pressCtrlV(WidgetTester tester) async {
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        await tester.sendKeyEvent(LogicalKeyboardKey.keyV);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+        await tester.pumpAndSettle();
+      }
+
+      testWidgets('uploads a clipboard image instead of pasting text', (
+        tester,
+      ) async {
+        clipboard.image = tinyPng;
+        await tester.pumpWidget(wrapWithSources());
+        await tester.pump();
+
+        await pressCtrlV(tester);
+
+        expect(api.lastPastedImage, tinyPng);
+        // The image replaced the paste — no text was typed into the pane.
+        expect(api.lastCall('terminalSendInput'), isNull);
+      });
+
+      /// With no clipboard image, Ctrl+V must still behave as xterm's own
+      /// binding would — our `onKeyEvent` pre-empts it, so the fallback is ours
+      /// to reproduce.
+      testWidgets('falls back to a text paste when the clipboard has no image', (
+        tester,
+      ) async {
+        clipboard.image = null;
+        const text = 'pasted text';
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async => call.method == 'Clipboard.getData'
+              ? <String, dynamic>{'text': text}
+              : null,
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            null,
+          ),
+        );
+        await tester.pumpWidget(wrapWithSources());
+        await tester.pump();
+
+        await pressCtrlV(tester);
+
+        expect(api.lastCall('pasteImage'), isNull);
+        expect(clipboard.readCount, 1);
+        final sent = api.lastCall('terminalSendInput');
+        expect(sent, isNotNull);
+        expect(utf8.decode(sent!.args['bytes'] as List<int>), text);
+      });
+
+      /// A shell attach has no image path, so Ctrl+V must be left entirely to
+      /// xterm — we must not even read the clipboard.
+      testWidgets('is not intercepted on a shell attach', (tester) async {
+        clipboard.image = tinyPng;
+        await tester.pumpWidget(wrapWithSources(kind: AttachKind.shell));
+        await tester.pump();
+
+        await pressCtrlV(tester);
+
+        expect(clipboard.readCount, 0);
+        expect(api.lastCall('pasteImage'), isNull);
+      });
+
+      /// Regression: `KeyRepeatEvent` is a sibling of `KeyDownEvent`, not a
+      /// subclass, so matching only `KeyDownEvent` let every auto-repeat fall
+      /// through to xterm — whose Ctrl+V activator defaults to
+      /// `includeRepeats: true` — pasting clipboard *text* into the pane while
+      /// our image upload was still in flight.
+      testWidgets('a held key does not leak a text paste to xterm', (
+        tester,
+      ) async {
+        clipboard.image = tinyPng;
+        const text = 'should never be pasted';
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          (call) async => call.method == 'Clipboard.getData'
+              ? <String, dynamic>{'text': text}
+              : null,
+        );
+        addTearDown(
+          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+            SystemChannels.platform,
+            null,
+          ),
+        );
+        await tester.pumpWidget(wrapWithSources());
+        await tester.pump();
+
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.keyV);
+        await tester.sendKeyRepeatEvent(LogicalKeyboardKey.keyV);
+        await tester.sendKeyRepeatEvent(LogicalKeyboardKey.keyV);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.keyV);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+        await tester.pumpAndSettle();
+
+        expect(api.lastPastedImage, tinyPng);
+        expect(
+          api.lastCall('terminalSendInput'),
+          isNull,
+          reason: 'repeats must be swallowed, not passed to xterm',
+        );
+      });
+
+      /// Regression: the in-flight flag used to be set only once the upload
+      /// began, so a second press arriving during the clipboard read (a platform
+      /// round trip) started a second upload and injected the path twice.
+      testWidgets('two fast presses upload once', (tester) async {
+        clipboard.image = tinyPng;
+        // Hold the clipboard read open so the second press genuinely lands
+        // mid-read, which is the window the real bug lived in.
+        final gate = Completer<void>();
+        clipboard.gate = gate;
+        await tester.pumpWidget(wrapWithSources());
+        await tester.pump();
+
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        await tester.sendKeyEvent(LogicalKeyboardKey.keyV);
+        await tester.sendKeyEvent(LogicalKeyboardKey.keyV);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+        gate.complete();
+        await tester.pumpAndSettle();
+
+        expect(
+          clipboard.readCount,
+          1,
+          reason: 'the second press must not even start a clipboard read',
+        );
+        expect(
+          api.calls.where((c) => c.method == 'pasteImage').length,
+          1,
+          reason: 'a second press during the clipboard read must be dropped',
+        );
+      });
+
+      /// Ctrl+V with Meta held previously reached the PTY as 0x16; intercepting
+      /// it would silently steal that.
+      testWidgets('is not intercepted when Meta is also held', (tester) async {
+        clipboard.image = tinyPng;
+        await tester.pumpWidget(wrapWithSources());
+        await tester.pump();
+
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.metaLeft);
+        await tester.sendKeyEvent(LogicalKeyboardKey.keyV);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.metaLeft);
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+        await tester.pumpAndSettle();
+
+        expect(clipboard.readCount, 0);
+        expect(api.lastCall('pasteImage'), isNull);
+      });
+
+      /// After the attach ends the view is frozen, so an upload would inject
+      /// into a pane the user cannot see.
+      testWidgets('is not intercepted after the attach has ended', (
+        tester,
+      ) async {
+        clipboard.image = tinyPng;
+        await tester.pumpWidget(wrapWithSources());
+        await tester.pump();
+        await emitAndPump(
+          tester,
+          signal(TerminalEventKind.detached, 'session ended'),
+        );
+
+        await pressCtrlV(tester);
+
+        expect(clipboard.readCount, 0);
+        expect(api.lastCall('pasteImage'), isNull);
+      });
+    });
   });
 }

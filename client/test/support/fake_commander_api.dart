@@ -77,6 +77,18 @@ class FakeCommanderApi implements CommanderApi {
   bool toggleFileReviewedResponse = true;
   Uint8List fetchBlobResponse = Uint8List(0);
 
+  /// Matches the real cap in `claude_commander_protocol::paste::MAX_IMAGE_BYTES`
+  /// so size-limit tests exercise realistic numbers.
+  int imageMaxBytesResponse = 10 * 1024 * 1024;
+
+  /// When set, [pasteImage] throws this instead of succeeding — for the upload
+  /// failure path (a rejected image, a dead server).
+  Object? pasteImageError;
+
+  /// Bytes handed to the most recent [pasteImage] call, so a test can assert the
+  /// picked/pasted image reached the API unmodified.
+  Uint8List? lastPastedImage;
+
   /// The session whose cascade is paused, surfaced in the workspace snapshot.
   /// Null (the default) means no cascade is paused.
   SessionId? cascadePausedResponse;
@@ -405,6 +417,25 @@ class FakeCommanderApi implements CommanderApi {
   }) async {
     _record('toggleKeepAlive', {'id': id});
     return toggleKeepAliveResponse;
+  }
+
+  @override
+  Future<void> pasteImage({
+    required String handle,
+    required String id,
+    required Uint8List bytes,
+  }) async {
+    _record('pasteImage', {'id': id, 'bytes': bytes.length});
+    lastPastedImage = bytes;
+    if (pasteImageError != null) {
+      throw pasteImageError!;
+    }
+  }
+
+  @override
+  Future<int> imageMaxBytes() async {
+    _record('imageMaxBytes', {});
+    return imageMaxBytesResponse;
   }
 
   @override

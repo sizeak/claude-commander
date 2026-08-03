@@ -236,6 +236,38 @@ pub fn toggle_keep_alive(handle: String, id: String) -> Result<bool> {
     call(client.toggle_keep_alive(parse_session_id(&id)?))
 }
 
+/// Upload an image to a session's agent pane (`POST /paste-image`).
+///
+/// The server writes the bytes to a temp file and types the path into the agent
+/// pane without pressing Enter, so the user can add prompt text around it — the
+/// form the Claude CLI accepts. The path shows up in the terminal view through
+/// the normal attach output stream, so a caller needs no success feedback.
+///
+/// `bytes` are whatever the platform picker or clipboard produced;
+/// [`RemoteClient::paste_image`] sniffs the content and refuses anything that
+/// isn't an allow-listed image (or is over
+/// [`claude_commander_protocol::paste::MAX_IMAGE_BYTES`]) *before* uploading, so
+/// a doomed transfer never leaves the device.
+pub fn paste_image(handle: String, id: String, bytes: Vec<u8>) -> Result<()> {
+    let client = with_client(&handle)?;
+    call(client.paste_image(parse_session_id(&id)?, bytes))
+}
+
+/// The pasted-image size cap in bytes, so the UI can reject an oversized pick
+/// from its file length — without reading a 50 MB phone photo into memory just
+/// to discard it — using the shared wire contract rather than a hardcoded Dart
+/// mirror that could drift.
+///
+/// `u32` (not `usize`/`u64`) so this lands in Dart as a plain `int` rather than a
+/// `BigInt`; the cap is single-digit MiB and will never approach 4 GiB. The
+/// const assert below makes that an enforced precondition rather than a comment,
+/// so raising the cap past `u32::MAX` fails the build instead of silently
+/// truncating.
+pub fn image_max_bytes() -> u32 {
+    const _: () = assert!(claude_commander_protocol::paste::MAX_IMAGE_BYTES <= u32::MAX as usize);
+    claude_commander_protocol::paste::MAX_IMAGE_BYTES as u32
+}
+
 // -- Projects --
 
 /// Register a project (git repo) by server-side path; returns the new project's
