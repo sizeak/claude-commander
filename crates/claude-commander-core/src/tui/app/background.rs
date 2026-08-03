@@ -111,6 +111,9 @@ impl App {
                         reviewed,
                         content_hash,
                         dropped_comments,
+                        // The TUI lays out from the parsed model it already
+                        // has; only a remote client re-parses the raw text.
+                        raw: _,
                     } = snapshot;
                     // The precompute is CPU-bound and synchronous; keep it off
                     // the async pool and hand the diff back with its models.
