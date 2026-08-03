@@ -12,7 +12,7 @@
 //!
 //! [`SessionManager`]: crate::session::SessionManager
 
-use ratatui::style::Color;
+use ratatui_core::style::Color;
 
 /// Terminal color capability
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -83,7 +83,7 @@ impl ColorMode {
     }
 }
 
-/// Convert a ratatui `Color` to a tmux-compatible color string
+/// Convert a `Color` to a tmux-compatible color string
 pub fn color_to_tmux(color: Color) -> String {
     match color {
         Color::Rgb(r, g, b) => format!("#{:02x}{:02x}{:02x}", r, g, b),

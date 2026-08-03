@@ -818,6 +818,7 @@ dependencies = [
  "proptest",
  "pty-process",
  "ratatui",
+ "ratatui-core",
  "ratatui-image",
  "rayon",
  "regex",

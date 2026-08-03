@@ -32,6 +32,25 @@ futures = "0.3"
 # reference generated from it live in `claude-commander` (and the server's own
 # `main.rs`). Embedders of this library don't inherit an argument parser.
 
+# `Color` for the `[theme]` config values and the tmux `status-style` string.
+# ratatui 0.30 is the modularised release and re-exports `ratatui_core::style`
+# verbatim (`pub use ratatui_core::{style, symbols, text};`), so this is the
+# SAME `Color` type the TUI renders with — not a mirror — and the hand-written
+# `ColorValue` serde impl in `config/theme.rs` is unaffected by using it here.
+# Depending on ratatui-core rather than full ratatui is what lets the headless
+# server and the mobile cdylib skip the whole terminal-UI dependency tree.
+#
+# `features = ["std"]` is REQUIRED, not decorative: ratatui-core's default
+# feature set is empty (`default = []`), and it is full ratatui that normally
+# turns `std` on. A consumer that takes core without the TUI crate (the server,
+# claude-commander-remote, client/rust) would otherwise get a no_std build.
+#
+# Keep this version in lockstep with the TUI crate's `ratatui`: if a future
+# ratatui bumps to ratatui-core 0.2 while this stays 0.1, `Color` becomes two
+# distinct types and `config/theme.rs` stops type-checking against the TUI.
+# That is a loud compile error, not silent breakage, but bump both together.
+ratatui-core = { version = "0.1", features = ["std"] }
+
 # TUI
 ratatui = "0.30"
 crossterm = { version = "0.29", features = ["event-stream"] }
