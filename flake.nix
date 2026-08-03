@@ -132,11 +132,14 @@
           fenix.packages.${system}.targets.x86_64-linux-android.stable.rust-std
           fenix.packages.${system}.targets.i686-linux-android.stable.rust-std
         ];
+        # Platform 36 is required by recent plugins (path_provider_android →
+        # jni_flutter compileSdk 36); the Nix SDK is read-only so every needed
+        # platform must be listed here rather than auto-installed by Gradle.
+        # Ascending order — the last entry is what every Android subproject is
+        # pinned to as its compile SDK (see ANDROID_COMPILE_SDK below).
+        clientPlatformVersions = [ "34" "35" "36" ];
         clientAndroid = clientPkgs.androidenv.composeAndroidPackages {
-          # Platform 36 is required by recent plugins (path_provider_android →
-          # jni_flutter compileSdk 36); the Nix SDK is read-only so every needed
-          # platform must be listed here rather than auto-installed by Gradle.
-          platformVersions = [ "34" "35" "36" ];
+          platformVersions = clientPlatformVersions;
           buildToolsVersions = [ "34.0.0" "35.0.0" "36.0.0" ];
           ndkVersions = [ "28.0.13004108" ];
           cmakeVersions = [ "3.22.1" ];
@@ -152,6 +155,12 @@
         };
         clientAndroidSdkRoot = "${clientAndroid.androidsdk}/libexec/android-sdk";
         clientNdkVersion = "28.0.13004108";
+        # Highest platform in `clientPlatformVersions`, derived rather than
+        # repeated so bumping the list can't leave this behind. Every Android
+        # subproject is pinned to it (see the ANDROID_COMPILE_SDK export) so no
+        # plugin's own stale `compileSdkVersion` triggers a download into the
+        # read-only store.
+        clientCompileSdk = clientPkgs.lib.last clientPlatformVersions;
         # cargokit (flutter_rust_bridge's native-build glue, vendored under
         # client/rust_builder/cargokit) hard-requires `rustup` — it queries
         # `rustup toolchain list` / `rustup target list --installed` and builds
@@ -295,6 +304,14 @@
             # Gradle (android/app/build.gradle.kts) reads this so AGP uses the
             # Nix-provided NDK rather than installing Flutter's default.
             export ANDROID_NDK_VERSION="${clientNdkVersion}"
+            # Same problem, same shape, for compile SDKs: some plugins still
+            # declare an ancient `compileSdkVersion` (irondash_engine_context,
+            # via super_clipboard, asks for 31), and Gradle would try to install
+            # that platform into the read-only Nix store. android/build.gradle.kts
+            # reads this and pins every subproject to it — Android SDKs are
+            # backward compatible for compilation, so raising a plugin's target
+            # is safe and is what AGP's own "use the highest version" advice says.
+            export ANDROID_COMPILE_SDK="${clientCompileSdk}"
             export JAVA_HOME="${clientPkgs.jdk17}"
             # Point Flutter at the Nix-provided SDK and silence analytics noise.
             flutter config --no-analytics >/dev/null 2>&1 || true
