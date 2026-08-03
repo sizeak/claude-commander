@@ -1,8 +1,9 @@
 //! Session view mode (project / sections / stacks / board).
 //!
-//! Lives in `config` rather than `tui` because the user's last-selected view
-//! is persisted (in `tui.json`). The TUI re-exports it from `crate::tui::app`
-//! for ergonomics at call sites.
+//! Lives here rather than in the `claude-commander-tui` crate because the user's
+//! last-selected view is persisted (in `tui.json`), and the persisted shape is
+//! the library's contract. The TUI re-exports it from its `app` module for
+//! ergonomics at call sites.
 
 use serde::{Deserialize, Serialize};
 

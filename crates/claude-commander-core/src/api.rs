@@ -2340,7 +2340,7 @@ fn pr_check_debounce_passed(
 /// now but [`AgentState::Working`] in the previous poll. Drives the unread
 /// marker. An empty `prev` (never polled, or cleared after an attach) yields no
 /// transitions, so a freshly-populated baseline can't produce false unread.
-pub(crate) fn detect_unread_transitions(
+pub fn detect_unread_transitions(
     prev: &BTreeMap<SessionId, AgentState>,
     new: &BTreeMap<SessionId, AgentState>,
 ) -> Vec<SessionId> {
@@ -2701,8 +2701,8 @@ fn build_session_info_list(state: &AppState, include_stopped: bool) -> Vec<Sessi
 /// (the change-feed cache reads it); this synchronous, allocation-only
 /// projection is retained for the tree-builder tests, which feed a
 /// hand-constructed `AppState` through the same DTO builders.
-#[cfg(test)]
-pub(crate) fn workspace_snapshot_from_state(state: &AppState) -> WorkspaceSnapshot {
+#[cfg(any(test, feature = "test-support"))]
+pub fn workspace_snapshot_from_state(state: &AppState) -> WorkspaceSnapshot {
     WorkspaceSnapshot {
         projects: build_project_info_list(state),
         sessions: build_session_info_list(state, true),

@@ -28,7 +28,12 @@
 
 pub mod error;
 pub mod local;
-#[cfg(test)]
+// Test scaffolding, not part of the supported API. Reachable under the
+// `test-support` feature as well as `cfg(test)` because the TUI crate's tests
+// need it and a `cfg(test)` item is invisible across a crate boundary. The
+// feature is off by default and enabled only by a dev-dependency, so the double
+// never reaches a release build.
+#[cfg(any(test, feature = "test-support"))]
 pub mod mock;
 pub mod placeholder;
 pub mod run_local;
@@ -54,9 +59,11 @@ pub use placeholder::PlaceholderBackend;
 pub use run_local::{RunLocalError, run_local};
 
 /// Builds a remote [`CommanderBackend`] from its [`RemoteServerConfig`], injected
-/// into [`App`](crate::tui::App) at construction so **core never depends on the
-/// remote client crate** — the binary owns the dependency direction and passes a
-/// closure that calls `claude_commander_remote::RemoteBackend::new`.
+/// into `claude_commander_tui::App` at construction so **core never depends on
+/// the remote client crate** — the binary owns the dependency direction and
+/// passes a closure that calls `claude_commander_remote::RemoteBackend::new`.
+/// (Not an intra-doc link: the TUI is downstream of core, so core cannot name it
+/// as a resolvable path.)
 ///
 /// Returning `Err` means the backend couldn't be constructed at all (a malformed
 /// URL, say); the TUI substitutes a permanently-degraded
@@ -230,8 +237,10 @@ impl BackendView {
 
 /// An empty [`WorkspaceSnapshot`] placeholder (no projects/sessions). Used to
 /// seed a [`BackendView`] before its first real snapshot lands (and by tests to
-/// stand up a [`MockBackend`](mock::MockBackend)).
-pub(crate) fn empty_snapshot() -> WorkspaceSnapshot {
+/// stand up a `mock::MockBackend` — plain text, since that module only exists
+/// under `cfg(test)` or the `test-support` feature, so a link to it would be
+/// unresolvable in a normal doc build).
+pub fn empty_snapshot() -> WorkspaceSnapshot {
     WorkspaceSnapshot {
         projects: Vec::new(),
         sessions: Vec::new(),

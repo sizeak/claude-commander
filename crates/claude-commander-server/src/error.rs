@@ -99,7 +99,6 @@ impl ApiError {
             CoreError::Git(_) => "git",
             CoreError::Config(_) => "config",
             CoreError::Io(_) => "io",
-            CoreError::Tui(_) => "tui",
             CoreError::Tts(_) => "tts",
         }
     }

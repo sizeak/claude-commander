@@ -12,8 +12,8 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 use claude_commander_core::{
     config::{AppState, Config, ConfigStore, StateStore},
     tmux::{AttachResult, attach_to_session},
-    tui::App,
 };
+use claude_commander_tui::App;
 
 use crate::cli_args::{Cli, Commands, cli_reference};
 
@@ -654,7 +654,7 @@ async fn main() -> Result<()> {
 
         Some(Commands::PickSession { out, current }) => {
             // No logging — the popup terminal is the picker's UI.
-            claude_commander_core::picker::run_session_picker(&out, current.as_deref())?;
+            claude_commander_tui::picker::run_session_picker(&out, current.as_deref())?;
         }
 
         Some(Commands::Config { init }) => {

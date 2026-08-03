@@ -51,12 +51,12 @@ futures = "0.3"
 # That is a loud compile error, not silent breakage, but bump both together.
 ratatui-core = { version = "0.1", features = ["std"] }
 
-# TUI
-ratatui = "0.30"
-crossterm = { version = "0.29", features = ["event-stream"] }
-ansi-to-tui = "8"
-# Text-input buffer (cursor/editing) for the review comment box.
-tui-input = "0.15"
+# Key events. NOT a rendering dependency: `config/keybindings.rs` persists
+# crossterm `KeyCode`/`KeyModifiers` in the keybinding map, and `tmux/attach.rs`
+# toggles raw mode, so these stay here after the frontend moved out. Crossterm is
+# pure Rust with no native libraries, and the `event-stream` feature — needed
+# only for the TUI's async `EventStream` — is deliberately NOT enabled here.
+crossterm = "0.29"
 
 # Git (pure Rust)
 gix = { version = "0.85", default-features = false, features = [
@@ -77,25 +77,14 @@ serde_json = { workspace = true }
 toml = "1.1"
 toml_edit = "0.25"
 
-# Error handling
+# Error handling. No color-eyre: installing a panic/error reporter is a binary's
+# job, and `claude-commander` already owns that dependency.
 thiserror = { workspace = true }
 anyhow = "1.0"
-color-eyre = "0.6"
 
-# Observability
+# Observability. Emitting spans/events is the library's job; *subscribing* to
+# them is the binary's, so tracing-subscriber is not a dependency here.
 tracing = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-# Syntax highlighting for the review diff view (fancy-regex backend — pure
-# Rust, no C/oniguruma dependency). `two-face` supplies an extended syntax set
-# (the bat language set, incl. TypeScript/TSX/TOML/…) that syntect's bundled
-# defaults lack.
-syntect = { version = "5.3", default-features = false, features = [
-    "default-fancy",
-] }
-two-face = { version = "0.5", default-features = false, features = [
-    "syntect-fancy",
-] }
 
 # Utilities
 chrono = { version = "0.4", features = ["serde"] }
@@ -117,18 +106,13 @@ pty-process = { version = "0.5", features = ["async"] }
 # Unix system calls (safe wrappers)
 nix = { version = "0.31", features = ["term", "poll", "fs", "user"] }
 
-# Throbber/spinner widget
-throbber-widgets-tui = "0.11"
-
-# Fuzzy matching for the quick-select palette
+# Fuzzy matching for the quick-select palette and session lookup. Stays here:
+# `session/types.rs` ranks sessions with it, so it is not frontend-only.
 fuzzy-matcher = "0.3"
-rayon = "1.12.0"
-# default features include `chafa-dyn`, which needs the chafa C lib via
-# pkg-config; we only need the built-in protocols + crossterm integration.
-ratatui-image = { version = "11.0.6", default-features = false, features = [
-    "crossterm",
-    "image-defaults",
-] }
+
+# RGBA→PNG encoding for pasted screenshots (`paste_image.rs`). The *rendering*
+# of those images is the frontend's job and lives with ratatui-image there;
+# encoding and the pruned temp-file store are core's.
 image = "0.25"
 
 # Conversation mode (TTS + STT): HTTP client for the OpenAI-compatible TTS/STT
@@ -183,6 +167,14 @@ arboard = { version = "3.6", optional = true }
 default = ["audio", "clipboard"]
 audio = ["dep:rodio", "dep:cpal", "dep:hound"]
 clipboard = ["dep:arboard"]
+# Exposes test scaffolding (`backend::mock::MockBackend`,
+# `api::workspace_snapshot_from_state`) to OTHER crates' tests. A `#[cfg(test)]`
+# item is invisible across a crate boundary, and `claude-commander-tui`'s tests
+# need both — so they are gated on `any(test, feature = "test-support")` instead.
+# Enable it only from a `[dev-dependencies]` entry: it is off by default, so
+# `cargo build` never compiles the double into a release binary, the headless
+# server, or the mobile cdylib.
+test-support = []
 
 [dev-dependencies]
 # Property-based testing
@@ -193,7 +185,5 @@ tokio-test = "0.4"
 tempfile = "3.27"
 # Test assertions
 pretty_assertions = "1.4"
-# Snapshot testing
-insta = "1.48"
 # Set file mtimes deterministically (paste-image prune test)
 filetime = "0.2"

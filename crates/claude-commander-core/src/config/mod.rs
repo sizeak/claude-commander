@@ -20,6 +20,11 @@ mod view_mode;
 
 pub use config::*;
 pub use config_store::ConfigStore;
+/// The locked atomic-write plumbing `StateStore` uses, re-exported because the
+/// TUI crate persists `tui.json` beside `state.json` and must take the same lock
+/// discipline rather than duplicating it. `store` itself stays private so
+/// `StateStore` keeps a single public path.
+pub use store::{atomic_write, open_lock_file};
 
 /// Write `contents` to `path` atomically, restricting the file to owner
 /// read/write (`0o600`) on Unix. The config file carries remote-server bearer

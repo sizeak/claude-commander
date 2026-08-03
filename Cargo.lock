@@ -92,19 +92,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ansi-to-tui"
-version = "8.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e42366bb9d958f042bf58f0a85e1b2d091997c1257ca49bddd7e4827aadc65fd"
-dependencies = [
- "nom 8.0.0",
- "ratatui-core",
- "simdutf8",
- "smallvec",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -765,6 +752,7 @@ dependencies = [
  "clap",
  "claude-commander-core",
  "claude-commander-remote",
+ "claude-commander-tui",
  "color-eyre",
  "nix 0.31.3",
  "serde_json",
@@ -795,13 +783,11 @@ dependencies = [
 name = "claude-commander-core"
 version = "0.31.1"
 dependencies = [
- "ansi-to-tui",
  "anyhow",
  "arboard",
  "async-trait",
  "chrono",
  "claude-commander-protocol",
- "color-eyre",
  "cpal",
  "crossterm",
  "directories",
@@ -812,32 +798,23 @@ dependencies = [
  "gix",
  "hound",
  "image",
- "insta",
  "nix 0.31.3",
  "pretty_assertions",
  "proptest",
  "pty-process",
- "ratatui",
  "ratatui-core",
- "ratatui-image",
- "rayon",
  "regex",
  "reqwest",
  "rodio",
  "serde",
  "serde_json",
- "syntect",
  "tempfile",
  "thiserror 2.0.18",
- "throbber-widgets-tui",
  "tokio",
  "tokio-test",
  "toml 1.1.2+spec-1.1.0",
  "toml_edit 0.25.12+spec-1.1.0",
  "tracing",
- "tracing-subscriber",
- "tui-input",
- "two-face",
  "url",
  "uuid",
  "xxhash-rust",
@@ -904,6 +881,34 @@ dependencies = [
  "claude-commander-server",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "claude-commander-tui"
+version = "0.31.1"
+dependencies = [
+ "chrono",
+ "claude-commander-core",
+ "crossterm",
+ "directories",
+ "futures",
+ "image",
+ "nix 0.31.3",
+ "ratatui",
+ "ratatui-image",
+ "rayon",
+ "serde",
+ "serde_json",
+ "syntect",
+ "tempfile",
+ "thiserror 2.0.18",
+ "throbber-widgets-tui",
+ "tokio",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "tui-input",
+ "two-face",
+ "uuid",
 ]
 
 [[package]]
@@ -994,17 +999,6 @@ dependencies = [
  "rustversion",
  "ryu",
  "static_assertions",
-]
-
-[[package]]
-name = "console"
-version = "0.16.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4fe5f465a4f6fee88fad41b85d990f84c835335e85b5d9e6e63e0d06d28cba7c"
-dependencies = [
- "encode_unicode",
- "libc",
- "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1398,12 +1392,6 @@ name = "either"
 version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
-
-[[package]]
-name = "encode_unicode"
-version = "1.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
 
 [[package]]
 name = "encoding_rs"
@@ -3039,18 +3027,6 @@ name = "inlinable_string"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8fae54786f62fb2918dcfae3d568594e50eb9b5c25bf04371af6fe7516452fb"
-
-[[package]]
-name = "insta"
-version = "1.48.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "86f0f8fee8c926415c58d6ae43a08523a26faccb2323f5e6b644fe7dd4ef6b82"
-dependencies = [
- "console",
- "once_cell",
- "similar",
- "tempfile",
-]
 
 [[package]]
 name = "instability"
@@ -5322,12 +5298,6 @@ name = "simdutf8"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
-
-[[package]]
-name = "similar"
-version = "2.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
 name = "siphasher"
