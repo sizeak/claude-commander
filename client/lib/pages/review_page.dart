@@ -741,20 +741,26 @@ String _fileNumber(int index) => (index + 1).toString().padLeft(2, '0');
 /// chrome colours itself.
 String _fileSubtitle(rust.ReviewFileDto file) => _statusLabel(file.status);
 
-/// The `+N −M` delta, added in success green and removed in danger red.
+/// The line delta, added in success green and removed in danger red.
 ///
 /// A widget rather than part of the subtitle string because that split is load
 /// bearing — it is how the sidebar reads at a glance, and it is what the pre-chrome
 /// `_FileRow` rendered. Composed into the row's trailing slot the same way
 /// `_recentRow` pairs a PR badge with an age.
+/// A zero count is omitted, so a pure deletion reads `−12` rather than
+/// `+0 −12`. That matches the pre-chrome wide sidebar, which guarded each count
+/// on `> 0`; the phone card always printed both, so the two disagreed and this
+/// picks the quieter of the two behaviours for both.
 Widget _fileDelta(BuildContext context, rust.ReviewFileDto file) {
   final t = CommanderTokens.of(context);
   return Row(
     mainAxisSize: MainAxisSize.min,
     children: [
-      Text('+${file.added}', style: t.meta(size: 10, color: t.success)),
-      const SizedBox(width: 5),
-      Text('−${file.removed}', style: t.meta(size: 10, color: t.danger)),
+      if (file.added > 0)
+        Text('+${file.added}', style: t.meta(size: 10, color: t.success)),
+      if (file.added > 0 && file.removed > 0) const SizedBox(width: 5),
+      if (file.removed > 0)
+        Text('−${file.removed}', style: t.meta(size: 10, color: t.danger)),
     ],
   );
 }

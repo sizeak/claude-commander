@@ -11,6 +11,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'support/fake_commander_api.dart';
 import 'support/fixtures.dart';
+import 'theme/mission_control_reference.dart';
 
 void main() {
   late FakeCommanderApi api;
@@ -426,6 +427,39 @@ void main() {
       find.textContaining('Cascade merge paused: conflict in foo.rs'),
       findsOneWidget,
     );
+  });
+
+  testWidgets('the lifecycle bar keeps Kill amber and Restart teal', (
+    tester,
+  ) async {
+    // The *call site* assertion. `bar_button_accent_test.dart` proves the chrome
+    // honours an accent; this proves this bar still passes one. Without it,
+    // deleting `accent:` from `_lifecycleBar` flattens both icons to the neutral
+    // textBright and every other test still passes — which is how that regression
+    // reached review in the first place.
+    final info = sessionInfo(status: SessionStatus.running);
+    api.getSessionDetailResponse = sessionDetail(info: info);
+    await pump(tester, info);
+
+    // IconButton builds its Tooltip *inside* itself, so the button is the
+    // tooltip's ancestor, not its descendant.
+    Color? iconColour(String tooltip) => tester
+        .widget<IconButton>(
+          find
+              .ancestor(
+                of: find.byTooltip(tooltip),
+                matching: find.byType(IconButton),
+              )
+              .first,
+        )
+        .color;
+
+    // Only these two: they are the pair that regressed. That a *normal* button
+    // stays neutral is covered by `chrome/bar_button_accent_test.dart`, and the
+    // other lifecycle labels appear elsewhere in this page's tree, so matching
+    // them by tooltip here is ambiguous.
+    expect(iconColour('Kill'), McRef.amberText);
+    expect(iconColour('Restart'), McRef.teal);
   });
 
   testWidgets('push stack confirms then calls pushStack', (tester) async {
