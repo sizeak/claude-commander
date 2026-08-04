@@ -45,7 +45,13 @@ cargo clippy
 ```
 
 This project uses [pre-commit](https://pre-commit.com/) to run `cargo fmt` and
-`cargo clippy` on every commit. After cloning, run `pre-commit install`.
+`cargo clippy` on every commit, plus `dart format` when the commit touches Dart.
+After cloning, run `pre-commit install`.
+
+The Dart hook shells out to `client/tool/dart-format.sh`, which re-enters the
+client dev shell if `dart` isn't already on your `PATH` — so it works whether or
+not you're inside `nix develop .#client`. The same script backs CI's Format Dart
+step (`--check`), so the two can't drift.
 
 ### Architecture
 

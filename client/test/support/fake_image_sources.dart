@@ -40,11 +40,8 @@ class FakeImagePicker implements ImagePickerService {
     Uint8List bytes, {
     String name = 'shot.png',
     int? reportedLength,
-  }) => XFile.fromData(
-    bytes,
-    name: name,
-    length: reportedLength ?? bytes.length,
-  );
+  }) =>
+      XFile.fromData(bytes, name: name, length: reportedLength ?? bytes.length);
 
   @override
   Future<XFile?> pick(ImagePickSource source) async {

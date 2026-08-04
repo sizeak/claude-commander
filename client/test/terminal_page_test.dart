@@ -102,25 +102,26 @@ void main() {
   // handoff) the socket goes half-open: no detach event ever arrives, so the UI
   // still reads "attached" while the pane is frozen. Disabling the button in
   // exactly that state is what turns a recoverable stall into a dead end.
-  testWidgets('the reconnect button stays enabled while the attach looks live', (
-    tester,
-  ) async {
-    await tester.pumpWidget(wrap());
-    await tester.pump();
+  testWidgets(
+    'the reconnect button stays enabled while the attach looks live',
+    (tester) async {
+      await tester.pumpWidget(wrap());
+      await tester.pump();
 
-    IconButton reconnect() => tester.widget<IconButton>(
-      find.widgetWithIcon(IconButton, Icons.refresh),
-    );
-    expect(reconnect().onPressed, isNotNull);
+      IconButton reconnect() => tester.widget<IconButton>(
+        find.widgetWithIcon(IconButton, Icons.refresh),
+      );
+      expect(reconnect().onPressed, isNotNull);
 
-    await emitAndPump(
-      tester,
-      signal(TerminalEventKind.detached, 'session ended'),
-    );
+      await emitAndPump(
+        tester,
+        signal(TerminalEventKind.detached, 'session ended'),
+      );
 
-    expect(reconnect().onPressed, isNotNull);
-    expect(find.textContaining('detached: session ended'), findsOneWidget);
-  });
+      expect(reconnect().onPressed, isNotNull);
+      expect(find.textContaining('detached: session ended'), findsOneWidget);
+    },
+  );
 
   // Reconnecting while the old attach may still be live must tear the old one
   // down first, or it becomes a zombie: the cdylib's registry entry keeps its
@@ -135,8 +136,7 @@ void main() {
     await tester.pumpWidget(wrap());
     await tester.pump();
 
-    final firstId =
-        api.lastCall('attachTerminal')!.args['attachId'] as String;
+    final firstId = api.lastCall('attachTerminal')!.args['attachId'] as String;
 
     // Note: no detached/error event — the attach still looks live, which is
     // exactly the half-open case.
@@ -599,34 +599,33 @@ void main() {
       /// With no clipboard image, Ctrl+V must still behave as xterm's own
       /// binding would — our `onKeyEvent` pre-empts it, so the fallback is ours
       /// to reproduce.
-      testWidgets('falls back to a text paste when the clipboard has no image', (
-        tester,
-      ) async {
-        clipboard.image = null;
-        const text = 'pasted text';
-        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-          SystemChannels.platform,
-          (call) async => call.method == 'Clipboard.getData'
-              ? <String, dynamic>{'text': text}
-              : null,
-        );
-        addTearDown(
-          () => tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      testWidgets(
+        'falls back to a text paste when the clipboard has no image',
+        (tester) async {
+          clipboard.image = null;
+          const text = 'pasted text';
+          tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
             SystemChannels.platform,
-            null,
-          ),
-        );
-        await tester.pumpWidget(wrapWithSources());
-        await tester.pump();
+            (call) async => call.method == 'Clipboard.getData'
+                ? <String, dynamic>{'text': text}
+                : null,
+          );
+          addTearDown(
+            () => tester.binding.defaultBinaryMessenger
+                .setMockMethodCallHandler(SystemChannels.platform, null),
+          );
+          await tester.pumpWidget(wrapWithSources());
+          await tester.pump();
 
-        await pressCtrlV(tester);
+          await pressCtrlV(tester);
 
-        expect(api.lastCall('pasteImage'), isNull);
-        expect(clipboard.readCount, 1);
-        final sent = api.lastCall('terminalSendInput');
-        expect(sent, isNotNull);
-        expect(utf8.decode(sent!.args['bytes'] as List<int>), text);
-      });
+          expect(api.lastCall('pasteImage'), isNull);
+          expect(clipboard.readCount, 1);
+          final sent = api.lastCall('terminalSendInput');
+          expect(sent, isNotNull);
+          expect(utf8.decode(sent!.args['bytes'] as List<int>), text);
+        },
+      );
 
       /// A shell attach has no image path, so Ctrl+V must be left entirely to
       /// xterm — we must not even read the clipboard.
