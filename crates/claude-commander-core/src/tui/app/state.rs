@@ -93,24 +93,29 @@ impl App {
                 self.refresh_list_items().await;
             }
             StateUpdate::PreviewReady {
+                spawned_at,
                 session_id,
                 project_id,
                 preview_content,
                 shell_content,
                 diff_info,
             } => {
-                // Only apply if the same thing is still selected — otherwise the
+                // Release the in-flight guard iff this result owns it. Keyed on
+                // the spawn token, not the selection: a result whose guard has
+                // since been replaced must not clear the newer fetch's guard,
+                // and a result for a selection that moved on *without* a
+                // respawn still has to release its own, or the next fetch is
+                // blocked until the 5s backstop.
+                if self.ui_state.preview_update_spawned_at == Some(spawned_at) {
+                    self.ui_state.preview_update_spawned_at = None;
+                }
+                // Only paint if the same thing is still selected — otherwise the
                 // pane would briefly show another session's output. Session and
                 // project ids are unique across backends, so comparing ids is
                 // enough.
                 let still_selected = self.ui_state.selected_session_id.map(|r| r.id) == session_id
                     && self.ui_state.selected_project_id.map(|(_, p)| p) == project_id;
                 if still_selected {
-                    // Clear the in-flight guard only for the fetch it belongs
-                    // to. A late result for a *previous* selection must not
-                    // clear the guard the new selection's fetch just set, or the
-                    // next tick spawns a duplicate for it.
-                    self.ui_state.preview_update_spawned_at = None;
                     self.ui_state.preview_content = preview_content;
                     self.ui_state.shell_content = shell_content;
                     self.ui_state.diff_info = diff_info;
@@ -118,8 +123,15 @@ impl App {
                     debug!("Discarding stale PreviewReady (selection changed)");
                 }
             }
-            StateUpdate::EnrichedPrReady { session_id, info } => {
-                self.ui_state.enriched_pr_fetch_spawned_at = None;
+            StateUpdate::EnrichedPrReady {
+                spawned_at,
+                session_id,
+                info,
+            } => {
+                // Same generation-token rule as `PreviewReady` above.
+                if self.ui_state.enriched_pr_fetch_spawned_at == Some(spawned_at) {
+                    self.ui_state.enriched_pr_fetch_spawned_at = None;
+                }
                 // Only apply if the session is still selected
                 if self.ui_state.selected_session_id.map(|r| r.id) == Some(session_id) {
                     // An empty result caches nothing, so record the attempt

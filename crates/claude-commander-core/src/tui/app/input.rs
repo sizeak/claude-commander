@@ -1597,6 +1597,12 @@ impl App {
             // availability gating); no-op on a sidebar/empty selection.
             UserCommand::OpenInfo if self.ui_state.selected_session_id.is_some() => {
                 self.ui_state.modal = Modal::Info { scroll: 0 };
+                // Opening Info is the discoverable retry for an enriched-PR
+                // fetch that came back empty (before the marker existed, every
+                // reopen retried). Dropping it here keeps the anti-spam property
+                // — the marker still suppresses the per-tick refetch loop while
+                // a surface stays open — without making PR-refresh the only way.
+                self.ui_state.enriched_pr_unavailable = None;
                 // Kick off the enriched-PR + working-tree diff fetches that
                 // populate the modal; clear the in-flight guard so the diff
                 // fetch runs even if one fired recently.

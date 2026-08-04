@@ -7183,6 +7183,7 @@ async fn preview_ready_applies_only_to_the_still_selected_session() {
         Some(SessionRef::new(crate::backend::LOCAL_BACKEND_ID, selected));
 
     app.handle_state_update(StateUpdate::PreviewReady {
+        spawned_at: Instant::now(),
         session_id: Some(selected),
         project_id: None,
         preview_content: "live output".to_string(),
@@ -7196,6 +7197,7 @@ async fn preview_ready_applies_only_to_the_still_selected_session() {
     // A fetch that resolves after the user moved on must not paint another
     // session's output into the pane.
     app.handle_state_update(StateUpdate::PreviewReady {
+        spawned_at: Instant::now(),
         session_id: Some(SessionId::new()),
         project_id: None,
         preview_content: "someone else's output".to_string(),
@@ -7390,6 +7392,8 @@ async fn a_stale_preview_result_does_not_clear_the_new_selections_guard() {
     let guard = Instant::now();
     app.ui_state.preview_update_spawned_at = Some(guard);
     app.handle_state_update(StateUpdate::PreviewReady {
+        // A result from a superseded fetch: its token is not the stored guard.
+        spawned_at: guard - std::time::Duration::from_millis(1),
         session_id: Some(old),
         project_id: None,
         preview_content: "stale".to_string(),
@@ -7406,6 +7410,7 @@ async fn a_stale_preview_result_does_not_clear_the_new_selections_guard() {
 
     // The matching result does clear it, so the next tick can refresh.
     app.handle_state_update(StateUpdate::PreviewReady {
+        spawned_at: guard,
         session_id: Some(new),
         project_id: None,
         preview_content: "live".to_string(),
@@ -7427,6 +7432,7 @@ async fn an_empty_enriched_pr_result_is_not_refetched_until_a_pr_refresh() {
     app.ui_state.selected_session_id = Some(SessionRef::local(sid));
 
     app.handle_state_update(StateUpdate::EnrichedPrReady {
+        spawned_at: Instant::now(),
         session_id: sid,
         info: None,
     })
@@ -7439,4 +7445,97 @@ async fn an_empty_enriched_pr_result_is_not_refetched_until_a_pr_refresh() {
         app.ui_state.enriched_pr_unavailable, None,
         "refreshing PR status must allow the enriched fetch to be retried"
     );
+}
+
+#[tokio::test]
+async fn a_selection_change_without_a_respawn_still_releases_the_guard() {
+    // Regression: keying the guard release on `still_selected` stranded it when
+    // the selection moved via a StateUpdate rather than a keypress — only the
+    // Input arm of `process_event` clears-and-respawns. A tick-spawned fetch for
+    // A, then (say) A being removed and the cursor landing on B, left A's guard
+    // set with nothing to clear it, so every tick skipped and the pane showed
+    // the departed session for up to the 5s backstop. The guard is now released
+    // by the token of the fetch that owns it, regardless of selection.
+    let old = SessionId::new();
+    let new = SessionId::new();
+    let mut app = make_test_app();
+    app.ui_state.view_mode = ViewMode::ProjectGrouped;
+
+    // A fetch is in flight for `old`...
+    let guard = Instant::now();
+    app.ui_state.preview_update_spawned_at = Some(guard);
+    // ...and the selection moves to `new` with no respawn (StateUpdate path).
+    app.ui_state.selected_session_id = Some(SessionRef::local(new));
+
+    app.handle_state_update(StateUpdate::PreviewReady {
+        spawned_at: guard,
+        session_id: Some(old),
+        project_id: None,
+        preview_content: "departed session".to_string(),
+        shell_content: String::new(),
+        diff_info: Arc::new(DiffInfo::empty()),
+    })
+    .await;
+
+    assert_eq!(
+        app.ui_state.preview_update_spawned_at, None,
+        "the owning result must release the guard even when the selection moved on"
+    );
+    assert_ne!(
+        app.ui_state.preview_content, "departed session",
+        "...while still not painting the old selection's content"
+    );
+
+    // With the guard released, the next tick can fetch for the new selection.
+    app.spawn_preview_update();
+    assert!(app.ui_state.preview_update_spawned_at.is_some());
+}
+
+#[tokio::test]
+async fn reopening_the_info_modal_retries_a_failed_enriched_fetch() {
+    // Reopening Info was the retry affordance before the negative marker
+    // existed; keep it, since it is far more discoverable than PR-refresh.
+    let sid = SessionId::new();
+    let mut app = make_test_app();
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+    app.ui_state.enriched_pr_unavailable = Some(sid);
+
+    app.handle_command(UserCommand::OpenInfo).await;
+    assert!(matches!(app.ui_state.modal, Modal::Info { .. }));
+    assert_eq!(
+        app.ui_state.enriched_pr_unavailable, None,
+        "reopening Info must allow the enriched fetch to be retried"
+    );
+}
+
+#[tokio::test]
+async fn a_stale_enriched_result_does_not_clear_the_new_fetchs_guard() {
+    // Same generation-token rule as PreviewReady: a superseded enriched result
+    // must not release the guard belonging to the fetch now in flight, or the
+    // next tick double-spawns `gh`.
+    let sid = SessionId::new();
+    let mut app = make_test_app();
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+
+    let guard = Instant::now();
+    app.ui_state.enriched_pr_fetch_spawned_at = Some(guard);
+    app.handle_state_update(StateUpdate::EnrichedPrReady {
+        spawned_at: guard - std::time::Duration::from_millis(1),
+        session_id: sid,
+        info: None,
+    })
+    .await;
+    assert_eq!(
+        app.ui_state.enriched_pr_fetch_spawned_at,
+        Some(guard),
+        "a superseded enriched result must leave the live fetch's guard intact"
+    );
+
+    app.handle_state_update(StateUpdate::EnrichedPrReady {
+        spawned_at: guard,
+        session_id: sid,
+        info: None,
+    })
+    .await;
+    assert_eq!(app.ui_state.enriched_pr_fetch_spawned_at, None);
 }

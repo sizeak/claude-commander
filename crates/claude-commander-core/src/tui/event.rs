@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::config::keybindings::{BindableAction, KeyBindings};
 use crate::git::{DiffInfo, EnrichedPrInfo};
@@ -90,6 +90,9 @@ pub enum StateUpdate {
     },
     /// Enriched PR info ready from background fetch
     EnrichedPrReady {
+        /// Generation token for the in-flight guard — see
+        /// [`StateUpdate::PreviewReady::spawned_at`].
+        spawned_at: Instant,
         session_id: SessionId,
         info: Option<EnrichedPrInfo>,
     },
@@ -191,6 +194,12 @@ pub enum StateUpdate {
     /// modal's diffstat (`diff_info`) — `backend.preview()` returns all three in
     /// a single round trip, so splitting them would double the traffic.
     PreviewReady {
+        /// The value the in-flight guard was set to when this fetch was spawned,
+        /// used as a generation token: the guard is cleared only by the result
+        /// that owns it. Comparing selections instead is not enough — a
+        /// selection can change without a respawn (a `StateUpdate` that shifts
+        /// the cursor), which would strand the guard until its 5s backstop.
+        spawned_at: Instant,
         /// Selected session at spawn time, or `None` when a project was selected.
         session_id: Option<SessionId>,
         /// Selected project at spawn time, or `None` when a session was selected.

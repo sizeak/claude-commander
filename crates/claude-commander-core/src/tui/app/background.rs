@@ -65,13 +65,15 @@ impl App {
         let project_id = sel_project.map(|(_, p)| p);
         let backend = self.backend_arc(backend_id);
         let tx = self.event_loop.sender();
-        self.ui_state.preview_update_spawned_at = Some(Instant::now());
+        let spawned_at = Instant::now();
+        self.ui_state.preview_update_spawned_at = Some(spawned_at);
 
         tokio::spawn(async move {
             let (preview_content, diff_info, shell_content) =
                 fetch_preview_data(&backend, session_id, project_id).await;
             let _ = tx
                 .send(AppEvent::StateUpdate(StateUpdate::PreviewReady {
+                    spawned_at,
                     session_id,
                     project_id,
                     preview_content,
@@ -227,7 +229,8 @@ impl App {
                 .and_then(|s| snapshot.projects.iter().find(|p| p.id == s.project_id))
                 .map(|p| p.repo_path.clone());
             let tx = self.event_loop.sender();
-            self.ui_state.enriched_pr_fetch_spawned_at = Some(Instant::now());
+            let spawned_at = Instant::now();
+            self.ui_state.enriched_pr_fetch_spawned_at = Some(spawned_at);
 
             tokio::spawn(async move {
                 let info = if let Some(repo_path) = repo_path {
@@ -238,6 +241,7 @@ impl App {
 
                 let _ = tx
                     .send(AppEvent::StateUpdate(StateUpdate::EnrichedPrReady {
+                        spawned_at,
                         session_id,
                         info,
                     }))
