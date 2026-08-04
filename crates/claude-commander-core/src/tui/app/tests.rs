@@ -6873,7 +6873,7 @@ async fn info_content_resolves_in_a_list_view_from_the_snapshot() {
     app.backend_mut_for_test(BackendId(0)).view.snapshot = snap;
     app.ui_state.selected_session_id = Some(SessionRef::local(sid));
     assert!(
-        matches!(app.build_session_info_content(), InfoContent::Session(_)),
+        matches!(app.build_info_content(), InfoContent::Session(_)),
         "Info content must resolve in a list view, not just on the board"
     );
 }
@@ -6918,4 +6918,624 @@ async fn target_section_uses_section_header_above_cursor_in_list_view() {
     app.ui_state.list_state.set_selectable(selectable);
     app.ui_state.list_state.select(Some(1));
     assert_eq!(app.target_section().as_deref(), Some("Review"));
+}
+
+// ---------------------------------------------------------------------------
+// Right-hand preview pane (list views only)
+//
+// The board redesign (#260) removed the pane outright; these pin the restored
+// behaviour so it can't be dropped again silently. The board must stay
+// full-screen — a right pane there would eat its columns.
+// ---------------------------------------------------------------------------
+
+use crate::tui::app::render::split_list_view;
+use crate::tui::app::{DEFAULT_LEFT_PANE_PCT, MAX_LEFT_PANE_PCT, MIN_LEFT_PANE_PCT, RightPaneView};
+
+#[test]
+fn split_list_view_gives_the_list_its_percentage_and_the_pane_the_rest() {
+    let content = Rect::new(0, 0, 100, 40);
+    let (left, right) = split_list_view(content, 30);
+
+    assert_eq!(left, Rect::new(0, 0, 30, 40));
+    assert_eq!(right, Rect::new(30, 0, 70, 40), "panes must tile the area");
+    assert_eq!(left.width + right.width, content.width);
+}
+
+#[test]
+fn split_list_view_clamps_an_out_of_range_percentage() {
+    let content = Rect::new(0, 0, 100, 40);
+    // A hand-edited tui.json could hold anything; both extremes must leave a
+    // usable list *and* a usable pane.
+    assert_eq!(split_list_view(content, 0).0.width, MIN_LEFT_PANE_PCT);
+    assert_eq!(split_list_view(content, 99).0.width, MAX_LEFT_PANE_PCT);
+}
+
+#[test]
+fn split_list_view_never_starves_a_pane_at_tiny_widths() {
+    // 3 columns at 15% rounds the left pane to 0, which would render an
+    // invisible list; the clamp keeps one column each.
+    let (left, right) = split_list_view(Rect::new(0, 0, 3, 10), MIN_LEFT_PANE_PCT);
+    assert_eq!((left.width, right.width), (1, 2));
+
+    // Below two columns there is nothing to split: the list takes it all.
+    let (left, right) = split_list_view(Rect::new(0, 0, 1, 10), 30);
+    assert_eq!((left.width, right.width), (1, 0));
+}
+
+#[test]
+fn right_pane_view_toggles_and_labels_its_tabs() {
+    // A session cycles all three tabs, and back to where it started.
+    let mut v = RightPaneView::Preview;
+    for expected in [
+        RightPaneView::Info,
+        RightPaneView::Shell,
+        RightPaneView::Preview,
+    ] {
+        v = v.cycled(false, true);
+        assert_eq!(v, expected);
+    }
+    // Reverse walks the same ring the other way.
+    for expected in [
+        RightPaneView::Shell,
+        RightPaneView::Info,
+        RightPaneView::Preview,
+    ] {
+        v = v.cycled(false, false);
+        assert_eq!(v, expected);
+    }
+
+    // Tab labels, with the active one indexed.
+    assert_eq!(
+        RightPaneView::Preview.tabs(false),
+        (&["Preview", "Info", "Shell"][..], 0)
+    );
+    assert_eq!(
+        RightPaneView::Info.tabs(false),
+        (&["Preview", "Info", "Shell"][..], 1)
+    );
+    assert_eq!(
+        RightPaneView::Shell.tabs(false),
+        (&["Preview", "Info", "Shell"][..], 2)
+    );
+
+    // A project has no agent pane: two tabs, Preview collapses to Shell, and
+    // the cycle is a straight Shell ↔ Info toggle in either direction.
+    assert_eq!(
+        RightPaneView::Preview.tabs(true),
+        (&["Shell", "Info"][..], 0)
+    );
+    assert_eq!(RightPaneView::Info.tabs(true), (&["Shell", "Info"][..], 1));
+    assert_eq!(RightPaneView::Preview.effective(true), RightPaneView::Shell);
+    assert_eq!(RightPaneView::Info.effective(true), RightPaneView::Info);
+    assert_eq!(
+        RightPaneView::Preview.effective(false),
+        RightPaneView::Preview
+    );
+
+    for forward in [true, false] {
+        // Preview is shown as Shell on a project, so it cycles to Info.
+        assert_eq!(
+            RightPaneView::Preview.cycled(true, forward),
+            RightPaneView::Info
+        );
+        assert_eq!(
+            RightPaneView::Shell.cycled(true, forward),
+            RightPaneView::Info
+        );
+        assert_eq!(
+            RightPaneView::Info.cycled(true, forward),
+            RightPaneView::Shell
+        );
+    }
+}
+
+#[tokio::test]
+async fn list_view_renders_a_right_pane_and_the_board_does_not() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = app_with_rendered_list(3);
+    let pane = app
+        .ui_state
+        .right_pane_rect
+        .expect("a list view must record a right-pane rect");
+    let list = app
+        .ui_state
+        .list_rect
+        .expect("a list view must record a list rect");
+    assert!(
+        pane.x >= list.right(),
+        "the pane must sit beside the list, not over it: pane={pane:?} list={list:?}"
+    );
+
+    // Switching to the board drops the pane entirely.
+    app.ui_state.view_mode = ViewMode::Board;
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    assert_eq!(
+        app.ui_state.right_pane_rect, None,
+        "the board is a full-screen takeover and must record no right pane"
+    );
+}
+
+#[tokio::test]
+async fn list_view_draws_the_pane_tab_header_and_its_content() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = app_with_rendered_list(3);
+    app.ui_state.preview_content = "hello-from-the-agent-pane".to_string();
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    let text = buffer_text(&terminal);
+
+    assert!(text.contains("Preview"), "pane tab header must render");
+    assert!(text.contains("Shell"), "inactive tab must render too");
+    assert!(
+        text.contains("hello-from-the-agent-pane"),
+        "captured pane content must reach the screen"
+    );
+}
+
+#[tokio::test]
+async fn toggle_pane_switches_tabs_only_in_list_views() {
+    let mut app = app_with_rendered_list(3);
+    assert_eq!(app.ui_state.right_pane_view, RightPaneView::Preview);
+
+    app.handle_command(UserCommand::TogglePane).await;
+    assert_eq!(app.ui_state.right_pane_view, RightPaneView::Info);
+    app.handle_command(UserCommand::TogglePane).await;
+    assert_eq!(app.ui_state.right_pane_view, RightPaneView::Shell);
+    app.handle_command(UserCommand::TogglePaneReverse).await;
+    assert_eq!(app.ui_state.right_pane_view, RightPaneView::Info);
+    app.handle_command(UserCommand::TogglePaneReverse).await;
+    assert_eq!(app.ui_state.right_pane_view, RightPaneView::Preview);
+
+    // On the board there is no pane to switch, so the command is inert.
+    app.ui_state.view_mode = ViewMode::Board;
+    app.handle_command(UserCommand::TogglePane).await;
+    assert_eq!(
+        app.ui_state.right_pane_view,
+        RightPaneView::Preview,
+        "the board has no right pane; TogglePane must not mutate its view"
+    );
+}
+
+#[tokio::test]
+async fn resizing_the_divider_clamps_at_both_ends_and_persists() {
+    let mut app = app_with_rendered_list(3);
+    assert_eq!(app.ui_state.left_pane_pct, DEFAULT_LEFT_PANE_PCT);
+
+    app.handle_command(UserCommand::GrowLeftPane).await;
+    assert_eq!(app.ui_state.left_pane_pct, DEFAULT_LEFT_PANE_PCT + 2);
+    app.handle_command(UserCommand::ShrinkLeftPane).await;
+    assert_eq!(app.ui_state.left_pane_pct, DEFAULT_LEFT_PANE_PCT);
+
+    // Hold the key: the width stops at the clamp instead of wrapping or
+    // running past it.
+    for _ in 0..60 {
+        app.handle_command(UserCommand::GrowLeftPane).await;
+    }
+    assert_eq!(app.ui_state.left_pane_pct, MAX_LEFT_PANE_PCT);
+    for _ in 0..60 {
+        app.handle_command(UserCommand::ShrinkLeftPane).await;
+    }
+    assert_eq!(app.ui_state.left_pane_pct, MIN_LEFT_PANE_PCT);
+
+    // The final width is persisted, so it survives a restart.
+    assert_eq!(
+        app.tui_prefs.prefs().left_pane_pct,
+        Some(MIN_LEFT_PANE_PCT),
+        "the divider position must be written to tui.json"
+    );
+}
+
+#[tokio::test]
+async fn resizing_the_divider_is_inert_on_the_board() {
+    let mut app = app_with_rendered_list(3);
+    app.ui_state.view_mode = ViewMode::Board;
+
+    app.handle_command(UserCommand::GrowLeftPane).await;
+    assert_eq!(app.ui_state.left_pane_pct, DEFAULT_LEFT_PANE_PCT);
+    assert_eq!(
+        app.tui_prefs.prefs().left_pane_pct,
+        None,
+        "a no-op resize must not write to tui.json"
+    );
+}
+
+#[tokio::test]
+async fn pane_commands_are_unavailable_on_the_board() {
+    let mut app = app_with_rendered_list(3);
+    for action in [
+        BindableAction::TogglePane,
+        BindableAction::TogglePaneReverse,
+        BindableAction::ShrinkLeftPane,
+        BindableAction::GrowLeftPane,
+    ] {
+        assert!(
+            app.ui_state.is_command_available(action),
+            "{action:?} must be offered in a list view"
+        );
+    }
+
+    app.ui_state.view_mode = ViewMode::Board;
+    for action in [
+        BindableAction::TogglePane,
+        BindableAction::TogglePaneReverse,
+        BindableAction::ShrinkLeftPane,
+        BindableAction::GrowLeftPane,
+    ] {
+        assert!(
+            !app.ui_state.is_command_available(action),
+            "{action:?} must be hidden on the board, which has no right pane"
+        );
+    }
+}
+
+#[tokio::test]
+async fn preview_ready_applies_only_to_the_still_selected_session() {
+    let selected = SessionId::new();
+    let mut app = make_test_app();
+    app.ui_state.view_mode = ViewMode::ProjectGrouped;
+    app.ui_state.selected_session_id =
+        Some(SessionRef::new(crate::backend::LOCAL_BACKEND_ID, selected));
+
+    app.handle_state_update(StateUpdate::PreviewReady {
+        spawned_at: Instant::now(),
+        session_id: Some(selected),
+        project_id: None,
+        preview_content: "live output".to_string(),
+        shell_content: "$ ".to_string(),
+        diff_info: Arc::new(DiffInfo::empty()),
+    })
+    .await;
+    assert_eq!(app.ui_state.preview_content, "live output");
+    assert_eq!(app.ui_state.preview_update_spawned_at, None);
+
+    // A fetch that resolves after the user moved on must not paint another
+    // session's output into the pane.
+    app.handle_state_update(StateUpdate::PreviewReady {
+        spawned_at: Instant::now(),
+        session_id: Some(SessionId::new()),
+        project_id: None,
+        preview_content: "someone else's output".to_string(),
+        shell_content: String::new(),
+        diff_info: Arc::new(DiffInfo::empty()),
+    })
+    .await;
+    assert_eq!(
+        app.ui_state.preview_content, "live output",
+        "a stale PreviewReady must be discarded, not painted"
+    );
+}
+
+#[tokio::test]
+async fn wheel_scrolls_the_pane_over_it_and_moves_the_selection_over_the_list() {
+    use crate::tui::app::ScrollDirection;
+
+    let mut app = app_with_rendered_list(30);
+    let list = app.ui_state.list_rect.unwrap();
+    let pane = app.ui_state.right_pane_rect.unwrap();
+
+    // Give the pane more content than fits, so it has somewhere to scroll, and
+    // let a render settle its follow-the-tail offset.
+    app.ui_state.preview_content = (0..200).map(|i| format!("line {i}\n")).collect();
+    {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+    }
+    let followed = app.ui_state.preview_state.scroll_offset;
+    assert!(followed > 0, "follow mode must start at the tail");
+
+    // Over the pane: the pane scrolls and the selection stays put.
+    let selected = app.ui_state.list_state.selected();
+    app.scroll_pane_at(pane.x + 1, ScrollDirection::Up);
+    assert!(
+        app.ui_state.preview_state.scroll_offset < followed,
+        "a wheel notch over the pane must scroll its content"
+    );
+    assert_eq!(
+        app.ui_state.list_state.selected(),
+        selected,
+        "scrolling the pane must not move the list selection"
+    );
+
+    // Over the list: the selection moves and the pane's offset is untouched.
+    let pane_offset = app.ui_state.preview_state.scroll_offset;
+    app.scroll_pane_at(list.x + 1, ScrollDirection::Down);
+    assert_ne!(app.ui_state.list_state.selected(), selected);
+    assert_eq!(app.ui_state.preview_state.scroll_offset, pane_offset);
+}
+
+#[tokio::test]
+async fn info_tab_renders_session_detail_in_the_right_pane() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (snap, sid, _pid) = snapshot_with_one_session();
+    let mut app = make_test_app();
+    app.ui_state.view_mode = ViewMode::ProjectGrouped;
+    app.backend_mut_for_test(BackendId(0)).view.snapshot = snap;
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+    app.ui_state.right_pane_view = RightPaneView::Info;
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    let text = buffer_text(&terminal);
+
+    assert!(
+        text.contains("Preview") && text.contains("Info") && text.contains("Shell"),
+        "all three tab labels must render in the header"
+    );
+    assert!(
+        text.contains("remote-sess"),
+        "the Info tab must render the selected session's detail, not a placeholder"
+    );
+}
+
+#[tokio::test]
+async fn info_tab_renders_project_detail_when_a_project_is_selected() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (snap, _sid, pid) = snapshot_with_one_session();
+    let mut app = make_test_app();
+    app.ui_state.view_mode = ViewMode::ProjectGrouped;
+    app.backend_mut_for_test(BackendId(0)).view.snapshot = snap;
+    // A project row: no session selected.
+    app.ui_state.selected_session_id = None;
+    app.ui_state.selected_project_id = Some((BackendId(0), pid));
+    app.ui_state.right_pane_view = RightPaneView::Info;
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    let text = buffer_text(&terminal);
+
+    // A project has no agent pane, so it offers Shell and Info only.
+    assert!(
+        !text.contains("Preview"),
+        "a project row must not offer a Preview tab"
+    );
+    assert!(
+        text.contains("remote-proj"),
+        "the Info tab must describe the selected project"
+    );
+    assert!(
+        text.contains("/tmp/rp"),
+        "the project's repo path must render"
+    );
+}
+
+#[tokio::test]
+async fn generate_summary_is_offered_from_the_info_tab_as_well_as_the_modal() {
+    let (snap, sid, _pid) = snapshot_with_one_session();
+    let mut app = make_test_app();
+    app.ui_state.view_mode = ViewMode::ProjectGrouped;
+    app.backend_mut_for_test(BackendId(0)).view.snapshot = snap;
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+
+    // On a capture tab the summary has nowhere to show, so it stays hidden.
+    app.ui_state.right_pane_view = RightPaneView::Preview;
+    assert!(
+        !app.ui_state
+            .is_command_available(BindableAction::GenerateSummary)
+    );
+
+    // The Info tab displays it, so `g` becomes available without opening the
+    // modal — the tab is now a first-class Info surface.
+    app.ui_state.right_pane_view = RightPaneView::Info;
+    assert!(
+        app.ui_state
+            .is_command_available(BindableAction::GenerateSummary)
+    );
+
+    // The board has no right pane, so only the modal can offer it there.
+    app.ui_state.view_mode = ViewMode::Board;
+    assert!(
+        !app.ui_state
+            .is_command_available(BindableAction::GenerateSummary)
+    );
+    app.ui_state.modal = Modal::Info { scroll: 0 };
+    assert!(
+        app.ui_state
+            .is_command_available(BindableAction::GenerateSummary)
+    );
+}
+
+#[tokio::test]
+async fn the_board_spawns_no_preview_traffic_unless_the_info_modal_is_open() {
+    // The headline property of the board redesign: no per-tick tmux/git traffic
+    // while the board is showing. The right pane restored that traffic for the
+    // list views, so pin that it did NOT leak back onto the board.
+    let (snap, sid, _pid) = snapshot_with_one_session();
+    let mut app = make_test_app();
+    app.backend_mut_for_test(BackendId(0)).view.snapshot = snap;
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+
+    app.ui_state.view_mode = ViewMode::Board;
+    app.spawn_preview_update();
+    assert_eq!(
+        app.ui_state.preview_update_spawned_at, None,
+        "the board has no right pane; a bare tick must not capture panes"
+    );
+
+    // The Info modal consumes the diff, so it re-enables the fetch there.
+    app.ui_state.modal = Modal::Info { scroll: 0 };
+    app.spawn_preview_update();
+    assert!(app.ui_state.preview_update_spawned_at.is_some());
+
+    // Every list view wants it: the right pane is showing.
+    let mut app = make_test_app();
+    app.ui_state.view_mode = ViewMode::ProjectGrouped;
+    app.spawn_preview_update();
+    assert!(
+        app.ui_state.preview_update_spawned_at.is_some(),
+        "a list view's right pane needs live content"
+    );
+}
+
+#[tokio::test]
+async fn a_stale_preview_result_does_not_clear_the_new_selections_guard() {
+    // A late result for the previous selection used to clear the in-flight
+    // guard belonging to the *new* selection's fetch, so the next tick spawned
+    // a duplicate capture for it.
+    let old = SessionId::new();
+    let new = SessionId::new();
+    let mut app = make_test_app();
+    app.ui_state.view_mode = ViewMode::ProjectGrouped;
+    app.ui_state.selected_session_id = Some(SessionRef::local(new));
+
+    let guard = Instant::now();
+    app.ui_state.preview_update_spawned_at = Some(guard);
+    app.handle_state_update(StateUpdate::PreviewReady {
+        // A result from a superseded fetch: its token is not the stored guard.
+        spawned_at: guard - std::time::Duration::from_millis(1),
+        session_id: Some(old),
+        project_id: None,
+        preview_content: "stale".to_string(),
+        shell_content: String::new(),
+        diff_info: Arc::new(DiffInfo::empty()),
+    })
+    .await;
+
+    assert_eq!(
+        app.ui_state.preview_update_spawned_at,
+        Some(guard),
+        "a discarded result must leave the in-flight fetch's guard intact"
+    );
+
+    // The matching result does clear it, so the next tick can refresh.
+    app.handle_state_update(StateUpdate::PreviewReady {
+        spawned_at: guard,
+        session_id: Some(new),
+        project_id: None,
+        preview_content: "live".to_string(),
+        shell_content: String::new(),
+        diff_info: Arc::new(DiffInfo::empty()),
+    })
+    .await;
+    assert_eq!(app.ui_state.preview_update_spawned_at, None);
+}
+
+#[tokio::test]
+async fn an_empty_enriched_pr_result_is_not_refetched_until_a_pr_refresh() {
+    // An Info surface used to be a briefly-open modal; the Info *tab* can stay
+    // up for a whole session. A failed/empty `gh` fetch caches nothing, so
+    // without a negative marker it would respawn the subprocess every few
+    // seconds for as long as the tab is visible.
+    let sid = SessionId::new();
+    let mut app = make_test_app();
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+
+    app.handle_state_update(StateUpdate::EnrichedPrReady {
+        spawned_at: Instant::now(),
+        session_id: sid,
+        info: None,
+    })
+    .await;
+    assert_eq!(app.ui_state.enriched_pr_unavailable, Some(sid));
+
+    // An explicit PR-status refresh is the retry path.
+    app.handle_command(UserCommand::RefreshPrStatus).await;
+    assert_eq!(
+        app.ui_state.enriched_pr_unavailable, None,
+        "refreshing PR status must allow the enriched fetch to be retried"
+    );
+}
+
+#[tokio::test]
+async fn a_selection_change_without_a_respawn_still_releases_the_guard() {
+    // Regression: keying the guard release on `still_selected` stranded it when
+    // the selection moved via a StateUpdate rather than a keypress — only the
+    // Input arm of `process_event` clears-and-respawns. A tick-spawned fetch for
+    // A, then (say) A being removed and the cursor landing on B, left A's guard
+    // set with nothing to clear it, so every tick skipped and the pane showed
+    // the departed session for up to the 5s backstop. The guard is now released
+    // by the token of the fetch that owns it, regardless of selection.
+    let old = SessionId::new();
+    let new = SessionId::new();
+    let mut app = make_test_app();
+    app.ui_state.view_mode = ViewMode::ProjectGrouped;
+
+    // A fetch is in flight for `old`...
+    let guard = Instant::now();
+    app.ui_state.preview_update_spawned_at = Some(guard);
+    // ...and the selection moves to `new` with no respawn (StateUpdate path).
+    app.ui_state.selected_session_id = Some(SessionRef::local(new));
+
+    app.handle_state_update(StateUpdate::PreviewReady {
+        spawned_at: guard,
+        session_id: Some(old),
+        project_id: None,
+        preview_content: "departed session".to_string(),
+        shell_content: String::new(),
+        diff_info: Arc::new(DiffInfo::empty()),
+    })
+    .await;
+
+    assert_eq!(
+        app.ui_state.preview_update_spawned_at, None,
+        "the owning result must release the guard even when the selection moved on"
+    );
+    assert_ne!(
+        app.ui_state.preview_content, "departed session",
+        "...while still not painting the old selection's content"
+    );
+
+    // With the guard released, the next tick can fetch for the new selection.
+    app.spawn_preview_update();
+    assert!(app.ui_state.preview_update_spawned_at.is_some());
+}
+
+#[tokio::test]
+async fn reopening_the_info_modal_retries_a_failed_enriched_fetch() {
+    // Reopening Info was the retry affordance before the negative marker
+    // existed; keep it, since it is far more discoverable than PR-refresh.
+    let sid = SessionId::new();
+    let mut app = make_test_app();
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+    app.ui_state.enriched_pr_unavailable = Some(sid);
+
+    app.handle_command(UserCommand::OpenInfo).await;
+    assert!(matches!(app.ui_state.modal, Modal::Info { .. }));
+    assert_eq!(
+        app.ui_state.enriched_pr_unavailable, None,
+        "reopening Info must allow the enriched fetch to be retried"
+    );
+}
+
+#[tokio::test]
+async fn a_stale_enriched_result_does_not_clear_the_new_fetchs_guard() {
+    // Same generation-token rule as PreviewReady: a superseded enriched result
+    // must not release the guard belonging to the fetch now in flight, or the
+    // next tick double-spawns `gh`.
+    let sid = SessionId::new();
+    let mut app = make_test_app();
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+
+    let guard = Instant::now();
+    app.ui_state.enriched_pr_fetch_spawned_at = Some(guard);
+    app.handle_state_update(StateUpdate::EnrichedPrReady {
+        spawned_at: guard - std::time::Duration::from_millis(1),
+        session_id: sid,
+        info: None,
+    })
+    .await;
+    assert_eq!(
+        app.ui_state.enriched_pr_fetch_spawned_at,
+        Some(guard),
+        "a superseded enriched result must leave the live fetch's guard intact"
+    );
+
+    app.handle_state_update(StateUpdate::EnrichedPrReady {
+        spawned_at: guard,
+        session_id: sid,
+        info: None,
+    })
+    .await;
+    assert_eq!(app.ui_state.enriched_pr_fetch_spawned_at, None);
 }

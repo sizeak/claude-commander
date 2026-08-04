@@ -240,6 +240,19 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub hide_empty_sections: bool,
 
+    /// Dim the list views' right-hand pane (preview / shell). The pane is a
+    /// passive live capture — keys always drive the session list — so it renders
+    /// dimmed by default to keep the list visually dominant. Default true.
+    #[serde(default = "default_true")]
+    pub dim_unfocused_preview: bool,
+
+    /// How much to dim the right pane's colours (0.0 = fully dimmed/black,
+    /// 1.0 = no dimming). Uses a foreground colour override rather than the
+    /// terminal DIM modifier, for cross-terminal consistency. Only takes effect
+    /// when `dim_unfocused_preview` is true.
+    #[serde(default = "default_dim_opacity")]
+    pub dim_unfocused_opacity: f32,
+
     /// Leader key for quick-switch modal (e.g. " " for Space, "ctrl+k", "f1")
     pub leader_key: String,
 
@@ -532,6 +545,8 @@ impl Default for Config {
             invert_pr_label_color: false,
             show_session_program: false,
             hide_empty_sections: true,
+            dim_unfocused_preview: true,
+            dim_unfocused_opacity: default_dim_opacity(),
             leader_key: " ".to_string(),
             session_number_debounce_ms: 250,
             ai_summary_enabled: true,
@@ -558,6 +573,10 @@ impl Default for Config {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_dim_opacity() -> f32 {
+    0.4
 }
 
 fn default_recent_sessions_limit() -> u32 {
@@ -1396,6 +1415,27 @@ command = "codex"
         assert!(config.hide_empty_sections);
         // Review cache precompute is on by default.
         assert!(config.precompute_review_caches);
+    }
+
+    #[test]
+    fn test_dim_unfocused_options_deserialise() {
+        // Absent → the defaults that make the right pane recede behind the list.
+        let cfg: Config = toml::from_str("").unwrap();
+        assert!(cfg.dim_unfocused_preview);
+        assert_eq!(cfg.dim_unfocused_opacity, 0.4);
+
+        // `config.toml` is never rewritten, so any spelling these keys ever
+        // accepted is permanently load-bearing: a user who set them before the
+        // board redesign dropped the pane must still have them honoured.
+        let cfg: Config = toml::from_str(
+            r#"
+dim_unfocused_preview = false
+dim_unfocused_opacity = 0.75
+"#,
+        )
+        .unwrap();
+        assert!(!cfg.dim_unfocused_preview);
+        assert_eq!(cfg.dim_unfocused_opacity, 0.75);
     }
 
     #[test]

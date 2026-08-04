@@ -10,6 +10,7 @@ A high-performance terminal UI for managing Claude coding sessions, written in R
 - **Hierarchical session model** - Projects contain worktree sessions
 - **Git worktree isolation** - Each session has its own worktree and branch
 - **Kanban board UI** - Full-screen board with sections as columns and sessions as project-coloured cards
+- **Live preview pane** - In the list views, a right-hand pane with Preview / Info / Shell tabs: Preview and Shell tail the selected session's agent and shell output as it happens, Info shows its metadata and PR detail (`Tab` cycles, `<`/`>` resizes)
 - **Info modal** - On-demand session metadata, PR details, CI status, and AI-generated change summaries (`i`)
 - **Review & comment** - Full-screen diff of a session's changes (vs its PR base) where you select lines, attach comments, mark files as reviewed, and apply comments straight to the running agent
 - **Agent state detection** - Detect if agent is waiting for input, processing, or errored
@@ -81,19 +82,24 @@ See the full [keyboard shortcuts](#keyboard-shortcuts) below, and the
 
 ### Views
 
-The session list can be shown four ways, cycled with `v`: three full-width
-**list** views — grouped by **project**, by **section**, or by **section with
+The session list can be shown four ways, cycled with `v`: three **list**
+views — grouped by **project**, by **section**, or by **section with
 PR stacks** — and the full-screen kanban **board**. The list starts in the
 project-grouped view; press `v` to rotate project → sections → stacks → board →
 project. When no `[[sections]]` are configured the two section views render
 identically to the project view, so `v` skips them and simply toggles between
 the project list and the board. The chosen view is remembered across restarts.
 
-There is no side panel in any view — open a session's details with `i` (Info),
-its shell with `Enter`/`s`, and its review diff with `r`. In the section-grouped
-list views a section under the cursor can be collapsed or expanded with the
-**Toggle section** command (unbound by default; bind a key in Settings or run it
-from the command palette).
+The three list views pair the list with a **right-hand pane** carrying
+**Preview**, **Info** and **Shell** tabs — a live tail of the session's agent
+pane, its details, and a live tail of its shell. `Tab`/`Shift-Tab` cycles them
+and `<`/`>` moves the divider, whose position persists across restarts. The
+board is a full-screen takeover with no side panel, so there `i` is the only
+route to a session's details. In every view `i` opens the Info modal,
+`Enter`/`s` a session's shell, and `r` its review diff. In the
+section-grouped list views a section under the cursor can be collapsed or
+expanded with the **Toggle section** command (unbound by default; bind a key in
+Settings or run it from the command palette).
 
 #### Board
 
@@ -202,7 +208,7 @@ The status bar surfaces the most useful actions as clickable buttons, with the h
 | `>` (as first char in palette) | Filter palette to commands only |
 | `Enter` | Attach to selected session |
 | `Esc` | Clear the active project filter (set by selecting a project in the sidebar) |
-| `i` | Show session info (Info modal — metadata, diffstat, PR details, stack chain, `g` for AI summary) |
+| `i` | Show session info in a modal — metadata, diffstat, PR details, stack chain, `g` for AI summary. Same content as the right pane's Info tab, and the only way to reach it from the board |
 | `n` | New worktree session |
 | `t` | New session stacked on top of the selected session's stack |
 | `N` | Add new project |
@@ -222,7 +228,9 @@ The status bar surfaces the most useful actions as clickable buttons, with the h
 | `r` or `Alt-r` | Review & comment on a session's diff — see [Usage](docs/usage.md#reviewing--commenting-on-changes) |
 | palette only | Rename session (UI title only; underlying worktree, branch, and tmux session are unchanged) |
 | palette only | Change program (agent) — pick a different program (e.g. `claude`, `codex`, `opencode`) for the selected session and relaunch it with a fresh conversation |
-| `g` | Generate AI summary (Info modal only) |
+| `g` | Generate AI summary (available while an Info surface is showing — the modal or the right pane's Info tab) |
+| `Tab` / `Shift-Tab` | Cycle the right pane forward / back through Preview, Info and Shell (list views only; the board is full-screen). A project row has no agent pane, so it cycles Shell ↔ Info |
+| `<` / `>` | Narrow / widen the session list, moving the divider between it and the right pane (list views only) |
 | `,` | Open settings |
 | `?` | Show help |
 | `q` or `Ctrl-c` | Quit |
