@@ -441,6 +441,16 @@ impl App {
         let view = self.ui_state.right_pane_view.effective(on_project);
         let (tabs, active) = self.ui_state.right_pane_view.tabs(on_project);
 
+        // A `Paragraph` only paints the cells its text covers, so switching to a
+        // shorter body would leave the previous tab's glyphs behind. Reset the
+        // pane whenever what it shows changes — driven by the *effective* view,
+        // so this also covers a selection moving between a session and a project
+        // row (which swaps Preview for Shell without any key being pressed).
+        if self.ui_state.last_pane_view != Some(view) {
+            self.ui_state.last_pane_view = Some(view);
+            frame.render_widget(Clear, area);
+        }
+
         let block = Block::default()
             .title(self.build_pane_tabs(tabs, active))
             .borders(Borders::ALL)

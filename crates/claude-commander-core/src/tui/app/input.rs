@@ -1611,6 +1611,10 @@ impl App {
                 // Wake every connected backend's PR-status loop; refreshed
                 // results arrive via each backend's change feed.
                 self.refresh_pr_status_all();
+                // This is the retry path for an enriched-PR fetch that came back
+                // empty, so drop the marker suppressing it and re-request.
+                self.ui_state.enriched_pr_unavailable = None;
+                self.spawn_info_fetch();
             }
             UserCommand::AddRemoteServer => {
                 self.handle_add_remote_server();
@@ -1679,9 +1683,9 @@ impl App {
                     .ui_state
                     .right_pane_view
                     .cycled(self.is_project_selected(), forward);
-                // The outgoing tab's styled cells would otherwise linger under
-                // the incoming one.
-                self.ui_state.force_clear = true;
+                // No explicit clear here: `render_right_pane` resets the pane
+                // whenever the effective view changes, which covers this and the
+                // selection-driven swaps a key handler can't see.
                 // Landing on Info needs the enriched-PR / summary fetches that
                 // only run while an Info surface is showing.
                 self.spawn_info_fetch();

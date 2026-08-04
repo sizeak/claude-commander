@@ -1349,6 +1349,11 @@ pub struct AppUiState {
     pub board_filter: Option<ProjectId>,
     /// Enriched PR info for the currently selected session
     pub enriched_pr: Option<(SessionId, EnrichedPrInfo)>,
+    /// Session whose enriched-PR fetch came back empty (no PR data, or `gh`
+    /// failed). Without this a failed fetch would never cache, so an Info
+    /// surface left open would respawn `gh` every few seconds forever. Cleared
+    /// by an explicit PR-status refresh, which is the retry path.
+    pub enriched_pr_unavailable: Option<SessionId>,
     /// Cached AI summaries keyed by session ID
     pub ai_summaries: std::collections::HashMap<SessionId, AiSummary>,
     /// Current modal
@@ -1405,6 +1410,9 @@ pub struct AppUiState {
     /// Right-pane rect from the last render frame, for wheel hit-testing.
     /// `None` in board view (no right pane) and before the first frame.
     pub right_pane_rect: Option<Rect>,
+    /// Effective right-pane view as of the last frame, so the renderer can reset
+    /// the pane's cells when the tab actually being shown changes.
+    pub last_pane_view: Option<RightPaneView>,
     /// Status message (with expiry time)
     pub status_message: Option<(String, Instant)>,
     /// Backend ids (raw) that have already shown their one-time version-mismatch
@@ -1560,6 +1568,7 @@ impl Default for AppUiState {
             board_column_rects: None,
             board_filter: None,
             enriched_pr: None,
+            enriched_pr_unavailable: None,
             ai_summaries: std::collections::HashMap::new(),
             modal: Modal::None,
             session_numbers: HashMap::new(),
@@ -1578,6 +1587,7 @@ impl Default for AppUiState {
             left_pane_pct: DEFAULT_LEFT_PANE_PCT,
             preview_update_spawned_at: None,
             right_pane_rect: None,
+            last_pane_view: None,
             status_message: None, // (message, expiry)
             version_warned: HashSet::new(),
             review_body_rect: None,
@@ -1623,13 +1633,6 @@ impl Default for AppUiState {
 }
 
 impl AppUiState {
-    /// Whether a given command is currently invokable.
-    ///
-    /// These rules mirror the early-return guards scattered across
-    /// `App::handle_command` and friends, so the palette only lists
-    /// commands that would actually *do* something if selected. Pure with
-    /// respect to `self` — safe to unit-test by constructing a default
-    /// `AppUiState` and mutating a few fields.
     /// Whether the selection is a project row rather than a session. A project
     /// has no agent pane, so the right pane offers it Shell and Info only.
     pub fn is_project_selected(&self) -> bool {
@@ -1643,6 +1646,13 @@ impl AppUiState {
             && self.right_pane_view.effective(self.is_project_selected()) == RightPaneView::Info
     }
 
+    /// Whether a given command is currently invokable.
+    ///
+    /// These rules mirror the early-return guards scattered across
+    /// `App::handle_command` and friends, so the palette only lists
+    /// commands that would actually *do* something if selected. Pure with
+    /// respect to `self` — safe to unit-test by constructing a default
+    /// `AppUiState` and mutating a few fields.
     pub fn is_command_available(&self, action: BindableAction) -> bool {
         // A degraded/connecting remote backend can't service actions against its
         // sessions/projects, so gate those on the selected backend being live.

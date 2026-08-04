@@ -7343,3 +7343,100 @@ async fn generate_summary_is_offered_from_the_info_tab_as_well_as_the_modal() {
             .is_command_available(BindableAction::GenerateSummary)
     );
 }
+
+#[tokio::test]
+async fn the_board_spawns_no_preview_traffic_unless_the_info_modal_is_open() {
+    // The headline property of the board redesign: no per-tick tmux/git traffic
+    // while the board is showing. The right pane restored that traffic for the
+    // list views, so pin that it did NOT leak back onto the board.
+    let (snap, sid, _pid) = snapshot_with_one_session();
+    let mut app = make_test_app();
+    app.backend_mut_for_test(BackendId(0)).view.snapshot = snap;
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+
+    app.ui_state.view_mode = ViewMode::Board;
+    app.spawn_preview_update();
+    assert_eq!(
+        app.ui_state.preview_update_spawned_at, None,
+        "the board has no right pane; a bare tick must not capture panes"
+    );
+
+    // The Info modal consumes the diff, so it re-enables the fetch there.
+    app.ui_state.modal = Modal::Info { scroll: 0 };
+    app.spawn_preview_update();
+    assert!(app.ui_state.preview_update_spawned_at.is_some());
+
+    // Every list view wants it: the right pane is showing.
+    let mut app = make_test_app();
+    app.ui_state.view_mode = ViewMode::ProjectGrouped;
+    app.spawn_preview_update();
+    assert!(
+        app.ui_state.preview_update_spawned_at.is_some(),
+        "a list view's right pane needs live content"
+    );
+}
+
+#[tokio::test]
+async fn a_stale_preview_result_does_not_clear_the_new_selections_guard() {
+    // A late result for the previous selection used to clear the in-flight
+    // guard belonging to the *new* selection's fetch, so the next tick spawned
+    // a duplicate capture for it.
+    let old = SessionId::new();
+    let new = SessionId::new();
+    let mut app = make_test_app();
+    app.ui_state.view_mode = ViewMode::ProjectGrouped;
+    app.ui_state.selected_session_id = Some(SessionRef::local(new));
+
+    let guard = Instant::now();
+    app.ui_state.preview_update_spawned_at = Some(guard);
+    app.handle_state_update(StateUpdate::PreviewReady {
+        session_id: Some(old),
+        project_id: None,
+        preview_content: "stale".to_string(),
+        shell_content: String::new(),
+        diff_info: Arc::new(DiffInfo::empty()),
+    })
+    .await;
+
+    assert_eq!(
+        app.ui_state.preview_update_spawned_at,
+        Some(guard),
+        "a discarded result must leave the in-flight fetch's guard intact"
+    );
+
+    // The matching result does clear it, so the next tick can refresh.
+    app.handle_state_update(StateUpdate::PreviewReady {
+        session_id: Some(new),
+        project_id: None,
+        preview_content: "live".to_string(),
+        shell_content: String::new(),
+        diff_info: Arc::new(DiffInfo::empty()),
+    })
+    .await;
+    assert_eq!(app.ui_state.preview_update_spawned_at, None);
+}
+
+#[tokio::test]
+async fn an_empty_enriched_pr_result_is_not_refetched_until_a_pr_refresh() {
+    // An Info surface used to be a briefly-open modal; the Info *tab* can stay
+    // up for a whole session. A failed/empty `gh` fetch caches nothing, so
+    // without a negative marker it would respawn the subprocess every few
+    // seconds for as long as the tab is visible.
+    let sid = SessionId::new();
+    let mut app = make_test_app();
+    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
+
+    app.handle_state_update(StateUpdate::EnrichedPrReady {
+        session_id: sid,
+        info: None,
+    })
+    .await;
+    assert_eq!(app.ui_state.enriched_pr_unavailable, Some(sid));
+
+    // An explicit PR-status refresh is the retry path.
+    app.handle_command(UserCommand::RefreshPrStatus).await;
+    assert_eq!(
+        app.ui_state.enriched_pr_unavailable, None,
+        "refreshing PR status must allow the enriched fetch to be retried"
+    );
+}

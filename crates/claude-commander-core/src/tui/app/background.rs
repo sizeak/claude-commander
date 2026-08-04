@@ -194,11 +194,17 @@ impl App {
         // Spawn enriched PR fetch if not already cached for this session and no
         // fetch is already in flight (with a 5s safety timeout, mirroring
         // `spawn_preview_update`).
+        // Already cached, or already known to be unavailable for this session —
+        // either way there is nothing to fetch. The unavailable marker matters
+        // because an Info surface can now stay open indefinitely (the right
+        // pane's tab, not just a briefly-open modal), and a failed fetch caches
+        // nothing, so without it `gh` would be respawned every few seconds.
         let needs_enriched = self
             .ui_state
             .enriched_pr
             .as_ref()
-            .is_none_or(|(sid, _)| *sid != session_id);
+            .is_none_or(|(sid, _)| *sid != session_id)
+            && self.ui_state.enriched_pr_unavailable != Some(session_id);
         let in_flight = self
             .ui_state
             .enriched_pr_fetch_spawned_at

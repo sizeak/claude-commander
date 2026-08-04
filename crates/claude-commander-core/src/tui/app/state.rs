@@ -99,7 +99,6 @@ impl App {
                 shell_content,
                 diff_info,
             } => {
-                self.ui_state.preview_update_spawned_at = None;
                 // Only apply if the same thing is still selected — otherwise the
                 // pane would briefly show another session's output. Session and
                 // project ids are unique across backends, so comparing ids is
@@ -107,6 +106,11 @@ impl App {
                 let still_selected = self.ui_state.selected_session_id.map(|r| r.id) == session_id
                     && self.ui_state.selected_project_id.map(|(_, p)| p) == project_id;
                 if still_selected {
+                    // Clear the in-flight guard only for the fetch it belongs
+                    // to. A late result for a *previous* selection must not
+                    // clear the guard the new selection's fetch just set, or the
+                    // next tick spawns a duplicate for it.
+                    self.ui_state.preview_update_spawned_at = None;
                     self.ui_state.preview_content = preview_content;
                     self.ui_state.shell_content = shell_content;
                     self.ui_state.diff_info = diff_info;
@@ -118,6 +122,10 @@ impl App {
                 self.ui_state.enriched_pr_fetch_spawned_at = None;
                 // Only apply if the session is still selected
                 if self.ui_state.selected_session_id.map(|r| r.id) == Some(session_id) {
+                    // An empty result caches nothing, so record the attempt
+                    // separately — otherwise an open Info surface would refetch
+                    // (spawning `gh`) every few seconds for the whole session.
+                    self.ui_state.enriched_pr_unavailable = info.is_none().then_some(session_id);
                     self.ui_state.enriched_pr = info.map(|pr| (session_id, pr));
                 } else {
                     debug!("Discarding stale EnrichedPrReady for {}", session_id);
