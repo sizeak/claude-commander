@@ -797,11 +797,19 @@ class LcarsChrome extends Chrome {
   @override
   Widget buildEyebrow(BuildContext context, String label) {
     final t = CommanderTokens.of(context);
-    return Text(
-      t.caseLabel(label),
-      maxLines: 1,
-      overflow: TextOverflow.ellipsis,
-      style: _caption(t, t.info, letterSpacing: 1.4),
+    return Padding(
+      // Vertical only — the content column already owns the horizontal inset.
+      // Without this the label sat flush against the row beneath it, so a group
+      // header read as part of its first row rather than as a heading over the
+      // run. Mission Control's eyebrow carried this padding from the start;
+      // LCARS' was a bare Text.
+      padding: const EdgeInsets.only(top: 12, bottom: 6),
+      child: Text(
+        t.caseLabel(label),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: _caption(t, t.info, letterSpacing: 1.4),
+      ),
     );
   }
 }
