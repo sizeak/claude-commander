@@ -94,14 +94,23 @@ class MissionControlChrome extends Chrome {
         'actions instead.',
       );
     }
-    // Deliberately uncoloured: the manager pages' FABs never set colours, so
-    // Material 3 gave them `primaryContainer`/`onPrimaryContainer` — the slate
-    // tile, not a violet one. Forcing `t.primary` here turned all three violet.
-    // The phone shell's docked FAB *was* explicitly violet and sets its own in
-    // [buildShell].
+    // Violet, and that is a **deliberate change** from what shipped before this
+    // branch, made with sign-off rather than by accident.
+    //
+    // Before, the phone shell's new-session FAB set `accent` explicitly while the
+    // Servers/Projects/Programs FABs set nothing and so inherited Material 3's
+    // default — `primaryContainer`, which this scheme maps to the slate
+    // `surfaceSelected` (measured: #242938 on a #E7EBF2 icon). Two renderings for
+    // one widget across four screens, and the difference lived only in whether a
+    // call site happened to type colour arguments.
+    //
+    // A page's *primary* action is the branded one by definition, so there is
+    // nothing for `ChromeActionKind` to express here and it is not consulted.
     return FloatingActionButton(
       onPressed: action.onPressed,
       tooltip: action.label,
+      backgroundColor: t.primary,
+      foregroundColor: t.canvas,
       child: Icon(action.icon),
     );
   }

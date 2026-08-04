@@ -35,13 +35,12 @@ void main() {
   }
 
   group('page-level FAB colours', () {
-    // Pins the third regression of this class. The manager pages' FABs never set
-    // colours before the chrome layer, so Material 3 gave them `primaryContainer`
-    // — the slate tile. Hardcoding `t.primary` in the chrome turned all three
-    // violet, and nothing caught it: the palette is unchanged, only its use.
-    testWidgets('a page primaryAction leaves its colours to the theme', (
-      tester,
-    ) async {
+    // A page's primary action is branded violet in every case. This is a
+    // deliberate unification: before this branch the manager pages' FABs set no
+    // colours and inherited Material 3's `primaryContainer` (the slate
+    // `surfaceSelected`), while the phone shell's set `accent`. One widget, two
+    // renderings, differing only by whether a call site typed colour arguments.
+    testWidgets('a page primaryAction is the branded accent', (tester) async {
       await tester.pumpWidget(
         MaterialApp(
           theme: themeDataFor(missionControlTokens),
@@ -59,14 +58,14 @@ void main() {
       final fab = tester.widget<FloatingActionButton>(
         find.byType(FloatingActionButton),
       );
-      expect(fab.backgroundColor, isNull, reason: 'must come from the theme');
-      expect(fab.foregroundColor, isNull);
+      expect(fab.backgroundColor, missionControlTokens.primary);
+      expect(fab.foregroundColor, missionControlTokens.canvas);
+      // And not the Material default it used to fall back to.
+      expect(fab.backgroundColor, isNot(missionControlTokens.surfaceSelected));
     });
 
-    testWidgets('the phone shell keeps its explicitly violet docked FAB', (
-      tester,
-    ) async {
-      // This one main *did* colour, so it must stay coloured.
+    testWidgets('the docked shell FAB matches it', (tester) async {
+      // The one that was already violet — the two must not drift apart again.
       await tester.pumpWidget(
         MaterialApp(
           theme: themeDataFor(missionControlTokens),
