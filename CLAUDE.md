@@ -126,7 +126,7 @@ When adding or changing config options, hotkeys, or keybindings:
 
 ## Pre-commit hooks
 
-This project uses [pre-commit](https://pre-commit.com/) to run `cargo fmt` and `cargo clippy` on every commit. After cloning, run:
+This project uses [pre-commit](https://pre-commit.com/) to run `cargo fmt` and `cargo clippy` on every commit, and `dart format` (via `client/tool/dart-format.sh`) when the commit touches Dart. After cloning, run:
 
 ```
 pre-commit install
