@@ -43,10 +43,10 @@ tui-input = "0.15"
 # gap expansion, role-tagged spans, soft wrapping and hit-testing. The review
 # view and `git::review_diff`'s parser both delegate to it.
 #
-# TODO: this MUST become a git dependency before this branch is pushed. An
-# absolute `path` outside the repository breaks CI and every other worktree —
-# nothing but this machine can resolve it.
-diffgrid = { path = "/home/si/Projects/diffgrid" }
+# Pinned to an exact revision rather than a branch so a build is reproducible
+# and an upstream push can't silently change what this compiles against. Bump
+# the `rev` deliberately when picking up diffgrid changes.
+diffgrid = { git = "https://github.com/sizeak/diffgrid", rev = "fcb11a136226b21b68ee090e470ae5077eec59e4" }
 
 # Git (pure Rust)
 gix = { version = "0.85", default-features = false, features = [

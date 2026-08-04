@@ -1331,6 +1331,7 @@ checksum = "56254986775e3233ffa9c4d7d3faaf6d36a2c09d30b20687e9f88bc8bafc16c8"
 [[package]]
 name = "diffgrid"
 version = "0.1.0"
+source = "git+https://github.com/sizeak/diffgrid?rev=fcb11a136226b21b68ee090e470ae5077eec59e4#fcb11a136226b21b68ee090e470ae5077eec59e4"
 dependencies = [
  "diffy",
  "similar 3.1.1",
