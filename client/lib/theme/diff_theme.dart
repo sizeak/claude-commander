@@ -20,10 +20,11 @@ import 'app_theme.dart';
 /// [_emphasisAlpha] composited *on top of that fill* rather than chosen
 /// independently. An emphasised run therefore always reads as "more of this
 /// line", never as a different colour, and the two can never drift apart when
-/// the palette is retuned. The ratios are Pierre's (12% light / 20% dark for
-/// the line, 15% / 20% for the emphasis); this app is dark-only, so it takes
-/// the dark pair. Flutter composites alpha for real, which is why this lands
-/// more faithfully here than the terminal's approximation of it can.
+/// the palette is retuned. Dark surfaces need a stronger tint than light ones
+/// to separate at all, so the ratios are chosen per appearance; this app is
+/// dark-only and takes the dark pair. Flutter composites alpha for real, which
+/// is why this lands more faithfully here than the terminal's approximation of
+/// it can.
 @immutable
 class DiffTheme extends InheritedWidget {
   const DiffTheme({super.key, required this.colors, required super.child});
