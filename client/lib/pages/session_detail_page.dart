@@ -740,6 +740,7 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
   /// `Spacer` this used to place is no longer ours to position), one contiguous
   /// run of lettered blocks in LCARS.
   Widget _lifecycleBar(SessionInfo info) {
+    final t = CommanderTokens.of(context);
     final running = info.status == SessionStatus.running;
     return ChromeButtonBar(
       ChromeButtonBarSpec(
@@ -752,11 +753,15 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
           ChromeBarButton(
             label: 'Kill',
             icon: Icons.stop,
+            // Amber and teal respectively, as before the chrome layer: these two
+            // read as distinct from the neutral Shell/Cascade/Push.
+            accent: t.attentionOn,
             onPressed: _busy || !running ? null : _kill,
           ),
           ChromeBarButton(
             label: 'Restart',
             icon: Icons.restart_alt,
+            accent: t.working,
             onPressed: _busy ? null : _restart,
           ),
           ChromeBarButton(

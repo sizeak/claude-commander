@@ -71,11 +71,17 @@ class _CommanderAppState extends State<CommanderApp> {
       workspace: widget.workspace,
       child: ThemeScope(
         controller: widget.theme,
-        // Rebuilds the whole app on a theme change. Cheap enough to be the whole
-        // switching mechanism: MaterialApp wraps an AnimatedTheme, so the repaint
-        // crossfades rather than snapping, and nothing below is disposed — which
-        // is what lets the deck promise switching never interrupts a running
-        // session or drops a live terminal attach.
+        // Rebuilds the whole app on a theme change, which is the whole switching
+        // mechanism: MaterialApp wraps an AnimatedTheme, so colours crossfade
+        // rather than snap.
+        //
+        // Structure does *not* crossfade. `tokens.chrome` swaps at the lerp
+        // midpoint, and the two chromes build different widget types, so the
+        // shells re-inflate and page State beneath them is rebuilt: a live
+        // terminal attach in the wide shell reopens, and fleet search text
+        // resets. That is the same cost as switching workspace tabs, which
+        // already re-creates attaches — but it is not "nothing is disposed", and
+        // the server-side session is untouched either way.
         child: ListenableBuilder(
           listenable: widget.theme,
           builder: (context, _) => MaterialApp(

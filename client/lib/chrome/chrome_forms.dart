@@ -134,6 +134,18 @@ class ChromeBarButton {
   final ChromeActionKind kind;
   final VoidCallback? onPressed;
 
+  /// Overrides the colour [kind] would give this button.
+  ///
+  /// Exists because `kind` has three values and Mission Control's lifecycle bar
+  /// has five hues: Kill is amber and Restart is teal, distinct from the neutral
+  /// Shell/Cascade/Push. Collapsing them onto `normal` silently flattened both —
+  /// a regression the token-parity test cannot see, because it pins what the
+  /// colours *are*, not where they are used.
+  ///
+  /// LCARS ignores this: its blocks are deliberately a three-role set, so extra
+  /// hues would dilute the grammar rather than enrich it.
+  final Color? accent;
+
   /// Takes the remaining width rather than sizing to its label.
   final bool expand;
 
@@ -141,6 +153,7 @@ class ChromeBarButton {
     required this.label,
     this.icon,
     this.tooltip,
+    this.accent,
     this.kind = ChromeActionKind.normal,
     this.onPressed,
     this.expand = false,

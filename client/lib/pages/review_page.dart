@@ -736,13 +736,28 @@ ChromeRowPosition _rowPosition(int index, int count) {
 /// as long as the snapshot does, so an index is stable here.
 String _fileNumber(int index) => (index + 1).toString().padLeft(2, '0');
 
-/// The metadata line under a file row's path: its line delta and change kind.
+/// The change kind, for the row's subtitle. The line counts are *not* here: they
+/// carry their own colours (see [_fileDelta]), and a subtitle is plain text the
+/// chrome colours itself.
+String _fileSubtitle(rust.ReviewFileDto file) => _statusLabel(file.status);
+
+/// The `+N −M` delta, added in success green and removed in danger red.
 ///
-/// One string, so it can be the row's subtitle. That costs the green/red split
-/// the two counts used to render with — a subtitle is plain text the chrome
-/// colours itself (muted in Mission Control, the tone accent in LCARS).
-String _fileSubtitle(rust.ReviewFileDto file) =>
-    '+${file.added} −${file.removed} · ${_statusLabel(file.status)}';
+/// A widget rather than part of the subtitle string because that split is load
+/// bearing — it is how the sidebar reads at a glance, and it is what the pre-chrome
+/// `_FileRow` rendered. Composed into the row's trailing slot the same way
+/// `_recentRow` pairs a PR badge with an age.
+Widget _fileDelta(BuildContext context, rust.ReviewFileDto file) {
+  final t = CommanderTokens.of(context);
+  return Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Text('+${file.added}', style: t.meta(size: 10, color: t.success)),
+      const SizedBox(width: 5),
+      Text('−${file.removed}', style: t.meta(size: 10, color: t.danger)),
+    ],
+  );
+}
 
 /// A small square status swatch (the deck's rounded-1px chip in a file row).
 Widget _statusDot(BuildContext context, rust.ReviewFileStatus status) =>
@@ -782,17 +797,24 @@ Widget _fileRow(
       selected: selected,
       position: _rowPosition(index, count),
       onTap: onSelect,
-      trailingWidget: InkWell(
-        onTap: onToggleReviewed,
-        customBorder: const CircleBorder(),
-        child: Padding(
-          padding: const EdgeInsets.all(2),
-          child: Icon(
-            reviewed ? Icons.check_circle : Icons.radio_button_unchecked,
-            size: 16,
-            color: reviewed ? t.success : t.idle,
+      trailingWidget: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _fileDelta(context, file),
+          const SizedBox(width: 8),
+          InkWell(
+            onTap: onToggleReviewed,
+            customBorder: const CircleBorder(),
+            child: Padding(
+              padding: const EdgeInsets.all(2),
+              child: Icon(
+                reviewed ? Icons.check_circle : Icons.radio_button_unchecked,
+                size: 16,
+                color: reviewed ? t.success : t.idle,
+              ),
+            ),
           ),
-        ),
+        ],
       ),
     ),
   );
@@ -864,6 +886,8 @@ class _FileCardState extends State<_FileCard> {
               trailingWidget: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  _fileDelta(context, file),
+                  const SizedBox(width: 4),
                   Checkbox(
                     visualDensity: VisualDensity.compact,
                     value: widget.reviewed,

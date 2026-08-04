@@ -276,8 +276,14 @@ class MissionControlChrome extends Chrome {
     final accent = spec.accent ?? tone?.accent;
     // The recurring Mission Control card: tinted (or neutral) fill, one border
     // all round at the card radius. A tone's `tintedSurface` supplies the 9%
-    // tint the hand-built attention banners used, and 40% is the alpha those
-    // banners' accent borders settled on.
+    // tint, and 40% the border alpha.
+    //
+    // Those match the activity feed's needs-you card exactly. They are a hair off
+    // two others the hand-built code had drifted to — the session detail waiting
+    // hint was 8%/35% at radius 11, the activity card radius 12 — so unifying
+    // them here nudges those two by amounts under a pixel and a few percent
+    // alpha. Deliberate: the alternative is a per-caller override to preserve
+    // drift nobody chose.
     Widget panel = Container(
       padding: spec.padding,
       decoration: BoxDecoration(
@@ -365,13 +371,15 @@ class MissionControlChrome extends Chrome {
     final t = CommanderTokens.of(context);
     final enabled = button.onPressed != null;
     final destructive = button.kind == ChromeActionKind.destructive;
-    // The spec carries a *kind*, not a hue, so the lifecycle bar's per-button
-    // colours collapse to three roles.
-    final color = switch (button.kind) {
-      ChromeActionKind.primary => t.primary,
-      ChromeActionKind.normal => t.textBright,
-      ChromeActionKind.destructive => t.danger,
-    };
+    // An explicit accent wins: `kind` has three values and this bar has five
+    // hues (see ChromeBarButton.accent).
+    final color =
+        button.accent ??
+        switch (button.kind) {
+          ChromeActionKind.primary => t.primary,
+          ChromeActionKind.normal => t.textBright,
+          ChromeActionKind.destructive => t.danger,
+        };
     final icon = button.icon;
     if (icon == null) return _keyPill(context, button, color, enabled, t);
     return Column(
@@ -793,20 +801,26 @@ class MissionControlChrome extends Chrome {
     CommanderTokens t,
   ) {
     if (action is! ChromeButtonAction) return _action(context, action, t);
-    return InkWell(
-      onTap: action.onPressed,
-      child: Semantics(
-        button: true,
-        label: action.label,
-        child: Container(
-          width: 34,
-          height: 34,
-          decoration: BoxDecoration(
-            color: t.surface,
-            borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: t.border),
+    // Tooltip as well as Semantics: the ⚙ tile this replaces was a
+    // `PopupMenuButton(tooltip: 'Settings')`, and the wide shell's equivalent
+    // icon button kept one — dropping it here was an inconsistency, not policy.
+    return Tooltip(
+      message: action.label,
+      child: InkWell(
+        onTap: action.onPressed,
+        child: Semantics(
+          button: true,
+          label: action.label,
+          child: Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              color: t.surface,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: t.border),
+            ),
+            child: Icon(action.icon, size: 16, color: t.textMuted),
           ),
-          child: Icon(action.icon, size: 16, color: t.textMuted),
         ),
       ),
     );
