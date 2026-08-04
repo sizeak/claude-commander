@@ -54,7 +54,10 @@ class _ActivityBodyState extends State<ActivityBody> {
         if (!widget.showHeader) {
           return Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [ChromeSegmented(slices), Expanded(child: timeline)],
+            children: [
+              ChromeSegmented(slices),
+              Expanded(child: timeline),
+            ],
           );
         }
 
@@ -119,14 +122,13 @@ class _ActivityBodyState extends State<ActivityBody> {
       children: [
         Container(
           decoration: BoxDecoration(
-            border: Border(
-              left: BorderSide(color: t.borderSubtle, width: 2),
-            ),
+            border: Border(left: BorderSide(color: t.borderSubtle, width: 2)),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              for (final e in events) _TimelineItem(event: e, onTap: () => _open(workspace, e)),
+              for (final e in events)
+                _TimelineItem(event: e, onTap: () => _open(workspace, e)),
             ],
           ),
         ),
@@ -167,11 +169,7 @@ class _ActivityBodyState extends State<ActivityBody> {
       MaterialPageRoute(
         builder: (_) => CommanderStoreScope(
           store: store,
-          child: TerminalPage(
-            api: store.api,
-            handle: handle,
-            session: session,
-          ),
+          child: TerminalPage(api: store.api, handle: handle, session: session),
         ),
       ),
     );

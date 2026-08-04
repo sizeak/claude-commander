@@ -163,9 +163,9 @@ class _ThemeRow extends StatelessWidget {
       builder: (context, _) => _SettingsRow(
         label: 'Theme',
         caption: controller.id.label,
-        onTap: () => Navigator.of(context).push(
-          MaterialPageRoute(builder: (_) => const ThemePickerPage()),
-        ),
+        onTap: () => Navigator.of(
+          context,
+        ).push(MaterialPageRoute(builder: (_) => const ThemePickerPage())),
       ),
     );
   }

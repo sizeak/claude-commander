@@ -26,10 +26,8 @@ enum ThemeId {
   /// Parses a persisted [wire] value, falling back to [missionControl] for
   /// anything absent or unrecognised — a preferences file written by a newer
   /// build naming a theme this one lacks must not crash the app on launch.
-  static ThemeId fromWire(String? wire) => values.firstWhere(
-    (id) => id.wire == wire,
-    orElse: () => missionControl,
-  );
+  static ThemeId fromWire(String? wire) =>
+      values.firstWhere((id) => id.wire == wire, orElse: () => missionControl);
 }
 
 /// Owns the selected theme and persists it to the device.
@@ -80,15 +78,10 @@ class ThemeController extends ChangeNotifier {
 class ThemeScope extends InheritedWidget {
   final ThemeController? controller;
 
-  const ThemeScope({
-    super.key,
-    required this.controller,
-    required super.child,
-  });
+  const ThemeScope({super.key, required this.controller, required super.child});
 
-  static ThemeController? of(BuildContext context) => context
-      .dependOnInheritedWidgetOfExactType<ThemeScope>()
-      ?.controller;
+  static ThemeController? of(BuildContext context) =>
+      context.dependOnInheritedWidgetOfExactType<ThemeScope>()?.controller;
 
   @override
   bool updateShouldNotify(ThemeScope oldWidget) =>

@@ -104,7 +104,10 @@ void main() {
         ),
       );
       expect(find.byType(IconButton), findsNothing);
-      expect(find.textContaining(RegExp('kill', caseSensitive: false)), findsOneWidget);
+      expect(
+        find.textContaining(RegExp('kill', caseSensitive: false)),
+        findsOneWidget,
+      );
     });
   });
 }

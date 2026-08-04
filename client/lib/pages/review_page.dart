@@ -693,7 +693,10 @@ class _ReviewBodyState extends State<ReviewBody> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.warning_amber, color: CommanderTokens.of(context).danger),
+            Icon(
+              Icons.warning_amber,
+              color: CommanderTokens.of(context).danger,
+            ),
             const SizedBox(height: 12),
             Text(
               error,

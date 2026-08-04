@@ -103,11 +103,11 @@ class ChromeElbow extends StatelessWidget {
     final content = height == null
         ? decorated
         : label == null
-            ? SizedBox(height: height, child: decorated)
-            : ConstrainedBox(
-                constraints: BoxConstraints(minHeight: height!),
-                child: decorated,
-              );
+        ? SizedBox(height: height, child: decorated)
+        : ConstrainedBox(
+            constraints: BoxConstraints(minHeight: height!),
+            child: decorated,
+          );
     if (onTap == null) return content;
     return GestureDetector(
       behavior: HitTestBehavior.opaque,

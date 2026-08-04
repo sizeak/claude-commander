@@ -404,9 +404,7 @@ class MissionControlDetail extends StatelessWidget {
       border: Border(bottom: BorderSide(color: t.divider)),
     ),
     child: Row(
-      children: [
-        for (var i = 0; i < spec.tabs.length; i++) _tabItem(t, i),
-      ],
+      children: [for (var i = 0; i < spec.tabs.length; i++) _tabItem(t, i)],
     ),
   );
 
@@ -593,10 +591,7 @@ class LcarsWide extends StatelessWidget {
         ),
         const SizedBox(height: 9),
         Expanded(child: spec.fleetList),
-        if (folded) ...[
-          const SizedBox(height: 6),
-          _foldedNav(t),
-        ],
+        if (folded) ...[const SizedBox(height: 6), _foldedNav(t)],
       ],
     );
   }

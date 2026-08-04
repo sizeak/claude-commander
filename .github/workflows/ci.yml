@@ -222,6 +222,9 @@ jobs:
         # the large hosted-package cache is still reused.
         run: nix develop .#clientCi -c bash -c 'rm -rf ~/.pub-cache/git && cd client && flutter pub get'
 
+      - name: Format Dart
+        run: nix develop .#clientCi -c client/tool/dart-format.sh --check
+
       - name: Analyze Dart
         run: nix develop .#clientCi -c bash -c 'cd client && flutter analyze lib test integration_test'
 

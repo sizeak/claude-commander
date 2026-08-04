@@ -37,9 +37,10 @@ void main() {
     );
     expect(preview, findsOneWidget);
     final colors = <Color>{};
-    for (final element in find
-        .descendant(of: preview, matching: find.byType(Container))
-        .evaluate()) {
+    for (final element
+        in find
+            .descendant(of: preview, matching: find.byType(Container))
+            .evaluate()) {
       final container = element.widget as Container;
       final color = container.color;
       if (color != null) colors.add(color);

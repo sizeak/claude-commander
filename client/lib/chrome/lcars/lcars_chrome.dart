@@ -180,7 +180,9 @@ class LcarsChrome extends Chrome {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        ChromeElbowCap(color: shouldShowBack(context, spec) ? t.primary : t.nav),
+        ChromeElbowCap(
+          color: shouldShowBack(context, spec) ? t.primary : t.nav,
+        ),
         if (title != null) ...[
           const SizedBox(height: 7),
           MediaQuery.withClampedTextScaling(
@@ -616,7 +618,9 @@ class LcarsChrome extends Chrome {
     return Container(
       decoration: BoxDecoration(
         color: t.surface,
-        border: Border(top: BorderSide(color: t.nav, width: t.panelTopBorder)),
+        border: Border(
+          top: BorderSide(color: t.nav, width: t.panelTopBorder),
+        ),
       ),
       child: TextField(
         controller: spec.controller,
@@ -788,7 +792,8 @@ class LcarsChrome extends Chrome {
   }
 
   @override
-  Widget buildWide(BuildContext context, ChromeWideSpec spec) => LcarsWide(spec);
+  Widget buildWide(BuildContext context, ChromeWideSpec spec) =>
+      LcarsWide(spec);
 
   @override
   Widget buildWideDetail(BuildContext context, ChromeWideDetailSpec spec) =>
@@ -875,12 +880,7 @@ TextStyle _caption(
 ///
 /// [bottom] rounds only the bottom pair, which is how the deck's footer meets the
 /// edge of the screen.
-BorderRadius _runEnds(
-  int i,
-  int count,
-  double radius, {
-  bool bottom = false,
-}) {
+BorderRadius _runEnds(int i, int count, double radius, {bool bottom = false}) {
   final r = Radius.circular(radius);
   final start = i == 0 ? r : Radius.zero;
   final end = i == count - 1 ? r : Radius.zero;

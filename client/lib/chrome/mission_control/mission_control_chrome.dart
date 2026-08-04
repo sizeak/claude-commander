@@ -81,11 +81,7 @@ class MissionControlChrome extends Chrome {
         ),
       };
 
-  Widget? _fab(
-    BuildContext context,
-    ChromePageSpec spec,
-    CommanderTokens t,
-  ) {
+  Widget? _fab(BuildContext context, ChromePageSpec spec, CommanderTokens t) {
     final action = spec.primaryAction;
     if (action == null) return null;
     // A menu as the *primary* action has no sensible FAB rendering, and no page

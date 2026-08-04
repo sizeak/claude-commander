@@ -155,10 +155,7 @@ void main() {
     }
 
     testWidgets('paints working teal under Mission Control', (tester) async {
-      expect(
-        await glyphColour(tester, missionControlTokens),
-        McRef.teal,
-      );
+      expect(await glyphColour(tester, missionControlTokens), McRef.teal);
     });
 
     testWidgets('paints working amber under LCARS', (tester) async {

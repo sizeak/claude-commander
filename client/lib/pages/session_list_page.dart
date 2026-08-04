@@ -50,11 +50,12 @@ bool _isWorking(CommanderStore store, SessionInfo s) =>
 bool _isReview(SessionInfo s) =>
     s.prNumber != null && s.prState == PrState.open;
 
-bool _matchesQuick(_Quick q, CommanderStore store, SessionInfo s) => switch (q) {
-  _Quick.needsInput => _isNeedsInput(store, s),
-  _Quick.working => _isWorking(store, s),
-  _Quick.review => _isReview(s),
-};
+bool _matchesQuick(_Quick q, CommanderStore store, SessionInfo s) =>
+    switch (q) {
+      _Quick.needsInput => _isNeedsInput(store, s),
+      _Quick.working => _isWorking(store, s),
+      _Quick.review => _isReview(s),
+    };
 
 /// Whether a server's base URL points at the local machine (drives the
 /// `local` / `remote` tag in the server node header). Compares the parsed
@@ -816,9 +817,9 @@ class _CascadeBannerState extends State<CascadeBanner> {
               Expanded(
                 child: Text(
                   'Cascade paused — awaiting a decision',
-                  style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                    color: t.attentionOn,
-                  ),
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleSmall?.copyWith(color: t.attentionOn),
                 ),
               ),
             ],

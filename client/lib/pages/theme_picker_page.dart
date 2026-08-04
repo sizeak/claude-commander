@@ -227,7 +227,9 @@ class ThemePreview extends StatelessWidget {
         ],
       ),
       const SizedBox(height: 7),
-      Expanded(child: _mcCard(p, accent: p.working, fill: p.surface)),
+      Expanded(
+        child: _mcCard(p, accent: p.working, fill: p.surface),
+      ),
       const SizedBox(height: 5),
       Expanded(
         child: _mcCard(
