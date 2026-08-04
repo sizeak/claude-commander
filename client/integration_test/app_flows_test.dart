@@ -79,9 +79,7 @@ void main() {
   );
 
   String terminalText(WidgetTester tester) {
-    final term = tester
-        .widget<TerminalView>(find.byType(TerminalView))
-        .terminal;
+    final term = tester.widget<TerminalView>(find.byType(TerminalView)).terminal;
     return [
       for (var i = 0; i < term.buffer.lines.length; i++)
         term.buffer.lines[i].getText(),
@@ -129,14 +127,11 @@ void main() {
   testWidgets('full journey: connect, create, terminal + rejoin, review, '
       'lifecycle', (tester) async {
     // ---- connect (with auth) ----
-    // One instance, as production has (main.dart): it owns the per-attach
-    // control queues, so two would order their calls independently.
-    final api = RustCommanderApi();
     await tester.pumpWidget(
       CommanderApp(
-        api: api,
+        api: const RustCommanderApi(),
         workspace: WorkspaceStore(
-          api: api,
+          api: const RustCommanderApi(),
           listStore: InMemoryServerListStore(),
         ),
       ),
@@ -158,12 +153,10 @@ void main() {
     await tester.pump();
     // Guard: the URL must actually be the e2e server before we connect.
     expect(
-      tester
-          .widget<TextField>(
-            find.descendant(of: urlField, matching: find.byType(TextField)),
-          )
-          .controller
-          ?.text,
+      tester.widget<TextField>(find.descendant(
+        of: urlField,
+        matching: find.byType(TextField),
+      )).controller?.text,
       _baseUrl,
     );
     await tester.tap(find.widgetWithText(FilledButton, 'Add server'));
@@ -177,10 +170,7 @@ void main() {
       find.widgetWithText(TextFormField, 'Project path (on the server)'),
       _repo,
     );
-    await tester.enterText(
-      find.widgetWithText(TextFormField, 'Title'),
-      'e2e-journey',
-    );
+    await tester.enterText(find.widgetWithText(TextFormField, 'Title'), 'e2e-journey');
     await tester.enterText(
       find.widgetWithText(TextFormField, 'Program (optional)'),
       'bash',

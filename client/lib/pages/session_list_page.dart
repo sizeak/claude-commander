@@ -18,8 +18,7 @@ import 'servers_page.dart';
 import 'session_detail_page.dart';
 
 /// Which slice of the sessions the list is showing: everything (grouped by
-/// server → project) or the active ones in MRU order (most recently attached,
-/// or created for one not yet attached).
+/// server → project) or the recently-attached sessions in MRU order.
 enum _SessionView { recent, all }
 
 /// A one-tap "attention" filter layered on top of the search box: the sessions
@@ -111,22 +110,6 @@ class _SessionListBodyState extends State<SessionListBody> {
   void _toggleQuick(_Quick q) =>
       setState(() => _quick = _quick == q ? null : q);
 
-  /// The active quick filter, or null when it no longer matches anything (its
-  /// chip has dropped out of the row, so it can't be cleared by hand).
-  _Quick? _liveQuick({
-    required int needs,
-    required int working,
-    required int review,
-  }) {
-    final count = switch (_quick) {
-      null => 0,
-      _Quick.needsInput => needs,
-      _Quick.working => working,
-      _Quick.review => review,
-    };
-    return count > 0 ? _quick : null;
-  }
-
   @override
   Widget build(BuildContext context) {
     final workspace = WorkspaceScope.of(context)!;
@@ -147,14 +130,6 @@ class _SessionListBodyState extends State<SessionListBody> {
             if (_isReview(s)) review++;
           }
         }
-        // A chip only renders while its count is non-zero, and tapping it is the
-        // only way to clear the filter — so once the count reaches zero (the
-        // agent stopped waiting, the PR merged) a still-applied filter is
-        // unreachable, and every session stays hidden behind a bare "No
-        // matches" with nothing on screen to explain why. Drop it instead. Safe
-        // to assign during build: the value we render with is computed here, so
-        // this needs no rebuild of its own.
-        _quick = _liveQuick(needs: needs, working: working, review: review);
 
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -371,12 +346,6 @@ class _SessionListBodyState extends State<SessionListBody> {
   /// regardless of status). The TUI's fixed cap already bounds how much stale
   /// history shows; an uncapped list has no such bound, so it filters to active
   /// sessions to avoid accumulating dead ones indefinitely.
-  ///
-  /// A third: the ordering key is [sessionRecency], not `lastAttachedAt`, so a
-  /// never-attached session sorts by its creation time instead of dropping out.
-  /// The TUI can drop those, because its recents block is pinned *above* the
-  /// full tree; here Recent is one of two exclusive tabs, so dropping a session
-  /// hides it outright — including the one the user has only just created.
   Widget _buildRecent(BuildContext context, List<CommanderStore> servers) {
     var pairs = <(CommanderStore, SessionInfo)>[
       for (final store in servers)
@@ -385,7 +354,7 @@ class _SessionListBodyState extends State<SessionListBody> {
               (_quick == null || _matchesQuick(_quick!, store, s)))
             (store, s),
     ];
-    pairs = mostRecent(pairs, (p) => sessionRecency(p.$2));
+    pairs = mostRecent(pairs, (p) => p.$2.lastAttachedAt);
     if (_query.isNotEmpty) {
       pairs = rankByScore(pairs, (p) => sessionFuzzyScore(p.$2, _query));
     }
@@ -729,8 +698,6 @@ Future<CommanderStore?> pickServer(
 }
 
 /// Push the create-session route for a chosen server. Shared by both layouts.
-/// The page refetches the snapshot itself before popping, so this route returns
-/// to a list that already holds the new session.
 Future<void> openCreateSession(
   BuildContext context,
   WorkspaceStore workspace,

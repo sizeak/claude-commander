@@ -25,17 +25,26 @@ use claude_commander_core::tmux::HeadlessAttach;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tracing::{debug, info, warn};
 
-use claude_commander_protocol::ws::{
-    ATTACH_MISSED_PONG_LIMIT, ATTACH_PING_INTERVAL, AttachKind, ClientControl, DetachReason,
-    ServerControl, WS_ERR_AUTH, WS_ERR_NO_SESSION,
+use super::protocol::{
+    AttachKind, ClientControl, DetachReason, ServerControl, WS_ERR_AUTH, WS_ERR_NO_SESSION,
 };
-
 use crate::state::AppState;
 
 /// How long to wait for the mandatory `auth` then `attach` handshake frames
 /// before giving up. Keeps a connecting-but-silent socket from holding the
 /// upgrade open indefinitely.
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Heartbeat interval. A ping is sent this often, and on each tick we check
+/// that a pong arrived since the previous one. Detects half-open sockets that
+/// never send a close.
+const PING_INTERVAL: Duration = Duration::from_secs(20);
+
+/// How many consecutive ping ticks may pass with no intervening pong (or any
+/// inbound frame) before the peer is declared dead and the socket is torn down.
+/// At 2 (with `PING_INTERVAL` = 20s) a peer tolerates a single dropped pong /
+/// scheduling hiccup and is torn down on the tick after ~2 missed intervals.
+const MISSED_PONG_LIMIT: u32 = 2;
 
 /// Default PTY size used until the client sends its first `resize`. tmux clamps
 /// a shared session to its smallest attached client, so this is only a starting
@@ -206,7 +215,7 @@ async fn attach_session(
 /// Steady-state pump: WS binary → PTY, PTY → WS binary, `resize`/`detach`
 /// control frames, and a pong-tracked heartbeat. Each interval sends a ping and
 /// counts it as outstanding; any inbound frame (a pong, or real traffic) clears
-/// the count. After [`ATTACH_MISSED_PONG_LIMIT`] un-answered intervals the peer is
+/// the count. After `MISSED_PONG_LIMIT` un-answered intervals the peer is
 /// declared dead and the loop tears down — so a half-open socket whose sends
 /// still nominally succeed is still detected, not just one where `send` errors.
 /// Returns once any teardown condition fires; the bridge's `ChildGuard` reaps
@@ -214,11 +223,11 @@ async fn attach_session(
 async fn pump(mut socket: WebSocket, bridge: HeadlessAttach) -> DetachReason {
     let (mut pty_reader, mut pty_writer, resize, mut child) = bridge.split();
     let mut pty_buf = [0u8; 4096];
-    let mut ping = tokio::time::interval(ATTACH_PING_INTERVAL);
+    let mut ping = tokio::time::interval(PING_INTERVAL);
     // Skip the immediate first tick so we don't ping before any traffic.
     ping.tick().await;
     // Liveness: a pong (or any inbound frame) resets this; each ping tick
-    // increments it. Past [`ATTACH_MISSED_PONG_LIMIT`] consecutive un-ponged ticks the
+    // increments it. Past `MISSED_PONG_LIMIT` consecutive un-ponged ticks the
     // peer is declared dead even if the socket send still appears to succeed.
     let mut missed_pongs: u32 = 0;
 
@@ -278,7 +287,7 @@ async fn pump(mut socket: WebSocket, bridge: HeadlessAttach) -> DetachReason {
             // send means the transport is gone; too many un-ponged ticks means a
             // half-open socket where sends still nominally succeed.
             _ = ping.tick() => {
-                if missed_pongs >= ATTACH_MISSED_PONG_LIMIT {
+                if missed_pongs >= MISSED_PONG_LIMIT {
                     warn!("WS peer missed {missed_pongs} heartbeat pongs; treating as dead");
                     break DetachReason::Transport;
                 }

@@ -6,6 +6,7 @@
 
 use std::fmt;
 
+use diffgrid::style::Appearance;
 use ratatui::style::Color;
 use serde::de::{self, Visitor};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -233,6 +234,68 @@ impl<'de> Visitor<'de> for AgentWorkingStyleVisitor {
 }
 
 // ---------------------------------------------------------------------------
+// AppearanceValue — light/dark terminal background, declared by the user
+// ---------------------------------------------------------------------------
+
+/// Whether the terminal this runs in draws light text on a dark background or
+/// the other way round.
+///
+/// Nothing detects this: the terminal only reports its background via `OSC 11`,
+/// which is deliberately out of scope, so it is a claim the user makes about
+/// their own terminal. It matters because a derived *fill* (the review diff
+/// view's line bands) has to be blended toward the surface it sits on —
+/// blending toward black on a light terminal gives a near-black band under dark
+/// text.
+///
+/// Spelled out rather than reusing [`diffgrid::style::Appearance`] directly so
+/// the TOML spelling is ours and core needn't turn on diffgrid's `serde`
+/// feature for one enum — the same reason [`ColorValue`] wraps
+/// `ratatui::style::Color`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AppearanceValue {
+    /// Light text on a dark background — the assumption every preset ships with.
+    #[default]
+    Dark,
+    /// Dark text on a light background.
+    Light,
+}
+
+impl AppearanceValue {
+    /// The config spelling, as written in `config.toml` and shown in settings.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Dark => "dark",
+            Self::Light => "light",
+        }
+    }
+
+    /// Parse a config spelling, case-insensitively. `None` for anything else.
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_lowercase().as_str() {
+            "dark" => Some(Self::Dark),
+            "light" => Some(Self::Light),
+            _ => None,
+        }
+    }
+}
+
+impl From<AppearanceValue> for Appearance {
+    fn from(v: AppearanceValue) -> Self {
+        match v {
+            AppearanceValue::Dark => Appearance::Dark,
+            AppearanceValue::Light => Appearance::Light,
+        }
+    }
+}
+
+impl fmt::Display for AppearanceValue {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ThemeOverrides — optional per-field overrides loaded from [theme]
 // ---------------------------------------------------------------------------
 
@@ -248,6 +311,14 @@ pub struct ThemeOverrides {
     /// Force a base palette: "basic", "indexed", or "truecolor".
     /// When set, the named palette is used instead of auto-detection.
     pub preset: Option<String>,
+
+    /// Declare the terminal background as `"dark"` or `"light"`.
+    ///
+    /// Unset means "whatever the preset says", which today is dark for every
+    /// one of them — so the default behaviour is unchanged. Set it to
+    /// `"light"` on a light terminal and derived fills (the review diff view's
+    /// add/remove bands) blend toward white instead of black.
+    pub appearance: Option<AppearanceValue>,
 
     // Pane borders
     pub border_focused: Option<ColorValue>,
@@ -454,6 +525,35 @@ mod tests {
         // Unset fields remain None
         assert!(overrides.border_unfocused.is_none());
         assert!(overrides.diff_added.is_none());
+    }
+
+    #[test]
+    fn test_theme_appearance_parses_from_toml() {
+        let overrides: ThemeOverrides = toml::from_str(r#"appearance = "light""#).unwrap();
+        assert_eq!(overrides.appearance, Some(AppearanceValue::Light));
+        assert_eq!(
+            Appearance::from(overrides.appearance.unwrap()),
+            Appearance::Light
+        );
+
+        // Unset is the common case and must not imply a surface of its own —
+        // the preset's declaration wins.
+        let none: ThemeOverrides = toml::from_str("").unwrap();
+        assert!(none.appearance.is_none());
+    }
+
+    #[test]
+    fn test_appearance_value_parse_is_case_insensitive_and_strict() {
+        assert_eq!(
+            AppearanceValue::parse("Light"),
+            Some(AppearanceValue::Light)
+        );
+        assert_eq!(
+            AppearanceValue::parse(" dark "),
+            Some(AppearanceValue::Dark)
+        );
+        assert_eq!(AppearanceValue::parse("solarized"), None);
+        assert_eq!(AppearanceValue::Light.as_str(), "light");
     }
 
     // ---- TOML round-trip ----------------------------------------------------

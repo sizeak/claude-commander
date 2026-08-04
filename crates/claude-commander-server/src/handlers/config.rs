@@ -75,6 +75,8 @@ pub struct ConfigPatch {
     pub agent_state_poll_interval_ms: Option<u64>,
     pub invert_pr_label_color: Option<bool>,
     pub show_session_program: Option<bool>,
+    pub dim_unfocused_preview: Option<bool>,
+    pub dim_unfocused_opacity: Option<f32>,
     pub session_number_debounce_ms: Option<u64>,
     pub ai_summary_enabled: Option<bool>,
     pub rounded_borders: Option<bool>,
@@ -107,6 +109,8 @@ impl ConfigPatch {
         set!(agent_state_poll_interval_ms);
         set!(invert_pr_label_color);
         set!(show_session_program);
+        set!(dim_unfocused_preview);
+        set!(dim_unfocused_opacity);
         set!(session_number_debounce_ms);
         set!(ai_summary_enabled);
         set!(rounded_borders);
@@ -116,8 +120,8 @@ impl ConfigPatch {
 }
 
 /// Validate a merged config before persisting. Catches values that would break
-/// the running app (a zero refresh rate, a zero tmux concurrency). Returns a
-/// 400 `ApiError` on failure.
+/// the running app (a zero refresh rate, an out-of-range opacity, a zero tmux
+/// concurrency). Returns a 400 `ApiError` on failure.
 fn validate(cfg: &Config) -> Result<(), ApiError> {
     let invalid = |key: &str, reason: &str| {
         ApiError(
@@ -133,6 +137,12 @@ fn validate(cfg: &Config) -> Result<(), ApiError> {
     }
     if cfg.max_concurrent_tmux == 0 {
         return Err(invalid("max_concurrent_tmux", "must be greater than zero"));
+    }
+    if !(0.0..=1.0).contains(&cfg.dim_unfocused_opacity) {
+        return Err(invalid(
+            "dim_unfocused_opacity",
+            "must be between 0.0 and 1.0",
+        ));
     }
     Ok(())
 }

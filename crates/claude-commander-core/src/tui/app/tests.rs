@@ -145,6 +145,15 @@ fn commander_chip_label_running_without_state() {
     );
 }
 
+#[test]
+fn test_app_ui_state_default() {
+    let state = AppUiState::default();
+    assert!(state.list_items.is_empty());
+    assert!(matches!(state.focused_pane, FocusedPane::SessionList));
+    assert!(matches!(state.modal, Modal::None));
+    assert!(!state.should_quit);
+}
+
 fn make_project() -> SessionListItem {
     SessionListItem::Project {
         id: ProjectId::new(),
@@ -373,15 +382,174 @@ fn test_palette_filter_query_strips_gt_prefix_only_in_command_only() {
 
 // --- is_command_available ---------------------------------------------------
 
-fn ui_state_with(session: Option<SessionId>, project: Option<ProjectId>) -> AppUiState {
+fn ui_state_with(
+    session: Option<SessionId>,
+    project: Option<ProjectId>,
+    right_pane: RightPaneView,
+) -> AppUiState {
     AppUiState {
         selected_session_id: session.map(crate::backend::SessionRef::local),
         selected_project_id: project.map(|p| (crate::backend::LOCAL_BACKEND_ID, p)),
+        right_pane_view: right_pane,
         ..AppUiState::default()
     }
 }
 
+#[test]
+fn test_is_command_available_session_scoped_hidden_without_session() {
+    let s = ui_state_with(None, None, RightPaneView::Preview);
+    for action in [
+        BindableAction::Select,
+        BindableAction::SelectShell,
+        BindableAction::DeleteSession,
+        BindableAction::RenameSession,
+        BindableAction::RestartSession,
+        BindableAction::ToggleKeepAlive,
+        BindableAction::OpenInEditor,
+        BindableAction::OpenPullRequest,
+    ] {
+        assert!(
+            !s.is_command_available(action),
+            "{action:?} should be hidden without a session"
+        );
+    }
+}
+
+#[test]
+fn test_is_command_available_session_scoped_shown_with_session() {
+    let s = ui_state_with(Some(SessionId::new()), None, RightPaneView::Preview);
+    for action in [
+        BindableAction::Select,
+        BindableAction::SelectShell,
+        BindableAction::DeleteSession,
+        BindableAction::RenameSession,
+        BindableAction::RestartSession,
+        BindableAction::ToggleKeepAlive,
+        BindableAction::OpenInEditor,
+        BindableAction::OpenPullRequest,
+    ] {
+        assert!(
+            s.is_command_available(action),
+            "{action:?} should be available with a selected session"
+        );
+    }
+}
+
+#[test]
+fn test_is_command_available_remove_project_requires_project_without_session() {
+    // project selected, no session → shown
+    let s = ui_state_with(None, Some(ProjectId::new()), RightPaneView::Preview);
+    assert!(s.is_command_available(BindableAction::RemoveProject));
+    // project selected but session also selected → hidden
+    let s = ui_state_with(
+        Some(SessionId::new()),
+        Some(ProjectId::new()),
+        RightPaneView::Preview,
+    );
+    assert!(!s.is_command_available(BindableAction::RemoveProject));
+    // nothing selected → hidden
+    let s = ui_state_with(None, None, RightPaneView::Preview);
+    assert!(!s.is_command_available(BindableAction::RemoveProject));
+}
+
+#[test]
+fn test_is_command_available_generate_summary_requires_info_pane_and_session() {
+    // info pane + session → shown
+    let s = ui_state_with(Some(SessionId::new()), None, RightPaneView::Info);
+    assert!(s.is_command_available(BindableAction::GenerateSummary));
+    // info pane but no session → hidden
+    let s = ui_state_with(None, None, RightPaneView::Info);
+    assert!(!s.is_command_available(BindableAction::GenerateSummary));
+    // session but preview pane → hidden
+    let s = ui_state_with(Some(SessionId::new()), None, RightPaneView::Preview);
+    assert!(!s.is_command_available(BindableAction::GenerateSummary));
+}
+
+#[test]
+fn new_session_and_checkout_gated_on_selected_backend_connected() {
+    // A degraded/connecting remote backend can't service create-options or a
+    // branch listing, and awaiting them would stall the event loop — so both
+    // commands must drop out of the palette when the selected backend is down.
+    let mut s = ui_state_with(None, Some(ProjectId::new()), RightPaneView::Preview);
+    s.selected_backend_connected = false;
+    assert!(!s.is_command_available(BindableAction::NewSession));
+    assert!(!s.is_command_available(BindableAction::CheckoutBranch));
+
+    // A live backend keeps them available.
+    s.selected_backend_connected = true;
+    assert!(s.is_command_available(BindableAction::NewSession));
+    assert!(s.is_command_available(BindableAction::CheckoutBranch));
+}
+
+#[test]
+fn test_is_command_available_unguarded_always_shown() {
+    let s = ui_state_with(None, None, RightPaneView::Preview);
+    for action in [
+        BindableAction::NewSession,
+        BindableAction::NewProject,
+        BindableAction::CheckoutBranch,
+        BindableAction::ScanDirectory,
+        BindableAction::TogglePane,
+        BindableAction::TogglePaneReverse,
+        BindableAction::ShrinkLeftPane,
+        BindableAction::GrowLeftPane,
+        BindableAction::ShowHelp,
+        BindableAction::ShowSettings,
+        BindableAction::Quit,
+        BindableAction::ScrollUp,
+        BindableAction::ScrollDown,
+        BindableAction::PageUp,
+        BindableAction::PageDown,
+    ] {
+        assert!(
+            s.is_command_available(action),
+            "{action:?} should always be available"
+        );
+    }
+}
+
 // --- gather_command_entries -------------------------------------------------
+
+#[test]
+fn test_gather_command_entries_excludes_navigation() {
+    let s = ui_state_with(Some(SessionId::new()), None, RightPaneView::Info);
+    let kb = KeyBindings::default();
+    let entries = s.gather_command_entries(&kb, "");
+    for e in &entries {
+        assert!(
+            !matches!(
+                e.action,
+                BindableAction::NavigateUp | BindableAction::NavigateDown
+            ),
+            "palette should never list list-navigation actions, got {:?}",
+            e.action
+        );
+    }
+}
+
+#[test]
+fn test_gather_command_entries_hides_context_unavailable() {
+    // nothing selected → session-scoped and GenerateSummary all hidden
+    let s = ui_state_with(None, None, RightPaneView::Preview);
+    let kb = KeyBindings::default();
+    let entries = s.gather_command_entries(&kb, "");
+    let actions: std::collections::HashSet<BindableAction> =
+        entries.iter().map(|e| e.action).collect();
+    for hidden in [
+        BindableAction::DeleteSession,
+        BindableAction::RenameSession,
+        BindableAction::RestartSession,
+        BindableAction::OpenInEditor,
+        BindableAction::OpenPullRequest,
+        BindableAction::GenerateSummary,
+        BindableAction::RemoveProject,
+    ] {
+        assert!(
+            !actions.contains(&hidden),
+            "{hidden:?} should be hidden when nothing is selected"
+        );
+    }
+}
 
 #[test]
 fn test_gather_command_entries_includes_actions_with_no_keybinding() {
@@ -406,6 +574,16 @@ fn test_gather_command_entries_includes_actions_with_no_keybinding() {
         .find(|e| e.action == BindableAction::ScrollDown)
         .expect("ScrollDown should appear in the palette even without a keybinding");
     assert!(scroll_down.keys.is_empty());
+}
+
+#[test]
+fn test_gather_command_entries_query_filters_by_label() {
+    let s = ui_state_with(Some(SessionId::new()), None, RightPaneView::Info);
+    let kb = KeyBindings::default();
+    // "summary" matches only GenerateSummary (description "Generate AI summary")
+    let entries = s.gather_command_entries(&kb, "summary");
+    let actions: Vec<BindableAction> = entries.iter().map(|e| e.action).collect();
+    assert_eq!(actions, vec![BindableAction::GenerateSummary]);
 }
 
 #[test]
@@ -494,7 +672,12 @@ fn test_toggle_view_mode_always_available_in_palette() {
     assert!(s.is_command_available(BindableAction::ToggleViewMode));
 }
 
-// The full four-way cycle (through Board) is covered in `config::view_mode`.
+#[test]
+fn test_view_mode_cycles_through_three_views() {
+    assert_eq!(ViewMode::ProjectGrouped.next(), ViewMode::SectionGrouped);
+    assert_eq!(ViewMode::SectionGrouped.next(), ViewMode::SectionStacks);
+    assert_eq!(ViewMode::SectionStacks.next(), ViewMode::ProjectGrouped);
+}
 
 #[test]
 fn test_view_mode_heading_label() {
@@ -1224,6 +1407,82 @@ fn test_apply_max_concurrent_tmux_rejects_zero() {
     );
 }
 
+#[tokio::test]
+async fn apply_section_move_keeps_moved_session_selected() {
+    use crate::session::{Project, SectionConfig, WorktreeSession};
+    use std::path::PathBuf;
+
+    let mut app = make_test_app();
+    // A manual-only section the session can be moved into.
+    app.config.sections = vec![SectionConfig {
+        name: "Beta".to_string(),
+        ..Default::default()
+    }];
+    app.ui_state.view_mode = ViewMode::SectionGrouped;
+
+    let project = Project::new("proj", PathBuf::from("/tmp/proj"), "main");
+    let project_id = project.id;
+    let s1 = WorktreeSession::new(
+        project_id,
+        "one",
+        "br-one",
+        PathBuf::from("/tmp/w1"),
+        "claude",
+    );
+    let s2 = WorktreeSession::new(
+        project_id,
+        "two",
+        "br-two",
+        PathBuf::from("/tmp/w2"),
+        "claude",
+    );
+    let s2_id = s2.id;
+
+    app.service
+        .store()
+        .mutate(move |state| {
+            state.add_project(project);
+            state.add_session(s1);
+            state.add_session(s2);
+        })
+        .await
+        .unwrap();
+
+    app.sync_local_view_from_store_for_test().await;
+    app.refresh_list_items().await;
+
+    // Move session two into "Beta" — it was in the "In Progress" catch-all.
+    // The move runs on a background task that posts `SessionMutationApplied`
+    // once the store is updated; drive that event to apply the view/tree refresh
+    // and reselection (as the event loop would).
+    app.apply_section_move(s2_id, Some("Beta".to_string()));
+    loop {
+        match app.event_loop.next().await.expect("a completion event") {
+            AppEvent::StateUpdate(su @ StateUpdate::SessionMutationApplied { .. }) => {
+                app.handle_state_update(su).await;
+                break;
+            }
+            _ => continue,
+        }
+    }
+
+    let selected_idx = app
+        .ui_state
+        .list_state
+        .selected()
+        .expect("a list item should be selected after the move");
+    let selected_item = &app.ui_state.list_items[selected_idx];
+    assert!(
+        matches!(selected_item, SessionListItem::Worktree { id, .. } if *id == s2_id),
+        "the moved session should remain selected, got {selected_item:?}"
+    );
+    assert_eq!(
+        app.ui_state.selected_session_id.map(|r| r.id),
+        Some(s2_id),
+        "selected_session_id should still track the moved session"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // List-modal mouse support: geometry, row mapping, click state machine
 // ---------------------------------------------------------------------------
@@ -1401,14 +1660,12 @@ fn edit_text_input_inserts_at_cursor_and_reports_change() {
 // ---------------------------------------------------------------------------
 
 /// Build an app whose session list is one project plus `sessions` worktrees,
-/// rendered once at 100x40 so the list's viewport height is recorded. Paging is
-/// a list-view behaviour, so this forces the project list rather than the board.
+/// rendered once at 100x40 so the list's viewport height is recorded.
 fn app_with_rendered_list(sessions: usize) -> App {
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
 
     let mut app = make_test_app();
-    app.ui_state.view_mode = ViewMode::ProjectGrouped;
     let mut items = vec![make_project()];
     items.extend(std::iter::repeat_with(make_worktree).take(sessions));
     app.ui_state.list_state.set_item_count(items.len());
@@ -1558,6 +1815,29 @@ fn render_keybindings_search_box_filters_and_shows_prompt() {
     assert!(
         !text.contains("Scroll up"),
         "unrelated binding not filtered"
+    );
+}
+
+#[test]
+fn render_consumes_clear_right_pane_flag() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    app.ui_state.clear_right_pane = true;
+
+    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+
+    // render() must consume the flag itself by drawing the `Clear` widget.
+    // Before the fix the flag was cleared by a `terminal.clear()` call in the
+    // event loop, which since ratatui 0.30 reads the cursor from stdin — a
+    // blocking read that races the background input reader and crashes the
+    // loop. Drawing through ratatui here performs no cursor read.
+    terminal.draw(|f| app.render(f)).unwrap();
+
+    assert!(
+        !app.ui_state.clear_right_pane,
+        "render() should consume clear_right_pane so the event loop never needs terminal.clear()"
     );
 }
 
@@ -1871,17 +2151,13 @@ fn make_test_app_with_path() -> (App, std::path::PathBuf) {
     let store = Arc::new(StateStore::with_path(AppState::new(), state_path));
     // Leak the TempDir so paths stay valid for the lifetime of the test.
     std::mem::forget(tmp);
-    let mut app = App::new(
+    let app = App::new(
         config_store,
         store,
         crate::telemetry::FrontendInfo::new("test", "0.0.0"),
         crate::backend::no_remote_backends(),
         test_cli_reference(),
     );
-    // Most existing tests exercise board behaviour (the board was the only view
-    // before the list views were revived), so the shared harness defaults to the
-    // board. List-view tests flip `view_mode` explicitly.
-    app.ui_state.view_mode = crate::config::ViewMode::Board;
     (app, config_path)
 }
 
@@ -2967,7 +3243,458 @@ fn buffer_lines(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> 
     out
 }
 
+/// A fixed instant plus `offset` seconds, so seeded ordering is deterministic
+/// and any rendered timestamp is stable.
+fn fixed_time(offset: i64) -> chrono::DateTime<chrono::Utc> {
+    use chrono::TimeZone;
+    chrono::Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap() + chrono::Duration::seconds(offset)
+}
+
+/// Seed a small but feature-rich scenario into `app` and refresh the list.
+///
+/// Covers three projects, a stacked parent/child chain, unread plus Working,
+/// WaitingForInput and Idle agent states, a Creating and a Stopped session,
+/// open/merged/draft PR chips, and section placement (including one manual
+/// `section_override`). All timestamps are fixed so ordering is deterministic.
+async fn seed_render_scenario(app: &mut App) {
+    use crate::git::PrState;
+    use crate::session::{Project, SectionConfig, SessionStatus, WorktreeSession};
+    use std::path::PathBuf;
+
+    app.config.sections = vec![
+        SectionConfig {
+            name: "Review".to_string(),
+            ..Default::default()
+        },
+        SectionConfig {
+            name: "Done".to_string(),
+            ..Default::default()
+        },
+    ];
+
+    let alpha = Project::new("alpha", PathBuf::from("/tmp/alpha"), "main");
+    let bravo = Project::new("bravo", PathBuf::from("/tmp/bravo"), "main");
+    let charlie = Project::new("charlie", PathBuf::from("/tmp/charlie"), "develop");
+    let (alpha_id, bravo_id, charlie_id) = (alpha.id, bravo.id, charlie.id);
+
+    // alpha: working / unread / stacked base+child / stopped
+    let mut working =
+        WorktreeSession::new(alpha_id, "fix-login", "fix-login", PathBuf::new(), "claude");
+    working.created_at = fixed_time(50);
+    working.status = SessionStatus::Running;
+
+    let mut unread = WorktreeSession::new(
+        alpha_id,
+        "flaky-test",
+        "flaky-test",
+        PathBuf::new(),
+        "claude",
+    );
+    unread.created_at = fixed_time(40);
+    unread.unread = true;
+
+    let mut base = WorktreeSession::new(
+        alpha_id,
+        "refactor",
+        "refactor-br",
+        PathBuf::new(),
+        "claude",
+    );
+    base.created_at = fixed_time(30);
+
+    let mut child = WorktreeSession::new(
+        alpha_id,
+        "refactor-2",
+        "refactor-2-br",
+        PathBuf::new(),
+        "claude",
+    );
+    child.created_at = fixed_time(35);
+    child.pr_base_branch = Some("refactor-br".to_string());
+
+    let mut stopped =
+        WorktreeSession::new(alpha_id, "old-thing", "old-thing", PathBuf::new(), "claude");
+    stopped.created_at = fixed_time(10);
+    stopped.status = SessionStatus::Stopped;
+
+    // bravo: creating / PR open / PR merged / PR draft
+    let mut creating = WorktreeSession::new(
+        bravo_id,
+        "spinning-up",
+        "spinning-up",
+        PathBuf::new(),
+        "claude",
+    );
+    creating.created_at = fixed_time(45);
+    creating.status = SessionStatus::Creating;
+
+    let mut pr_open =
+        WorktreeSession::new(bravo_id, "review-me", "review-me", PathBuf::new(), "claude");
+    pr_open.created_at = fixed_time(35);
+    pr_open.pr_number = Some(42);
+    pr_open.pr_url = Some("https://example.com/pr/42".to_string());
+    pr_open.pr_state = Some(PrState::Open);
+    pr_open.current_section = Some("Review".to_string());
+    pr_open.section_override = Some("Review".to_string());
+
+    let mut pr_merged =
+        WorktreeSession::new(bravo_id, "shipped", "shipped", PathBuf::new(), "claude");
+    pr_merged.created_at = fixed_time(25);
+    pr_merged.pr_number = Some(7);
+    pr_merged.pr_url = Some("https://example.com/pr/7".to_string());
+    pr_merged.pr_state = Some(PrState::Merged);
+    pr_merged.pr_merged = true;
+    pr_merged.current_section = Some("Done".to_string());
+
+    let mut pr_draft = WorktreeSession::new(bravo_id, "wip-pr", "wip-pr", PathBuf::new(), "claude");
+    pr_draft.created_at = fixed_time(15);
+    pr_draft.pr_number = Some(99);
+    pr_draft.pr_url = Some("https://example.com/pr/99".to_string());
+    pr_draft.pr_state = Some(PrState::Open);
+    pr_draft.pr_draft = true;
+
+    // charlie: waiting-for-input
+    let mut waiting = WorktreeSession::new(
+        charlie_id,
+        "need-input",
+        "need-input",
+        PathBuf::new(),
+        "claude",
+    );
+    waiting.created_at = fixed_time(20);
+
+    let working_id = working.id;
+    let base_id = base.id;
+    let pr_open_id = pr_open.id;
+
+    app.service
+        .store()
+        .mutate(move |state| {
+            state.add_project(alpha);
+            state.add_project(bravo);
+            state.add_project(charlie);
+            for s in [
+                working, unread, base, child, stopped, creating, pr_open, pr_merged, pr_draft,
+                waiting,
+            ] {
+                state.add_session(s);
+            }
+        })
+        .await
+        .unwrap();
+
+    // Agent states: Working / Idle / WaitingForInput; others left unset.
+    app.ui_state
+        .agent_states
+        .insert(working_id, AgentState::Working);
+    app.ui_state.agent_states.insert(base_id, AgentState::Idle);
+    app.ui_state
+        .agent_states
+        .insert(pr_open_id, AgentState::WaitingForInput);
+
+    // Pin the spinner frame so Working/Creating rows are stable.
+    app.ui_state.tick_count = 0;
+    app.sync_local_view_from_store_for_test().await;
+    app.refresh_list_items().await;
+}
+
+#[tokio::test]
+async fn render_project_grouped_view_matches_snapshot() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    seed_render_scenario(&mut app).await;
+    app.ui_state.view_mode = ViewMode::ProjectGrouped;
+    app.refresh_list_items().await;
+    app.ui_state.list_state.select(Some(0));
+    app.update_selection();
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+
+    let expected = r#"
+  Sessions [Project]:               ┌ Shell · Info ───────────────────────────────────────────────────────────────────┐
+  alpha [main] (5)                  │                                                                                 │
+      1 ⠋ fix-login                 │                                                                                 │
+      2 ◆ flaky-test                │                                                                                 │
+      3 ● refactor [refactor-br]    │                                                                                 │
+         4 ● refactor-2 [refactor-2-│                                                                                 │
+      5 ○ old-thing                 │                                                                                 │
+  bravo [main] (4)                  │                                                                                 │
+      6 ⠋ spinning-up               │                                                                                 │
+      7 ? review-me  PR #42         │                                                                                 │
+      8 ● shipped  PR #7            │                                                                                 │
+      9 ● wip-pr  PR #99            │                                                                                 │
+  charlie [develop] (1)             │                                                                                 │
+     10 ● need-input                │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    └─────────────────────────────────────────────────────────────────────────────────┘
+
+ Sessions: 10 │ [n]ew session │ s[t]acked │ [N]ew project                                                        ? help
+"#;
+    pretty_assertions::assert_eq!(buffer_lines(&terminal), expected);
+}
+
+#[tokio::test]
+async fn render_section_grouped_view_matches_snapshot() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    seed_render_scenario(&mut app).await;
+    app.ui_state.view_mode = ViewMode::SectionGrouped;
+    app.refresh_list_items().await;
+    app.ui_state.list_state.select(Some(0));
+    app.update_selection();
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+
+    let expected = r#"
+  Sessions [Sections]:              ┌ Preview · Info · Shell ─────────────────────────────────────────────────────────┐
+  ▾ In Progress (8)                 │                                                                                 │
+    alpha [main] (5)                │                                                                                 │
+      1 ⠋ fix-login                 │                                                                                 │
+      2 ◆ flaky-test                │                                                                                 │
+      3 ● refactor [refactor-br]    │                                                                                 │
+      4 ● refactor-2 [refactor-2-br]│                                                                                 │
+      5 ○ old-thing                 │                                                                                 │
+    bravo [main] (2)                │                                                                                 │
+      6 ⠋ spinning-up               │                                                                                 │
+      7 ● wip-pr  PR #99            │                                                                                 │
+    charlie [develop] (1)           │                                                                                 │
+      8 ● need-input                │                                                                                 │
+   ────────────────────             │                                                                                 │
+  ▾ Review (1)                      │                                                                                 │
+    bravo [main] (1)                │                                                                                 │
+      9 ? review-me  PR #42         │                                                                                 │
+   ────────────────────             │                                                                                 │
+  ▾ Done (1)                        │                                                                                 │
+    bravo [main] (1)                │                                                                                 │
+     10 ● shipped  PR #7            │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    └─────────────────────────────────────────────────────────────────────────────────┘
+
+ Sessions: 10 │ [n]ew session │ s[t]acked │ [N]ew project                                                        ? help
+"#;
+    pretty_assertions::assert_eq!(buffer_lines(&terminal), expected);
+}
+
+#[tokio::test]
+async fn render_section_stacks_view_matches_snapshot() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    seed_render_scenario(&mut app).await;
+    app.ui_state.view_mode = ViewMode::SectionStacks;
+    app.refresh_list_items().await;
+    app.ui_state.list_state.select(Some(0));
+    app.update_selection();
+
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+
+    let expected = r#"
+  Sessions [Section Stacks]:        ┌ Preview · Info · Shell ─────────────────────────────────────────────────────────┐
+  ▾ In Progress (8)                 │                                                                                 │
+    alpha [main] (5)                │                                                                                 │
+      1 ⠋ fix-login                 │                                                                                 │
+      2 ◆ flaky-test                │                                                                                 │
+      3 ● refactor [refactor-br]    │                                                                                 │
+         4 ● refactor-2 [refactor-2-│                                                                                 │
+      5 ○ old-thing                 │                                                                                 │
+    bravo [main] (2)                │                                                                                 │
+      6 ⠋ spinning-up               │                                                                                 │
+      7 ● wip-pr  PR #99            │                                                                                 │
+    charlie [develop] (1)           │                                                                                 │
+      8 ● need-input                │                                                                                 │
+   ────────────────────             │                                                                                 │
+  ▾ Review (1)                      │                                                                                 │
+    bravo [main] (1)                │                                                                                 │
+      9 ? review-me  PR #42         │                                                                                 │
+   ────────────────────             │                                                                                 │
+  ▾ Done (1)                        │                                                                                 │
+    bravo [main] (1)                │                                                                                 │
+     10 ● shipped  PR #7            │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    │                                                                                 │
+                                    └─────────────────────────────────────────────────────────────────────────────────┘
+
+ Sessions: 10 │ [n]ew session │ s[t]acked │ [N]ew project                                                        ? help
+"#;
+    pretty_assertions::assert_eq!(buffer_lines(&terminal), expected);
+}
+
+#[tokio::test]
+async fn render_navigation_moves_selection_and_swaps_status_actions() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = make_test_app();
+    seed_render_scenario(&mut app).await;
+    app.ui_state.view_mode = ViewMode::ProjectGrouped;
+    app.refresh_list_items().await;
+
+    // Start on the first row (the `alpha` project header) and move the
+    // selection down two rows onto the second worktree (`flaky-test`).
+    app.ui_state.list_state.select(Some(0));
+    app.update_selection();
+    app.ui_state.list_state.next();
+    app.ui_state.list_state.next();
+    app.update_selection();
+
+    // Selection landed on list index 2, which is the unread `flaky-test`
+    // worktree; `selected_session_id` tracks it and no project is selected.
+    assert_eq!(app.ui_state.list_state.selected(), Some(2));
+    let selected = &app.ui_state.list_items[2];
+    let (selected_id, selected_project) = match selected {
+        SessionListItem::Worktree {
+            id,
+            project_id,
+            title,
+            unread,
+            ..
+        } => {
+            assert_eq!(title, "flaky-test");
+            assert!(unread, "flaky-test is seeded unread");
+            (*id, *project_id)
+        }
+        other => panic!("expected the flaky-test worktree at index 2, got {other:?}"),
+    };
+    assert_eq!(
+        app.ui_state.selected_session_id.map(|r| r.id),
+        Some(selected_id)
+    );
+    // Characterization: selecting a worktree also stamps `selected_project_id`
+    // with the session's parent project (it is not cleared to None).
+    assert_eq!(
+        app.ui_state.selected_project_id.map(|(_, p)| p),
+        Some(selected_project)
+    );
+
+    // With a session selected, the status bar surfaces the session-scoped
+    // action buttons (delete / review / edit) alongside the always-present
+    // new-session and new-project actions.
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    let lines = buffer_lines(&terminal);
+    let status = lines.lines().last().unwrap();
+    assert_eq!(
+        status,
+        " Sessions: 10 │ [n]ew session │ s[t]acked │ [d]elete │ [r]eview │ edit [.] │ [N]ew project                       ? help"
+    );
+}
+
 // --- actions.rs decision predicates (characterization) ----------------------
+
+#[tokio::test]
+async fn selected_session_is_creating_tracks_selected_worktree_status() {
+    let mut app = make_test_app();
+    seed_render_scenario(&mut app).await;
+    app.ui_state.view_mode = ViewMode::ProjectGrouped;
+    app.refresh_list_items().await;
+
+    // Point the selection at the `spinning-up` (Creating) worktree.
+    let creating_id = app.ui_state.list_items.iter().find_map(|i| match i {
+        SessionListItem::Worktree {
+            id, title, status, ..
+        } if title == "spinning-up" && *status == SessionStatus::Creating => Some(*id),
+        _ => None,
+    });
+    app.ui_state.selected_session_id = creating_id.map(crate::backend::SessionRef::local);
+    assert!(
+        app.selected_session_is_creating(),
+        "a selected Creating session should be reported as creating"
+    );
+
+    // A Running session is not creating.
+    let running_id = app.ui_state.list_items.iter().find_map(|i| match i {
+        SessionListItem::Worktree { id, title, .. } if title == "fix-login" => Some(*id),
+        _ => None,
+    });
+    app.ui_state.selected_session_id = running_id.map(crate::backend::SessionRef::local);
+    assert!(!app.selected_session_is_creating());
+
+    // No selection at all is not creating.
+    app.ui_state.selected_session_id = None;
+    assert!(!app.selected_session_is_creating());
+}
+
+#[tokio::test]
+async fn selected_item_is_section_header_detects_header_rows() {
+    let mut app = make_test_app();
+    seed_render_scenario(&mut app).await;
+    app.ui_state.view_mode = ViewMode::SectionGrouped;
+    app.refresh_list_items().await;
+
+    // Index 0 in a section view is the "In Progress" section header.
+    assert!(matches!(
+        app.ui_state.list_items[0],
+        SessionListItem::SectionHeader { .. }
+    ));
+    app.ui_state.list_state.select(Some(0));
+    assert!(app.selected_item_is_section_header());
+
+    // Select the first worktree row instead — not a header.
+    let worktree_idx = app
+        .ui_state
+        .list_items
+        .iter()
+        .position(|i| matches!(i, SessionListItem::Worktree { .. }))
+        .unwrap();
+    app.ui_state.list_state.select(Some(worktree_idx));
+    assert!(!app.selected_item_is_section_header());
+}
 
 // ---------------------------------------------------------------------------
 // Phase E: multi-backend tree, connection state, hot-reload reconcile
@@ -2978,34 +3705,6 @@ use crate::api::WorkspaceSnapshot;
 use crate::backend::{
     BackendId, ConnectionState, RemoteBackendFactory, SessionRef, empty_snapshot, mock::MockBackend,
 };
-
-/// A snapshot carrying one session with the caller's exact `pid`/`sid`/`status`,
-/// so a board built by hand (e.g. `board_with_one_session`) can be backed by a
-/// matching snapshot — the board is derived from the snapshot in production, so
-/// snapshot-reading helpers (`selected_session_is_creating`, Info content) need
-/// the session present there too.
-fn snapshot_with_session(
-    pid: ProjectId,
-    sid: SessionId,
-    status: SessionStatus,
-) -> WorkspaceSnapshot {
-    let mut state = crate::config::AppState::default();
-    let mut project = crate::session::Project::new("P", std::path::PathBuf::from("/tmp/p"), "main");
-    project.id = pid;
-    let mut sess = crate::session::WorktreeSession::new(
-        pid,
-        "s",
-        "br",
-        std::path::PathBuf::from("/tmp/w"),
-        "claude",
-    );
-    sess.id = sid;
-    sess.status = status;
-    project.add_worktree(sid);
-    state.projects.insert(pid, project);
-    state.sessions.insert(sid, sess);
-    crate::api::workspace_snapshot_from_state(&state)
-}
 
 /// A snapshot carrying one running session under one project, for exercising a
 /// remote backend's tree contents / command gating.
@@ -3059,43 +3758,20 @@ fn build_app_with_mock_remotes(servers: Vec<(&str, WorkspaceSnapshot)>) -> App {
             .unwrap_or_else(empty_snapshot);
         Ok(Arc::new(MockBackend::new(cfg.name.clone(), snap)) as Arc<dyn CommanderBackend>)
     });
-    let mut app = App::new(
+    App::new(
         config_store,
         store,
         crate::telemetry::FrontendInfo::new("test", "0.0.0"),
         factory,
         test_cli_reference(),
-    );
-    // These tests inspect the board sidebar (server headings / version
-    // warnings), so drive the board view.
-    app.ui_state.view_mode = crate::config::ViewMode::Board;
-    app
+    )
 }
 
 #[tokio::test]
 async fn single_local_backend_suppresses_server_header() {
     // The C0 invariant: with only the local backend, no ServerHeader is emitted.
-    use crate::session::{Project, WorktreeSession};
-    use std::path::PathBuf;
-
     let mut app = make_test_app();
-    let project = Project::new("proj", PathBuf::from("/tmp/proj"), "main");
-    let session = WorktreeSession::new(
-        project.id,
-        "one",
-        "br-one",
-        PathBuf::from("/tmp/w1"),
-        "claude",
-    );
-    app.service
-        .store()
-        .mutate(move |state| {
-            state.add_project(project);
-            state.add_session(session);
-        })
-        .await
-        .unwrap();
-    app.sync_local_view_from_store_for_test().await;
+    seed_render_scenario(&mut app).await;
     app.ui_state.view_mode = ViewMode::ProjectGrouped;
     app.refresh_list_items().await;
     assert!(
@@ -3104,16 +3780,46 @@ async fn single_local_backend_suppresses_server_header() {
     );
 }
 
-// ===== Server version-mismatch warning (ported to the board sidebar) =====
+#[tokio::test]
+async fn multi_backend_tree_emits_server_headers_in_config_order_local_first() {
+    let mut app = build_app_with_mock_remotes(vec![
+        ("buildbox", empty_snapshot()),
+        ("ci", empty_snapshot()),
+    ]);
+    app.bootstrap_backend_views().await;
+    app.refresh_list_items().await;
 
-/// The `version_warning` on the buildbox server's sidebar heading, or `None`.
-fn buildbox_version_warning(app: &App) -> Option<crate::backend::VersionMismatch> {
-    app.ui_state
-        .board
-        .servers
+    let headers: Vec<(BackendId, String)> = app
+        .ui_state
+        .list_items
         .iter()
-        .find(|srv| srv.name == "buildbox")
-        .and_then(|srv| srv.version_warning.clone())
+        .filter_map(|i| match i {
+            SessionListItem::ServerHeader { backend, name, .. } => Some((*backend, name.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        headers,
+        vec![
+            (BackendId(0), "local".to_string()),
+            (BackendId(1), "buildbox".to_string()),
+            (BackendId(2), "ci".to_string()),
+        ],
+        "server headers should be local-first, then config order"
+    );
+}
+
+/// The `version_warning` on the buildbox server header, or `None` if there's no
+/// such header.
+fn buildbox_version_warning(app: &App) -> Option<crate::backend::VersionMismatch> {
+    app.ui_state.list_items.iter().find_map(|i| match i {
+        SessionListItem::ServerHeader {
+            name,
+            version_warning,
+            ..
+        } if name == "buildbox" => version_warning.clone(),
+        _ => None,
+    })
 }
 
 fn agent_states_box() -> Box<crate::api::AgentStatesSnapshot> {
@@ -3124,11 +3830,10 @@ fn agent_states_box() -> Box<crate::api::AgentStatesSnapshot> {
 }
 
 #[tokio::test]
-async fn older_server_snapshot_annotates_heading_but_placeholder_does_not() {
+async fn older_server_snapshot_annotates_header_but_placeholder_does_not() {
     // A remote whose server build is behind this client (major.minor) flags a
-    // warning on its sidebar heading. Before its first real snapshot lands the
-    // heading carries the connecting placeholder (== client version), so no
-    // false alarm.
+    // warning on its header. Before its first real snapshot lands the header
+    // carries the connecting placeholder (== client version), so no false alarm.
     let mut old_snap = empty_snapshot();
     old_snap.server.version = "0.1.0".to_string(); // certainly behind the client
     let mut app = build_app_with_mock_remotes(vec![("buildbox", old_snap.clone())]);
@@ -3153,7 +3858,7 @@ async fn older_server_snapshot_annotates_heading_but_placeholder_does_not() {
             server: "0.1.0".to_string(),
             client: crate::VERSION.to_string(),
         }),
-        "an older remote server must carry a version warning on its heading"
+        "an older remote server must carry a version warning on its header"
     );
 }
 
@@ -3207,7 +3912,7 @@ async fn version_toast_does_not_clobber_a_live_status_message() {
     let mut app = build_app_with_mock_remotes(vec![("buildbox", old_snap.clone())]);
     app.bootstrap_backend_views().await;
 
-    // A live message (e.g. "Created session ...") occupies the single slot.
+    // A live message (e.g. "Created session …") occupies the single slot.
     app.ui_state.status_message = Some((
         "busy".to_string(),
         std::time::Instant::now() + std::time::Duration::from_secs(30),
@@ -3292,6 +3997,26 @@ async fn two_stale_servers_each_get_their_own_toast() {
 }
 
 #[tokio::test]
+async fn multi_backend_list_keys_are_unique() {
+    let (remote_snap, _sid, _pid) = snapshot_with_one_session();
+    let (local_snap, _s, _p) = snapshot_with_one_session();
+    let mut app = build_app_with_mock_remotes(vec![("buildbox", remote_snap)]);
+    // Give the local backend some content too.
+    app.backends[0].view.snapshot = local_snap;
+    app.backends[0].view.connection = ConnectionState::Connected;
+    app.bootstrap_backend_views().await;
+    app.refresh_list_items().await;
+
+    let keys: Vec<String> = app.ui_state.list_items.iter().map(|i| i.key()).collect();
+    let unique: std::collections::HashSet<&String> = keys.iter().collect();
+    assert_eq!(
+        keys.len(),
+        unique.len(),
+        "list item keys must be unique: {keys:?}"
+    );
+}
+
+#[tokio::test]
 async fn factory_failure_yields_degraded_placeholder() {
     let tmp = tempfile::TempDir::new().unwrap();
     let mut config = Config::default();
@@ -3372,11 +4097,9 @@ async fn degraded_server_header_renders_greyed_name_and_reason() {
     terminal.draw(|f| app.render(f)).unwrap();
     let text = buffer_lines(&terminal);
     assert!(text.contains("buildbox"), "header should name the server");
-    // The sidebar is a fixed narrow lane, so a long reason truncates; assert
-    // the reason's visible prefix rather than the full string.
     assert!(
-        text.contains("(connection"),
-        "degraded header should show the reason (truncated to the lane): {text}"
+        text.contains("connection refused"),
+        "degraded header should show the reason: {text}"
     );
 }
 
@@ -4689,7 +5412,6 @@ async fn restore_selection_resolves_remembered_remote_backend() {
     // resolution explicit and keeps the read side symmetric with the write.)
     let (remote_snap, remote_sid, _pid) = snapshot_with_one_session();
     let mut app = build_app_with_mock_remotes(vec![("buildbox", remote_snap)]);
-    app.ui_state.view_mode = ViewMode::ProjectGrouped;
     app.bootstrap_backend_views().await;
     app.refresh_backend_view(BackendId(1)).await;
     app.refresh_list_items().await;
@@ -5575,1967 +6297,4 @@ async fn pending_comment_markers_union_every_backend_view() {
         app.ui_state.sessions_with_comments.contains(&remote_sid),
         "folding a backend snapshot must re-derive pending-comment markers"
     );
-}
-
-// ===== Board-redesign tests (ui-expr) =====
-
-/// Build a two-column board (In Progress catch-all + one named section) with a
-/// single project and a single in-progress session, for the App-level board
-/// selection tests below.
-fn board_with_one_session(pid: ProjectId, session_id: SessionId) -> crate::session::Board {
-    use crate::session::{Board, BoardCard, BoardColumn, BoardProjectEntry};
-    let mut row = make_worktree_with_id(session_id);
-    let SessionListItem::Worktree { project_id, .. } = &mut row else {
-        unreachable!("worktree row")
-    };
-    *project_id = pid;
-    let card = BoardCard {
-        project_id: pid,
-        project_name: "P".to_string(),
-        row,
-        indent: false,
-    };
-    Board {
-        servers: vec![],
-        projects: vec![BoardProjectEntry {
-            project_id: pid,
-            name: "P".to_string(),
-            session_count: 1,
-        }],
-        columns: vec![
-            BoardColumn {
-                name: crate::session::IN_PROGRESS.to_string(),
-                max_sessions: None,
-                cards: vec![card],
-            },
-            BoardColumn {
-                name: "Review".to_string(),
-                max_sessions: None,
-                cards: vec![],
-            },
-        ],
-    }
-}
-
-#[tokio::test]
-async fn update_selection_maps_sidebar_to_project_and_card_to_session() {
-    let mut app = make_test_app();
-    let pid = ProjectId::new();
-    let sid = SessionId::new();
-    app.ui_state.board = board_with_one_session(pid, sid);
-    app.ui_state.board_state.sync(vec![1, 1, 0]);
-
-    // A card row (col 1 = In Progress, row 0) yields both session and project.
-    app.ui_state
-        .board_state
-        .select(Some(BoardPos { col: 1, row: 0 }));
-    app.update_selection();
-    assert_eq!(app.ui_state.selected_session_id.map(|r| r.id), Some(sid));
-    assert_eq!(app.ui_state.selected_project_id.map(|(_, p)| p), Some(pid));
-
-    // A sidebar row (col 0) yields the project only — preserving RemoveProject
-    // and project-shell gating.
-    app.ui_state
-        .board_state
-        .select(Some(BoardPos { col: 0, row: 0 }));
-    app.update_selection();
-    assert_eq!(app.ui_state.selected_session_id, None);
-    assert_eq!(app.ui_state.selected_project_id.map(|(_, p)| p), Some(pid));
-}
-
-#[tokio::test]
-async fn target_section_is_none_for_sidebar_and_catch_all() {
-    let mut app = make_test_app();
-    let pid = ProjectId::new();
-    let sid = SessionId::new();
-    app.ui_state.board = board_with_one_session(pid, sid);
-    app.ui_state.board_state.sync(vec![1, 1, 0]);
-
-    // Sidebar → no section override for a new session.
-    app.ui_state
-        .board_state
-        .select(Some(BoardPos { col: 0, row: 0 }));
-    assert_eq!(app.target_section(), None);
-
-    // In Progress catch-all → None (a new session lands there by default, so
-    // stamping an override would be pointless).
-    app.ui_state
-        .board_state
-        .select(Some(BoardPos { col: 1, row: 0 }));
-    assert_eq!(app.target_section(), None);
-
-    // A real section column → its name.
-    app.ui_state
-        .board_state
-        .select(Some(BoardPos { col: 2, row: 0 }));
-    assert_eq!(app.target_section(), Some("Review".to_string()));
-}
-
-#[tokio::test]
-async fn jump_to_session_number_moves_board_cursor_to_that_session() {
-    let mut app = make_test_app();
-    let pid = ProjectId::new();
-    let sid = SessionId::new();
-    app.ui_state.board = board_with_one_session(pid, sid);
-    app.ui_state.board_state.sync(vec![1, 1, 0]);
-    // Start on the sidebar so the jump has to move the cursor.
-    app.ui_state
-        .board_state
-        .select(Some(BoardPos { col: 0, row: 0 }));
-
-    app.jump_to_session_number(1);
-
-    assert_eq!(
-        app.ui_state.board_state.selected(),
-        Some(BoardPos { col: 1, row: 0 }),
-        "jumping to session #1 lands on its card row"
-    );
-    assert_eq!(app.ui_state.selected_session_id.map(|r| r.id), Some(sid));
-}
-
-#[test]
-fn test_is_command_available_generate_summary_requires_info_modal() {
-    // GenerateSummary is only available while the Info modal is open — that's
-    // where the summary and its `g` hotkey are displayed.
-    let mut s = ui_state_with(Some(SessionId::new()), None);
-    // Closed modal → hidden, even with a session selected.
-    assert!(!s.is_command_available(BindableAction::GenerateSummary));
-    // Info modal open → available.
-    s.modal = Modal::Info { scroll: 0 };
-    assert!(s.is_command_available(BindableAction::GenerateSummary));
-}
-
-#[test]
-fn render_consumes_force_clear_flag() {
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-
-    let mut app = make_test_app();
-    app.ui_state.force_clear = true;
-
-    let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
-
-    // render() must consume the flag itself by drawing the `Clear` widget.
-    // Before the fix the flag was cleared by a `terminal.clear()` call in the
-    // event loop, which since ratatui 0.30 reads the cursor from stdin — a
-    // blocking read that races the background input reader and crashes the
-    // loop. Drawing through ratatui here performs no cursor read.
-    terminal.draw(|f| app.render(f)).unwrap();
-
-    assert!(
-        !app.ui_state.force_clear,
-        "render() should consume force_clear so the event loop never needs terminal.clear()"
-    );
-}
-
-/// Seed the store with one project and two In-Progress sessions, then refresh.
-/// Returns `(app, project_id, s1_id, s2_id)`.
-async fn app_with_two_sessions() -> (App, ProjectId, SessionId, SessionId) {
-    let mut app = make_test_app();
-    let project =
-        crate::session::Project::new("proj", std::path::PathBuf::from("/tmp/proj"), "main");
-    let project_id = project.id;
-    let s1 = crate::session::WorktreeSession::new(
-        project_id,
-        "one",
-        "br-one",
-        std::path::PathBuf::from("/tmp/w1"),
-        "claude",
-    );
-    let s2 = crate::session::WorktreeSession::new(
-        project_id,
-        "two",
-        "br-two",
-        std::path::PathBuf::from("/tmp/w2"),
-        "claude",
-    );
-    let s1_id = s1.id;
-    let s2_id = s2.id;
-    app.service
-        .store()
-        .mutate(move |state| {
-            state.add_project(project);
-            state.add_session(s1);
-            state.add_session(s2);
-        })
-        .await
-        .unwrap();
-    app.sync_local_view_from_store_for_test().await;
-    app.refresh_list_items().await;
-    (app, project_id, s1_id, s2_id)
-}
-
-#[tokio::test]
-async fn refresh_reanchors_cursor_to_selected_session_after_column_move() {
-    let mut app = make_test_app();
-    // A manual section the moved card can land in.
-    app.config.sections = vec![crate::session::SectionConfig {
-        name: "Beta".to_string(),
-        ..Default::default()
-    }];
-    let project =
-        crate::session::Project::new("proj", std::path::PathBuf::from("/tmp/proj"), "main");
-    let project_id = project.id;
-    let s1 = crate::session::WorktreeSession::new(
-        project_id,
-        "one",
-        "br-one",
-        std::path::PathBuf::from("/tmp/w1"),
-        "claude",
-    );
-    let s2 = crate::session::WorktreeSession::new(
-        project_id,
-        "two",
-        "br-two",
-        std::path::PathBuf::from("/tmp/w2"),
-        "claude",
-    );
-    let s2_id = s2.id;
-    app.service
-        .store()
-        .mutate(move |state| {
-            state.add_project(project);
-            state.add_session(s1);
-            state.add_session(s2);
-        })
-        .await
-        .unwrap();
-    app.sync_local_view_from_store_for_test().await;
-    app.refresh_list_items().await;
-
-    // Select s2 on its In-Progress card.
-    let start = app.ui_state.board.position_of(s2_id).expect("s2 has a row");
-    app.ui_state.board_state.select(Some(start));
-    app.update_selection();
-    assert_eq!(app.ui_state.selected_session_id.map(|r| r.id), Some(s2_id));
-
-    // Simulate a background reassignment moving s2 into the Beta column (as a
-    // PR poll would), followed by a plain refresh with no manual re-selection.
-    let sections = crate::session::effective_sections(&app.config.sections).into_owned();
-    let now = chrono::Utc::now();
-    app.service
-        .store()
-        .mutate(move |state| {
-            if let Some(s) = state.get_session_mut(&s2_id) {
-                s.section_override = Some("Beta".to_string());
-                crate::session::apply_assignment(s, &sections, now);
-            }
-        })
-        .await
-        .unwrap();
-    app.sync_local_view_from_store_for_test().await;
-    app.refresh_list_items().await;
-
-    // The cursor followed s2 to its new column, and the tracked id is unchanged.
-    let moved = app
-        .ui_state
-        .board
-        .position_of(s2_id)
-        .expect("s2 still has a row");
-    assert_eq!(
-        app.ui_state.board_state.selected(),
-        Some(moved),
-        "cursor follows the session across the column move"
-    );
-    assert_ne!(moved.col, start.col, "s2 actually changed column");
-    assert_eq!(app.ui_state.selected_session_id.map(|r| r.id), Some(s2_id));
-}
-
-#[tokio::test]
-async fn refresh_drops_dangling_id_when_selected_session_removed() {
-    let (mut app, _pid, s1_id, s2_id) = app_with_two_sessions().await;
-
-    // Select s1.
-    let pos = app.ui_state.board.position_of(s1_id).expect("s1 has a row");
-    app.ui_state.board_state.select(Some(pos));
-    app.update_selection();
-    assert_eq!(app.ui_state.selected_session_id.map(|r| r.id), Some(s1_id));
-
-    // Simulate a remote removal of the selected session, then refresh.
-    app.service
-        .store()
-        .mutate(move |state| {
-            state.remove_session(&s1_id);
-        })
-        .await
-        .unwrap();
-    app.sync_local_view_from_store_for_test().await;
-    app.refresh_list_items().await;
-
-    // The dead id is gone; the cursor clamped onto the surviving neighbour and
-    // the tracked id was re-derived to match it (never left dangling).
-    assert_ne!(
-        app.ui_state.selected_session_id.map(|r| r.id),
-        Some(s1_id),
-        "the removed session's id must not linger"
-    );
-    assert_eq!(app.ui_state.selected_session_id.map(|r| r.id), Some(s2_id));
-    let sel = app
-        .ui_state
-        .board_state
-        .selected()
-        .expect("a row stays selected");
-    assert_eq!(app.ui_state.board.ids_at(sel).0, Some(s2_id));
-}
-
-#[tokio::test]
-async fn refresh_keeps_selection_on_untouched_session_when_another_is_added() {
-    let (mut app, project_id, _s1_id, s2_id) = app_with_two_sessions().await;
-
-    // Select s2.
-    let pos = app.ui_state.board.position_of(s2_id).expect("s2 has a row");
-    app.ui_state.board_state.select(Some(pos));
-    app.update_selection();
-    assert_eq!(app.ui_state.selected_session_id.map(|r| r.id), Some(s2_id));
-
-    // A third, unrelated session appears (e.g. created in another frontend).
-    let s3 = crate::session::WorktreeSession::new(
-        project_id,
-        "three",
-        "br-three",
-        std::path::PathBuf::from("/tmp/w3"),
-        "claude",
-    );
-    app.service
-        .store()
-        .mutate(move |state| {
-            state.add_session(s3);
-        })
-        .await
-        .unwrap();
-    app.sync_local_view_from_store_for_test().await;
-    app.refresh_list_items().await;
-
-    // The selection still tracks s2, cursor included.
-    assert_eq!(app.ui_state.selected_session_id.map(|r| r.id), Some(s2_id));
-    let sel = app
-        .ui_state
-        .board_state
-        .selected()
-        .expect("a row stays selected");
-    assert_eq!(app.ui_state.board.ids_at(sel).0, Some(s2_id));
-}
-
-#[tokio::test]
-async fn refresh_reanchors_sidebar_cursor_to_selected_project_after_resort() {
-    let mut app = make_test_app();
-    // Project P has no sessions, so it appears only as a sidebar row.
-    let p = crate::session::Project::new("mmm", std::path::PathBuf::from("/tmp/mmm"), "main");
-    let p_id = p.id;
-    app.service
-        .store()
-        .mutate(move |state| {
-            state.add_project(p);
-        })
-        .await
-        .unwrap();
-    app.sync_local_view_from_store_for_test().await;
-    app.refresh_list_items().await;
-
-    // Land the cursor on P's sidebar row and confirm it is selected.
-    app.select_project_in_sidebar(p_id);
-    let start = app
-        .ui_state
-        .board_state
-        .selected()
-        .expect("P has a sidebar row");
-    assert_eq!(start.col, 0);
-    assert_eq!(app.ui_state.selected_project_id.map(|(_, p)| p), Some(p_id));
-    assert_eq!(app.ui_state.selected_session_id, None);
-
-    // A remote scan adds a project that name-sorts before P, shifting P's
-    // sidebar row down. A plain refresh (no manual re-selection) follows.
-    let a = crate::session::Project::new("aaa", std::path::PathBuf::from("/tmp/aaa"), "main");
-    app.service
-        .store()
-        .mutate(move |state| {
-            state.add_project(a);
-        })
-        .await
-        .unwrap();
-    app.sync_local_view_from_store_for_test().await;
-    app.refresh_list_items().await;
-
-    // The cursor followed P to its new (shifted) row, and the tracked project
-    // id is unchanged — it did not strand onto the newly inserted neighbour.
-    let moved = app
-        .ui_state
-        .board
-        .sidebar_row_of(p_id)
-        .expect("P still has a sidebar row");
-    assert_ne!(moved, start.row, "P's sidebar row actually shifted");
-    assert_eq!(
-        app.ui_state.board_state.selected(),
-        Some(BoardPos { col: 0, row: moved }),
-    );
-    assert_eq!(app.ui_state.selected_project_id.map(|(_, p)| p), Some(p_id));
-    assert_eq!(app.ui_state.selected_session_id, None);
-}
-
-#[tokio::test]
-async fn reload_theme_rebuilds_project_color_cache_on_theme_switch() {
-    let mut app = make_test_app();
-    let p = crate::session::Project::new("proj", std::path::PathBuf::from("/tmp/proj"), "main");
-    let pid = p.id;
-    app.service
-        .store()
-        .mutate(move |state| {
-            state.add_project(p);
-        })
-        .await
-        .unwrap();
-
-    // Start on the `basic` preset and populate the cache via a refresh.
-    app.config.theme.preset = Some("basic".to_string());
-    app.reload_theme();
-    app.sync_local_view_from_store_for_test().await;
-    app.refresh_list_items().await;
-    let basic_color = app.theme.project_color(0);
-    assert_eq!(
-        app.ui_state.project_colors.get(&pid).copied(),
-        Some(basic_color),
-    );
-
-    // Switch presets through the theme-apply path only (no refresh_list_items).
-    // The stale-cache bug left `project_colors` on the old theme here; the fix
-    // rebuilds it inside `reload_theme`.
-    app.config.theme.preset = Some("rose-pine".to_string());
-    app.reload_theme();
-
-    let new_color = app.theme.project_color(0);
-    assert_ne!(
-        new_color, basic_color,
-        "the preset switch must actually change the project palette"
-    );
-    assert_eq!(
-        app.ui_state.project_colors.get(&pid).copied(),
-        Some(new_color),
-        "cache must reflect the new theme without a refresh_list_items call"
-    );
-}
-
-#[tokio::test]
-async fn spawn_info_fetch_is_noop_while_enriched_fetch_in_flight() {
-    let mut app = make_test_app();
-    let project =
-        crate::session::Project::new("proj", std::path::PathBuf::from("/tmp/proj"), "main");
-    let project_id = project.id;
-    let session = crate::session::WorktreeSession::new(
-        project_id,
-        "one",
-        "br-one",
-        std::path::PathBuf::from("/tmp/w1"),
-        "claude",
-    );
-    let sid = session.id;
-    app.service
-        .store()
-        .mutate(move |state| {
-            state.add_project(project);
-            state.add_session(session);
-            // A PR number is required for the enriched fetch to be attempted.
-            if let Some(s) = state.get_session_mut(&sid) {
-                s.pr_number = Some(42);
-            }
-        })
-        .await
-        .unwrap();
-    app.sync_local_view_from_store_for_test().await;
-    app.refresh_list_items().await;
-
-    // Arrange the conditions under which the fetch would fire: Info modal open,
-    // this session selected, `gh` available, and no cached enriched PR yet.
-    app.ui_state.selected_session_id = Some(crate::backend::SessionRef::local(sid));
-    app.ui_state.gh_available = true;
-    app.ui_state.modal = Modal::Info { scroll: 0 };
-    app.ui_state.enriched_pr = None;
-
-    // Simulate a fetch already in flight (spawned within the 5s window).
-    let in_flight_since = std::time::Instant::now();
-    app.ui_state.enriched_pr_fetch_spawned_at = Some(in_flight_since);
-
-    // A tick-driven call must be a no-op: the in-flight guard skips the spawn
-    // block, leaving the timestamp untouched (no duplicate `gh` fetch).
-    app.spawn_info_fetch();
-
-    assert_eq!(
-        app.ui_state.enriched_pr_fetch_spawned_at,
-        Some(in_flight_since),
-        "an in-flight fetch must not be re-spawned"
-    );
-}
-
-#[test]
-fn top_bar_keeps_title_accent_and_right_aligns_counts() {
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-
-    let mut app = make_test_app();
-    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
-    terminal.draw(|f| app.render(f)).unwrap();
-
-    let buf = terminal.backend().buffer();
-    // The title " Claude Commander" has a leading space, so 'C' sits at x=1 on
-    // the top row and must keep its accent fg — the old two-paragraph render
-    // let the counts paragraph reset it to the plain status-bar style.
-    let cell = &buf[(1u16, 0u16)];
-    assert_eq!(cell.symbol(), "C", "title starts at x=1");
-    assert_eq!(
-        cell.fg, app.theme.text_accent,
-        "title keeps its accent fg (not stripped by the counts paragraph)"
-    );
-
-    // The counts render right-aligned: their text sits in the right half of the
-    // 100-column bar.
-    let row0: String = (0..100u16)
-        .map(|x| buf[(x, 0u16)].symbol().to_string())
-        .collect();
-    assert!(row0.contains("session") && row0.contains("project"));
-    let sessions_at = row0.find("session").unwrap();
-    assert!(
-        sessions_at > 50,
-        "counts should be right-aligned (found at column {sessions_at})"
-    );
-}
-
-#[tokio::test]
-async fn left_click_selects_row_and_double_click_dispatches_select() {
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-
-    let mut app = make_test_app();
-    let pid = ProjectId::new();
-    let sid = SessionId::new();
-    let mut board = board_with_one_session(pid, sid);
-    // Mark the session Creating so the double-click's Select dispatch is a safe
-    // no-op — attaching a live session would require a real tmux server.
-    let SessionListItem::Worktree { status, .. } = &mut board.columns[0].cards[0].row else {
-        unreachable!("worktree row")
-    };
-    *status = SessionStatus::Creating;
-    app.ui_state.board = board;
-    app.ui_state.board_state.sync(vec![1, 1, 0]);
-    // Start on the sidebar so the click has to move the cursor onto the card.
-    app.ui_state
-        .board_state
-        .select(Some(BoardPos { col: 0, row: 0 }));
-    app.update_selection();
-    assert_eq!(app.ui_state.selected_session_id, None);
-
-    // Render once so the click handler has hit regions to resolve against.
-    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
-    terminal.draw(|f| app.render(f)).unwrap();
-
-    let region = app
-        .ui_state
-        .board_hit_regions
-        .iter()
-        .find(|r| r.pos == BoardPos { col: 1, row: 0 })
-        .copied()
-        .expect("session row has a hit region");
-    let (cx, cy) = (region.rect.x, region.rect.y);
-
-    // board_pos_at maps the screen coordinate back to the row.
-    assert_eq!(app.board_pos_at(cx, cy), Some(BoardPos { col: 1, row: 0 }));
-
-    // First click selects the row and arms the double-click timer, no dispatch.
-    app.handle_left_click(cx, cy).await;
-    assert_eq!(
-        app.ui_state.board_state.selected(),
-        Some(BoardPos { col: 1, row: 0 })
-    );
-    assert_eq!(app.ui_state.selected_session_id.map(|r| r.id), Some(sid));
-    assert!(
-        app.ui_state.last_left_click.is_some(),
-        "single click arms the double-click timer"
-    );
-
-    // Second click on the same row within the window is a double-click: it
-    // dispatches Select (a no-op for a Creating session) and consumes the timer.
-    app.handle_left_click(cx, cy).await;
-    assert!(
-        app.ui_state.last_left_click.is_none(),
-        "double-click consumes the timer via the Select path"
-    );
-}
-
-#[tokio::test]
-async fn clicking_a_card_button_selects_the_card_and_dispatches_its_command() {
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-
-    let mut app = make_test_app();
-    let pid = ProjectId::new();
-    let sid = SessionId::new();
-    let mut board = board_with_one_session(pid, sid);
-    // Creating so the SelectShell dispatch is a safe no-op (no tmux/attach).
-    let SessionListItem::Worktree { status, .. } = &mut board.columns[0].cards[0].row else {
-        unreachable!("worktree row")
-    };
-    *status = SessionStatus::Creating;
-    app.ui_state.board = board;
-    // Back the board with a matching snapshot (the board is derived from it in
-    // production) so the Creating-guard, which reads the snapshot, fires.
-    app.backend_mut_for_test(BackendId(0)).view.snapshot =
-        snapshot_with_session(pid, sid, SessionStatus::Creating);
-    app.ui_state.board_state.sync(vec![1, 1, 0]);
-    // Start on the sidebar so the click must move the cursor onto the card.
-    app.ui_state
-        .board_state
-        .select(Some(BoardPos { col: 0, row: 0 }));
-    app.update_selection();
-    assert_eq!(app.ui_state.selected_session_id, None);
-
-    // Render so the button hit regions are populated.
-    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
-    terminal.draw(|f| app.render(f)).unwrap();
-
-    // Locate the shell button for the card at (col 1, row 0).
-    let region = app
-        .ui_state
-        .board_button_regions
-        .iter()
-        .find(|r| {
-            r.pos == BoardPos { col: 1, row: 0 }
-                && r.button == crate::tui::widgets::board::CardButton::Shell
-        })
-        .copied()
-        .expect("card has a shell button region");
-    let (bx, by) = (region.rect.x, region.rect.y);
-
-    // The button hit-test wins over the row region it sits within.
-    assert_eq!(
-        app.board_button_at(bx, by).map(|(_, b)| b),
-        Some(crate::tui::widgets::board::CardButton::Shell)
-    );
-
-    // A single click on the button selects the card's session AND dispatches
-    // SelectShell (a no-op here since the session is Creating), and does not arm
-    // the double-click timer.
-    app.handle_left_click(bx, by).await;
-    assert_eq!(
-        app.ui_state.board_state.selected(),
-        Some(BoardPos { col: 1, row: 0 }),
-        "button click selects the card"
-    );
-    assert_eq!(app.ui_state.selected_session_id.map(|r| r.id), Some(sid));
-    assert!(
-        app.ui_state.last_left_click.is_none(),
-        "button click does not arm the double-click timer"
-    );
-    // SelectShell no-ops on a Creating session: no attach was requested.
-    assert!(app.ui_state.attach_request.is_none());
-    assert!(!app.ui_state.should_quit);
-}
-
-#[tokio::test]
-async fn wheel_over_hovered_column_moves_selection_within_that_column() {
-    use crate::session::{Board, BoardCard, BoardColumn, BoardProjectEntry};
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-
-    let mut app = make_test_app();
-    let pid = ProjectId::new();
-    let a_id = SessionId::new();
-    let b1_id = SessionId::new();
-    let b2_id = SessionId::new();
-    let mk = |id: SessionId| {
-        let mut row = make_worktree_with_id(id);
-        let SessionListItem::Worktree { project_id, .. } = &mut row else {
-            unreachable!("worktree row")
-        };
-        *project_id = pid;
-        row
-    };
-    let mk_card = |row: SessionListItem| BoardCard {
-        project_id: pid,
-        project_name: "P".to_string(),
-        row,
-        indent: false,
-    };
-    app.ui_state.board = Board {
-        servers: vec![],
-        projects: vec![BoardProjectEntry {
-            project_id: pid,
-            name: "P".to_string(),
-            session_count: 3,
-        }],
-        columns: vec![
-            BoardColumn {
-                name: crate::session::IN_PROGRESS.to_string(),
-                max_sessions: None,
-                cards: vec![mk_card(mk(a_id))],
-            },
-            BoardColumn {
-                name: "Review".to_string(),
-                max_sessions: None,
-                cards: vec![mk_card(mk(b1_id)), mk_card(mk(b2_id))],
-            },
-        ],
-    };
-    app.ui_state.board_state.sync(vec![1, 1, 2]);
-    // Start selection in the In Progress column on session A.
-    app.ui_state
-        .board_state
-        .select(Some(BoardPos { col: 1, row: 0 }));
-    app.update_selection();
-    assert_eq!(app.ui_state.selected_session_id.map(|r| r.id), Some(a_id));
-
-    // Render so the column rectangles the wheel handler needs are populated.
-    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
-    terminal.draw(|f| app.render(f)).unwrap();
-
-    // An x inside the Review column (addressable col 2 → rects.columns[1]).
-    let review_x = app.ui_state.board_column_rects.as_ref().unwrap().columns[1].x + 1;
-
-    // Wheel down over the Review column moves selection into THAT column (the
-    // hovered one), not the currently-selected In Progress column.
-    app.scroll_pane_at(review_x, super::ScrollDirection::Down);
-
-    let sel = app
-        .ui_state
-        .board_state
-        .selected()
-        .expect("a row stays selected");
-    assert_eq!(sel.col, 2, "selection moved into the hovered Review column");
-    assert_eq!(
-        sel,
-        BoardPos { col: 2, row: 1 },
-        "stepped one row down within Review"
-    );
-    assert_eq!(app.ui_state.selected_session_id.map(|r| r.id), Some(b2_id));
-}
-
-// ===== Board-adapted shared tests (ui-expr versions) =====
-
-#[test]
-fn test_app_ui_state_default() {
-    let state = AppUiState::default();
-    assert!(state.session_numbers.is_empty());
-    assert!(state.board.columns.is_empty());
-    assert!(state.board_state.selected().is_none());
-    assert!(matches!(state.modal, Modal::None));
-    assert!(!state.should_quit);
-}
-
-#[test]
-fn test_is_command_available_session_scoped_hidden_without_session() {
-    let s = ui_state_with(None, None);
-    for action in [
-        BindableAction::Select,
-        BindableAction::SelectShell,
-        BindableAction::DeleteSession,
-        BindableAction::RenameSession,
-        BindableAction::RestartSession,
-        BindableAction::ToggleKeepAlive,
-        BindableAction::OpenInEditor,
-        BindableAction::OpenInfo,
-        BindableAction::OpenPullRequest,
-    ] {
-        assert!(
-            !s.is_command_available(action),
-            "{action:?} should be hidden without a session"
-        );
-    }
-}
-
-#[test]
-fn test_is_command_available_session_scoped_shown_with_session() {
-    let s = ui_state_with(Some(SessionId::new()), None);
-    for action in [
-        BindableAction::Select,
-        BindableAction::SelectShell,
-        BindableAction::DeleteSession,
-        BindableAction::RenameSession,
-        BindableAction::RestartSession,
-        BindableAction::ToggleKeepAlive,
-        BindableAction::OpenInEditor,
-        BindableAction::OpenInfo,
-        BindableAction::OpenPullRequest,
-    ] {
-        assert!(
-            s.is_command_available(action),
-            "{action:?} should be available with a selected session"
-        );
-    }
-}
-
-#[test]
-fn test_is_command_available_remove_project_requires_project_without_session() {
-    // project selected, no session → shown
-    let s = ui_state_with(None, Some(ProjectId::new()));
-    assert!(s.is_command_available(BindableAction::RemoveProject));
-    // project selected but session also selected → hidden
-    let s = ui_state_with(Some(SessionId::new()), Some(ProjectId::new()));
-    assert!(!s.is_command_available(BindableAction::RemoveProject));
-    // nothing selected → hidden
-    let s = ui_state_with(None, None);
-    assert!(!s.is_command_available(BindableAction::RemoveProject));
-}
-
-#[test]
-fn test_is_command_available_unguarded_always_shown() {
-    let s = ui_state_with(None, None);
-    for action in [
-        BindableAction::NewSession,
-        BindableAction::NewProject,
-        BindableAction::CheckoutBranch,
-        BindableAction::ScanDirectory,
-        BindableAction::ShowHelp,
-        BindableAction::ShowSettings,
-        BindableAction::Quit,
-        BindableAction::ScrollUp,
-        BindableAction::ScrollDown,
-        BindableAction::PageUp,
-        BindableAction::PageDown,
-    ] {
-        assert!(
-            s.is_command_available(action),
-            "{action:?} should always be available"
-        );
-    }
-}
-
-#[test]
-fn test_gather_command_entries_excludes_navigation() {
-    let s = ui_state_with(Some(SessionId::new()), None);
-    let kb = KeyBindings::default();
-    let entries = s.gather_command_entries(&kb, "");
-    for e in &entries {
-        assert!(
-            !matches!(
-                e.action,
-                BindableAction::NavigateUp | BindableAction::NavigateDown
-            ),
-            "palette should never list list-navigation actions, got {:?}",
-            e.action
-        );
-    }
-}
-
-#[test]
-fn test_gather_command_entries_hides_context_unavailable() {
-    // nothing selected → session-scoped and GenerateSummary all hidden
-    let s = ui_state_with(None, None);
-    let kb = KeyBindings::default();
-    let entries = s.gather_command_entries(&kb, "");
-    let actions: std::collections::HashSet<BindableAction> =
-        entries.iter().map(|e| e.action).collect();
-    for hidden in [
-        BindableAction::DeleteSession,
-        BindableAction::RenameSession,
-        BindableAction::RestartSession,
-        BindableAction::OpenInEditor,
-        BindableAction::OpenPullRequest,
-        BindableAction::GenerateSummary,
-        BindableAction::RemoveProject,
-    ] {
-        assert!(
-            !actions.contains(&hidden),
-            "{hidden:?} should be hidden when nothing is selected"
-        );
-    }
-}
-
-#[test]
-fn test_gather_command_entries_query_filters_by_label() {
-    let mut s = ui_state_with(Some(SessionId::new()), None);
-    // GenerateSummary is only available while the Info modal is open.
-    s.modal = Modal::Info { scroll: 0 };
-    let kb = KeyBindings::default();
-    // "summary" matches only GenerateSummary (description "Generate AI summary")
-    let entries = s.gather_command_entries(&kb, "summary");
-    let actions: Vec<BindableAction> = entries.iter().map(|e| e.action).collect();
-    assert_eq!(actions, vec![BindableAction::GenerateSummary]);
-}
-
-#[tokio::test]
-async fn apply_section_move_keeps_moved_session_selected() {
-    use crate::session::{Project, SectionConfig, WorktreeSession};
-    use std::path::PathBuf;
-
-    let mut app = make_test_app();
-    // A manual-only section the session can be moved into.
-    app.config.sections = vec![SectionConfig {
-        name: "Beta".to_string(),
-        ..Default::default()
-    }];
-
-    let project = Project::new("proj", PathBuf::from("/tmp/proj"), "main");
-    let project_id = project.id;
-    let s1 = WorktreeSession::new(
-        project_id,
-        "one",
-        "br-one",
-        PathBuf::from("/tmp/w1"),
-        "claude",
-    );
-    let s2 = WorktreeSession::new(
-        project_id,
-        "two",
-        "br-two",
-        PathBuf::from("/tmp/w2"),
-        "claude",
-    );
-    let s2_id = s2.id;
-
-    app.service
-        .store()
-        .mutate(move |state| {
-            state.add_project(project);
-            state.add_session(s1);
-            state.add_session(s2);
-        })
-        .await
-        .unwrap();
-
-    app.sync_local_view_from_store_for_test().await;
-    app.refresh_list_items().await;
-
-    // Move session two into "Beta" — it was in the "In Progress" catch-all.
-    // `apply_section_move` spawns the backend call and re-selects via the
-    // `SessionMutationApplied` event; drive those two steps synchronously.
-    app.local_arc()
-        .set_section(s2_id, Some("Beta".to_string()))
-        .await
-        .unwrap();
-    app.handle_state_update(StateUpdate::SessionMutationApplied {
-        backend_id: crate::backend::LOCAL_BACKEND_ID.0,
-        session_id: s2_id,
-    })
-    .await;
-
-    let pos = app
-        .ui_state
-        .board_state
-        .selected()
-        .expect("a board row should be selected after the move");
-    let (sid, _) = app.ui_state.board.ids_at(pos);
-    assert_eq!(
-        sid,
-        Some(s2_id),
-        "the board cursor should land on the moved session's new row"
-    );
-    // The moved session landed in the "Beta" column, not the catch-all.
-    assert_eq!(
-        app.ui_state.board.columns[pos.col - 1].name,
-        "Beta",
-        "the moved session should sit in the Beta column"
-    );
-    assert_eq!(
-        app.ui_state.selected_session_id.map(|r| r.id),
-        Some(s2_id),
-        "selected_session_id should still track the moved session"
-    );
-}
-
-#[tokio::test]
-async fn clicking_a_sidebar_server_heading_opens_its_programs_settings() {
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-
-    // Two backends → the sidebar renders per-server headings with a ⚙.
-    let mut app = build_app_with_mock_remotes(vec![("buildbox", empty_snapshot())]);
-    app.bootstrap_backend_views().await;
-    app.refresh_list_items().await;
-
-    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
-    terminal.draw(|f| app.render(f)).unwrap();
-
-    // The remote's heading region is recorded; click it.
-    let (rect, backend) = app
-        .ui_state
-        .board_heading_regions
-        .iter()
-        .find(|(_, b)| *b == BackendId(1))
-        .copied()
-        .expect("remote server heading region recorded");
-    app.handle_left_click(rect.x, rect.y).await;
-
-    match &app.ui_state.modal {
-        Modal::Settings(state) => {
-            assert_eq!(state.tab, SettingsTab::Programs);
-            assert_eq!(
-                state.programs_state.target, backend,
-                "programs tab must target the clicked server's backend"
-            );
-        }
-        other => panic!("expected Settings modal on Programs tab, got {other:?}"),
-    }
-}
-
-// ===== Board project filtering (ui-expr) =====
-
-/// Seed two local projects, each with one In-Progress session, and refresh.
-/// Returns `(app, project_a, session_a, project_b, session_b)` with A's name
-/// sorting before B's so sidebar rows are deterministic.
-async fn app_with_two_projects() -> (App, ProjectId, SessionId, ProjectId, SessionId) {
-    let mut app = make_test_app();
-    let pa = crate::session::Project::new("aaa", std::path::PathBuf::from("/tmp/aaa"), "main");
-    let pb = crate::session::Project::new("bbb", std::path::PathBuf::from("/tmp/bbb"), "main");
-    let (pa_id, pb_id) = (pa.id, pb.id);
-    let sa = crate::session::WorktreeSession::new(
-        pa_id,
-        "sa",
-        "sa",
-        std::path::PathBuf::from("/tmp/sa"),
-        "claude",
-    );
-    let sb = crate::session::WorktreeSession::new(
-        pb_id,
-        "sb",
-        "sb",
-        std::path::PathBuf::from("/tmp/sb"),
-        "claude",
-    );
-    let (sa_id, sb_id) = (sa.id, sb.id);
-    app.service
-        .store()
-        .mutate(move |state| {
-            state.add_project(pa);
-            state.add_project(pb);
-            state.add_session(sa);
-            state.add_session(sb);
-        })
-        .await
-        .unwrap();
-    app.sync_local_view_from_store_for_test().await;
-    app.refresh_list_items().await;
-    (app, pa_id, sa_id, pb_id, sb_id)
-}
-
-/// Move the cursor to a project's sidebar row and Select it (Enter), toggling
-/// the board filter — the explicit gesture the UI uses.
-async fn select_project_row(app: &mut App, project_id: ProjectId) {
-    app.select_project_in_sidebar(project_id);
-    app.handle_command(UserCommand::Select).await;
-}
-
-#[tokio::test]
-async fn selecting_a_sidebar_project_filters_and_entering_columns_keeps_it() {
-    let (mut app, pa_id, sa_id, _pb_id, sb_id) = app_with_two_projects().await;
-
-    // Selecting project A in the sidebar filters the board to it.
-    select_project_row(&mut app, pa_id).await;
-
-    assert_eq!(app.ui_state.board_filter, Some(pa_id));
-    // Only A's card is in the columns; the sidebar still lists both projects.
-    assert_eq!(app.ui_state.board.worktree_count(), 1);
-    assert!(app.ui_state.board.position_of(sa_id).is_some());
-    assert!(app.ui_state.board.position_of(sb_id).is_none());
-    assert_eq!(app.ui_state.board.projects.len(), 2);
-
-    // Entering the columns keeps the filter active.
-    app.ui_state.board_state.next_column();
-    app.refresh_list_items().await;
-    assert_eq!(
-        app.ui_state.board_filter,
-        Some(pa_id),
-        "filter stays active after moving into the columns"
-    );
-    assert_eq!(app.ui_state.board.worktree_count(), 1);
-}
-
-#[tokio::test]
-async fn navigating_the_sidebar_without_selecting_does_not_filter() {
-    let (mut app, pa_id, _sa_id, _pb_id, _sb_id) = app_with_two_projects().await;
-
-    // Just moving the cursor onto a project row must NOT filter — only Select
-    // does. This is the fix for "no way to unfilter": navigation is neutral.
-    app.select_project_in_sidebar(pa_id);
-    app.refresh_list_items().await;
-    assert_eq!(app.ui_state.board_filter, None);
-    assert_eq!(app.ui_state.board.worktree_count(), 2);
-}
-
-#[tokio::test]
-async fn selecting_the_filtered_project_again_toggles_the_filter_off() {
-    let (mut app, pa_id, _sa_id, _pb_id, sb_id) = app_with_two_projects().await;
-
-    select_project_row(&mut app, pa_id).await;
-    assert_eq!(app.ui_state.board_filter, Some(pa_id));
-
-    // Selecting the same project again clears the filter.
-    app.handle_command(UserCommand::Select).await;
-    assert_eq!(app.ui_state.board_filter, None);
-    assert_eq!(app.ui_state.board.worktree_count(), 2);
-    assert!(app.ui_state.board.position_of(sb_id).is_some());
-}
-
-#[tokio::test]
-async fn selecting_another_project_refilters() {
-    let (mut app, pa_id, sa_id, pb_id, sb_id) = app_with_two_projects().await;
-
-    select_project_row(&mut app, pa_id).await;
-    assert_eq!(app.ui_state.board_filter, Some(pa_id));
-    assert!(app.ui_state.board.position_of(sa_id).is_some());
-
-    // Selecting B refilters to B.
-    select_project_row(&mut app, pb_id).await;
-    assert_eq!(app.ui_state.board_filter, Some(pb_id));
-    assert!(app.ui_state.board.position_of(sb_id).is_some());
-    assert!(app.ui_state.board.position_of(sa_id).is_none());
-}
-
-#[tokio::test]
-async fn esc_clears_the_project_filter() {
-    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-
-    let (mut app, pa_id, _sa_id, _pb_id, sb_id) = app_with_two_projects().await;
-
-    select_project_row(&mut app, pa_id).await;
-    assert_eq!(app.ui_state.board_filter, Some(pa_id));
-
-    // Esc in the main view clears the filter; all cards return.
-    let esc = KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE);
-    app.handle_input(InputEvent::Key(esc)).await;
-
-    assert_eq!(app.ui_state.board_filter, None);
-    assert_eq!(app.ui_state.board.worktree_count(), 2);
-    assert!(app.ui_state.board.position_of(sb_id).is_some());
-}
-
-#[tokio::test]
-async fn deleting_the_filtered_project_clears_the_filter_not_an_empty_board() {
-    // Regression: deleting the filtered project must drop the filter (via the
-    // reconciliation against the live snapshot) rather than leaving the columns
-    // filtered to an absent project and rendered empty.
-    let (mut app, pa_id, _sa_id, _pb_id, sb_id) = app_with_two_projects().await;
-
-    select_project_row(&mut app, pa_id).await;
-    assert_eq!(app.ui_state.board_filter, Some(pa_id));
-    assert_eq!(app.ui_state.board.worktree_count(), 1);
-
-    // Delete the filtered project (as RemoveProject's teardown would), then
-    // refresh.
-    app.service
-        .store()
-        .mutate(move |state| {
-            state.remove_project(&pa_id);
-        })
-        .await
-        .unwrap();
-    app.sync_local_view_from_store_for_test().await;
-    app.refresh_list_items().await;
-
-    // The filter dropped (its project is gone) and the surviving project's
-    // card is visible — not a stuck empty board.
-    assert_eq!(app.ui_state.board_filter, None);
-    assert!(app.ui_state.board.position_of(sb_id).is_some());
-    assert_eq!(app.ui_state.board.worktree_count(), 1);
-}
-
-#[tokio::test]
-async fn palette_jump_to_a_filtered_out_session_clears_the_filter_and_selects() {
-    let (mut app, pa_id, _sa_id, _pb_id, sb_id) = app_with_two_projects().await;
-
-    // Filter to A so B's session is hidden from the columns.
-    select_project_row(&mut app, pa_id).await;
-    assert!(app.ui_state.board.position_of(sb_id).is_none());
-
-    // Open the palette and activate B's session (a Stopped session, so
-    // handle_select is a tmux-free no-op after selection).
-    app.open_quick_switch_with_mode(PaletteMode::Unified).await;
-    if let Modal::QuickSwitch {
-        matches,
-        selected_idx,
-        ..
-    } = &mut app.ui_state.modal
-    {
-        let idx = matches
-            .iter()
-            .position(|m| matches!(m, QuickSwitchItem::Session(s) if s.session_id == sb_id))
-            .expect("palette lists the filtered-out session");
-        *selected_idx = idx;
-    } else {
-        panic!("expected quick-switch modal");
-    }
-    app.activate_quick_switch_selection().await;
-
-    // The jump cleared the filter and selected B's session.
-    assert_eq!(app.ui_state.board_filter, None);
-    assert_eq!(app.ui_state.selected_session_id.map(|r| r.id), Some(sb_id));
-    assert!(app.ui_state.board.position_of(sb_id).is_some());
-}
-
-// ===========================================================================
-// View cycling (`v` / ToggleViewMode) across list and board views
-// ===========================================================================
-
-/// A single configured section, enough for the section-list views to differ
-/// from the project view (so `v` doesn't skip them).
-fn one_section() -> Vec<crate::session::SectionConfig> {
-    vec![crate::session::SectionConfig {
-        name: "Beta".to_string(),
-        ..Default::default()
-    }]
-}
-
-#[tokio::test]
-async fn toggle_view_mode_cycles_all_four_views_with_sections() {
-    let mut app = make_test_app();
-    app.config.sections = one_section();
-    app.ui_state.view_mode = ViewMode::ProjectGrouped;
-
-    app.handle_toggle_view_mode().await;
-    assert_eq!(app.ui_state.view_mode, ViewMode::SectionGrouped);
-    app.handle_toggle_view_mode().await;
-    assert_eq!(app.ui_state.view_mode, ViewMode::SectionStacks);
-    app.handle_toggle_view_mode().await;
-    assert_eq!(app.ui_state.view_mode, ViewMode::Board);
-    app.handle_toggle_view_mode().await;
-    assert_eq!(app.ui_state.view_mode, ViewMode::ProjectGrouped);
-}
-
-#[tokio::test]
-async fn toggle_view_mode_skips_section_views_without_sections() {
-    let mut app = make_test_app();
-    app.config.sections.clear();
-    app.ui_state.view_mode = ViewMode::ProjectGrouped;
-
-    // With no sections the two section-grouped views would render identically
-    // to the project view, so `v` skips straight to the board and back.
-    app.handle_toggle_view_mode().await;
-    assert_eq!(app.ui_state.view_mode, ViewMode::Board);
-    app.handle_toggle_view_mode().await;
-    assert_eq!(app.ui_state.view_mode, ViewMode::ProjectGrouped);
-}
-
-#[tokio::test]
-async fn toggle_view_mode_persists_to_tui_json() {
-    let (mut app, _config_path) = make_test_app_with_path();
-    app.config.sections.clear();
-    app.ui_state.view_mode = ViewMode::ProjectGrouped;
-
-    // Project → (skip sections) → Board, persisted.
-    app.handle_toggle_view_mode().await;
-    assert_eq!(app.ui_state.view_mode, ViewMode::Board);
-    assert_eq!(app.tui_prefs.prefs().view_mode, Some(ViewMode::Board));
-}
-
-#[tokio::test]
-async fn jump_to_session_number_selects_nth_worktree_in_list_view() {
-    let mut app = make_test_app();
-    app.ui_state.view_mode = ViewMode::ProjectGrouped;
-    let first = SessionId::new();
-    let second = SessionId::new();
-    let third = SessionId::new();
-    app.ui_state.list_items = vec![
-        make_worktree_with_id(first),
-        make_worktree_with_id(second),
-        make_worktree_with_id(third),
-    ];
-    app.ui_state
-        .list_state
-        .set_item_count(app.ui_state.list_items.len());
-
-    // 1-based, column-major: number 2 → the second worktree row.
-    app.jump_to_session_number(2);
-    assert_eq!(app.ui_state.list_state.selected(), Some(1));
-    assert_eq!(app.ui_state.selected_session_id.map(|r| r.id), Some(second));
-}
-
-#[tokio::test]
-async fn select_session_in_tree_routes_to_the_active_view() {
-    let mut app = make_test_app();
-    app.ui_state.view_mode = ViewMode::ProjectGrouped;
-    let target = SessionId::new();
-    app.ui_state.list_items = vec![
-        make_worktree_with_id(SessionId::new()),
-        make_worktree_with_id(target),
-    ];
-    app.ui_state
-        .list_state
-        .set_item_count(app.ui_state.list_items.len());
-
-    assert!(app.select_session_in_tree(target));
-    assert_eq!(app.ui_state.list_state.selected(), Some(1));
-    assert_eq!(app.ui_state.selected_session_id.map(|r| r.id), Some(target));
-
-    // A session with no row returns false and leaves the selection put.
-    assert!(!app.select_session_in_tree(SessionId::new()));
-    assert_eq!(app.ui_state.list_state.selected(), Some(1));
-}
-
-// ===========================================================================
-// List-view regressions: paths that must NOT read the board (built only in
-// board view). The shared harness defaults to Board, so these force a list
-// view and seed the local backend snapshot directly.
-// ===========================================================================
-
-#[tokio::test]
-async fn info_content_resolves_in_a_list_view_from_the_snapshot() {
-    // Regression: the Info modal resolved the session from the board, which is
-    // only built in board view — so `i` closed instantly in the list views.
-    let (snap, sid, _pid) = snapshot_with_one_session();
-    let mut app = make_test_app();
-    app.ui_state.view_mode = ViewMode::ProjectGrouped;
-    app.backend_mut_for_test(BackendId(0)).view.snapshot = snap;
-    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
-    assert!(
-        matches!(app.build_info_content(), InfoContent::Session(_)),
-        "Info content must resolve in a list view, not just on the board"
-    );
-}
-
-#[tokio::test]
-async fn selected_session_is_creating_reads_snapshot_in_list_view() {
-    // Regression: the creating-guards (attach/delete/shell) read the board, so
-    // they never fired in list views. They must read the snapshot.
-    let (mut snap, sid, _pid) = snapshot_with_one_session();
-    snap.sessions[0].status = SessionStatus::Creating;
-    let mut app = make_test_app();
-    app.ui_state.view_mode = ViewMode::ProjectGrouped;
-    app.backend_mut_for_test(BackendId(0)).view.snapshot = snap;
-    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
-    assert!(
-        app.selected_session_is_creating(),
-        "creating-guards must work in list views (the board is not built there)"
-    );
-}
-
-#[tokio::test]
-async fn target_section_uses_section_header_above_cursor_in_list_view() {
-    // Regression: new-session section stamping read the board cursor; in a
-    // section list view it must read the header above the list cursor.
-    let mut app = make_test_app();
-    app.ui_state.view_mode = ViewMode::SectionGrouped;
-    app.ui_state.list_items = vec![
-        SessionListItem::SectionHeader {
-            name: "Review".to_string(),
-            count: 1,
-            collapsed: false,
-            max_sessions: None,
-        },
-        make_worktree_with_id(SessionId::new()),
-    ];
-    let selectable: Vec<bool> = app
-        .ui_state
-        .list_items
-        .iter()
-        .map(|i| i.is_selectable())
-        .collect();
-    app.ui_state.list_state.set_selectable(selectable);
-    app.ui_state.list_state.select(Some(1));
-    assert_eq!(app.target_section().as_deref(), Some("Review"));
-}
-
-// ---------------------------------------------------------------------------
-// Right-hand preview pane (list views only)
-//
-// The board redesign (#260) removed the pane outright; these pin the restored
-// behaviour so it can't be dropped again silently. The board must stay
-// full-screen — a right pane there would eat its columns.
-// ---------------------------------------------------------------------------
-
-use crate::tui::app::render::split_list_view;
-use crate::tui::app::{DEFAULT_LEFT_PANE_PCT, MAX_LEFT_PANE_PCT, MIN_LEFT_PANE_PCT, RightPaneView};
-
-#[test]
-fn split_list_view_gives_the_list_its_percentage_and_the_pane_the_rest() {
-    let content = Rect::new(0, 0, 100, 40);
-    let (left, right) = split_list_view(content, 30);
-
-    assert_eq!(left, Rect::new(0, 0, 30, 40));
-    assert_eq!(right, Rect::new(30, 0, 70, 40), "panes must tile the area");
-    assert_eq!(left.width + right.width, content.width);
-}
-
-#[test]
-fn split_list_view_clamps_an_out_of_range_percentage() {
-    let content = Rect::new(0, 0, 100, 40);
-    // A hand-edited tui.json could hold anything; both extremes must leave a
-    // usable list *and* a usable pane.
-    assert_eq!(split_list_view(content, 0).0.width, MIN_LEFT_PANE_PCT);
-    assert_eq!(split_list_view(content, 99).0.width, MAX_LEFT_PANE_PCT);
-}
-
-#[test]
-fn split_list_view_never_starves_a_pane_at_tiny_widths() {
-    // 3 columns at 15% rounds the left pane to 0, which would render an
-    // invisible list; the clamp keeps one column each.
-    let (left, right) = split_list_view(Rect::new(0, 0, 3, 10), MIN_LEFT_PANE_PCT);
-    assert_eq!((left.width, right.width), (1, 2));
-
-    // Below two columns there is nothing to split: the list takes it all.
-    let (left, right) = split_list_view(Rect::new(0, 0, 1, 10), 30);
-    assert_eq!((left.width, right.width), (1, 0));
-}
-
-#[test]
-fn right_pane_view_toggles_and_labels_its_tabs() {
-    // A session cycles all three tabs, and back to where it started.
-    let mut v = RightPaneView::Preview;
-    for expected in [
-        RightPaneView::Info,
-        RightPaneView::Shell,
-        RightPaneView::Preview,
-    ] {
-        v = v.cycled(false, true);
-        assert_eq!(v, expected);
-    }
-    // Reverse walks the same ring the other way.
-    for expected in [
-        RightPaneView::Shell,
-        RightPaneView::Info,
-        RightPaneView::Preview,
-    ] {
-        v = v.cycled(false, false);
-        assert_eq!(v, expected);
-    }
-
-    // Tab labels, with the active one indexed.
-    assert_eq!(
-        RightPaneView::Preview.tabs(false),
-        (&["Preview", "Info", "Shell"][..], 0)
-    );
-    assert_eq!(
-        RightPaneView::Info.tabs(false),
-        (&["Preview", "Info", "Shell"][..], 1)
-    );
-    assert_eq!(
-        RightPaneView::Shell.tabs(false),
-        (&["Preview", "Info", "Shell"][..], 2)
-    );
-
-    // A project has no agent pane: two tabs, Preview collapses to Shell, and
-    // the cycle is a straight Shell ↔ Info toggle in either direction.
-    assert_eq!(
-        RightPaneView::Preview.tabs(true),
-        (&["Shell", "Info"][..], 0)
-    );
-    assert_eq!(RightPaneView::Info.tabs(true), (&["Shell", "Info"][..], 1));
-    assert_eq!(RightPaneView::Preview.effective(true), RightPaneView::Shell);
-    assert_eq!(RightPaneView::Info.effective(true), RightPaneView::Info);
-    assert_eq!(
-        RightPaneView::Preview.effective(false),
-        RightPaneView::Preview
-    );
-
-    for forward in [true, false] {
-        // Preview is shown as Shell on a project, so it cycles to Info.
-        assert_eq!(
-            RightPaneView::Preview.cycled(true, forward),
-            RightPaneView::Info
-        );
-        assert_eq!(
-            RightPaneView::Shell.cycled(true, forward),
-            RightPaneView::Info
-        );
-        assert_eq!(
-            RightPaneView::Info.cycled(true, forward),
-            RightPaneView::Shell
-        );
-    }
-}
-
-#[tokio::test]
-async fn list_view_renders_a_right_pane_and_the_board_does_not() {
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-
-    let mut app = app_with_rendered_list(3);
-    let pane = app
-        .ui_state
-        .right_pane_rect
-        .expect("a list view must record a right-pane rect");
-    let list = app
-        .ui_state
-        .list_rect
-        .expect("a list view must record a list rect");
-    assert!(
-        pane.x >= list.right(),
-        "the pane must sit beside the list, not over it: pane={pane:?} list={list:?}"
-    );
-
-    // Switching to the board drops the pane entirely.
-    app.ui_state.view_mode = ViewMode::Board;
-    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
-    terminal.draw(|f| app.render(f)).unwrap();
-    assert_eq!(
-        app.ui_state.right_pane_rect, None,
-        "the board is a full-screen takeover and must record no right pane"
-    );
-}
-
-#[tokio::test]
-async fn list_view_draws_the_pane_tab_header_and_its_content() {
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-
-    let mut app = app_with_rendered_list(3);
-    app.ui_state.preview_content = "hello-from-the-agent-pane".to_string();
-
-    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
-    terminal.draw(|f| app.render(f)).unwrap();
-    let text = buffer_text(&terminal);
-
-    assert!(text.contains("Preview"), "pane tab header must render");
-    assert!(text.contains("Shell"), "inactive tab must render too");
-    assert!(
-        text.contains("hello-from-the-agent-pane"),
-        "captured pane content must reach the screen"
-    );
-}
-
-#[tokio::test]
-async fn toggle_pane_switches_tabs_only_in_list_views() {
-    let mut app = app_with_rendered_list(3);
-    assert_eq!(app.ui_state.right_pane_view, RightPaneView::Preview);
-
-    app.handle_command(UserCommand::TogglePane).await;
-    assert_eq!(app.ui_state.right_pane_view, RightPaneView::Info);
-    app.handle_command(UserCommand::TogglePane).await;
-    assert_eq!(app.ui_state.right_pane_view, RightPaneView::Shell);
-    app.handle_command(UserCommand::TogglePaneReverse).await;
-    assert_eq!(app.ui_state.right_pane_view, RightPaneView::Info);
-    app.handle_command(UserCommand::TogglePaneReverse).await;
-    assert_eq!(app.ui_state.right_pane_view, RightPaneView::Preview);
-
-    // On the board there is no pane to switch, so the command is inert.
-    app.ui_state.view_mode = ViewMode::Board;
-    app.handle_command(UserCommand::TogglePane).await;
-    assert_eq!(
-        app.ui_state.right_pane_view,
-        RightPaneView::Preview,
-        "the board has no right pane; TogglePane must not mutate its view"
-    );
-}
-
-#[tokio::test]
-async fn resizing_the_divider_clamps_at_both_ends_and_persists() {
-    let mut app = app_with_rendered_list(3);
-    assert_eq!(app.ui_state.left_pane_pct, DEFAULT_LEFT_PANE_PCT);
-
-    app.handle_command(UserCommand::GrowLeftPane).await;
-    assert_eq!(app.ui_state.left_pane_pct, DEFAULT_LEFT_PANE_PCT + 2);
-    app.handle_command(UserCommand::ShrinkLeftPane).await;
-    assert_eq!(app.ui_state.left_pane_pct, DEFAULT_LEFT_PANE_PCT);
-
-    // Hold the key: the width stops at the clamp instead of wrapping or
-    // running past it.
-    for _ in 0..60 {
-        app.handle_command(UserCommand::GrowLeftPane).await;
-    }
-    assert_eq!(app.ui_state.left_pane_pct, MAX_LEFT_PANE_PCT);
-    for _ in 0..60 {
-        app.handle_command(UserCommand::ShrinkLeftPane).await;
-    }
-    assert_eq!(app.ui_state.left_pane_pct, MIN_LEFT_PANE_PCT);
-
-    // The final width is persisted, so it survives a restart.
-    assert_eq!(
-        app.tui_prefs.prefs().left_pane_pct,
-        Some(MIN_LEFT_PANE_PCT),
-        "the divider position must be written to tui.json"
-    );
-}
-
-#[tokio::test]
-async fn resizing_the_divider_is_inert_on_the_board() {
-    let mut app = app_with_rendered_list(3);
-    app.ui_state.view_mode = ViewMode::Board;
-
-    app.handle_command(UserCommand::GrowLeftPane).await;
-    assert_eq!(app.ui_state.left_pane_pct, DEFAULT_LEFT_PANE_PCT);
-    assert_eq!(
-        app.tui_prefs.prefs().left_pane_pct,
-        None,
-        "a no-op resize must not write to tui.json"
-    );
-}
-
-#[tokio::test]
-async fn pane_commands_are_unavailable_on_the_board() {
-    let mut app = app_with_rendered_list(3);
-    for action in [
-        BindableAction::TogglePane,
-        BindableAction::TogglePaneReverse,
-        BindableAction::ShrinkLeftPane,
-        BindableAction::GrowLeftPane,
-    ] {
-        assert!(
-            app.ui_state.is_command_available(action),
-            "{action:?} must be offered in a list view"
-        );
-    }
-
-    app.ui_state.view_mode = ViewMode::Board;
-    for action in [
-        BindableAction::TogglePane,
-        BindableAction::TogglePaneReverse,
-        BindableAction::ShrinkLeftPane,
-        BindableAction::GrowLeftPane,
-    ] {
-        assert!(
-            !app.ui_state.is_command_available(action),
-            "{action:?} must be hidden on the board, which has no right pane"
-        );
-    }
-}
-
-#[tokio::test]
-async fn preview_ready_applies_only_to_the_still_selected_session() {
-    let selected = SessionId::new();
-    let mut app = make_test_app();
-    app.ui_state.view_mode = ViewMode::ProjectGrouped;
-    app.ui_state.selected_session_id =
-        Some(SessionRef::new(crate::backend::LOCAL_BACKEND_ID, selected));
-
-    app.handle_state_update(StateUpdate::PreviewReady {
-        spawned_at: Instant::now(),
-        session_id: Some(selected),
-        project_id: None,
-        preview_content: "live output".to_string(),
-        shell_content: "$ ".to_string(),
-        diff_info: Arc::new(DiffInfo::empty()),
-    })
-    .await;
-    assert_eq!(app.ui_state.preview_content, "live output");
-    assert_eq!(app.ui_state.preview_update_spawned_at, None);
-
-    // A fetch that resolves after the user moved on must not paint another
-    // session's output into the pane.
-    app.handle_state_update(StateUpdate::PreviewReady {
-        spawned_at: Instant::now(),
-        session_id: Some(SessionId::new()),
-        project_id: None,
-        preview_content: "someone else's output".to_string(),
-        shell_content: String::new(),
-        diff_info: Arc::new(DiffInfo::empty()),
-    })
-    .await;
-    assert_eq!(
-        app.ui_state.preview_content, "live output",
-        "a stale PreviewReady must be discarded, not painted"
-    );
-}
-
-#[tokio::test]
-async fn wheel_scrolls_the_pane_over_it_and_moves_the_selection_over_the_list() {
-    use crate::tui::app::ScrollDirection;
-
-    let mut app = app_with_rendered_list(30);
-    let list = app.ui_state.list_rect.unwrap();
-    let pane = app.ui_state.right_pane_rect.unwrap();
-
-    // Give the pane more content than fits, so it has somewhere to scroll, and
-    // let a render settle its follow-the-tail offset.
-    app.ui_state.preview_content = (0..200).map(|i| format!("line {i}\n")).collect();
-    {
-        use ratatui::Terminal;
-        use ratatui::backend::TestBackend;
-        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
-        terminal.draw(|f| app.render(f)).unwrap();
-    }
-    let followed = app.ui_state.preview_state.scroll_offset;
-    assert!(followed > 0, "follow mode must start at the tail");
-
-    // Over the pane: the pane scrolls and the selection stays put.
-    let selected = app.ui_state.list_state.selected();
-    app.scroll_pane_at(pane.x + 1, ScrollDirection::Up);
-    assert!(
-        app.ui_state.preview_state.scroll_offset < followed,
-        "a wheel notch over the pane must scroll its content"
-    );
-    assert_eq!(
-        app.ui_state.list_state.selected(),
-        selected,
-        "scrolling the pane must not move the list selection"
-    );
-
-    // Over the list: the selection moves and the pane's offset is untouched.
-    let pane_offset = app.ui_state.preview_state.scroll_offset;
-    app.scroll_pane_at(list.x + 1, ScrollDirection::Down);
-    assert_ne!(app.ui_state.list_state.selected(), selected);
-    assert_eq!(app.ui_state.preview_state.scroll_offset, pane_offset);
-}
-
-#[tokio::test]
-async fn info_tab_renders_session_detail_in_the_right_pane() {
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-
-    let (snap, sid, _pid) = snapshot_with_one_session();
-    let mut app = make_test_app();
-    app.ui_state.view_mode = ViewMode::ProjectGrouped;
-    app.backend_mut_for_test(BackendId(0)).view.snapshot = snap;
-    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
-    app.ui_state.right_pane_view = RightPaneView::Info;
-
-    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
-    terminal.draw(|f| app.render(f)).unwrap();
-    let text = buffer_text(&terminal);
-
-    assert!(
-        text.contains("Preview") && text.contains("Info") && text.contains("Shell"),
-        "all three tab labels must render in the header"
-    );
-    assert!(
-        text.contains("remote-sess"),
-        "the Info tab must render the selected session's detail, not a placeholder"
-    );
-}
-
-#[tokio::test]
-async fn info_tab_renders_project_detail_when_a_project_is_selected() {
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-
-    let (snap, _sid, pid) = snapshot_with_one_session();
-    let mut app = make_test_app();
-    app.ui_state.view_mode = ViewMode::ProjectGrouped;
-    app.backend_mut_for_test(BackendId(0)).view.snapshot = snap;
-    // A project row: no session selected.
-    app.ui_state.selected_session_id = None;
-    app.ui_state.selected_project_id = Some((BackendId(0), pid));
-    app.ui_state.right_pane_view = RightPaneView::Info;
-
-    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
-    terminal.draw(|f| app.render(f)).unwrap();
-    let text = buffer_text(&terminal);
-
-    // A project has no agent pane, so it offers Shell and Info only.
-    assert!(
-        !text.contains("Preview"),
-        "a project row must not offer a Preview tab"
-    );
-    assert!(
-        text.contains("remote-proj"),
-        "the Info tab must describe the selected project"
-    );
-    assert!(
-        text.contains("/tmp/rp"),
-        "the project's repo path must render"
-    );
-}
-
-#[tokio::test]
-async fn generate_summary_is_offered_from_the_info_tab_as_well_as_the_modal() {
-    let (snap, sid, _pid) = snapshot_with_one_session();
-    let mut app = make_test_app();
-    app.ui_state.view_mode = ViewMode::ProjectGrouped;
-    app.backend_mut_for_test(BackendId(0)).view.snapshot = snap;
-    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
-
-    // On a capture tab the summary has nowhere to show, so it stays hidden.
-    app.ui_state.right_pane_view = RightPaneView::Preview;
-    assert!(
-        !app.ui_state
-            .is_command_available(BindableAction::GenerateSummary)
-    );
-
-    // The Info tab displays it, so `g` becomes available without opening the
-    // modal — the tab is now a first-class Info surface.
-    app.ui_state.right_pane_view = RightPaneView::Info;
-    assert!(
-        app.ui_state
-            .is_command_available(BindableAction::GenerateSummary)
-    );
-
-    // The board has no right pane, so only the modal can offer it there.
-    app.ui_state.view_mode = ViewMode::Board;
-    assert!(
-        !app.ui_state
-            .is_command_available(BindableAction::GenerateSummary)
-    );
-    app.ui_state.modal = Modal::Info { scroll: 0 };
-    assert!(
-        app.ui_state
-            .is_command_available(BindableAction::GenerateSummary)
-    );
-}
-
-#[tokio::test]
-async fn the_board_spawns_no_preview_traffic_unless_the_info_modal_is_open() {
-    // The headline property of the board redesign: no per-tick tmux/git traffic
-    // while the board is showing. The right pane restored that traffic for the
-    // list views, so pin that it did NOT leak back onto the board.
-    let (snap, sid, _pid) = snapshot_with_one_session();
-    let mut app = make_test_app();
-    app.backend_mut_for_test(BackendId(0)).view.snapshot = snap;
-    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
-
-    app.ui_state.view_mode = ViewMode::Board;
-    app.spawn_preview_update();
-    assert_eq!(
-        app.ui_state.preview_update_spawned_at, None,
-        "the board has no right pane; a bare tick must not capture panes"
-    );
-
-    // The Info modal consumes the diff, so it re-enables the fetch there.
-    app.ui_state.modal = Modal::Info { scroll: 0 };
-    app.spawn_preview_update();
-    assert!(app.ui_state.preview_update_spawned_at.is_some());
-
-    // Every list view wants it: the right pane is showing.
-    let mut app = make_test_app();
-    app.ui_state.view_mode = ViewMode::ProjectGrouped;
-    app.spawn_preview_update();
-    assert!(
-        app.ui_state.preview_update_spawned_at.is_some(),
-        "a list view's right pane needs live content"
-    );
-}
-
-#[tokio::test]
-async fn a_stale_preview_result_does_not_clear_the_new_selections_guard() {
-    // A late result for the previous selection used to clear the in-flight
-    // guard belonging to the *new* selection's fetch, so the next tick spawned
-    // a duplicate capture for it.
-    let old = SessionId::new();
-    let new = SessionId::new();
-    let mut app = make_test_app();
-    app.ui_state.view_mode = ViewMode::ProjectGrouped;
-    app.ui_state.selected_session_id = Some(SessionRef::local(new));
-
-    let guard = Instant::now();
-    app.ui_state.preview_update_spawned_at = Some(guard);
-    app.handle_state_update(StateUpdate::PreviewReady {
-        // A result from a superseded fetch: its token is not the stored guard.
-        spawned_at: guard - std::time::Duration::from_millis(1),
-        session_id: Some(old),
-        project_id: None,
-        preview_content: "stale".to_string(),
-        shell_content: String::new(),
-        diff_info: Arc::new(DiffInfo::empty()),
-    })
-    .await;
-
-    assert_eq!(
-        app.ui_state.preview_update_spawned_at,
-        Some(guard),
-        "a discarded result must leave the in-flight fetch's guard intact"
-    );
-
-    // The matching result does clear it, so the next tick can refresh.
-    app.handle_state_update(StateUpdate::PreviewReady {
-        spawned_at: guard,
-        session_id: Some(new),
-        project_id: None,
-        preview_content: "live".to_string(),
-        shell_content: String::new(),
-        diff_info: Arc::new(DiffInfo::empty()),
-    })
-    .await;
-    assert_eq!(app.ui_state.preview_update_spawned_at, None);
-}
-
-#[tokio::test]
-async fn an_empty_enriched_pr_result_is_not_refetched_until_a_pr_refresh() {
-    // An Info surface used to be a briefly-open modal; the Info *tab* can stay
-    // up for a whole session. A failed/empty `gh` fetch caches nothing, so
-    // without a negative marker it would respawn the subprocess every few
-    // seconds for as long as the tab is visible.
-    let sid = SessionId::new();
-    let mut app = make_test_app();
-    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
-
-    app.handle_state_update(StateUpdate::EnrichedPrReady {
-        spawned_at: Instant::now(),
-        session_id: sid,
-        info: None,
-    })
-    .await;
-    assert_eq!(app.ui_state.enriched_pr_unavailable, Some(sid));
-
-    // An explicit PR-status refresh is the retry path.
-    app.handle_command(UserCommand::RefreshPrStatus).await;
-    assert_eq!(
-        app.ui_state.enriched_pr_unavailable, None,
-        "refreshing PR status must allow the enriched fetch to be retried"
-    );
-}
-
-#[tokio::test]
-async fn a_selection_change_without_a_respawn_still_releases_the_guard() {
-    // Regression: keying the guard release on `still_selected` stranded it when
-    // the selection moved via a StateUpdate rather than a keypress — only the
-    // Input arm of `process_event` clears-and-respawns. A tick-spawned fetch for
-    // A, then (say) A being removed and the cursor landing on B, left A's guard
-    // set with nothing to clear it, so every tick skipped and the pane showed
-    // the departed session for up to the 5s backstop. The guard is now released
-    // by the token of the fetch that owns it, regardless of selection.
-    let old = SessionId::new();
-    let new = SessionId::new();
-    let mut app = make_test_app();
-    app.ui_state.view_mode = ViewMode::ProjectGrouped;
-
-    // A fetch is in flight for `old`...
-    let guard = Instant::now();
-    app.ui_state.preview_update_spawned_at = Some(guard);
-    // ...and the selection moves to `new` with no respawn (StateUpdate path).
-    app.ui_state.selected_session_id = Some(SessionRef::local(new));
-
-    app.handle_state_update(StateUpdate::PreviewReady {
-        spawned_at: guard,
-        session_id: Some(old),
-        project_id: None,
-        preview_content: "departed session".to_string(),
-        shell_content: String::new(),
-        diff_info: Arc::new(DiffInfo::empty()),
-    })
-    .await;
-
-    assert_eq!(
-        app.ui_state.preview_update_spawned_at, None,
-        "the owning result must release the guard even when the selection moved on"
-    );
-    assert_ne!(
-        app.ui_state.preview_content, "departed session",
-        "...while still not painting the old selection's content"
-    );
-
-    // With the guard released, the next tick can fetch for the new selection.
-    app.spawn_preview_update();
-    assert!(app.ui_state.preview_update_spawned_at.is_some());
-}
-
-#[tokio::test]
-async fn reopening_the_info_modal_retries_a_failed_enriched_fetch() {
-    // Reopening Info was the retry affordance before the negative marker
-    // existed; keep it, since it is far more discoverable than PR-refresh.
-    let sid = SessionId::new();
-    let mut app = make_test_app();
-    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
-    app.ui_state.enriched_pr_unavailable = Some(sid);
-
-    app.handle_command(UserCommand::OpenInfo).await;
-    assert!(matches!(app.ui_state.modal, Modal::Info { .. }));
-    assert_eq!(
-        app.ui_state.enriched_pr_unavailable, None,
-        "reopening Info must allow the enriched fetch to be retried"
-    );
-}
-
-#[tokio::test]
-async fn a_stale_enriched_result_does_not_clear_the_new_fetchs_guard() {
-    // Same generation-token rule as PreviewReady: a superseded enriched result
-    // must not release the guard belonging to the fetch now in flight, or the
-    // next tick double-spawns `gh`.
-    let sid = SessionId::new();
-    let mut app = make_test_app();
-    app.ui_state.selected_session_id = Some(SessionRef::local(sid));
-
-    let guard = Instant::now();
-    app.ui_state.enriched_pr_fetch_spawned_at = Some(guard);
-    app.handle_state_update(StateUpdate::EnrichedPrReady {
-        spawned_at: guard - std::time::Duration::from_millis(1),
-        session_id: sid,
-        info: None,
-    })
-    .await;
-    assert_eq!(
-        app.ui_state.enriched_pr_fetch_spawned_at,
-        Some(guard),
-        "a superseded enriched result must leave the live fetch's guard intact"
-    );
-
-    app.handle_state_update(StateUpdate::EnrichedPrReady {
-        spawned_at: guard,
-        session_id: sid,
-        info: None,
-    })
-    .await;
-    assert_eq!(app.ui_state.enriched_pr_fetch_spawned_at, None);
 }

@@ -7,23 +7,23 @@
 //! them to a temp file and injects the file path into the tmux pane — a form
 //! the Claude CLI accepts (a plain-text image path in the prompt).
 //!
-//! This module holds the *effectful* server-side pieces: RGBA→PNG encoding for
+//! This module holds the transport-agnostic, unit-testable pieces:
+//! magic-byte sniffing (the accepted-type allow-list), RGBA→PNG encoding for
 //! the clipboard path, and the pruned temp-file [`PasteImageStore`]. The
 //! orchestration (resolve session → store → inject path) lives in
 //! [`crate::api::CommanderService::paste_image`].
-//!
-//! The accept allow-list and size cap are part of the route's *wire contract*,
-//! shared with the server's body limit and with clients that pre-check before
-//! uploading, so they live in
-//! [`claude_commander_protocol::paste`] instead of here.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
-use claude_commander_protocol::paste::validate;
 use uuid::Uuid;
 
 use crate::error::{Result, SessionError};
+
+/// Max accepted pasted-image size (bytes). Clipboard screenshots are large but
+/// bounded; this caps memory/disk from a huge or malicious upload. Enforced in
+/// [`PasteImageStore::store`] and mirrored by an axum body limit on the route.
+pub const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 
 /// Prune paste-image files older than this on each write. The file is only
 /// needed until the Claude CLI reads it when the user submits the prompt, so a
@@ -34,6 +34,49 @@ pub const IMAGE_TTL: Duration = Duration::from_secs(60 * 60);
 /// in addition to the TTL. Bounds disk use even under a burst of pastes inside
 /// the TTL window (an authed client can otherwise write ≤`MAX_IMAGE_BYTES` each).
 pub const MAX_IMAGE_FILES: usize = 64;
+
+/// Sniff an image type from the leading magic bytes, returning the file
+/// extension to use. `None` means the bytes are not a recognised image — this
+/// doubles as the accept allow-list: the extension is *never* taken from a
+/// client-supplied filename or Content-Type, only from the content itself.
+pub fn image_ext_from_magic(bytes: &[u8]) -> Option<&'static str> {
+    const PNG: &[u8] = &[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+    if bytes.starts_with(PNG) {
+        return Some("png");
+    }
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return Some("jpg");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("gif");
+    }
+    if bytes.starts_with(b"BM") {
+        return Some("bmp");
+    }
+    // WEBP: "RIFF" <u32 len> "WEBP".
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("webp");
+    }
+    None
+}
+
+/// Validate pasted-image bytes: within the size cap and a recognised image
+/// type. Returns the sniffed file extension on success. Callers validate up
+/// front (before resolving the target session) so junk input is a clean
+/// rejection independent of session existence.
+pub fn validate(bytes: &[u8]) -> Result<&'static str> {
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err(SessionError::InvalidImage(format!(
+            "image is {} bytes, over the {} byte limit",
+            bytes.len(),
+            MAX_IMAGE_BYTES
+        ))
+        .into());
+    }
+    image_ext_from_magic(bytes).ok_or_else(|| {
+        SessionError::InvalidImage("not a recognised image (png/jpeg/gif/webp/bmp)".into()).into()
+    })
+}
 
 /// Encode raw RGBA pixels (as produced by a clipboard read) to PNG bytes.
 /// Returns [`SessionError::InvalidImage`] if the buffer size doesn't match the
@@ -79,7 +122,7 @@ impl PasteImageStore {
     /// sniffed extension — never client-controlled — so there is no
     /// path-traversal or arbitrary-extension surface.
     pub fn store(&self, bytes: &[u8]) -> Result<PathBuf> {
-        let ext = validate(bytes)?.ext();
+        let ext = validate(bytes)?;
 
         std::fs::create_dir_all(&self.dir)?;
         // Guard against a squatted temp dir: on a shared, world-writable `/tmp`,
@@ -206,8 +249,6 @@ fn harden_file(path: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use claude_commander_protocol::paste::{ImageFormat, MAX_IMAGE_BYTES, format_from_magic};
-
     use super::*;
 
     /// A minimal but valid 1×1 PNG, used to exercise the store without pulling
@@ -220,15 +261,30 @@ mod tests {
         0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
     ];
 
-    // The magic-byte allow-list itself is tested in
-    // `claude_commander_protocol::paste`, which now owns it.
+    #[test]
+    fn magic_recognises_known_formats() {
+        assert_eq!(image_ext_from_magic(TINY_PNG), Some("png"));
+        assert_eq!(image_ext_from_magic(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("jpg"));
+        assert_eq!(image_ext_from_magic(b"GIF89a....."), Some("gif"));
+        assert_eq!(image_ext_from_magic(b"BM......"), Some("bmp"));
+        assert_eq!(image_ext_from_magic(b"RIFF\0\0\0\0WEBP...."), Some("webp"));
+    }
+
+    #[test]
+    fn magic_rejects_non_images() {
+        assert_eq!(image_ext_from_magic(b""), None);
+        assert_eq!(image_ext_from_magic(b"#!/bin/sh\n"), None);
+        assert_eq!(image_ext_from_magic(b"not an image at all"), None);
+        // A truncated RIFF header that isn't actually WEBP.
+        assert_eq!(image_ext_from_magic(b"RIFF\0\0\0\0AVI "), None);
+    }
 
     #[test]
     fn encode_rgba_png_produces_png_bytes() {
         // 2×2 RGBA = 16 bytes.
         let rgba = vec![255u8; 2 * 2 * 4];
         let png = encode_rgba_png(2, 2, rgba).expect("encode");
-        assert_eq!(format_from_magic(&png), Some(ImageFormat::Png));
+        assert_eq!(image_ext_from_magic(&png), Some("png"));
     }
 
     #[test]

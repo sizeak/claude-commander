@@ -83,11 +83,6 @@ pub fn test_state(data_dir: &TempDir, worktrees_dir: &TempDir) -> AppState {
     let mut config = Config {
         worktrees_dir: Some(worktrees_dir.path().to_path_buf()),
         tmux_tmpdir: Some(tmux_tmpdir),
-        // Keep pasted-image writes — and the store's prune, which *deletes*
-        // files in this directory — under `data_dir` rather than the real OS
-        // temp dir. Without this, any suite exercising the paste-image route
-        // would litter (and prune) `/tmp/paste-images` on the developer's box.
-        paste_images_dir: Some(data_dir.path().join("paste")),
         ..Config::default()
     };
     // Telemetry is opt-out by default with a baked ingest token, so a plain

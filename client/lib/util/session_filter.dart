@@ -112,17 +112,6 @@ List<E> rankByScore<E>(Iterable<E> items, int? Function(E) score) {
   return [for (final e in scored) e.$3];
 }
 
-/// How recent a session is for the Recent view: when it was last attached, or —
-/// for one that has never been attached — when it was created.
-///
-/// The fallback is what keeps a freshly created session in that view. Keyed on
-/// `lastAttachedAt` alone its key is null, and [mostRecent] drops null keys, so
-/// the session the user had just made was absent from the tab — and absent from
-/// the only place they could have attached it from, which is what would have
-/// given it a key. Creation is a real recency signal, and the row already
-/// falls back to it when rendering the session's age.
-DateTime sessionRecency(SessionInfo s) => s.lastAttachedAt ?? s.createdAt;
-
 /// The [items] carrying the most recent [attachedAt] timestamps, newest first.
 ///
 /// A generic port of the TUI's `order_recent`: items whose key is null (never

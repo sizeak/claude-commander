@@ -81,11 +81,9 @@ mod tests {
         let (status, body) = do_get(router, "/create-options").await;
         assert_eq!(status, 200);
         let opts: claude_commander_core::api::CreateOptions = json(&body);
-        // Default config has a default program; with no [[sections]]
-        // configured the baked-in default board sections are advertised so
-        // clients can target them (e.g. `new --section "In Review"`).
+        // Default config has a default program and no configured sections.
         assert!(!opts.default_program.is_empty());
-        assert_eq!(opts.sections, vec!["In Review", "Merged"]);
+        assert!(opts.sections.is_empty());
     }
 
     /// `pr-refresh` acknowledges with 202 (it wakes the loop; refreshed state

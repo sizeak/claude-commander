@@ -1,6 +1,6 @@
 use super::*;
 use crate::git::PrState;
-use crate::session::{ProjectId, SessionId, SessionStatus};
+use crate::session::{ProjectId, SessionId};
 use ratatui::buffer::Buffer;
 use ratatui::style::Color;
 use ratatui::{Terminal, backend::TestBackend, widgets::ListState};
@@ -372,7 +372,7 @@ fn worktree_shows_keep_alive_marker() {
     // No anchor marker when the session is not kept alive.
     let plain = render_tree(&items_off, 40, 4).join("\n");
     assert!(
-        !plain.contains(crate::tui::widgets::status_glyph::KEEP_ALIVE_MARKER),
+        !plain.contains(KEEP_ALIVE_MARKER),
         "unexpected keep-alive marker:\n{plain}"
     );
 
@@ -383,7 +383,7 @@ fn worktree_shows_keep_alive_marker() {
     let items_on = vec![make_project("proj", 1), wt];
     let marked = render_tree(&items_on, 40, 4).join("\n");
     assert!(
-        marked.contains(crate::tui::widgets::status_glyph::KEEP_ALIVE_MARKER),
+        marked.contains(KEEP_ALIVE_MARKER),
         "expected keep-alive marker:\n{marked}"
     );
 }
@@ -400,7 +400,7 @@ fn worktree_shows_pending_comment_marker() {
     // No marker when the session has no pending comments.
     let plain = render_tree(&items, 40, 4).join("\n");
     assert!(
-        !plain.contains(crate::tui::widgets::status_glyph::COMMENT_MARKER),
+        !plain.contains(COMMENT_MARKER),
         "unexpected marker:\n{plain}"
     );
 
@@ -409,7 +409,7 @@ fn worktree_shows_pending_comment_marker() {
     let marked =
         render_tree_with(&items, 40, 4, |t| t.comment_sessions(flagged.clone())).join("\n");
     assert!(
-        marked.contains(crate::tui::widgets::status_glyph::COMMENT_MARKER),
+        marked.contains(COMMENT_MARKER),
         "expected pending-comment marker:\n{marked}"
     );
 }
@@ -954,7 +954,7 @@ fn review_labels() -> Vec<String> {
 #[test]
 fn test_pr_badge_color_open() {
     let theme = Theme::basic();
-    let c = crate::tui::widgets::pr_colors::pr_badge_color(
+    let c = pr_colors::pr_badge_color(
         &theme,
         Some(PrState::Open),
         false,
@@ -968,7 +968,7 @@ fn test_pr_badge_color_open() {
 #[test]
 fn test_pr_badge_color_merged() {
     let theme = Theme::basic();
-    let c = crate::tui::widgets::pr_colors::pr_badge_color(
+    let c = pr_colors::pr_badge_color(
         &theme,
         Some(PrState::Merged),
         true,
@@ -982,7 +982,7 @@ fn test_pr_badge_color_merged() {
 #[test]
 fn test_pr_badge_color_closed() {
     let theme = Theme::basic();
-    let c = crate::tui::widgets::pr_colors::pr_badge_color(
+    let c = pr_colors::pr_badge_color(
         &theme,
         Some(PrState::Closed),
         false,
@@ -997,7 +997,7 @@ fn test_pr_badge_color_closed() {
 fn test_pr_badge_color_draft_takes_precedence_over_label() {
     let theme = Theme::basic();
     let labels = vec!["dev-review-required".into()];
-    let c = crate::tui::widgets::pr_colors::pr_badge_color(
+    let c = pr_colors::pr_badge_color(
         &theme,
         Some(PrState::Open),
         false,
@@ -1012,7 +1012,7 @@ fn test_pr_badge_color_draft_takes_precedence_over_label() {
 fn test_pr_badge_color_review_label_match() {
     let theme = Theme::basic();
     let labels = vec!["unrelated".into(), "ready-for-test".into()];
-    let c = crate::tui::widgets::pr_colors::pr_badge_color(
+    let c = pr_colors::pr_badge_color(
         &theme,
         Some(PrState::Open),
         false,
@@ -1027,7 +1027,7 @@ fn test_pr_badge_color_review_label_match() {
 fn test_pr_badge_color_review_label_case_insensitive() {
     let theme = Theme::basic();
     let labels = vec!["Dev-Review-Required".into()];
-    let c = crate::tui::widgets::pr_colors::pr_badge_color(
+    let c = pr_colors::pr_badge_color(
         &theme,
         Some(PrState::Open),
         false,
@@ -1042,7 +1042,7 @@ fn test_pr_badge_color_review_label_case_insensitive() {
 fn test_pr_badge_color_non_matching_labels_fall_through_to_open() {
     let theme = Theme::basic();
     let labels = vec!["bug".into(), "documentation".into()];
-    let c = crate::tui::widgets::pr_colors::pr_badge_color(
+    let c = pr_colors::pr_badge_color(
         &theme,
         Some(PrState::Open),
         false,
@@ -1057,14 +1057,7 @@ fn test_pr_badge_color_non_matching_labels_fall_through_to_open() {
 fn test_pr_badge_color_unknown_state_uses_pr_merged_flag_for_merged() {
     // Backward compat: pre-pr_state state.json with pr_merged=true
     let theme = Theme::basic();
-    let c = crate::tui::widgets::pr_colors::pr_badge_color(
-        &theme,
-        None,
-        true,
-        false,
-        &[],
-        &review_labels(),
-    );
+    let c = pr_colors::pr_badge_color(&theme, None, true, false, &[], &review_labels());
     assert_eq!(c, theme.status_pr_merged);
 }
 
@@ -1072,18 +1065,223 @@ fn test_pr_badge_color_unknown_state_uses_pr_merged_flag_for_merged() {
 fn test_pr_badge_color_unknown_state_falls_back_to_open() {
     // Backward compat: pre-pr_state state.json with pr_merged=false
     let theme = Theme::basic();
-    let c = crate::tui::widgets::pr_colors::pr_badge_color(
-        &theme,
-        None,
-        false,
-        false,
-        &[],
-        &review_labels(),
-    );
+    let c = pr_colors::pr_badge_color(&theme, None, false, false, &[], &review_labels());
     assert_eq!(c, theme.pr_open);
 }
 
 // -- session_status_glyph (single unified icon column) --
+
+fn empty_items() -> [SessionListItem; 0] {
+    []
+}
+
+fn make_tree<'a>(theme: &'a Theme, items: &'a [SessionListItem]) -> TreeList<'a> {
+    TreeList::new(items, theme)
+}
+
+#[test]
+fn test_glyph_working_shows_spinner() {
+    let theme = Theme::basic();
+    let items = empty_items();
+    let tree = make_tree(&theme, &items);
+    let (g, c) = tree
+        .session_status_glyph(SessionStatus::Running, Some(AgentState::Working), false)
+        .unwrap();
+    assert!(SPINNER_FRAMES.contains(&g.as_str()));
+    // Default theme uses Rainbow → colour comes from the rainbow palette
+    assert!(crate::config::theme::RAINBOW_PALETTE.contains(&c));
+}
+
+#[test]
+fn test_glyph_working_beats_unread() {
+    let theme = Theme::basic();
+    let items = empty_items();
+    let tree = make_tree(&theme, &items);
+    let (g, _) = tree
+        .session_status_glyph(SessionStatus::Running, Some(AgentState::Working), true)
+        .unwrap();
+    assert!(SPINNER_FRAMES.contains(&g.as_str()));
+}
+
+#[test]
+fn test_glyph_waiting_for_input() {
+    let theme = Theme::basic();
+    let items = empty_items();
+    let tree = make_tree(&theme, &items);
+    let (g, c) = tree
+        .session_status_glyph(
+            SessionStatus::Running,
+            Some(AgentState::WaitingForInput),
+            false,
+        )
+        .unwrap();
+    assert_eq!(g, "?");
+    assert_eq!(c, theme.agent_waiting);
+}
+
+#[test]
+fn test_glyph_waiting_beats_unread() {
+    let theme = Theme::basic();
+    let items = empty_items();
+    let tree = make_tree(&theme, &items);
+    let (g, _) = tree
+        .session_status_glyph(
+            SessionStatus::Running,
+            Some(AgentState::WaitingForInput),
+            true,
+        )
+        .unwrap();
+    assert_eq!(g, "?");
+}
+
+#[test]
+fn test_glyph_unread_when_idle() {
+    let theme = Theme::basic();
+    let items = empty_items();
+    let tree = make_tree(&theme, &items);
+    let (g, c) = tree
+        .session_status_glyph(SessionStatus::Running, Some(AgentState::Idle), true)
+        .unwrap();
+    assert_eq!(g, "◆");
+    assert_eq!(c, theme.unread_indicator);
+}
+
+#[test]
+fn test_glyph_running_idle_no_unread() {
+    let theme = Theme::basic();
+    let items = empty_items();
+    let tree = make_tree(&theme, &items);
+    let (g, c) = tree
+        .session_status_glyph(SessionStatus::Running, Some(AgentState::Idle), false)
+        .unwrap();
+    assert_eq!(g, "●");
+    assert_eq!(c, theme.status_running);
+}
+
+#[test]
+fn test_glyph_running_unknown_no_unread() {
+    let theme = Theme::basic();
+    let items = empty_items();
+    let tree = make_tree(&theme, &items);
+    let (g, c) = tree
+        .session_status_glyph(SessionStatus::Running, Some(AgentState::Unknown), false)
+        .unwrap();
+    assert_eq!(g, "●");
+    assert_eq!(c, theme.status_running);
+}
+
+#[test]
+fn test_glyph_running_no_agent_state_no_unread() {
+    let theme = Theme::basic();
+    let items = empty_items();
+    let tree = make_tree(&theme, &items);
+    let (g, c) = tree
+        .session_status_glyph(SessionStatus::Running, None, false)
+        .unwrap();
+    assert_eq!(g, "●");
+    assert_eq!(c, theme.status_running);
+}
+
+#[test]
+fn test_glyph_stopped() {
+    let theme = Theme::basic();
+    let items = empty_items();
+    let tree = make_tree(&theme, &items);
+    let (g, c) = tree
+        .session_status_glyph(SessionStatus::Stopped, None, false)
+        .unwrap();
+    assert_eq!(g, "○");
+    assert_eq!(c, theme.status_stopped);
+}
+
+#[test]
+fn test_glyph_stopped_ignores_unread_and_agent_state() {
+    let theme = Theme::basic();
+    let items = empty_items();
+    let tree = make_tree(&theme, &items);
+    // Stopped sessions can't have a meaningful agent state, but ensure
+    // the glyph is consistent regardless.
+    let (g, _) = tree
+        .session_status_glyph(SessionStatus::Stopped, Some(AgentState::Working), true)
+        .unwrap();
+    assert_eq!(g, "○");
+}
+
+#[test]
+fn test_glyph_creating_shows_spinner() {
+    let theme = Theme::basic();
+    let items = empty_items();
+    let tree = make_tree(&theme, &items);
+    let (g, c) = tree
+        .session_status_glyph(SessionStatus::Creating, None, false)
+        .unwrap();
+    assert!(SPINNER_FRAMES.contains(&g.as_str()));
+    assert_eq!(c, theme.status_creating);
+}
+
+// Cycle-arithmetic tests for the spinner index computation in
+// `session_status_glyph`: `SPINNER_FRAMES[(tick as usize / 3) % SPINNER_FRAMES.len()]`.
+// SPINNER_FRAMES has 10 entries, so the cycle is `(tick / 3) % 10`. Each
+// test below picks tick values whose original-vs-mutant outputs differ:
+//
+//   tick=3  → original `(3/3)%10 = 1` ⇒ frame[1] = "⠙"
+//             `/`→`%`: `(3%3)%10 = 0` ⇒ "⠋"  (distinguishes / from %)
+//             `/`→`*`: `(3*3)%10 = 9` ⇒ "⠏"  (distinguishes / from *)
+//             `%`→`/`: `(3/3)/10 = 0` ⇒ "⠋"  (distinguishes % from /)
+//   tick=30 → original `(30/3)%10 = 0` ⇒ "⠋"
+//             `%`→`/`: `(30/3)/10 = 1` ⇒ "⠙"  (extra guard for % from /)
+
+#[test]
+fn test_glyph_creating_spinner_uses_tick_div_three_mod_len() {
+    let theme = Theme::basic();
+    let items = empty_items();
+
+    // tick=3: original index 1 → "⠙"
+    let (g, _) = make_tree(&theme, &items)
+        .tick(3)
+        .session_status_glyph(SessionStatus::Creating, None, false)
+        .unwrap();
+    assert_eq!(
+        g, "⠙",
+        "tick=3 must select SPINNER_FRAMES[(3/3)%10] = SPINNER_FRAMES[1]"
+    );
+
+    // tick=30: original index 0 → "⠋" (catches `%` → `/` which would give 1)
+    let (g, _) = make_tree(&theme, &items)
+        .tick(30)
+        .session_status_glyph(SessionStatus::Creating, None, false)
+        .unwrap();
+    assert_eq!(
+        g, "⠋",
+        "tick=30 must select SPINNER_FRAMES[(30/3)%10] = SPINNER_FRAMES[0]"
+    );
+}
+
+#[test]
+fn test_glyph_working_spinner_uses_tick_div_three_mod_len() {
+    let theme = Theme::basic();
+    let items = empty_items();
+
+    // tick=3: original index 1 → "⠙"
+    let (g, _) = make_tree(&theme, &items)
+        .tick(3)
+        .session_status_glyph(SessionStatus::Running, Some(AgentState::Working), false)
+        .unwrap();
+    assert_eq!(
+        g, "⠙",
+        "tick=3 must select SPINNER_FRAMES[(3/3)%10] = SPINNER_FRAMES[1]"
+    );
+
+    // tick=30: original index 0 → "⠋" (catches `%` → `/` which would give 1)
+    let (g, _) = make_tree(&theme, &items)
+        .tick(30)
+        .session_status_glyph(SessionStatus::Running, Some(AgentState::Working), false)
+        .unwrap();
+    assert_eq!(
+        g, "⠋",
+        "tick=30 must select SPINNER_FRAMES[(30/3)%10] = SPINNER_FRAMES[0]"
+    );
+}
 
 #[test]
 fn test_stacked_child_row_has_extra_indent() {

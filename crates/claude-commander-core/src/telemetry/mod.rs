@@ -429,7 +429,7 @@ mod tests {
             shell: Some("zsh".into()),
             color_mode: Some("truecolor".into()),
         };
-        let config = ConfigSnapshot::from_config(&crate::config::Config::default());
+        let config = ConfigSnapshot::from_config(&crate::config::Config::default(), None);
         t.session_start(&env, &config);
         t.flush().await;
 

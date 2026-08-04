@@ -173,15 +173,17 @@ impl App {
         };
     }
 
-    /// Check if the selected session is in Creating state. Reads the owning
-    /// backend's snapshot (always populated), not the board — the board is only
-    /// built in board view, so the creating-guards must work in list views too.
+    /// Check if the selected session is in Creating state
     pub(super) fn selected_session_is_creating(&self) -> bool {
-        let Some(sref) = self.ui_state.selected_session_id else {
-            return false;
-        };
-        self.session(sref)
-            .is_some_and(|s| s.status == SessionStatus::Creating)
+        let selected = self.ui_state.selected_session_id.map(|r| r.id);
+        self.ui_state.list_items.iter().any(|item| {
+            matches!(
+                item,
+                SessionListItem::Worktree { id, status, .. }
+                if selected == Some(*id)
+                    && *status == SessionStatus::Creating
+            )
+        })
     }
 
     /// Handle selection (attach to session)
@@ -686,7 +688,11 @@ impl App {
             // Capture the section under the cursor now, so a background list
             // refresh while the modal is open can't change where the new
             // session lands.
-            let section = self.target_section();
+            let section = self
+                .ui_state
+                .list_state
+                .selected()
+                .and_then(|idx| super::selection::section_at(&self.ui_state.list_items, idx));
             let project_picker = self.new_project_picker(backend, project_id).await;
             // The server picker is hidden for a single-backend setup; the section
             // picker pre-selects the section under the cursor (built before the
@@ -1319,7 +1325,7 @@ impl App {
                 label: in_progress.to_string(),
             });
         }
-        for section in self.config.effective_sections().iter() {
+        for section in &self.config.sections {
             if !q.is_empty() && !section.name.to_lowercase().contains(&q) {
                 continue;
             }
@@ -1333,7 +1339,7 @@ impl App {
     }
 
     /// Re-filter the quick-switch matches based on the current query.
-    /// Rebuilds from the board so backspace can widen results.
+    /// Rebuilds from list_items so backspace can widen results.
     pub(super) fn refilter_quick_switch(&mut self) {
         // Snapshot the inputs we need so the closure borrow on self doesn't
         // conflict with the `&mut self.ui_state.modal` below.
@@ -1406,39 +1412,71 @@ impl App {
             return;
         }
 
-        // Build the session rows synchronously from every backend's snapshot so
-        // the refilter runs without awaiting the store lock on each keystroke.
-        // Read the snapshots (not the board) so an active project filter never
-        // narrows the palette — quick-switch always spans the whole tree,
-        // mirroring `gather_quick_switch_matches`.
+        // Build the session rows synchronously from list_items so the refilter
+        // can run without awaiting the store lock on every keystroke.
         let mut scored_sessions: Vec<(i64, QuickSwitchMatch)> = Vec::new();
         if eff_mode == PaletteMode::Unified {
+            // Attach-time lookup, sourced from the cached backend snapshots
+            // (the `list_items` rows don't carry it). Drives the empty-query
+            // recency ordering below.
+            let mut last_attached: std::collections::HashMap<
+                SessionId,
+                chrono::DateTime<chrono::Utc>,
+            > = std::collections::HashMap::new();
             for handle in &self.backends {
-                for session in &handle.view.snapshot.sessions {
-                    if session.status == SessionStatus::Creating {
-                        continue;
+                for s in &handle.view.snapshot.sessions {
+                    if let Some(at) = s.last_attached_at {
+                        last_attached.insert(s.session_id, at);
                     }
-                    // Score against title, branch and program; best field wins.
-                    // Matches `gather_quick_switch_matches` so a session found on
-                    // program name at open doesn't vanish on the first keystroke.
-                    let score = [
-                        session.title.as_str(),
-                        session.branch.as_str(),
-                        session.program.as_str(),
-                    ]
-                    .iter()
-                    .filter_map(|s| crate::fuzzy::fuzzy_score(s, eff_query))
-                    .max();
+                }
+            }
+            // Build project name lookup from list items
+            let mut project_names: std::collections::HashMap<SessionId, String> =
+                std::collections::HashMap::new();
+            let mut current_project_name = String::new();
+            for item in &self.ui_state.list_items {
+                match item {
+                    SessionListItem::Project { name, .. } => {
+                        current_project_name = name.clone();
+                    }
+                    SessionListItem::Worktree { id, .. } => {
+                        project_names.insert(*id, current_project_name.clone());
+                    }
+                    // Recent-block rows duplicate real worktree rows, which are
+                    // already scored below — skip them here.
+                    SessionListItem::SectionHeader { .. }
+                    | SessionListItem::ServerHeader { .. }
+                    | SessionListItem::Spacer
+                    | SessionListItem::RecentsHeader
+                    | SessionListItem::RecentSession { .. } => {}
+                }
+            }
+
+            for item in &self.ui_state.list_items {
+                if let SessionListItem::Worktree {
+                    id,
+                    title,
+                    branch,
+                    status,
+                    ..
+                } = item
+                {
+                    // Score against title and branch; best field wins.
+                    let score = [title.as_str(), branch.as_str()]
+                        .iter()
+                        .filter_map(|s| crate::fuzzy::fuzzy_score(s, eff_query))
+                        .max();
                     let Some(score) = score else { continue };
+                    let project_name = project_names.get(id).cloned().unwrap_or_default();
                     scored_sessions.push((
                         score,
                         QuickSwitchMatch {
-                            session_id: session.session_id,
-                            title: session.title.clone(),
-                            branch: session.branch.clone(),
-                            project_name: session.project_name.clone(),
-                            status: session.status,
-                            last_attached_at: session.last_attached_at,
+                            session_id: *id,
+                            title: title.clone(),
+                            branch: branch.clone(),
+                            project_name,
+                            status: *status,
+                            last_attached_at: last_attached.get(id).copied(),
                         },
                     ));
                 }
@@ -1670,11 +1708,80 @@ impl App {
         });
     }
 
+    /// Whether the currently selected list item is a section header.
+    pub(super) fn selected_item_is_section_header(&self) -> bool {
+        self.ui_state
+            .list_state
+            .selected()
+            .and_then(|idx| self.ui_state.list_items.get(idx))
+            .is_some_and(|item| matches!(item, SessionListItem::SectionHeader { .. }))
+    }
+
+    /// Toggle collapse/expand for the section that contains the selected item.
+    ///
+    /// When the selected item is a section header, toggle that section directly.
+    /// When the selected item is a project or worktree, walk backwards to find
+    /// the nearest section header and toggle it.
+    pub(super) async fn handle_toggle_section(&mut self) {
+        if self.config.sections.is_empty() {
+            return;
+        }
+        let Some(idx) = self.ui_state.list_state.selected() else {
+            return;
+        };
+
+        let section_name = self.find_parent_section_name(idx);
+        let Some(name) = section_name else {
+            return;
+        };
+
+        if self.ui_state.collapsed_sections.contains(&name) {
+            self.ui_state.collapsed_sections.remove(&name);
+        } else {
+            self.ui_state.collapsed_sections.insert(name.clone());
+        }
+
+        self.refresh_list_items().await;
+
+        // After rebuilding the list, find the section header and select it.
+        // This handles both collapse (selected child is now hidden) and expand
+        // (keep focus on the header).
+        for (i, item) in self.ui_state.list_items.iter().enumerate() {
+            if let SessionListItem::SectionHeader { name: n, .. } = item
+                && *n == name
+            {
+                self.ui_state.list_state.list_state.select(Some(i));
+                break;
+            }
+        }
+
+        self.update_selection();
+        self.spawn_preview_update();
+    }
+
+    /// Walk backwards from `idx` to find the name of the nearest section header.
+    fn find_parent_section_name(&self, idx: usize) -> Option<String> {
+        for i in (0..=idx).rev() {
+            if let Some(SessionListItem::SectionHeader { name, .. }) =
+                self.ui_state.list_items.get(i)
+            {
+                return Some(name.clone());
+            }
+        }
+        None
+    }
+
     /// Open the "Move to section" palette for the selected session.
-    /// The palette lists "Auto" plus one entry per effective section (the
-    /// configured `[[sections]]`, or the baked-in defaults when none are
-    /// configured); selecting "Auto" clears any override.
+    /// The palette lists "Auto" plus one entry per configured `[[sections]]`;
+    /// selecting "Auto" clears any override.
     pub(super) async fn handle_move_to_section(&mut self) {
+        if self.config.sections.is_empty() {
+            self.ui_state.status_message = Some((
+                "No [[sections]] configured".to_string(),
+                Instant::now() + Duration::from_secs(3),
+            ));
+            return;
+        }
         let Some(session_id) = self.ui_state.selected_session_id.map(|r| r.id) else {
             return;
         };
@@ -1687,100 +1794,6 @@ impl App {
             selected_idx: 0,
             scroll: 0,
         };
-    }
-
-    /// Cycle the session-list view (`v`): project → sections → stacks → board →
-    /// (repeat). Section-grouped modes are skipped when no `[[sections]]` are
-    /// configured (they would render identically to the project view), so with
-    /// no sections `v` simply toggles between the project list and the board.
-    /// The chosen view is persisted to `tui.json` so it survives restarts, and
-    /// the current session/project selection is carried across the rebuild.
-    pub(super) async fn handle_toggle_view_mode(&mut self) {
-        let mut new_view = self.ui_state.view_mode.next();
-        if self.config.sections.is_empty() {
-            while new_view.is_section_view() {
-                new_view = new_view.next();
-            }
-        }
-        self.ui_state.view_mode = new_view;
-        // Persist the chosen view so it survives restarts. A failed write is
-        // logged (not surfaced) inside the prefs store — the runtime behaviour
-        // is correct either way.
-        self.tui_prefs.set_view_mode(new_view).await;
-
-        let selected_session = self.ui_state.selected_session_id.map(|r| r.id);
-        let selected_project = self.ui_state.selected_project_id.map(|(_, p)| p);
-        self.refresh_list_items().await;
-
-        // Carry the previous selection across the rebuild so the same session
-        // (or project) stays focused after switching view.
-        if new_view.is_board() {
-            if let Some(sid) = selected_session
-                && let Some(pos) = self.ui_state.board.position_of(sid)
-            {
-                self.ui_state.board_state.select(Some(pos));
-            } else if let Some(pid) = selected_project {
-                self.select_project_in_sidebar(pid);
-            }
-        } else if let Some(sid) = selected_session
-            && let Some(idx) =
-                self.ui_state.list_items.iter().position(
-                    |item| matches!(item, SessionListItem::Worktree { id, .. } if *id == sid),
-                )
-        {
-            self.ui_state.list_state.select(Some(idx));
-        } else if let Some(pid) = selected_project
-            && let Some(idx) =
-                self.ui_state.list_items.iter().position(
-                    |item| matches!(item, SessionListItem::Project { id, .. } if *id == pid),
-                )
-        {
-            self.ui_state.list_state.select(Some(idx));
-        }
-        self.update_selection();
-    }
-
-    /// Find the section header that a list row belongs to, scanning backwards
-    /// from `idx`. Returns `None` for rows above the first section header.
-    fn find_parent_section_name(&self, idx: usize) -> Option<String> {
-        (0..=idx)
-            .rev()
-            .find_map(|i| match self.ui_state.list_items.get(i) {
-                Some(SessionListItem::SectionHeader { name, .. }) => Some(name.clone()),
-                _ => None,
-            })
-    }
-
-    /// Collapse or expand the section containing the selected row (`ToggleSection`).
-    /// Section-list-only; a no-op on the board (which has no `list_state` cursor),
-    /// with no sections configured, or with no selection.
-    pub(super) async fn handle_toggle_section(&mut self) {
-        if self.ui_state.view_mode.is_board() || self.config.sections.is_empty() {
-            return;
-        }
-        let Some(idx) = self.ui_state.list_state.selected() else {
-            return;
-        };
-        let Some(name) = self.find_parent_section_name(idx) else {
-            return;
-        };
-
-        if self.ui_state.collapsed_sections.contains(&name) {
-            self.ui_state.collapsed_sections.remove(&name);
-        } else {
-            self.ui_state.collapsed_sections.insert(name.clone());
-        }
-
-        self.refresh_list_items().await;
-
-        // After rebuilding, keep focus on the section header (handles both
-        // collapse — the selected child is now hidden — and expand).
-        if let Some(i) = self.ui_state.list_items.iter().position(
-            |item| matches!(item, SessionListItem::SectionHeader { name: n, .. } if *n == name),
-        ) {
-            self.ui_state.list_state.select(Some(i));
-        }
-        self.update_selection();
     }
 
     /// Open the "Change program" palette for the selected session. The palette
@@ -2212,8 +2225,12 @@ impl App {
                         ));
                         self.refresh_local_view().await;
                         self.refresh_list_items().await;
-                        // Select the newly added project in the sidebar.
-                        self.select_project_in_sidebar(project_id);
+                        // Select the newly added project
+                        if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
+                            matches!(item, SessionListItem::Project { id, .. } if *id == project_id)
+                        }) {
+                            self.ui_state.list_state.select(Some(idx));
+                        }
                     }
                     Err(e) => {
                         self.ui_state.modal = Modal::Error {
@@ -2273,7 +2290,13 @@ impl App {
                             ));
                             self.refresh_local_view().await;
                             self.refresh_list_items().await;
-                            self.select_project_in_sidebar(project_id);
+                            if let Some(idx) =
+                                self.ui_state.list_items.iter().position(|item| {
+                                    matches!(item, SessionListItem::Project { id, .. } if *id == project_id)
+                                })
+                            {
+                                self.ui_state.list_state.select(Some(idx));
+                            }
                         }
                         Err(e) => {
                             self.ui_state.modal = Modal::Error {

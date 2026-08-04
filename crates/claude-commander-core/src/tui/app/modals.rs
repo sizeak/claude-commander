@@ -590,17 +590,6 @@ impl App {
                 }
             }
 
-            Modal::Info { scroll } => {
-                let mut offset = *scroll;
-                self.render_info_modal(frame, area, &mut offset);
-                // The selected session may have vanished (deleted while open),
-                // in which case `render_info_modal` closes the modal — only
-                // write the clamped scroll back if it's still an Info modal.
-                if let Modal::Info { scroll } = &mut self.ui_state.modal {
-                    *scroll = offset;
-                }
-            }
-
             Modal::Settings(state) => {
                 self.render_settings_modal(frame, area, state);
             }
@@ -914,25 +903,6 @@ impl App {
             }
         }
 
-        // Board (hardcoded main-view keys, not bindable actions).
-        lines.push(Line::from(""));
-        lines.push(Line::from("Board:"));
-        lines.push(Line::from(format!(
-            "  {:<width$}Enter on a sidebar project filters the board to it;",
-            "filter",
-            width = key_col_width,
-        )));
-        lines.push(Line::from(format!(
-            "  {:<width$}Enter again (or Esc) clears the filter",
-            "",
-            width = key_col_width,
-        )));
-        lines.push(Line::from(format!(
-            "  {:<width$}Jump to a session by its number",
-            "1-99",
-            width = key_col_width,
-        )));
-
         // Quick-switch (hardcoded since leader_key is in config, not keybindings)
         lines.push(Line::from(""));
         lines.push(Line::from("Quick Switch:"));
@@ -1016,28 +986,8 @@ impl App {
             width = key_col_width,
         )));
         lines.push(Line::from(format!(
-            "  {:<width$}Each session card carries [>_] shell, [±] review",
-            "card buttons",
-            width = key_col_width,
-        )));
-        lines.push(Line::from(format!(
-            "  {:<width$}diff, and [i] info buttons; double-click a card to",
-            "",
-            width = key_col_width,
-        )));
-        lines.push(Line::from(format!(
-            "  {:<width$}attach.",
-            "",
-            width = key_col_width,
-        )));
-        lines.push(Line::from(format!(
-            "  {:<width$}Click a server heading in the sidebar to edit its",
+            "  {:<width$}Click the ⚙ on a server header to edit its program list.",
             "click ⚙",
-            width = key_col_width,
-        )));
-        lines.push(Line::from(format!(
-            "  {:<width$}program list (shown with multiple servers).",
-            "",
             width = key_col_width,
         )));
 
@@ -1136,73 +1086,6 @@ impl App {
                 .begin_symbol(None)
                 .end_symbol(None);
             frame.render_stateful_widget(scrollbar, content_area, &mut sb_state);
-        }
-    }
-
-    /// Render the session Info modal (`Modal::Info`). Mirrors
-    /// [`render_help_modal`]: the caller passes the current scroll, this clamps
-    /// it against the composed content height and writes back the clamp result.
-    ///
-    /// If the selected session has disappeared (e.g. deleted while the modal is
-    /// open) the composed content is `Empty`; rather than show a stray "select a
-    /// session" panel we close the modal gracefully.
-    pub(super) fn render_info_modal(&mut self, frame: &mut Frame, area: Rect, scroll: &mut u16) {
-        // Resolve the session title up front from owned data so the close
-        // decision doesn't hold a borrow of `self` into the mutation below.
-        // Resolve from the owning backend's snapshot (always populated), not the
-        // board — the board is only built in board view, so a board lookup would
-        // wrongly close the modal in any list view.
-        let title = self
-            .ui_state
-            .selected_session_id
-            .and_then(|sref| self.session(sref))
-            .map(|s| s.title.clone());
-        let Some(title) = title else {
-            self.ui_state.modal = Modal::None;
-            return;
-        };
-
-        let modal_area = centered_rect(70, 80, area);
-        frame.render_widget(Clear, modal_area);
-
-        // Truncate a long session title so the border title can't overflow.
-        let max_title = modal_area.width.saturating_sub(12) as usize;
-        let shown_title = if title.chars().count() > max_title && max_title > 1 {
-            let head: String = title.chars().take(max_title.saturating_sub(1)).collect();
-            format!("{head}…")
-        } else {
-            title
-        };
-
-        let block = Block::default()
-            .title(format!(" Info — {shown_title} "))
-            .borders(Borders::ALL)
-            .border_type(self.border_type())
-            .border_style(Style::default().fg(self.theme.modal_info));
-        let inner = block.inner(modal_area);
-        frame.render_widget(block, modal_area);
-
-        let view = InfoView::new(self.build_info_content(), &self.theme);
-        let lines = view.build_lines();
-
-        let visible = inner.height;
-        let max_scroll = (lines.len() as u16).saturating_sub(visible);
-        if *scroll > max_scroll {
-            *scroll = max_scroll;
-        }
-        let offset = *scroll;
-
-        frame.render_widget(view.with_prebuilt_lines(lines).scroll(offset), inner);
-
-        if max_scroll > 0 {
-            let mut sb_state = ScrollbarState::new(max_scroll as usize + 1)
-                .position(offset as usize)
-                .viewport_content_length(visible as usize);
-            let scrollbar = Scrollbar::default()
-                .orientation(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(None)
-                .end_symbol(None);
-            frame.render_stateful_widget(scrollbar, inner, &mut sb_state);
         }
     }
 }

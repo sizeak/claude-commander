@@ -29,8 +29,6 @@ pub enum BindableAction {
     PreviousGroup,
     NavigateFirst,
     NavigateLast,
-    NavigateLeft,
-    NavigateRight,
     ListPageUp,
     ListPageDown,
     Select,
@@ -51,13 +49,16 @@ pub enum BindableAction {
     ToggleKeepAlive,
     RemoveProject,
     OpenInEditor,
-    OpenInfo,
     OpenPullRequest,
     RefreshPrStatus,
     OpenCommander,
     ToggleConversationOverlay,
     ToggleVoiceInput,
     OpenReviewDiff,
+    TogglePane,
+    TogglePaneReverse,
+    ShrinkLeftPane,
+    GrowLeftPane,
     ShowHelp,
     ShowSettings,
     Quit,
@@ -68,12 +69,8 @@ pub enum BindableAction {
     GenerateSummary,
     ScanDirectory,
     MoveToSection,
-    ToggleViewMode,
     ToggleSection,
-    TogglePane,
-    TogglePaneReverse,
-    ShrinkLeftPane,
-    GrowLeftPane,
+    ToggleViewMode,
     AddRemoteServer,
     RemoveRemoteServer,
     EditServerPrograms,
@@ -91,8 +88,6 @@ impl BindableAction {
         Self::PreviousGroup,
         Self::NavigateFirst,
         Self::NavigateLast,
-        Self::NavigateLeft,
-        Self::NavigateRight,
         Self::ListPageUp,
         Self::ListPageDown,
         // Sessions
@@ -105,7 +100,6 @@ impl BindableAction {
         Self::ToggleKeepAlive,
         Self::DeleteSession,
         Self::OpenInEditor,
-        Self::OpenInfo,
         // Stacked & Cascade
         Self::NewStackedSession,
         Self::PushStack,
@@ -125,21 +119,21 @@ impl BindableAction {
         Self::AddRemoteServer,
         Self::RemoveRemoteServer,
         Self::EditServerPrograms,
-        // Sections
-        Self::MoveToSection,
+        // Sections & View
         Self::ToggleViewMode,
+        Self::MoveToSection,
         Self::ToggleSection,
-        // Right pane (list views)
-        Self::TogglePane,
-        Self::TogglePaneReverse,
-        Self::ShrinkLeftPane,
-        Self::GrowLeftPane,
         // Review & AI
         Self::OpenReviewDiff,
         Self::GenerateSummary,
         Self::OpenCommander,
         Self::ToggleConversationOverlay,
         Self::ToggleVoiceInput,
+        // Layout
+        Self::TogglePane,
+        Self::TogglePaneReverse,
+        Self::ShrinkLeftPane,
+        Self::GrowLeftPane,
         // Scrolling
         Self::ScrollUp,
         Self::ScrollDown,
@@ -160,8 +154,6 @@ impl BindableAction {
             Self::PreviousGroup => "previous_group",
             Self::NavigateFirst => "navigate_first",
             Self::NavigateLast => "navigate_last",
-            Self::NavigateLeft => "navigate_left",
-            Self::NavigateRight => "navigate_right",
             Self::ListPageUp => "list_page_up",
             Self::ListPageDown => "list_page_down",
             Self::Select => "select",
@@ -182,13 +174,16 @@ impl BindableAction {
             Self::ToggleKeepAlive => "toggle_keep_alive",
             Self::RemoveProject => "remove_project",
             Self::OpenInEditor => "open_in_editor",
-            Self::OpenInfo => "open_info",
             Self::OpenPullRequest => "open_pull_request",
             Self::RefreshPrStatus => "refresh_pr_status",
             Self::OpenCommander => "open_commander",
             Self::ToggleConversationOverlay => "toggle_conversation_overlay",
             Self::ToggleVoiceInput => "toggle_voice_input",
             Self::OpenReviewDiff => "open_review_diff",
+            Self::TogglePane => "toggle_pane",
+            Self::TogglePaneReverse => "toggle_pane_reverse",
+            Self::ShrinkLeftPane => "shrink_left_pane",
+            Self::GrowLeftPane => "grow_left_pane",
             Self::ShowHelp => "show_help",
             Self::ShowSettings => "show_settings",
             Self::Quit => "quit",
@@ -199,12 +194,8 @@ impl BindableAction {
             Self::GenerateSummary => "generate_summary",
             Self::ScanDirectory => "scan_directory",
             Self::MoveToSection => "move_to_section",
-            Self::ToggleViewMode => "toggle_view_mode",
             Self::ToggleSection => "toggle_section",
-            Self::TogglePane => "toggle_pane",
-            Self::TogglePaneReverse => "toggle_pane_reverse",
-            Self::ShrinkLeftPane => "shrink_left_pane",
-            Self::GrowLeftPane => "grow_left_pane",
+            Self::ToggleViewMode => "toggle_view_mode",
             Self::EditServerPrograms => "edit_server_programs",
             Self::AddRemoteServer => "add_remote_server",
             Self::RemoveRemoteServer => "remove_remote_server",
@@ -216,12 +207,10 @@ impl BindableAction {
         match self {
             Self::NavigateUp => "Navigate up",
             Self::NavigateDown => "Navigate down",
-            Self::NextGroup => "Next column / project-section group",
-            Self::PreviousGroup => "Previous column / project-section group",
-            Self::NavigateFirst => "Jump to first card/item",
-            Self::NavigateLast => "Jump to last card/item",
-            Self::NavigateLeft => "Previous column",
-            Self::NavigateRight => "Next column",
+            Self::NextGroup => "Jump to next project/section",
+            Self::PreviousGroup => "Jump to previous project/section",
+            Self::NavigateFirst => "Jump to first item",
+            Self::NavigateLast => "Jump to last item",
             Self::ListPageUp => "Move up a screenful in the list",
             Self::ListPageDown => "Move down a screenful in the list",
             Self::Select => "Attach to selected session",
@@ -242,29 +231,28 @@ impl BindableAction {
             Self::ToggleKeepAlive => "Toggle keep-alive (never auto-hibernate)",
             Self::RemoveProject => "Remove project",
             Self::OpenInEditor => "Open in editor/IDE",
-            Self::OpenInfo => "Show session info",
             Self::OpenPullRequest => "Open PR in browser",
             Self::RefreshPrStatus => "Refresh PR status",
             Self::OpenCommander => "Open commander session",
             Self::ToggleConversationOverlay => "Open/close conversation overlay (TTS)",
             Self::ToggleVoiceInput => "Voice input: record / send (STT)",
             Self::OpenReviewDiff => "Review diff & comment",
+            Self::TogglePane => "Toggle preview/diff/shell view",
+            Self::TogglePaneReverse => "Toggle view (reverse)",
+            Self::ShrinkLeftPane => "Shrink left pane",
+            Self::GrowLeftPane => "Grow left pane",
             Self::ShowHelp => "Show help",
             Self::ShowSettings => "Settings",
             Self::Quit => "Quit",
             Self::ScrollUp => "Scroll up",
             Self::ScrollDown => "Scroll down",
-            Self::PageUp => "First card in column / page up in modals",
-            Self::PageDown => "Last card in column / page down in modals",
+            Self::PageUp => "Page up in the right pane",
+            Self::PageDown => "Page down in the right pane",
             Self::GenerateSummary => "Generate AI summary",
             Self::ScanDirectory => "Scan directory for repos",
             Self::MoveToSection => "Move session to section…",
-            Self::ToggleViewMode => "Cycle view: project / sections / stacks / board",
             Self::ToggleSection => "Collapse/expand section",
-            Self::TogglePane => "Cycle right pane: preview / info / shell",
-            Self::TogglePaneReverse => "Cycle right pane (reverse)",
-            Self::ShrinkLeftPane => "Narrow the session list",
-            Self::GrowLeftPane => "Widen the session list",
+            Self::ToggleViewMode => "Cycle project / sections / section stacks view",
             Self::EditServerPrograms => "Edit server's program list…",
             Self::AddRemoteServer => "Add remote server",
             Self::RemoveRemoteServer => "Remove remote server",
@@ -282,12 +270,10 @@ impl BindableAction {
         match self {
             Self::NavigateUp => "up",
             Self::NavigateDown => "down",
-            Self::NextGroup => "next column",
-            Self::PreviousGroup => "prev column",
+            Self::NextGroup => "next group",
+            Self::PreviousGroup => "prev group",
             Self::NavigateFirst => "first",
             Self::NavigateLast => "last",
-            Self::NavigateLeft => "prev column",
-            Self::NavigateRight => "next column",
             Self::ListPageUp => "list page up",
             Self::ListPageDown => "list page down",
             Self::Select => "attach",
@@ -308,29 +294,28 @@ impl BindableAction {
             Self::ToggleKeepAlive => "keep alive",
             Self::RemoveProject => "remove project",
             Self::OpenInEditor => "edit",
-            Self::OpenInfo => "info",
             Self::OpenPullRequest => "open PR",
             Self::RefreshPrStatus => "refresh PR",
             Self::OpenCommander => "commander",
             Self::ToggleConversationOverlay => "conversation",
             Self::ToggleVoiceInput => "voice",
             Self::OpenReviewDiff => "review",
+            Self::TogglePane => "view",
+            Self::TogglePaneReverse => "view back",
+            Self::ShrinkLeftPane => "shrink",
+            Self::GrowLeftPane => "grow",
             Self::ShowHelp => "help",
             Self::ShowSettings => "settings",
             Self::Quit => "quit",
             Self::ScrollUp => "scroll up",
             Self::ScrollDown => "scroll down",
-            Self::PageUp => "first card",
-            Self::PageDown => "last card",
+            Self::PageUp => "page up",
+            Self::PageDown => "page down",
             Self::GenerateSummary => "summary",
             Self::ScanDirectory => "scan",
             Self::MoveToSection => "move",
-            Self::ToggleViewMode => "view",
-            Self::ToggleSection => "collapse",
-            Self::TogglePane => "pane",
-            Self::TogglePaneReverse => "pane back",
-            Self::ShrinkLeftPane => "narrower",
-            Self::GrowLeftPane => "wider",
+            Self::ToggleSection => "toggle section",
+            Self::ToggleViewMode => "view mode",
             Self::EditServerPrograms => "server programs",
             Self::AddRemoteServer => "add server",
             Self::RemoveRemoteServer => "remove server",
@@ -349,8 +334,6 @@ impl BindableAction {
             | Self::PreviousGroup
             | Self::NavigateFirst
             | Self::NavigateLast
-            | Self::NavigateLeft
-            | Self::NavigateRight
             | Self::ListPageUp
             | Self::ListPageDown => "Navigation",
             Self::Select
@@ -361,8 +344,7 @@ impl BindableAction {
             | Self::ChangeProgram
             | Self::ToggleKeepAlive
             | Self::DeleteSession
-            | Self::OpenInEditor
-            | Self::OpenInfo => "Sessions",
+            | Self::OpenInEditor => "Sessions",
             Self::NewStackedSession
             | Self::PushStack
             | Self::CascadeMergeMain
@@ -377,16 +359,16 @@ impl BindableAction {
             Self::AddRemoteServer | Self::RemoveRemoteServer | Self::EditServerPrograms => {
                 "Remote Servers"
             }
-            Self::MoveToSection | Self::ToggleViewMode | Self::ToggleSection => "Sections",
-            Self::TogglePane
-            | Self::TogglePaneReverse
-            | Self::ShrinkLeftPane
-            | Self::GrowLeftPane => "Right Pane",
+            Self::ToggleViewMode | Self::MoveToSection | Self::ToggleSection => "Sections & View",
             Self::OpenReviewDiff
             | Self::GenerateSummary
             | Self::OpenCommander
             | Self::ToggleConversationOverlay
             | Self::ToggleVoiceInput => "Review & AI",
+            Self::TogglePane
+            | Self::TogglePaneReverse
+            | Self::ShrinkLeftPane
+            | Self::GrowLeftPane => "Layout",
             Self::ScrollUp | Self::ScrollDown | Self::PageUp | Self::PageDown => "Scrolling",
             Self::ShowHelp | Self::ShowSettings | Self::Quit => "Application",
         }
@@ -404,8 +386,6 @@ impl FromStr for BindableAction {
             "previous_group" => Ok(Self::PreviousGroup),
             "navigate_first" => Ok(Self::NavigateFirst),
             "navigate_last" => Ok(Self::NavigateLast),
-            "navigate_left" => Ok(Self::NavigateLeft),
-            "navigate_right" => Ok(Self::NavigateRight),
             "list_page_up" => Ok(Self::ListPageUp),
             "list_page_down" => Ok(Self::ListPageDown),
             "select" => Ok(Self::Select),
@@ -426,13 +406,16 @@ impl FromStr for BindableAction {
             "toggle_keep_alive" => Ok(Self::ToggleKeepAlive),
             "remove_project" => Ok(Self::RemoveProject),
             "open_in_editor" => Ok(Self::OpenInEditor),
-            "open_info" => Ok(Self::OpenInfo),
             "open_pull_request" => Ok(Self::OpenPullRequest),
             "refresh_pr_status" => Ok(Self::RefreshPrStatus),
             "open_commander" => Ok(Self::OpenCommander),
             "toggle_conversation_overlay" => Ok(Self::ToggleConversationOverlay),
             "toggle_voice_input" => Ok(Self::ToggleVoiceInput),
             "open_review_diff" => Ok(Self::OpenReviewDiff),
+            "toggle_pane" => Ok(Self::TogglePane),
+            "toggle_pane_reverse" => Ok(Self::TogglePaneReverse),
+            "shrink_left_pane" => Ok(Self::ShrinkLeftPane),
+            "grow_left_pane" => Ok(Self::GrowLeftPane),
             "show_help" => Ok(Self::ShowHelp),
             "show_settings" => Ok(Self::ShowSettings),
             "quit" => Ok(Self::Quit),
@@ -443,12 +426,8 @@ impl FromStr for BindableAction {
             "generate_summary" => Ok(Self::GenerateSummary),
             "scan_directory" => Ok(Self::ScanDirectory),
             "move_to_section" => Ok(Self::MoveToSection),
-            "toggle_view_mode" => Ok(Self::ToggleViewMode),
             "toggle_section" => Ok(Self::ToggleSection),
-            "toggle_pane" => Ok(Self::TogglePane),
-            "toggle_pane_reverse" => Ok(Self::TogglePaneReverse),
-            "shrink_left_pane" => Ok(Self::ShrinkLeftPane),
-            "grow_left_pane" => Ok(Self::GrowLeftPane),
+            "toggle_view_mode" => Ok(Self::ToggleViewMode),
             "edit_server_programs" => Ok(Self::EditServerPrograms),
             "add_remote_server" => Ok(Self::AddRemoteServer),
             "remove_remote_server" => Ok(Self::RemoveRemoteServer),
@@ -733,16 +712,8 @@ impl Default for KeyBindings {
         );
         bindings.insert(BindableAction::NavigateFirst, vec![kb(KeyCode::Home, none)]);
         bindings.insert(BindableAction::NavigateLast, vec![kb(KeyCode::End, none)]);
-        bindings.insert(
-            BindableAction::NavigateLeft,
-            vec![kb(KeyCode::Char('h'), none), kb(KeyCode::Left, none)],
-        );
-        bindings.insert(
-            BindableAction::NavigateRight,
-            vec![kb(KeyCode::Char('l'), none), kb(KeyCode::Right, none)],
-        );
-        // PgUp/PgDn page the session list / board column; `PageUp`/`PageDown`
-        // (Ctrl-u/Ctrl-d) jump to the column's first/last card instead.
+        // PgUp/PgDn page the session list; the right pane has its own paging
+        // under `PageUp`/`PageDown` (Ctrl-u/Ctrl-d) further down.
         bindings.insert(BindableAction::ListPageUp, vec![kb(KeyCode::PageUp, none)]);
         bindings.insert(
             BindableAction::ListPageDown,
@@ -797,7 +768,6 @@ impl Default for KeyBindings {
             BindableAction::OpenPullRequest,
             vec![kb(KeyCode::Char('o'), none)],
         );
-        bindings.insert(BindableAction::OpenInfo, vec![kb(KeyCode::Char('i'), none)]);
         bindings.insert(
             BindableAction::OpenCommander,
             vec![kb(KeyCode::Char('C'), shift)],
@@ -818,20 +788,13 @@ impl Default for KeyBindings {
             BindableAction::MoveToSection,
             vec![kb(KeyCode::Char('m'), none)],
         );
-        bindings.insert(
-            BindableAction::ToggleViewMode,
-            vec![kb(KeyCode::Char('v'), none)],
-        );
-        bindings.insert(BindableAction::ToggleSection, vec![]);
 
-        // Right pane (list views only)
+        // Pane control
         bindings.insert(BindableAction::TogglePane, vec![kb(KeyCode::Tab, none)]);
         bindings.insert(
             BindableAction::TogglePaneReverse,
             vec![kb(KeyCode::BackTab, shift)],
         );
-        // `<` / `>` need both modifier forms registered: they are shifted
-        // characters, and terminals disagree on whether they also report SHIFT.
         bindings.insert(
             BindableAction::ShrinkLeftPane,
             vec![kb(KeyCode::Char('<'), shift), kb(KeyCode::Char('<'), none)],
@@ -850,6 +813,11 @@ impl Default for KeyBindings {
         bindings.insert(
             BindableAction::ScanDirectory,
             vec![kb(KeyCode::Char('S'), shift)],
+        );
+        bindings.insert(BindableAction::ToggleSection, vec![]);
+        bindings.insert(
+            BindableAction::ToggleViewMode,
+            vec![kb(KeyCode::Char('v'), none)],
         );
 
         // Info Pane
@@ -1259,46 +1227,6 @@ mod tests {
     }
 
     #[test]
-    fn test_navigate_left_right_default_bindings() {
-        let kb = KeyBindings::default();
-        for (code, action) in [
-            (KeyCode::Char('h'), BindableAction::NavigateLeft),
-            (KeyCode::Left, BindableAction::NavigateLeft),
-            (KeyCode::Char('l'), BindableAction::NavigateRight),
-            (KeyCode::Right, BindableAction::NavigateRight),
-        ] {
-            let key = KeyEvent::new(code, KeyModifiers::NONE);
-            assert_eq!(kb.resolve(&key), Some(action), "{code:?}");
-        }
-    }
-
-    #[test]
-    fn test_navigate_left_right_config_names_round_trip() {
-        for action in [BindableAction::NavigateLeft, BindableAction::NavigateRight] {
-            assert_eq!(
-                BindableAction::from_str(action.config_name()).unwrap(),
-                action
-            );
-        }
-    }
-
-    #[test]
-    fn test_open_info_default_bound_to_i() {
-        let kb = KeyBindings::default();
-        let key = KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE);
-        assert_eq!(kb.resolve(&key), Some(BindableAction::OpenInfo));
-    }
-
-    #[test]
-    fn test_open_info_config_name_round_trips() {
-        assert_eq!(
-            BindableAction::from_str(BindableAction::OpenInfo.config_name()).unwrap(),
-            BindableAction::OpenInfo
-        );
-        assert_eq!(BindableAction::OpenInfo.config_name(), "open_info");
-    }
-
-    #[test]
     fn test_default_move_to_section_bound_to_m() {
         let kb = KeyBindings::default();
         let key = KeyEvent::new(KeyCode::Char('m'), KeyModifiers::NONE);
@@ -1574,9 +1502,9 @@ mod tests {
                 "Projects",
                 "Pull Requests",
                 "Remote Servers",
-                "Sections",
-                "Right Pane",
+                "Sections & View",
                 "Review & AI",
+                "Layout",
                 "Scrolling",
                 "Application",
             ],
