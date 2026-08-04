@@ -92,23 +92,52 @@ impl App {
                 debug!("Session removed: {}", session_id);
                 self.refresh_list_items().await;
             }
-            StateUpdate::SessionDiffReady {
+            StateUpdate::PreviewReady {
+                spawned_at,
                 session_id,
+                project_id,
+                preview_content,
+                shell_content,
                 diff_info,
             } => {
-                self.ui_state.diff_fetch_spawned_at = None;
-                // Only apply if the same session is still selected (compare
-                // ids; session ids are unique across backends).
-                if self.ui_state.selected_session_id.map(|r| r.id) == Some(session_id) {
+                // Release the in-flight guard iff this result owns it. Keyed on
+                // the spawn token, not the selection: a result whose guard has
+                // since been replaced must not clear the newer fetch's guard,
+                // and a result for a selection that moved on *without* a
+                // respawn still has to release its own, or the next fetch is
+                // blocked until the 5s backstop.
+                if self.ui_state.preview_update_spawned_at == Some(spawned_at) {
+                    self.ui_state.preview_update_spawned_at = None;
+                }
+                // Only paint if the same thing is still selected — otherwise the
+                // pane would briefly show another session's output. Session and
+                // project ids are unique across backends, so comparing ids is
+                // enough.
+                let still_selected = self.ui_state.selected_session_id.map(|r| r.id) == session_id
+                    && self.ui_state.selected_project_id.map(|(_, p)| p) == project_id;
+                if still_selected {
+                    self.ui_state.preview_content = preview_content;
+                    self.ui_state.shell_content = shell_content;
                     self.ui_state.diff_info = diff_info;
                 } else {
-                    debug!("Discarding stale SessionDiffReady (selection changed)");
+                    debug!("Discarding stale PreviewReady (selection changed)");
                 }
             }
-            StateUpdate::EnrichedPrReady { session_id, info } => {
-                self.ui_state.enriched_pr_fetch_spawned_at = None;
+            StateUpdate::EnrichedPrReady {
+                spawned_at,
+                session_id,
+                info,
+            } => {
+                // Same generation-token rule as `PreviewReady` above.
+                if self.ui_state.enriched_pr_fetch_spawned_at == Some(spawned_at) {
+                    self.ui_state.enriched_pr_fetch_spawned_at = None;
+                }
                 // Only apply if the session is still selected
                 if self.ui_state.selected_session_id.map(|r| r.id) == Some(session_id) {
+                    // An empty result caches nothing, so record the attempt
+                    // separately — otherwise an open Info surface would refetch
+                    // (spawning `gh`) every few seconds for the whole session.
+                    self.ui_state.enriched_pr_unavailable = info.is_none().then_some(session_id);
                     self.ui_state.enriched_pr = info.map(|pr| (session_id, pr));
                 } else {
                     debug!("Discarding stale EnrichedPrReady for {}", session_id);
@@ -161,7 +190,7 @@ impl App {
                 self.refresh_list_items().await;
                 // Select the newly created session
                 self.select_session_in_tree(session_id);
-                self.spawn_diff_fetch();
+                self.spawn_preview_update();
             }
             StateUpdate::SessionCreateFailed { message } => {
                 debug!("Session creation failed: {}", message);
@@ -283,8 +312,8 @@ impl App {
                 // move relocates it); keep it selected and refresh the Info
                 // modal's diff if it is open.
                 if self.select_session_in_tree(session_id) {
-                    self.ui_state.diff_fetch_spawned_at = None;
-                    self.spawn_diff_fetch();
+                    self.ui_state.preview_update_spawned_at = None;
+                    self.spawn_preview_update();
                 }
             }
             StateUpdate::NewSessionProgramsLoaded {
@@ -402,7 +431,7 @@ impl App {
                         diff,
                         comments,
                         reviewed,
-                        segments,
+                        models,
                         content_hash,
                         dropped_comments,
                     } = *prepared;
@@ -410,7 +439,7 @@ impl App {
                     state.content_hash = content_hash;
                     state.reviewed = reviewed.into_iter().collect();
                     state.select_first_unreviewed();
-                    state.prime_segments(segments);
+                    state.prime_views(models);
                     self.reset_review_images();
                     self.ensure_review_image(&state).await;
                     self.ensure_review_file_lines(&state).await;
@@ -517,7 +546,7 @@ impl App {
                                 diff,
                                 comments,
                                 reviewed,
-                                segments,
+                                models,
                                 content_hash,
                                 dropped_comments,
                                 ..
@@ -526,7 +555,7 @@ impl App {
                                 diff,
                                 comments,
                                 reviewed.into_iter().collect(),
-                                segments,
+                                models,
                                 content_hash,
                             );
                             // The drop notice wins over "Review refreshed": the

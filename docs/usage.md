@@ -59,7 +59,13 @@ claude-commander --config /path/to/config.toml
 
 ## Views and the Board
 
-The session list has four views, cycled with `v`: three full-width **list** views (grouped by project, by section, or by section with PR stacks) and the full-screen kanban **board** (see [Views](../README.md#views)). The project list is the default; `v` rotates project → sections → stacks → board → project, skipping the section views when no `[[sections]]` are configured, and the chosen view is remembered across restarts. No view has a side panel — `i` opens a session's Info modal, `Enter`/`s` its shell, and `r` its review diff.
+The session list has four views, cycled with `v`: three **list** views (grouped by project, by section, or by section with PR stacks) and the full-screen kanban **board** (see [Views](../README.md#views)). The project list is the default; `v` rotates project → sections → stacks → board → project, skipping the section views when no `[[sections]]` are configured, and the chosen view is remembered across restarts.
+
+The three list views pair the list with a **right-hand pane**, cycled with `Tab` (or `Shift-Tab` to go back) through three tabs: **Preview** (a live tail of the agent's pane), **Info** (the selected session's metadata, diffstat, PR details and stack chain — the same content the `i` modal shows, including `g` to generate an AI summary), and **Shell** (a live tail of its shell). `<` / `>` move the divider, and the width is remembered across restarts. A project row has no agent pane, so it cycles Shell ↔ Info and its Info tab describes the project — path, main branch, and any reason its background pull is blocked.
+
+The pane is passive — keys always drive the list — so the two live captures render dimmed by default (`dim_unfocused_preview`); Info is left at full brightness, being static text rather than a tail. The mouse wheel over the pane scrolls its content rather than moving the selection. On a capture tab, scrolling away from the bottom stops the auto-follow and wheeling back to the bottom resumes it; Info stays anchored where you leave it.
+
+The board is a full-screen takeover with no side pane, so `Tab` and `<`/`>` do nothing there — `i` is the only way to reach a session's Info there. In every view, `i` opens the Info modal, `Enter`/`s` a session's shell, and `r` its review diff.
 
 The board is described below. Each column is a section, and every session is its own card bordered in its project's colour. The leftmost column is a project sidebar listing every project (sorted alphabetically) with its session count.
 

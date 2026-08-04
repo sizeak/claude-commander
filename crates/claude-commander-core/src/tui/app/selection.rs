@@ -257,14 +257,71 @@ impl App {
             .map(|r| (r.pos, r.button))
     }
 
-    /// Move the selection within the board column under the mouse `x`, mirroring
-    /// the old left-pane wheel: one notch = one row up/down in that column.
+    /// Whether the selection is a project row rather than a session.
+    pub(super) fn is_project_selected(&self) -> bool {
+        self.ui_state.is_project_selected()
+    }
+
+    /// Scroll state of the right pane's active tab, so wheel handling doesn't
+    /// need to know which tab is showing.
+    pub(super) fn active_pane_state(&mut self) -> &mut PreviewState {
+        match self
+            .ui_state
+            .right_pane_view
+            .effective(self.is_project_selected())
+        {
+            RightPaneView::Preview => &mut self.ui_state.preview_state,
+            RightPaneView::Info => &mut self.ui_state.info_state,
+            RightPaneView::Shell => &mut self.ui_state.shell_state,
+        }
+    }
+
+    /// Move the list/pane divider by `delta` percentage points, clamped to
+    /// [`MIN_LEFT_PANE_PCT`]..=[`MAX_LEFT_PANE_PCT`], and persist the result.
+    /// A no-op in board view (no divider) and when already at the clamp, so a
+    /// held key can't spam `tui.json` writes.
+    pub(super) async fn resize_left_pane(&mut self, delta: i16) {
+        if self.ui_state.view_mode.is_board() {
+            return;
+        }
+        let next = (self.ui_state.left_pane_pct as i16 + delta)
+            .clamp(MIN_LEFT_PANE_PCT as i16, MAX_LEFT_PANE_PCT as i16) as u16;
+        if next == self.ui_state.left_pane_pct {
+            return;
+        }
+        self.ui_state.left_pane_pct = next;
+        self.tui_prefs.set_left_pane_pct(next).await;
+    }
+
+    /// Whether an absolute terminal column falls in the right pane, using the
+    /// rect recorded at render time (so it matches what is actually on screen).
+    /// Always false in board view, which records no right pane.
+    pub(super) fn x_in_right_pane(&self, x: u16) -> bool {
+        self.ui_state
+            .right_pane_rect
+            .is_some_and(|r| x >= r.x && x < r.right())
+    }
+
+    /// Route a wheel notch by the column it happened over.
+    ///
+    /// In a list view: over the session list it steps the selection, and over the
+    /// right pane it scrolls that pane's content (three lines a notch, which also
+    /// breaks follow-the-tail until the user wheels back to the bottom). On the
+    /// board it moves the selection within the hovered column — one notch, one
+    /// row.
     pub(super) fn scroll_pane_at(&mut self, x: u16, direction: ScrollDirection) {
-        // List views: the wheel steps the single full-width list selection.
         if !self.ui_state.view_mode.is_board() {
-            match direction {
-                ScrollDirection::Up => self.nav_up(),
-                ScrollDirection::Down => self.nav_down(),
+            if self.x_in_right_pane(x) {
+                const LINES_PER_TICK: u16 = 3;
+                match direction {
+                    ScrollDirection::Up => self.active_pane_state().scroll_up(LINES_PER_TICK),
+                    ScrollDirection::Down => self.active_pane_state().scroll_down(LINES_PER_TICK),
+                }
+            } else {
+                match direction {
+                    ScrollDirection::Up => self.nav_up(),
+                    ScrollDirection::Down => self.nav_down(),
+                }
             }
             return;
         }
@@ -302,14 +359,14 @@ impl App {
             if let Some(pos) = self.ui_state.board.pos_of_session_number(number) {
                 self.ui_state.board_state.select(Some(pos));
                 self.update_selection();
-                self.ui_state.diff_fetch_spawned_at = None;
-                self.spawn_diff_fetch();
+                self.ui_state.preview_update_spawned_at = None;
+                self.spawn_preview_update();
             }
         } else if let Some(idx) = session_number_to_list_index(&self.ui_state.list_items, number) {
             self.ui_state.list_state.select(Some(idx));
             self.update_selection();
-            self.ui_state.diff_fetch_spawned_at = None;
-            self.spawn_diff_fetch();
+            self.ui_state.preview_update_spawned_at = None;
+            self.spawn_preview_update();
         }
     }
 
@@ -404,8 +461,8 @@ impl App {
         if let Some(id) = session_id
             && self.select_session_in_tree(id)
         {
-            self.ui_state.diff_fetch_spawned_at = None;
-            self.spawn_diff_fetch();
+            self.ui_state.preview_update_spawned_at = None;
+            self.spawn_preview_update();
         }
     }
 }

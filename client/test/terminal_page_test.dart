@@ -24,6 +24,7 @@ void main() {
   Widget wrap({
     EdgeInsets viewInsets = EdgeInsets.zero,
     EdgeInsets viewPadding = const EdgeInsets.only(bottom: 24),
+    DateTime Function()? clock,
   }) => MaterialApp(
     home: Builder(
       builder: (context) => MediaQuery(
@@ -38,6 +39,7 @@ void main() {
           api: api,
           handle: testHandle,
           session: sessionInfo(),
+          clock: clock,
         ),
       ),
     ),
@@ -95,15 +97,21 @@ void main() {
     expect(text, contains('✓'));
   });
 
-  testWidgets('a detached event enables the reconnect button', (tester) async {
+  // The reconnect button must never be gated on the attach *looking* dead. If
+  // the network path vanishes without a TCP FIN reaching us (Wi-Fi drop, cell
+  // handoff) the socket goes half-open: no detach event ever arrives, so the UI
+  // still reads "attached" while the pane is frozen. Disabling the button in
+  // exactly that state is what turns a recoverable stall into a dead end.
+  testWidgets('the reconnect button stays enabled while the attach looks live', (
+    tester,
+  ) async {
     await tester.pumpWidget(wrap());
     await tester.pump();
 
-    // While live, reconnect is disabled.
     IconButton reconnect() => tester.widget<IconButton>(
       find.widgetWithIcon(IconButton, Icons.refresh),
     );
-    expect(reconnect().onPressed, isNull);
+    expect(reconnect().onPressed, isNotNull);
 
     await emitAndPump(
       tester,
@@ -112,6 +120,133 @@ void main() {
 
     expect(reconnect().onPressed, isNotNull);
     expect(find.textContaining('detached: session ended'), findsOneWidget);
+  });
+
+  // Reconnecting while the old attach may still be live must tear the old one
+  // down first, or it becomes a zombie: the cdylib's registry entry keeps its
+  // control sender alive, so the pump's `rx.recv()` never ends, and the pump only
+  // notices Dart dropped the stream by failing to push an Output frame — which
+  // never arrives on the half-open socket this button exists to escape. The
+  // leaked pump holds the WS open and, while the network is fine, keeps answering
+  // the server's pings, so the server keeps a `tmux attach-session` child alive.
+  testWidgets('reconnecting detaches the previous attach before re-attaching', (
+    tester,
+  ) async {
+    await tester.pumpWidget(wrap());
+    await tester.pump();
+
+    final firstId =
+        api.lastCall('attachTerminal')!.args['attachId'] as String;
+
+    // Note: no detached/error event — the attach still looks live, which is
+    // exactly the half-open case.
+    await tester.tap(find.widgetWithIcon(IconButton, Icons.refresh));
+    await tester.pump();
+
+    // Assert on ordering, not just that a detach happened: detaching after the
+    // id is regenerated would tear down the *new* attach instead of the old one.
+    final detachIndex = api.calls.indexWhere(
+      (c) => c.method == 'terminalDetach' && c.args['attachId'] == firstId,
+    );
+    expect(
+      detachIndex,
+      isNonNegative,
+      reason: 'the superseded attach must be detached, not abandoned',
+    );
+    final reattachIndex = api.calls.lastIndexWhere(
+      (c) => c.method == 'attachTerminal',
+    );
+    expect(detachIndex, lessThan(reattachIndex));
+
+    // And it really did re-attach, under a fresh id.
+    expect(api.attachTerminalCount, 2);
+    expect(api.calls[reattachIndex].args['attachId'], isNot(firstId));
+  });
+
+  // Android walks resumed → inactive → hidden → paused on the way out and back
+  // in again on the way in; `handleAppLifecycleStateChanged` validates those
+  // transitions, so the tests must walk them rather than jumping.
+  Future<void> background(WidgetTester tester) async {
+    for (final state in const [
+      AppLifecycleState.inactive,
+      AppLifecycleState.hidden,
+      AppLifecycleState.paused,
+    ]) {
+      tester.binding.handleAppLifecycleStateChanged(state);
+    }
+    await tester.pump();
+  }
+
+  Future<void> foreground(WidgetTester tester) async {
+    for (final state in const [
+      AppLifecycleState.hidden,
+      AppLifecycleState.inactive,
+      AppLifecycleState.resumed,
+    ]) {
+      tester.binding.handleAppLifecycleStateChanged(state);
+    }
+    await tester.pump();
+  }
+
+  // A frozen background process can't answer the server's heartbeat pings, so
+  // past the shared deadline the server has certainly killed the attach — even
+  // though a dropped network path means no detach frame ever reached us. Coming
+  // back to a permanently dead pane is the bug; re-attach without being asked.
+  testWidgets('foregrounding after the heartbeat deadline re-attaches', (
+    tester,
+  ) async {
+    var now = DateTime(2026, 8, 3, 12);
+    await tester.pumpWidget(wrap(clock: () => now));
+    await tester.pump(); // subscribe
+    await tester.pump(); // let attachDeadAfter resolve
+    expect(api.attachTerminalCount, 1);
+
+    await background(tester);
+    // Longer than the 60s the fake reports, so the attach is provably gone.
+    now = now.add(const Duration(minutes: 5));
+    await foreground(tester);
+
+    expect(api.attachTerminalCount, 2);
+  });
+
+  // The other half of the contract: below the deadline the attach may well still
+  // be live, and re-attaching spawns a fresh tmux attach child — which loses a
+  // scrolled copy-mode view. A glance at a notification must not cost the user
+  // their place in the scrollback.
+  testWidgets('a brief background does not disturb a live attach', (
+    tester,
+  ) async {
+    var now = DateTime(2026, 8, 3, 12);
+    await tester.pumpWidget(wrap(clock: () => now));
+    await tester.pump();
+    await tester.pump();
+    expect(api.attachTerminalCount, 1);
+
+    await background(tester);
+    now = now.add(const Duration(seconds: 5));
+    await foreground(tester);
+
+    expect(api.attachTerminalCount, 1);
+  });
+
+  // When the detach *did* reach us the clock is irrelevant — the pane is known
+  // dead, so a resume of any length must re-attach it.
+  testWidgets('foregrounding re-attaches an attach that already ended', (
+    tester,
+  ) async {
+    var now = DateTime(2026, 8, 3, 12);
+    await tester.pumpWidget(wrap(clock: () => now));
+    await tester.pump();
+    await tester.pump();
+
+    await emitAndPump(tester, signal(TerminalEventKind.error, 'lost'));
+    expect(api.attachTerminalCount, 1);
+
+    await background(tester);
+    now = now.add(const Duration(seconds: 1));
+    await foreground(tester);
+
+    expect(api.attachTerminalCount, 2);
   });
 
   testWidgets('a ready event re-announces the terminal size', (tester) async {

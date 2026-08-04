@@ -1204,6 +1204,9 @@ impl CommanderService {
             reviewed,
             content_hash,
             dropped_comments,
+            // Moved, not cloned: nothing below needs the composition again, and
+            // a remote client re-parses this instead of the lossier `diff`.
+            raw: Some(composed.raw),
         })
     }
 
@@ -3298,6 +3301,29 @@ mod tests {
             ApplyOutcome::Deferred { count, .. } => assert_eq!(count, 1),
             other => panic!("expected Deferred, got {other:?}"),
         }
+    }
+
+    /// A snapshot carries the composition it was parsed from, so a remote
+    /// client can lay the diff out itself (word diff, side-by-side, context
+    /// expansion) instead of re-deriving it from the lossier wire model.
+    #[tokio::test]
+    async fn open_review_carries_the_raw_composition() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let svc = service(&dir);
+        let (sid, _repo) = seed_review_repo(&svc, &dir).await;
+
+        let snapshot = svc.open_review(&sid).await.unwrap();
+        let raw = snapshot.raw.expect("the raw diff must reach the client");
+        assert!(
+            raw.contains("+++ b/changed.txt"),
+            "expected the composed unified diff, got: {raw}"
+        );
+        // It is the *same* text `content_hash` was taken over, so a client that
+        // re-parses it cannot disagree with the server's staleness check.
+        assert_eq!(
+            xxhash_rust::xxh3::xxh3_64(raw.as_bytes()),
+            snapshot.content_hash
+        );
     }
 
     /// The safety precondition for the drop: a diff that fell back to

@@ -152,6 +152,19 @@ project_pull_interval_secs = 3600
 # Use rounded border corners (╭╮╰╯) instead of square (┌┐└┘)
 rounded_borders = false
 
+# Dim the live-capture tabs (Preview / Shell) of the list views' right-hand
+# pane. They are passive tails — keys always drive the session list — so they
+# render dimmed by default to keep the list visually dominant. Set to false to
+# render them at full brightness. The pane's Info tab is never dimmed (it is
+# static text, not a tail), and the board has no right pane at all.
+dim_unfocused_preview = true
+
+# How much to dim the right pane's colours (0.0 = fully dimmed/black, 1.0 = no
+# dimming). Uses a foreground colour override rather than the terminal DIM
+# modifier, for cross-terminal consistency. Only applies when
+# dim_unfocused_preview is true.
+dim_unfocused_opacity = 0.4
+
 # When opening the review view, precompute every file's render caches
 # (word-diff segments + syntax highlighting) up front behind a loading spinner,
 # instead of building each file's cache lazily on first navigation. Trades a
@@ -257,6 +270,10 @@ state_sync_interval_ms = 2000
 # page_up = ["Ctrl-u"]                     # first card in the board column
 # page_down = ["Ctrl-d"]                   # last card in the board column
 # open_info = ["i"]
+# toggle_pane = ["Tab"]                    # cycle the right pane: Preview / Info / Shell
+# toggle_pane_reverse = ["Shift-Tab"]
+# shrink_left_pane = ["<"]                 # move the list/pane divider left
+# grow_left_pane = [">"]                   # move it right
 # quit = ["q", "Ctrl-c"]
 # toggle_keep_alive = ["K"]                # palette-only by default; bind a key here
 
@@ -473,6 +490,26 @@ Available presets:
 When `preset` is unset (or `"(auto)"`), the theme auto-detects your terminal's color capability.
 
 Individual color overrides (e.g. `border_focused = "#ff6600"`) still apply on top of the chosen preset.
+
+### Light terminals
+
+Every preset above is designed for a **dark** terminal background. On a light one, declare it:
+
+```toml
+[theme]
+appearance = "light"   # "dark" (default) | "light"
+```
+
+This does not swap the palette — it changes the surface that *derived fills* are blended against.
+The review diff view (`R`) builds its add/remove line bands by scaling the theme's diff colours
+toward the background; scaling toward black on a light terminal produces a near-black band under
+dark text. With `appearance = "light"` those bands blend toward white instead, so they read as a
+pale green/red wash.
+
+Nothing detects this for you — querying the terminal background (`OSC 11`) is deliberately out of
+scope — so it is a claim you make about your own terminal. Leaving it unset keeps whatever the
+preset declares, which is `dark` for all of them. Editable in-app from **Settings ▸ Theme ▸
+Appearance** (`,` key); clear the field to fall back to the preset.
 
 ## Session List Sections
 

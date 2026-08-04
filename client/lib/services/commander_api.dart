@@ -2,12 +2,16 @@ import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show visibleForTesting;
 
+import '../src/rust/api/diff.dart' as diff;
+import '../src/rust/api/diff.dart'
+    show DiffExpansion, DiffLayoutDto, DiffLayoutMode;
 import '../src/rust/api/mirrors.dart';
 import '../src/rust/api/registry.dart' as registry;
 import '../src/rust/api/review.dart' as review;
 // The DTO types unprefixed, so the abstract signatures read cleanly; the
 // prefixed alias above carries the forwarded functions.
-import '../src/rust/api/review.dart' show ApplyResult, ReviewSnapshotDto;
+import '../src/rust/api/review.dart'
+    show ApplyResult, ReviewFileDto, ReviewSnapshotDto;
 import '../src/rust/api/simple.dart' as simple;
 import '../src/rust/api/simple.dart' show ScanResultDto;
 import '../src/rust/api/terminal.dart' as terminal;
@@ -133,6 +137,13 @@ abstract class CommanderApi {
   /// whole thing into memory first.
   Future<int> imageMaxBytes();
 
+  /// How long a silent client can be away before the server has certainly torn
+  /// its terminal attach down, from the shared wire contract. A backgrounded app
+  /// can't answer the server's heartbeat pings, so the terminal uses this on
+  /// resume to tell "definitely dead, re-attach" from "might still be live,
+  /// leave it alone".
+  Future<Duration> attachDeadAfter();
+
   Future<String> addProject({required String handle, required String path});
 
   Future<void> removeProject({required String handle, required String id});
@@ -202,6 +213,19 @@ abstract class CommanderApi {
     required String sessionId,
     required String side,
     required String path,
+  });
+
+  /// Lay one file of a review diff out into rows of styled runs.
+  ///
+  /// Pure computation in the cdylib — no server involved, hence no `handle` —
+  /// but it goes through this seam like everything else so widget tests can
+  /// substitute a layout without loading the native library.
+  Future<DiffLayoutDto> diffRows({
+    required String? raw,
+    required ReviewFileDto file,
+    required DiffLayoutMode mode,
+    String? fileText,
+    List<DiffExpansion> expansions,
   });
 
   /// Open a live terminal attach. [attachId] is a caller-supplied per-attach id
@@ -427,6 +451,13 @@ class RustCommanderApi implements CommanderApi {
   @override
   Future<int> imageMaxBytes() => simple.imageMaxBytes();
 
+  /// The bridge carries plain milliseconds (a `u32`, so Dart sees an `int` rather
+  /// than a `BigInt`); rewrap it as a [Duration] here so no call site has to
+  /// remember the unit.
+  @override
+  Future<Duration> attachDeadAfter() async =>
+      Duration(milliseconds: await simple.attachDeadAfterMillis());
+
   @override
   Future<String> addProject({required String handle, required String path}) =>
       simple.addProject(handle: handle, path: path);
@@ -542,6 +573,23 @@ class RustCommanderApi implements CommanderApi {
     sessionId: sessionId,
     side: side,
     path: path,
+  );
+
+  @override
+  Future<DiffLayoutDto> diffRows({
+    required String? raw,
+    required ReviewFileDto file,
+    required DiffLayoutMode mode,
+    String? fileText,
+    List<DiffExpansion> expansions = const [],
+  }) => diff.diffRows(
+    raw: raw,
+    fallback: file,
+    mode: mode,
+    fileText: fileText,
+    expansions: expansions,
+    // Four columns, matching the TUI's default tab width.
+    tabWidth: 4,
   );
 
   @override

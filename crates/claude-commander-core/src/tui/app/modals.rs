@@ -1182,7 +1182,7 @@ impl App {
         let inner = block.inner(modal_area);
         frame.render_widget(block, modal_area);
 
-        let view = InfoView::new(self.build_session_info_content(), &self.theme);
+        let view = InfoView::new(self.build_info_content(), &self.theme);
         let lines = view.build_lines();
 
         let visible = inner.height;
