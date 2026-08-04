@@ -491,6 +491,26 @@ When `preset` is unset (or `"(auto)"`), the theme auto-detects your terminal's c
 
 Individual color overrides (e.g. `border_focused = "#ff6600"`) still apply on top of the chosen preset.
 
+### Light terminals
+
+Every preset above is designed for a **dark** terminal background. On a light one, declare it:
+
+```toml
+[theme]
+appearance = "light"   # "dark" (default) | "light"
+```
+
+This does not swap the palette — it changes the surface that *derived fills* are blended against.
+The review diff view (`R`) builds its add/remove line bands by scaling the theme's diff colours
+toward the background; scaling toward black on a light terminal produces a near-black band under
+dark text. With `appearance = "light"` those bands blend toward white instead, so they read as a
+pale green/red wash.
+
+Nothing detects this for you — querying the terminal background (`OSC 11`) is deliberately out of
+scope — so it is a claim you make about your own terminal. Leaving it unset keeps whatever the
+preset declares, which is `dark` for all of them. Editable in-app from **Settings ▸ Theme ▸
+Appearance** (`,` key); clear the field to fall back to the preset.
+
 ## Session List Sections
 
 Sections are the **columns** of the [board](../README.md#board). Each configured section becomes one column, and a session's card lands in the first column whose predicate it matches.

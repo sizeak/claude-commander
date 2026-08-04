@@ -23,9 +23,7 @@ use claude_commander_protocol::session::{SessionId, SessionStatus};
 use crate::api::mirrors::{
     AgentStatesSnapshotDto, OperationStatusDto, PreviewDataDto, WorkspaceSnapshotDto,
 };
-use crate::api::registry::{
-    call, map_client_err, parse_project_id, parse_session_id, with_client,
-};
+use crate::api::registry::{call, map_client_err, parse_project_id, parse_session_id, with_client};
 
 #[flutter_rust_bridge::frb(init)]
 pub fn init_app() {
@@ -102,11 +100,7 @@ pub fn get_session_detail(
 }
 
 /// Preview payload for a session (agent pane + diff text/stat + shell pane).
-pub fn session_preview(
-    handle: String,
-    id: String,
-    lines: Option<u32>,
-) -> Result<PreviewDataDto> {
+pub fn session_preview(handle: String, id: String, lines: Option<u32>) -> Result<PreviewDataDto> {
     let client = with_client(&handle)?;
     let sid = parse_session_id(&id)?;
     Ok(call(client.session_preview(sid, lines.map(|n| n as usize)))?.into())

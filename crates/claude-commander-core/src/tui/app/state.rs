@@ -431,7 +431,7 @@ impl App {
                         diff,
                         comments,
                         reviewed,
-                        segments,
+                        models,
                         content_hash,
                         dropped_comments,
                     } = *prepared;
@@ -439,7 +439,7 @@ impl App {
                     state.content_hash = content_hash;
                     state.reviewed = reviewed.into_iter().collect();
                     state.select_first_unreviewed();
-                    state.prime_segments(segments);
+                    state.prime_views(models);
                     self.reset_review_images();
                     self.ensure_review_image(&state).await;
                     self.ensure_review_file_lines(&state).await;
@@ -546,7 +546,7 @@ impl App {
                                 diff,
                                 comments,
                                 reviewed,
-                                segments,
+                                models,
                                 content_hash,
                                 dropped_comments,
                                 ..
@@ -555,7 +555,7 @@ impl App {
                                 diff,
                                 comments,
                                 reviewed.into_iter().collect(),
-                                segments,
+                                models,
                                 content_hash,
                             );
                             // The drop notice wins over "Review refreshed": the
