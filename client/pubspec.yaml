@@ -38,6 +38,10 @@ dependencies:
     path: rust_builder
   flutter_rust_bridge: 2.11.1
   flutter_secure_storage: ^10.3.1
+  # Non-secret device preferences (the selected theme). Deliberately not
+  # flutter_secure_storage: routing a UI preference through the Android Keystore
+  # / libsecret would gate the first frame's theme on the keyring being unlocked.
+  shared_preferences: ^2.3.2
   uuid: ^4.5.3
   # Terminal emulator widget for the live PTY view. Pinned to our fork's
   # `commander` branch, which carries local patches on top of upstream v4.0.0
@@ -108,6 +112,11 @@ flutter:
     - family: JetBrainsMono
       fonts:
         - asset: assets/fonts/JetBrainsMono-VF.ttf
+    # The LCARS theme's display face — condensed, uppercase-led. Only ever used
+    # for chrome: terminal output stays JetBrainsMono in every theme.
+    - family: Antonio
+      fonts:
+        - asset: assets/fonts/Antonio-VF.ttf
 
   # An image asset can refer to one or more resolution-specific "variants", see
   # https://flutter.dev/to/resolution-aware-images

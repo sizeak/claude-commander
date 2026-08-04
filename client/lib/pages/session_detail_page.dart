@@ -1,10 +1,11 @@
 import 'package:flutter/material.dart';
 
+import '../chrome/chrome.dart';
+import '../chrome/chrome_forms.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
-import '../theme/app_colors.dart';
-import '../theme/app_theme.dart';
+import '../theme/tokens.dart';
 import '../widgets/session_chips.dart';
 import 'review_page.dart';
 import 'terminal_page.dart';
@@ -262,7 +263,7 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
         'Stops the running program. The worktree is kept and the '
         'conversation resumes on next attach.',
     confirmLabel: 'Kill',
-    confirmColor: AppColors.amber,
+    confirmColor: CommanderTokens.of(context).attention,
     successMessage: 'Session killed',
     action: () => _store!.killSession(_id),
   );
@@ -271,7 +272,7 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
     title: 'Restart session?',
     message: 'Restarts the program in this session.',
     confirmLabel: 'Restart',
-    confirmColor: AppColors.teal,
+    confirmColor: CommanderTokens.of(context).working,
     successMessage: 'Session restarted',
     action: () => _store!.restartSession(_id),
   );
@@ -282,7 +283,7 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
         'Removes the session, its branch, and its worktree. '
         'This cannot be undone.',
     confirmLabel: 'Delete',
-    confirmColor: AppColors.red,
+    confirmColor: CommanderTokens.of(context).danger,
     successMessage: 'Session deleted',
     leaveOnSuccess: true,
     action: () => _store!.deleteSession(_id),
@@ -463,13 +464,14 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
             _paneSection(context, info),
           ],
           const SizedBox(height: 24),
-          _lifecycleBar(context, info),
+          _lifecycleBar(info),
         ],
       ),
     );
   }
 
   Widget _header(BuildContext context, SessionInfo info) {
+    final t = CommanderTokens.of(context);
     final section = info.sectionOverride ?? info.currentSection;
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -483,7 +485,7 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
                 padding: const EdgeInsets.only(top: 6),
                 child: Text(
                   '${info.projectName} · ${info.branch} · ${info.program}',
-                  style: AppTheme.mono(size: 12, color: AppColors.textMuted),
+                  style: t.meta(size: 12, color: t.textMuted),
                 ),
               ),
               const SizedBox(height: 10),
@@ -508,41 +510,42 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
     );
   }
 
-  /// A slim amber banner shown only while the agent is blocked on a prompt,
-  /// nudging the user into the Agent terminal (the only place the prompt can be
-  /// answered). We don't have the prompt text on the client, so the copy is
-  /// generic.
+  /// A slim attention-tinted banner shown only while the agent is blocked on a
+  /// prompt, nudging the user into the Agent terminal (the only place the
+  /// prompt can be answered). We don't have the prompt text on the client, so
+  /// the copy is generic.
+  ///
+  /// The tint comes from [SessionTone.waiting] rather than being derived here,
+  /// so the hint and the row of the session it describes can never drift apart:
+  /// one amber-tinted box in Mission Control, a salmon-top-bordered panel in
+  /// LCARS.
   Widget _waitingHint(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
-      decoration: BoxDecoration(
-        color: AppColors.amber.withValues(alpha: 0.08),
-        borderRadius: BorderRadius.circular(11),
-        border: Border.all(color: AppColors.amber.withValues(alpha: 0.35)),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            '?',
-            style: AppTheme.mono(
-              size: 12,
-              weight: FontWeight.w700,
-              color: AppColors.amber,
-            ),
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              'Waiting for input — answer in the Agent terminal.',
-              style: AppTheme.mono(
-                size: 11.5,
-                color: AppColors.amberText,
-                height: 1.4,
+    final t = CommanderTokens.of(context);
+    final tone = t.toneStyle(SessionTone.waiting);
+    return ChromePanel(
+      ChromePanelSpec(
+        tone: SessionTone.waiting,
+        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '?',
+              style: t.meta(
+                size: 12,
+                weight: FontWeight.w700,
+                color: tone.accent,
               ),
             ),
-          ),
-        ],
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'Waiting for input — answer in the Agent terminal.',
+                style: t.meta(size: 11.5, color: tone.onTint, height: 1.4),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -598,6 +601,13 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
   /// terminal. Shell / review / lifecycle are all reachable below, so the agent
   /// pane — the primary interaction — gets the hero treatment. The Changes card
   /// below is the diff entry point; Shell lives in the lifecycle bar.
+  ///
+  /// Deliberately **not** a chrome form. No form element expresses a full-width
+  /// prominent call to action: [ChromePanel] would flatten it to a bordered card
+  /// and [ChromeButtonBar]'s Mission Control cell is a 38px icon over a caption.
+  /// It needs neither — `filledButtonTheme` already resolves shape and colour
+  /// from the tokens, so this renders as a violet 12px-radius button in Mission
+  /// Control and a hard-cornered amber block in LCARS.
   Widget _agentHero(BuildContext context) {
     return SizedBox(
       width: double.infinity,
@@ -617,66 +627,68 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
   /// the review view is then simply empty, and this keeps it reachable on the
   /// phone layout, which has no review tab.
   Widget _detailSection(BuildContext context) {
+    final t = CommanderTokens.of(context);
     final diffStat = _detail?.diffStat;
+    // The Semantics wrapper stays outside the panel: the chrome's tappable panel
+    // carries a tap handler, but only LCARS marks it as a button, so the flag is
+    // asserted here for both.
     return Semantics(
       button: true,
-      child: Card(
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
+      child: ChromePanel(
+        ChromePanelSpec(
+          padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 12),
           onTap: widget.onOpenReview,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 12),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Text(
-                            'Changes',
-                            style: Theme.of(context).textTheme.titleSmall,
-                          ),
-                          const SizedBox(width: 7),
-                          Icon(
-                            Icons.rate_review_outlined,
-                            size: 14,
-                            color: AppColors.textFaint,
-                          ),
-                          const SizedBox(width: 3),
-                          Text(
-                            'review',
-                            style: AppTheme.mono(
-                              size: 11,
-                              color: AppColors.textFaint,
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 5),
-                      Text(
-                        diffStat == null || diffStat.isEmpty
-                            ? 'No changes'
-                            : diffStat,
-                        style: AppTheme.mono(color: AppColors.textMuted),
-                      ),
-                    ],
-                  ),
+          child: Row(
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Text(
+                          'Changes',
+                          style: Theme.of(context).textTheme.titleSmall,
+                        ),
+                        const SizedBox(width: 7),
+                        Icon(
+                          Icons.rate_review_outlined,
+                          size: 14,
+                          color: t.textFaint,
+                        ),
+                        const SizedBox(width: 3),
+                        Text(
+                          'review',
+                          style: t.meta(size: 11, color: t.textFaint),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 5),
+                    Text(
+                      diffStat == null || diffStat.isEmpty
+                          ? 'No changes'
+                          : diffStat,
+                      style: t.meta(color: t.textMuted),
+                    ),
+                  ],
                 ),
-                const Icon(Icons.chevron_right, color: AppColors.textFaint),
-              ],
-            ),
+              ),
+              Icon(Icons.chevron_right, color: t.textFaint),
+            ],
           ),
         ),
       ),
     );
   }
 
+  /// The on-demand terminal snapshot. Only the frame is themed: the captured
+  /// output itself stays `t.mono` on `t.terminalFg` over `t.terminalBg` in every
+  /// theme, because it is real agent output rather than chrome.
   Widget _paneSection(BuildContext context, SessionInfo info) {
+    final t = CommanderTokens.of(context);
     final pane = _detail?.paneContent;
-    return Card(
-      child: Padding(
+    return ChromePanel(
+      ChromePanelSpec(
         padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -701,18 +713,14 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
               constraints: const BoxConstraints(maxHeight: 320),
               padding: const EdgeInsets.all(10),
               decoration: BoxDecoration(
-                color: AppColors.bgTerminal,
+                color: t.terminalBg,
                 borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: AppColors.borderSubtle),
+                border: Border.all(color: t.borderSubtle),
               ),
               child: SingleChildScrollView(
                 child: SelectableText(
                   (pane == null || pane.isEmpty) ? '(no output)' : pane,
-                  style: AppTheme.mono(
-                    size: 12,
-                    color: AppColors.terminalFg,
-                    height: 1.5,
-                  ),
+                  style: t.meta(size: 12, color: t.terminalFg, height: 1.5),
                 ),
               ),
             ),
@@ -722,121 +730,60 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
     );
   }
 
-  /// The session lifecycle controls, as a compact labelled icon bar: the common
-  /// shell/kill/restart/cascade/push on the left, destructive delete pushed to
-  /// the far right and tinted red. Shell is pure navigation (always enabled);
-  /// Kill needs a running session; the rest are gated only by the busy flag.
-  Widget _lifecycleBar(BuildContext context, SessionInfo info) {
+  /// The session lifecycle controls: the common shell/kill/restart/cascade/push
+  /// first, with the destructive delete last. Shell is pure navigation (always
+  /// enabled); Kill needs a running session; the rest are gated only by the busy
+  /// flag.
+  ///
+  /// The bar's shape is the chrome's — a labelled icon bar in Mission Control
+  /// (which pushes the destructive action to the trailing edge itself, so the
+  /// `Spacer` this used to place is no longer ours to position), one contiguous
+  /// run of lettered blocks in LCARS.
+  Widget _lifecycleBar(SessionInfo info) {
+    final t = CommanderTokens.of(context);
     final running = info.status == SessionStatus.running;
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        const Divider(),
-        const SizedBox(height: 4),
-        Row(
-          children: [
-            _lifecycleAction(
-              icon: Icons.code,
-              label: 'Shell',
-              tooltip: 'Shell',
-              color: AppColors.textBright,
-              onPressed: () => widget.onOpenTerminal(AttachKind.shell),
-            ),
-            const SizedBox(width: 8),
-            _lifecycleAction(
-              icon: Icons.stop,
-              label: 'Kill',
-              tooltip: 'Kill',
-              color: AppColors.amberText,
-              onPressed: _busy || !running ? null : _kill,
-            ),
-            const SizedBox(width: 8),
-            _lifecycleAction(
-              icon: Icons.restart_alt,
-              label: 'Restart',
-              tooltip: 'Restart',
-              color: AppColors.teal,
-              onPressed: _busy ? null : _restart,
-            ),
-            const SizedBox(width: 8),
-            _lifecycleAction(
-              icon: Icons.merge_type,
-              label: 'Cascade',
-              tooltip: 'Cascade merge',
-              color: AppColors.textBright,
-              onPressed: _busy ? null : _cascadeMerge,
-            ),
-            const SizedBox(width: 8),
-            _lifecycleAction(
-              icon: Icons.publish,
-              label: 'Push',
-              tooltip: 'Push stack',
-              color: AppColors.textBright,
-              onPressed: _busy ? null : _pushStack,
-            ),
-            const Spacer(),
-            _lifecycleAction(
-              icon: Icons.delete_outline,
-              label: 'Delete',
-              tooltip: 'Delete',
-              color: AppColors.red,
-              onPressed: _busy ? null : _delete,
-              danger: true,
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-
-  /// One cell of the lifecycle bar: a rounded-square icon button over a small
-  /// mono label. [danger] tints the surface red for the destructive delete.
-  Widget _lifecycleAction({
-    required IconData icon,
-    required String label,
-    required String tooltip,
-    required Color color,
-    required VoidCallback? onPressed,
-    bool danger = false,
-  }) {
-    final enabled = onPressed != null;
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Container(
-          decoration: BoxDecoration(
-            color: danger
-                ? AppColors.red.withValues(alpha: 0.1)
-                : AppColors.surface,
-            borderRadius: BorderRadius.circular(9),
-            border: Border.all(
-              color: danger
-                  ? AppColors.red.withValues(alpha: 0.3)
-                  : AppColors.border,
-            ),
+    return ChromeButtonBar(
+      ChromeButtonBarSpec(
+        buttons: [
+          ChromeBarButton(
+            label: 'Shell',
+            icon: Icons.code,
+            onPressed: () => widget.onOpenTerminal(AttachKind.shell),
           ),
-          child: IconButton(
-            onPressed: onPressed,
-            icon: Icon(icon, size: 18),
-            tooltip: tooltip,
-            color: color,
-            disabledColor: AppColors.textDim,
-            visualDensity: VisualDensity.compact,
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 38, minHeight: 38),
+          ChromeBarButton(
+            label: 'Kill',
+            icon: Icons.stop,
+            // Amber and teal respectively, as before the chrome layer: these two
+            // read as distinct from the neutral Shell/Cascade/Push.
+            accent: t.attentionOn,
+            onPressed: _busy || !running ? null : _kill,
           ),
-        ),
-        const SizedBox(height: 4),
-        Text(
-          label,
-          style: AppTheme.mono(
-            size: 8.5,
-            color: enabled
-                ? (danger ? AppColors.red : AppColors.textMuted)
-                : AppColors.textDim,
+          ChromeBarButton(
+            label: 'Restart',
+            icon: Icons.restart_alt,
+            accent: t.working,
+            onPressed: _busy ? null : _restart,
           ),
-        ),
-      ],
+          ChromeBarButton(
+            label: 'Cascade',
+            icon: Icons.merge_type,
+            tooltip: 'Cascade merge',
+            onPressed: _busy ? null : _cascadeMerge,
+          ),
+          ChromeBarButton(
+            label: 'Push',
+            icon: Icons.publish,
+            tooltip: 'Push stack',
+            onPressed: _busy ? null : _pushStack,
+          ),
+          ChromeBarButton(
+            label: 'Delete',
+            icon: Icons.delete_outline,
+            kind: ChromeActionKind.destructive,
+            onPressed: _busy ? null : _delete,
+          ),
+        ],
+      ),
     );
   }
 
@@ -873,7 +820,7 @@ class _SessionDetailBodyState extends State<SessionDetailBody> {
   }
 }
 
-/// The phone (stacked-navigation) detail screen: a Scaffold titled by the
+/// The phone (stacked-navigation) detail screen: a [ChromePage] titled by the
 /// session, wrapping a [SessionDetailBody] whose terminal/review actions push
 /// routes and whose delete/dismiss pop back to the list.
 class SessionDetailPage extends StatelessWidget {
@@ -924,10 +871,9 @@ class SessionDetailPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final store = CommanderStoreScope.of(context)!;
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(session.title, overflow: TextOverflow.ellipsis),
-      ),
+    return ChromePage(
+      code: '47-D',
+      title: session.title,
       body: SessionDetailBody(
         session: session,
         onOpenTerminal: (kind) => _openTerminal(context, store, kind),

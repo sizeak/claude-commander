@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 
+import '../chrome/chrome.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
-import '../theme/app_colors.dart';
-import '../theme/app_theme.dart';
+import '../theme/tokens.dart';
 
 /// Manages the server's registered projects (git repos). Lists each project's
 /// name + repo path; adds one by its server-side path (`addProject`), removes one
@@ -61,6 +61,7 @@ class _ProjectsPageState extends State<ProjectsPage> {
   }
 
   Future<void> _remove(ProjectInfoDto project) async {
+    final t = CommanderTokens.of(context);
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -76,8 +77,8 @@ class _ProjectsPageState extends State<ProjectsPage> {
           ),
           FilledButton(
             style: FilledButton.styleFrom(
-              backgroundColor: AppColors.red,
-              foregroundColor: AppColors.bg,
+              backgroundColor: t.danger,
+              foregroundColor: t.canvas,
             ),
             onPressed: () => Navigator.of(ctx).pop(true),
             child: const Text('Remove'),
@@ -119,21 +120,20 @@ class _ProjectsPageState extends State<ProjectsPage> {
       listenable: _store,
       builder: (context, _) {
         final projects = _store.projects;
-        return Scaffold(
-          appBar: AppBar(
-            title: const Text('Projects'),
-            actions: [
-              IconButton(
-                onPressed: _busy ? null : _scan,
-                icon: const Icon(Icons.travel_explore),
-                tooltip: 'Scan directory',
-              ),
-            ],
-          ),
-          floatingActionButton: FloatingActionButton(
+        return ChromePage(
+          title: 'Projects',
+          code: '47-P',
+          actions: [
+            ChromeButtonAction(
+              icon: Icons.travel_explore,
+              label: 'Scan directory',
+              onPressed: _busy ? null : _scan,
+            ),
+          ],
+          primaryAction: ChromeButtonAction(
+            icon: Icons.add,
+            label: 'Add project',
             onPressed: _busy ? null : _addProject,
-            tooltip: 'Add project',
-            child: const Icon(Icons.add),
           ),
           body: projects.isEmpty
               ? _emptyState()
@@ -211,6 +211,7 @@ class _ProjectTileState extends State<_ProjectTile> {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       child: ExpansionTile(
@@ -223,7 +224,7 @@ class _ProjectTileState extends State<_ProjectTile> {
           widget.project.repoPath,
           maxLines: 1,
           overflow: TextOverflow.ellipsis,
-          style: AppTheme.mono(size: 11, color: AppColors.textMuted),
+          style: t.meta(size: 11, color: t.textMuted),
         ),
         trailing: IconButton(
           onPressed: widget.onRemove,
@@ -259,6 +260,7 @@ class _ProjectTileState extends State<_ProjectTile> {
         child: Text('No branches'),
       );
     }
+    final t = CommanderTokens.of(context);
     return Column(
       children: [
         for (final b in branches)
@@ -267,12 +269,9 @@ class _ProjectTileState extends State<_ProjectTile> {
             leading: Icon(
               b.isRemote ? Icons.cloud_outlined : Icons.call_split,
               size: 18,
-              color: b.isRemote ? AppColors.textFaint : AppColors.teal,
+              color: b.isRemote ? t.textFaint : t.working,
             ),
-            title: Text(
-              b.name,
-              style: AppTheme.mono(size: 12, color: AppColors.textBright),
-            ),
+            title: Text(b.name, style: t.meta(size: 12, color: t.textBright)),
           ),
       ],
     );

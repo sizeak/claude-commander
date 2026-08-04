@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
 
+import '../chrome/chrome_forms.dart';
 import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
 import '../state/workspace_store.dart';
-import '../theme/app_colors.dart';
-import '../theme/app_theme.dart';
+import '../theme/tokens.dart';
 import '../util/activity_feed.dart';
 import '../util/format.dart';
 import 'terminal_page.dart';
@@ -12,16 +12,19 @@ import 'terminal_page.dart';
 /// The cross-server Activity timeline — layout-agnostic (no Scaffold, no route),
 /// so it embeds in both the phone bottom-nav and the wide workspace pane. A
 /// vertical rail runs down the left with a coloured node per event; actionable
-/// "needs you" events float to the top as amber cards with an Answer button.
+/// "needs you" events float to the top as attention-tinted cards with an Answer
+/// button.
 ///
 /// Reads the [WorkspaceStore] from the enclosing [WorkspaceScope] and rebuilds
 /// off its change broadcast (it re-emits every child store's ticks), deriving the
 /// feed via [buildActivityFeed]. Tapping an event with a session navigates to
 /// that session's agent terminal, the same route the session list uses.
 class ActivityBody extends StatefulWidget {
-  /// Whether to render the in-body "Activity" title + subtitle. The phone
-  /// bottom-nav and the wide workspace pane keep it (true); a push wrapper whose
-  /// AppBar already titles the screen passes false.
+  /// Whether the view frames itself with a [ChromeViewRail] — the "Activity"
+  /// title + subtitle in Mission Control, the deck's elbow rail in LCARS. The
+  /// phone bottom-nav and the wide workspace pane keep it (true); a push wrapper
+  /// whose own chrome already titles the screen passes false and gets the filter
+  /// strip over the timeline alone.
   final bool showHeader;
 
   const ActivityBody({super.key, this.showHeader = true});
@@ -42,72 +45,62 @@ class _ActivityBodyState extends State<ActivityBody> {
         final servers = workspace.servers;
         final events = buildActivityFeed(servers);
         final filtered = filterActivity(events, _filter);
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (widget.showHeader) _header(servers.length),
-            _filterChips(needsYouCount(events)),
-            Expanded(
-              child: RefreshIndicator(
-                onRefresh: workspace.refreshAll,
-                child: _timeline(workspace, servers, filtered),
-              ),
-            ),
-          ],
+        final slices = _sliceSpec(needsYouCount(events));
+        final timeline = RefreshIndicator(
+          onRefresh: workspace.refreshAll,
+          child: _timeline(workspace, servers, filtered),
+        );
+
+        if (!widget.showHeader) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              ChromeSegmented(slices),
+              Expanded(child: timeline),
+            ],
+          );
+        }
+
+        return ChromeViewRail(
+          ChromeViewRailSpec(
+            code: '47-V',
+            title: 'Activity',
+            subtitle:
+                'across ${servers.length} '
+                'server${servers.length == 1 ? '' : 's'} · live',
+            // No brand mark and no aggregate tile: this view is a feed, and the
+            // deck titles it plainly.
+            style: ChromeViewRailStyle.plain,
+            slices: slices,
+            body: timeline,
+          ),
         );
       },
     );
   }
 
-  Widget _header(int serverCount) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(18, 14, 18, 8),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'Activity',
-            style: Theme.of(
-              context,
-            ).textTheme.titleLarge?.copyWith(fontSize: 24),
-          ),
-          const SizedBox(height: 2),
-          Text(
-            'across $serverCount server${serverCount == 1 ? '' : 's'} · live',
-            style: AppTheme.mono(),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _filterChips(int needsYou) {
-    return SizedBox(
-      height: 46,
-      child: ListView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
-        children: [
-          _FilterChip(
-            label: 'All',
-            selected: _filter == ActivityFilter.all,
-            onTap: () => setState(() => _filter = ActivityFilter.all),
-          ),
-          _FilterChip(
-            label: 'Needs you · $needsYou',
-            color: AppColors.amberText,
-            selected: _filter == ActivityFilter.needsYou,
-            onTap: () => setState(() => _filter = ActivityFilter.needsYou),
-          ),
-          _FilterChip(
-            label: 'PRs',
-            selected: _filter == ActivityFilter.prs,
-            onTap: () => setState(() => _filter = ActivityFilter.prs),
-          ),
-        ],
-      ),
-    );
-  }
+  /// The feed's filters as slices: everything, the events wanting a human, and
+  /// the open PRs.
+  ChromeSegmentedSpec _sliceSpec(int needsYou) => ChromeSegmentedSpec(
+    // Separate pills rather than one segmented control, which is the shape this
+    // row has always had in Mission Control. LCARS renders them as rail blocks.
+    style: ChromeSegmentedStyle.chips,
+    segments: [
+      for (final filter in ActivityFilter.values)
+        ChromeSegment(
+          label: switch (filter) {
+            ActivityFilter.all => 'All',
+            ActivityFilter.needsYou => 'Needs you · $needsYou',
+            ActivityFilter.prs => 'PRs',
+          },
+          // The needs-you filter keeps its amber caption while unselected — it is
+          // the one that is asking for something.
+          attention: filter == ActivityFilter.needsYou,
+          selected: _filter == filter,
+          onTap: () => setState(() => _filter = filter),
+        ),
+    ],
+  );
 
   Widget _timeline(
     WorkspaceStore workspace,
@@ -122,15 +115,14 @@ class _ActivityBodyState extends State<ActivityBody> {
         children: [_emptyState(servers)],
       );
     }
+    final t = CommanderTokens.of(context);
     return ListView(
       physics: const AlwaysScrollableScrollPhysics(),
       padding: const EdgeInsets.fromLTRB(26, 20, 20, 24),
       children: [
         Container(
-          decoration: const BoxDecoration(
-            border: Border(
-              left: BorderSide(color: AppColors.borderSubtle, width: 2),
-            ),
+          decoration: BoxDecoration(
+            border: Border(left: BorderSide(color: t.borderSubtle, width: 2)),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -184,19 +176,22 @@ class _ActivityBodyState extends State<ActivityBody> {
   }
 }
 
-/// The palette node colour for an event kind, matching the deck's timeline dots.
-Color _nodeColor(ActivityKind kind) => switch (kind) {
-  ActivityKind.needsYou => AppColors.amber,
-  ActivityKind.paused => AppColors.amber,
-  ActivityKind.working => AppColors.teal,
-  ActivityKind.prReady => AppColors.green,
-  ActivityKind.prMerged => AppColors.accentSoft,
-  ActivityKind.pushed => AppColors.accentSoft,
-  ActivityKind.finishedUnread => AppColors.accentSoft,
-};
+/// The node colour for an event kind, matching the deck's timeline dots.
+Color _nodeColor(BuildContext context, ActivityKind kind) {
+  final t = CommanderTokens.of(context);
+  return switch (kind) {
+    ActivityKind.needsYou => t.attention,
+    ActivityKind.paused => t.held,
+    ActivityKind.working => t.working,
+    ActivityKind.prReady => t.success,
+    ActivityKind.prMerged => t.info,
+    ActivityKind.pushed => t.info,
+    ActivityKind.finishedUnread => t.info,
+  };
+}
 
 /// One row on the timeline: a coloured node sitting on the rail, then either an
-/// amber "NEEDS YOU" card (actionable events) or a compact event row.
+/// attention-tinted "NEEDS YOU" card (actionable events) or a compact event row.
 class _TimelineItem extends StatelessWidget {
   final ActivityEvent event;
   final VoidCallback onTap;
@@ -206,7 +201,7 @@ class _TimelineItem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final actionable = event.actionable;
-    final color = _nodeColor(event.kind);
+    final color = _nodeColor(context, event.kind);
     // Node radius + its vertical offset differ between the card and a plain row
     // so the dot lands on the title baseline in both.
     final radius = actionable ? 7.0 : 4.5;
@@ -239,104 +234,127 @@ class _TimelineItem extends StatelessWidget {
     ),
   );
 
+  /// The actionable event's card. Its tint is a [SessionTone], not a colour
+  /// derived here, so it reads the same as the row of the session it is about:
+  /// an amber-tinted rounded card in Mission Control, a salmon- (or, for a held
+  /// cascade, tan-) top-bordered panel in LCARS.
+  ///
+  /// The "NEEDS YOU" / "PAUSED" label stays inline beside the title rather than
+  /// becoming the panel's `eyebrow`: the eyebrow slot renders *above* the
+  /// content (outside the box entirely in Mission Control), which would pull the
+  /// label out of the title row it belongs to.
   Widget _needsYouCard(BuildContext context) {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
+    final t = CommanderTokens.of(context);
+    // Paused is the held tone, which Mission Control paints identically to
+    // waiting (both are its one amber) and LCARS distinguishes.
+    final tone = event.kind == ActivityKind.paused
+        ? SessionTone.held
+        : SessionTone.waiting;
+    final toneStyle = t.toneStyle(tone);
+    return ChromePanel(
+      ChromePanelSpec(
+        tone: tone,
+        padding: const EdgeInsets.fromLTRB(14, 11, 12, 11),
         onTap: event.sessionId == null ? null : onTap,
-        borderRadius: BorderRadius.circular(12),
-        child: Container(
-          padding: const EdgeInsets.fromLTRB(14, 11, 12, 11),
-          decoration: BoxDecoration(
-            color: AppColors.amber.withValues(alpha: 0.09),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: AppColors.amber.withValues(alpha: 0.4)),
-          ),
-          child: Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Text(
-                          event.kind == ActivityKind.paused
-                              ? 'PAUSED'
-                              : 'NEEDS YOU',
-                          style: AppTheme.mono(
-                            size: 9,
-                            weight: FontWeight.w700,
-                            color: AppColors.amberText,
-                            letterSpacing: 0.8,
-                          ),
-                        ),
-                        const SizedBox(width: 9),
-                        Flexible(
-                          child: Text(
-                            event.title,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
-                              color: AppColors.text,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 3),
-                    Text(
-                      '${event.description} · ${event.serverName} / ${event.location}',
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: AppTheme.mono(size: 10.5),
-                    ),
-                  ],
-                ),
-              ),
-              const SizedBox(width: 10),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  if (event.at != null)
-                    Text(
-                      relativeAge(event.at!),
-                      style: AppTheme.mono(
-                        size: 10,
-                        color: AppColors.textFaint,
+                  Row(
+                    children: [
+                      Text(
+                        event.kind == ActivityKind.paused
+                            ? 'PAUSED'
+                            : 'NEEDS YOU',
+                        style: t.meta(
+                          size: 9,
+                          weight: FontWeight.w700,
+                          color: toneStyle.onTint,
+                          letterSpacing: 0.8,
+                        ),
                       ),
-                    ),
-                  const SizedBox(height: 8),
-                  if (event.sessionId != null) _answerButton(),
+                      const SizedBox(width: 9),
+                      Flexible(
+                        child: Text(
+                          event.title,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            color: t.text,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 3),
+                  Text(
+                    '${event.description} · ${event.serverName} / ${event.location}',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: t.meta(size: 10.5),
+                  ),
                 ],
               ),
-            ],
-          ),
+            ),
+            const SizedBox(width: 10),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                if (event.at != null)
+                  Text(
+                    relativeAge(event.at!),
+                    style: t.meta(size: 10, color: t.textFaint),
+                  ),
+                const SizedBox(height: 8),
+                if (event.sessionId != null) _answerButton(context),
+              ],
+            ),
+          ],
         ),
       ),
     );
   }
 
-  Widget _answerButton() => Container(
-    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-    decoration: BoxDecoration(
-      color: AppColors.accent,
-      borderRadius: BorderRadius.circular(9),
-    ),
-    child: const Text(
-      'Answer ›',
-      style: TextStyle(
-        fontSize: 12,
-        fontWeight: FontWeight.w700,
-        color: AppColors.bg,
+  /// The card's inline call to action. Not a [ChromeButtonBar]: it is decoration
+  /// rather than a control (the whole panel is the tap target), and Mission
+  /// Control renders a bar cell as either an icon over a caption or a flat
+  /// surface key pill — neither of which is this filled accent chip.
+  Widget _answerButton(BuildContext context) {
+    final t = CommanderTokens.of(context);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+      decoration: BoxDecoration(
+        color: t.primary,
+        borderRadius: BorderRadius.circular(9),
       ),
-    ),
-  );
+      child: Text(
+        'Answer ›',
+        style: TextStyle(
+          fontSize: 12,
+          fontWeight: FontWeight.w700,
+          color: t.canvas,
+        ),
+      ),
+    );
+  }
 
+  /// A non-actionable event: two lines of text and a trailing age, with no fill,
+  /// border or radius of its own.
+  ///
+  /// Deliberately **not** a [ChromeListRow]. The chrome's two-line shape is a
+  /// faithful copy of the fleet list's recents tile, which is a denser row than
+  /// this one and is ruled with a bottom divider — adopting it would put a
+  /// divider under every event on a timeline that is already delimited by its
+  /// rail, shrink both lines by a point, and inset the text away from the node
+  /// dot that is positioned against it. Being frameless, this row is already
+  /// theme-neutral: every colour is a token and the face follows the theme.
   Widget _eventRow(BuildContext context) {
+    final t = CommanderTokens.of(context);
     final trailing = event.at == null
         ? event.location
         : '${relativeAge(event.at!)} · ${event.location}';
@@ -358,10 +376,10 @@ class _TimelineItem extends StatelessWidget {
                       event.title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.w600,
-                        color: AppColors.text,
+                        color: t.text,
                       ),
                     ),
                     const SizedBox(height: 2),
@@ -369,7 +387,7 @@ class _TimelineItem extends StatelessWidget {
                       event.description,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: AppTheme.mono(size: 10.5),
+                      style: t.meta(size: 10.5),
                     ),
                   ],
                 ),
@@ -379,60 +397,10 @@ class _TimelineItem extends StatelessWidget {
                 padding: const EdgeInsets.only(top: 1),
                 child: Text(
                   trailing,
-                  style: AppTheme.mono(size: 10, color: AppColors.textFaint),
+                  style: t.meta(size: 10, color: t.textFaint),
                 ),
               ),
             ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// A pill toggle for the filter row. Selected fills [AppColors.surfaceSel];
-/// unselected is a bordered surface pill with muted (or [color]-tinted) text.
-class _FilterChip extends StatelessWidget {
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
-  final Color? color;
-
-  const _FilterChip({
-    required this.label,
-    required this.selected,
-    required this.onTap,
-    this.color,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(right: 7),
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(20),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 7),
-            decoration: BoxDecoration(
-              color: selected ? AppColors.surfaceSel : AppColors.surface,
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(
-                color: selected ? AppColors.surfaceSel : AppColors.border,
-              ),
-            ),
-            child: Text(
-              label,
-              style: AppTheme.mono(
-                size: 10.5,
-                weight: FontWeight.w600,
-                color: selected
-                    ? AppColors.text
-                    : (color ?? AppColors.textMuted),
-              ),
-            ),
           ),
         ),
       ),
@@ -448,16 +416,17 @@ class _InlineNote extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 48),
       child: Column(
         children: [
-          Icon(icon, color: AppColors.textFaint),
+          Icon(icon, color: t.textFaint),
           const SizedBox(height: 10),
           Text(
             text,
             textAlign: TextAlign.center,
-            style: const TextStyle(color: AppColors.textMuted),
+            style: TextStyle(color: t.textMuted),
           ),
         ],
       ),

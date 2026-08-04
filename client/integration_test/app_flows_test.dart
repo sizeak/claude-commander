@@ -23,6 +23,8 @@ import 'package:claude_commander_client/services/commander_api.dart';
 import 'package:claude_commander_client/src/rust/frb_generated.dart';
 import 'package:claude_commander_client/state/workspace_store.dart';
 import 'package:flutter/material.dart';
+import 'package:claude_commander_client/services/pref_store.dart';
+import 'package:claude_commander_client/theme/theme_controller.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:xterm/xterm.dart';
@@ -139,6 +141,9 @@ void main() {
           api: api,
           listStore: InMemoryServerListStore(),
         ),
+        // A throwaway store: the e2e run must not read or write the real
+        // device preferences, and it exercises the default theme.
+        theme: ThemeController(store: InMemoryPrefStore()),
       ),
     );
     await waitFor(tester, find.text('Add server'));

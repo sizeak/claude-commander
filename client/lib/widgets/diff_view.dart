@@ -2,9 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../src/rust/api/diff.dart';
 import '../src/rust/api/review.dart' show ReviewLineOrigin;
-import '../theme/app_colors.dart';
-import '../theme/app_theme.dart';
 import '../theme/diff_theme.dart';
+import '../theme/tokens.dart';
 
 /// Signature for staging a comment on a selected line range.
 typedef AddCommentFn =
@@ -173,6 +172,7 @@ class _DiffViewState extends State<DiffView> {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     final colors = DiffTheme.of(context);
     final selectable = widget.onAddComment != null;
     final hi = (_anchor != null && _focus != null)
@@ -181,7 +181,7 @@ class _DiffViewState extends State<DiffView> {
 
     final children = <Widget>[];
     for (final row in widget.layout.rows) {
-      children.add(_row(colors, row, selectable));
+      children.add(_row(t, colors, row, selectable));
       // The action bar sits directly under the last selected line rather than
       // at the end of the file, which in a long diff can be a screen away.
       if (hi != null && (row.left.sel == hi || row.right.sel == hi)) {
@@ -209,12 +209,13 @@ class _DiffViewState extends State<DiffView> {
   );
 
   Widget _row(
+    CommanderTokens t,
     DiffColors colors,
     DiffRowDto row,
     bool selectable,
   ) => switch (row.kind) {
     DiffRowKind.hunkHeader => _hunkHeader(colors, row),
-    DiffRowKind.expandControl => _expandControl(colors, row),
+    DiffRowKind.expandControl => _expandControl(t, colors, row),
     DiffRowKind.alignmentGap => Container(
       height: 18,
       color: colors.alignmentGapFill,
@@ -229,12 +230,12 @@ class _DiffViewState extends State<DiffView> {
           ? Row(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                Expanded(child: _half(colors, row, row.left, selectable)),
-                const VerticalDivider(width: 1, color: AppColors.divider),
-                Expanded(child: _half(colors, row, row.right, selectable)),
+                Expanded(child: _half(t, colors, row, row.left, selectable)),
+                VerticalDivider(width: 1, color: t.divider),
+                Expanded(child: _half(t, colors, row, row.right, selectable)),
               ],
             )
-          : _half(colors, row, row.left, selectable),
+          : _half(t, colors, row, row.left, selectable),
     ),
   };
 
@@ -254,7 +255,7 @@ class _DiffViewState extends State<DiffView> {
 
   /// A gap's "reveal more" affordance. `diffgrid` also knows how to lay this out
   /// as centred glyphs for a terminal; here the counts drive real buttons.
-  Widget _expandControl(DiffColors colors, DiffRowDto row) {
+  Widget _expandControl(CommanderTokens t, DiffColors colors, DiffRowDto row) {
     final gap = row.gap;
     if (gap == null) return const SizedBox.shrink();
     void expand(DiffExpandAction action) =>
@@ -267,6 +268,7 @@ class _DiffViewState extends State<DiffView> {
         children: [
           if (row.canExpandDown)
             _expandButton(
+              t,
               Icons.keyboard_arrow_down,
               'Expand down',
               () => expand(DiffExpandAction.down),
@@ -275,16 +277,18 @@ class _DiffViewState extends State<DiffView> {
             padding: const EdgeInsets.symmetric(horizontal: 10),
             child: Text(
               '${row.hidden} hidden line${row.hidden == 1 ? '' : 's'}',
-              style: AppTheme.mono(color: colors.expandedFg),
+              style: t.meta(color: colors.expandedFg),
             ),
           ),
           if (row.canExpandUp)
             _expandButton(
+              t,
               Icons.keyboard_arrow_up,
               'Expand up',
               () => expand(DiffExpandAction.up),
             ),
           _expandButton(
+            t,
             Icons.unfold_more,
             'Expand all',
             () => expand(DiffExpandAction.all),
@@ -294,17 +298,21 @@ class _DiffViewState extends State<DiffView> {
     );
   }
 
-  Widget _expandButton(IconData icon, String tooltip, VoidCallback onTap) =>
-      IconButton(
-        visualDensity: VisualDensity.compact,
-        padding: EdgeInsets.zero,
-        constraints: const BoxConstraints(minWidth: 32, minHeight: 28),
-        iconSize: 16,
-        color: AppColors.textMuted,
-        tooltip: tooltip,
-        onPressed: onTap,
-        icon: Icon(icon),
-      );
+  Widget _expandButton(
+    CommanderTokens t,
+    IconData icon,
+    String tooltip,
+    VoidCallback onTap,
+  ) => IconButton(
+    visualDensity: VisualDensity.compact,
+    padding: EdgeInsets.zero,
+    constraints: const BoxConstraints(minWidth: 32, minHeight: 28),
+    iconSize: 16,
+    color: t.textMuted,
+    tooltip: tooltip,
+    onPressed: onTap,
+    icon: Icon(icon),
+  );
 
   /// One column of a row: the line-number gutter, then the code.
   ///
@@ -312,6 +320,7 @@ class _DiffViewState extends State<DiffView> {
   /// bridge strips it off the spans — so a soft-wrapped continuation stays in
   /// the code column instead of running back under the numbers.
   Widget _half(
+    CommanderTokens t,
     DiffColors colors,
     DiffRowDto row,
     DiffCellDto cell,
@@ -338,7 +347,7 @@ class _DiffViewState extends State<DiffView> {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          _gutter(colors, cell, expanded),
+          _gutter(t, colors, cell, expanded),
           Expanded(
             child: Container(
               color: fill,
@@ -350,11 +359,7 @@ class _DiffViewState extends State<DiffView> {
                     width: 10,
                     child: Text(
                       sign,
-                      style: AppTheme.mono(
-                        size: 12,
-                        color: signColor,
-                        height: 1.45,
-                      ),
+                      style: t.meta(size: 12, color: signColor, height: 1.45),
                     ),
                   ),
                   Expanded(
@@ -376,8 +381,13 @@ class _DiffViewState extends State<DiffView> {
     );
   }
 
-  Widget _gutter(DiffColors colors, DiffCellDto cell, bool expanded) {
-    final style = AppTheme.mono(size: 11, color: colors.gutterFg, height: 1.45);
+  Widget _gutter(
+    CommanderTokens t,
+    DiffColors colors,
+    DiffCellDto cell,
+    bool expanded,
+  ) {
+    final style = t.meta(size: 11, color: colors.gutterFg, height: 1.45);
     // Side by side already splits the numbers across the two halves, so the dual
     // gutter is a single-column affordance only.
     final dual = widget.dualGutter && !widget.sideBySide;

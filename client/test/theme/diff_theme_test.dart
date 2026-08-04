@@ -1,13 +1,16 @@
 import 'package:claude_commander_client/src/rust/api/diff.dart';
 import 'package:claude_commander_client/src/rust/api/review.dart'
     show ReviewLineOrigin;
-import 'package:claude_commander_client/theme/app_colors.dart';
+import 'package:claude_commander_client/theme/tokens.dart';
 import 'package:claude_commander_client/theme/diff_theme.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  final colors = DiffColors.dark;
+  // Was `DiffColors.dark`, a single hardcoded palette. It is now derived per
+  // theme, so the tests name the theme they mean.
+  const tokens = missionControlTokens;
+  final colors = DiffColors.fromTokens(tokens);
 
   test('emphasis is composited on the line fill, not picked separately', () {
     // The rule the whole palette hangs on: an emphasised run is the SAME accent
@@ -17,14 +20,14 @@ void main() {
     expect(
       colors.emphasisFill(DiffRole.addition),
       Color.alphaBlend(
-        AppColors.green.withValues(alpha: 0.20),
+        tokens.success.withValues(alpha: 0.20),
         colors.additionFill,
       ),
     );
     expect(
       colors.emphasisFill(DiffRole.deletion),
       Color.alphaBlend(
-        AppColors.red.withValues(alpha: 0.20),
+        tokens.danger.withValues(alpha: 0.20),
         colors.deletionFill,
       ),
     );
@@ -36,7 +39,7 @@ void main() {
   test('the line fill is the accent over the page background', () {
     expect(
       colors.additionFill,
-      Color.alphaBlend(AppColors.green.withValues(alpha: 0.20), AppColors.bg),
+      Color.alphaBlend(tokens.success.withValues(alpha: 0.20), tokens.canvas),
     );
   });
 
@@ -55,6 +58,7 @@ void main() {
 
   testWidgets('the palette in scope wins over the default', (tester) async {
     final custom = DiffColors.derive(
+      codeStyle: tokens.meta(),
       background: const Color(0xFF000000),
       gutterBackground: const Color(0xFF000000),
       addition: const Color(0xFF00FF00),
@@ -77,6 +81,6 @@ void main() {
       ),
     );
     expect(seen, custom);
-    expect(seen, isNot(DiffColors.dark));
+    expect(seen, isNot(DiffColors.fromTokens(tokens)));
   });
 }

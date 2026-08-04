@@ -2,8 +2,8 @@
 
 The app icon is the same mark as the in-app `BrandMark` widget
 (`lib/widgets/brand_mark.dart`): three rank chevrons in the brand gradient on
-the deck's slate tile. Colours come from `AppColors` — `brandTileTop` /
-`brandTileBottom` for the tile, `brandGradient` for the chevrons.
+the deck's slate tile. Colours come from `BrandAssets` (`lib/theme/brand_assets.dart`) — `tileTop` /
+`tileBottom` for the tile, `chevronGradient` for the chevrons.
 
 | File | Role |
 |------|------|
@@ -26,7 +26,7 @@ done
 cd ../.. && flutter pub run flutter_launcher_icons
 ```
 
-`test/theme/launcher_icon_test.dart` pins the SVG colours to `AppColors` so a
+`test/theme/launcher_icon_test.dart` pins the SVG colours to `BrandAssets` so a
 palette retune can't silently leave the launcher icon on the old scheme.
 
 ## Sizing

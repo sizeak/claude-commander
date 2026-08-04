@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
 
+import '../chrome/chrome.dart';
 import '../services/commander_api.dart';
 import '../src/rust/api/mirrors.dart';
-import '../theme/app_colors.dart';
-import '../theme/app_theme.dart';
+import '../theme/tokens.dart';
 
 /// Edits the server's launch-program list (`PUT /api/config/programs`). Each row
 /// is a `{label, command}` pair the create-session form offers as a choice.
@@ -110,33 +110,26 @@ class _ProgramsPageState extends State<ProgramsPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Programs'),
-        actions: [
-          if (_rows != null)
-            _saving
-                ? const Padding(
-                    padding: EdgeInsets.all(16),
-                    child: SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    ),
-                  )
-                : IconButton(
-                    onPressed: _save,
-                    icon: const Icon(Icons.save),
-                    tooltip: 'Save',
-                  ),
-        ],
-      ),
-      floatingActionButton: _rows == null
+    return ChromePage(
+      title: 'Programs',
+      code: '47-G',
+      actions: [
+        // An in-flight save disables the action rather than swapping it for a
+        // spinner: a ChromeAction is an icon + label, not a widget, and the
+        // themes render it themselves.
+        if (_rows != null)
+          ChromeButtonAction(
+            icon: Icons.save,
+            label: 'Save',
+            onPressed: _saving ? null : _save,
+          ),
+      ],
+      primaryAction: _rows == null
           ? null
-          : FloatingActionButton(
+          : ChromeButtonAction(
+              icon: Icons.add,
+              label: 'Add program',
               onPressed: _add,
-              tooltip: 'Add program',
-              child: const Icon(Icons.add),
             ),
       body: _body(context),
     );
@@ -196,6 +189,7 @@ class _ProgramRowTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       child: Card(
@@ -217,7 +211,7 @@ class _ProgramRowTile extends StatelessWidget {
                     const SizedBox(height: 8),
                     TextField(
                       controller: row.command,
-                      style: AppTheme.mono(size: 13, color: AppColors.text),
+                      style: t.meta(size: 13, color: t.text),
                       decoration: const InputDecoration(
                         labelText: 'Command',
                         isDense: true,

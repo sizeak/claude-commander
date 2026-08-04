@@ -6,45 +6,15 @@ import 'package:flutter/services.dart';
 import 'package:uuid/uuid.dart';
 import 'package:xterm/xterm.dart';
 
+import '../chrome/chrome.dart';
 import '../services/clipboard_image_reader.dart';
 import '../services/commander_api.dart';
 import '../services/image_picker_service.dart';
 import '../src/rust/api/mirrors.dart';
 import '../state/commander_store.dart';
 import '../state/commander_store_scope.dart';
-import '../theme/app_colors.dart';
-import '../theme/app_theme.dart';
-
-/// The xterm palette, built from the app tokens: the deepest terminal bg, the
-/// soft off-white foreground the deck uses for pane text, and the violet accent
-/// for the cursor/selection. The ANSI ramp is nudged toward the palette's
-/// semantic accents (teal/green/amber/red/violet) so agent output reads in the
-/// same colour language as the rest of the app.
-const _terminalTheme = TerminalTheme(
-  cursor: AppColors.accent,
-  selection: Color(0x407C6CFF), // AppColors.accent @ ~25% alpha
-  foreground: AppColors.terminalFg,
-  background: AppColors.bgTerminal,
-  black: Color(0xFF1C1F28), // AppColors.borderSubtle (darkest ANSI slot)
-  red: AppColors.red,
-  green: AppColors.green,
-  yellow: AppColors.amber,
-  blue: AppColors.accentSoft,
-  magenta: AppColors.accent,
-  cyan: AppColors.teal,
-  white: AppColors.textBright,
-  brightBlack: AppColors.textDim,
-  brightRed: AppColors.red,
-  brightGreen: AppColors.green,
-  brightYellow: AppColors.amberText,
-  brightBlue: AppColors.accentSoft,
-  brightMagenta: AppColors.accentSoft,
-  brightCyan: AppColors.teal,
-  brightWhite: AppColors.text,
-  searchHitBackground: Color(0x66F5B545), // AppColors.amber @ ~40% alpha
-  searchHitBackgroundCurrent: AppColors.amber,
-  searchHitForeground: AppColors.bg,
-);
+import '../theme/terminal_theme.dart';
+import '../theme/tokens.dart';
 
 /// Live attached terminal, layout-agnostic (no Scaffold, no route). Streams raw
 /// PTY bytes from the cdylib WS bridge into an `xterm.dart` [Terminal], forwards
@@ -394,7 +364,7 @@ class _TerminalBodyState extends State<TerminalBody>
   Future<void> _pickAndAttach() async {
     final source = await showModalBottomSheet<_ImageSource>(
       context: context,
-      backgroundColor: AppColors.bgRaised,
+      backgroundColor: CommanderTokens.of(context).canvasRaised,
       builder: (sheetContext) => SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -432,7 +402,11 @@ class _TerminalBodyState extends State<TerminalBody>
     String label,
     _ImageSource source,
   ) => ListTile(
-    leading: Icon(icon, color: AppColors.textMuted, size: 20),
+    leading: Icon(
+      icon,
+      color: CommanderTokens.of(sheetContext).textMuted,
+      size: 20,
+    ),
     title: Text(label),
     onTap: () => Navigator.of(sheetContext).pop(source),
   );
@@ -613,9 +587,10 @@ class _TerminalBodyState extends State<TerminalBody>
     // resizes the pane on a soft keyboard — a known limitation, and a
     // touch-device-only one, since a desktop has no soft keyboard.
     final obscured = MediaQuery.viewInsetsOf(context).bottom;
+    final t = CommanderTokens.of(context);
 
     return ColoredBox(
-      color: AppColors.bgTerminal,
+      color: t.terminalBg,
       child: Column(
         children: [
           // Fixed: the status line stays put while the pane pans beneath it.
@@ -645,10 +620,8 @@ class _TerminalBodyState extends State<TerminalBody>
                         _terminal,
                         autofocus: true,
                         backgroundOpacity: 1,
-                        theme: _terminalTheme,
-                        textStyle: const TerminalStyle(
-                          fontFamily: AppFonts.mono,
-                        ),
+                        theme: terminalThemeFor(t),
+                        textStyle: TerminalStyle(fontFamily: t.mono),
                         padding: const EdgeInsets.symmetric(
                           horizontal: 14,
                           vertical: 8,
@@ -669,20 +642,23 @@ class _TerminalBodyState extends State<TerminalBody>
     );
   }
 
-  /// The dot colour reflects the link state: teal while attached, red once the
-  /// attach has ended (reconnect offered), amber while connecting.
+  /// The dot colour reflects the link state: the working accent while attached,
+  /// danger once the attach has ended (reconnect offered), attention while
+  /// connecting.
   Color get _statusColor {
-    if (_ended) return AppColors.red;
-    if (_status.startsWith('attached')) return AppColors.teal;
-    return AppColors.amber;
+    final t = CommanderTokens.of(context);
+    if (_ended) return t.danger;
+    if (_status.startsWith('attached')) return t.working;
+    return t.attention;
   }
 
   Widget _statusBar(BuildContext context) {
+    final t = CommanderTokens.of(context);
     return Container(
       padding: const EdgeInsets.only(left: 14, right: 4, top: 4, bottom: 4),
-      decoration: const BoxDecoration(
-        color: AppColors.bgRaised,
-        border: Border(bottom: BorderSide(color: AppColors.borderSubtle)),
+      decoration: BoxDecoration(
+        color: t.canvasRaised,
+        border: Border(bottom: BorderSide(color: t.borderSubtle)),
       ),
       child: Row(
         children: [
@@ -700,12 +676,12 @@ class _TerminalBodyState extends State<TerminalBody>
               _status,
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
-              style: AppTheme.mono(size: 10, color: AppColors.textMuted),
+              style: t.meta(size: 10, color: t.textMuted),
             ),
           ),
           Text(
             '${_fmtRate(_bytesPerSec)} · ${_totalBytes ~/ 1024} KB',
-            style: AppTheme.mono(size: 10, color: AppColors.textFaint),
+            style: t.meta(size: 10, color: t.textFaint),
           ),
           // Agent attaches only: the server injects the image path into the
           // agent pane, so on a shell attach this would type somewhere the user
@@ -716,16 +692,16 @@ class _TerminalBodyState extends State<TerminalBody>
               visualDensity: VisualDensity.compact,
               onPressed: _imageBusy || _ended ? null : _attachImage,
               icon: _uploading
-                  ? const SizedBox.square(
+                  ? SizedBox.square(
                       dimension: 18,
                       child: CircularProgressIndicator(
                         strokeWidth: 2,
-                        color: AppColors.textMuted,
+                        color: t.textMuted,
                       ),
                     )
                   : const Icon(Icons.image_outlined, size: 18),
-              color: AppColors.textMuted,
-              disabledColor: AppColors.textDim,
+              color: t.textMuted,
+              disabledColor: t.textDim,
               tooltip: 'Attach image',
             ),
           // Never gated on [_ended]. A half-open socket — the network path gone
@@ -737,7 +713,7 @@ class _TerminalBodyState extends State<TerminalBody>
             visualDensity: VisualDensity.compact,
             onPressed: _reconnect,
             icon: const Icon(Icons.refresh, size: 18),
-            color: AppColors.textMuted,
+            color: t.textMuted,
             tooltip: 'Reconnect',
           ),
         ],
@@ -746,7 +722,7 @@ class _TerminalBodyState extends State<TerminalBody>
   }
 }
 
-/// The phone (stacked-navigation) terminal screen: a Scaffold titled by the
+/// The phone (stacked-navigation) terminal screen: a [ChromePage] titled by the
 /// session, wrapping a [TerminalBody] with the on-screen modifier bar enabled.
 class TerminalPage extends StatelessWidget {
   final CommanderApi api;
@@ -779,31 +755,23 @@ class TerminalPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isShell = kind == AttachKind.shell;
-    return Scaffold(
-      appBar: AppBar(
-        title: Text(
-          isShell ? '${session.title} · shell' : session.title,
-          overflow: TextOverflow.ellipsis,
-        ),
-      ),
+    return ChromePage(
+      code: '47-T',
+      title: isShell ? '${session.title} · shell' : session.title,
       // The keyboard must not shrink the body: [TerminalBody] insets its own
       // chrome and pans the pane instead, so the remote PTY never sees a resize.
-      resizeToAvoidBottomInset: false,
-      body: SafeArea(
-        // Keep reserving the bottom system chrome even while the keyboard covers
-        // it. Without this, SafeArea's bottom padding collapses to zero when the
-        // keyboard appears and the pane's row count would move with it — the
-        // resize [TerminalBody] exists to avoid.
-        maintainBottomViewPadding: true,
-        child: TerminalBody(
-          api: api,
-          handle: handle,
-          session: session,
-          kind: kind,
-          imagePicker: imagePicker,
-          clipboardImages: clipboardImages,
-          clock: clock,
-        ),
+      // ChromeInsets.pan *is* main's resizeToAvoidBottomInset:false plus
+      // SafeArea(maintainBottomViewPadding: true) — see applyChromeInsets. It
+      // lives in the chrome so LCARS cannot diverge from it.
+      insets: ChromeInsets.pan,
+      body: TerminalBody(
+        api: api,
+        handle: handle,
+        session: session,
+        kind: kind,
+        imagePicker: imagePicker,
+        clipboardImages: clipboardImages,
+        clock: clock,
       ),
     );
   }
@@ -855,13 +823,14 @@ class _ModifierBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final t = CommanderTokens.of(context);
     // No SafeArea here: [TerminalBody] already insets the bottom chrome, and a
     // bar whose height changed with the keyboard would change the pane's rows.
     return Container(
       height: 48,
-      decoration: const BoxDecoration(
-        color: AppColors.bgTerminal,
-        border: Border(top: BorderSide(color: AppColors.borderSubtle)),
+      decoration: BoxDecoration(
+        color: t.terminalBg,
+        border: Border(top: BorderSide(color: t.borderSubtle)),
       ),
       child: ListView(
         scrollDirection: Axis.horizontal,
@@ -894,10 +863,11 @@ class _ModifierBar extends StatelessWidget {
   /// tap. Deliberately not a Material button so it matches the deck's flat pills
   /// and stays compact in the horizontal strip.
   Widget _key(BuildContext context, String label, VoidCallback onTap) {
+    final t = CommanderTokens.of(context);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 3),
       child: Material(
-        color: AppColors.surface,
+        color: t.surface,
         borderRadius: BorderRadius.circular(7),
         child: InkWell(
           onTap: onTap,
@@ -907,14 +877,14 @@ class _ModifierBar extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 12),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(7),
-              border: Border.all(color: AppColors.border),
+              border: Border.all(color: t.border),
             ),
             child: Text(
               label,
-              style: AppTheme.mono(
+              style: t.meta(
                 size: 10.5,
                 weight: FontWeight.w600,
-                color: AppColors.textBright,
+                color: t.textBright,
               ),
             ),
           ),

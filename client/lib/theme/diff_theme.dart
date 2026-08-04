@@ -2,8 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../src/rust/api/diff.dart';
 import '../src/rust/api/review.dart' show ReviewLineOrigin;
-import 'app_colors.dart';
-import 'app_theme.dart';
+import 'tokens.dart';
 
 /// Colours and text styles for the review diff: one semantic [DiffRole] in, the
 /// ink to draw it in out.
@@ -20,22 +19,27 @@ import 'app_theme.dart';
 /// [_emphasisAlpha] composited *on top of that fill* rather than chosen
 /// independently. An emphasised run therefore always reads as "more of this
 /// line", never as a different colour, and the two can never drift apart when
-/// the palette is retuned. Dark surfaces need a stronger tint than light ones
-/// to separate at all, so the ratios are chosen per appearance; this app is
-/// dark-only and takes the dark pair. Flutter composites alpha for real, which
-/// is why this lands more faithfully here than the terminal's approximation of
-/// it can.
+/// the palette is retuned. Flutter composites alpha for real, which is why this
+/// lands more faithfully here than the terminal's approximation of it can.
+///
+/// Dark surfaces need a stronger tint than light ones to separate at all, so
+/// the ratios below are the dark pair — and they stay correct in both themes
+/// without an appearance flag, because every tint is composited over the
+/// *theme's own* [CommanderTokens.canvas] (near-black in Mission Control, pure
+/// black in LCARS) rather than over a background assumed here.
 @immutable
 class DiffTheme extends InheritedWidget {
   const DiffTheme({super.key, required this.colors, required super.child});
 
   final DiffColors colors;
 
-  /// The diff palette in scope, or the app default when no [DiffTheme] wraps
-  /// the caller — so a widget can be dropped anywhere without a wrapper.
+  /// The diff palette in scope, or one derived from the ambient
+  /// [CommanderTokens] when no [DiffTheme] wraps the caller — so a widget can
+  /// be dropped anywhere without a wrapper and still paint in the active
+  /// theme's colours rather than a baked-in default's.
   static DiffColors of(BuildContext context) =>
       context.dependOnInheritedWidgetOfExactType<DiffTheme>()?.colors ??
-      DiffColors.dark;
+      DiffColors.fromTokens(CommanderTokens.of(context));
 
   @override
   bool updateShouldNotify(DiffTheme oldWidget) => oldWidget.colors != colors;
@@ -52,9 +56,16 @@ const double _emphasisAlpha = 0.20;
 /// row apart.
 const double _gutterAlpha = 0.28;
 
-/// The resolved diff palette. Construct with [DiffColors.derive] rather than
-/// listing colours by hand — the whole point is that the emphasis tint is a
-/// function of the line tint.
+/// Single-entry memo behind [DiffColors.fromTokens]; see its doc for why one
+/// entry and why it is kept at all. Top-level rather than static fields so the
+/// `@immutable` palette itself stays free of mutable state.
+CommanderTokens? _memoKey;
+DiffColors? _memo;
+
+/// The resolved diff palette. Construct with [DiffColors.fromTokens] — or
+/// [DiffColors.derive] to pick the accents by hand — rather than listing every
+/// colour: the whole point is that the emphasis tint is a function of the line
+/// tint.
 @immutable
 class DiffColors {
   const DiffColors({
@@ -76,6 +87,7 @@ class DiffColors {
     required this.expandedFill,
     required this.selectionFill,
     required this.alignmentGapFill,
+    required this.codeStyle,
   });
 
   /// The surface the line tints are composited over.
@@ -108,6 +120,13 @@ class DiffColors {
   /// "nothing here" rather than "not drawn yet".
   final Color alignmentGapFill;
 
+  /// The base style for a code run: the theme's mono face at its metadata
+  /// weight, carrying no run-specific ink. [spanStyle] copies the size, colour
+  /// and emphasis fill on. Held as a whole style rather than a font-family name
+  /// so the face's *other* defaults keep coming from
+  /// [CommanderTokens.meta] instead of being restated here.
+  final TextStyle codeStyle;
+
   /// Derives a whole palette from two accents and a pair of surfaces.
   factory DiffColors.derive({
     required Color background,
@@ -118,6 +137,7 @@ class DiffColors {
     required Color gutterFg,
     required Color hunkHeaderFg,
     required Color selection,
+    required TextStyle codeStyle,
   }) {
     Color over(Color base, Color tint, double alpha) =>
         Color.alphaBlend(tint.withValues(alpha: alpha), base);
@@ -145,20 +165,46 @@ class DiffColors {
       expandedFill: over(background, hunkHeaderFg, 0.04),
       selectionFill: over(background, selection, 0.24),
       alignmentGapFill: over(background, gutterFg, 0.10),
+      codeStyle: codeStyle,
     );
   }
 
-  /// The app's dark diff palette.
-  static final DiffColors dark = DiffColors.derive(
-    background: AppColors.bg,
-    gutterBackground: AppColors.diffGutterBg,
-    addition: AppColors.green,
-    deletion: AppColors.red,
-    contextFg: AppColors.terminalFg,
-    gutterFg: AppColors.diffGutter,
-    hunkHeaderFg: AppColors.teal,
-    selection: AppColors.amber,
-  );
+  /// The diff palette for a theme's tokens — the only place the diff's roles
+  /// are bound to the app's semantic ones.
+  ///
+  /// **The result is memoised on the token set's identity**, mirroring
+  /// `terminalThemeFor`, because [DiffTheme.of] resolves this on every build of
+  /// every diff view. Unlike the terminal's, this memo is an economy and not a
+  /// correctness fix — [DiffColors] compares by value, so a fresh-but-equal
+  /// instance costs a rebuild of nothing. A single entry, again for the same
+  /// reason: `AnimatedTheme` interpolates fresh tokens every frame during a
+  /// theme switch, and a map keyed on those would grow one palette per frame.
+  factory DiffColors.fromTokens(CommanderTokens t) {
+    final cached = _memo;
+    if (cached != null && identical(_memoKey, t)) return cached;
+    final built = DiffColors.derive(
+      background: t.canvas,
+      gutterBackground: t.diffGutterBg,
+      addition: t.success,
+      deletion: t.danger,
+      contextFg: t.terminalFg,
+      gutterFg: t.diffGutter,
+      // The hunk header takes `working` — Mission Control's teal, LCARS'
+      // amber — because it is structural chrome around the diff rather than
+      // part of it, and neither theme's `primary` would read as that in both.
+      hunkHeaderFg: t.working,
+      // A selected range is an attention band — but `held`, not `attention`.
+      // Both are the same amber in Mission Control, so this is identical there.
+      // Under LCARS they differ, and `attention`'s salmon over black lands within
+      // a few units of a deletion line's own `danger` fill, making a selected
+      // deletion nearly impossible to see. `held`'s tan separates cleanly.
+      selection: t.held,
+      codeStyle: t.meta(),
+    );
+    _memoKey = t;
+    _memo = built;
+    return built;
+  }
 
   /// The background a whole row of this origin sits on. `null` — a context
   /// line — keeps the page background rather than painting one.
@@ -195,11 +241,13 @@ class DiffColors {
   };
 
   /// The style for one run, emphasis background included.
-  TextStyle spanStyle(DiffSpanDto span, {double size = 12}) => AppTheme.mono(
-    size: size,
-    color: foreground(span.role),
-    height: 1.45,
-  ).copyWith(backgroundColor: span.emphasis ? emphasisFill(span.role) : null);
+  TextStyle spanStyle(DiffSpanDto span, {double size = 12}) =>
+      codeStyle.copyWith(
+        fontSize: size,
+        height: 1.45,
+        color: foreground(span.role),
+        backgroundColor: span.emphasis ? emphasisFill(span.role) : null,
+      );
 
   /// The `+` / `−` sign column glyph and colour for a row of this origin.
   (String, Color) sign(ReviewLineOrigin? origin) => switch (origin) {
@@ -229,7 +277,8 @@ class DiffColors {
           other.expandedFg == expandedFg &&
           other.expandedFill == expandedFill &&
           other.selectionFill == selectionFill &&
-          other.alignmentGapFill == alignmentGapFill;
+          other.alignmentGapFill == alignmentGapFill &&
+          other.codeStyle == codeStyle;
 
   @override
   int get hashCode => Object.hash(
@@ -251,5 +300,6 @@ class DiffColors {
     expandedFill,
     selectionFill,
     alignmentGapFill,
+    codeStyle,
   );
 }

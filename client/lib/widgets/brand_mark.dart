@@ -1,6 +1,8 @@
+import 'package:flutter/foundation.dart' show listEquals;
 import 'package:flutter/material.dart';
 
-import '../theme/app_colors.dart';
+import '../theme/brand_assets.dart';
+import '../theme/tokens.dart';
 
 /// The Commander brand mark: three stacked chevrons ("rank" marks) painted with
 /// the vertical brand gradient, on the deck's rounded slate tile. Used in the
@@ -18,7 +20,9 @@ class BrandMark extends StatelessWidget {
   Widget build(BuildContext context) {
     final marks = CustomPaint(
       size: Size.square(size),
-      painter: _ChevronPainter(),
+      painter: _ChevronPainter(
+        gradient: CommanderTokens.of(context).brandGradient,
+      ),
     );
     if (!tile) return SizedBox.square(dimension: size, child: marks);
     return Container(
@@ -30,7 +34,7 @@ class BrandMark extends StatelessWidget {
         gradient: const LinearGradient(
           begin: Alignment.topLeft,
           end: Alignment.bottomRight,
-          colors: [AppColors.brandTileTop, AppColors.brandTileBottom],
+          colors: [BrandAssets.tileTop, BrandAssets.tileBottom],
         ),
         border: Border.all(color: Colors.white.withValues(alpha: 0.05)),
       ),
@@ -40,6 +44,12 @@ class BrandMark extends StatelessWidget {
 }
 
 class _ChevronPainter extends CustomPainter {
+  /// The three-stop ramp to stroke with, top → bottom. Passed in rather than
+  /// read from the theme because a painter has no [BuildContext].
+  final List<Color> gradient;
+
+  _ChevronPainter({required this.gradient});
+
   @override
   void paint(Canvas canvas, Size size) {
     // The deck draws on a 1024×1024 viewBox; scale our three chevron polylines
@@ -54,11 +64,11 @@ class _ChevronPainter extends CustomPainter {
       ..strokeCap = StrokeCap.square
       ..strokeJoin = StrokeJoin.miter
       ..strokeMiterLimit = 6
-      ..shader = const LinearGradient(
+      ..shader = LinearGradient(
         begin: Alignment.topCenter,
         end: Alignment.bottomCenter,
-        colors: AppColors.brandGradient,
-        stops: [0.0, 0.5, 1.0],
+        colors: gradient,
+        stops: const [0.0, 0.5, 1.0],
       ).createShader(Rect.fromLTWH(0, 0, size.width, size.height));
 
     for (final dy in const [0.0, 150.0, 300.0]) {
@@ -71,5 +81,6 @@ class _ChevronPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_ChevronPainter oldDelegate) => false;
+  bool shouldRepaint(_ChevronPainter oldDelegate) =>
+      !listEquals(oldDelegate.gradient, gradient);
 }

@@ -2,6 +2,7 @@ import 'package:claude_commander_client/src/rust/api/diff.dart';
 import 'package:claude_commander_client/src/rust/api/review.dart'
     show ReviewLineOrigin;
 import 'package:claude_commander_client/theme/diff_theme.dart';
+import 'package:claude_commander_client/theme/tokens.dart';
 import 'package:claude_commander_client/widgets/diff_view.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -9,7 +10,7 @@ import 'package:flutter_test/flutter_test.dart';
 import '../support/fake_diff_layout.dart';
 
 void main() {
-  final colors = DiffColors.dark;
+  final colors = DiffColors.fromTokens(missionControlTokens);
   final expanded = <DiffExpansion>[];
 
   setUp(expanded.clear);

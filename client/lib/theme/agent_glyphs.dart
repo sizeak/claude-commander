@@ -1,19 +1,27 @@
 import 'package:flutter/material.dart';
 
 import '../src/rust/api/mirrors.dart';
-import 'app_colors.dart';
+import 'tokens.dart';
 
 /// A resolved visual descriptor for a session/agent state: the glyph shown in
-/// the leading column of a list row, its colour, and a short lower-case label.
+/// the leading column of a list row, its [SessionTone], and a short lower-case
+/// label.
 ///
-/// This is the single source of the deck's state vocabulary — working ● (teal),
-/// waiting ? (amber), unread ◆ (accent), idle ● (grey), stopped ○, cascade
-/// paused ⏸ (amber) — reused by the Fleet list, the rail, session detail, and
-/// the Activity feed so the glyphs never drift between screens.
+/// This is the single source of the deck's state vocabulary — working ●,
+/// waiting ?, unread ◆, idle ●, stopped ○, cascade paused ⏸ — reused by the
+/// Fleet list, the rail, session detail, and the Activity feed so the glyphs
+/// never drift between screens.
+///
+/// Carries a [tone] rather than a `Color`. It used to hold the colour directly,
+/// which made it unthemable and, worse, invited call sites to compare
+/// `descriptor.color == AppColors.amber` as a stand-in for "this row wants
+/// attention" — a test that quietly covered *both* waiting and cascade-paused
+/// because they shared one amber. Use [sessionWantsAttention] for that question
+/// and [CommanderTokens.toneStyle] for the colours.
 @immutable
 class StateDescriptor {
   final String glyph;
-  final Color color;
+  final SessionTone tone;
   final String label;
 
   /// Whether this state should animate (a gentle pulse) — used for the live
@@ -22,10 +30,13 @@ class StateDescriptor {
 
   const StateDescriptor(
     this.glyph,
-    this.color,
+    this.tone,
     this.label, {
     this.pulse = false,
   });
+
+  /// True when this state should pull the eye to its row.
+  bool get wantsAttention => sessionWantsAttention(tone);
 }
 
 /// The leading glyph for a session row, combining lifecycle [SessionStatus],
@@ -36,34 +47,35 @@ class StateDescriptor {
 StateDescriptor sessionDescriptor(SessionInfo info, AgentState agent) {
   switch (info.status) {
     case SessionStatus.cascadePaused:
-      return const StateDescriptor('⏸', AppColors.amber, 'cascade paused');
+      return const StateDescriptor('⏸', SessionTone.held, 'cascade paused');
     case SessionStatus.stopped:
-      return const StateDescriptor('○', AppColors.idle, 'stopped');
+      return const StateDescriptor('○', SessionTone.stopped, 'stopped');
     case SessionStatus.creating:
-      return const StateDescriptor('◍', AppColors.accentSoft, 'creating');
+      return const StateDescriptor('◍', SessionTone.creating, 'creating');
     case SessionStatus.merging:
-      return const StateDescriptor('⑃', AppColors.accentSoft, 'merging');
+      return const StateDescriptor('⑃', SessionTone.merging, 'merging');
     case SessionStatus.pushing:
-      return const StateDescriptor('⬆', AppColors.teal, 'pushing');
+      return const StateDescriptor('⬆', SessionTone.pushing, 'pushing');
     case SessionStatus.running:
       break;
   }
   // Running: the live agent sub-state drives the glyph.
   switch (agent) {
     case AgentState.waitingForInput:
-      return const StateDescriptor('?', AppColors.amber, 'waiting');
+      return const StateDescriptor('?', SessionTone.waiting, 'waiting');
     case AgentState.working:
-      return const StateDescriptor('●', AppColors.teal, 'working', pulse: true);
+      return const StateDescriptor(
+        '●',
+        SessionTone.working,
+        'working',
+        pulse: true,
+      );
     case AgentState.idle:
-      if (info.unread) {
-        return const StateDescriptor('◆', AppColors.accent, 'unread');
-      }
-      return const StateDescriptor('●', AppColors.idle, 'idle');
     case AgentState.unknown:
       if (info.unread) {
-        return const StateDescriptor('◆', AppColors.accent, 'unread');
+        return const StateDescriptor('◆', SessionTone.unread, 'unread');
       }
-      return const StateDescriptor('●', AppColors.idle, 'idle');
+      return const StateDescriptor('●', SessionTone.idle, 'idle');
   }
 }
 
@@ -122,12 +134,13 @@ class _SessionGlyphState extends State<SessionGlyph>
 
   @override
   Widget build(BuildContext context) {
+    final tokens = CommanderTokens.of(context);
     final glyph = Text(
       widget.descriptor.glyph,
       textAlign: TextAlign.center,
       style: TextStyle(
         fontSize: widget.size,
-        color: widget.descriptor.color,
+        color: tokens.toneStyle(widget.descriptor.tone).accent,
         height: 1,
       ),
     );
