@@ -67,7 +67,9 @@ class _ActivityBodyState extends State<ActivityBody> {
         children: [
           Text(
             'Activity',
-            style: Theme.of(context).textTheme.titleLarge?.copyWith(fontSize: 24),
+            style: Theme.of(
+              context,
+            ).textTheme.titleLarge?.copyWith(fontSize: 24),
           ),
           const SizedBox(height: 2),
           Text(
@@ -133,7 +135,8 @@ class _ActivityBodyState extends State<ActivityBody> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              for (final e in events) _TimelineItem(event: e, onTap: () => _open(workspace, e)),
+              for (final e in events)
+                _TimelineItem(event: e, onTap: () => _open(workspace, e)),
             ],
           ),
         ),
@@ -174,11 +177,7 @@ class _ActivityBodyState extends State<ActivityBody> {
       MaterialPageRoute(
         builder: (_) => CommanderStoreScope(
           store: store,
-          child: TerminalPage(
-            api: store.api,
-            handle: handle,
-            session: session,
-          ),
+          child: TerminalPage(api: store.api, handle: handle, session: session),
         ),
       ),
     );
@@ -305,7 +304,10 @@ class _TimelineItem extends StatelessWidget {
                   if (event.at != null)
                     Text(
                       relativeAge(event.at!),
-                      style: AppTheme.mono(size: 10, color: AppColors.textFaint),
+                      style: AppTheme.mono(
+                        size: 10,
+                        color: AppColors.textFaint,
+                      ),
                     ),
                   const SizedBox(height: 8),
                   if (event.sessionId != null) _answerButton(),

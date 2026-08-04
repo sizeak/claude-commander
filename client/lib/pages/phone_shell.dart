@@ -51,9 +51,7 @@ class _PhoneShellState extends State<PhoneShell> {
         backgroundColor: AppColors.accent,
         foregroundColor: AppColors.bg,
         elevation: 6,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-        ),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
         tooltip: 'New session',
         child: const Icon(Icons.add, size: 26),
       ),
@@ -119,7 +117,11 @@ class _NavTab extends StatelessWidget {
           const SizedBox(height: 4),
           Text(
             label,
-            style: AppTheme.mono(size: 9, weight: FontWeight.w600, color: color),
+            style: AppTheme.mono(
+              size: 9,
+              weight: FontWeight.w600,
+              color: color,
+            ),
           ),
         ],
       ),

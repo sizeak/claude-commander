@@ -132,7 +132,9 @@ class _AdaptiveShellState extends State<AdaptiveShell> {
                   ),
                 ),
                 const VerticalDivider(width: 1, color: AppColors.borderSubtle),
-                Expanded(child: _workspace(context, workspace, store, resolved)),
+                Expanded(
+                  child: _workspace(context, workspace, store, resolved),
+                ),
               ],
             ),
           ),
@@ -310,11 +312,18 @@ class _ModeToggle extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(glyph, style: TextStyle(fontSize: 14, color: color, height: 1)),
+            Text(
+              glyph,
+              style: TextStyle(fontSize: 14, color: color, height: 1),
+            ),
             const SizedBox(width: 6),
             Text(
               label,
-              style: AppTheme.mono(size: 10, weight: FontWeight.w600, color: color),
+              style: AppTheme.mono(
+                size: 10,
+                weight: FontWeight.w600,
+                color: color,
+              ),
             ),
           ],
         ),
@@ -534,9 +543,7 @@ class _DetailPaneState extends State<_DetailPane> {
         border: Border(bottom: BorderSide(color: AppColors.divider)),
       ),
       child: Row(
-        children: [
-          for (final tab in _DetailTab.values) _tabItem(tab),
-        ],
+        children: [for (final tab in _DetailTab.values) _tabItem(tab)],
       ),
     );
   }
