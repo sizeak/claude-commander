@@ -35,7 +35,7 @@ class LcarsChrome extends Chrome {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             _rail(context, spec, t),
-            const SizedBox(width: 5),
+            const SizedBox(width: _railPitch),
             Expanded(child: _content(context, spec, t)),
             const SizedBox(width: 10),
           ],
@@ -97,19 +97,23 @@ class LcarsChrome extends Chrome {
       ),
     );
 
-    return SizedBox(
-      width: t.railWidth,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          for (var i = 0; i < blocks.length; i++) ...[
-            if (i > 0) const SizedBox(height: 5),
-            blocks[i],
-          ],
-        ],
-      ),
-    );
+    return _railColumn(t, blocks);
   }
+
+  /// A rail: [blocks] stacked at the deck's 5px pitch, in a [CommanderTokens.railWidth]
+  /// column. Shared by the page rail and the view rail so the two cannot drift.
+  Widget _railColumn(CommanderTokens t, List<Widget> blocks) => SizedBox(
+    width: t.railWidth,
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        for (var i = 0; i < blocks.length; i++) ...[
+          if (i > 0) const SizedBox(height: _railPitch),
+          blocks[i],
+        ],
+      ],
+    ),
+  );
 
   /// A block's fill for a given emphasis. Shared by the rail, the button bar and
   /// the footer, so an action reads the same wherever the chrome puts it.
@@ -546,6 +550,234 @@ class LcarsChrome extends Chrome {
     );
   }
 
+  /// A contiguous run of blocks, pill-ended on the outside only — the same shape
+  /// [buildButtonBar] and the footer use, so a slice control reads as the theme's
+  /// one segmented idiom. [ChromeSegmentedStyle] is ignored: the deck has no
+  /// separate chip shape, and two rounded pill rows would be Mission Control's
+  /// distinction, not this theme's.
+  @override
+  Widget buildSegmented(BuildContext context, ChromeSegmentedSpec spec) {
+    final t = CommanderTokens.of(context);
+    final segments = spec.segments;
+    final note = spec.note;
+    // The note closes the run, so it counts as one of its blocks for the purpose
+    // of which ends get rounded.
+    final count = segments.length + (note == null ? 0 : 1);
+    return Row(
+      children: [
+        for (var i = 0; i < segments.length; i++) ...[
+          if (i > 0) const SizedBox(width: _seam),
+          Expanded(
+            child: ClipRRect(
+              borderRadius: _runEnds(i, count, t.pillRadius),
+              child: ChromeElbow(
+                color: segments[i].selected ? t.primary : t.borderSubtle,
+                labelColor: segments[i].selected ? t.canvas : t.nav,
+                height: _segmentHeight,
+                label: t.caseLabel(segments[i].label),
+                labelAlignment: Alignment.center,
+                labelSize: 12,
+                labelWeight: FontWeight.w700,
+                onTap: segments[i].onTap,
+              ),
+            ),
+          ),
+        ],
+        if (note != null) ...[
+          const SizedBox(width: _seam),
+          ClipRRect(
+            borderRadius: _runEnds(count - 1, count, t.pillRadius),
+            child: ChromeElbow(
+              // Inert, so it takes the dark filler fill rather than a slice's —
+              // it reports the mode, it does not select one.
+              color: t.divider,
+              labelColor: t.nav,
+              height: _segmentHeight,
+              label: t.caseLabel(note),
+              labelAlignment: Alignment.center,
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  /// Deck P1's input boxes: a near-black block whose whole decoration is a 2px
+  /// coloured top border, exactly as [buildPanel] draws one. No radius —
+  /// `t.cardRadius` is 0 here, so the theme's `inputDecorationTheme` border is
+  /// dropped altogether rather than drawn square all round.
+  @override
+  Widget buildField(BuildContext context, ChromeFieldSpec spec) {
+    final t = CommanderTokens.of(context);
+    final icon = spec.icon;
+    final hint = spec.hint;
+    final onClear = spec.onClear;
+    return Container(
+      decoration: BoxDecoration(
+        color: t.surface,
+        border: Border(top: BorderSide(color: t.nav, width: t.panelTopBorder)),
+      ),
+      child: TextField(
+        controller: spec.controller,
+        onChanged: spec.onChanged,
+        textInputAction: spec.textInputAction,
+        style: TextStyle(
+          fontFamily: t.sans,
+          fontSize: 14,
+          letterSpacing: 0.6,
+          color: t.text,
+        ),
+        decoration: InputDecoration(
+          isDense: true,
+          // The container above owns the fill and the border, so the decoration
+          // draws neither in any state.
+          filled: false,
+          border: InputBorder.none,
+          enabledBorder: InputBorder.none,
+          focusedBorder: InputBorder.none,
+          contentPadding: const EdgeInsets.symmetric(horizontal: 4, vertical: 11),
+          prefixIcon: icon == null ? null : Icon(icon, size: 16),
+          prefixIconColor: t.nav,
+          hintText: hint == null ? null : t.caseLabel(hint),
+          hintStyle: _caption(t, t.textFaint, letterSpacing: 0.9),
+          suffixIcon: onClear == null
+              ? null
+              : IconButton(
+                  icon: const Icon(Icons.clear, size: 16),
+                  tooltip: 'Clear',
+                  color: t.nav,
+                  onPressed: onClear,
+                ),
+        ),
+      ),
+    );
+  }
+
+  /// Deck P2's phone fleet frame: an elbow rail down the left carrying the view's
+  /// identifier and its slices, and a content column capped by a short bar.
+  ///
+  /// The same bracket [buildPage] draws, but scoped to a *view* rather than a
+  /// route — so there is no back block (a shell tab has nothing to pop) and the
+  /// slices take the position the page rail gives its actions.
+  @override
+  Widget buildViewRail(BuildContext context, ChromeViewRailSpec spec) {
+    final t = CommanderTokens.of(context);
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _viewRail(context, spec, t),
+        const SizedBox(width: _railPitch),
+        Expanded(child: _viewContent(context, spec, t)),
+        const SizedBox(width: 10),
+      ],
+    );
+  }
+
+  /// The view rail, top to bottom: the identifier, a block per slice, any actions
+  /// beyond the last, a band (labelled with the slice note when there is one),
+  /// inert filler, then a closing elbow carrying the last action.
+  Widget _viewRail(
+    BuildContext context,
+    ChromeViewRailSpec spec,
+    CommanderTokens t,
+  ) {
+    final actions = spec.actions;
+    // The deck's bottom-left block is where a rail's standing action lives, so
+    // the last one goes there and any earlier ones become blocks of their own.
+    final closing = actions.isEmpty ? null : actions.last;
+    final slices = spec.slices;
+    final note = slices?.note;
+    final blocks = <Widget>[
+      ChromeElbow(
+        color: t.nav,
+        corner: ElbowCorner.topLeft,
+        height: 74,
+        label: spec.code,
+        labelAlignment: Alignment.bottomRight,
+        labelSize: 12,
+        labelWeight: FontWeight.w700,
+      ),
+      for (final slice in slices?.segments ?? const <ChromeSegment>[])
+        ChromeElbow(
+          color: slice.selected ? t.primary : t.borderSubtle,
+          labelColor: slice.selected ? t.canvas : t.nav,
+          height: _railSliceHeight,
+          label: t.caseLabel(slice.label),
+          onTap: slice.onTap,
+        ),
+      for (final action in actions.take(actions.length > 1 ? actions.length - 1 : 0))
+        ChromeElbow(
+          color: _kindColor(action.kind, t),
+          labelColor: _kindLabelColor(action.kind, t),
+          height: 26,
+          label: t.caseLabel(action.label),
+          onTap: () => _invoke(context, action),
+        ),
+      // The thin bright band the deck steps down through before the dark filler.
+      // It carries the mode note when there is one — an inert label on an inert
+      // block, which is where LCARS puts a readout.
+      if (note == null)
+        ChromeElbow(color: t.borderSubtle, height: 16)
+      else
+        ChromeElbow(
+          color: t.borderSubtle,
+          labelColor: t.nav,
+          height: 26,
+          label: t.caseLabel(note),
+        ),
+      Expanded(child: ChromeElbow(color: t.divider)),
+      ChromeElbow(
+        color: t.nav,
+        corner: ElbowCorner.bottomLeft,
+        height: 44,
+        label: closing == null ? null : t.caseLabel(closing.label),
+        labelAlignment: Alignment.topRight,
+        onTap: closing == null ? null : () => _invoke(context, closing),
+      ),
+    ];
+    return _railColumn(t, blocks);
+  }
+
+  /// The content column: the elbow cap closing the rail's bracket, the title and
+  /// its subtitle, the filter field, then the body.
+  Widget _viewContent(
+    BuildContext context,
+    ChromeViewRailSpec spec,
+    CommanderTokens t,
+  ) {
+    final subtitle = spec.subtitle;
+    final filter = spec.filter;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        ChromeElbowCap(color: t.nav),
+        const SizedBox(height: 7),
+        MediaQuery.withClampedTextScaling(
+          maxScaleFactor: 1.5,
+          child: Text(
+            spec.title.toUpperCase(),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: t.display(size: 22),
+          ),
+        ),
+        if (subtitle != null)
+          Text(
+            subtitle.toUpperCase(),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: _caption(t, t.nav, letterSpacing: 1.1),
+          ),
+        const SizedBox(height: 9),
+        if (filter != null) ...[
+          buildField(context, filter),
+          const SizedBox(height: 9),
+        ],
+        Expanded(child: spec.body),
+      ],
+    );
+  }
+
   @override
   Widget buildWide(BuildContext context, ChromeWideSpec spec) => LcarsWide(spec);
 
@@ -574,8 +806,21 @@ class LcarsChrome extends Chrome {
 /// meant to read as a join, not a separation.
 const _seam = 4.0;
 
+/// The vertical pitch of a rail: the gap between stacked blocks, and the gap
+/// between the rail and the content column beside it. The deck's rails are 5px
+/// apart throughout.
+const _railPitch = 5.0;
+
 /// The list row's leading number block (deck P2's node headers: `width:38px`).
 const _rowNumberWidth = 38.0;
+
+/// A slice block in a view rail. Taller than a rail action (26) because a slice is
+/// the rail's primary control, matching the wide nav's destination blocks.
+const _railSliceHeight = 30.0;
+
+/// A block in a horizontal segmented run. Shorter than a button bar's 36 — a
+/// slice control sits inside a view's controls, not under its content.
+const _segmentHeight = 30.0;
 
 /// Bar block height. The deck's `padding:11px 0` on 13px type comes to ~37px;
 /// rounded down, and comfortably clear of ChromeElbow's clamped 1.3× scaler.

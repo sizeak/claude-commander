@@ -159,6 +159,161 @@ class ChromeButtonBarSpec {
   const ChromeButtonBarSpec({required this.buttons});
 }
 
+/// One choice in a [ChromeSegmented] run, or one slice in a [ChromeViewRail].
+///
+/// Distinct from [ChromeNavItem] — which it otherwise resembles — because a
+/// segment has no glyph (neither theme draws one on a segmented control or a rail
+/// block) and does carry [attention], which a footer destination has no use for.
+@immutable
+class ChromeSegment {
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  /// Marks the one choice that is asking for a human ("Needs you"). Mission
+  /// Control tints its label; LCARS ignores it, a selected block being amber
+  /// already.
+  final bool attention;
+
+  const ChromeSegment({
+    required this.label,
+    required this.selected,
+    required this.onTap,
+    this.attention = false,
+  });
+}
+
+/// Which shape Mission Control gives a run of segments.
+///
+/// Two values because the app has two, and they are not interchangeable: the
+/// fleet list's Recent/All toggle is one bordered container with an inner
+/// selected pill, while the activity feed's filters are separate rounded pills in
+/// a horizontally scrolling strip that carries its own insets. LCARS collapses
+/// both to the same contiguous run of blocks.
+enum ChromeSegmentedStyle { control, chips }
+
+/// A single-select run of choices: a segmented control or a filter-chip strip in
+/// Mission Control, a contiguous run of blocks with rounded outer ends in LCARS.
+@immutable
+class ChromeSegmentedSpec {
+  final List<ChromeSegment> segments;
+
+  final ChromeSegmentedStyle style;
+
+  /// A short read-only note beside the run — the fleet list's `grouped` /
+  /// `↓ recency` mode indicator. Mission Control renders it as a tile at the
+  /// trailing end; LCARS as an inert block closing the run.
+  final String? note;
+
+  const ChromeSegmentedSpec({
+    required this.segments,
+    this.style = ChromeSegmentedStyle.control,
+    this.note,
+  });
+}
+
+/// A single-line text input: a bordered, rounded `TextField` in Mission Control,
+/// a hard-cornered panel with a 2px coloured top border in LCARS (`t.cardRadius`
+/// is 0 there, and rounding one would read as Mission Control).
+@immutable
+class ChromeFieldSpec {
+  final TextEditingController? controller;
+
+  /// Placeholder text. LCARS uppercases it.
+  final String? hint;
+
+  /// A leading glyph. LCARS tints it with the nav accent.
+  final IconData? icon;
+
+  final ValueChanged<String>? onChanged;
+
+  /// A clear affordance is rendered when this is non-null, so "is there anything
+  /// to clear?" stays the caller's decision (it owns the controller) while the
+  /// button's icon, tooltip and placement stay the chrome's.
+  final VoidCallback? onClear;
+
+  final TextInputAction? textInputAction;
+
+  const ChromeFieldSpec({
+    this.controller,
+    this.hint,
+    this.icon,
+    this.onChanged,
+    this.onClear,
+    this.textInputAction,
+  });
+}
+
+/// Which header treatment Mission Control gives a [ChromeViewRail].
+///
+/// The app's two views differ in more than a brand mark — the padding, the title
+/// face and the subtitle size all differ — so this selects the whole treatment
+/// rather than being a `brand` flag that quietly also moves the metrics. LCARS
+/// ignores it: both views get the same elbow rail.
+enum ChromeViewRailStyle {
+  /// The fleet list: a `BrandMark`-led header over a segmented slice control.
+  branded,
+
+  /// The activity feed: a plain title header over a scrolling filter strip.
+  plain,
+}
+
+/// A whole *view's* frame: what slice of its data is showing, how it is filtered,
+/// what it is called, and what can be done to it.
+///
+/// Distinct from [ChromeShellSpec], and the split matters: the shell's footer
+/// carries **app**-level navigation (Fleet / + / Activity) while this carries
+/// **view**-scoped controls. The deck's phone frames have both at once, which is
+/// why the rail belongs to the view rather than to the shell — a view embedded in
+/// the wide shell (whose own chrome already titles its panes) simply doesn't ask
+/// for one.
+///
+/// Mission Control renders it as the branded header the two pages built by hand,
+/// with the filter and slices in a padded controls column beneath. LCARS renders
+/// the deck's left elbow rail: [code], a block per slice, an inert band, filler,
+/// and a closing elbow for the last action — with the title, subtitle and filter
+/// in the content column beside it.
+@immutable
+class ChromeViewRailSpec {
+  /// The LCARS rail identifier ("47-A"). Mission Control ignores it.
+  final String? code;
+
+  final String title;
+
+  /// The aggregate line under the title ("0 active · 0 total · 1 server").
+  final String? subtitle;
+
+  final ChromeViewRailStyle style;
+
+  /// The view's filter field. Mission Control puts it under the header, above the
+  /// slices; LCARS puts it at the top of the content column. Placement is the
+  /// whole reason it is a slot here rather than the first widget of [body].
+  final ChromeFieldSpec? filter;
+
+  /// Which slice of the view's data is showing (Recent/All, or the activity
+  /// filters). LCARS turns these into rail blocks, which is why they are data
+  /// rather than a pre-built [ChromeSegmented].
+  final ChromeSegmentedSpec? slices;
+
+  /// Actions on the view itself (settings). LCARS gives the last one the rail's
+  /// closing elbow — the deck's bottom-left block — and any earlier ones a block
+  /// of their own; Mission Control renders each as a tile beside the title.
+  final List<ChromeAction> actions;
+
+  final Widget body;
+
+  const ChromeViewRailSpec({
+    this.code,
+    required this.title,
+    this.subtitle,
+    this.style = ChromeViewRailStyle.branded,
+    this.filter,
+    this.slices,
+    this.actions = const [],
+    required this.body,
+  });
+}
+
 /// One destination in the phone shell's footer navigation.
 @immutable
 class ChromeNavItem {
@@ -229,6 +384,9 @@ abstract interface class ChromeForms {
   Widget buildButtonBar(BuildContext context, ChromeButtonBarSpec spec);
   Widget buildFooterNav(BuildContext context, ChromeFooterNavSpec spec);
   Widget buildShell(BuildContext context, ChromeShellSpec spec);
+  Widget buildSegmented(BuildContext context, ChromeSegmentedSpec spec);
+  Widget buildField(BuildContext context, ChromeFieldSpec spec);
+  Widget buildViewRail(BuildContext context, ChromeViewRailSpec spec);
 
   /// The wide (desktop/tablet) shell, and the workspace pane inside it. Their
   /// specs and both implementations live in `chrome_wide.dart` — see that file
@@ -288,6 +446,37 @@ class ChromeShell extends StatelessWidget {
   @override
   Widget build(BuildContext context) =>
       Chrome.of(context).buildShell(context, spec);
+}
+
+/// A single-select run of choices. See [ChromeSegmentedSpec].
+class ChromeSegmented extends StatelessWidget {
+  final ChromeSegmentedSpec spec;
+  const ChromeSegmented(this.spec, {super.key});
+
+  @override
+  Widget build(BuildContext context) =>
+      Chrome.of(context).buildSegmented(context, spec);
+}
+
+/// A single-line text input. See [ChromeFieldSpec].
+class ChromeField extends StatelessWidget {
+  final ChromeFieldSpec spec;
+  const ChromeField(this.spec, {super.key});
+
+  @override
+  Widget build(BuildContext context) =>
+      Chrome.of(context).buildField(context, spec);
+}
+
+/// A view's frame — its title, filter, slices and actions around its body. See
+/// [ChromeViewRailSpec].
+class ChromeViewRail extends StatelessWidget {
+  final ChromeViewRailSpec spec;
+  const ChromeViewRail(this.spec, {super.key});
+
+  @override
+  Widget build(BuildContext context) =>
+      Chrome.of(context).buildViewRail(context, spec);
 }
 
 class ChromeEyebrow extends StatelessWidget {

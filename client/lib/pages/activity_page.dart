@@ -20,9 +20,11 @@ import 'terminal_page.dart';
 /// feed via [buildActivityFeed]. Tapping an event with a session navigates to
 /// that session's agent terminal, the same route the session list uses.
 class ActivityBody extends StatefulWidget {
-  /// Whether to render the in-body "Activity" title + subtitle. The phone
-  /// bottom-nav and the wide workspace pane keep it (true); a push wrapper whose
-  /// AppBar already titles the screen passes false.
+  /// Whether the view frames itself with a [ChromeViewRail] — the "Activity"
+  /// title + subtitle in Mission Control, the deck's elbow rail in LCARS. The
+  /// phone bottom-nav and the wide workspace pane keep it (true); a push wrapper
+  /// whose own chrome already titles the screen passes false and gets the filter
+  /// strip over the timeline alone.
   final bool showHeader;
 
   const ActivityBody({super.key, this.showHeader = true});
@@ -43,70 +45,59 @@ class _ActivityBodyState extends State<ActivityBody> {
         final servers = workspace.servers;
         final events = buildActivityFeed(servers);
         final filtered = filterActivity(events, _filter);
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (widget.showHeader) _header(servers.length),
-            _filterChips(needsYouCount(events)),
-            Expanded(
-              child: RefreshIndicator(
-                onRefresh: workspace.refreshAll,
-                child: _timeline(workspace, servers, filtered),
-              ),
-            ),
-          ],
+        final slices = _sliceSpec(needsYouCount(events));
+        final timeline = RefreshIndicator(
+          onRefresh: workspace.refreshAll,
+          child: _timeline(workspace, servers, filtered),
+        );
+
+        if (!widget.showHeader) {
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [ChromeSegmented(slices), Expanded(child: timeline)],
+          );
+        }
+
+        return ChromeViewRail(
+          ChromeViewRailSpec(
+            code: '47-V',
+            title: 'Activity',
+            subtitle:
+                'across ${servers.length} '
+                'server${servers.length == 1 ? '' : 's'} · live',
+            // No brand mark and no aggregate tile: this view is a feed, and the
+            // deck titles it plainly.
+            style: ChromeViewRailStyle.plain,
+            slices: slices,
+            body: timeline,
+          ),
         );
       },
     );
   }
 
-  Widget _header(int serverCount) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(18, 14, 18, 8),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'Activity',
-            style: Theme.of(context).textTheme.titleLarge?.copyWith(fontSize: 24),
-          ),
-          const SizedBox(height: 2),
-          Text(
-            'across $serverCount server${serverCount == 1 ? '' : 's'} · live',
-            style: CommanderTokens.of(context).meta(),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _filterChips(int needsYou) {
-    return SizedBox(
-      height: 46,
-      child: ListView(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
-        children: [
-          _FilterChip(
-            label: 'All',
-            selected: _filter == ActivityFilter.all,
-            onTap: () => setState(() => _filter = ActivityFilter.all),
-          ),
-          _FilterChip(
-            label: 'Needs you · $needsYou',
-            color: CommanderTokens.of(context).attentionOn,
-            selected: _filter == ActivityFilter.needsYou,
-            onTap: () => setState(() => _filter = ActivityFilter.needsYou),
-          ),
-          _FilterChip(
-            label: 'PRs',
-            selected: _filter == ActivityFilter.prs,
-            onTap: () => setState(() => _filter = ActivityFilter.prs),
-          ),
-        ],
-      ),
-    );
-  }
+  /// The feed's filters as slices: everything, the events wanting a human, and
+  /// the open PRs.
+  ChromeSegmentedSpec _sliceSpec(int needsYou) => ChromeSegmentedSpec(
+    // Separate pills rather than one segmented control, which is the shape this
+    // row has always had in Mission Control. LCARS renders them as rail blocks.
+    style: ChromeSegmentedStyle.chips,
+    segments: [
+      for (final filter in ActivityFilter.values)
+        ChromeSegment(
+          label: switch (filter) {
+            ActivityFilter.all => 'All',
+            ActivityFilter.needsYou => 'Needs you · $needsYou',
+            ActivityFilter.prs => 'PRs',
+          },
+          // The needs-you filter keeps its amber caption while unselected — it is
+          // the one that is asking for something.
+          attention: filter == ActivityFilter.needsYou,
+          selected: _filter == filter,
+          onTap: () => setState(() => _filter = filter),
+        ),
+    ],
+  );
 
   Widget _timeline(
     WorkspaceStore workspace,
@@ -412,55 +403,6 @@ class _TimelineItem extends StatelessWidget {
                 ),
               ),
             ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// A pill toggle for the filter row. Selected fills the selected-surface token;
-/// unselected is a bordered surface pill with muted (or [color]-tinted) text.
-class _FilterChip extends StatelessWidget {
-  final String label;
-  final bool selected;
-  final VoidCallback onTap;
-  final Color? color;
-
-  const _FilterChip({
-    required this.label,
-    required this.selected,
-    required this.onTap,
-    this.color,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final t = CommanderTokens.of(context);
-    return Padding(
-      padding: const EdgeInsets.only(right: 7),
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: onTap,
-          borderRadius: BorderRadius.circular(20),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 7),
-            decoration: BoxDecoration(
-              color: selected ? t.surfaceSelected : t.surface,
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(
-                color: selected ? t.surfaceSelected : t.border,
-              ),
-            ),
-            child: Text(
-              label,
-              style: t.meta(
-                size: 10.5,
-                weight: FontWeight.w600,
-                color: selected ? t.text : (color ?? t.textMuted),
-              ),
-            ),
           ),
         ),
       ),

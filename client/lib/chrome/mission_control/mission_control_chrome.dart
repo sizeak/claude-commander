@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../theme/tokens.dart';
+import '../../widgets/brand_mark.dart';
 import '../chrome.dart';
 import '../chrome_forms.dart';
 import '../chrome_wide.dart';
@@ -546,6 +547,285 @@ class MissionControlChrome extends Chrome {
             item.label,
             style: t.meta(size: 9, weight: FontWeight.w600, color: color),
           ),
+        ],
+      ),
+    );
+  }
+
+  /// `session_list_page.dart`'s `_segmented` / `_segment` (the Recent/All toggle
+  /// with its mode indicator) and `activity_page.dart`'s `_filterChips` /
+  /// `_FilterChip`. Both are reproduced verbatim, which is why one method has two
+  /// shapes rather than one shape with a flag: they were never the same control.
+  @override
+  Widget buildSegmented(BuildContext context, ChromeSegmentedSpec spec) {
+    final t = CommanderTokens.of(context);
+    return switch (spec.style) {
+      ChromeSegmentedStyle.control => _segmentedControl(t, spec),
+      ChromeSegmentedStyle.chips => _segmentedChips(t, spec),
+    };
+  }
+
+  /// One bordered container holding the segments, with the mode indicator as a
+  /// matching tile beside it. No outer padding — its caller supplies that, as the
+  /// fleet list's controls column always did.
+  Widget _segmentedControl(CommanderTokens t, ChromeSegmentedSpec spec) {
+    final note = spec.note;
+    return Row(
+      children: [
+        Expanded(
+          child: Container(
+            decoration: BoxDecoration(
+              color: t.surface,
+              borderRadius: BorderRadius.circular(9),
+              border: Border.all(color: t.border),
+            ),
+            padding: const EdgeInsets.all(3),
+            child: Row(
+              children: [for (final s in spec.segments) _segment(t, s)],
+            ),
+          ),
+        ),
+        if (note != null) ...[
+          const SizedBox(width: 9),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+            decoration: BoxDecoration(
+              color: t.surface,
+              borderRadius: BorderRadius.circular(9),
+              border: Border.all(color: t.border),
+            ),
+            child: Text(
+              note,
+              style: t.meta(
+                size: 10,
+                weight: FontWeight.w600,
+                color: t.textBright,
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  Widget _segment(CommanderTokens t, ChromeSegment segment) => Expanded(
+    child: GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: segment.onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        decoration: segment.selected
+            ? BoxDecoration(
+                color: t.surfaceSelected,
+                borderRadius: BorderRadius.circular(6),
+              )
+            : null,
+        child: Text(
+          segment.label,
+          textAlign: TextAlign.center,
+          style: t.meta(
+            size: 11,
+            weight: FontWeight.w600,
+            color: segment.selected ? t.text : t.textMuted,
+          ),
+        ),
+      ),
+    ),
+  );
+
+  /// Separate rounded pills in a horizontally scrolling strip. The insets are the
+  /// scroll view's own, because the row scrolls — which is why this shape needs no
+  /// padding from its caller and the segmented control does.
+  ///
+  /// [ChromeSegmentedSpec.note] is ignored: the filter strip never had one, and
+  /// there is nowhere in a scrolling row to put a fixed tile.
+  Widget _segmentedChips(CommanderTokens t, ChromeSegmentedSpec spec) => SizedBox(
+    height: 46,
+    child: ListView(
+      scrollDirection: Axis.horizontal,
+      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 6),
+      children: [for (final s in spec.segments) _chip(t, s)],
+    ),
+  );
+
+  Widget _chip(CommanderTokens t, ChromeSegment segment) => Padding(
+    padding: const EdgeInsets.only(right: 7),
+    child: Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: segment.onTap,
+        borderRadius: BorderRadius.circular(20),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 7),
+          decoration: BoxDecoration(
+            color: segment.selected ? t.surfaceSelected : t.surface,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(
+              color: segment.selected ? t.surfaceSelected : t.border,
+            ),
+          ),
+          child: Text(
+            segment.label,
+            style: t.meta(
+              size: 10.5,
+              weight: FontWeight.w600,
+              color: segment.selected
+                  ? t.text
+                  // The attention slice keeps its amber caption while unselected,
+                  // which is what `_FilterChip`'s `color` parameter carried.
+                  : (segment.attention ? t.attentionOn : t.textMuted),
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
+  /// `session_list_page.dart`'s search box: a dense `TextField` taking its fill,
+  /// radius and border from `inputDecorationTheme`.
+  @override
+  Widget buildField(BuildContext context, ChromeFieldSpec spec) {
+    final t = CommanderTokens.of(context);
+    final icon = spec.icon;
+    final onClear = spec.onClear;
+    return TextField(
+      controller: spec.controller,
+      onChanged: spec.onChanged,
+      textInputAction: spec.textInputAction,
+      style: TextStyle(fontSize: 13.5, color: t.text),
+      decoration: InputDecoration(
+        isDense: true,
+        prefixIcon: icon == null ? null : Icon(icon, size: 18),
+        prefixIconColor: t.textFaint,
+        hintText: spec.hint,
+        suffixIcon: onClear == null
+            ? null
+            : IconButton(
+                icon: const Icon(Icons.clear, size: 18),
+                tooltip: 'Clear',
+                onPressed: onClear,
+              ),
+      ),
+    );
+  }
+
+  /// `session_list_page.dart`'s `_FleetHeader` and `activity_page.dart`'s
+  /// `_header`, over the controls those pages carried beneath them.
+  ///
+  /// There is no rail here — Mission Control's view chrome is a header. The
+  /// rail is LCARS' answer to the same spec.
+  @override
+  Widget buildViewRail(BuildContext context, ChromeViewRailSpec spec) {
+    final t = CommanderTokens.of(context);
+    final controls = _viewControls(context, spec);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _viewHeader(context, spec, t),
+        ?controls,
+        Expanded(child: spec.body),
+      ],
+    );
+  }
+
+  Widget _viewHeader(
+    BuildContext context,
+    ChromeViewRailSpec spec,
+    CommanderTokens t,
+  ) {
+    final branded = spec.style == ChromeViewRailStyle.branded;
+    final subtitle = spec.subtitle;
+    return Padding(
+      // The fleet header's insets and the activity header's, unchanged — they
+      // never agreed, and neither is worth retuning here.
+      padding: branded
+          ? const EdgeInsets.fromLTRB(16, 10, 16, 6)
+          : const EdgeInsets.fromLTRB(18, 14, 18, 8),
+      child: Row(
+        children: [
+          if (branded) ...[const BrandMark(size: 32), const SizedBox(width: 10)],
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  spec.title,
+                  style: branded
+                      ? TextStyle(
+                          fontSize: 23,
+                          fontWeight: FontWeight.w700,
+                          letterSpacing: -0.4,
+                          color: t.text,
+                        )
+                      : Theme.of(
+                          context,
+                        ).textTheme.titleLarge?.copyWith(fontSize: 24),
+                ),
+                if (subtitle != null) ...[
+                  const SizedBox(height: 2),
+                  Text(subtitle, style: t.meta(size: branded ? 10.5 : 11)),
+                ],
+              ],
+            ),
+          ),
+          // No gap before the first tile: the `Expanded` above absorbs the slack,
+          // which is what the fleet header's settings button sat against.
+          for (var i = 0; i < spec.actions.length; i++) ...[
+            if (i > 0) const SizedBox(width: 8),
+            _viewAction(context, spec.actions[i], t),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// The fleet header's rounded ⚙ tile. A menu action falls back to the app-bar
+  /// rendering, since a `PopupMenuButton` needs to be its own button and no view
+  /// asks for one.
+  Widget _viewAction(
+    BuildContext context,
+    ChromeAction action,
+    CommanderTokens t,
+  ) {
+    if (action is! ChromeButtonAction) return _action(context, action, t);
+    return InkWell(
+      onTap: action.onPressed,
+      child: Semantics(
+        button: true,
+        label: action.label,
+        child: Container(
+          width: 34,
+          height: 34,
+          decoration: BoxDecoration(
+            color: t.surface,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: t.border),
+          ),
+          child: Icon(action.icon, size: 16, color: t.textMuted),
+        ),
+      ),
+    );
+  }
+
+  /// The filter field over the slices, in the fleet list's one padded column.
+  ///
+  /// The chip strip is returned bare: it scrolls, so its insets are its own (see
+  /// [_segmentedChips]), and wrapping it would inset the row twice.
+  Widget? _viewControls(BuildContext context, ChromeViewRailSpec spec) {
+    final filter = spec.filter;
+    final slices = spec.slices;
+    if (filter == null && slices == null) return null;
+    if (filter == null && slices!.style == ChromeSegmentedStyle.chips) {
+      return buildSegmented(context, slices);
+    }
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 6, 16, 0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (filter != null) buildField(context, filter),
+          if (filter != null && slices != null) const SizedBox(height: 9),
+          if (slices != null) buildSegmented(context, slices),
         ],
       ),
     );
