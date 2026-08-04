@@ -99,10 +99,6 @@ pub struct PreviewState {
     pub visible_height: u16,
     /// Whether to follow new content (auto-scroll to bottom)
     follow: bool,
-    /// Whether this pane is a document rather than a live tail. Anchored states
-    /// never turn follow back on, so scrolling to the bottom once doesn't
-    /// silently convert them into tailing panes. See [`Self::anchored_top`].
-    anchored: bool,
 }
 
 impl Default for PreviewState {
@@ -112,7 +108,6 @@ impl Default for PreviewState {
             total_lines: 0,
             visible_height: 0,
             follow: true,
-            anchored: false,
         }
     }
 }
@@ -121,22 +116,6 @@ impl PreviewState {
     /// Create a new state
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// A state anchored at the top that never follows new content.
-    ///
-    /// For panes whose content is a document rather than a live tail — the Info
-    /// tab — where auto-scrolling to the bottom on every refresh would hide the
-    /// title and status the reader actually wants. Unlike a merely
-    /// scrolled-away tail, this survives the reader scrolling to the bottom:
-    /// otherwise one wheel-to-the-end would re-arm follow, and the next content
-    /// growth (or the next session selected) would render pinned to the bottom.
-    pub fn anchored_top() -> Self {
-        Self {
-            follow: false,
-            anchored: true,
-            ..Self::default()
-        }
     }
 
     /// Update content info
@@ -181,9 +160,8 @@ impl PreviewState {
     pub fn scroll_down(&mut self, n: u16) {
         self.scroll_offset = self.scroll_offset.saturating_add(n);
         self.clamp_scroll();
-        // Re-enable follow if we've scrolled to the bottom — but never for an
-        // anchored (document) pane, which must not become a tail.
-        if !self.anchored && !self.can_scroll_down() {
+        // Re-enable follow if we've scrolled to the bottom
+        if !self.can_scroll_down() {
             self.follow = true;
         }
     }
@@ -208,7 +186,7 @@ impl PreviewState {
 
     /// Scroll to bottom
     pub fn scroll_to_bottom(&mut self) {
-        self.follow = !self.anchored;
+        self.follow = true;
         if self.total_lines > self.visible_height as usize {
             self.scroll_offset = (self.total_lines - self.visible_height as usize) as u16;
         } else {
@@ -417,74 +395,6 @@ mod tests {
     // Each test below targets a specific mutation site identified by
     // cargo-mutants in src/tui/widgets/preview.rs.
     // ---------------------------------------------------------------------
-
-    /// An anchored (document) pane must never become a tail.
-    ///
-    /// Regression: `scroll_down` re-enables follow on reaching the bottom, which
-    /// is right for a live capture but wrong for the Info tab — one wheel to the
-    /// end would silently re-arm follow, and the next content growth (an
-    /// enriched PR or AI summary arriving) or the next session selected would
-    /// render pinned to the bottom, hiding the title and status.
-    #[test]
-    fn anchored_state_never_re_enables_follow() {
-        let mut state = PreviewState::anchored_top();
-        let content = (0..100)
-            .map(|i| format!("Line {}", i))
-            .collect::<Vec<_>>()
-            .join("\n");
-        state.set_content(&content, 20);
-        // Anchored panes start at the top rather than the tail.
-        assert_eq!(state.scroll_offset, 0);
-
-        // Scroll all the way to the bottom.
-        state.scroll_down(1000);
-        assert_eq!(state.scroll_offset, 80);
-        assert!(!state.can_scroll_down(), "should be at the bottom");
-
-        // Growing the content must NOT drag the view down with it.
-        let longer = (0..140)
-            .map(|i| format!("Line {}", i))
-            .collect::<Vec<_>>()
-            .join("\n");
-        state.set_content(&longer, 20);
-        assert_eq!(
-            state.scroll_offset, 80,
-            "an anchored pane must stay where the reader left it, not follow the tail"
-        );
-
-        // Explicitly asking for the bottom still works, and still doesn't arm follow.
-        state.scroll_to_bottom();
-        assert_eq!(state.scroll_offset, 120);
-        state.set_metrics(200, 20);
-        assert_eq!(
-            state.scroll_offset, 120,
-            "scroll_to_bottom must not convert an anchored pane into a tailing one"
-        );
-    }
-
-    /// The unanchored (live capture) default keeps its follow-the-tail
-    /// behaviour — the fix above must not leak into Preview/Shell.
-    #[test]
-    fn unanchored_state_still_follows_after_scrolling_to_the_bottom() {
-        let mut state = PreviewState::new();
-        let content = (0..100)
-            .map(|i| format!("Line {}", i))
-            .collect::<Vec<_>>()
-            .join("\n");
-        state.set_content(&content, 20);
-        state.scroll_up(30);
-        state.scroll_down(30);
-
-        let longer = (0..140)
-            .map(|i| format!("Line {}", i))
-            .collect::<Vec<_>>()
-            .join("\n");
-        state.set_content(&longer, 20);
-        assert_eq!(
-            state.scroll_offset, 120,
-            "a live capture must resume tailing"
-        );
-    }
 
     /// Kills mutant: `replace PreviewState::page_down with ()` (line 177).
     ///

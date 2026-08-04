@@ -1,19 +1,19 @@
-//! Structured unified-diff model and parser for the review/diff view.
+//! Composition of the review diff, and the git-shaped enrichment around it.
 //!
 //! Unlike [`super::diff`] (which produces only summary stats for the preview
-//! pane), this module parses a unified diff into a `file -> hunk -> line`
-//! structure with per-line old/new line numbers. The diff view uses that to
-//! render gutters, drive line-range selection, and anchor comments.
-//!
-//! The parser is deliberately tolerant: it skips the metadata lines git emits
-//! (`index`, mode, `similarity`, rename headers, `Binary files`) and copes with
-//! several files concatenated with blank-line separators, as the review-diff
-//! composition does when appending untracked-file patches.
+//! pane), the review view needs a `file -> hunk -> line` structure with per-line
+//! old/new line numbers to render gutters, drive line-range selection, and
+//! anchor comments. **Parsing that structure is [`diffgrid`]'s job**; this module
+//! owns everything git-shaped around it that a diff library must not know about:
+//! composing the diff in the first place (`git diff`, base/merge-base
+//! resolution, the untracked-file half), reading blobs, git-LFS pointer
+//! reclassification, and image MIME sniffing.
 
 use std::path::Path;
 use std::process::Stdio;
 
 use tokio::process::Command;
+use tracing::warn;
 use xxhash_rust::xxh3::Xxh3;
 
 use super::diff::untracked_patch_and_count;
@@ -356,208 +356,136 @@ pub fn file_diff_hash(file: &FileDiff) -> u64 {
     h.digest()
 }
 
+/// The path git writes for the side a file does not exist on. `diffgrid`
+/// resolves both sides to the real path (an added file's "old path" is the path
+/// git *would* have used), but the wire model predates that and consumers —
+/// including the Flutter client — key off this sentinel, so it is restored here.
+const DEV_NULL: &str = "/dev/null";
+
 /// Parse a unified diff (the output of `git diff`) into a [`ParsedDiff`].
+///
+/// The parse itself is [`diffgrid`]'s; this maps its model onto the wire shape in
+/// `claude-commander-protocol` and layers on the two git-specific
+/// reclassifications a diff library has no business knowing about: git-LFS
+/// pointers (which git diffs as *text*) become binary, and a binary file's
+/// extension picks an image MIME type.
+///
+/// Total, like the parser beneath it: entries `diffgrid` cannot represent are
+/// logged and omitted rather than aborting the parse, so one malformed file
+/// never costs the user the rest of the review.
 pub fn parse_unified_diff(raw: &str) -> ParsedDiff {
-    let mut files: Vec<FileDiff> = Vec::new();
-    let mut cur: Option<FileBuilder> = None;
-
-    for line in raw.lines() {
-        // New file section.
-        if let Some(rest) = line.strip_prefix("diff --git ") {
-            if let Some(b) = cur.take() {
-                files.push(b.finish());
-            }
-            let mut b = FileBuilder::default();
-            // Best-effort fallback paths; `---`/`+++` below override these.
-            if let Some((old, new)) = split_diff_git_paths(rest) {
-                b.old_path = old;
-                b.new_path = new;
-            }
-            cur = Some(b);
-            continue;
-        }
-
-        let Some(b) = cur.as_mut() else {
-            // Anything before the first `diff --git` (e.g. blank separators).
-            continue;
-        };
-
-        // Hunk header starts a new hunk.
-        if line.starts_with("@@") {
-            b.flush_hunk();
-            if let Some(h) = parse_hunk_header(line) {
-                b.old_lineno = h.old_start;
-                b.new_lineno = h.new_start;
-                b.cur_hunk = Some(h);
-            }
-            continue;
-        }
-
-        // Body lines, while inside a hunk.
-        if b.cur_hunk.is_some() {
-            match line.as_bytes().first() {
-                Some(b' ') => {
-                    let (old, new) = (b.old_lineno, b.new_lineno);
-                    b.push_line(DiffLine {
-                        origin: LineOrigin::Context,
-                        old_lineno: Some(old),
-                        new_lineno: Some(new),
-                        content: line[1..].to_string(),
-                    });
-                    b.old_lineno += 1;
-                    b.new_lineno += 1;
-                }
-                Some(b'+') => {
-                    let new = b.new_lineno;
-                    b.push_line(DiffLine {
-                        origin: LineOrigin::Addition,
-                        old_lineno: None,
-                        new_lineno: Some(new),
-                        content: line[1..].to_string(),
-                    });
-                    b.new_lineno += 1;
-                    b.added += 1;
-                }
-                Some(b'-') => {
-                    let old = b.old_lineno;
-                    b.push_line(DiffLine {
-                        origin: LineOrigin::Deletion,
-                        old_lineno: Some(old),
-                        new_lineno: None,
-                        content: line[1..].to_string(),
-                    });
-                    b.old_lineno += 1;
-                    b.removed += 1;
-                }
-                // "\ No newline at end of file" is not a content line.
-                Some(b'\\') => {}
-                // Blank/unexpected line ends the hunk.
-                _ => b.flush_hunk(),
-            }
-            continue;
-        }
-
-        // File metadata lines (only relevant before the first hunk).
-        if let Some(p) = line.strip_prefix("--- ") {
-            b.old_path = parse_header_path(p);
-        } else if let Some(p) = line.strip_prefix("+++ ") {
-            b.new_path = parse_header_path(p);
-        } else if line.starts_with("new file mode") {
-            b.added_file = true;
-        } else if line.starts_with("deleted file mode") {
-            b.deleted_file = true;
-        } else if let Some(from) = line.strip_prefix("rename from ") {
-            b.renamed = true;
-            b.old_path = from.to_string();
-        } else if let Some(to) = line.strip_prefix("rename to ") {
-            b.renamed = true;
-            b.new_path = to.to_string();
-        } else if let Some(rest) = line.strip_prefix("index ") {
-            // `index <old>..<new>[ <mode>]` — capture both blob oids so binary
-            // metadata can carry them. Harmless to record for text files too.
-            if let Some((old, new)) = rest.split_once("..") {
-                b.old_oid = Some(old.trim().to_string());
-                // The new oid may be followed by a file mode; keep just the oid.
-                b.new_oid = new.split_whitespace().next().map(str::to_string);
-            }
-        } else if line.starts_with("Binary files ") || line.starts_with("GIT binary patch") {
-            // git emits "Binary files a/x and b/x differ" (default) or a
-            // "GIT binary patch" header (with --binary) — either marks a binary.
-            b.binary = true;
-        }
-        // Everything else (mode, similarity) is ignored.
+    let (files, warnings) = diffgrid::parse(raw, &diffgrid::ParseOptions::default());
+    for w in &warnings {
+        // Warn rather than swallow: every one of these means a file the user
+        // changed is missing from (or degraded in) the review they are looking
+        // at, and the old hand-rolled parser dropped them silently.
+        warn!(
+            path = w.path.as_deref().unwrap_or("?"),
+            byte_offset = w.byte_offset,
+            "review diff: {:?}",
+            w.kind
+        );
     }
-
-    if let Some(b) = cur.take() {
-        files.push(b.finish());
+    ParsedDiff {
+        files: files.iter().map(convert_file).collect(),
     }
-
-    ParsedDiff { files }
 }
 
-/// Mutable accumulator for one file's diff.
-#[derive(Default)]
-struct FileBuilder {
-    old_path: String,
-    new_path: String,
-    added_file: bool,
-    deleted_file: bool,
-    renamed: bool,
-    binary: bool,
-    old_oid: Option<String>,
-    new_oid: Option<String>,
-    added: usize,
-    removed: usize,
-    hunks: Vec<Hunk>,
-    cur_hunk: Option<Hunk>,
-    old_lineno: usize,
-    new_lineno: usize,
+/// Map one [`diffgrid::FileDiff`] onto the wire [`FileDiff`].
+fn convert_file(f: &diffgrid::FileDiff<'_>) -> FileDiff {
+    let status = match f.status {
+        diffgrid::FileStatus::Added => FileStatus::Added,
+        diffgrid::FileStatus::Deleted => FileStatus::Deleted,
+        diffgrid::FileStatus::Modified => FileStatus::Modified,
+        // A copy has the same observable shape as a rename here — two distinct
+        // paths, both sides on disk, so context expansion works — and the wire
+        // enum has no `Copied` variant to add without breaking older clients.
+        // git only emits `copy from`/`copy to` under `-C`, which we never pass.
+        diffgrid::FileStatus::Renamed | diffgrid::FileStatus::Copied => FileStatus::Renamed,
+        // `FileStatus` is `#[non_exhaustive]`: a variant added upstream renders
+        // as a plain modification rather than failing to compile the day it lands.
+        _ => FileStatus::Modified,
+    };
+    let hunks: Vec<Hunk> = f.hunks.iter().map(convert_hunk).collect();
+
+    // git diffs an LFS-tracked file as a textual diff of its pointer (never
+    // "Binary files differ"), so a textual diff whose content is an LFS pointer
+    // is really a binary change. Reclassify it as binary — but keep the hunks,
+    // since `file_diff_hash` keys reviewed marks off them and the pointer's
+    // `oid` lines make that hash invalidate on re-upload.
+    let lfs_sizes = (!f.is_binary())
+        .then(|| lfs_pointer_sizes(&hunks))
+        .flatten();
+    let display = if status == FileStatus::Deleted {
+        f.old_path.as_ref()
+    } else {
+        f.new_path.as_ref()
+    };
+    let binary = (f.is_binary() || lfs_sizes.is_some()).then(|| {
+        let kind = match image_mime_for_path(display) {
+            Some(mime) => BinaryKind::Image {
+                mime: mime.to_string(),
+            },
+            None => BinaryKind::Other,
+        };
+        let (old_size, new_size) = lfs_sizes.unwrap_or((None, None));
+        BinaryInfo {
+            kind,
+            old_oid: zero_oid_to_none(f.old_oid.as_deref()),
+            new_oid: zero_oid_to_none(f.new_oid.as_deref()),
+            old_size,
+            new_size,
+        }
+    });
+
+    FileDiff {
+        old_path: side_or_dev_null(&f.old_path, status == FileStatus::Added),
+        new_path: side_or_dev_null(&f.new_path, status == FileStatus::Deleted),
+        status,
+        added: f.added(),
+        removed: f.removed(),
+        // A binary file's "hunks" are only ever the LFS pointer's text; a real
+        // binary patch has none.
+        hunks: if f.is_binary() { Vec::new() } else { hunks },
+        binary,
+    }
 }
 
-impl FileBuilder {
-    fn push_line(&mut self, line: DiffLine) {
-        if let Some(h) = self.cur_hunk.as_mut() {
-            h.lines.push(line);
-        }
+/// The wire spelling of one side's path: [`DEV_NULL`] on the side the file does
+/// not exist on, else the real path.
+fn side_or_dev_null(path: &str, absent: bool) -> String {
+    if absent {
+        DEV_NULL.to_string()
+    } else {
+        path.to_string()
     }
+}
 
-    fn flush_hunk(&mut self) {
-        if let Some(h) = self.cur_hunk.take() {
-            self.hunks.push(h);
-        }
-    }
-
-    fn finish(mut self) -> FileDiff {
-        self.flush_hunk();
-        let status = if self.renamed {
-            FileStatus::Renamed
-        } else if self.added_file || self.old_path == "/dev/null" {
-            FileStatus::Added
-        } else if self.deleted_file || self.new_path == "/dev/null" {
-            FileStatus::Deleted
-        } else {
-            FileStatus::Modified
-        };
-        // git diffs an LFS-tracked file as a textual diff of its pointer (never
-        // "Binary files differ"), so a textual diff whose content is an LFS
-        // pointer is really a binary change. Reclassify it as binary — but keep
-        // the hunks, since `file_diff_hash` keys reviewed marks off them and the
-        // pointer's `oid` lines make that hash invalidate on re-upload.
-        let lfs_sizes = (!self.binary)
-            .then(|| lfs_pointer_sizes(&self.hunks))
-            .flatten();
-        let binary = if self.binary || lfs_sizes.is_some() {
-            let display = if status == FileStatus::Deleted {
-                self.old_path.as_str()
-            } else {
-                self.new_path.as_str()
-            };
-            let kind = match image_mime_for_path(display) {
-                Some(mime) => BinaryKind::Image {
-                    mime: mime.to_string(),
+/// Map one [`diffgrid::Hunk`] onto the wire [`Hunk`].
+fn convert_hunk(h: &diffgrid::Hunk<'_>) -> Hunk {
+    Hunk {
+        old_start: h.old_start,
+        old_lines: h.old_lines,
+        new_start: h.new_start,
+        new_lines: h.new_lines,
+        header: h.section.to_string(),
+        lines: h
+            .lines
+            .iter()
+            .map(|l| DiffLine {
+                origin: match l.origin {
+                    diffgrid::LineOrigin::Context => LineOrigin::Context,
+                    diffgrid::LineOrigin::Addition => LineOrigin::Addition,
+                    diffgrid::LineOrigin::Deletion => LineOrigin::Deletion,
+                    // `LineOrigin` is `#[non_exhaustive]`; anything new reads as
+                    // unchanged rather than breaking the build.
+                    _ => LineOrigin::Context,
                 },
-                None => BinaryKind::Other,
-            };
-            let (old_size, new_size) = lfs_sizes.unwrap_or((None, None));
-            Some(BinaryInfo {
-                kind,
-                old_oid: zero_oid_to_none(self.old_oid.take()),
-                new_oid: zero_oid_to_none(self.new_oid.take()),
-                old_size,
-                new_size,
+                old_lineno: l.old_lineno.map(diffgrid::LineNo::get),
+                new_lineno: l.new_lineno.map(diffgrid::LineNo::get),
+                content: l.content.to_string(),
             })
-        } else {
-            None
-        };
-        FileDiff {
-            old_path: self.old_path,
-            new_path: self.new_path,
-            status,
-            added: self.added,
-            removed: self.removed,
-            hunks: self.hunks,
-            binary,
-        }
+            .collect(),
     }
 }
 
@@ -624,8 +552,9 @@ fn lfs_pointer_sizes(hunks: &[Hunk]) -> Option<(Option<u64>, Option<u64>)> {
 
 /// Map an all-zero blob oid (git's "absent" sentinel for the missing side of an
 /// add or delete) to `None`; pass any real oid through unchanged.
-fn zero_oid_to_none(oid: Option<String>) -> Option<String> {
+fn zero_oid_to_none(oid: Option<&str>) -> Option<String> {
     oid.filter(|o| !o.is_empty() && o.bytes().any(|c| c != b'0'))
+        .map(str::to_owned)
 }
 
 /// MIME type for a path's extension when it names a raster image we can render,
@@ -643,60 +572,6 @@ fn image_mime_for_path(path: &str) -> Option<&'static str> {
         "tif" | "tiff" => "image/tiff",
         _ => return None,
     })
-}
-
-/// Parse a `---`/`+++` header path, stripping the `a/`/`b/` prefix and handling
-/// `/dev/null`.
-fn parse_header_path(p: &str) -> String {
-    if p == "/dev/null" {
-        return "/dev/null".to_string();
-    }
-    p.strip_prefix("a/")
-        .or_else(|| p.strip_prefix("b/"))
-        .unwrap_or(p)
-        .to_string()
-}
-
-/// Best-effort split of `a/old b/new` from a `diff --git` line. Only used as a
-/// fallback when `---`/`+++`/rename headers are absent (e.g. mode-only change).
-fn split_diff_git_paths(rest: &str) -> Option<(String, String)> {
-    let a = rest.trim().strip_prefix("a/")?;
-    let idx = a.find(" b/")?;
-    Some((a[..idx].to_string(), a[idx + 3..].to_string()))
-}
-
-/// Parse a hunk header `@@ -old_start,old_lines +new_start,new_lines @@ heading`.
-fn parse_hunk_header(line: &str) -> Option<Hunk> {
-    let after = line.strip_prefix("@@ ")?;
-    let close = after.find(" @@")?;
-    let ranges = &after[..close];
-    let header = after[close + 3..].trim_start().to_string();
-
-    let mut parts = ranges.split_whitespace();
-    let old = parts.next()?.strip_prefix('-')?;
-    let new = parts.next()?.strip_prefix('+')?;
-    let (old_start, old_lines) = parse_range(old)?;
-    let (new_start, new_lines) = parse_range(new)?;
-
-    Some(Hunk {
-        old_start,
-        old_lines,
-        new_start,
-        new_lines,
-        header,
-        lines: Vec::new(),
-    })
-}
-
-/// Parse a `start,count` range; `count` defaults to 1 when omitted (`@@ -5 +5 @@`).
-fn parse_range(s: &str) -> Option<(usize, usize)> {
-    let mut it = s.split(',');
-    let start: usize = it.next()?.parse().ok()?;
-    let lines: usize = match it.next() {
-        Some(n) => n.parse().ok()?,
-        None => 1,
-    };
-    Some((start, lines))
 }
 
 #[cfg(test)]
@@ -836,6 +711,107 @@ index 1111111..0000000
         // deletions display the old path
         assert_eq!(f.display_path(), "gone.txt");
         assert_eq!(f.removed, 1);
+    }
+
+    /// A copy (`git diff -C`) has two distinct paths with both sides on disk,
+    /// which the wire enum spells `Renamed`. The hand-rolled parser did not
+    /// recognise `copy from`/`copy to` at all and reported these as plain
+    /// modifications of the destination.
+    #[test]
+    fn detects_copy_as_a_two_path_change() {
+        let raw = "\
+diff --git a/src.txt b/dst.txt
+similarity index 90%
+copy from src.txt
+copy to dst.txt
+--- a/src.txt
++++ b/dst.txt
+@@ -1 +1 @@
+-a
++b
+";
+        let f = &parse_unified_diff(raw).files[0];
+        assert_eq!(f.status, FileStatus::Renamed);
+        assert_eq!(f.old_path, "src.txt");
+        assert_eq!(f.new_path, "dst.txt");
+        assert_eq!(f.display_path(), "dst.txt");
+    }
+
+    /// A conflicted working tree makes `git diff` emit combined (`diff --cc`)
+    /// entries. They have no shape in this model, so they are dropped — but the
+    /// rest of the diff must still parse, rather than the `--cc` body being
+    /// mistaken for the previous file's content.
+    #[test]
+    fn combined_diff_is_dropped_without_swallowing_neighbours() {
+        let raw = "\
+diff --git a/before.txt b/before.txt
+--- a/before.txt
++++ b/before.txt
+@@ -1 +1 @@
+-a
++b
+diff --cc merged.txt
+index 1111111,2222222..3333333
+--- a/merged.txt
++++ b/merged.txt
+@@@ -1,1 -1,1 +1,1 @@@
+- ours
+ -theirs
+++resolved
+diff --git a/after.txt b/after.txt
+--- a/after.txt
++++ b/after.txt
+@@ -1 +1 @@
+-c
++d
+";
+        let d = parse_unified_diff(raw);
+        let paths: Vec<&str> = d.files.iter().map(FileDiff::display_path).collect();
+        assert_eq!(paths, ["before.txt", "after.txt"]);
+        // The neighbours are intact — no `--cc` body leaked into either.
+        assert_eq!(d.files[0].hunks[0].lines.len(), 2);
+        assert_eq!(d.files[1].hunks[0].lines.len(), 2);
+    }
+
+    /// A CRLF file's lines must not carry a stray `\r` into the rendered body
+    /// (or into a comment snippet, which is matched against them verbatim). The
+    /// hand-rolled parser kept it, because `str::lines()` strips `\n` only when
+    /// it splits — and it split on `\n`.
+    #[test]
+    fn crlf_content_is_normalised() {
+        // git frames the diff with LF and lets the file's own `\r` ride on the
+        // content lines, which is exactly where the stray carriage return came
+        // from.
+        let raw = "\
+diff --git a/w.txt b/w.txt
+--- a/w.txt
++++ b/w.txt
+@@ -1 +1 @@
+-old\r
++new\r
+";
+        let f = &parse_unified_diff(raw).files[0];
+        assert_eq!(f.new_path, "w.txt");
+        assert_eq!(f.hunks[0].lines[0].content, "old");
+        assert_eq!(f.hunks[0].lines[1].content, "new");
+    }
+
+    /// `core.quotePath` (on by default) makes git C-quote any path with
+    /// non-ASCII bytes. The display path must be the real name, or the file
+    /// list shows octal escapes and reviewed marks key off a path that never
+    /// matches the working tree.
+    #[test]
+    fn quoted_non_ascii_path_is_decoded() {
+        let raw = "\
+diff --git \"a/caf\\303\\251.txt\" \"b/caf\\303\\251.txt\"
+--- \"a/caf\\303\\251.txt\"
++++ \"b/caf\\303\\251.txt\"
+@@ -1 +1 @@
+-a
++b
+";
+        let f = &parse_unified_diff(raw).files[0];
+        assert_eq!(f.display_path(), "café.txt");
     }
 
     #[test]

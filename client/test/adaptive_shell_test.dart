@@ -81,17 +81,15 @@ void main() {
   );
 
   testWidgets(
-    'selecting a session opens its workspace on the Agent tab, in place',
+    'selecting a session opens its workspace on the Overview tab, in place',
     (tester) async {
       await pumpWide(tester);
 
       await tester.tap(find.text('Alpha'));
       await tester.pumpAndSettle();
 
-      // The live agent terminal is shown in place, not the Overview body, and
-      // no phone detail route was pushed.
-      expect(find.byType(TerminalBody), findsOneWidget);
-      expect(find.byType(SessionDetailBody), findsNothing);
+      // Overview body is shown in place; no phone detail route was pushed.
+      expect(find.byType(SessionDetailBody), findsOneWidget);
       expect(find.byType(SessionDetailPage), findsNothing);
       expect(find.text('Select a session'), findsNothing);
       // The underline tab row is present.
@@ -99,24 +97,18 @@ void main() {
       expect(find.byKey(const ValueKey('ws-tab-terminal')), findsOneWidget);
       expect(find.byKey(const ValueKey('ws-tab-shell')), findsOneWidget);
       expect(find.byKey(const ValueKey('ws-tab-review')), findsOneWidget);
-      expect(find.text('Agent'), findsOneWidget);
+      expect(find.text('Overview'), findsOneWidget);
     },
   );
 
-  testWidgets('the Overview and Shell tabs switch bodies in place', (
+  testWidgets('the Agent and Shell tabs switch to live terminal bodies in place', (
     tester,
   ) async {
     await pumpWide(tester);
     await tester.tap(find.text('Alpha'));
     await tester.pumpAndSettle();
 
-    // Overview tab → the detail body, off the default agent attach.
-    await tester.tap(find.byKey(const ValueKey('ws-tab-detail')));
-    await tester.pumpAndSettle();
-    expect(find.byType(SessionDetailBody), findsOneWidget);
-    expect(find.byType(TerminalBody), findsNothing);
-
-    // Agent tab → back to an agent-pane attach.
+    // Agent tab → an agent-pane attach.
     await tester.tap(find.byKey(const ValueKey('ws-tab-terminal')));
     await tester.pump();
     await tester.pump();
@@ -152,21 +144,21 @@ void main() {
       // A session is selected first, to prove ACTIVITY overrides the workspace.
       await tester.tap(find.text('Alpha'));
       await tester.pumpAndSettle();
-      expect(find.byType(TerminalBody), findsOneWidget);
+      expect(find.byType(SessionDetailBody), findsOneWidget);
 
       await tester.tap(find.text('ACTIVITY'));
       await tester.pumpAndSettle();
 
       // Workspace is now the Activity feed; the rail (list) is still there.
       expect(find.byType(ActivityBody), findsOneWidget);
-      expect(find.byType(TerminalBody), findsNothing);
+      expect(find.byType(SessionDetailBody), findsNothing);
       expect(find.byType(SessionListBody), findsOneWidget);
 
       // Toggling back to FLEET restores the selected session's workspace.
       await tester.tap(find.text('FLEET'));
       await tester.pumpAndSettle();
       expect(find.byType(ActivityBody), findsNothing);
-      expect(find.byType(TerminalBody), findsOneWidget);
+      expect(find.byType(SessionDetailBody), findsOneWidget);
     },
   );
 
@@ -185,9 +177,6 @@ void main() {
       await tester.pumpAndSettle();
 
       await tester.tap(find.text('Alpha'));
-      await tester.pumpAndSettle();
-      // The preview lives on Overview; selection lands on Agent by default.
-      await tester.tap(find.byKey(const ValueKey('ws-tab-detail')));
       await tester.pumpAndSettle();
 
       expect(find.text('Terminal snapshot'), findsOneWidget);

@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::config::keybindings::{BindableAction, KeyBindings};
 use crate::git::{DiffInfo, EnrichedPrInfo};
@@ -90,9 +90,6 @@ pub enum StateUpdate {
     },
     /// Enriched PR info ready from background fetch
     EnrichedPrReady {
-        /// Generation token for the in-flight guard — see
-        /// [`StateUpdate::PreviewReady::spawned_at`].
-        spawned_at: Instant,
         session_id: SessionId,
         info: Option<EnrichedPrInfo>,
     },
@@ -188,27 +185,18 @@ pub enum StateUpdate {
         backend: crate::backend::BackendId,
         message: String,
     },
-    /// Preview / shell / diff data ready from a background fetch, applied only
-    /// if the same thing is still selected. One fetch feeds every consumer: the
-    /// list views' right pane (`preview_content` / `shell_content`) and the Info
-    /// modal's diffstat (`diff_info`) — `backend.preview()` returns all three in
-    /// a single round trip, so splitting them would double the traffic.
+    /// Preview/diff/shell data ready from background fetch
     PreviewReady {
-        /// The value the in-flight guard was set to when this fetch was spawned,
-        /// used as a generation token: the guard is cleared only by the result
-        /// that owns it. Comparing selections instead is not enough — a
-        /// selection can change without a respawn (a `StateUpdate` that shifts
-        /// the cursor), which would strand the guard until its 5s backstop.
-        spawned_at: Instant,
-        /// Selected session at spawn time, or `None` when a project was selected.
+        /// Which session this data is for (None if project-level)
         session_id: Option<SessionId>,
-        /// Selected project at spawn time, or `None` when a session was selected.
+        /// Which project this data is for
         project_id: Option<ProjectId>,
-        /// Agent-pane capture (empty for a project, which has no agent pane).
+        /// Preview pane content (tmux capture)
         preview_content: String,
-        /// Shell-pane capture, or a placeholder when no shell session exists.
-        shell_content: String,
+        /// Diff information
         diff_info: Arc<DiffInfo>,
+        /// Shell pane content
+        shell_content: String,
     },
     /// Cascade-merge background task finished (completed, paused on conflict,
     /// or errored). The TUI refreshes and shows a toast from the recorded
@@ -298,10 +286,6 @@ pub enum UserCommand {
     NavigateFirst,
     /// Jump to the last item in the list
     NavigateLast,
-    /// Move to the previous board column (or sidebar)
-    NavigateLeft,
-    /// Move to the next board column (or sidebar)
-    NavigateRight,
     /// Select/attach to current item
     Select,
     /// Open shell in worktree
@@ -338,8 +322,6 @@ pub enum UserCommand {
     RemoveProject,
     /// Open worktree in editor/IDE
     OpenInEditor,
-    /// Open the Info modal for the selected session
-    OpenInfo,
     /// Open the selected session's PR URL in a web browser
     OpenPullRequest,
     /// Force an immediate PR-status re-check for all sessions (palette-only)
@@ -356,6 +338,14 @@ pub enum UserCommand {
     ToggleVoiceInput,
     /// Open the full-screen review-diff-and-comment view for the session
     OpenReviewDiff,
+    /// Toggle between preview/diff panes
+    TogglePane,
+    /// Toggle between preview/diff panes (reverse)
+    TogglePaneReverse,
+    /// Shrink left pane (move divider left)
+    ShrinkLeftPane,
+    /// Grow left pane (move divider right)
+    GrowLeftPane,
     /// Show help
     ShowHelp,
     /// Show settings modal
@@ -374,40 +364,30 @@ pub enum UserCommand {
     TextInput(char),
     /// Backspace in text input
     Backspace,
-    /// Scroll up (one row in the board column, or a line in a scrolling modal)
+    /// Scroll preview up
     ScrollUp,
-    /// Scroll down (one row in the board column, or a line in a scrolling modal)
+    /// Scroll preview down
     ScrollDown,
-    /// First card in the board column, or page up in a scrolling modal
+    /// Page up in the right pane (preview / info / shell)
     PageUp,
-    /// Last card in the board column, or page down in a scrolling modal
+    /// Page down in the right pane (preview / info / shell)
     PageDown,
-    /// Move the list / board-column cursor up a screenful
+    /// Move the session-list cursor up a screenful
     ListPageUp,
-    /// Move the list / board-column cursor down a screenful
+    /// Move the session-list cursor down a screenful
     ListPageDown,
     /// Open quick-switch session search modal
     QuickSwitch,
-    /// Generate AI summary for the current session (Info modal only)
+    /// Generate AI summary for the current session (Info pane only)
     GenerateSummary,
     /// Scan a directory for git repos and add them as projects
     ScanDirectory,
     /// Open the "Move to section" modal for the selected session.
     MoveToSection,
-    /// Cycle the view: project / sections / stacks / board.
-    ToggleViewMode,
-    /// Switch the list views' right pane between Preview and Shell.
-    TogglePane,
-    /// Switch the right pane the other way. With two tabs this is the same
-    /// toggle; kept as its own command so `BackTab` stays bindable and reads
-    /// symmetrically with [`Self::TogglePane`].
-    TogglePaneReverse,
-    /// Narrow the session list (move the pane divider left).
-    ShrinkLeftPane,
-    /// Widen the session list (move the pane divider right).
-    GrowLeftPane,
     /// Collapse or expand the section containing the selected item.
     ToggleSection,
+    /// Toggle between project-grouped and section-grouped list views.
+    ToggleViewMode,
 }
 
 impl UserCommand {
@@ -473,8 +453,6 @@ impl UserCommand {
             | UserCommand::PreviousGroup
             | UserCommand::NavigateFirst
             | UserCommand::NavigateLast
-            | UserCommand::NavigateLeft
-            | UserCommand::NavigateRight
             | UserCommand::ScrollUp
             | UserCommand::ScrollDown
             | UserCommand::PageUp
@@ -497,7 +475,6 @@ impl UserCommand {
             UserCommand::CascadeMergeMain => Some("cascade.merge_main"),
             UserCommand::CascadeAbandon => Some("cascade.abandon"),
             UserCommand::OpenInEditor => Some("editor.open"),
-            UserCommand::OpenInfo => Some("ui.open_info"),
             UserCommand::OpenPullRequest => Some("pr.open"),
             UserCommand::RefreshPrStatus => Some("pr.refresh_status"),
             UserCommand::AddRemoteServer => Some("server.add_remote"),
@@ -506,14 +483,14 @@ impl UserCommand {
             UserCommand::ToggleConversationOverlay => Some("conversation.toggle"),
             UserCommand::ToggleVoiceInput => Some("stt.toggle_voice"),
             UserCommand::GenerateSummary => Some("ai_summary.generate"),
+            UserCommand::TogglePane | UserCommand::TogglePaneReverse => Some("ui.toggle_pane"),
             UserCommand::ShowHelp => Some("ui.help"),
             UserCommand::ShowSettings => Some("ui.settings"),
             UserCommand::EditServerPrograms => Some("ui.edit_server_programs"),
             UserCommand::QuickSwitch => Some("ui.quick_switch"),
             UserCommand::MoveToSection => Some("ui.move_to_section"),
-            UserCommand::ToggleViewMode => Some("ui.toggle_view_mode"),
             UserCommand::ToggleSection => Some("ui.toggle_section"),
-            UserCommand::TogglePane | UserCommand::TogglePaneReverse => Some("ui.toggle_pane"),
+            UserCommand::ToggleViewMode => Some("ui.toggle_view_mode"),
         }
     }
 }
@@ -527,8 +504,6 @@ impl From<BindableAction> for UserCommand {
             BindableAction::PreviousGroup => Self::PreviousGroup,
             BindableAction::NavigateFirst => Self::NavigateFirst,
             BindableAction::NavigateLast => Self::NavigateLast,
-            BindableAction::NavigateLeft => Self::NavigateLeft,
-            BindableAction::NavigateRight => Self::NavigateRight,
             BindableAction::ListPageUp => Self::ListPageUp,
             BindableAction::ListPageDown => Self::ListPageDown,
             BindableAction::Select => Self::Select,
@@ -549,13 +524,16 @@ impl From<BindableAction> for UserCommand {
             BindableAction::ToggleKeepAlive => Self::ToggleKeepAlive,
             BindableAction::RemoveProject => Self::RemoveProject,
             BindableAction::OpenInEditor => Self::OpenInEditor,
-            BindableAction::OpenInfo => Self::OpenInfo,
             BindableAction::OpenPullRequest => Self::OpenPullRequest,
             BindableAction::RefreshPrStatus => Self::RefreshPrStatus,
             BindableAction::OpenCommander => Self::OpenCommander,
             BindableAction::ToggleConversationOverlay => Self::ToggleConversationOverlay,
             BindableAction::ToggleVoiceInput => Self::ToggleVoiceInput,
             BindableAction::OpenReviewDiff => Self::OpenReviewDiff,
+            BindableAction::TogglePane => Self::TogglePane,
+            BindableAction::TogglePaneReverse => Self::TogglePaneReverse,
+            BindableAction::ShrinkLeftPane => Self::ShrinkLeftPane,
+            BindableAction::GrowLeftPane => Self::GrowLeftPane,
             BindableAction::ShowHelp => Self::ShowHelp,
             BindableAction::ShowSettings => Self::ShowSettings,
             BindableAction::EditServerPrograms => Self::EditServerPrograms,
@@ -567,12 +545,8 @@ impl From<BindableAction> for UserCommand {
             BindableAction::GenerateSummary => Self::GenerateSummary,
             BindableAction::ScanDirectory => Self::ScanDirectory,
             BindableAction::MoveToSection => Self::MoveToSection,
-            BindableAction::ToggleViewMode => Self::ToggleViewMode,
             BindableAction::ToggleSection => Self::ToggleSection,
-            BindableAction::TogglePane => Self::TogglePane,
-            BindableAction::TogglePaneReverse => Self::TogglePaneReverse,
-            BindableAction::ShrinkLeftPane => Self::ShrinkLeftPane,
-            BindableAction::GrowLeftPane => Self::GrowLeftPane,
+            BindableAction::ToggleViewMode => Self::ToggleViewMode,
             BindableAction::AddRemoteServer => Self::AddRemoteServer,
             BindableAction::RemoveRemoteServer => Self::RemoveRemoteServer,
         }
@@ -781,19 +755,13 @@ mod tests {
             Some("commander.open")
         );
         assert_eq!(
-            UserCommand::OpenInfo.telemetry_feature(),
-            Some("ui.open_info")
+            UserCommand::ToggleViewMode.telemetry_feature(),
+            Some("ui.toggle_view_mode")
         );
-    }
-
-    #[test]
-    fn test_open_info_key_maps_to_open_info() {
-        let b = kb();
-        let key = KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE);
-        assert!(matches!(
-            UserCommand::from_key(key, &b),
-            Some(UserCommand::OpenInfo)
-        ));
+        assert_eq!(
+            UserCommand::TogglePaneReverse.telemetry_feature(),
+            Some("ui.toggle_pane")
+        );
     }
 
     #[test]
@@ -812,28 +780,6 @@ mod tests {
             UserCommand::from_key(key, &b),
             Some(UserCommand::NavigateUp)
         ));
-
-        // Column navigation: h/l and ←/→ move between board columns.
-        for code in [KeyCode::Char('h'), KeyCode::Left] {
-            let key = KeyEvent::new(code, KeyModifiers::NONE);
-            assert!(
-                matches!(
-                    UserCommand::from_key(key, &b),
-                    Some(UserCommand::NavigateLeft)
-                ),
-                "{code:?} should map to NavigateLeft"
-            );
-        }
-        for code in [KeyCode::Char('l'), KeyCode::Right] {
-            let key = KeyEvent::new(code, KeyModifiers::NONE);
-            assert!(
-                matches!(
-                    UserCommand::from_key(key, &b),
-                    Some(UserCommand::NavigateRight)
-                ),
-                "{code:?} should map to NavigateRight"
-            );
-        }
 
         // Quit
         let key = KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE);
@@ -854,36 +800,29 @@ mod tests {
     fn test_pane_resize_keys() {
         let b = kb();
 
-        // `<` / `>` are shifted characters, and terminals disagree on whether
-        // they also report the SHIFT modifier — both forms must bind.
-        for mods in [KeyModifiers::SHIFT, KeyModifiers::NONE] {
-            assert!(
-                matches!(
-                    UserCommand::from_key(KeyEvent::new(KeyCode::Char('<'), mods), &b),
-                    Some(UserCommand::ShrinkLeftPane)
-                ),
-                "`<` must shrink the left pane (mods={mods:?})"
-            );
-            assert!(
-                matches!(
-                    UserCommand::from_key(KeyEvent::new(KeyCode::Char('>'), mods), &b),
-                    Some(UserCommand::GrowLeftPane)
-                ),
-                "`>` must grow the left pane (mods={mods:?})"
-            );
-        }
-    }
-
-    #[test]
-    fn test_tab_toggles_the_right_pane() {
-        let b = kb();
+        let key = KeyEvent::new(KeyCode::Char('<'), KeyModifiers::SHIFT);
         assert!(matches!(
-            UserCommand::from_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &b),
-            Some(UserCommand::TogglePane)
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::ShrinkLeftPane)
         ));
+
+        let key = KeyEvent::new(KeyCode::Char('>'), KeyModifiers::SHIFT);
         assert!(matches!(
-            UserCommand::from_key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT), &b),
-            Some(UserCommand::TogglePaneReverse)
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::GrowLeftPane)
+        ));
+
+        // Some terminals report without SHIFT
+        let key = KeyEvent::new(KeyCode::Char('<'), KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::ShrinkLeftPane)
+        ));
+
+        let key = KeyEvent::new(KeyCode::Char('>'), KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::GrowLeftPane)
         ));
     }
 
@@ -941,6 +880,23 @@ mod tests {
         assert!(matches!(
             UserCommand::from_key(key, &b),
             Some(UserCommand::Select)
+        ));
+    }
+
+    #[test]
+    fn test_tab_toggles_pane() {
+        let b = kb();
+
+        let tab = KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(tab, &b),
+            Some(UserCommand::TogglePane)
+        ));
+
+        let backtab = KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT);
+        assert!(matches!(
+            UserCommand::from_key(backtab, &b),
+            Some(UserCommand::TogglePaneReverse)
         ));
     }
 
@@ -1055,8 +1011,8 @@ mod tests {
             Some(UserCommand::PageDown)
         ));
 
-        // PgUp/PgDn page the list / board column; Ctrl-u/Ctrl-d (above) jump
-        // to the column's first/last card instead.
+        // PgUp/PgDn page the session list; the right pane is paged with
+        // Ctrl-u/Ctrl-d above.
         let pgup = KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE);
         assert!(matches!(
             UserCommand::from_key(pgup, &b),
@@ -1166,7 +1122,17 @@ mod tests {
     }
 
     #[test]
-    fn test_unbound_char_falls_through_to_text_input() {
+    fn test_toggle_view_mode_bound_to_v() {
+        let b = kb();
+        let key = KeyEvent::new(KeyCode::Char('v'), KeyModifiers::NONE);
+        assert!(matches!(
+            UserCommand::from_key(key, &b),
+            Some(UserCommand::ToggleViewMode)
+        ));
+    }
+
+    #[test]
+    fn test_toggle_section_not_bound_by_default() {
         let b = kb();
         // z is unbound by default, falls through to TextInput
         let key = KeyEvent::new(KeyCode::Char('z'), KeyModifiers::NONE);

@@ -182,57 +182,6 @@ Future<void> markUnread({required String handle, required List<String> ids}) =>
 Future<bool> toggleKeepAlive({required String handle, required String id}) =>
     RustLib.instance.api.crateApiSimpleToggleKeepAlive(handle: handle, id: id);
 
-/// Upload an image to a session's agent pane (`POST /paste-image`).
-///
-/// The server writes the bytes to a temp file and types the path into the agent
-/// pane without pressing Enter, so the user can add prompt text around it — the
-/// form the Claude CLI accepts. The path shows up in the terminal view through
-/// the normal attach output stream, so a caller needs no success feedback.
-///
-/// `bytes` are whatever the platform picker or clipboard produced;
-/// [`RemoteClient::paste_image`] sniffs the content and refuses anything that
-/// isn't an allow-listed image (or is over
-/// [`claude_commander_protocol::paste::MAX_IMAGE_BYTES`]) *before* uploading, so
-/// a doomed transfer never leaves the device.
-Future<void> pasteImage({
-  required String handle,
-  required String id,
-  required List<int> bytes,
-}) => RustLib.instance.api.crateApiSimplePasteImage(
-  handle: handle,
-  id: id,
-  bytes: bytes,
-);
-
-/// The pasted-image size cap in bytes, so the UI can reject an oversized pick
-/// from its file length — without reading a 50 MB phone photo into memory just
-/// to discard it — using the shared wire contract rather than a hardcoded Dart
-/// mirror that could drift.
-///
-/// `u32` (not `usize`/`u64`) so this lands in Dart as a plain `int` rather than a
-/// `BigInt`; the cap is single-digit MiB and will never approach 4 GiB. The
-/// const assert below makes that an enforced precondition rather than a comment,
-/// so raising the cap past `u32::MAX` fails the build instead of silently
-/// truncating.
-Future<int> imageMaxBytes() =>
-    RustLib.instance.api.crateApiSimpleImageMaxBytes();
-
-/// How long a silent client can be away before the server is *guaranteed* to
-/// have torn its terminal attach down, in milliseconds.
-///
-/// The mobile UI needs this on resume: a frozen background process can't answer
-/// the server's heartbeat pings, so an absence longer than this means the attach
-/// is certainly gone and must be re-opened, while a shorter one proves nothing —
-/// leaving a live socket alone there is what keeps a scrolled tmux copy-mode view
-/// in place. Sourced from the shared wire contract rather than a hardcoded Dart
-/// threshold, which would drift silently the moment the heartbeat is retuned.
-///
-/// `u32` milliseconds (not a `Duration`) so this crosses the bridge as a plain
-/// Dart `int`; the const assert makes the range a build-time precondition rather
-/// than a comment.
-Future<int> attachDeadAfterMillis() =>
-    RustLib.instance.api.crateApiSimpleAttachDeadAfterMillis();
-
 /// Register a project (git repo) by server-side path; returns the new project's
 /// full-id string.
 Future<String> addProject({required String handle, required String path}) =>

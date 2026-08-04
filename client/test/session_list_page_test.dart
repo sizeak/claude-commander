@@ -301,7 +301,8 @@ void main() {
     expect(find.text('No matches'), findsOneWidget);
   });
 
-  testWidgets('the Recent view shows sessions newest-first', (tester) async {
+  testWidgets('the Recent view shows attached sessions newest-first and hides '
+      'never-attached', (tester) async {
     api.listSessionsResponse = [
       sessionInfo(
         id: '11111111-2222-3333-4444-555555555555',
@@ -313,6 +314,11 @@ void main() {
         title: 'Newer',
         lastAttachedAt: DateTime.utc(2026, 1, 5),
       ),
+      sessionInfo(
+        id: '33333333-2222-3333-4444-555555555555',
+        title: 'Never',
+        lastAttachedAt: null,
+      ),
     ];
     unawaited(store.connect());
     await tester.pumpWidget(wrap());
@@ -322,97 +328,14 @@ void main() {
     await tester.tap(find.text('Recent'));
     await tester.pumpAndSettle();
 
+    // Never-attached is excluded; the two attached ones show newest-first.
+    expect(find.text('Never'), findsNothing);
     expect(find.text('Newer'), findsOneWidget);
     expect(find.text('Older'), findsOneWidget);
     expect(
       tester.getTopLeft(find.text('Newer')).dy,
       lessThan(tester.getTopLeft(find.text('Older')).dy),
     );
-  });
-
-  testWidgets('the Recent view keeps a never-attached session, ordered by its '
-      'creation time', (tester) async {
-    // A session created seconds ago has never been attached. Keyed on the attach
-    // time alone it vanished from this tab entirely — so the session the user
-    // had just created was missing from the list, with no way to attach it (and
-    // so no way to make it appear).
-    api.listSessionsResponse = [
-      sessionInfo(
-        id: '11111111-2222-3333-4444-555555555555',
-        title: 'Attached',
-        createdAt: DateTime.utc(2026, 1, 1),
-        lastAttachedAt: DateTime.utc(2026, 1, 3),
-      ),
-      sessionInfo(
-        id: '22222222-2222-3333-4444-555555555555',
-        title: 'Just created',
-        createdAt: DateTime.utc(2026, 1, 9),
-        lastAttachedAt: null,
-      ),
-    ];
-    unawaited(store.connect());
-    await tester.pumpWidget(wrap());
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.text('Recent'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Just created'), findsOneWidget);
-    expect(find.text('Attached'), findsOneWidget);
-    // Its creation time is the most recent thing that happened, so it leads.
-    expect(
-      tester.getTopLeft(find.text('Just created')).dy,
-      lessThan(tester.getTopLeft(find.text('Attached')).dy),
-    );
-  });
-
-  testWidgets('a quick filter stops applying once its chip drops out of the '
-      'row', (tester) async {
-    final waiting = sessionInfo(
-      id: '11111111-2222-3333-4444-555555555555',
-      title: 'Waiting',
-    );
-    api.listSessionsResponse = [waiting];
-    api.agentStatesResponse = AgentStatesSnapshotDto(
-      states: [
-        AgentStateEntryDto(
-          sessionId: waiting.sessionId,
-          state: AgentState.waitingForInput,
-        ),
-      ],
-      commanderRunning: false,
-    );
-    unawaited(store.connect());
-    await tester.pumpWidget(wrap());
-    await tester.pumpAndSettle();
-
-    // Turn the needs-input filter on while there is something to show.
-    await tester.tap(find.textContaining('needs input'));
-    await tester.pumpAndSettle();
-    expect(find.text('Waiting'), findsOneWidget);
-
-    // The agent stops waiting and a new session shows up. The needs-input count
-    // is now zero, so its chip is gone from the row — the only control that
-    // could clear the filter. It must therefore stop filtering, rather than
-    // hiding every session (including the one just created) for good.
-    api.listSessionsResponse = [
-      waiting,
-      sessionInfo(
-        id: '22222222-2222-3333-4444-555555555555',
-        title: 'Just created',
-      ),
-    ];
-    api.agentStatesResponse = const AgentStatesSnapshotDto(
-      states: [],
-      commanderRunning: false,
-    );
-    api.emitChange();
-    await tester.pumpAndSettle();
-
-    expect(find.textContaining('needs input'), findsNothing);
-    expect(find.text('Just created'), findsOneWidget);
-    expect(find.text('Waiting'), findsOneWidget);
-    expect(find.text('No matches'), findsNothing);
   });
 
   testWidgets('the Recent view hides stopped sessions even if attached', (
@@ -492,59 +415,6 @@ void main() {
     expect(find.byTooltip('Clear'), findsNothing);
     expect(find.text('Alpha'), findsOneWidget);
     expect(find.text('Beta'), findsOneWidget);
-  });
-
-  testWidgets('creating a session refreshes the list immediately', (
-    tester,
-  ) async {
-    api.listSessionsResponse = [sessionInfo(title: 'Existing')];
-    api.createSessionResponse = 'created-1';
-    await store.connect();
-    await tester.pumpWidget(
-      WorkspaceScope(
-        workspace: workspace,
-        child: MaterialApp(
-          home: Builder(
-            builder: (context) => Scaffold(
-              body: SessionListBody(onSelect: (_, _) {}),
-              floatingActionButton: FloatingActionButton(
-                onPressed: () => openCreateSession(context, workspace),
-                child: const Icon(Icons.add),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    await tester.tap(find.byType(FloatingActionButton));
-    await tester.pumpAndSettle();
-
-    // The server will report the new session on the next snapshot fetch. (Its
-    // own project, as the fake synthesizes one per session — hence the distinct
-    // name, so the create page's picker keeps unique values while it pops.)
-    api.listSessionsResponse = [
-      sessionInfo(title: 'Existing'),
-      sessionInfo(
-        id: '22222222-2222-3333-4444-555555555555',
-        title: 'Just created',
-        projectName: 'other-repo',
-      ),
-    ];
-    final before = api.countOf('workspaceSnapshot');
-    await tester.enterText(
-      find.widgetWithText(TextFormField, 'Title'),
-      'Just created',
-    );
-    await tester.tap(find.widgetWithText(FilledButton, 'Create session'));
-    await tester.pumpAndSettle();
-
-    // No change-feed tick has fired: without an explicit refetch the list would
-    // still be showing the pre-create snapshot, and the session the user just
-    // made would look lost until the next poll.
-    expect(api.countOf('workspaceSnapshot'), greaterThan(before));
-    expect(find.text('Just created'), findsOneWidget);
   });
 
   testWidgets('the Recent tab shows a spinner while the server is loading', (

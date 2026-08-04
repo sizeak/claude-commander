@@ -3,13 +3,12 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::{List, ListState, StatefulWidget},
 };
 
 use super::*;
-use crate::tui::widgets::{pr_colors, status_glyph};
 
 impl<'a> StatefulWidget for TreeList<'a> {
     type State = ListState;
@@ -96,13 +95,9 @@ impl<'a> TreeList<'a> {
         )];
 
         // Single status glyph: spinner > waiting > unread > running > stopped
-        if let Some((glyph, color)) = status_glyph::session_status_glyph(
-            self.theme,
-            self.tick,
-            row.status,
-            row.agent_state,
-            row.unread,
-        ) {
+        if let Some((glyph, color)) =
+            self.session_status_glyph(row.status, row.agent_state, row.unread)
+        {
             spans.push(Span::styled(
                 format!("{glyph} "),
                 Style::default().fg(color),
@@ -118,14 +113,14 @@ impl<'a> TreeList<'a> {
 
         if row.has_comments {
             spans.push(Span::styled(
-                format!(" {}", status_glyph::COMMENT_MARKER),
+                format!(" {COMMENT_MARKER}"),
                 Style::default().fg(self.theme.diff_file_header),
             ));
         }
         if row.keep_alive {
             // Anchored: opted out of auto-hibernation.
             spans.push(Span::styled(
-                format!(" {}", status_glyph::KEEP_ALIVE_MARKER),
+                format!(" {KEEP_ALIVE_MARKER}"),
                 Style::default().fg(self.theme.text_accent),
             ));
         }
@@ -147,7 +142,7 @@ impl<'a> TreeList<'a> {
         if row.show_program {
             spans.push(Span::raw(" "));
             spans.push(Span::styled(
-                format!("({})", status_glyph::program_name(row.program)),
+                format!("({})", program_name(row.program)),
                 Style::default().fg(self.theme.text_secondary),
             ));
         }

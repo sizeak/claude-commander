@@ -6,154 +6,50 @@ use super::*;
 /// render pass clamps against the real content-area height each frame.
 const HELP_PAGE: u16 = 10;
 
-/// A scroll/close action shared by the read-only scrolling modals (Help and
-/// Info). Both classifiers map their keys onto this, and
-/// [`apply_scroll_action`] applies it uniformly.
+/// Outcome of interpreting a key inside the Help modal.
 #[derive(Debug, PartialEq, Eq)]
-enum ScrollAction {
+enum HelpKey {
     ScrollBy(i16),
     Home,
     End,
     Close,
-}
-
-/// Apply a [`ScrollAction`] to a modal's scroll offset. Returns `true` when the
-/// action was `Close`, i.e. the caller should dismiss the modal. `End` uses
-/// `u16::MAX` as a sentinel that the render pass clamps to the real content
-/// height each frame.
-fn apply_scroll_action(scroll: &mut u16, action: ScrollAction) -> bool {
-    match action {
-        ScrollAction::ScrollBy(n) => {
-            *scroll = scroll.saturating_add_signed(n);
-            false
-        }
-        ScrollAction::Home => {
-            *scroll = 0;
-            false
-        }
-        ScrollAction::End => {
-            *scroll = u16::MAX;
-            false
-        }
-        ScrollAction::Close => true,
-    }
+    Ignore,
 }
 
 /// Classify a key press within the Help modal. Kept as a free function
-/// so it can be unit-tested without constructing an `App`. Returns `None` when
-/// the key is ignored.
+/// so it can be unit-tested without constructing an `App`.
 ///
 /// Raw `KeyCode` matches take precedence over `kb.resolve` so modal-native
 /// keys (arrows, Enter, Esc) are not shadowed by global bindings like
 /// `NavigateUp`/`Submit`. `kb.resolve` fills in configured scroll bindings
 /// — notably the default `Ctrl-u`/`Ctrl-d` for `PageUp`/`PageDown`.
-fn classify_help_key(
-    key: &crossterm::event::KeyEvent,
-    kb: &crate::config::KeyBindings,
-) -> Option<ScrollAction> {
+fn classify_help_key(key: &crossterm::event::KeyEvent, kb: &crate::config::KeyBindings) -> HelpKey {
     use crossterm::event::KeyCode;
 
     match key.code {
-        KeyCode::Up => return Some(ScrollAction::ScrollBy(-1)),
-        KeyCode::Down => return Some(ScrollAction::ScrollBy(1)),
-        KeyCode::PageUp => return Some(ScrollAction::ScrollBy(-(HELP_PAGE as i16))),
-        KeyCode::PageDown => return Some(ScrollAction::ScrollBy(HELP_PAGE as i16)),
-        KeyCode::Home => return Some(ScrollAction::Home),
-        KeyCode::End => return Some(ScrollAction::End),
+        KeyCode::Up => return HelpKey::ScrollBy(-1),
+        KeyCode::Down => return HelpKey::ScrollBy(1),
+        KeyCode::PageUp => return HelpKey::ScrollBy(-(HELP_PAGE as i16)),
+        KeyCode::PageDown => return HelpKey::ScrollBy(HELP_PAGE as i16),
+        KeyCode::Home => return HelpKey::Home,
+        KeyCode::End => return HelpKey::End,
         KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') | KeyCode::Char('?') => {
-            return Some(ScrollAction::Close);
+            return HelpKey::Close;
         }
         _ => {}
     }
 
     match kb.resolve(key) {
-        Some(BindableAction::ScrollUp) => Some(ScrollAction::ScrollBy(-1)),
-        Some(BindableAction::ScrollDown) => Some(ScrollAction::ScrollBy(1)),
+        Some(BindableAction::ScrollUp) => HelpKey::ScrollBy(-1),
+        Some(BindableAction::ScrollDown) => HelpKey::ScrollBy(1),
         Some(BindableAction::PageUp | BindableAction::ListPageUp) => {
-            Some(ScrollAction::ScrollBy(-(HELP_PAGE as i16)))
+            HelpKey::ScrollBy(-(HELP_PAGE as i16))
         }
         Some(BindableAction::PageDown | BindableAction::ListPageDown) => {
-            Some(ScrollAction::ScrollBy(HELP_PAGE as i16))
+            HelpKey::ScrollBy(HELP_PAGE as i16)
         }
-        _ => None,
+        _ => HelpKey::Ignore,
     }
-}
-
-/// Outcome of interpreting a key inside the Info modal: either a shared
-/// scroll/close action, the Info-only summary trigger, or ignored.
-#[derive(Debug, PartialEq, Eq)]
-enum InfoKey {
-    Scroll(ScrollAction),
-    GenerateSummary,
-    Ignore,
-}
-
-/// Classify a key press within the Info modal. Kept as a free function so it
-/// can be unit-tested without constructing an `App`.
-///
-/// Unlike the Help modal, `j`/`k` scroll here (the board's navigation bindings
-/// don't apply while the modal is open); `g` triggers AI-summary generation and
-/// `Esc`/`q`/`i` all close.
-fn classify_info_key(key: &crossterm::event::KeyEvent) -> InfoKey {
-    use crossterm::event::KeyCode;
-
-    match key.code {
-        KeyCode::Up | KeyCode::Char('k') => InfoKey::Scroll(ScrollAction::ScrollBy(-1)),
-        KeyCode::Down | KeyCode::Char('j') => InfoKey::Scroll(ScrollAction::ScrollBy(1)),
-        KeyCode::PageUp => InfoKey::Scroll(ScrollAction::ScrollBy(-(HELP_PAGE as i16))),
-        KeyCode::PageDown => InfoKey::Scroll(ScrollAction::ScrollBy(HELP_PAGE as i16)),
-        KeyCode::Home => InfoKey::Scroll(ScrollAction::Home),
-        KeyCode::End => InfoKey::Scroll(ScrollAction::End),
-        KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('i') => {
-            InfoKey::Scroll(ScrollAction::Close)
-        }
-        KeyCode::Char('g') => InfoKey::GenerateSummary,
-        _ => InfoKey::Ignore,
-    }
-}
-
-/// Map a mouse position to a session-list row index, given the rects recorded
-/// on the last frame. Kept as a free function so the arithmetic can be
-/// unit-tested without constructing an `App`.
-///
-/// A click in the pinned recents panel maps straight to its row (indices
-/// `0..recents_len`), regardless of how far the main list is scrolled; a click
-/// in the scrolling main list maps to
-/// `recents_len + main_list_offset + visible_row`. Returns `None` when the click
-/// is outside both areas, when no frame has recorded a list rect yet, or when
-/// the position maps past the last item.
-///
-/// The two rects never overlap, so a hit inside the recents panel is resolved
-/// there and never falls through to the main list.
-fn list_row_at(
-    col: u16,
-    row: u16,
-    recents_rect: Option<Rect>,
-    list_rect: Option<Rect>,
-    recents_len: usize,
-    main_list_offset: usize,
-    item_count: usize,
-) -> Option<usize> {
-    let hit =
-        |rect: Rect| col >= rect.x && col < rect.right() && row >= rect.y && row < rect.bottom();
-
-    // Pinned recents panel (rendered at offset 0).
-    if let Some(rect) = recents_rect
-        && hit(rect)
-    {
-        let idx = (row - rect.y) as usize;
-        return (idx < recents_len && idx < item_count).then_some(idx);
-    }
-
-    // Scrolling main list, below the recents panel (when present).
-    let rect = list_rect?;
-    if !hit(rect) {
-        return None;
-    }
-    let idx = recents_len
-        .checked_add(main_list_offset)?
-        .checked_add((row - rect.y) as usize)?;
-    (idx < item_count).then_some(idx)
 }
 
 /// Which filterable modal needs its filter recomputed after a paste.
@@ -519,19 +415,6 @@ impl App {
                     return;
                 }
 
-                // Esc clears an active project filter (set by selecting a
-                // project in the board sidebar). Board-only — the filter has no
-                // effect or indicator in the list views.
-                if key.code == crossterm::event::KeyCode::Esc
-                    && key.modifiers.is_empty()
-                    && self.ui_state.view_mode.is_board()
-                    && self.ui_state.board_filter.is_some()
-                {
-                    self.ui_state.board_filter = None;
-                    self.refresh_list_items().await;
-                    return;
-                }
-
                 // Number-jump: intercept digit keys to select by session number.
                 if let crossterm::event::KeyCode::Char(c @ '0'..='9') = key.code
                     && key.modifiers.is_empty()
@@ -878,26 +761,20 @@ impl App {
                 // Non-interactive — swallow all keys while loading
             }
 
-            Modal::Help { scroll } => {
-                if let Some(action) = classify_help_key(&key, &self.config.keybindings)
-                    && apply_scroll_action(scroll, action)
-                {
+            Modal::Help { scroll } => match classify_help_key(&key, &self.config.keybindings) {
+                HelpKey::ScrollBy(n) => {
+                    *scroll = scroll.saturating_add_signed(n);
+                }
+                HelpKey::Home => {
+                    *scroll = 0;
+                }
+                HelpKey::End => {
+                    *scroll = u16::MAX;
+                }
+                HelpKey::Close => {
                     self.ui_state.modal = Modal::None;
                 }
-            }
-
-            Modal::Info { scroll } => match classify_info_key(&key) {
-                InfoKey::Scroll(action) => {
-                    if apply_scroll_action(scroll, action) {
-                        self.ui_state.modal = Modal::None;
-                    }
-                }
-                InfoKey::GenerateSummary => {
-                    if let Some(session_id) = self.ui_state.selected_session_id.map(|r| r.id) {
-                        self.spawn_ai_summary_if_needed(session_id);
-                    }
-                }
-                InfoKey::Ignore => {}
+                HelpKey::Ignore => {}
             },
 
             Modal::Error { .. } => {
@@ -1070,14 +947,14 @@ impl App {
 
     /// Handle a left-mouse click at the given absolute terminal position.
     ///
-    /// Clicks outside the board are ignored. A click on a card row or sidebar
-    /// row moves the cursor there; two clicks on the same row within
-    /// [`DOUBLE_CLICK_WINDOW`] act as `UserCommand::Select` (attach for
-    /// sessions, project shell/new-session for sidebar rows).
-    pub(super) async fn handle_left_click(&mut self, col: u16, row: u16) {
+    /// Clicks outside the session list area are ignored. Clicks on a selectable
+    /// row move the highlight there and refresh the preview; two clicks on the
+    /// same row within [`DOUBLE_CLICK_WINDOW`] act as `UserCommand::Select`
+    /// (attach for sessions, toggle for section headers).
+    async fn handle_left_click(&mut self, col: u16, row: u16) {
         use crate::tui::list_nav::DOUBLE_CLICK_WINDOW;
 
-        // Status-bar action buttons sit outside the board. A hit dispatches the
+        // Status-bar action buttons sit outside the list. A hit dispatches the
         // bound command — behaving exactly like the keypress — and consumes the
         // click.
         if let Some(action) = crate::tui::hotkey::button_at(&self.ui_state.action_buttons, col, row)
@@ -1087,123 +964,31 @@ impl App {
             return;
         }
 
-        // List views have no board regions/buttons — route to the list handler.
-        if !self.ui_state.view_mode.is_board() {
-            self.handle_list_left_click(col, row).await;
-            return;
-        }
-
-        // Card action buttons win over the row region they sit within: select
-        // the card's session, then dispatch the button's command through the
-        // normal handle_command path, exactly as the equivalent keypress would.
-        // Note handle_command does NOT consult is_command_available (only the
-        // palette and status bar do) — like keypresses, this relies on each
-        // handler self-gating (SelectShell/OpenReviewDiff/OpenInfo all no-op
-        // safely without a valid selection).
-        // A click on a sidebar server heading opens that server's Programs
-        // settings (its ⚙ affordance advertises this; the whole row is the
-        // target). Headings aren't selectable rows, so pass the backend
-        // straight through rather than routing via the selection.
-        if let Some(backend) = self.board_heading_at(col, row) {
-            self.ui_state.last_left_click = None;
-            self.open_settings_on_programs(backend);
-            return;
-        }
-        if let Some((pos, button)) = self.board_button_at(col, row) {
-            use crate::tui::widgets::board::CardButton;
-            self.ui_state.last_left_click = None;
-            if self.ui_state.board_state.selected() != Some(pos) {
-                self.ui_state.board_state.select(Some(pos));
-                self.update_selection();
-                self.ui_state.preview_update_spawned_at = None;
-                self.spawn_preview_update();
-            }
-            let cmd = match button {
-                CardButton::Shell => UserCommand::SelectShell,
-                CardButton::Review => UserCommand::OpenReviewDiff,
-                CardButton::Info => UserCommand::OpenInfo,
-            };
-            self.handle_command(cmd).await;
-            return;
-        }
-
-        let Some(pos) = self.board_pos_at(col, row) else {
-            self.ui_state.last_left_click = None;
-            return;
-        };
-
-        let now = Instant::now();
-        let is_double_click = matches!(
-            self.ui_state.last_left_click,
-            Some((prev_pos, prev_at))
-                if prev_pos == pos && now.duration_since(prev_at) <= DOUBLE_CLICK_WINDOW
-        );
-
-        if self.ui_state.board_state.selected() != Some(pos) {
-            self.ui_state.board_state.select(Some(pos));
-            self.update_selection();
-            self.ui_state.preview_update_spawned_at = None;
-            self.spawn_preview_update();
-        }
-
-        if is_double_click {
-            // Consume the click pair so a third click within the window
-            // doesn't fire again.
-            self.ui_state.last_left_click = None;
-            self.handle_command(UserCommand::Select).await;
-        } else {
-            self.ui_state.last_left_click = Some((pos, now));
-        }
-    }
-
-    /// Map a mouse `(col, row)` in absolute terminal coordinates to a session-
-    /// list row index, using the rects recorded on the last frame. See
-    /// [`list_row_at`] for the mapping itself.
-    fn list_index_at(&self, col: u16, row: u16) -> Option<usize> {
-        list_row_at(
-            col,
-            row,
-            self.ui_state.recents_rect,
-            self.ui_state.list_rect,
-            self.ui_state.recents_len,
-            self.ui_state.main_list_offset,
-            self.ui_state.list_items.len(),
-        )
-    }
-
-    /// Left-click handling for the session-list views (project / sections /
-    /// stacks): select the clicked row, open a server header's Programs pane,
-    /// and treat a double-click on the same row as `Select` (like Enter).
-    async fn handle_list_left_click(&mut self, col: u16, row: u16) {
-        use crate::tui::list_nav::DOUBLE_CLICK_WINDOW;
-
         let Some(idx) = self.list_index_at(col, row) else {
-            self.ui_state.last_list_click = None;
+            self.ui_state.last_left_click = None;
             return;
         };
-
-        // A click on a server header opens that server's Programs settings.
-        // Route through the command so it selects the header first and records
-        // the UI-feature telemetry.
+        // A click on a server header (its `⚙` affordance / anywhere on the row)
+        // opens that server's Programs settings pane. Route through the command
+        // so it selects the header first and records the UI-feature telemetry.
         if matches!(
             self.ui_state.list_items.get(idx),
             Some(SessionListItem::ServerHeader { .. })
         ) {
-            self.ui_state.last_list_click = None;
+            self.ui_state.last_left_click = None;
             self.ui_state.list_state.select(Some(idx));
             self.update_selection();
             self.handle_command(UserCommand::EditServerPrograms).await;
             return;
         }
-        // Ignore non-selectable rows (spacers, and — for a single click —
-        // section/project headers still select so their children are reachable).
+        // Skip rows that aren't selectable (e.g. Spacer).
         match self.ui_state.list_items.get(idx) {
             Some(item) if !item.is_selectable() => {
-                self.ui_state.last_list_click = None;
+                self.ui_state.last_left_click = None;
                 return;
             }
             None => {
-                self.ui_state.last_list_click = None;
+                self.ui_state.last_left_click = None;
                 return;
             }
             _ => {}
@@ -1211,7 +996,7 @@ impl App {
 
         let now = Instant::now();
         let is_double_click = matches!(
-            self.ui_state.last_list_click,
+            self.ui_state.last_left_click,
             Some((prev_idx, prev_at))
                 if prev_idx == idx && now.duration_since(prev_at) <= DOUBLE_CLICK_WINDOW
         );
@@ -1224,10 +1009,12 @@ impl App {
         }
 
         if is_double_click {
-            self.ui_state.last_list_click = None;
+            // Consume the click pair so a third click within the window
+            // doesn't fire again.
+            self.ui_state.last_left_click = None;
             self.handle_command(UserCommand::Select).await;
         } else {
-            self.ui_state.last_list_click = Some((idx, now));
+            self.ui_state.last_left_click = Some((idx, now));
         }
     }
 
@@ -1314,17 +1101,16 @@ impl App {
             Some(QuickSwitchItem::Session(m)) => {
                 let session_id = m.session_id;
                 self.ui_state.modal = Modal::None;
-                // The target may be hidden by an active project filter (the
-                // palette lists every session regardless of the filter). Clear
-                // it and rebuild so the jump always lands — quick-switch is the
-                // primary jump path and must never silently no-op.
-                if self.ui_state.board_filter.is_some()
-                    && self.ui_state.board.position_of(session_id).is_none()
-                {
-                    self.ui_state.board_filter = None;
-                    self.refresh_list_items().await;
+                self.ui_state.selected_session_id = Some(SessionRef::new(
+                    self.backend_of_session(session_id),
+                    session_id,
+                ));
+                if let Some(idx) = self.ui_state.list_items.iter().position(|item| {
+                    matches!(item, SessionListItem::Worktree { id, .. } if *id == session_id)
+                }) {
+                    self.ui_state.list_state.select(Some(idx));
                 }
-                self.select_session_in_tree(session_id);
+                self.update_selection();
                 self.handle_select().await;
             }
             Some(QuickSwitchItem::Command(entry)) => {
@@ -1473,7 +1259,7 @@ impl App {
                     *scroll = adjust_list_scroll(new_idx, *scroll, LIST_MAX_VISIBLE);
                 }
             }
-            Modal::Help { scroll } | Modal::Info { scroll } => {
+            Modal::Help { scroll } => {
                 *scroll = scroll.saturating_add_signed(if down { 1 } else { -1 });
             }
             _ => {}
@@ -1489,35 +1275,33 @@ impl App {
             self.record_feature(feature);
         }
         match cmd {
-            UserCommand::NavigateUp => self.nav_up(),
-            UserCommand::NavigateDown => self.nav_down(),
-            UserCommand::NavigateRight => self.nav_right(),
-            UserCommand::NavigateLeft => self.nav_left(),
-            // On the board these switch column; in a list they jump between
-            // project/section group headers.
-            UserCommand::NextGroup => self.nav_next_group(),
-            UserCommand::PreviousGroup => self.nav_previous_group(),
-            UserCommand::NavigateFirst => self.nav_first(),
-            UserCommand::NavigateLast => self.nav_last(),
+            UserCommand::NavigateUp => {
+                self.ui_state.list_state.previous();
+            }
+            UserCommand::NavigateDown => {
+                self.ui_state.list_state.next();
+            }
+            UserCommand::NextGroup => {
+                self.ui_state.list_state.next_group();
+            }
+            UserCommand::PreviousGroup => {
+                self.ui_state.list_state.previous_group();
+            }
             UserCommand::ListPageUp | UserCommand::ListPageDown => {
-                self.nav_page(matches!(cmd, UserCommand::ListPageDown));
+                let rows = super::selection::list_page_rows(self.ui_state.main_list_height);
+                self.ui_state
+                    .list_state
+                    .page(rows, matches!(cmd, UserCommand::ListPageDown));
+            }
+            UserCommand::NavigateFirst => {
+                self.ui_state.list_state.select_first();
+            }
+            UserCommand::NavigateLast => {
+                self.ui_state.list_state.select_last();
             }
             UserCommand::Select => {
-                // On a card row, attach. On the board sidebar's project row (a
-                // project is selected but no session), Select toggles the board
-                // filter for that project — select to filter, select again to
-                // unfilter. The filter is board-only, so in the list views a
-                // project row falls through to the normal select handler.
-                if self.ui_state.view_mode.is_board()
-                    && self.ui_state.selected_session_id.is_none()
-                    && let Some((_, pid)) = self.ui_state.selected_project_id
-                {
-                    self.ui_state.board_filter = if self.ui_state.board_filter == Some(pid) {
-                        None
-                    } else {
-                        Some(pid)
-                    };
-                    self.refresh_list_items().await;
+                if self.selected_item_is_section_header() {
+                    self.handle_toggle_section().await;
                 } else {
                     self.handle_select().await;
                 }
@@ -1572,12 +1356,6 @@ impl App {
             UserCommand::MoveToSection => {
                 self.handle_move_to_section().await;
             }
-            UserCommand::ToggleViewMode => {
-                self.handle_toggle_view_mode().await;
-            }
-            UserCommand::ToggleSection => {
-                self.handle_toggle_section().await;
-            }
             UserCommand::RestartSession => {
                 self.handle_restart_session();
             }
@@ -1593,23 +1371,6 @@ impl App {
             UserCommand::OpenInEditor => {
                 self.handle_open_in_editor().await;
             }
-            // Only meaningful with a session selected (matches OpenInfo's
-            // availability gating); no-op on a sidebar/empty selection.
-            UserCommand::OpenInfo if self.ui_state.selected_session_id.is_some() => {
-                self.ui_state.modal = Modal::Info { scroll: 0 };
-                // Opening Info is the discoverable retry for an enriched-PR
-                // fetch that came back empty (before the marker existed, every
-                // reopen retried). Dropping it here keeps the anti-spam property
-                // — the marker still suppresses the per-tick refetch loop while
-                // a surface stays open — without making PR-refresh the only way.
-                self.ui_state.enriched_pr_unavailable = None;
-                // Kick off the enriched-PR + working-tree diff fetches that
-                // populate the modal; clear the in-flight guard so the diff
-                // fetch runs even if one fired recently.
-                self.ui_state.preview_update_spawned_at = None;
-                self.spawn_info_fetch();
-                self.spawn_preview_update();
-            }
             UserCommand::OpenPullRequest => {
                 self.handle_open_pull_request().await;
             }
@@ -1617,10 +1378,6 @@ impl App {
                 // Wake every connected backend's PR-status loop; refreshed
                 // results arrive via each backend's change feed.
                 self.refresh_pr_status_all();
-                // This is the retry path for an enriched-PR fetch that came back
-                // empty, so drop the marker suppressing it and re-request.
-                self.ui_state.enriched_pr_unavailable = None;
-                self.spawn_info_fetch();
             }
             UserCommand::AddRemoteServer => {
                 self.handle_add_remote_server();
@@ -1639,6 +1396,59 @@ impl App {
             }
             UserCommand::OpenReviewDiff => {
                 self.handle_open_review().await;
+            }
+            UserCommand::TogglePane => {
+                let on_project = self.ui_state.selected_session_id.is_none()
+                    && self.ui_state.selected_project_id.is_some();
+                self.ui_state.right_pane_view = if on_project {
+                    // Project: Shell → Info → Shell (no Preview)
+                    match self.ui_state.right_pane_view {
+                        RightPaneView::Shell => RightPaneView::Info,
+                        _ => RightPaneView::Shell,
+                    }
+                } else {
+                    // Session: Preview → Info → Shell → Preview
+                    match self.ui_state.right_pane_view {
+                        RightPaneView::Preview => RightPaneView::Info,
+                        RightPaneView::Info => RightPaneView::Shell,
+                        RightPaneView::Shell => RightPaneView::Preview,
+                    }
+                };
+                self.ui_state.clear_right_pane = true;
+                self.spawn_info_fetch();
+            }
+            UserCommand::TogglePaneReverse => {
+                let on_project = self.ui_state.selected_session_id.is_none()
+                    && self.ui_state.selected_project_id.is_some();
+                self.ui_state.right_pane_view = if on_project {
+                    // Project: Info → Shell → Info (no Preview)
+                    match self.ui_state.right_pane_view {
+                        RightPaneView::Info => RightPaneView::Shell,
+                        _ => RightPaneView::Info,
+                    }
+                } else {
+                    // Session: Shell → Info → Preview → Shell
+                    match self.ui_state.right_pane_view {
+                        RightPaneView::Preview => RightPaneView::Shell,
+                        RightPaneView::Info => RightPaneView::Preview,
+                        RightPaneView::Shell => RightPaneView::Info,
+                    }
+                };
+                self.ui_state.clear_right_pane = true;
+                self.spawn_info_fetch();
+            }
+            UserCommand::ShrinkLeftPane => {
+                self.ui_state.left_pane_pct = self
+                    .ui_state
+                    .left_pane_pct
+                    .saturating_sub(2)
+                    .max(MIN_LEFT_PANE_PCT);
+                self.save_left_pane_pct().await;
+            }
+            UserCommand::GrowLeftPane => {
+                self.ui_state.left_pane_pct =
+                    (self.ui_state.left_pane_pct + 2).min(MAX_LEFT_PANE_PCT);
+                self.save_left_pane_pct().await;
             }
             UserCommand::ShowHelp => {
                 self.ui_state.modal = Modal::Help { scroll: 0 };
@@ -1666,39 +1476,51 @@ impl App {
             UserCommand::Quit => {
                 self.ui_state.should_quit = true;
             }
-            // Column paging within the board: to the ends of the selected
-            // column, and single-row steps for the (unbound) scroll actions.
-            UserCommand::PageUp => self.nav_first(),
-            UserCommand::PageDown => self.nav_last(),
-            UserCommand::ScrollUp => self.nav_up(),
-            UserCommand::ScrollDown => self.nav_down(),
+            UserCommand::PageUp => self.active_pane_state().page_up(),
+            UserCommand::PageDown => self.active_pane_state().page_down(),
+            UserCommand::ScrollUp => self.active_pane_state().scroll_up(1),
+            UserCommand::ScrollDown => self.active_pane_state().scroll_down(1),
             UserCommand::GenerateSummary => {
-                // The summary surfaces in the Info modal, but generation is safe
-                // to trigger for the selected session regardless.
-                if let Some(session_id) = self.ui_state.selected_session_id.map(|r| r.id) {
+                // Context-specific: only works when Info pane is showing
+                if self.ui_state.right_pane_view == RightPaneView::Info
+                    && let Some(session_id) = self.ui_state.selected_session_id.map(|r| r.id)
+                {
                     self.spawn_ai_summary_if_needed(session_id);
                 }
             }
-            // Right-pane commands are list-view only — the board is full-screen
-            // and draws no right pane, so they would have nothing to act on.
-            UserCommand::TogglePane | UserCommand::TogglePaneReverse
-                if !self.ui_state.view_mode.is_board() =>
-            {
-                let forward = matches!(cmd, UserCommand::TogglePane);
-                self.ui_state.right_pane_view = self
-                    .ui_state
-                    .right_pane_view
-                    .cycled(self.is_project_selected(), forward);
-                // No explicit clear here: `render_right_pane` resets the pane
-                // whenever the effective view changes, which covers this and the
-                // selection-driven swaps a key handler can't see.
-                // Landing on Info needs the enriched-PR / summary fetches that
-                // only run while an Info surface is showing.
-                self.spawn_info_fetch();
+            UserCommand::ToggleSection => {
+                self.handle_toggle_section().await;
+            }
+            UserCommand::ToggleViewMode => {
+                if self.config.sections.is_empty() {
+                    return;
+                }
+                let new_view = self.ui_state.view_mode.next();
+                self.ui_state.view_mode = new_view;
+                // Persist the chosen view so it survives restarts. A failed
+                // write is logged (not surfaced) inside the prefs store — the
+                // runtime behaviour is correct either way.
+                self.tui_prefs.set_view_mode(new_view).await;
+                let selected_session = self.ui_state.selected_session_id.map(|r| r.id);
+                let selected_project = self.ui_state.selected_project_id.map(|(_, p)| p);
+                self.refresh_list_items().await;
+                // Restore selection after rebuilding the list
+                if let Some(sid) = selected_session {
+                    if let Some(idx) = self.ui_state.list_items.iter().position(
+                        |item| matches!(item, SessionListItem::Worktree { id, .. } if *id == sid),
+                    ) {
+                        self.ui_state.list_state.select(Some(idx));
+                    }
+                } else if let Some(pid) = selected_project
+                    && let Some(idx) = self.ui_state.list_items.iter().position(
+                        |item| matches!(item, SessionListItem::Project { id, .. } if *id == pid),
+                    )
+                {
+                    self.ui_state.list_state.select(Some(idx));
+                }
+                self.update_selection();
                 self.spawn_preview_update();
             }
-            UserCommand::ShrinkLeftPane => self.resize_left_pane(-2).await,
-            UserCommand::GrowLeftPane => self.resize_left_pane(2).await,
             _ => {}
         }
     }
@@ -1718,153 +1540,16 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::CONTROL)
     }
 
-    // ── list_row_at: mouse → session-list row ──────────────────────────
-    //
-    // The list views record their rects at render time; these cover the
-    // arithmetic that turns a click inside them into a `list_items` index.
-
-    /// A 3-row pinned recents panel at the top of a 30-wide list column, with
-    /// the scrolling main list directly below it.
-    fn recents() -> Rect {
-        Rect::new(2, 5, 30, 3)
-    }
-
-    /// The scrolling main list below [`recents`].
-    fn main_list() -> Rect {
-        Rect::new(2, 8, 30, 10)
-    }
-
-    /// `list_row_at` with no recents panel — the whole column is one list.
-    fn row_at_plain(col: u16, row: u16, offset: usize, item_count: usize) -> Option<usize> {
-        list_row_at(
-            col,
-            row,
-            None,
-            Some(Rect::new(2, 5, 30, 10)),
-            0,
-            offset,
-            item_count,
-        )
-    }
-
-    /// `list_row_at` with the [`recents`] + [`main_list`] pair.
-    fn row_at_panelled(col: u16, row: u16, offset: usize, item_count: usize) -> Option<usize> {
-        list_row_at(
-            col,
-            row,
-            Some(recents()),
-            Some(main_list()),
-            3,
-            offset,
-            item_count,
-        )
-    }
-
-    #[test]
-    fn list_row_at_maps_top_row_to_the_first_item() {
-        assert_eq!(row_at_plain(2, 5, 0, 10), Some(0));
-        assert_eq!(row_at_plain(2, 6, 0, 10), Some(1));
-        // Anywhere across the row's width maps to the same item.
-        assert_eq!(row_at_plain(31, 5, 0, 10), Some(0));
-    }
-
-    #[test]
-    fn list_row_at_adds_the_scroll_offset() {
-        // Second visible row of a list scrolled by 5 → item 6.
-        assert_eq!(row_at_plain(2, 6, 5, 20), Some(6));
-    }
-
-    #[test]
-    fn list_row_at_maps_pinned_recents_rows_directly() {
-        // The recents panel renders at offset 0, so its rows are indices 0..3
-        // no matter how far the main list beneath it has scrolled.
-        assert_eq!(row_at_panelled(2, 5, 7, 20), Some(0));
-        assert_eq!(row_at_panelled(2, 7, 7, 20), Some(2));
-    }
-
-    #[test]
-    fn list_row_at_maps_the_first_main_list_row_below_the_recents_panel() {
-        // The boundary case: the row immediately under a 3-row recents panel is
-        // the main list's scrolled top — recents_len(3) + offset(5) = 8. An
-        // off-by-one here would silently select the wrong session on click.
-        assert_eq!(row_at_panelled(2, 8, 5, 20), Some(8));
-        assert_eq!(row_at_panelled(2, 9, 5, 20), Some(9));
-        // With the list unscrolled the rows run straight on from the panel.
-        assert_eq!(row_at_panelled(2, 8, 0, 20), Some(3));
-    }
-
-    #[test]
-    fn list_row_at_rejects_positions_outside_the_list_column() {
-        // Left of, right of, above and below the rects.
-        assert_eq!(row_at_plain(1, 5, 0, 10), None);
-        assert_eq!(row_at_plain(32, 5, 0, 10), None);
-        assert_eq!(row_at_plain(2, 4, 0, 10), None);
-        assert_eq!(row_at_plain(2, 15, 0, 10), None);
-    }
-
-    #[test]
-    fn list_row_at_rejects_rows_past_the_last_item() {
-        // Inside the rect, but the list is shorter than the viewport.
-        assert_eq!(row_at_plain(2, 8, 0, 3), None);
-        assert_eq!(row_at_plain(2, 5, 0, 0), None);
-        // Scrolled such that the visible row is past the end.
-        assert_eq!(row_at_plain(2, 9, 18, 20), None);
-    }
-
-    #[test]
-    fn list_row_at_rejects_recents_rows_past_the_panel_contents() {
-        // A 3-row rect holding only 2 recents: the third row is padding, and
-        // the panel never falls through to the main list beneath it.
-        assert_eq!(
-            list_row_at(2, 7, Some(recents()), Some(main_list()), 2, 5, 20),
-            None
-        );
-        // Nor past the end of a list shorter than the panel claims.
-        assert_eq!(
-            list_row_at(2, 6, Some(recents()), Some(main_list()), 3, 0, 1),
-            None
-        );
-    }
-
-    #[test]
-    fn list_row_at_resolves_an_overlapping_recents_hit_in_the_panel() {
-        // The renderer stacks the panel above the list, so these rects never
-        // actually overlap — this pins the documented precedence anyway, so a
-        // future layout change can't silently start reading a panel row as a
-        // main-list row (which would apply the scroll offset to it).
-        let overlapping = Rect::new(2, 5, 30, 10);
-        assert_eq!(
-            list_row_at(2, 6, Some(recents()), Some(overlapping), 3, 5, 20),
-            Some(1),
-            "a hit inside the panel maps to its own row, not recents_len + offset"
-        );
-        // A padding row inside the panel resolves to nothing rather than
-        // falling through to the list rect underneath it.
-        assert_eq!(
-            list_row_at(2, 7, Some(recents()), Some(overlapping), 2, 5, 20),
-            None
-        );
-    }
-
-    #[test]
-    fn list_row_at_without_a_recorded_frame_maps_nothing() {
-        // Before the first render there is no list rect to hit-test against.
-        assert_eq!(list_row_at(2, 5, None, None, 0, 0, 10), None);
-        // A recents rect alone still resolves its own rows.
-        assert_eq!(list_row_at(2, 5, Some(recents()), None, 3, 0, 10), Some(0));
-        assert_eq!(list_row_at(2, 9, Some(recents()), None, 3, 0, 10), None);
-    }
-
     #[test]
     fn arrows_scroll_one_line() {
         let kb = KeyBindings::default();
         assert_eq!(
             classify_help_key(&key(KeyCode::Down), &kb),
-            Some(ScrollAction::ScrollBy(1))
+            HelpKey::ScrollBy(1)
         );
         assert_eq!(
             classify_help_key(&key(KeyCode::Up), &kb),
-            Some(ScrollAction::ScrollBy(-1))
+            HelpKey::ScrollBy(-1)
         );
     }
 
@@ -1875,8 +1560,14 @@ mod tests {
         // the Help modal. This pins the current default so a future remapping
         // doesn't silently change modal behavior.
         let kb = KeyBindings::default();
-        assert_eq!(classify_help_key(&key(KeyCode::Char('j')), &kb), None);
-        assert_eq!(classify_help_key(&key(KeyCode::Char('k')), &kb), None);
+        assert_eq!(
+            classify_help_key(&key(KeyCode::Char('j')), &kb),
+            HelpKey::Ignore
+        );
+        assert_eq!(
+            classify_help_key(&key(KeyCode::Char('k')), &kb),
+            HelpKey::Ignore
+        );
     }
 
     #[test]
@@ -1885,34 +1576,28 @@ mod tests {
         let page = HELP_PAGE as i16;
         assert_eq!(
             classify_help_key(&key(KeyCode::PageDown), &kb),
-            Some(ScrollAction::ScrollBy(page))
+            HelpKey::ScrollBy(page)
         );
         assert_eq!(
             classify_help_key(&key(KeyCode::PageUp), &kb),
-            Some(ScrollAction::ScrollBy(-page))
+            HelpKey::ScrollBy(-page)
         );
         // Default bindings: Ctrl-d / Ctrl-u for PageDown / PageUp.
         assert_eq!(
             classify_help_key(&ctrl(KeyCode::Char('d')), &kb),
-            Some(ScrollAction::ScrollBy(page))
+            HelpKey::ScrollBy(page)
         );
         assert_eq!(
             classify_help_key(&ctrl(KeyCode::Char('u')), &kb),
-            Some(ScrollAction::ScrollBy(-page))
+            HelpKey::ScrollBy(-page)
         );
     }
 
     #[test]
     fn home_and_end_jump() {
         let kb = KeyBindings::default();
-        assert_eq!(
-            classify_help_key(&key(KeyCode::Home), &kb),
-            Some(ScrollAction::Home)
-        );
-        assert_eq!(
-            classify_help_key(&key(KeyCode::End), &kb),
-            Some(ScrollAction::End)
-        );
+        assert_eq!(classify_help_key(&key(KeyCode::Home), &kb), HelpKey::Home);
+        assert_eq!(classify_help_key(&key(KeyCode::End), &kb), HelpKey::End);
     }
 
     #[test]
@@ -1926,7 +1611,7 @@ mod tests {
         ] {
             assert_eq!(
                 classify_help_key(&key(code), &kb),
-                Some(ScrollAction::Close),
+                HelpKey::Close,
                 "{code:?}"
             );
         }
@@ -1935,72 +1620,10 @@ mod tests {
     #[test]
     fn unrelated_key_is_ignored() {
         let kb = KeyBindings::default();
-        assert_eq!(classify_help_key(&key(KeyCode::Char('x')), &kb), None);
-    }
-
-    // -- Info modal key classification --
-
-    #[test]
-    fn info_arrows_and_jk_scroll_one_line() {
-        // Unlike the Help modal, j/k scroll the Info modal (the board's
-        // navigation bindings don't apply while it's open).
-        for code in [KeyCode::Up, KeyCode::Char('k')] {
-            assert_eq!(
-                classify_info_key(&key(code)),
-                InfoKey::Scroll(ScrollAction::ScrollBy(-1)),
-                "{code:?}"
-            );
-        }
-        for code in [KeyCode::Down, KeyCode::Char('j')] {
-            assert_eq!(
-                classify_info_key(&key(code)),
-                InfoKey::Scroll(ScrollAction::ScrollBy(1)),
-                "{code:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn info_page_and_home_end_keys() {
-        let page = HELP_PAGE as i16;
         assert_eq!(
-            classify_info_key(&key(KeyCode::PageDown)),
-            InfoKey::Scroll(ScrollAction::ScrollBy(page))
+            classify_help_key(&key(KeyCode::Char('x')), &kb),
+            HelpKey::Ignore
         );
-        assert_eq!(
-            classify_info_key(&key(KeyCode::PageUp)),
-            InfoKey::Scroll(ScrollAction::ScrollBy(-page))
-        );
-        assert_eq!(
-            classify_info_key(&key(KeyCode::Home)),
-            InfoKey::Scroll(ScrollAction::Home)
-        );
-        assert_eq!(
-            classify_info_key(&key(KeyCode::End)),
-            InfoKey::Scroll(ScrollAction::End)
-        );
-    }
-
-    #[test]
-    fn info_close_keys() {
-        for code in [KeyCode::Esc, KeyCode::Char('q'), KeyCode::Char('i')] {
-            assert_eq!(
-                classify_info_key(&key(code)),
-                InfoKey::Scroll(ScrollAction::Close),
-                "{code:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn info_g_generates_summary_and_others_ignored() {
-        assert_eq!(
-            classify_info_key(&key(KeyCode::Char('g'))),
-            InfoKey::GenerateSummary
-        );
-        assert_eq!(classify_info_key(&key(KeyCode::Char('x'))), InfoKey::Ignore);
-        // Enter does not close the Info modal (distinct from Help).
-        assert_eq!(classify_info_key(&key(KeyCode::Enter)), InfoKey::Ignore);
     }
 
     #[test]

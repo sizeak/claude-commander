@@ -63,42 +63,6 @@ void main() {
     });
   });
 
-  group('sessionRecency', () {
-    test('uses the attach time when the session has been attached', () {
-      final s = sessionInfo(
-        createdAt: DateTime.utc(2026, 1, 1),
-        lastAttachedAt: DateTime.utc(2026, 1, 9),
-      );
-      expect(sessionRecency(s), DateTime.utc(2026, 1, 9));
-    });
-
-    test('falls back to the creation time when never attached', () {
-      final s = sessionInfo(
-        createdAt: DateTime.utc(2026, 1, 4),
-        lastAttachedAt: null,
-      );
-      expect(sessionRecency(s), DateTime.utc(2026, 1, 4));
-    });
-
-    test('keeps a never-attached session in a mostRecent ordering', () {
-      // The whole point of the fallback: keyed on lastAttachedAt alone, a
-      // freshly created session has a null key and mostRecent drops it.
-      final attached = sessionInfo(
-        id: '11111111-1111-1111-1111-111111111111',
-        lastAttachedAt: DateTime.utc(2026, 1, 2),
-      );
-      final justCreated = sessionInfo(
-        id: '22222222-2222-2222-2222-222222222222',
-        createdAt: DateTime.utc(2026, 1, 8),
-        lastAttachedAt: null,
-      );
-      expect(mostRecent([attached, justCreated], sessionRecency), [
-        justCreated,
-        attached,
-      ]);
-    });
-  });
-
   group('mostRecent', () {
     DateTime? at(SessionInfo s) => s.lastAttachedAt;
 

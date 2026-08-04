@@ -15,14 +15,12 @@ void main() {
   // A workspace whose per-server stores are each backed by their own fake, so
   // the aggregator can be exercised without a live bridge.
   late Map<String, FakeCommanderApi> fakes;
-  late InMemoryServerListStore listStore;
 
   WorkspaceStore build(List<ServerConfig> initial) {
     fakes = {for (final c in initial) c.id: FakeCommanderApi()};
-    listStore = InMemoryServerListStore();
     return WorkspaceStore(
       api: FakeCommanderApi(),
-      listStore: listStore,
+      listStore: InMemoryServerListStore(),
       storeFactory: (cfg) {
         final api = fakes.putIfAbsent(cfg.id, FakeCommanderApi.new);
         return CommanderStore(api: api, config: cfg);
@@ -83,41 +81,6 @@ void main() {
     expect(fakes['id-a']!.countOf('disconnectServer'), 1);
     // The surviving server is untouched.
     expect(fakes['id-b']!.countOf('disconnectServer'), 0);
-  });
-
-  test('updateServer completes once the edit is persisted, not when it reconnects',
-      () async {
-    final a = _cfg('id-a', 'laptop');
-    final ws = build([a]);
-    await ws.addServer(a);
-
-    // The edited server is slow to come back (or never does): its reconnect
-    // parks inside connectServer.
-    final gate = Completer<void>();
-    addTearDown(() {
-      if (!gate.isCompleted) gate.complete();
-    });
-    fakes[a.id]!.connectGate = gate;
-    const edited = ServerConfig(
-      id: 'id-a',
-      name: 'renamed',
-      baseUrl: 'http://renamed:7878',
-      token: 't-id-a',
-    );
-
-    var saved = false;
-    unawaited(ws.updateServer(edited).then((_) => saved = true));
-    await pumpEventQueue();
-
-    // The save is done: the Edit server form can dismiss. Waiting on the
-    // reconnect here is what left it spinning indefinitely with the edit
-    // already applied.
-    expect(saved, isTrue);
-    expect(ws.serverById('id-a')!.config.name, 'renamed');
-    // ...and the edit is durable, not just in memory.
-    final persisted = await listStore.load();
-    expect(persisted.single.name, 'renamed');
-    expect(persisted.single.baseUrl, 'http://renamed:7878');
   });
 
   test('loadAndConnectAll connects every saved server on relaunch', () async {

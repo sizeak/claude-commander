@@ -149,6 +149,19 @@ pub struct ReviewSnapshot {
     /// `#[serde(default)]`: an older server omits the field entirely.
     #[serde(default)]
     pub dropped_comments: Vec<Comment>,
+    /// The raw unified diff [`Self::diff`] was parsed from, so a client can
+    /// re-parse it locally with a richer model than [`ParsedDiff`] carries
+    /// (`\ No newline at EOF`, CRLF, rename similarity) and lay it out itself.
+    /// This is what lets the Flutter client render word-diff emphasis,
+    /// side-by-side and context expansion in its own cdylib rather than asking
+    /// the server for pre-rendered rows.
+    ///
+    /// `#[serde(default)]` + `Option`: an older server omits the field, and a
+    /// client that gets `None` falls back to converting [`Self::diff`] — which
+    /// is lossier, but still enough to lay out. An empty diff is
+    /// `Some(String::new())`, never `None`.
+    #[serde(default)]
+    pub raw: Option<String>,
 }
 
 /// Options for creating a session (request body for `POST /sessions`). Optional
@@ -690,6 +703,34 @@ mod tests {
         // An empty list is a valid request (clears the picker to the fallback).
         let empty: SetProgramsRequest = serde_json::from_str(r#"{"programs":[]}"#).unwrap();
         assert!(empty.programs.is_empty());
+    }
+
+    /// A snapshot from a server predating the `raw` field still deserializes,
+    /// with `raw: None` telling the client to fall back to `diff`. Without the
+    /// `#[serde(default)]` this is a hard decode failure and the review view
+    /// goes blank against every older server.
+    #[test]
+    fn review_snapshot_tolerates_a_server_without_raw() {
+        let wire = r#"{
+            "base": "main",
+            "diff": {"files": []},
+            "comments": [],
+            "reviewed": [],
+            "content_hash": 7
+        }"#;
+        let snap: ReviewSnapshot = serde_json::from_str(wire).unwrap();
+        assert_eq!(snap.base, "main");
+        assert!(snap.raw.is_none());
+
+        // And a current server's `raw` survives the round trip. An empty diff
+        // is `Some("")` — distinguishable from "this server never sent one".
+        let snap = ReviewSnapshot {
+            raw: Some(String::new()),
+            ..snap
+        };
+        let back: ReviewSnapshot =
+            serde_json::from_str(&serde_json::to_string(&snap).unwrap()).unwrap();
+        assert_eq!(back.raw.as_deref(), Some(""));
     }
 
     #[test]

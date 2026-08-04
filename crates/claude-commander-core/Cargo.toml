@@ -39,6 +39,15 @@ ansi-to-tui = "8"
 # Text-input buffer (cursor/editing) for the review comment box.
 tui-input = "0.15"
 
+# Diff view-model and layout engine: unified-diff parsing, logical rows,
+# gap expansion, role-tagged spans, soft wrapping and hit-testing. The review
+# view and `git::review_diff`'s parser both delegate to it.
+#
+# Pinned to an exact revision rather than a branch so a build is reproducible
+# and an upstream push can't silently change what this compiles against. Bump
+# the `rev` deliberately when picking up diffgrid changes.
+diffgrid = { git = "https://github.com/sizeak/diffgrid", rev = "83698a53458868c7c691d89dbb21e89fbc905afa" }
+
 # Git (pure Rust)
 gix = { version = "0.85", default-features = false, features = [
     "sha1",
@@ -88,6 +97,13 @@ directories = "6.0"
 url = "2.5"
 xxhash-rust = { version = "0.8", features = ["xxh3"] }
 regex = "1.12"
+# Display-column measurement. Already in the tree via `ratatui-core`, so taking
+# it directly costs nothing — and any width math outside `diffgrid` must use it
+# rather than `chars().count()`, which is not a column count.
+unicode-width = "0.2"
+# Grapheme-safe slicing, for the same reason: `chars().take(n)` can cut a
+# combining sequence in half. Already in the tree via `diffgrid`.
+unicode-segmentation = "1.13"
 
 # Async utilities
 async-trait = "0.1"

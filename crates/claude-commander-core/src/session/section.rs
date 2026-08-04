@@ -4,8 +4,6 @@
 //! Assignment is a pure function of the session's PR-derived state and the
 //! user's section configuration.
 
-use std::borrow::Cow;
-
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -186,28 +184,6 @@ fn has_predicates(section: &SectionConfig) -> bool {
 /// position 0 (displayed first).
 pub const IN_PROGRESS: &str = "In Progress";
 
-/// Baked-in board sections used when the user has configured no `[[sections]]`.
-///
-/// "In Progress" is the implicit catch-all at process position 0 (see
-/// [`IN_PROGRESS`]) and is therefore *not* included here — these are only the
-/// predicate-bearing columns that follow it. Nothing here is ever written to
-/// `config.toml`; the moment the user declares any section of their own, these
-/// defaults disappear (see [`effective_sections`]).
-pub fn default_board_sections() -> Vec<SectionConfig> {
-    vec![
-        SectionConfig {
-            name: "In Review".to_string(),
-            pr_state: Some(StatePredicate::One(PrState::Open)),
-            ..Default::default()
-        },
-        SectionConfig {
-            name: "Merged".to_string(),
-            pr_state: Some(StatePredicate::One(PrState::Merged)),
-            ..Default::default()
-        },
-    ]
-}
-
 /// Output group for one section in the rendered session list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderedSection {
@@ -267,23 +243,6 @@ fn display_index(name: Option<&str>, sections: &[SectionConfig]) -> usize {
         .position(|s| s.name == n)
         .map(|i| i + 1)
         .unwrap_or(0)
-}
-
-/// The sections that actually drive board columns and section assignment: the
-/// user's configured sections when non-empty, otherwise the baked-in
-/// [`default_board_sections`].
-///
-/// Every section consumer (auto-assignment, the `m` move picker, WIP limits,
-/// section views) routes through this so that an empty `[[sections]]` config
-/// behaves exactly as if the user had configured the defaults. The result is
-/// never persisted back to config — the settings editor keeps operating on the
-/// raw configured list.
-pub fn effective_sections(configured: &[SectionConfig]) -> Cow<'_, [SectionConfig]> {
-    if configured.is_empty() {
-        Cow::Owned(default_board_sections())
-    } else {
-        Cow::Borrowed(configured)
-    }
 }
 
 /// Recompute the session's section assignment and update
@@ -662,6 +621,37 @@ mod tests {
 
         assert!(changed);
         assert_eq!(session.current_section.as_deref(), Some("Open"));
+    }
+
+    #[test]
+    fn session_pinned_to_manual_only_section_renders_in_that_bucket() {
+        // A session manually moved to "Stale" must render under "Stale",
+        // not fall into In Progress. Display order follows config order
+        // regardless of whether a section has predicates.
+        let sections = vec![
+            SectionConfig {
+                name: "Needs Review".into(),
+                has_label: Some(LabelPredicate::One("dev-review-required".into())),
+                ..Default::default()
+            },
+            SectionConfig {
+                name: "Stale".into(),
+                ..Default::default()
+            },
+        ];
+        let mut session = make_session();
+        session.current_section = Some("Stale".into());
+
+        let groups = build_sections(&[session.clone()], &sections);
+
+        assert_eq!(
+            groups.iter().map(|g| g.name.as_str()).collect::<Vec<_>>(),
+            vec!["In Progress", "Needs Review", "Stale"]
+        );
+        let stale = groups.iter().find(|g| g.name == "Stale").unwrap();
+        assert_eq!(stale.sessions, vec![session.id]);
+        let in_progress = groups.iter().find(|g| g.name == "In Progress").unwrap();
+        assert!(in_progress.sessions.is_empty());
     }
 
     #[test]
@@ -1481,39 +1471,6 @@ mod tests {
     }
 
     #[test]
-    fn effective_sections_returns_defaults_when_empty() {
-        let defaults = effective_sections(&[]);
-        let names: Vec<&str> = defaults.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, vec!["In Review", "Merged"]);
-        // "In Progress" stays implicit — it must not be baked in as a section.
-        assert!(defaults.iter().all(|s| s.name != IN_PROGRESS));
-    }
-
-    #[test]
-    fn effective_sections_returns_configured_when_non_empty() {
-        let configured = vec![SectionConfig {
-            name: "My Column".into(),
-            ..Default::default()
-        }];
-        let effective = effective_sections(&configured);
-        let names: Vec<&str> = effective.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, vec!["My Column"]);
-    }
-
-    #[test]
-    fn default_sections_assign_open_pr_to_in_review() {
-        let mut session = make_session();
-        session.pr_state = Some(PrState::Open);
-
-        let sections = default_board_sections();
-
-        assert_eq!(
-            assign_section(&session, &sections),
-            SectionAssignment::Matched("In Review".into())
-        );
-    }
-
-    #[test]
     fn renaming_a_manual_only_section_keeps_its_pinned_sessions() {
         // A session pinned to a predicate-less waypoint holds the section's
         // name in both `section_override` and `current_section`. Renaming the
@@ -1584,19 +1541,6 @@ mod tests {
     }
 
     #[test]
-    fn default_sections_assign_merged_pr_to_merged() {
-        let mut session = make_session();
-        session.pr_state = Some(PrState::Merged);
-
-        let sections = default_board_sections();
-
-        assert_eq!(
-            assign_section(&session, &sections),
-            SectionAssignment::Matched("Merged".into())
-        );
-    }
-
-    #[test]
     fn section_name_availability_rules() {
         let sections = vec![SectionConfig {
             name: "Drafts".into(),
@@ -1628,18 +1572,6 @@ mod tests {
         assert_eq!(
             session.entered_section_at, stamp,
             "a relabel is not a move; ordering within the section must survive"
-        );
-    }
-
-    #[test]
-    fn default_sections_leave_prless_session_in_progress() {
-        let session = make_session(); // no PR at all
-
-        let sections = default_board_sections();
-
-        assert_eq!(
-            assign_section(&session, &sections),
-            SectionAssignment::InProgress
         );
     }
 

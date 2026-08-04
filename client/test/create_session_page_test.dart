@@ -168,33 +168,6 @@ void main() {
     },
   );
 
-  testWidgets('a successful create refreshes the store before popping', (
-    tester,
-  ) async {
-    api.createSessionResponse = 'sess-1';
-    final store = await connectedStore([projectInfo()]);
-    await pumpPage(tester, store);
-    final before = api.countOf('workspaceSnapshot');
-
-    await tester.enterText(
-      find.widgetWithText(TextFormField, 'Title'),
-      'My work',
-    );
-    await tester.tap(find.widgetWithText(FilledButton, 'Create session'));
-    await tester.pumpAndSettle();
-
-    // Nothing has ticked the change feed, so without an explicit refetch the
-    // list behind this page would still be showing the pre-create snapshot and
-    // the new session would look lost until the next poll.
-    expect(api.countOf('workspaceSnapshot'), greaterThan(before));
-    // And it happened as part of the create, not before it.
-    final methods = [for (final c in api.calls) c.method];
-    expect(
-      methods.lastIndexOf('workspaceSnapshot'),
-      greaterThan(methods.indexOf('createSession')),
-    );
-  });
-
   testWidgets('choosing a different project sends its repo path', (
     tester,
   ) async {

@@ -13,7 +13,7 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   // Initialise the Rust bridge before any `api` call.
   await RustLib.init();
-  final api = RustCommanderApi();
+  const api = RustCommanderApi();
   final workspace = WorkspaceStore(
     api: api,
     listStore: SecureServerListStore(),
