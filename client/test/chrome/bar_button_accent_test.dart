@@ -34,6 +34,62 @@ void main() {
     return tester.widget<IconButton>(find.byType(IconButton)).color;
   }
 
+  group('page-level FAB colours', () {
+    // Pins the third regression of this class. The manager pages' FABs never set
+    // colours before the chrome layer, so Material 3 gave them `primaryContainer`
+    // — the slate tile. Hardcoding `t.primary` in the chrome turned all three
+    // violet, and nothing caught it: the palette is unchanged, only its use.
+    testWidgets('a page primaryAction leaves its colours to the theme', (
+      tester,
+    ) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: themeDataFor(missionControlTokens),
+          home: ChromePage(
+            title: 'Servers',
+            primaryAction: ChromeButtonAction(
+              icon: Icons.add,
+              label: 'Add server',
+              onPressed: () {},
+            ),
+            body: const SizedBox(),
+          ),
+        ),
+      );
+      final fab = tester.widget<FloatingActionButton>(
+        find.byType(FloatingActionButton),
+      );
+      expect(fab.backgroundColor, isNull, reason: 'must come from the theme');
+      expect(fab.foregroundColor, isNull);
+    });
+
+    testWidgets('the phone shell keeps its explicitly violet docked FAB', (
+      tester,
+    ) async {
+      // This one main *did* colour, so it must stay coloured.
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: themeDataFor(missionControlTokens),
+          home: ChromeShell(
+            ChromeShellSpec(
+              items: const [],
+              centreAction: ChromeButtonAction(
+                icon: Icons.add,
+                label: 'New session',
+                onPressed: () {},
+              ),
+              body: const SizedBox(),
+            ),
+          ),
+        ),
+      );
+      final fab = tester.widget<FloatingActionButton>(
+        find.byType(FloatingActionButton),
+      );
+      expect(fab.backgroundColor, missionControlTokens.primary);
+    });
+  });
+
   group('ChromeBarButton.accent', () {
     testWidgets('overrides the colour that kind alone would give', (
       tester,

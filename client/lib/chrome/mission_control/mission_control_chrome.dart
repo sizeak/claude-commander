@@ -94,11 +94,14 @@ class MissionControlChrome extends Chrome {
         'actions instead.',
       );
     }
+    // Deliberately uncoloured: the manager pages' FABs never set colours, so
+    // Material 3 gave them `primaryContainer`/`onPrimaryContainer` — the slate
+    // tile, not a violet one. Forcing `t.primary` here turned all three violet.
+    // The phone shell's docked FAB *was* explicitly violet and sets its own in
+    // [buildShell].
     return FloatingActionButton(
       onPressed: action.onPressed,
       tooltip: action.label,
-      backgroundColor: t.primary,
-      foregroundColor: t.canvas,
       child: Icon(action.icon),
     );
   }
@@ -232,11 +235,13 @@ class MissionControlChrome extends Chrome {
                       spec.title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: t.text,
-                      ),
+                      style: spec.monoTitle
+                          ? t.meta(size: 13, color: t.text)
+                          : TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              color: t.text,
+                            ),
                     ),
                     const SizedBox(height: 2),
                     Text(
@@ -852,6 +857,10 @@ class MissionControlChrome extends Chrome {
   /// into its own label. Verbatim casing: uppercasing here would break the call
   /// sites that already pass sentence case ("Files changed").
   @override
+  /// The padding is `_ProjectHeader`'s. The review screen's own eyebrows sat at
+  /// `LTRB(16, 14, 16, 10)` before the migration, so they tighten slightly here —
+  /// one shared element cannot carry two paddings, and the session list is the
+  /// denser, more frequently seen of the two.
   Widget buildEyebrow(BuildContext context, String label) {
     final t = CommanderTokens.of(context);
     return Padding(

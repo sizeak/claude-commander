@@ -1040,6 +1040,7 @@ class _FileCardState extends State<_FileCard> {
           ChromeListRow(
             ChromeListRowSpec(
               title: file.displayPath,
+              monoTitle: true,
               subtitle: _fileSubtitle(file),
               tone: _statusTone(file.status),
               glyph: _statusDot(context, file.status),

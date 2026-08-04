@@ -193,11 +193,12 @@ class DiffColors {
       // amber — because it is structural chrome around the diff rather than
       // part of it, and neither theme's `primary` would read as that in both.
       hunkHeaderFg: t.working,
-      // A selected range is an attention band, so it takes that role: identical
-      // to Mission Control's previous amber (where `attention` and `held` are
-      // the same colour), salmon under LCARS. If the LCARS band ever reads too
-      // close to its `danger` red beneath it, `t.held`'s tan is the swap.
-      selection: t.attention,
+      // A selected range is an attention band — but `held`, not `attention`.
+      // Both are the same amber in Mission Control, so this is identical there.
+      // Under LCARS they differ, and `attention`'s salmon over black lands within
+      // a few units of a deletion line's own `danger` fill, making a selected
+      // deletion nearly impossible to see. `held`'s tan separates cleanly.
+      selection: t.held,
       codeStyle: t.meta(),
     );
     _memoKey = t;

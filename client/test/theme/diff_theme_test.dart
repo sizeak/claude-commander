@@ -7,7 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  // Was `DiffColors.fromTokens(tokens)`, a single hardcoded palette. It is now derived per
+  // Was `DiffColors.dark`, a single hardcoded palette. It is now derived per
   // theme, so the tests name the theme they mean.
   const tokens = missionControlTokens;
   final colors = DiffColors.fromTokens(tokens);
