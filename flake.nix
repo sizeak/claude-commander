@@ -346,13 +346,32 @@
             #            -no-audio -no-boot-anim -accel on &
             #   adb wait-for-device
             #   until adb shell getprop sys.boot_completed 2>/dev/null | grep -q 1; do sleep 3; done
-            if ! avdmanager list avd 2>/dev/null | grep -q 'Name: cctest'; then
+            #
+            # On failure this prints avdmanager's ACTUAL error. It used to swallow
+            # stderr and print a guess about /dev/kvm, which was actively
+            # misleading: the real failure here is `avdmanager` (a Java tool)
+            # hitting a broken JDK — "libnio.so: undefined symbol: ipv6_available"
+            # — while KVM is fine and the emulator itself, being native, boots
+            # normally against an AVD created some other way. Never diagnose on the
+            # user's behalf from an exit code alone.
+            # Existence is checked on disk, not with `avdmanager list avd` —
+            # that is the same Java tool, so when it is broken the check fails
+            # too and creation is retried on every single shell entry even though
+            # the AVD is right there. $ANDROID_AVD_HOME wins over the default when
+            # set, matching the emulator's own lookup.
+            avdHome="''${ANDROID_AVD_HOME:-$HOME/.android/avd}"
+            if [ ! -f "$avdHome/cctest.ini" ]; then
               echo "Creating Android emulator AVD 'cctest' (android-35 google_apis x86_64)..."
-              avdmanager create avd -n cctest \
-                -k "system-images;android-35;google_apis;x86_64" \
-                --device pixel_6 --force >/dev/null 2>&1 \
-                && echo "AVD 'cctest' created." \
-                || echo "AVD creation skipped (non-Linux host or no /dev/kvm — emulator needs Linux/KVM to boot)."
+              if avdCreateOut=$(avdmanager create avd -n cctest \
+                   -k "system-images;android-35;google_apis;x86_64" \
+                   --device pixel_6 --force 2>&1); then
+                echo "AVD 'cctest' created."
+              else
+                echo "AVD creation failed. avdmanager said:"
+                printf '%s\n' "$avdCreateOut" | sed 's/^/  /'
+                echo "  (the emulator binary is native and can still run an AVD"
+                echo "   created another way, e.g. by Android Studio.)"
+              fi
             fi
             echo "entered claude-commander client dev shell (flutter + rust + android ndk)"
           '';
