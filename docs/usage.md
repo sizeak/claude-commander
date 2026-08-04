@@ -59,7 +59,11 @@ claude-commander --config /path/to/config.toml
 
 ## Views and the Board
 
-The session list has four views, cycled with `v`: three full-width **list** views (grouped by project, by section, or by section with PR stacks) and the full-screen kanban **board** (see [Views](../README.md#views)). The project list is the default; `v` rotates project → sections → stacks → board → project, skipping the section views when no `[[sections]]` are configured, and the chosen view is remembered across restarts. No view has a side panel — `i` opens a session's Info modal, `Enter`/`s` its shell, and `r` its review diff.
+The session list has four views, cycled with `v`: three **list** views (grouped by project, by section, or by section with PR stacks) and the full-screen kanban **board** (see [Views](../README.md#views)). The project list is the default; `v` rotates project → sections → stacks → board → project, skipping the section views when no `[[sections]]` are configured, and the chosen view is remembered across restarts.
+
+The three list views pair the list with a **right-hand pane** that tails the selected session live: `Tab` (or `Shift-Tab`) switches it between **Preview** (the agent's pane) and **Shell**, and `<` / `>` move the divider, with the width remembered across restarts. A project row has no agent pane, so it shows only its shell. The pane is passive — keys always drive the list — so it renders dimmed by default (`dim_unfocused_preview`), and the mouse wheel over it scrolls its content rather than moving the selection. Scrolling away from the bottom stops the auto-follow; wheeling back to the bottom resumes it.
+
+The board is a full-screen takeover with no side pane, so `Tab` and `<`/`>` do nothing there. In every view, `i` opens a session's Info modal, `Enter`/`s` its shell, and `r` its review diff.
 
 The board is described below. Each column is a section, and every session is its own card bordered in its project's colour. The leftmost column is a project sidebar listing every project (sorted alphabetically) with its session count.
 

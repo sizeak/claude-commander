@@ -55,6 +55,11 @@ pub struct TuiPrefs {
     /// backend (back-compat with prefs written before multi-backend).
     #[serde(default)]
     pub last_selected_backend: Option<String>,
+    /// Left (session-list) pane width in the list views, as a percentage of the
+    /// content area. `None`/absent means "never resized", so the TUI uses
+    /// [`DEFAULT_LEFT_PANE_PCT`](crate::tui::app::DEFAULT_LEFT_PANE_PCT).
+    #[serde(default)]
+    pub left_pane_pct: Option<u16>,
 }
 
 /// The UI-pref fields as they lived in `state.json` before `tui.json` existed,
@@ -69,6 +74,8 @@ struct LegacyStatePrefs {
     last_selected_session: Option<SessionId>,
     #[serde(default)]
     last_selected_project: Option<ProjectId>,
+    #[serde(default)]
+    left_pane_pct: Option<u16>,
 }
 
 impl From<LegacyStatePrefs> for TuiPrefs {
@@ -82,6 +89,7 @@ impl From<LegacyStatePrefs> for TuiPrefs {
             last_selected_project: l.last_selected_project,
             // Legacy state.json predates multi-backend; its selection is local.
             last_selected_backend: None,
+            left_pane_pct: l.left_pane_pct,
         }
     }
 }
@@ -173,6 +181,11 @@ impl TuiPrefsStore {
     /// Persist the last-active session-list view so it survives restarts.
     pub async fn set_view_mode(&self, view: ViewMode) {
         self.update(|p| p.view_mode = Some(view)).await;
+    }
+
+    /// Persist the left-pane width (already clamped by the caller).
+    pub async fn set_left_pane_pct(&self, pct: u16) {
+        self.update(|p| p.left_pane_pct = Some(pct)).await;
     }
 }
 
@@ -342,5 +355,38 @@ mod tests {
         assert_eq!(reloaded.last_selected_session, Some(session));
         assert_eq!(reloaded.last_selected_project, Some(project));
         assert_eq!(reloaded.last_selected_backend.as_deref(), Some("buildbox"));
+    }
+
+    #[tokio::test]
+    async fn left_pane_pct_persists_and_survives_reload() {
+        let dir = TempDir::new().unwrap();
+        assert_eq!(
+            TuiPrefsStore::load(dir.path()).prefs().left_pane_pct,
+            None,
+            "an unresized divider must record no preference"
+        );
+        {
+            let store = TuiPrefsStore::load(dir.path());
+            store.set_left_pane_pct(45).await;
+        }
+        assert_eq!(
+            TuiPrefsStore::load(dir.path()).prefs().left_pane_pct,
+            Some(45)
+        );
+    }
+
+    #[test]
+    fn left_pane_pct_migrates_out_of_legacy_state_json() {
+        // Anyone upgrading from a build that predates tui.json keeps the pane
+        // width they had, rather than silently snapping back to the default.
+        let dir = TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join("state.json"),
+            r#"{"left_pane_pct": 42, "seen_help": true}"#,
+        )
+        .unwrap();
+
+        let prefs = TuiPrefsStore::load(dir.path()).prefs();
+        assert_eq!(prefs.left_pane_pct, Some(42));
     }
 }

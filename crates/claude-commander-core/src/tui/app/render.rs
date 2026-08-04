@@ -3,6 +3,35 @@
 use super::*;
 use crate::tui::hotkey::ActionButton;
 
+/// Split a list view's content area into (session list, right pane).
+///
+/// Pure, and the single definition of that geometry: `render` lays the panes out
+/// with it and the wheel hit-test reads the recorded right-pane rect it
+/// produced, so the two can't drift. `left_pane_pct` is a percentage of
+/// `content.width`, clamped so both panes keep at least one column even at an
+/// extreme width.
+pub(super) fn split_list_view(content: Rect, left_pane_pct: u16) -> (Rect, Rect) {
+    let pct = left_pane_pct.clamp(MIN_LEFT_PANE_PCT, MAX_LEFT_PANE_PCT);
+    let left_width = ((content.width as u32 * pct as u32) / 100) as u16;
+    // Never starve either side: below 2 columns there is nothing to split, so the
+    // list keeps the whole area and the right pane renders empty.
+    let left_width = if content.width < 2 {
+        content.width
+    } else {
+        left_width.clamp(1, content.width - 1)
+    };
+    let left = Rect {
+        width: left_width,
+        ..content
+    };
+    let right = Rect {
+        x: content.x.saturating_add(left_width),
+        width: content.width.saturating_sub(left_width),
+        ..content
+    };
+    (left, right)
+}
+
 /// Build the footer commander chip label, or `None` when the commander is not
 /// running (the chip is hidden then). When running, the label is `● Commander`,
 /// refined with the live agent state (`· working` / `· waiting` / `· idle`) once
@@ -132,12 +161,18 @@ impl App {
                 height: content.height.saturating_sub(1),
                 ..content
             };
+            // The board is a full-screen takeover with no right pane; drop the
+            // rect so a stale wheel event can't scroll an invisible pane.
+            self.ui_state.right_pane_rect = None;
             self.render_top_bar(frame, top_bar);
             self.render_board(frame, board_area);
             self.render_modal(frame, board_area);
         } else {
-            // List view: the full-width tree-list (its own heading bar).
-            self.render_session_list(frame, content);
+            // List view: session list on the left, live pane on the right.
+            let (left, right) = split_list_view(content, self.ui_state.left_pane_pct);
+            self.ui_state.right_pane_rect = Some(right);
+            self.render_session_list(frame, left);
+            self.render_right_pane(frame, right);
             self.render_modal(frame, content);
         }
 
@@ -386,6 +421,79 @@ impl App {
         self.ui_state.board_button_regions = out.button_regions;
         self.ui_state.board_heading_regions = out.heading_regions;
         self.ui_state.board_column_rects = Some(out.rects);
+    }
+
+    /// Render the list views' right-hand pane: a live capture of the selected
+    /// session's agent pane or shell, with a tab header naming both.
+    ///
+    /// The pane is passive — keys always drive the session list — so it renders
+    /// dimmed when `dim_unfocused_preview` is set, keeping the list visually
+    /// dominant. Content arrives from `spawn_preview_update`; the scroll state
+    /// follows the tail until the user wheels away from the bottom.
+    fn render_right_pane(&mut self, frame: &mut Frame, area: Rect) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+        let on_project = self.is_project_selected();
+        let view = self.ui_state.right_pane_view.effective(on_project);
+        let (tabs, active) = self.ui_state.right_pane_view.tabs(on_project);
+
+        let block = Block::default()
+            .title(self.build_pane_tabs(tabs, active))
+            .borders(Borders::ALL)
+            .border_type(self.border_type())
+            .border_style(self.theme.border_unfocused());
+
+        let dim_opacity = self
+            .config
+            .dim_unfocused_preview
+            .then_some(self.config.dim_unfocused_opacity);
+
+        // Borders take one row top and bottom.
+        let inner_height = area.height.saturating_sub(2);
+        let (content, state) = match view {
+            RightPaneView::Preview => (
+                &self.ui_state.preview_content,
+                &mut self.ui_state.preview_state,
+            ),
+            RightPaneView::Shell => (&self.ui_state.shell_content, &mut self.ui_state.shell_state),
+        };
+        state.set_content(content, inner_height);
+        let scroll = state.scroll_offset;
+
+        frame.render_widget(
+            Preview::new(content)
+                .block(block)
+                .scroll(scroll)
+                .dim_opacity(dim_opacity),
+            area,
+        );
+    }
+
+    /// Build a styled tab-title line for the right pane's header. The active tab
+    /// is bold accent, the rest secondary, separated by ` · `.
+    fn build_pane_tabs(&self, tabs: &[&str], active: usize) -> Line<'static> {
+        let active_style = Style::default()
+            .fg(self.theme.text_accent)
+            .add_modifier(Modifier::BOLD);
+        let inactive_style = Style::default().fg(self.theme.text_secondary);
+
+        let mut spans: Vec<Span<'static>> = vec![Span::raw(" ")];
+        for (i, tab) in tabs.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(" \u{00b7} ", inactive_style));
+            }
+            spans.push(Span::styled(
+                tab.to_string(),
+                if i == active {
+                    active_style
+                } else {
+                    inactive_style
+                },
+            ));
+        }
+        spans.push(Span::raw(" "));
+        Line::from(spans)
     }
 
     /// Build the Info-modal content for the selected session.

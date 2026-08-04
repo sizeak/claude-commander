@@ -92,17 +92,26 @@ impl App {
                 debug!("Session removed: {}", session_id);
                 self.refresh_list_items().await;
             }
-            StateUpdate::SessionDiffReady {
+            StateUpdate::PreviewReady {
                 session_id,
+                project_id,
+                preview_content,
+                shell_content,
                 diff_info,
             } => {
-                self.ui_state.diff_fetch_spawned_at = None;
-                // Only apply if the same session is still selected (compare
-                // ids; session ids are unique across backends).
-                if self.ui_state.selected_session_id.map(|r| r.id) == Some(session_id) {
+                self.ui_state.preview_update_spawned_at = None;
+                // Only apply if the same thing is still selected — otherwise the
+                // pane would briefly show another session's output. Session and
+                // project ids are unique across backends, so comparing ids is
+                // enough.
+                let still_selected = self.ui_state.selected_session_id.map(|r| r.id) == session_id
+                    && self.ui_state.selected_project_id.map(|(_, p)| p) == project_id;
+                if still_selected {
+                    self.ui_state.preview_content = preview_content;
+                    self.ui_state.shell_content = shell_content;
                     self.ui_state.diff_info = diff_info;
                 } else {
-                    debug!("Discarding stale SessionDiffReady (selection changed)");
+                    debug!("Discarding stale PreviewReady (selection changed)");
                 }
             }
             StateUpdate::EnrichedPrReady { session_id, info } => {
@@ -161,7 +170,7 @@ impl App {
                 self.refresh_list_items().await;
                 // Select the newly created session
                 self.select_session_in_tree(session_id);
-                self.spawn_diff_fetch();
+                self.spawn_preview_update();
             }
             StateUpdate::SessionCreateFailed { message } => {
                 debug!("Session creation failed: {}", message);
@@ -283,8 +292,8 @@ impl App {
                 // move relocates it); keep it selected and refresh the Info
                 // modal's diff if it is open.
                 if self.select_session_in_tree(session_id) {
-                    self.ui_state.diff_fetch_spawned_at = None;
-                    self.spawn_diff_fetch();
+                    self.ui_state.preview_update_spawned_at = None;
+                    self.spawn_preview_update();
                 }
             }
             StateUpdate::NewSessionProgramsLoaded {

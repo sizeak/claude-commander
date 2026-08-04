@@ -42,7 +42,9 @@ use super::theme::Theme;
 use super::widgets::board::{
     BoardButtonRegion, BoardHitRegion, BoardRects, BoardState, BoardWidget,
 };
-use super::widgets::{InfoContent, InfoSessionData, InfoView, TreeList, TreeListState};
+use super::widgets::{
+    InfoContent, InfoSessionData, InfoView, Preview, PreviewState, TreeList, TreeListState,
+};
 use crate::api::{CommanderService, DiffSide};
 use crate::backend::{
     AttachConnection, AttachKind, BResult, BackendCapabilities, BackendError, BackendHandle,
@@ -236,6 +238,63 @@ pub enum AttachTarget {
     /// a project shell — attached via the local backend by name. Local-only:
     /// these are absent from the workspace snapshot.
     LocalName(String),
+}
+
+/// Minimum left pane width as a percentage of the content area
+pub(crate) const MIN_LEFT_PANE_PCT: u16 = 15;
+/// Maximum left pane width as a percentage of the content area
+pub(crate) const MAX_LEFT_PANE_PCT: u16 = 60;
+/// Default left pane width as a percentage of the content area
+pub(crate) const DEFAULT_LEFT_PANE_PCT: u16 = 30;
+
+/// Which live view the right-hand pane shows in the *list* view modes.
+///
+/// The board is a full-screen takeover with no right pane, so this is only
+/// consulted when [`ViewMode::is_board`] is false. Session metadata is *not* a
+/// variant here: that lives in the `i` Info modal (reachable from the board
+/// too), so there is exactly one info surface to keep in sync.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RightPaneView {
+    /// Live capture of the session's agent pane.
+    #[default]
+    Preview,
+    /// Live capture of the session's (or project's) shell pane.
+    Shell,
+}
+
+impl RightPaneView {
+    /// The other view — `Tab`/`BackTab` both toggle, since there are two.
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Preview => Self::Shell,
+            Self::Shell => Self::Preview,
+        }
+    }
+
+    /// Tab labels and the active index, for the pane header.
+    ///
+    /// A project has no agent pane, so it shows a single `Shell` tab; a session
+    /// shows both. Returned as a slice + index so the header renderer stays
+    /// ignorant of which selection kind produced it.
+    pub fn tabs(self, on_project: bool) -> (&'static [&'static str], usize) {
+        if on_project {
+            (&["Shell"], 0)
+        } else {
+            (
+                &["Preview", "Shell"],
+                match self {
+                    Self::Preview => 0,
+                    Self::Shell => 1,
+                },
+            )
+        }
+    }
+
+    /// The view actually rendered for the current selection: a project has no
+    /// agent pane, so `Preview` collapses to `Shell` there.
+    pub fn effective(self, on_project: bool) -> Self {
+        if on_project { Self::Shell } else { self }
+    }
 }
 
 /// A single entry in the pre-computed stack chain for the Info modal.
@@ -1299,6 +1358,27 @@ pub struct AppUiState {
     pub main_list_height: u16,
     /// Diff info
     pub diff_info: Arc<DiffInfo>,
+    /// Which live view the right-hand pane shows (list views only — the board
+    /// is full-screen and has no right pane).
+    pub right_pane_view: RightPaneView,
+    /// Latest agent-pane capture for the selection, fed by `spawn_preview_update`.
+    pub preview_content: String,
+    /// Latest shell-pane capture for the selection.
+    pub shell_content: String,
+    /// Scroll/follow state for the Preview tab.
+    pub preview_state: PreviewState,
+    /// Scroll/follow state for the Shell tab.
+    pub shell_state: PreviewState,
+    /// Left (session-list) pane width as a percentage of the content area,
+    /// clamped to [`MIN_LEFT_PANE_PCT`]..=[`MAX_LEFT_PANE_PCT`]. Persisted in
+    /// `tui.json`.
+    pub left_pane_pct: u16,
+    /// When the last background preview/shell capture was spawned (None = not
+    /// in flight). Guards `spawn_preview_update` against double-spawns.
+    pub preview_update_spawned_at: Option<Instant>,
+    /// Right-pane rect from the last render frame, for wheel hit-testing.
+    /// `None` in board view (no right pane) and before the first frame.
+    pub right_pane_rect: Option<Rect>,
     /// Status message (with expiry time)
     pub status_message: Option<(String, Instant)>,
     /// Backend ids (raw) that have already shown their one-time version-mismatch
@@ -1371,14 +1451,11 @@ pub struct AppUiState {
     pub prev_fullscreen: bool,
     /// Whether the `gh` CLI is available
     pub gh_available: bool,
-    /// When the last background diff fetch was spawned (None = not in flight).
-    /// Guards `spawn_diff_fetch` (feeds the Info modal) against double-spawns.
-    pub diff_fetch_spawned_at: Option<Instant>,
     /// When the last enriched-PR fetch was spawned (None = not in flight).
     /// Guards `spawn_info_fetch` against double-spawns: `update_selection` now
     /// runs it every tick (via `refresh_list_items`), so without this an open
     /// Info modal would re-spawn a duplicate `gh` fetch each tick until the
-    /// first resolves. Mirrors `diff_fetch_spawned_at`'s 5s safety window.
+    /// first resolves. Mirrors `preview_update_spawned_at`'s 5s safety window.
     pub enriched_pr_fetch_spawned_at: Option<Instant>,
     /// Whether a review-diff refresh re-compose is currently in flight, so the
     /// idle trigger and a manual refresh don't double-spawn.
@@ -1466,6 +1543,14 @@ impl Default for AppUiState {
             main_list_offset: 0,
             main_list_height: 0,
             diff_info: Arc::new(DiffInfo::empty()),
+            right_pane_view: RightPaneView::default(),
+            preview_content: String::new(),
+            shell_content: String::new(),
+            preview_state: PreviewState::new(),
+            shell_state: PreviewState::new(),
+            left_pane_pct: DEFAULT_LEFT_PANE_PCT,
+            preview_update_spawned_at: None,
+            right_pane_rect: None,
             status_message: None, // (message, expiry)
             version_warned: HashSet::new(),
             review_body_rect: None,
@@ -1488,7 +1573,6 @@ impl Default for AppUiState {
             force_clear: false,
             prev_fullscreen: false,
             gh_available: false,
-            diff_fetch_spawned_at: None,
             enriched_pr_fetch_spawned_at: None,
             review_refresh_in_flight: false,
             terminal_size: Rect::default(),
@@ -1563,6 +1647,12 @@ impl AppUiState {
             // `connected` true (local default), so single-machine setups and the
             // no-selection case are unaffected.
             BindableAction::NewSession | BindableAction::CheckoutBranch => connected,
+            // The right pane only exists in the list views; the board is a
+            // full-screen takeover, so these have nothing to act on there.
+            BindableAction::TogglePane
+            | BindableAction::TogglePaneReverse
+            | BindableAction::ShrinkLeftPane
+            | BindableAction::GrowLeftPane => !self.view_mode.is_board(),
             // All other actions are always available
             _ => true,
         }
@@ -2438,6 +2528,13 @@ impl App {
             None if !self.config.sections.is_empty() => ViewMode::SectionStacks,
             None => ViewMode::ProjectGrouped,
         };
+
+        // Restore the list views' pane split. Clamped on the way in so a
+        // hand-edited or older out-of-range `tui.json` can't render an unusable
+        // (or zero-width) pane.
+        if let Some(pct) = self.tui_prefs.prefs().left_pane_pct {
+            self.ui_state.left_pane_pct = pct.clamp(MIN_LEFT_PANE_PCT, MAX_LEFT_PANE_PCT);
+        }
 
         // Restore last selection from persisted state
         self.refresh_list_items().await;

@@ -6919,3 +6919,285 @@ async fn target_section_uses_section_header_above_cursor_in_list_view() {
     app.ui_state.list_state.select(Some(1));
     assert_eq!(app.target_section().as_deref(), Some("Review"));
 }
+
+// ---------------------------------------------------------------------------
+// Right-hand preview pane (list views only)
+//
+// The board redesign (#260) removed the pane outright; these pin the restored
+// behaviour so it can't be dropped again silently. The board must stay
+// full-screen — a right pane there would eat its columns.
+// ---------------------------------------------------------------------------
+
+use crate::tui::app::render::split_list_view;
+use crate::tui::app::{DEFAULT_LEFT_PANE_PCT, MAX_LEFT_PANE_PCT, MIN_LEFT_PANE_PCT, RightPaneView};
+
+#[test]
+fn split_list_view_gives_the_list_its_percentage_and_the_pane_the_rest() {
+    let content = Rect::new(0, 0, 100, 40);
+    let (left, right) = split_list_view(content, 30);
+
+    assert_eq!(left, Rect::new(0, 0, 30, 40));
+    assert_eq!(right, Rect::new(30, 0, 70, 40), "panes must tile the area");
+    assert_eq!(left.width + right.width, content.width);
+}
+
+#[test]
+fn split_list_view_clamps_an_out_of_range_percentage() {
+    let content = Rect::new(0, 0, 100, 40);
+    // A hand-edited tui.json could hold anything; both extremes must leave a
+    // usable list *and* a usable pane.
+    assert_eq!(split_list_view(content, 0).0.width, MIN_LEFT_PANE_PCT);
+    assert_eq!(split_list_view(content, 99).0.width, MAX_LEFT_PANE_PCT);
+}
+
+#[test]
+fn split_list_view_never_starves_a_pane_at_tiny_widths() {
+    // 3 columns at 15% rounds the left pane to 0, which would render an
+    // invisible list; the clamp keeps one column each.
+    let (left, right) = split_list_view(Rect::new(0, 0, 3, 10), MIN_LEFT_PANE_PCT);
+    assert_eq!((left.width, right.width), (1, 2));
+
+    // Below two columns there is nothing to split: the list takes it all.
+    let (left, right) = split_list_view(Rect::new(0, 0, 1, 10), 30);
+    assert_eq!((left.width, right.width), (1, 0));
+}
+
+#[test]
+fn right_pane_view_toggles_and_labels_its_tabs() {
+    assert_eq!(RightPaneView::Preview.toggled(), RightPaneView::Shell);
+    assert_eq!(RightPaneView::Shell.toggled(), RightPaneView::Preview);
+
+    // A session shows both tabs, with the active one indexed.
+    assert_eq!(
+        RightPaneView::Preview.tabs(false),
+        (&["Preview", "Shell"][..], 0)
+    );
+    assert_eq!(
+        RightPaneView::Shell.tabs(false),
+        (&["Preview", "Shell"][..], 1)
+    );
+
+    // A project has no agent pane: one tab, and Preview collapses to Shell.
+    assert_eq!(RightPaneView::Preview.tabs(true), (&["Shell"][..], 0));
+    assert_eq!(RightPaneView::Preview.effective(true), RightPaneView::Shell);
+    assert_eq!(
+        RightPaneView::Preview.effective(false),
+        RightPaneView::Preview
+    );
+}
+
+#[tokio::test]
+async fn list_view_renders_a_right_pane_and_the_board_does_not() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = app_with_rendered_list(3);
+    let pane = app
+        .ui_state
+        .right_pane_rect
+        .expect("a list view must record a right-pane rect");
+    let list = app
+        .ui_state
+        .list_rect
+        .expect("a list view must record a list rect");
+    assert!(
+        pane.x >= list.right(),
+        "the pane must sit beside the list, not over it: pane={pane:?} list={list:?}"
+    );
+
+    // Switching to the board drops the pane entirely.
+    app.ui_state.view_mode = ViewMode::Board;
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    assert_eq!(
+        app.ui_state.right_pane_rect, None,
+        "the board is a full-screen takeover and must record no right pane"
+    );
+}
+
+#[tokio::test]
+async fn list_view_draws_the_pane_tab_header_and_its_content() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let mut app = app_with_rendered_list(3);
+    app.ui_state.preview_content = "hello-from-the-agent-pane".to_string();
+
+    let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+    terminal.draw(|f| app.render(f)).unwrap();
+    let text = buffer_text(&terminal);
+
+    assert!(text.contains("Preview"), "pane tab header must render");
+    assert!(text.contains("Shell"), "inactive tab must render too");
+    assert!(
+        text.contains("hello-from-the-agent-pane"),
+        "captured pane content must reach the screen"
+    );
+}
+
+#[tokio::test]
+async fn toggle_pane_switches_tabs_only_in_list_views() {
+    let mut app = app_with_rendered_list(3);
+    assert_eq!(app.ui_state.right_pane_view, RightPaneView::Preview);
+
+    app.handle_command(UserCommand::TogglePane).await;
+    assert_eq!(app.ui_state.right_pane_view, RightPaneView::Shell);
+    app.handle_command(UserCommand::TogglePaneReverse).await;
+    assert_eq!(app.ui_state.right_pane_view, RightPaneView::Preview);
+
+    // On the board there is no pane to switch, so the command is inert.
+    app.ui_state.view_mode = ViewMode::Board;
+    app.handle_command(UserCommand::TogglePane).await;
+    assert_eq!(
+        app.ui_state.right_pane_view,
+        RightPaneView::Preview,
+        "the board has no right pane; TogglePane must not mutate its view"
+    );
+}
+
+#[tokio::test]
+async fn resizing_the_divider_clamps_at_both_ends_and_persists() {
+    let mut app = app_with_rendered_list(3);
+    assert_eq!(app.ui_state.left_pane_pct, DEFAULT_LEFT_PANE_PCT);
+
+    app.handle_command(UserCommand::GrowLeftPane).await;
+    assert_eq!(app.ui_state.left_pane_pct, DEFAULT_LEFT_PANE_PCT + 2);
+    app.handle_command(UserCommand::ShrinkLeftPane).await;
+    assert_eq!(app.ui_state.left_pane_pct, DEFAULT_LEFT_PANE_PCT);
+
+    // Hold the key: the width stops at the clamp instead of wrapping or
+    // running past it.
+    for _ in 0..60 {
+        app.handle_command(UserCommand::GrowLeftPane).await;
+    }
+    assert_eq!(app.ui_state.left_pane_pct, MAX_LEFT_PANE_PCT);
+    for _ in 0..60 {
+        app.handle_command(UserCommand::ShrinkLeftPane).await;
+    }
+    assert_eq!(app.ui_state.left_pane_pct, MIN_LEFT_PANE_PCT);
+
+    // The final width is persisted, so it survives a restart.
+    assert_eq!(
+        app.tui_prefs.prefs().left_pane_pct,
+        Some(MIN_LEFT_PANE_PCT),
+        "the divider position must be written to tui.json"
+    );
+}
+
+#[tokio::test]
+async fn resizing_the_divider_is_inert_on_the_board() {
+    let mut app = app_with_rendered_list(3);
+    app.ui_state.view_mode = ViewMode::Board;
+
+    app.handle_command(UserCommand::GrowLeftPane).await;
+    assert_eq!(app.ui_state.left_pane_pct, DEFAULT_LEFT_PANE_PCT);
+    assert_eq!(
+        app.tui_prefs.prefs().left_pane_pct,
+        None,
+        "a no-op resize must not write to tui.json"
+    );
+}
+
+#[tokio::test]
+async fn pane_commands_are_unavailable_on_the_board() {
+    let mut app = app_with_rendered_list(3);
+    for action in [
+        BindableAction::TogglePane,
+        BindableAction::TogglePaneReverse,
+        BindableAction::ShrinkLeftPane,
+        BindableAction::GrowLeftPane,
+    ] {
+        assert!(
+            app.ui_state.is_command_available(action),
+            "{action:?} must be offered in a list view"
+        );
+    }
+
+    app.ui_state.view_mode = ViewMode::Board;
+    for action in [
+        BindableAction::TogglePane,
+        BindableAction::TogglePaneReverse,
+        BindableAction::ShrinkLeftPane,
+        BindableAction::GrowLeftPane,
+    ] {
+        assert!(
+            !app.ui_state.is_command_available(action),
+            "{action:?} must be hidden on the board, which has no right pane"
+        );
+    }
+}
+
+#[tokio::test]
+async fn preview_ready_applies_only_to_the_still_selected_session() {
+    let selected = SessionId::new();
+    let mut app = make_test_app();
+    app.ui_state.view_mode = ViewMode::ProjectGrouped;
+    app.ui_state.selected_session_id =
+        Some(SessionRef::new(crate::backend::LOCAL_BACKEND_ID, selected));
+
+    app.handle_state_update(StateUpdate::PreviewReady {
+        session_id: Some(selected),
+        project_id: None,
+        preview_content: "live output".to_string(),
+        shell_content: "$ ".to_string(),
+        diff_info: Arc::new(DiffInfo::empty()),
+    })
+    .await;
+    assert_eq!(app.ui_state.preview_content, "live output");
+    assert_eq!(app.ui_state.preview_update_spawned_at, None);
+
+    // A fetch that resolves after the user moved on must not paint another
+    // session's output into the pane.
+    app.handle_state_update(StateUpdate::PreviewReady {
+        session_id: Some(SessionId::new()),
+        project_id: None,
+        preview_content: "someone else's output".to_string(),
+        shell_content: String::new(),
+        diff_info: Arc::new(DiffInfo::empty()),
+    })
+    .await;
+    assert_eq!(
+        app.ui_state.preview_content, "live output",
+        "a stale PreviewReady must be discarded, not painted"
+    );
+}
+
+#[tokio::test]
+async fn wheel_scrolls_the_pane_over_it_and_moves_the_selection_over_the_list() {
+    use crate::tui::app::ScrollDirection;
+
+    let mut app = app_with_rendered_list(30);
+    let list = app.ui_state.list_rect.unwrap();
+    let pane = app.ui_state.right_pane_rect.unwrap();
+
+    // Give the pane more content than fits, so it has somewhere to scroll, and
+    // let a render settle its follow-the-tail offset.
+    app.ui_state.preview_content = (0..200).map(|i| format!("line {i}\n")).collect();
+    {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+    }
+    let followed = app.ui_state.preview_state.scroll_offset;
+    assert!(followed > 0, "follow mode must start at the tail");
+
+    // Over the pane: the pane scrolls and the selection stays put.
+    let selected = app.ui_state.list_state.selected();
+    app.scroll_pane_at(pane.x + 1, ScrollDirection::Up);
+    assert!(
+        app.ui_state.preview_state.scroll_offset < followed,
+        "a wheel notch over the pane must scroll its content"
+    );
+    assert_eq!(
+        app.ui_state.list_state.selected(),
+        selected,
+        "scrolling the pane must not move the list selection"
+    );
+
+    // Over the list: the selection moves and the pane's offset is untouched.
+    let pane_offset = app.ui_state.preview_state.scroll_offset;
+    app.scroll_pane_at(list.x + 1, ScrollDirection::Down);
+    assert_ne!(app.ui_state.list_state.selected(), selected);
+    assert_eq!(app.ui_state.preview_state.scroll_offset, pane_offset);
+}

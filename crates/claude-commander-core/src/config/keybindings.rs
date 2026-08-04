@@ -70,6 +70,10 @@ pub enum BindableAction {
     MoveToSection,
     ToggleViewMode,
     ToggleSection,
+    TogglePane,
+    TogglePaneReverse,
+    ShrinkLeftPane,
+    GrowLeftPane,
     AddRemoteServer,
     RemoveRemoteServer,
     EditServerPrograms,
@@ -125,6 +129,11 @@ impl BindableAction {
         Self::MoveToSection,
         Self::ToggleViewMode,
         Self::ToggleSection,
+        // Right pane (list views)
+        Self::TogglePane,
+        Self::TogglePaneReverse,
+        Self::ShrinkLeftPane,
+        Self::GrowLeftPane,
         // Review & AI
         Self::OpenReviewDiff,
         Self::GenerateSummary,
@@ -192,6 +201,10 @@ impl BindableAction {
             Self::MoveToSection => "move_to_section",
             Self::ToggleViewMode => "toggle_view_mode",
             Self::ToggleSection => "toggle_section",
+            Self::TogglePane => "toggle_pane",
+            Self::TogglePaneReverse => "toggle_pane_reverse",
+            Self::ShrinkLeftPane => "shrink_left_pane",
+            Self::GrowLeftPane => "grow_left_pane",
             Self::EditServerPrograms => "edit_server_programs",
             Self::AddRemoteServer => "add_remote_server",
             Self::RemoveRemoteServer => "remove_remote_server",
@@ -248,6 +261,10 @@ impl BindableAction {
             Self::MoveToSection => "Move session to section…",
             Self::ToggleViewMode => "Cycle view: project / sections / stacks / board",
             Self::ToggleSection => "Collapse/expand section",
+            Self::TogglePane => "Switch right pane: preview / shell",
+            Self::TogglePaneReverse => "Switch right pane (reverse)",
+            Self::ShrinkLeftPane => "Narrow the session list",
+            Self::GrowLeftPane => "Widen the session list",
             Self::EditServerPrograms => "Edit server's program list…",
             Self::AddRemoteServer => "Add remote server",
             Self::RemoveRemoteServer => "Remove remote server",
@@ -310,6 +327,10 @@ impl BindableAction {
             Self::MoveToSection => "move",
             Self::ToggleViewMode => "view",
             Self::ToggleSection => "collapse",
+            Self::TogglePane => "pane",
+            Self::TogglePaneReverse => "pane back",
+            Self::ShrinkLeftPane => "narrower",
+            Self::GrowLeftPane => "wider",
             Self::EditServerPrograms => "server programs",
             Self::AddRemoteServer => "add server",
             Self::RemoveRemoteServer => "remove server",
@@ -357,6 +378,10 @@ impl BindableAction {
                 "Remote Servers"
             }
             Self::MoveToSection | Self::ToggleViewMode | Self::ToggleSection => "Sections",
+            Self::TogglePane
+            | Self::TogglePaneReverse
+            | Self::ShrinkLeftPane
+            | Self::GrowLeftPane => "Right Pane",
             Self::OpenReviewDiff
             | Self::GenerateSummary
             | Self::OpenCommander
@@ -420,6 +445,10 @@ impl FromStr for BindableAction {
             "move_to_section" => Ok(Self::MoveToSection),
             "toggle_view_mode" => Ok(Self::ToggleViewMode),
             "toggle_section" => Ok(Self::ToggleSection),
+            "toggle_pane" => Ok(Self::TogglePane),
+            "toggle_pane_reverse" => Ok(Self::TogglePaneReverse),
+            "shrink_left_pane" => Ok(Self::ShrinkLeftPane),
+            "grow_left_pane" => Ok(Self::GrowLeftPane),
             "edit_server_programs" => Ok(Self::EditServerPrograms),
             "add_remote_server" => Ok(Self::AddRemoteServer),
             "remove_remote_server" => Ok(Self::RemoveRemoteServer),
@@ -794,6 +823,23 @@ impl Default for KeyBindings {
             vec![kb(KeyCode::Char('v'), none)],
         );
         bindings.insert(BindableAction::ToggleSection, vec![]);
+
+        // Right pane (list views only)
+        bindings.insert(BindableAction::TogglePane, vec![kb(KeyCode::Tab, none)]);
+        bindings.insert(
+            BindableAction::TogglePaneReverse,
+            vec![kb(KeyCode::BackTab, shift)],
+        );
+        // `<` / `>` need both modifier forms registered: they are shifted
+        // characters, and terminals disagree on whether they also report SHIFT.
+        bindings.insert(
+            BindableAction::ShrinkLeftPane,
+            vec![kb(KeyCode::Char('<'), shift), kb(KeyCode::Char('<'), none)],
+        );
+        bindings.insert(
+            BindableAction::GrowLeftPane,
+            vec![kb(KeyCode::Char('>'), shift), kb(KeyCode::Char('>'), none)],
+        );
 
         // Scrolling
         bindings.insert(BindableAction::ScrollUp, vec![]);
@@ -1529,6 +1575,7 @@ mod tests {
                 "Pull Requests",
                 "Remote Servers",
                 "Sections",
+                "Right Pane",
                 "Review & AI",
                 "Scrolling",
                 "Application",

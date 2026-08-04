@@ -1115,8 +1115,8 @@ impl App {
             if self.ui_state.board_state.selected() != Some(pos) {
                 self.ui_state.board_state.select(Some(pos));
                 self.update_selection();
-                self.ui_state.diff_fetch_spawned_at = None;
-                self.spawn_diff_fetch();
+                self.ui_state.preview_update_spawned_at = None;
+                self.spawn_preview_update();
             }
             let cmd = match button {
                 CardButton::Shell => UserCommand::SelectShell,
@@ -1142,8 +1142,8 @@ impl App {
         if self.ui_state.board_state.selected() != Some(pos) {
             self.ui_state.board_state.select(Some(pos));
             self.update_selection();
-            self.ui_state.diff_fetch_spawned_at = None;
-            self.spawn_diff_fetch();
+            self.ui_state.preview_update_spawned_at = None;
+            self.spawn_preview_update();
         }
 
         if is_double_click {
@@ -1219,8 +1219,8 @@ impl App {
         if self.ui_state.list_state.selected() != Some(idx) {
             self.ui_state.list_state.select(Some(idx));
             self.update_selection();
-            self.ui_state.diff_fetch_spawned_at = None;
-            self.spawn_diff_fetch();
+            self.ui_state.preview_update_spawned_at = None;
+            self.spawn_preview_update();
         }
 
         if is_double_click {
@@ -1593,18 +1593,16 @@ impl App {
             UserCommand::OpenInEditor => {
                 self.handle_open_in_editor().await;
             }
-            UserCommand::OpenInfo => {
-                // Only meaningful with a session selected (matches OpenInfo's
-                // availability gating); no-op on a sidebar/empty selection.
-                if self.ui_state.selected_session_id.is_some() {
-                    self.ui_state.modal = Modal::Info { scroll: 0 };
-                    // Kick off the enriched-PR + working-tree diff fetches that
-                    // populate the modal; clear the in-flight guard so the diff
-                    // fetch runs even if one fired recently.
-                    self.ui_state.diff_fetch_spawned_at = None;
-                    self.spawn_info_fetch();
-                    self.spawn_diff_fetch();
-                }
+            // Only meaningful with a session selected (matches OpenInfo's
+            // availability gating); no-op on a sidebar/empty selection.
+            UserCommand::OpenInfo if self.ui_state.selected_session_id.is_some() => {
+                self.ui_state.modal = Modal::Info { scroll: 0 };
+                // Kick off the enriched-PR + working-tree diff fetches that
+                // populate the modal; clear the in-flight guard so the diff
+                // fetch runs even if one fired recently.
+                self.ui_state.preview_update_spawned_at = None;
+                self.spawn_info_fetch();
+                self.spawn_preview_update();
             }
             UserCommand::OpenPullRequest => {
                 self.handle_open_pull_request().await;
@@ -1671,6 +1669,19 @@ impl App {
                     self.spawn_ai_summary_if_needed(session_id);
                 }
             }
+            // Right-pane commands are list-view only — the board is full-screen
+            // and draws no right pane, so they would have nothing to act on.
+            UserCommand::TogglePane | UserCommand::TogglePaneReverse
+                if !self.ui_state.view_mode.is_board() =>
+            {
+                self.ui_state.right_pane_view = self.ui_state.right_pane_view.toggled();
+                // The outgoing tab's styled cells would otherwise linger under
+                // the incoming one.
+                self.ui_state.force_clear = true;
+                self.spawn_preview_update();
+            }
+            UserCommand::ShrinkLeftPane => self.resize_left_pane(-2).await,
+            UserCommand::GrowLeftPane => self.resize_left_pane(2).await,
             _ => {}
         }
     }

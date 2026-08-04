@@ -10,6 +10,7 @@ A high-performance terminal UI for managing Claude coding sessions, written in R
 - **Hierarchical session model** - Projects contain worktree sessions
 - **Git worktree isolation** - Each session has its own worktree and branch
 - **Kanban board UI** - Full-screen board with sections as columns and sessions as project-coloured cards
+- **Live preview pane** - In the list views, a right-hand pane tails the selected session's agent or shell output as it happens (`Tab` switches, `<`/`>` resizes)
 - **Info modal** - On-demand session metadata, PR details, CI status, and AI-generated change summaries (`i`)
 - **Review & comment** - Full-screen diff of a session's changes (vs its PR base) where you select lines, attach comments, mark files as reviewed, and apply comments straight to the running agent
 - **Agent state detection** - Detect if agent is waiting for input, processing, or errored
@@ -223,6 +224,8 @@ The status bar surfaces the most useful actions as clickable buttons, with the h
 | palette only | Rename session (UI title only; underlying worktree, branch, and tmux session are unchanged) |
 | palette only | Change program (agent) — pick a different program (e.g. `claude`, `codex`, `opencode`) for the selected session and relaunch it with a fresh conversation |
 | `g` | Generate AI summary (Info modal only) |
+| `Tab` / `Shift-Tab` | Switch the right pane between Preview and Shell (list views only; the board is full-screen) |
+| `<` / `>` | Narrow / widen the session list, moving the divider between it and the right pane (list views only) |
 | `,` | Open settings |
 | `?` | Show help |
 | `q` or `Ctrl-c` | Quit |

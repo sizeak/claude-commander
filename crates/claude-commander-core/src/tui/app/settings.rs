@@ -142,6 +142,16 @@ impl App {
                         "recent_sessions_limit",
                     ),
                     SettingsRow::toggle("Rounded Borders", c.rounded_borders, "rounded_borders"),
+                    SettingsRow::toggle(
+                        "Dim Right Pane",
+                        c.dim_unfocused_preview,
+                        "dim_unfocused_preview",
+                    ),
+                    SettingsRow::text(
+                        "Dim Opacity",
+                        c.dim_unfocused_opacity.to_string(),
+                        "dim_unfocused_opacity",
+                    ),
                     SettingsRow::header("Performance"),
                     SettingsRow::text(
                         "UI Refresh FPS",
@@ -1034,6 +1044,13 @@ impl App {
                         self.config.recent_sessions_limit = v;
                     }
                 }
+                // An opacity outside 0.0..=1.0 would render the pane black or
+                // brighter than the source, so clamp rather than reject.
+                "dim_unfocused_opacity" => {
+                    if let Ok(v) = value.parse::<f32>() {
+                        self.config.dim_unfocused_opacity = v.clamp(0.0, 1.0);
+                    }
+                }
                 "ai_summary_model" => {
                     self.config.ai_summary_model = value.to_string();
                 }
@@ -1274,6 +1291,7 @@ impl App {
             "show_session_program" => self.config.show_session_program = value,
             "hide_empty_sections" => self.config.hide_empty_sections = value,
             "rounded_borders" => self.config.rounded_borders = value,
+            "dim_unfocused_preview" => self.config.dim_unfocused_preview = value,
             "precompute_review_caches" => self.config.precompute_review_caches = value,
             "ai_summary_enabled" => self.config.ai_summary_enabled = value,
             "commander_enabled" => self.config.commander_enabled = value,
